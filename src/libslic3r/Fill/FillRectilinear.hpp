@@ -97,6 +97,7 @@ protected:
 class FillGridVarSpeed : public FillRectilinear
 {
 public:
+    FillGridVarSpeed() : FillRectilinear() { can_fill_surface_single = false; }
     Fill* clone() const override { return new FillGridVarSpeed(*this); }
     ~FillGridVarSpeed() override = default;
     Polylines fill_surface(const Surface *surface, const FillParams &params) const override {

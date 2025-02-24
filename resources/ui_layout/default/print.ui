@@ -250,6 +250,10 @@ group:Advanced Infill options
 		setting:label_width$8:width$5:fill_rectilinearholes_travel_flow_ratio
 		setting:label_width$26:width$5:sidetext_width$7:fill_rectilinearholes_travel_speed
 	end_line
+	line:Grid with varying speed
+		setting:fill_gridvarspeed_width_diff
+		setting:fill_gridvarspeed_zhop
+	end_line
 group:title_width$19:Ironing post-process (This will go on top of infills and perimeters)
 	line:Enable ironing post-process
 		setting:label$_:sidetext_width$0:ironing

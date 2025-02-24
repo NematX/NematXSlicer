@@ -5459,63 +5459,52 @@ std::string GCodeGenerator::extrude_multi_path(const ExtrusionMultiPath &multipa
     return gcode;
 }
 
-std::string GCodeGenerator::extrude_multi_path3D(const ExtrusionMultiPath3D &multipath3D, const std::string_view description, double speed) {
-    
+std::string GCodeGenerator::extrude_multi_path3D(const ExtrusionMultiPath3D &multipath, const std::string_view description, double speed) {
+#ifndef NDEBUG
+    assert(!multipath.empty());
+    assert(!multipath.paths.front().polyline.empty());
+    for (auto it = std::next(multipath.paths.begin()); it != multipath.paths.end(); ++it) {
+        assert(it->polyline.size() >= 2);
+        assert(std::prev(it)->polyline.back() == it->polyline.front());
+    }
+#endif // NDEBUG
+    std::string gcode;
     //test if we reverse
     bool should_reverse = this->visitor_flipped;
-    if(should_reverse)
-        should_reverse = !(last_pos_defined() && multipath3D.can_reverse() 
-            && multipath3D.last_point().distance_to_square(last_pos()) > multipath3D.first_point().distance_to_square(last_pos()));
+    if(should_reverse) //TODO: rethink that
+        should_reverse = !(last_pos_defined() && multipath.can_reverse() 
+            && multipath.last_point().distance_to_square(last_pos()) > multipath.first_point().distance_to_square(last_pos()));
     else
-        should_reverse = last_pos_defined() && multipath3D.can_reverse() 
-            && multipath3D.first_point().distance_to_square(last_pos()) > multipath3D.last_point().distance_to_square(last_pos());
-    
-    std::string gcode;
-    //auto extrudepath3D =
-    //    [&](const ExtrusionPath3D &path) {
-    //        gcode += this->_before_extrude(path, description, speed);
-
-    //        // calculate extrusion length per distance unit
-    //        double e_per_mm = _compute_e_per_mm(path);
-    //        double path_length = 0.;
-    //        {
-    //            std::string_view comment = m_writer.gcode_config().gcode_comments ? description : ""sv;
-    //            // for (const Line &line : path.polyline.lines()) {
-    //            for (size_t i = 0; i < path.polyline.size() - 1; i++) {
-    //                assert(!path.as_polyline().has_arc()); // FIXME extrude_arc_to_xyz
-    //                Line         line(path.polyline.get_point(i), path.polyline.get_point(i + 1));
-    //                const double line_length = line.length() * SCALING_FACTOR;
-    //                path_length += line_length;
-    //                gcode += m_writer.extrude_to_xyz(this->point_to_gcode(line.b, path.z_offsets.size() > i + 1 ? path.z_offsets[i + 1] : 0),
-    //                                                 e_per_mm * line_length, comment);
-    //            }
-    //        }
-    //        gcode += this->_after_extrude(path);
-    //    };
-    // extrude along the path
+        should_reverse = last_pos_defined() && multipath.can_reverse() 
+            && multipath.first_point().distance_to_square(last_pos()) > multipath.last_point().distance_to_square(last_pos());
+    m_mm3_per_mm_target = multipath.try_keep_same_flow ? multipath.keep_same_flow_mm3_per_mm_target : 0;
     bool saved_flipped = this->visitor_flipped;
     if (should_reverse) {
+        //reverse to get a shorter point (hopefully there is still no feature that choose a point that need no perimeter crossing before).
+
+        // it's possible to have un-reverseable paths into a reversable multipath: this means that only the whole thing can be reversed, and not individual paths.
+        // but it's not possible to reverse individual paths inside a multipath anyway.
         this->visitor_flipped = true;
-        // reverse to get a shorter point (hopefully there is still no feature that choose a point that need no perimeter crossing before).
         // extrude along the  reversedpath
-        for (size_t idx_path = multipath3D.paths.size() - 1; idx_path < multipath3D.paths.size(); --idx_path) {
-            //childs of multipath can't reverse themseves. the one that can decide to reverse is the multipath.
-            assert(!multipath3D.paths[idx_path].can_reverse());
+        for (size_t idx_path = multipath.paths.size() - 1; idx_path < multipath.paths.size(); --idx_path) {
             // extrude_path will reverse the path by itself, no need to copy it do to it here.
-            gcode += extrude_path_3D(multipath3D.paths[idx_path], description, speed);
+            gcode += extrude_path_3D(multipath.paths[idx_path], description, speed);
         }
-        add_wipe_points(multipath3D.paths, false, false);
+        //wipe points are dangerous in 3D
+        //add_wipe_points(multipath.paths, false, false);
     } else {
         this->visitor_flipped = false;
-        for (const ExtrusionPath3D &path : multipath3D.paths) {
+        // extrude along the path
+        for (const ExtrusionPath3D& path : multipath.paths) {
             gcode += extrude_path_3D(path, description, speed);
-            //extrudepath3D(path);
         }
-        add_wipe_points(multipath3D.paths, true, false);
-    }
+        //wipe points are dangerous in 3D
+        //add_wipe_points(multipath.paths, true, false);
+    };
     this->visitor_flipped = saved_flipped;
     // reset acceleration
     m_writer.set_acceleration((uint16_t)floor(get_default_acceleration(m_config) + 0.5));
+    m_mm3_per_mm_target = 0;
     return gcode;
 }
 
@@ -5704,6 +5693,13 @@ std::string GCodeGenerator::extrude_path(const ExtrusionPath &path, const std::s
 std::string GCodeGenerator::extrude_path_3D(const ExtrusionPath3D &path, const std::string_view description, double speed) {
     //path.simplify(SCALED_RESOLUTION);
     ExtrusionPath3D simplifed_path = path;
+    assert(!simplifed_path.polyline.has_arc()); //FIXME extrude_to_arc_xyz ?
+    assert(simplifed_path.z_offsets.size() == simplifed_path.polyline.size());
+    assert(simplifed_path.size() > 1);
+    if (simplifed_path.polyline.size() < 2 || simplifed_path.z_offsets.size() < 2) {
+        // fail safe
+        return "";
+    }
     if (this->visitor_flipped) {
         // in a multipath, the multipath can be reversed, but all individual path are marqued as 'unreversable', even if they can be reversed by the multipath.
         // hence, it's possible to have a !can_reverse and a visitor_flipped from the multipath.
@@ -5717,7 +5713,35 @@ std::string GCodeGenerator::extrude_path_3D(const ExtrusionPath3D &path, const s
         simplifed_path.reverse();
     }
 
-    std::string gcode = this->_before_extrude(simplifed_path, description, speed);
+    //ensure the unlift will go to first z
+    Vec3d start_gcode_pos = this->point_to_gcode(simplifed_path.polyline.front(), simplifed_path.z_offsets.front());
+    //if (get_lift() > 0) {
+    //    // only go to actual lift
+    //    if (m_writer.get_position.z() > start_gcode_pos.z() + EPSILON) {
+    //        // current lift not enough, at least do'nt unlift plz.
+    //        m_writer.set_lift(0);
+    //    } else {
+    //        assert(!will_move_z(start_gcode_pos.z());
+    //        m_writer.travel_to_z(start_gcode_pos);
+    //    }
+    //}
+    std::string gcode;
+    // set expected z to start_gcode_pos, with lift to keep our current z pos
+    if (m_delayed_layer_change.empty()) {
+        double current_z = m_writer.get_unlifted_position().z();
+        gcode += m_writer.travel_to_z(start_gcode_pos.z()); // discard gcode
+        // set lift so the gcode writer know he's still at current_z (can be a negative lift)
+        m_writer.set_lift(current_z - start_gcode_pos.z());
+        m_need_z_reset_after_path_3D = true;
+    }
+
+    // perform travel.
+    gcode += this->_before_extrude(simplifed_path, description, speed);
+
+    // ensure the first position is at the right z
+    if (!is_approx(m_writer.get_position().z(), start_gcode_pos.z(), EPSILON)) {
+        gcode += m_writer.travel_to_xyz(start_gcode_pos, false);
+    }
 
     // calculate extrusion length per distance unit
     double e_per_mm = _compute_e_per_mm(simplifed_path);
@@ -5731,7 +5755,7 @@ std::string GCodeGenerator::extrude_path_3D(const ExtrusionPath3D &path, const s
             const double line_length = line.length() * SCALING_FACTOR;
             path_length += line_length;
             gcode += m_writer.extrude_to_xyz(
-                this->point_to_gcode(line.b, simplifed_path.z_offsets.size()>i ? simplifed_path.z_offsets[i] : 0),
+                this->point_to_gcode(line.b, i+1 < simplifed_path.z_offsets.size() ? simplifed_path.z_offsets[i+1] : 0),
                 e_per_mm * line_length,
                 comment);
         }
@@ -5744,12 +5768,24 @@ std::string GCodeGenerator::extrude_path_3D(const ExtrusionPath3D &path, const s
     }
 
     if (m_wipe.is_enabled()) {
-        ArcPolyline temp = simplifed_path.as_polyline();
-        temp.reverse();
-        m_wipe.set_path(std::move(temp.get_arc()), false);
+        // wipe is dangerous in 3D
+        ArcPolyline temp;
+        assert(!simplifed_path.polyline.has_arc());
+        assert(!simplifed_path.z_offsets.empty());
+        const coord_t good_zoffset = 0;
+        for (size_t i = simplifed_path.polyline.size() - 1; i < simplifed_path.polyline.size(); --i) {
+            if (simplifed_path.z_offsets[i] != good_zoffset) {
+                break;
+            }
+            temp.append(simplifed_path.polyline.get_point(i));
+        }
+        if (temp.size() > 1) {
+            m_wipe.set_path(std::move(temp.get_arc()), false);
+        }
     }
     // reset acceleration
     m_writer.set_acceleration((uint16_t)floor(get_default_acceleration(m_config) + 0.5));
+    m_need_z_reset_after_path_3D = false;
     return gcode;
 }
 
@@ -6590,6 +6626,8 @@ double GCodeGenerator::_compute_e_per_mm(const ExtrusionPath &path) {
 
 std::string GCodeGenerator::_extrude(const ExtrusionPath &path, const std::string_view description, double speed) {
 
+    assert(is_approx(m_writer.get_position().z(), m_layer->print_z, EPSILON));
+
     std::string descr = description.empty() ? gcode_extrusion_role_to_string(extrusion_role_to_gcode_extrusion_role(path.role())) : std::string(description);
     // external_perimeters_staggered
     std::optional<double> saved_z;
@@ -7426,13 +7464,13 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
 
     // compensate retraction
     if (m_delayed_layer_change.empty()) {
-        gcode += m_writer.unlift();//this->unretract();
-        assert(is_approx(m_writer.get_position().z(), m_layer->print_z, EPSILON) ||
+        gcode += m_writer.unlift();// this->unretract();
+        assert(is_approx(m_writer.get_position().z(), m_layer->print_z, EPSILON) || m_need_z_reset_after_path_3D ||
                (config().external_perimeters_first && config().external_perimeters_staggered));
     } else {
         //check if an unlift happens
         std::string unlift = m_writer.unlift();
-        assert(is_approx(m_writer.get_position().z(), m_layer->print_z, EPSILON) ||
+        assert(is_approx(m_writer.get_position().z(), m_layer->print_z, EPSILON) || m_need_z_reset_after_path_3D ||
                (config().external_perimeters_first && config().external_perimeters_staggered));
         if (unlift.empty()) {
             unlift = m_delayed_layer_change;
@@ -8000,7 +8038,7 @@ void GCodeGenerator::write_travel_to(std::string &gcode, Polyline& travel, std::
         this->writer().set_lift(this->writer().get_position().z() - *m_new_z_target);
         m_new_z_target.reset();
     }
-    assert(is_approx(this->writer().get_unlifted_position().z(), m_layer->print_z, EPSILON) || comment == "Travel to a Wipe Tower" ||
+    assert(m_need_z_reset_after_path_3D || is_approx(this->writer().get_unlifted_position().z(), m_layer->print_z, EPSILON) || comment == "Travel to a Wipe Tower" ||
                (config().external_perimeters_first && config().external_perimeters_staggered));
 }
 

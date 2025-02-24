@@ -1442,6 +1442,7 @@ void PrintConfigDef::init_fff_params()
         { "monotonicgapfill",   L("Monotonic (filled)") },
         { "monotoniclines",     L("Monotonic Lines") },
         { "alignedrectilinear", L("Aligned Rectilinear") },
+        { "gridvarspeed",       L("Grid with varying speed") },
         { "concentric",         L("Concentric") },
         { "concentricgapfill",  L("Concentric (filled)") },
         { "hilbertcurve",       L("Hilbert Curve") },
@@ -2558,6 +2559,40 @@ void PrintConfigDef::init_fff_params()
     });
     def->mode = comSimpleAE | comPrusa;
     def->set_default_value(new ConfigOptionPercent(18));
+
+    def = this->add("fill_gridvarspeed_width_diff", coPercent);
+    def->label = L("minimum width for Grid with varying speed");
+    def->full_label = L("Grid with varying speed : minimum width");
+    def->sidetext = L("%");
+    def->category = OptionCategory::infill;
+    def->tooltip = L("For infill 'Grid with varying speed',It will speed up (less flow) when it intersect with the line from the other side."
+                    "\nYou can enter a value in % to change this varyation. 0% means it won't extrude anything in the corssing section."
+                    " 50% means that the flow is halved (speed doubled) in the intersection."
+                    " 100% means that the flow/speed is unchanged from a regular grid."
+    );
+    def->min = 0;
+    def->max = 100;
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionPercent(50));
+
+    def = this->add("fill_gridvarspeed_zhop", coFloatOrPercent);
+    def->label = L("Grid with varying speed z hop for the second layer");
+    def->full_label = L("Grid with varying speed z hop for the second layer");
+    def->sidetext = L("mm or %");
+    def->category = OptionCategory::infill;
+    def->tooltip = L("For infill 'Grid with varying speed', you can change the height of the second pass to be a bit higher."
+                    "\nYou can enter a value in mm or in % of the current layer height."
+        "\nIf 'infill_first', then the first pass height will be lowered by that amount, and if not ti's the second "
+        "pass that will be raised. If the second pass is raised, be sure to activate the z-hop for travels with a "
+        "high enough value, without any exceptions."
+        "\nPlease don't go over half of the layer height, or it may create arfifacts. If you're using variable layer "
+        "height, be sure it's never more than half of the minimum layer height."
+        "\n note that the flow won't change, so the stacking of layer can still happen. So there may be an underextrusion/overextrusion at the start/end."
+                    "\nSet to zero to disable."
+    );
+    def->min = 0;
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
 
     def = this->add("fill_pattern", coEnum);
     def->label = L("Pattern");
@@ -9976,6 +10011,8 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "fill_angle_cross",
 "fill_angle_follow_model",
 "fill_angle_template",
+"fill_gridvarspeed_width_diff",
+"fill_gridvarspeed_zhop",
 "fill_rectilinearholes_travel_flow_ratio",
 "fill_rectilinearholes_travel_speed",
 "fill_smooth_distribution",

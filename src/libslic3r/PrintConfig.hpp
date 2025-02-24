@@ -910,6 +910,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                fill_angle_increment))
     ((ConfigOptionFloats,               fill_angle_template))
     ((ConfigOptionPercent,              fill_density))
+    ((ConfigOptionPercent,              fill_gridvarspeed_width_diff))
+    ((ConfigOptionFloatOrPercent,       fill_gridvarspeed_zhop))
     ((ConfigOptionEnum<InfillPattern>,  fill_pattern))
     ((ConfigOptionFloatOrPercent,       fill_rectilinearholes_travel_speed))
     ((ConfigOptionPercent,              fill_rectilinearholes_travel_flow_ratio))

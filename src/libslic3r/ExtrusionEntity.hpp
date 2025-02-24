@@ -352,6 +352,10 @@ public:
     double keep_same_flow_mm3_per_mm_target = 0;
 
     ExtrusionMultiEntity(): ExtrusionEntity(false) {};
+    ExtrusionMultiEntity(const ExtrusionEntity &rhs, bool try_keep_same_flow, double keep_same_flow_mm3_per_mm_target)
+        : ExtrusionEntity(rhs)
+        , try_keep_same_flow(try_keep_same_flow)
+        , keep_same_flow_mm3_per_mm_target( keep_same_flow_mm3_per_mm_target) {}
     ExtrusionMultiEntity(const ExtrusionMultiEntity &rhs)
         : paths(rhs.paths), ExtrusionEntity(rhs.m_id, rhs.m_can_reverse)
         , try_keep_same_flow(rhs.try_keep_same_flow)
@@ -499,6 +503,8 @@ public:
     ExtrusionMultiPath3D(ExtrusionMultiPath3D &&rhs) : ExtrusionMultiEntity(rhs) {}
     ExtrusionMultiPath3D(const ExtrusionPaths3D &paths) : ExtrusionMultiEntity(paths) {};
     ExtrusionMultiPath3D(const ExtrusionPath3D &path) :ExtrusionMultiEntity(path) {}
+    ExtrusionMultiPath3D(const ExtrusionMultiPath &rhs) // note: don't copy paths
+        : ExtrusionMultiEntity(rhs, rhs.try_keep_same_flow, rhs.keep_same_flow_mm3_per_mm_target) {}
 
     ExtrusionMultiPath3D& operator=(const ExtrusionMultiPath3D& rhs) { this->paths = rhs.paths; return *this; }
     ExtrusionMultiPath3D& operator=(ExtrusionMultiPath3D&& rhs) { this->paths = std::move(rhs.paths); return *this; }

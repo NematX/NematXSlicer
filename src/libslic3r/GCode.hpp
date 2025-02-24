@@ -547,6 +547,7 @@ private:
     std::string                         m_last_description;
     double                              m_last_speed_mm_per_sec;
     double                              m_mm3_per_mm_target = 0;
+    bool                                m_need_z_reset_after_path_3D = false;
 
     std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
     std::unique_ptr<SpiralVase>         m_spiral_vase;

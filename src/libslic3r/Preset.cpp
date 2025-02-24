@@ -532,6 +532,8 @@ static std::vector<std::string> s_Preset_print_options {
         "fill_smooth_distribution",
         "fill_rectilinearholes_travel_speed",
         "fill_rectilinearholes_travel_flow_ratio",
+        "fill_gridvarspeed_width_diff",
+        "fill_gridvarspeed_zhop",
         "top_fill_pattern",
         "bottom_fill_pattern",
         "solid_fill_pattern",

@@ -3261,6 +3261,75 @@ void remove_too_near_points(Polylines &polylines, coord_t spacing) {
     }
 }
 
+class Path2Path3DVisitor : public ExtrusionVisitorRecursive {
+public:
+    using ExtrusionVisitorRecursive::use;
+    coord_t delta_z;
+    std::unique_ptr<ExtrusionEntity> current_for_collection;
+    //std::unique_ptr<ExtrusionPath3D> current_path3D;
+    std::vector<ExtrusionPath3D> *current_paths3D = nullptr;
+    virtual void use(ExtrusionPath& path) override {
+        //assert(!current_path3D);
+        assert(!current_for_collection);
+        if (current_paths3D) {
+            current_paths3D->emplace_back(path);
+            current_paths3D->back().z_offsets = std::vector<coord_t>(path.size(), delta_z);
+        } else {
+            ExtrusionPath3D *ep3D = new ExtrusionPath3D(path);
+            ep3D->z_offsets = std::vector<coord_t>(path.size(), delta_z);
+            current_for_collection.reset(ep3D);
+        }
+    }
+    virtual void use(ExtrusionMultiPath3D &multi_path3D) override {assert(false);}
+    virtual void use(ExtrusionPath3D &path3D) override {assert(false);}
+    virtual void use(ExtrusionLoop &loop) override { assert(false); }
+    virtual void use(ExtrusionMultiPath &multi_path) override {
+        assert(!current_for_collection);
+        assert(!current_paths3D);
+        ExtrusionMultiPath3D* new_multi_path3D = new ExtrusionMultiPath3D(multi_path);
+        current_paths3D = &new_multi_path3D->paths;
+        for (size_t entity_idx = 0; entity_idx < multi_path.size(); ++entity_idx ) {
+            //assert(!current_path3D);
+            //current_path3D.reset();
+            size_t size_before = new_multi_path3D->paths.size();
+            this->use(multi_path.paths[entity_idx]);
+            assert(new_multi_path3D->paths.size() == size_before + 1);
+            //assert(current_path3D);
+            //if (current_path3D) {
+            //    // swapped, set the new one and delete the old one.
+            //    new_multi_path3D->paths.push_back(std::move(*current_path3D.get()));
+            //    current_path3D.reset();
+            //    //don't delete the path, it will deleted when the multipath will be, by the collection.
+            //}
+        }
+        current_paths3D = nullptr;
+        current_for_collection.reset(new_multi_path3D);
+    }
+    virtual void use(ExtrusionEntityCollection &collection) override {
+        assert(!current_for_collection);
+        for (size_t entity_idx = 0; entity_idx < collection.size(); ++entity_idx ) {
+            ExtrusionEntity *entity = collection.set_entities()[entity_idx];
+            assert(!current_for_collection);
+            current_for_collection.reset();
+            assert(!current_paths3D);
+            entity->visit(*this);
+            assert(!current_paths3D);
+            if (current_for_collection) {
+                //assert(!current_path3D);
+                // swapped, set the new one and delete the old one.
+                collection.set_entities()[entity_idx] = current_for_collection.release();
+                delete entity;
+            }
+            //else if (current_path3D) {
+            //    // swapped, set the new one and delete the old one.
+            //    collection.set_entities()[entity_idx] = current_path3D.release();
+            //    delete entity;
+            //}
+            assert(!current_for_collection);
+        }
+    }
+};
+
 void FillGridVarSpeed::fill_surface_extrusion(const Surface *surface, const FillParams &params, ExtrusionEntitiesPtr &out) const
 {
     Polylines polylines_first_pass;
@@ -3289,6 +3358,9 @@ void FillGridVarSpeed::fill_surface_extrusion(const Surface *surface, const Fill
     double mult_flow = compute_flow_no_overextrude(*surface, polylines_first_pass, params);
     double mult_flow2 = compute_flow_no_overextrude(*surface, polylines_second_pass, params);
     mult_flow = (mult_flow + mult_flow2) / 2;
+    
+    float fill_gridvarspeed_width_diff = params.config->fill_gridvarspeed_width_diff.get_abs_value(1);
+    fill_gridvarspeed_width_diff = std::min(1.f, std::max(0.f, fill_gridvarspeed_width_diff));
 
     // Save into layer.
     auto* eec = new ExtrusionEntityCollection();
@@ -3314,10 +3386,25 @@ void FillGridVarSpeed::fill_surface_extrusion(const Surface *surface, const Fill
     // create paths from polylines
     auto* eec_first_pass = new ExtrusionEntityCollection();
     eec_first_pass->set_can_sort_reverse(!this->no_sort(), !this->no_sort());
-    this->change_flow_intersection(polylines_first_pass, polylines_second_pass, 0.5f, 0.5f, *eec_first_pass, default_attribute, params);
+    this->change_flow_intersection(polylines_first_pass, polylines_second_pass, fill_gridvarspeed_width_diff, fill_gridvarspeed_width_diff, *eec_first_pass, default_attribute, params);
     auto* eec_second_pass = new ExtrusionEntityCollection();
     eec_second_pass->set_can_sort_reverse(!this->no_sort(), !this->no_sort());
-    this->change_flow_intersection(polylines_second_pass, polylines_first_pass, 0.1f, 0.5f, *eec_second_pass, default_attribute, params);
+    this->change_flow_intersection(polylines_second_pass, polylines_first_pass, fill_gridvarspeed_width_diff, fill_gridvarspeed_width_diff, *eec_second_pass, default_attribute, params);
+    assert(params.flow.height() > 0 && params.flow.height() < 100);
+    coord_t fill_gridvarspeed_zhop = scale_t(params.config->fill_gridvarspeed_zhop.get_abs_value(params.flow.height()));
+    if (fill_gridvarspeed_zhop > 0) {
+        // move higher/lower
+        Path2Path3DVisitor visitor;
+        if (params.config->infill_first) {
+            // first pass lower
+            visitor.delta_z = -fill_gridvarspeed_zhop;
+            eec_second_pass->visit(visitor);
+        } else {
+            //second pass higher
+            visitor.delta_z = fill_gridvarspeed_zhop;
+            eec_second_pass->visit(visitor);
+        }
+    }
     eec->set_entities().push_back(eec_first_pass);
     eec->set_entities().push_back(eec_second_pass);
 #ifdef _DEBUG
@@ -3330,7 +3417,7 @@ void FillGridVarSpeed::fill_surface_extrusion(const Surface *surface, const Fill
     std::cout<<"extr vol first pass: "<<compute_volume_first.volume<<"\n";
     std::cout<<"extr vol second pass: "<<compute_volume_second.volume<<"\n";
     std::cout<<"extr vol both pass: "<<(compute_volume_first.volume + compute_volume_second.volume)<<"\n";
-    assert(is_approx((compute_volume_first.volume + compute_volume_second.volume), surface_volume, EPSILON));
+    assert(is_approx((compute_volume_first.volume + compute_volume_second.volume), surface_volume * params.density, EPSILON));
     //eec->visit(ExtrusionModifyFlow(surface_volume / eec_first_pass.volume + eec_second_pass.volume);
 #endif
 }
@@ -3420,14 +3507,14 @@ void FillRectilinear::change_flow_intersection(const Polylines &polylines_first_
                     return p1.distance_to_square(pt_previous) < p2.distance_to_square(pt_previous);
                 });
                 // ensure first collision is ~more than spacing/2 from startpt_previous
-                assert(pt_previous.distance_to(collisions.front()) > half_spacing - SCALED_EPSILON);
+/*                assert(pt_previous.distance_to(collisions.front()) > half_spacing - SCALED_EPSILON);
                 // ensure each collision is ~more than spacing apart
                 for (size_t idx_coll = 1; idx_coll < collisions.size(); ++idx_coll) {
                     assert(collisions[idx_coll - 1].distance_to(collisions[idx_coll]) >
                            half_spacing * 2 - SCALED_EPSILON);
                 }
                 // ensure last collision is ~more than spacing/2 from start
-                assert(pt_current.distance_to(collisions.back()) > half_spacing - SCALED_EPSILON);
+                assert(pt_current.distance_to(collisions.back()) > half_spacing - SCALED_EPSILON);*/
             }
 
             // add point to the current path
@@ -3446,7 +3533,9 @@ void FillRectilinear::change_flow_intersection(const Polylines &polylines_first_
                     // too small, no acceleration, just reduced flow
                     // note: this works because collision are all on the same strait path, and the distance
                     // between points is always higher than half_spacing
-                    path.polyline.clip_end(-half_spacing);
+                    Line line(path.polyline.get_point(path.polyline.size()-2), path.polyline.back());
+                    line.extend_end(half_spacing);
+                    path.polyline.set_back(line.b);
                     collisions.front() = path.polyline.back();
                     // check if we can reuse previous path
                     if (!multi_path.empty() &&
@@ -3643,7 +3732,9 @@ void FillRectilinear::change_flow_intersection(const Polylines &polylines_first_
 //#endif /* SLIC3R_DEBUG */
             // simplify (remove collinear)
             for (ExtrusionPath &path : multi_path.paths) {
-                path.polyline.make_arc(ArcFittingType::Disabled, coordf_t(SCALED_EPSILON), 0);
+                if (path.size() > 2) {
+                    path.polyline.make_arc(ArcFittingType::Disabled, coordf_t(SCALED_EPSILON), 0);
+                }
             }
             // ensure they are merged
             for (size_t path_idx = 1; path_idx < multi_path.paths.size(); ++path_idx) {
