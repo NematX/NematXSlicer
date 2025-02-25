@@ -791,14 +791,16 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
 
         // some options only apply when not using firmware retraction
         vec.resize(0);
-        vec = { "retract_speed", "deretract_speed", "retract_before_wipe", "retract_restart_extra", "wipe", "wipe_speed" , "wipe_only_crossing"};
+        vec = { "retract_speed", "deretract_speed", "retract_before_wipe",
+            "retract_restart_extra", "wipe", "wipe_speed" , "wipe_only_crossing",
+            "wipe_return"};
         for (auto el : vec) {
             toggle_field(el, retraction && !use_firmware_retraction, i);
         }
 
         bool wipe = config->opt_bool("wipe", i) && have_retract_length;
         vec.resize(0);
-        vec = { "retract_before_wipe", "wipe_only_crossing", "wipe_speed" };
+        vec = { "retract_before_wipe", "wipe_only_crossing", "wipe_return", "wipe_speed" };
         for (auto el : vec) {
             toggle_field(el, wipe, i);
         }

@@ -887,6 +887,7 @@ static std::vector<std::string> s_Preset_filament_options {
         "filament_wipe",
         "filament_wipe_extra_perimeter",
         "filament_wipe_only_crossing", "filament_wipe_speed",
+        "filament_wipe_return",
         "filament_wipe_inside_depth",
         "filament_wipe_inside_end",
         "filament_wipe_inside_start",

@@ -7105,6 +7105,15 @@ void PrintConfigDef::init_fff_params()
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionBools{ true });
 
+    def = this->add("wipe_return", coBools);
+    def->label = L("return to seam to end the wipe");
+    def->category = OptionCategory::extruders;
+    def->tooltip = L("If true, it ensure the wipe ends at the seam. It can stop and return back at mid-distance."
+        " If it's a loop, it can consitue a bit more or stop early to stop at the right point.");
+    def->mode = comExpert | comSuSi;
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionBools{ false });
+
     def = this->add("wipe_speed", coFloats);
     def->label = L("Wipe speed");
     def->category = OptionCategory::extruders;
@@ -7568,7 +7577,7 @@ void PrintConfigDef::init_fff_params()
         //"wipe_extra_perimeter", "wipe_speed",
         //"wipe_inside_depth", "wipe_inside_end", "wipe_inside_start",
         //// bools
-        //"retract_layer_change", "wipe", "wipe_only_crossing",
+        //"retract_layer_change", "wipe", "wipe_only_crossing", "wipe_return",
         //"travel_lift_before_obstacle", "travel_ramping_lift", "travel_slope",
         //// percents
         //"retract_before_wipe", "travel_slope",
@@ -7669,6 +7678,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "wipe_lift_length",
         "wipe_min",
         "wipe_only_crossing",
+        "wipe_return",
         "wipe_speed",
     };
     assert(std::is_sorted(m_extruder_option_keys.begin(), m_extruder_option_keys.end()));
@@ -7704,6 +7714,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "wipe_lift_length",
         "wipe_min",
         "wipe_only_crossing",
+        "wipe_return",
         "wipe_speed",
     };
     assert(std::is_sorted(m_extruder_retract_keys.begin(), m_extruder_retract_keys.end()));
@@ -7735,6 +7746,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "wipe_lift_length",
         "wipe_min",
         "wipe_only_crossing",
+        "wipe_return",
         "wipe_speed",
     };
 }
@@ -10173,6 +10185,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "wipe_lift_length",
 "wipe_min",
 "wipe_only_crossing",
+"wipe_return",
 "wipe_speed",
 "filament_wipe_extra_perimeter", // filament override
 "filament_wipe_inside_depth", // filament override
@@ -10182,6 +10195,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "filament_wipe_lift_length", // filament override
 "filament_wipe_min", // filament override
 "filament_wipe_only_crossing", // filament override
+"filament_wipe_return", // filament override
 "filament_wipe_speed", // filament override
 "wipe_tower_extrusion_width",
 "wipe_tower_speed",

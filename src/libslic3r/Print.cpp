@@ -255,6 +255,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         "wipe_lift_length",
         "wipe_min",
         "wipe_only_crossing",
+        "wipe_return",
         "wipe_speed",
     };
 
