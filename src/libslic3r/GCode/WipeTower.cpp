@@ -346,7 +346,11 @@ public:
         //snprintf(all, 80, "G4 P%d\n", meltpause);
         {
             char buf[64];
-            sprintf(buf, "G4 P%d\n", meltpause);
+            if (this->m_gcode_flavor == (gcfNematX)) {
+                sprintf(buf, "G4 X%d\n", meltpause);
+            } else {
+                sprintf(buf, "G4 P%d\n", meltpause);
+            }
             this->append(std::string(buf));
         }
         //snprintf(all, 80,  "G1 E-%.4f F%.0f\n", distance, upspeed*60);
@@ -355,9 +359,13 @@ public:
         this->append(set_format_F(upspeed * 60));
         this->append("\n");
         //snprintf(all, 80, "G4 P%d\n", coolpause);
-        {
+        if (this->m_gcode_flavor != (gcfNematX)) {
             char buf[64];
-            sprintf(buf, "G4 P%d\n", coolpause);
+            if (this->m_gcode_flavor == (gcfNematX)) {
+                sprintf(buf, "G4 X%d\n", coolpause);
+            } else {
+                sprintf(buf, "G4 P%d\n", coolpause);
+            }
             this->append(std::string(buf));
         }
         this->append("; SKINNYDIP END\n");
@@ -451,9 +459,14 @@ public:
     // Wait for a period of time (seconds).
 	WipeTowerWriter& wait(float time)
 	{
-        if (time==0.f)
+        if (time == 0.f) {
             return *this;
-        m_gcode += "G4 S" + Slic3r::float_to_string_decimal_point(time, 3) + "\n";
+        }
+        if (this->m_gcode_flavor == (gcfNematX)) {
+            m_gcode += "G4 X" + Slic3r::float_to_string_decimal_point(time, 3) + "\n";
+        } else {
+            m_gcode += "G4 S" + Slic3r::float_to_string_decimal_point(time, 3) + "\n";
+        }
 		return *this;
     }
 
@@ -501,7 +514,9 @@ public:
 
 	WipeTowerWriter& flush_planner_queue()
 	{ 
-		m_gcode += "G4 S0\n"; 
+        if (this->m_gcode_flavor != (gcfNematX)) {
+            m_gcode += "G4 S0\n";
+        }
 		return *this;
 	}
 
