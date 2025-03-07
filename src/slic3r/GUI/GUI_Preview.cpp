@@ -559,7 +559,7 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool sho
             current_lower_tick++;
         }
         current_higher_tick++;
-    }else if (layers_z.size() == m_layers_slider->GetMaxValue()) {
+    } else if (layers_z.size() == m_layers_slider->GetMaxValue()) {
         // new array is smaller by one
         current_lower_tick = std::max(current_lower_tick - 1, 0);
         current_higher_tick =  std::max(current_higher_tick - 1, 0);
@@ -586,7 +586,7 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool sho
     m_layers_slider->SetMaxValue(layers_z.empty() ? 0 : layers_z.size() - 1);
 
     int idx_low = std::max(current_lower_tick, 0);
-    int idx_high = std::min(current_higher_tick, m_layers_slider->GetMaxValue());
+    int idx_high = snap_to_max ? m_layers_slider->GetMaxValue() : std::min(current_higher_tick, m_layers_slider->GetMaxValue());
     if (!layers_z.empty()) {
         if (!snap_to_min && !is_approx(layers_z[idx_low], z_low, 0.0000001)) {
             int idx_new = find_close_layer_idx(layers_z, z_low, DoubleSlider::epsilon()/*1e-6*/);
