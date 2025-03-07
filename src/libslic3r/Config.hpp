@@ -952,7 +952,7 @@ public:
             this->m_enabled.erase(this->m_enabled.begin() + n, this->m_enabled.end());
         } else if (n > this->m_values.size()) {
             if (this->m_values.empty()) {
-                if (opt_default == nullptr)
+                if (opt_default == nullptr || opt_default->size() == 0)
                     this->m_values.resize(n, this->default_value);
                 else if (opt_default->type() != this->type())
                     throw ConfigurationError("ConfigOptionVector::resize(): Extending with an incompatible type.");

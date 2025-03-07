@@ -479,7 +479,6 @@ void init()
     value_translation_map["machine_limits_usage"]["1"] = "emit_to_gcode";
 
 
-
 /// GCODE
     custom_gcode_replace.emplace_back("[bed_temperature_initial_layer_single]", "{first_layer_bed_temperature[initial_extruder]}");
     custom_gcode_replace.emplace_back("bed_temperature_initial_layer_single", "first_layer_bed_temperature[initial_extruder]");
@@ -571,6 +570,20 @@ void complicated_convert(t_config_option_key &opt_key,
     if ("print_flow_ratio" == opt_key) {
         opt_key = "print_extrusion_multiplier";
         value = std::to_string(int(std::stof(value.c_str()) * 100));
+    }
+    // since Mar 10, 2024 ( Optimize ensure vertical feature's UX #4402 )
+    if ("ensure_vertical_shell_thickness" == opt_key && value != "0" && value != "1") {
+        if ("none" == value) {
+            value = "disabled";
+        } else if("ensure_critical_only" == value) {
+            value = "enabled_old";
+            output["solid_over_perimeters"] = "2";
+        } else if("ensure_moderate" == value) {
+            value = "enabled_old";
+            output["solid_over_perimeters"] = "4";
+        } else if("ensure_all" == value) {
+            value = "enabled_old";
+        }
     }
 }
 
@@ -793,6 +806,8 @@ bool read_json_file_bambu(const std_path &temp_file,
     std::map<std::string, std::string>              good_key_values;
     std::map<std::string, std::vector<std::string>> good_key_vector_values;
     std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> dict_opt;
+
+    // key_translation_map
     for (const auto& [bb_key, value] : key_values) {
         if (push_into_custom_variable(config, bb_key, value))
             continue;
@@ -803,7 +818,8 @@ bool read_json_file_bambu(const std_path &temp_file,
 
         dict_opt[my_key] = {my_key, value};
     }
-    PrintConfigDef::handle_legacy_map(dict_opt, false);
+
+    // complicated_convert & value_translation_map
     for (auto &[saved_key, key_val] : dict_opt) {
         auto &[opt_key, value] = key_val;
 
@@ -818,7 +834,24 @@ bool read_json_file_bambu(const std_path &temp_file,
         //else
         //    config_substitutions.substitutions.push_back(ConfigSubstitution{ nullptr, entry.first+std::string(" : ")+value, nullptr});
     }
-    
+
+    // handle_legacy_map
+    dict_opt.clear();
+    for (const auto &[my_key, value] : good_key_values) {
+        dict_opt[my_key] = {my_key, value};
+    }
+    PrintConfigDef::handle_legacy_map(dict_opt, false);
+    good_key_values.clear();
+    for (auto &[saved_key, key_val] : dict_opt) {
+        auto &[opt_key, value] = key_val;
+        if (!opt_key.empty())
+            good_key_values[opt_key] = value;
+        //else
+        //    config_substitutions.substitutions.push_back(ConfigSubstitution{ nullptr, entry.first+std::string(" : ")+value, nullptr});
+    }
+
+    //now same for vectors (but no complicated_convert)
+    // key_translation_map, handle_legacy_pair
     std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> dict_opt_vector;
     std::unordered_map<t_config_option_key, std::string> dict_old_value;
     for (auto &entry : key_vector_values) {
@@ -828,29 +861,22 @@ bool read_json_file_bambu(const std_path &temp_file,
             continue;
         if (auto it = key_translation_map.find(key); it != key_translation_map.end())
             key = it->second;
-
-        dict_opt_vector[key] = {key, values[0]};
-    }
-    PrintConfigDef::handle_legacy_map(dict_opt_vector, false);
-    for (auto &[saved_key, key_val] : dict_opt_vector) {
-        auto &[opt_key, value] = key_val;
         
-        std::string saved_val = key_vector_values[saved_key][0];
-        if (!opt_key.empty()) {
-            if (saved_val != value) {
-                for (size_t idx = 1; idx < key_vector_values[saved_key].size(); ++idx) {
-                    PrintConfigDef::handle_legacy_pair(opt_key, key_vector_values[saved_key][idx], false);
-                    assert(!opt_key.empty());
+        if (!key.empty()) {
+            for (size_t idx = 0; idx < values.size(); ++idx) {
+                PrintConfigDef::handle_legacy_pair(key, values[idx], false);
+                if (key.empty()) {
+                    break;
                 }
             }
-            if (!opt_key.empty()) {
-                key_vector_values[saved_key][0] = value;
-                good_key_vector_values[opt_key] = key_vector_values[saved_key];
+            if (!key.empty()) {
+                good_key_vector_values[key] = values;
             }
         }
         //else
-        //    config_substitutions.substitutions.push_back(ConfigSubstitution{ nullptr, entry.first+std::string(" : ")+(values.empty()?"":values.front()), nullptr});
+        //    config_substitutions.substitutions.push_back(ConfigSubstitution{ nullptr, entry.first+std::string(" : ")+value, nullptr});
     }
+    // there will be a final handle_legacy_pair after concat anyway
 
     // check how to serialize the array (string use ';', others ',')
     const ConfigDef *config_def = config.def();
@@ -906,10 +932,14 @@ bool read_json_file_bambu(const std_path &temp_file,
     }
 
     // push these into config
-
-    for (auto &entry : good_key_values) {
-        if(config_def->has(entry.first))
-            config.set_deserialize(entry.first, entry.second, config_substitutions);
+    dict_opt.clear();
+    for (const auto &[my_key, value] : good_key_values) {
+        dict_opt[my_key] = {my_key, value};
+    }
+    PrintConfigDef::handle_legacy_map(dict_opt, false);
+    for (auto &entry : dict_opt) {
+        if (!entry.second.first.empty() && config_def->has(entry.second.first))
+            config.set_deserialize(entry.second.first, entry.second.second, config_substitutions);
     }
 
     // final transform

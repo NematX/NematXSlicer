@@ -1811,9 +1811,9 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This string is edited by a Dialog and contains extusion multiplier for different speeds.");
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
-    def->set_default_value(new ConfigOptionGraphs( GraphData(0,10, GraphData::GraphType::LINEAR,
+    def->set_default_value(new ConfigOptionGraphs({ GraphData(0,10, GraphData::GraphType::LINEAR,
         {{10,1.},{20,1.},{30,1.},{40,1.},{60,1.},{80,1.},{120,1.},{160,1.},{240,1.},{320,1.},{480,1.},{640,1.},{960,1.},{1280,1.}}
-    )));
+    )}));
     def->graph_settings = std::make_shared<GraphSettings>();
     def->graph_settings->title       = L("Extrusion multiplier per extrusion speed");
     def->graph_settings->description = L("Choose the extrusion multipler value for multiple speeds.\nYou can add/remove points with a right clic.");
@@ -4426,7 +4426,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip    = L("Overhang size is expressed as a percentage of overlap of the extrusion with the previous layer:"
                         " 100% would be full overlap (no overhang), while 0% represents full overhang (floating extrusion, bridge)."
                         " Speeds for overhang sizes in between are calculated via linear interpolation,"
-                        " as a percentage between the (external) perimeter speed and the overhang speed."
+                        " as a percentage between the the overhang speed and the (external) perimeter speed."
                         "\nNote that the speeds generated to gcode will never exceed the max volumetric speed value.");
     def->sidetext   = L("mm/s");
     def->can_be_disabled = true;
@@ -5229,7 +5229,7 @@ void PrintConfigDef::init_fff_params()
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionBools{ false });
 
-    // why not reuse rretract_lift ? because it's a max? My current impl enforced the lift, so it's okay for me to remove it.
+    // why not reuse retract_lift ? because it's a max? My current impl enforced the lift, so it's okay for me to remove it.
     // def = this->add("travel_max_lift", coFloats);
     // def->label = L("Maximum ramping lift");
     // def->tooltip = L("Maximum lift height of the ramping lift. It may not be reached if the next position "
@@ -6857,7 +6857,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Only used for Klipper, where you can name the extruder. If not set, will be 'extruderX' with 'X' replaced by the extruder number.");
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
-    def->set_default_value(new ConfigOptionStrings(""));
+    def->set_default_value(new ConfigOptionStrings({""}));
 
     def = this->add("top_fan_speed", coInts);
     def->label = L("Top Solid fan speed");
@@ -7499,7 +7499,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->precision = 8;
     def->mode = comExpert | comSuSi;
-    def->set_default_value(new ConfigOptionFloat(0.005));
+    def->set_default_value(new ConfigOptionFloat(0.0));
 
     def = this->add("init_z_rotate", coFloat);
     def->label = L("Preferred orientation");
@@ -8802,7 +8802,7 @@ inline void for_ech_entry(std::unordered_map<t_config_option_key, std::pair<t_co
     }
 }
 inline bool has(std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> &dict,
-                 const t_config_option_key &&opt_key) {
+                 const t_config_option_key &opt_key) {
     last_search_result = dict.find(opt_key);
     // exists and not already deleted/changed
     return last_search_result != dict.end() && last_search_result->second.first == opt_key;
@@ -8877,6 +8877,15 @@ inline t_config_option_key &opt_key() {
 //    it->second.first = "";
 //    it->second.second = "";
 //}
+
+const std::vector<std::pair<t_config_option_key, t_config_option_key>> widths_2_spacings_for_phony_fix =
+    {{"extrusion_width", "extrusion_spacing"},
+     {"perimeter_extrusion_width", "perimeter_extrusion_spacing"},
+     {"external_perimeter_extrusion_width", "external_perimeter_extrusion_spacing"},
+     {"first_layer_extrusion_width", "first_layer_extrusion_spacing"},
+     {"infill_extrusion_width", "infill_extrusion_spacing"},
+     {"solid_infill_extrusion_width", "solid_infill_extrusion_spacing"},
+     {"top_infill_extrusion_width", "top_infill_extrusion_spacing"}};
 
 inline void erase() {
     last_search_result->second.first = "";
@@ -9030,7 +9039,9 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
             value() = "cost";
         } else if ("near" == value() || "nearest" == value()) {
             value() = "cost";
-            //FIXME can we change the cost?
+            // we change the cost
+            dict["seam_angle_cost"] = {"seam_angle_cost", "50%"};
+            dict["seam_travel_cost"] = {"seam_travel_cost", "50%"};
         }
     }
     if (has(dict, "perimeter_loop_seam"s)) {
@@ -9040,10 +9051,13 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
     }
     if (has(dict, "overhangs"s)) {
         opt_key() = "overhangs_width_speed";
-        if (value() == "1")
+        if (value() == "1") {
             value() = "50%";
-        else
+            dict["overhangs_width"] = {"overhangs_width", "50%"};
+        } else {
             value() = "!50%";
+            dict["overhangs_width"] = {"overhangs_width", "!50%"};
+        }
     }
     if (has(dict, "print_machine_envelope"s)) {
         opt_key() = "machine_limits_usage";
@@ -9090,16 +9104,24 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
             } catch (boost::bad_lexical_cast &) { value = "100%"; }
         }
     });
-    if (has(dict, "thick_bridges"s)) {
-        opt_key() = "bridge_type"s;
-        if (value() == "1")
-            value() = "nozzle";
-        else
-            value() = "flow";
-    }
-    if (has(dict, "sla_archive_format"s)) {
-        opt_key() = "output_format"s;
-    }
+    //if (has(dict, "thick_bridges"s)) {
+    //    assert(dict.find("bridge_type") == dict.end());
+    //    assert(dict.find("bridge_overlap") == dict.end());
+    //    assert(dict.find("bridge_overlap_min") == dict.end());
+    //    opt_key() = "bridge_type"s;
+    //    if (value() == "1") {
+    //        value() = "nozzle";
+    //        dict["bridge_overlap_min"] = {"bridge_overlap_min", "80%"};
+    //        dict["bridge_overlap"] = {"bridge_overlap", "95%"};
+    //    } else {
+    //        value() = "flow";
+    //        dict["bridge_overlap_min"] = {"bridge_overlap_min", "60%"};
+    //        dict["bridge_overlap"] = {"bridge_overlap", "75%"};
+    //    }
+    //}
+    //if (has(dict, "sla_archive_format"s)) {
+    //    opt_key() = "output_format"s;
+    //}
 
     // In PrusaSlicer 2.3.0-alpha0 the "monotonic" infill was introduced, which was later renamed to "monotonous".
     for_ech_entry(dict, {"top_fill_pattern", "bottom_fill_pattern", "fill_pattern", "solid_fill_pattern", "bridge_fill_pattern", "support_material_interface_pattern"},
@@ -9285,17 +9307,56 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         // nil-> disabled
         if (value.find("nil") != std::string::npos) {
             const ConfigOptionDef *def = print_config_def.get(opt_key);
-            if (def->type != coString && def->type != coStrings) {
-                assert(def && def->can_be_disabled);
-                if (def && def->can_be_disabled) {
-                    ConfigOption *default_opt = def->default_value->clone();
-                    default_opt->set_enabled(false);
-                    value = default_opt->serialize();
-                    delete default_opt;
+            if (def) {
+                if (def->type != coString && def->type != coStrings) {
+                    assert(def && def->can_be_disabled);
+                    if (def && def->can_be_disabled) {
+                        ConfigOption *default_opt = def->default_value->clone();
+                        default_opt->set_enabled(false);
+                        value = default_opt->serialize();
+                        delete default_opt;
+                    }
                 }
+            } else {
+                // unknown key
+                opt_key.clear();
             }
         }
     }
+    //phony
+    for (const auto &width_2_spacing : widths_2_spacings_for_phony_fix) {
+        if (has(dict, width_2_spacing.first)) {
+            const std::string &width_value = value();
+            if (!has(dict, width_2_spacing.second)) {
+                if (!width_value.empty()) {
+                    // we have a width => phony spacing
+                    dict[width_2_spacing.second] = {width_2_spacing.second, ""};
+                } else {
+                    // can't compute it... put 0
+                    dict[width_2_spacing.second] = {width_2_spacing.second, "0"};
+                }
+            } else {
+                const std::string &spacing_value = value();
+                if (width_value.empty() && spacing_value.empty()) {
+                    // all phony => set width to 0
+                    dict[width_2_spacing.first] = {width_2_spacing.first, "0"};
+                } else if (!width_value.empty() && !spacing_value.empty()) {
+                    // no phony => set width to phony
+                    dict[width_2_spacing.first] = {width_2_spacing.first, ""};
+                }
+            }
+        } else if (has(dict, width_2_spacing.second)) {
+            const std::string &spacing_value = value();
+            if (!spacing_value.empty()) {
+                // we have a spacing => phony width
+                dict[width_2_spacing.first] = {width_2_spacing.first, ""};
+            } else {
+                    // can't compute it... put 0
+                dict[width_2_spacing.first] = {width_2_spacing.first, "0"};
+            }
+        }
+    }
+
 }
 } // namespace Handle_gacy_tools
 
@@ -9371,9 +9432,11 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config, std::ma
     for (const t_config_option_key &opt_key : to_erase) {
         opt_deleted.erase(opt_key);
     }
-    if (useful_items.find("enable_dynamic_overhang_speeds") != useful_items.end()) {
+    if (useful_items.find("enable_dynamic_overhang_speeds") != useful_items.end() ||
+        useful_items.find("overhang_speed_0") != useful_items.end()) {
         ConfigOptionBool enable_dynamic_overhang_speeds;
-        enable_dynamic_overhang_speeds.deserialize(useful_items["enable_dynamic_overhang_speeds"]);
+        if (useful_items.find("enable_dynamic_overhang_speeds") != useful_items.end())
+            enable_dynamic_overhang_speeds.deserialize(useful_items["enable_dynamic_overhang_speeds"]);
         std::vector<ConfigOptionFloatOrPercent> values;
         values.resize(4);
         values[0].deserialize(useful_items["overhang_speed_0"]);
@@ -9407,10 +9470,8 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config, std::ma
         // extract values
         Pointfs graph_curve;
         for (int x = 0; x < values.size(); ++x) {
-            double speed = std::clamp(values[x].value, min, max);
-            if (values[x].percent) {
-                speed = values[x].get_abs_value(external_perimeter_speed);
-            }
+            double speed = values[x].get_abs_value(external_perimeter_speed);
+            speed = std::clamp(speed, min, max);
             double percent = (speed - min) / (max - min);
             if (min == external_perimeter_speed) {
                 percent = 1 - percent;
@@ -9423,29 +9484,71 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config, std::ma
             graph_curve.push_back(Vec2d(100, 100));
         }
         opt.value = GraphData(graph_curve);
-        opt.set_enabled(enable_dynamic_overhang_speeds.value);
+        if (useful_items.find("enable_dynamic_overhang_speeds") != useful_items.end())
+            opt.set_enabled(enable_dynamic_overhang_speeds.value);
         config.set_key_value("overhangs_dynamic_speed", opt.clone());
     }
-    if (useful_items.find("enable_dynamic_fan_speeds") != useful_items.end()) {
+    if (useful_items.find("enable_dynamic_fan_speeds") != useful_items.end() ||
+        useful_items.find("overhang_fan_speed_0") != useful_items.end()) {
+        // note: there can be a enable_dynamic_fan_speeds and no overhang_fan_speed_X (if it's disabled)
+        // note: there can be a overhang_fan_speed_0 but no overhang_fan_speed_1/2/3
         ConfigOptionBools enable_dynamic_fan_speeds;
-        enable_dynamic_fan_speeds.deserialize(useful_items["enable_dynamic_fan_speeds"]);
+        if(useful_items.find("enable_dynamic_fan_speeds") != useful_items.end())
+            enable_dynamic_fan_speeds.deserialize(useful_items["enable_dynamic_fan_speeds"]);
         auto *external_perimeter_fan_speed = config.option<ConfigOptionInts>("external_perimeter_fan_speed");
         auto *perimeter_fan_speed = config.option<ConfigOptionInts>("perimeter_fan_speed");
         auto *default_fan_speed = config.option<ConfigOptionInts>("default_fan_speed");
         std::vector<ConfigOptionFloats> values;
         values.resize(4);
-        values[0].deserialize(useful_items["overhang_fan_speed_0"]);
-        values[1].deserialize(useful_items["overhang_fan_speed_1"]);
-        values[2].deserialize(useful_items["overhang_fan_speed_2"]);
-        values[3].deserialize(useful_items["overhang_fan_speed_3"]);
+        if(useful_items.find("overhang_fan_speed_0") != useful_items.end())
+            values[0].deserialize(useful_items["overhang_fan_speed_0"]);
+        if(useful_items.find("overhang_fan_speed_1") != useful_items.end())
+            values[1].deserialize(useful_items["overhang_fan_speed_1"]);
+        if(useful_items.find("overhang_fan_speed_2") != useful_items.end())
+            values[2].deserialize(useful_items["overhang_fan_speed_2"]);
+        if(useful_items.find("overhang_fan_speed_3") != useful_items.end())
+            values[3].deserialize(useful_items["overhang_fan_speed_3"]);
         ConfigOptionGraphs opt;
         opt.set_can_be_disabled();
         std::vector<GraphData> graph_data;
+        //ensure same size
+        if (enable_dynamic_fan_speeds.size() <  values[0].size()) {
+            for (size_t extruder_id = 0; extruder_id < values[0].size(); extruder_id++) {
+                enable_dynamic_fan_speeds.set_at(true, extruder_id);
+            }
+        }
+        assert(enable_dynamic_fan_speeds.size() >= values[0].size());
+        assert(values[0].size() >= values[1].size());
+        assert(values[1].size() >= values[2].size());
+        assert(values[2].size() >= values[3].size());
+        const size_t overhang_fan_speed_size = enable_dynamic_fan_speeds.size();
+        for (size_t extruder_id = 0; extruder_id < overhang_fan_speed_size; extruder_id++) {
+            double default_value = 0;
+            if (values[0].size() <= extruder_id) {
+                assert(!enable_dynamic_fan_speeds.get_at(extruder_id));
+                assert(values[0].size() == extruder_id);
+                values[0].set_at(default_value, extruder_id);
+            } else {
+                default_value = values[0].get_at(extruder_id);
+            }
+            if (values[1].size() <= extruder_id) {
+                assert(values[1].size() == extruder_id);
+                values[1].set_at(default_value, extruder_id);
+            } else {
+                default_value = values[1].get_at(extruder_id);
+            }
+            if (values[2].size() <= extruder_id) {
+                assert(values[2].size() == extruder_id);
+                values[2].set_at(default_value, extruder_id);
+            } else {
+                default_value = values[2].get_at(extruder_id);
+            }
+            if (values[3].size() <= extruder_id) {
+                assert(values[3].size() == extruder_id);
+                values[3].set_at(default_value, extruder_id);
+            }
+        }
         // while there is a value
-        assert(enable_dynamic_fan_speeds.size() == values[0].size());
-        assert(values[0].size() == values[1].size());
-        assert(values[0].size() == values[2].size());
-        assert(values[0].size() == values[3].size());
         for(int idx = 0 ;idx < enable_dynamic_fan_speeds.size(); ++idx) {
             // extract values
             Pointfs graph_curve;
@@ -9560,11 +9663,31 @@ std::map<std::string,std::string> PrintConfigDef::from_prusa(t_config_option_key
             output["brim_ears"] = "1";
         }
     }
-    if ("support_material_contact_distance" == 0) {
-        output["support_material_contact_distance_type"] = "none";
+    if ("thick_bridges" == opt_key) {
+        opt_key = "bridge_type";
+        if (value == "1") {
+            value = "nozzle";
+            output["bridge_overlap_min"] = "80%";
+            output["bridge_overlap"] = "95%";
+        } else {
+            value = "flow";
+            output["bridge_overlap_min"] = "60%";
+            output["bridge_overlap"] = "75%";
+        }
+    }
+    if ("support_material_contact_distance" == opt_key) {
+        if ("0" == value) {
+            output["support_material_contact_distance_type"] = "none";
+        } else {
+            output["support_material_contact_distance_type"] = "plane";
+        }
     }
     if (opt_key == "seam_position") {
         if ("cost" == value ) { // eqauls to "near" == value || "nearest" == value
+            output["seam_angle_cost"] = "50%";
+            output["seam_travel_cost"] = "50%";
+        } else if ("nearest" == value) {
+            value = "cost";
             output["seam_angle_cost"] = "50%";
             output["seam_travel_cost"] = "50%";
         }
@@ -9578,14 +9701,15 @@ std::map<std::string,std::string> PrintConfigDef::from_prusa(t_config_option_key
     if ("first_layer_height" == opt_key) {
         if (!value.empty() && value.back() == '%') {
             // A first_layer_height isn't a % of layer_height but from nozzle_diameter now!
-            // can't really convert right now, so put it at a safe value liek 50%.
+            // can't really convert right now, so put it at a safe value like 50%.
             value = "50%";
         }
     }
     if ("resolution" == opt_key && value == "0") {
         value = "0.0125";
     }
-    if ("gcode_resolution" == opt_key) {
+    // can't transfert from print config to printer config (unless there is both)
+    if ("gcode_resolution" == opt_key && all_conf.has("nozzle_diameter")) {
         output["gcode_min_resolution"] = value;
     }
     if (("brim_width" == opt_key || "brim_width_interior" == opt_key) && all_conf.option("brim_separation") ) {
@@ -9603,9 +9727,15 @@ std::map<std::string,std::string> PrintConfigDef::from_prusa(t_config_option_key
         value = "rectilinear";
     }
     if ("fan_always_on" == opt_key) {
+        opt_key = "";
         //min_fan_speed is already converted to default_fan_speed, just has to deactivate it if not always_on
-        if (value != "1")
-            output["default_fan_speed"] = "0";
+        if (value != "1") {
+            if (all_conf.option("default_fan_speed")) {
+                output["default_fan_speed"] = std::string("!") + all_conf.option("default_fan_speed")->serialize();
+            } else {
+                output["default_fan_speed"] = "!0";
+            }
+        }
     }
     if ("bridge_angle" == opt_key && "0" == value) {
         value = "!0";
@@ -9666,10 +9796,18 @@ std::map<std::string,std::string> PrintConfigDef::from_prusa(t_config_option_key
     static const std::vector<std::pair<std::string, std::string>> custom_gcode_replace =
         {{"[temperature]", "{temperature+extruder_temperature_offset}"},
          {"{temperature}", "{temperature+extruder_temperature_offset}"},
-         {"{temperature[initial_extruder]}", "{temperature[initial_extruder]+extruder_temperature_offset[initial_extruder]}"},
+         {"[temperature[initial_tool]]", "{temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
+         {"{temperature[initial_tool]}", "{temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
+         {"[temperature[initial_extruder]]", "{temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
+         {"{temperature[initial_extruder]}", "{temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
          {"[first_layer_temperature]", "{first_layer_temperature+extruder_temperature_offset}"},
          {"{first_layer_temperature}", "{first_layer_temperature+extruder_temperature_offset}"},
-         {"{first_layer_temperature[initial_extruder]}", "{first_layer_temperature[initial_extruder]+extruder_temperature_offset[initial_extruder]}"}};
+         {"[first_layer_temperature[initial_tool]]", "{first_layer_temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
+         {"[first_layer_temperature[initial_extruder]]", "{first_layer_temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
+         {"{first_layer_temperature[initial_tool]}", "{first_layer_temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
+         {"{first_layer_temperature[initial_extruder]}", "{first_layer_temperature[initial_tool]+extruder_temperature_offset[initial_tool]}"},
+         {"!is_nil(", "is_enabled("},
+         {"is_nil(", "!is_enabled("}};
 
     static const std::set<t_config_option_key> custom_gcode_keys =
         {"template_custom_gcode", "toolchange_gcode", "before_layer_gcode",
@@ -9693,14 +9831,6 @@ const std::unordered_set<std::string> prusa_import_to_review_keys =
     "thumbnails"
 };
 
-const std::vector<std::pair<t_config_option_key, t_config_option_key>> prusa_import_widths_2_spacings_for_phony_fix =
-    {{"extrusion_width", "extrusion_spacing"},
-     {"perimeter_extrusion_width", "perimeter_extrusion_spacing"},
-     {"external_perimeter_extrusion_width", "external_perimeter_extrusion_spacing"},
-     {"first_layer_extrusion_width", "first_layer_extrusion_spacing"},
-     {"infill_extrusion_width", "infill_extrusion_spacing"},
-     {"solid_infill_extrusion_width", "solid_infill_extrusion_spacing"},
-     {"top_infill_extrusion_width", "top_infill_extrusion_spacing"}};
 
 template<typename CONFIG_CLASS>
 void _convert_from_prusa(CONFIG_CLASS& conf, const DynamicPrintConfig& global_config, bool with_phony) {
@@ -9733,7 +9863,7 @@ void _convert_from_prusa(CONFIG_CLASS& conf, const DynamicPrintConfig& global_co
 
     // set phony entries
     if (with_phony) {
-        for (auto & [opt_key_width, opt_key_spacing] : prusa_import_widths_2_spacings_for_phony_fix) {
+        for (auto & [opt_key_width, opt_key_spacing] : Handle_legacy_tools::widths_2_spacings_for_phony_fix) {
             // if prusa has defined a width, or if the conf has a default spacing that need to be overwritten
             if (conf.option(opt_key_width) != nullptr || conf.option(opt_key_spacing) != nullptr) {
                 ConfigOption *opt_new = print_config_def.get(opt_key_spacing)->default_value.get()->clone();
@@ -9779,7 +9909,7 @@ void _deserialize_maybe_from_prusa(const std::map<t_config_option_key, std::stri
                     unknown_keys[key] = {key, opt_value/*should be old value, before handle_legacy*/}; 
                 } else {
                     config.set_deserialize(opt_key, opt_value, config_substitutions);
-                    if (config_substitutions.rule == ForwardCompatibilitySubstitutionRule::Enable && settings.at(key) != opt_value) {
+                    if (auto it = settings.find(key); config_substitutions.rule == ForwardCompatibilitySubstitutionRule::Enable && it != settings.end() && it->second != opt_value) {
                         const ConfigOptionDef *optdef = def->get(opt_key);
                         if (optdef != nullptr) {
                             ConfigSubstitution substitution(optdef, settings.at(key), ConfigOptionUniquePtr(config.option(opt_key)->clone()));
@@ -9874,7 +10004,7 @@ void _deserialize_maybe_from_prusa(const std::map<t_config_option_key, std::stri
     // set phony entries
     if (with_phony) {
         const ConfigDef *def = config.def();
-        for (auto & [opt_key_width, opt_key_spacing] : prusa_import_widths_2_spacings_for_phony_fix) {
+        for (auto & [opt_key_width, opt_key_spacing] : Handle_legacy_tools::widths_2_spacings_for_phony_fix) {
             const ConfigOption *opt_width = config.option(opt_key_width);
             const ConfigOption *opt_spacing = config.option(opt_key_spacing);
             if (opt_width && opt_spacing) {
@@ -10432,16 +10562,13 @@ std::map<std::string, std::string> PrintConfigDef::to_prusa(t_config_option_key&
     }
     if ("default_fan_speed" == opt_key) {
         if (!value.empty() && value.front() == '!') {
-            value = "1";
-        }
-        if (value == "0") {
-            opt_key = "min_fan_speed";
-            value = std::to_string(all_conf.option("fan_printer_min_speed")->get_float());
             new_entries["fan_always_on"] = "0";
         } else {
-            opt_key = "min_fan_speed";
             new_entries["fan_always_on"] = "1";
         }
+        opt_key = "min_fan_speed";
+        value = std::to_string(std::max(all_conf.option("fan_printer_min_speed")->get_float(),
+                                        all_conf.option("default_fan_speed")->get_float()));
     }
     if ("bridge_fan_speed" == opt_key) {
         if (!value.empty() && value.front() == '!') {
@@ -12184,10 +12311,21 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
     def->label = L("Next color");
     def->tooltip = L("Next color to display when a color change is performed, in #ffffff format.");
 
-    def = this->add("next_colour", coString);
-    // TRN: This is a label in custom g-code editor dialog, belonging to color_change_extruder. Denoted index of the extruder for which color change is performed.
-    def->label = L("Next colour");
-    def->tooltip = L("Next colour to display when a colour change is performed, in #ffffff format.");
+    def = this->add("previous_extrusion_role", coString);
+    def->label = L("Previous extrusion role");
+    def->tooltip = L("The extrusion role before changing to the new one.");
+
+    def = this->add("next_extrusion_role", coString);
+    def->label = L("Next extrusion role");
+    def->tooltip = L("The new extrusion role the gcode changes to.");
+
+    def = this->add("extrusion_role", coString);
+    def->label = L("Extrusion role");
+    def->tooltip = L("Deprecated, use next_extrusion_role.");
+
+    def = this->add("last_extrusion_role", coString);
+    def->label = L("Last extrusion role");
+    def->tooltip = L("Deprecated, use previous_extrusion_role.");
     
     def = this->add("start_gcode_bed_temperature", coInt);
     def->label = L("Computed bed temperature for first layer");

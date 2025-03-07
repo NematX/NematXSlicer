@@ -1257,7 +1257,6 @@ bool ConfigBase::set_deserialize_nothrow(const t_config_option_key &opt_key_src,
     try {
         return this->set_deserialize_raw(opt_key, value, substitutions_ctxt, append);
     } catch (UnknownOptionException e) {
-        this->handle_legacy(opt_key, value);
         return true;
     }
 }

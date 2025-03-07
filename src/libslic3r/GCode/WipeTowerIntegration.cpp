@@ -138,9 +138,13 @@ std::string WipeTowerIntegration::append_tcr(GCodeGenerator &gcodegen, const Wip
     //}
     std::string tcr_rotated_gcode = post_process_wipe_tower_moves(tcr, wipe_tower_offset, wipe_tower_rotation, gcodegen.config().gcode_flavor.value,
                                                                   gcodegen, new_extruder_id);
-    std::string tcr_gcode;
-    unescape_string_cstyle(tcr_rotated_gcode, tcr_gcode);
-    gcode += tcr_gcode;
+
+    // the custom gcode is already processed by the parser...
+    // supermerill: why? it breaks the '\' from custom gcode. disabling it
+    //std::string tcr_gcode;
+    //unescape_string_cstyle(tcr_rotated_gcode, tcr_gcode);
+    //gcode += tcr_gcode;
+    gcode += tcr_rotated_gcode;
 
     // tag for fan speed (to not lost it)
     if (!finalize)
