@@ -181,32 +181,40 @@ namespace Slic3r {
         //}
         unsigned int extruder_id = gcodegen.writer().tool()->id();
         const ConfigOptionInts& filament_idle_temp = gcodegen.config().idle_temperature;
+        bool cooldown = false;
         if (!filament_idle_temp.is_enabled(extruder_id)) {
             // There is no idle temperature defined in filament settings.
             // Use the delta value from print config.
-            if (gcodegen.config().standby_temperature_delta.value != 0 && gcodegen.writer().tool_is_extruder() && this->_get_temp(gcodegen) > 0) {
+            if (gcodegen.writer().tool_is_extruder() && this->_get_temp(gcodegen) > 0 &&
+                gcodegen.config().standby_temperature_delta.value != 0) {
                 // we assume that heating is always slower than cooling, so no need to block
                 gcode += gcodegen.writer().set_temperature
                 (this->_get_temp(gcodegen) + gcodegen.config().standby_temperature_delta.value, false, extruder_id);
-                if(gcode.back() == '\n') gcode.pop_back(); // delete \n if possible to insert our comment FIXME: allow set_temperature to get an extra comment
-                gcode += " ;cooldown\n"; // this is a marker for GCodeProcessor, so it can supress the commands when needed
+                cooldown = true;
             }
         } else {
             // Use the value from filament settings. That one is absolute, not delta.
             gcode += gcodegen.writer().set_temperature(filament_idle_temp.get_at(extruder_id), false, extruder_id);
-            if(gcode.back() == '\n') gcode.pop_back(); // delete \n if possible to insert our comment FIXME: allow set_temperature to get an extra comment
+            cooldown = true;
+        }
+        if (cooldown) {
+            if (gcode.back() == '\n')
+                gcode.pop_back(); // delete \n if possible to insert our comment FIXME: allow set_temperature to get
+                                  // an extra comment
             gcode += " ;cooldown\n"; // this is a marker for GCodeProcessor, so it can supress the commands when needed
         }
-
         return gcode;
     }
 
     std::string OozePrevention::post_toolchange(GCodeGenerator& gcodegen)
     {
-        if (gcodegen.config().standby_temperature_delta.value != 0 && gcodegen.writer().tool_is_extruder()){
+        if (gcodegen.writer().tool_is_extruder() &&
+            (gcodegen.config().standby_temperature_delta.value != 0 ||
+             gcodegen.config().idle_temperature.is_enabled(gcodegen.writer().tool()->id()))) {
             int temp = this->_get_temp(gcodegen);
-            if (temp > 0)
+            if (temp > 0) {
                 return gcodegen.writer().set_temperature(temp, true, gcodegen.writer().tool()->id());
+            }
         }
         return std::string();
     }
@@ -1188,11 +1196,16 @@ void GCodeGenerator::_init_multiextruders(const Print& print, std::string& out, 
     //set standby temp for reprap
     if (std::set<uint8_t>{gcfRepRap}.count(print.config().gcode_flavor.value) > 0) {
         for (uint16_t tool_id : tool_ordering.all_extruders()) {
-            int standby_temp = int(print.config().temperature.get_at(tool_id));
-            if (standby_temp > 0) {
+            int printing_temp = int(print.config().temperature.get_at(tool_id));
+            if (printing_temp > 0) {
+                int standby_temp = printing_temp;
                 if (print.config().ooze_prevention.value)
                     standby_temp += print.config().standby_temperature_delta.value;
+                if (print.config().idle_temperature.is_enabled(tool_id)) {
+                    standby_temp = print.config().idle_temperature.get_at(tool_id);
+                }
                 out.append("G10 P").append(std::to_string(tool_id)).append(" R").append(std::to_string(standby_temp)).append(" ; sets the standby temperature\n");
+                //out.append("G10 P").append(std::to_string(tool_id)).append(" S").append(std::to_string(printing_temp)).append(" ; sets the default temperature\n");
             }
         }
     }
@@ -2939,17 +2952,21 @@ void GCodeGenerator::_print_first_layer_extruder_temperatures(std::string &out, 
         m_writer.set_temperature(temp, wait, first_printing_extruder_id);
     } else {
         // Custom G-code does not set the extruder temperature. Do it now.
-        if (!print.config().single_extruder_multi_material.value) {
+        // it's useful to do it when there is really multiple extruder, or if reprap because of the G10
+        if (!print.config().single_extruder_multi_material.value ||
+            std::set<uint8_t>{gcfRepRap}.count(print.config().gcode_flavor.value) > 0) {
             // Set temperatures of all the printing extruders.
             for (const Extruder& tool : m_writer.extruders()) {
                 int temp = print.config().first_layer_temperature.get_at(tool.id());
                 if (temp == 0)
                     temp = print.config().temperature.get_at(tool.id());
-                if (print.config().ooze_prevention.value && tool.id() != first_printing_extruder_id)
-                    if (!print.config().idle_temperature.is_enabled(tool.id()))
-                        temp += print.config().standby_temperature_delta.value;
-                    else
+                if (print.config().ooze_prevention.value && tool.id() != first_printing_extruder_id) {
+                    if (print.config().idle_temperature.is_enabled(tool.id())) {
                         temp = print.config().idle_temperature.get_at(tool.id());
+                    } else {
+                        temp += print.config().standby_temperature_delta.value;
+                    }
+                }
                 if (temp > 0)
                     out += (m_writer.set_temperature(temp, false, tool.id()));
             }
@@ -4827,6 +4844,7 @@ std::string GCodeGenerator::extrude_loop(const ExtrusionLoop &original_loop, con
             assert(!path.polyline.get_point(i - 1).coincides_with_epsilon(path.polyline.get_point(i)));
 
     split_at_seam_pos(loop_to_seam, is_hole_loop);
+    const Point seam_pos = loop_to_seam.first_point();
     const coordf_t full_loop_length = loop_to_seam.length();
     const bool is_full_loop_ccw = loop_to_seam.polygon().is_counter_clockwise();
     //after that point, loop_to_seam can be modified by 'paths', so don't use it anymore
@@ -5011,6 +5029,13 @@ std::string GCodeGenerator::extrude_loop(const ExtrusionLoop &original_loop, con
         gcode += extrude_path(path, description, speed);
     }
 
+    // print seam tag with seam position (only for external perimeter & overhangs)
+    if (original_loop.paths.front().role().is_external_perimeter())
+    {
+        Vec2d seam_gcode_point = point_to_gcode(seam_pos);
+        gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Seam) + ":" +
+            to_string_nozero(seam_gcode_point.x(), 3) + ":" + to_string_nozero(seam_gcode_point.y(), 3) + "\n";
+    }
     // reset acceleration
     m_writer.set_acceleration((uint16_t)floor(get_default_acceleration(m_config) + 0.5));
 
@@ -5229,7 +5254,7 @@ std::string GCodeGenerator::extrude_loop(const ExtrusionLoop &original_loop, con
                             }
                             assert(polys.front().closest_point(pt_inside) != nullptr &&
                                    std::abs(polys.front().closest_point(pt_inside)->distance_to_square(pt_inside) -
-                                            best_dist_sqr) < SCALED_EPSILON);
+                                            best_dist_sqr) < SCALED_EPSILON * SCALED_EPSILON);
                         } else {
                             polys = { original_polygon };
                         }
@@ -5583,7 +5608,7 @@ std::string GCodeGenerator::extrude_path(const ExtrusionPath &path, const std::s
     }
 
     // if the path is too small to be printed, put in the queue to be merge with the next one.
-    const coordf_t scaled_min_length = this->config().gcode_min_length.is_enabled() ?
+    const distf_t scaled_min_length = this->config().gcode_min_length.is_enabled() ?
         scale_d(this->config().gcode_min_length.get_abs_value(m_current_perimeter_extrusion_width)) :
         0;
     if (scaled_min_length > 0 && simplifed_path.length() < scaled_min_length) {
@@ -5597,31 +5622,69 @@ std::string GCodeGenerator::extrude_path(const ExtrusionPath &path, const std::s
     // simplify with gcode_resolution (not used yet). Simplify by junction deviation before the g1/sec count, to be able to use that decimation to reduce max_gcode_per_second triggers.
     // But as it can be visible on cylinders, should only be called if a max_gcode_per_second trigger may come.
     const coordf_t scaled_min_resolution = scale_d(this->config().gcode_min_resolution.get_abs_value(m_current_perimeter_extrusion_width));
-    const int32_t max_gcode_per_second = (false /*disabled*/&& this->config().max_gcode_per_second.is_enabled()) ?
+    const int32_t max_gcode_per_second = (this->config().max_gcode_per_second.is_enabled()) ?
         this->config().max_gcode_per_second.value :
         0;
     double fan_speed;
+    //if (max_gcode_per_second > 0) {
+    //    // if (broken) max_gcode_per_second is used, simplify the segment with it
+    //    const int32_t gcode_buffer_window = this->config().gcode_command_buffer.value;
+    //    double speed = _compute_speed_mm_per_sec(path, speed_mm_per_sec, fan_speed, nullptr);
+    //    coordf_t scaled_mean_length = scale_d(speed / max_gcode_per_second);
+
+    //    // set at least 2 buffer space, to not over-erase first lines.
+    //    if (gcode_buffer_window > 2 && gcode_buffer_window - m_last_command_buffer_used < 2) {
+    //        m_last_command_buffer_used = gcode_buffer_window - 2;
+    //    }
+
+    //    // simplify
+    //    m_last_command_buffer_used = simplifed_path.polyline.simplify_straits(scaled_min_resolution,
+    //                                                                            scaled_min_length,
+    //                                                                            scaled_mean_length,
+    //                                                                            gcode_buffer_window,
+    //                                                                            m_last_command_buffer_used);
+    //} else if (scaled_min_length > 0) {
+    //    // else, simplify with the simple algo only
+    //    simplifed_path.polyline.simplify_straits(scaled_min_resolution, scaled_min_length);
+    //}
+    // old 2.5 way
+    distf_t current_scaled_min_length = scaled_min_length;
     if (max_gcode_per_second > 0) {
-        // if (broken) max_gcode_per_second is used, simplify the segment with it
-        const int32_t gcode_buffer_window = this->config().gcode_command_buffer.value;
-        double speed = _compute_speed_mm_per_sec(path, speed_mm_per_sec, fan_speed, nullptr);
-        coordf_t scaled_mean_length = scale_d(speed / max_gcode_per_second);
-
-        // set at least 2 buffer space, to not over-erase first lines.
-        if (gcode_buffer_window > 2 && gcode_buffer_window - m_last_command_buffer_used < 2) {
-            m_last_command_buffer_used = gcode_buffer_window - 2;
-        }
-
-        // simplify
-        m_last_command_buffer_used = simplifed_path.polyline.simplify_straits(scaled_min_resolution,
-                                                                                scaled_min_length,
-                                                                                scaled_mean_length,
-                                                                                gcode_buffer_window,
-                                                                                m_last_command_buffer_used);
-    } else if (scaled_min_length > 0) {
-        // else, simplify with the simple algo only
-        simplifed_path.polyline.simplify_straits(scaled_min_resolution, scaled_min_length);
+        current_scaled_min_length = std::max(current_scaled_min_length, scale_d(_compute_speed_mm_per_sec(path, speed_mm_per_sec, fan_speed, nullptr)) / max_gcode_per_second);
     }
+    if (current_scaled_min_length > 0 && !simplifed_path.polyline.has_arc() && !config().spiral_vase) {
+        // it's an alternative to simplifed_path.simplify(scale_(this->config().min_length)); with more enphasis on
+        // the segment length that on the feature detail. because tolerance = min_length /10, douglas_peucker will
+        // erase more points if angles are shallower than 6° and then the '_plus' will kick in to keep a bit more. if
+        // angles are all bigger than 6°, then the douglas_peucker will do all the work.
+        // NOTE: okay to use set_points() as i have checked against the absence of arc.
+        bool can_simplify = true;
+        if (simplifed_path.polyline.size() < 3) {
+            can_simplify = false;
+        }
+        if (simplifed_path.polyline.size() < 4 &&
+            simplifed_path.polyline.front().coincides_with_epsilon(simplifed_path.polyline.back())) {
+            // polygon
+            can_simplify = false;
+        }
+        for (int i = 1; i < simplifed_path.polyline.size(); ++i)
+            assert(!simplifed_path.polyline.get_point(i - 1).coincides_with_epsilon(
+                simplifed_path.polyline.get_point(i)));
+        if (can_simplify) {
+            ExtrusionPath old_path = simplifed_path;
+            simplifed_path.polyline = ArcPolyline(
+                MultiPoint::_douglas_peucker_plus(simplifed_path.polyline.to_polyline().points,
+                                                  std::max(scaled_min_resolution, current_scaled_min_length / 20),
+                                                  current_scaled_min_length));
+            for (int i = 1; i < simplifed_path.polyline.size(); ++i)
+                assert(!simplifed_path.polyline.get_point(i - 1).coincides_with_epsilon(
+                    simplifed_path.polyline.get_point(i)));
+            if (simplifed_path.size() <= 1) {
+                simplifed_path = old_path;
+            }
+        }
+    }
+    // end old 2.5 way
 
     for(int i=1;i<simplifed_path.polyline.size();++i)
         assert(!simplifed_path.polyline.get_point(i - 1).coincides_with_epsilon(simplifed_path.polyline.get_point(i)));
@@ -6731,7 +6794,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionPath &path, const std::strin
     return gcode;
 }
 
-double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, const double set_speed, double &fan_speed, std::string *comment) {
+double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, const double set_speed, double &fan_speed, std::string *comment) const {
 
     float factor = 1;
     double speed = set_speed;
@@ -7221,11 +7284,11 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
             // go to midpoint to let us set the decel speed)
             if (!last_pos_defined() || !last_pos().coincides_with_epsilon(path.first_point())) {
                 Polyline poly_start = this->travel_to(gcode, path.first_point(), path.role());
-                coordf_t length = poly_start.length();
+                const coordf_t length = poly_start.length();
                 if (length > SCALED_EPSILON) {
                     // compute some numbers
                     double previous_accel = m_writer.get_acceleration(); // in mm/s²
-                    double previous_speed = m_writer.get_speed_mm_s(); // in mm/s
+                    double previous_speed = m_writer.get_speed_mm_s();   // in mm/s
                     double travel_speed = m_config.get_computed_value("travel_speed");
                     // first, the acceleration distance
                     const double extrude2travel_speed_diff = previous_speed >= travel_speed ?
@@ -7238,7 +7301,8 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
                     assert(!std::isinf(dist_to_go_travel_speed));
                     assert(!std::isnan(dist_to_go_travel_speed));
                     // then the deceleration distance
-                    const double travel2extrude_speed_diff = speed_mm_s >= travel_speed ? 0 : (travel_speed - speed_mm_s);
+                    const double travel2extrude_speed_diff = speed_mm_s >= travel_speed ? 0 :
+                                                                                          (travel_speed - speed_mm_s);
                     const double seconds_to_go_extrude_speed = (travel2extrude_speed_diff / acceleration);
                     const coordf_t dist_to_go_extrude_speed = scaled(seconds_to_go_extrude_speed *
                                                                      (travel_speed - travel2extrude_speed_diff / 2));
@@ -7300,26 +7364,35 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
                             poly_start.clip_end(length * ratio);
                             poly_end.clip_start(length * (1 - ratio));
                         }
-                        //gcode += "; acceleration to travel\n";
+                        // gcode += "; acceleration to travel\n";
                         m_writer.set_travel_acceleration((uint32_t) floor(travel_acceleration + 0.5));
                         this->write_travel_to(gcode, poly_start,
                                               "move to first " + description + " point (acceleration)");
                         // travel acceleration should be already set at startup via special gcode, and so it's
                         // automatically used by G0.
-                        //gcode += "; decel to extrusion\n";
+                        // gcode += "; decel to extrusion\n";
                         m_writer.set_travel_acceleration((uint32_t) floor(acceleration + 0.5));
                         this->write_travel_to(gcode, poly_end,
                                               "move to first " + description + " point (deceleration)");
                         // restore travel accel and ensure the new extrusion accel is set
                         m_writer.set_travel_acceleration((uint32_t) floor(travel_acceleration + 0.5));
                         m_writer.set_acceleration((uint32_t) floor(acceleration + 0.5));
-                        //gcode += "; end travel\n";
+                        // gcode += "; end travel\n";
                         assert(!moved_to_point);
                         moved_to_point = true;
                     }
+                } else if (poly_start.size() == 2 && length < SCALED_EPSILON) {
+                    // the travel is epsilon (can this really happen? maybe it needs to be investigated. I saw it happen one time with A21_borked project)
+                    // last_pos().coincides_with_epsilon(path.first_point()) should have prevented this, but it works with SCALED_EPSILON / 2
+                    // were's here because length is between SCALED_EPSILON / 2 and SCALED_EPSILON.
+                    // => No travel needed.
+                    assert(last_pos_defined());
+                    m_writer.set_acceleration((uint32_t)floor(acceleration + 0.5));
+                    assert(!moved_to_point);
+                    moved_to_point = true;
                 } else {
                     // this can only happen when !last_pos_defined(), and then poly_start has only one point
-                    assert(poly_start.size() == 1 && !last_pos_defined());
+                    assert(!last_pos_defined() && poly_start.size() == 1);
                     m_writer.set_travel_acceleration((uint32_t) floor(acceleration + 0.5));
                     m_writer.set_acceleration((uint32_t) floor(acceleration + 0.5));
                     this->write_travel_to(gcode, poly_start,
@@ -7328,6 +7401,8 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
                     moved_to_point = true;
                 }
             } else {
+                assert(last_pos_defined());
+                assert(moved_to_point);
                 m_writer.set_acceleration((uint32_t)floor(acceleration + 0.5));
             }
         }
@@ -7516,6 +7591,7 @@ void GCodeGenerator::_add_object_change_labels(std::string& gcode) {
         // if m_new_z_target, then the ramping lift will be written. if not, then there isn't anything to ensure a good z
         if(!m_new_z_target && BOOL_EXTRUDER_CONFIG(travel_ramping_lift) && m_spiral_vase_layer <= 0) {
             gcode += m_writer.get_travel_to_z_gcode(m_writer.get_position().z(), "ensure z is right");
+            m_writer.set_lift(0);
         }
     }
 }
@@ -7782,13 +7858,12 @@ void GCodeGenerator::write_travel_to(std::string &gcode, Polyline& travel, std::
                 double layer_change_diff = m_layer->print_z - m_writer.get_unlifted_position().z();
                 // move layer_change_diff into lift & z_diff_layer_and_lift
                 z_diff_layer_and_lift += layer_change_diff;
-            } else {
-                // do a strait z-move (as we can't see the preious point.
-                gcode += m_writer.get_travel_to_z_gcode(m_layer->print_z, "strait z-move, as the travel is undefined.");
-                no_ramping = true;
             }
-        } else {
-            assert(!m_new_z_target);
+        }
+        if (travel.size() <= 1) {
+            // do a strait z-move (as we can't see the previous point.
+            gcode += m_writer.travel_to_z(m_layer->print_z, "strait z-move, as the travel is undefined.");
+            no_ramping = true;
         }
         // register get_extra_lift for our ramping lift (ramping lift + lift_min)
         if (m_writer.get_extra_lift() != 0) {
@@ -8442,7 +8517,7 @@ std::string GCodeGenerator::toolchange(uint16_t extruder_id, double print_z) {
     if (toolchange_gcode.empty() && m_writer.multiple_extruders) { // !custom_gcode_changes_tool(toolchange_gcode_parsed, m_writer.toolchange_prefix(), extruder_id) && !no_toolchange)
         gcode += toolchange_command;
     } else {
-        // user provided his own toolchange gcode, no need to do anything
+        // user provided his own toolchange gcode, no need to write anything
     }
     if (m_enable_cooling_markers) {
         gcode += ";_TOOLCHANGE " + std::to_string(extruder_id) + "\n";
