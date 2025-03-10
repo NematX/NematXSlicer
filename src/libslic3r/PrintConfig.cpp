@@ -750,6 +750,27 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("avoid_travel_island", coBool);
+    def->label = L("Find smallest crossing between islands");
+    def->category = OptionCategory::perimeter;
+    def->tooltip = L("When using 'Avoid crossing perimeters', if you neeed to travel between two islands, find the two poitns that are nearest to each other."
+        "\nNote: In modifiers, only works in object & layer range modifiers.");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("avoid_travel_island_weight", coFloat);
+    def->label = L("Weight for internal travel");
+    def->full_label = L("Weight for internal distance while choosing island crossing");
+    def->category = OptionCategory::perimeter;
+    def->tooltip = L("When using 'Avoid crossing perimeters', and 'Find smallest travel between islands'"
+        ", also consider the distance bewteen the crossing poitns and the start & end of the travel while searchign for the smallest crossing."
+        "\nSet to zero to be sure to have the smallest crossing possible."
+        "\nSet to a higher value to be able to choose a nearer crossing even if the crossing distance isn't as small as possible."
+        "\nNote: In modifiers, only works in object & layer range modifiers.");
+    def->min = 0;
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloat(0.4));
+
     def = this->add("bed_temperature", coInts);
     def->label = L("Other layers");
     def->category = OptionCategory::filament;
@@ -10105,6 +10126,8 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "arc_fitting_tolerance",
 "avoid_crossing_not_first_layer",
 "avoid_crossing_top",
+"avoid_travel_island",
+"avoid_travel_island_weight",
 "bridge_fill_pattern",
 "bridge_precision",
 "bridge_overlap",

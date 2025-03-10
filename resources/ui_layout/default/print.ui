@@ -56,6 +56,10 @@ group:Avoid crossing perimeters
 		setting:label_width$12:label$Not on first layer:avoid_crossing_not_first_layer
 		setting:avoid_crossing_top
 	end_line
+	line:Between islands
+		setting:label$Find smallest crossing:avoid_travel_island
+		setting:avoid_travel_island_weight
+	end_line
 	setting:avoid_crossing_curled_overhangs
 group:label_width$12:Overhangs
 		setting:script:bool:tags$Simple$Advanced$Prusa$SuSi:depends$overhangs_width_speed$overhangs_width:label$Activate (threshold):label_width$0:tooltip$Simple widget to enable/disable the overhangs detection (using stored thresholds)\nUse the expert mode to get more detailled widgets:s_overhangs

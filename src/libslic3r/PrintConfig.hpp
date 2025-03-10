@@ -864,6 +864,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     PrintRegionConfig,
 
     ((ConfigOptionBool,                 avoid_crossing_top))
+    ((ConfigOptionBool,                 avoid_travel_island))
+    ((ConfigOptionFloat,                avoid_travel_island_weight))
     ((ConfigOptionFloatOrPercent,       bridge_acceleration))
     ((ConfigOptionFloat,                bridge_angle))
     ((ConfigOptionEnum<InfillPattern>,  bridge_fill_pattern))

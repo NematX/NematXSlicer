@@ -499,6 +499,8 @@ static std::vector<std::string> s_Preset_print_options {
         "avoid_crossing_perimeters", 
         "avoid_crossing_not_first_layer",
         "avoid_crossing_top",
+        "avoid_travel_island",
+        "avoid_travel_island_weight",
         "thin_perimeters", "thin_perimeters_all",
         "overhangs_speed",
         "overhangs_speed_enforce",

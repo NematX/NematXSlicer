@@ -1601,6 +1601,8 @@ bool PrintObject::invalidate_state_by_config_options(
             //}
         } else if (
                 opt_key == "avoid_crossing_top"
+                || opt_key == "avoid_travel_island"
+                || opt_key == "avoid_travel_island_weight"
                 || opt_key == "bridge_acceleration"
                 || opt_key == "bridge_speed"
                 || opt_key == "brim_acceleration"

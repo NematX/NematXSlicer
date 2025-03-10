@@ -624,6 +624,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
     toggle_field("avoid_crossing_perimeters_max_detour", have_avoid_crossing_perimeters);
     toggle_field("avoid_crossing_not_first_layer", have_avoid_crossing_perimeters);
     toggle_field("avoid_crossing_top", have_avoid_crossing_perimeters);
+    toggle_field("avoid_travel_island", have_avoid_crossing_perimeters);
+    toggle_field("avoid_travel_island_weight", have_avoid_crossing_perimeters && config->opt_bool("avoid_travel_island"));
     
     toggle_field("enforce_retract_first_layer", config->opt_bool("only_retract_when_crossing_perimeters"));
 
