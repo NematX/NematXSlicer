@@ -59,6 +59,7 @@ private:
     std::array<float, 7>        m_current_pos;
     // Current known fan speed or -1 if not known yet.
     int                         m_fan_speed;
+    int                         m_override_fan_speed{-1};
     // Cached from GCodeWriter.
     // Printing extruder IDs, zero based.
     std::vector<unsigned int>   m_extruder_ids;

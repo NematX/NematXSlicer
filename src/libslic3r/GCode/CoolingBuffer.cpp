@@ -55,6 +55,7 @@ void CoolingBuffer::reset(const Vec3d &position)
     m_current_pos[AxisIdx::I] = 0.f;
     m_current_pos[AxisIdx::J] = 0.f;
     m_fan_speed = -1;
+    m_override_fan_speed = -1;
 }
 
 struct CoolingLine
@@ -1139,7 +1140,6 @@ std::string CoolingBuffer::apply_layer_cooldown(
     int                 current_feedrate  = 0;
     int                 stored_fan_speed  = m_fan_speed < 0 ? 0 : m_fan_speed;
     int                 current_fan_speed = -1;
-    int                 override_fan_speed = -1;
     int                 override_min_fan_speed = -1;
     const std::string   comment_speed = m_config.gcode_comments ? " ; speed changed by the cooling algorithm" : "";
     std::pair<int,int> fan_speed_limits = change_extruder_set_fan();
@@ -1175,10 +1175,10 @@ std::string CoolingBuffer::apply_layer_cooldown(
             override_min_fan_speed = -1;
             fan_need_set = true;
         } else if (line->type & CoolingLine::TYPE_SET_FAN_SPEED) {
-            override_fan_speed = std::clamp(line->fan_speed, fan_speed_limits.first, fan_speed_limits.second);
+            m_override_fan_speed = std::clamp(line->fan_speed, fan_speed_limits.first, fan_speed_limits.second);
             fan_need_set = true;
         } else if (line->type & CoolingLine::TYPE_RESET_FAN_SPEED){
-            override_fan_speed = -1;
+            m_override_fan_speed = -1;
             fan_need_set = true;
         } else if (line->type & CoolingLine::TYPE_EXTRUDE_END) {
             assert(extrude_tree.size() > 0);
@@ -1292,13 +1292,14 @@ std::string CoolingBuffer::apply_layer_cooldown(
             new_gcode.append(line_start, line_end - line_start);
         }
         if (fan_need_set) {
-            if (override_fan_speed >= 0 && override_fan_speed > current_fan_speed) {
-                current_fan_speed = override_fan_speed;
-                new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_config.gcode_comments, current_fan_speed,
-                                                  EXTRUDER_CONFIG(extruder_fan_offset),
-                                                  m_current_extruder,
-                                                  m_config.fan_percentage,
-                                                  "set override fan");
+            if (m_override_fan_speed >= 0) {
+                if (current_fan_speed != m_override_fan_speed) {
+                    current_fan_speed = m_override_fan_speed;
+                    new_gcode += GCodeWriter::set_fan(m_config.gcode_flavor, m_config.gcode_comments,
+                                                      current_fan_speed, EXTRUDER_CONFIG(extruder_fan_offset),
+                                                      m_current_extruder, m_config.fan_percentage,
+                                                      "set override fan");
+                }
             } else {
                 //use the most current fan
                 bool fan_set = false;

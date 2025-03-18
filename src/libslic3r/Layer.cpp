@@ -727,7 +727,14 @@ void Layer::make_perimeters()
                             && config.perimeter_overlap         == other_config.perimeter_overlap
                             && config.perimeter_reverse         == other_config.perimeter_reverse
                             && config.perimeter_speed           == other_config.perimeter_speed // it is mandatory? can't this be set at gcode.cpp?
-                            && config.print_extrusion_multiplier == other_config.print_extrusion_multiplier
+                            // print -modifier, because region are fused in gode wiew if not.
+                            && config.print_extrusion_multiplier        == other_config.print_extrusion_multiplier
+                            && config.print_fan_speed                   == other_config.print_fan_speed
+                            && config.print_first_layer_temperature     == other_config.print_first_layer_temperature
+                            && config.print_retract_length              == other_config.print_retract_length
+                            && config.print_retract_lift                == other_config.print_retract_lift
+                            && config.print_temperature                 == other_config.print_temperature
+                            // end print modifier
                             && config.region_gcode              == other_config.region_gcode
                             && config.small_perimeter_speed     == other_config.small_perimeter_speed
                             && config.small_perimeter_min_length == other_config.small_perimeter_min_length

@@ -5812,6 +5812,16 @@ void GCodeGenerator::set_region_for_extrude(const Print &print, const PrintObjec
     } else if (m_config.temperature.get_at(m_writer.tool()->id()) > 0) { // don't set it if disabled
         gcode += m_writer.set_temperature(m_config.temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
     }
+    if (m_config.print_fan_speed.is_enabled() && (m_print_fan_speed_override != m_config.print_fan_speed.value)) {
+        gcode += ";_SET_FAN_SPEED";
+        assert(m_config.print_fan_speed.value >= 0 && m_config.print_fan_speed <= 100);
+        gcode += std::to_string(int(m_config.print_fan_speed.value));
+        gcode += "\n";
+        m_print_fan_speed_override = m_config.print_fan_speed.value;
+    } else if (!m_config.print_fan_speed.is_enabled() && m_print_fan_speed_override >= 0) {
+        gcode += ";_RESET_FAN_SPEED\n";
+        m_print_fan_speed_override = (-1);
+    }
     // apply region_gcode
     if (!region_config.region_gcode.value.empty()) {
 //TODO 2.7: new placeholder_parser_process call

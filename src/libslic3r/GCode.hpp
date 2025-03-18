@@ -522,6 +522,7 @@ private:
     double                              m_last_width{ 0.0 };
     // to pass between before_xtrude and after_extrude.
     double                              m_overhang_fan_override{ -1.0 };
+    int                                 m_print_fan_speed_override{-1};
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     double                              m_last_mm3_per_mm;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING

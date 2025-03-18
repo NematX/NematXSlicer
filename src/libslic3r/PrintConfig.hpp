@@ -1037,6 +1037,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,              stretch_corners_exiting_section))
     ((ConfigOptionPercent,              stretch_corners_inner_perimeters))
     ((ConfigOptionFloat,                stretch_corners_max_angle))
+    ((ConfigOptionPercent,              print_fan_speed))
     ((ConfigOptionInt,                  print_first_layer_temperature))
     ((ConfigOptionInt,                  print_temperature))
     ((ConfigOptionPercent,              thin_perimeters))

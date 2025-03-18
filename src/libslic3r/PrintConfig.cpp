@@ -4888,6 +4888,18 @@ void PrintConfigDef::init_fff_params()
     def->can_be_disabled = true;
     def->set_default_value(disable_defaultoption(new ConfigOptionInt(60)));
 
+    def = this->add("print_fan_speed", coPercent);
+    def->label = L("Fan speed override");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Override the fan speed (to be used in modifiers)."
+                    "\nIf disabled, uses the fan speed as specified for the current filament."
+                    "\nSet to 0 to disable the fan.");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comExpert | comSuSi;
+    def->can_be_disabled = true;
+    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+
     def = this->add("print_first_layer_bed_temperature", coInt);
     def->label = L("First Layer Bed Temperature");
     def->category = OptionCategory::filament;
@@ -4903,8 +4915,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("print_first_layer_temperature", coInt);
     def->label = L("First Layer Temperature");
     def->category = OptionCategory::filament;
-    def->tooltip = L("Override the temperature of the extruder (for the first layer). Avoid making too many changes, it won't stop for cooling/heating."
-        "May only work on Height range modifiers.");
+    def->tooltip = L("Override the temperature of the extruder (for the first layer). Avoid making too many changes, it won't stop for cooling/heating.");
     def->sidetext = L("°C");
     def->min = 0;
     def->mode = comExpert | comSuSi;
@@ -4923,7 +4934,7 @@ void PrintConfigDef::init_fff_params()
     def = this->add("print_retract_lift", coFloat);
     def->label = L("Z-lift override");
     def->category = OptionCategory::filament;
-    def->tooltip = L("Set the new lift-z value for this override. 0 will disable the z-lift. -& to disable. May only work on Height range modifiers.");
+    def->tooltip = L("Set the new lift-z value for this override. 0 will disable the z-lift. -& to disable.");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comExpert | comSuSi;
@@ -10249,6 +10260,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "priming_position",
 "print_bed_temperature",
 "print_extrusion_multiplier",
+"print_fan_speed",
 "print_first_layer_bed_temperature",
 "print_first_layer_temperature",
 "print_custom_variables",
