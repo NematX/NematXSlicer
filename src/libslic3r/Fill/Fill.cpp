@@ -194,6 +194,8 @@ struct SurfaceFillParams : FillParams
             // print -modifier, because region are fused in gode wiew if not.
             RETURN_COMPARE_NON_EQUAL(config->print_extrusion_multiplier.value);
             RETURN_COMPARE_NON_EQUAL(config->print_fan_speed.value);
+            RETURN_COMPARE_NON_EQUAL(config->print_solid_infill_fan_speed.value);
+            RETURN_COMPARE_NON_EQUAL(config->print_bridge_fan_speed.value);
             RETURN_COMPARE_NON_EQUAL(config->print_first_layer_temperature.value);
             RETURN_COMPARE_NON_EQUAL(config->print_retract_length.value);
             RETURN_COMPARE_NON_EQUAL(config->print_retract_lift.value);
@@ -242,6 +244,8 @@ struct SurfaceFillParams : FillParams
             // print -modifier, because region are fused in gode wiew if not.
             || config->print_extrusion_multiplier        != rhs.config->print_extrusion_multiplier
             || config->print_fan_speed                   != rhs.config->print_fan_speed
+            || config->print_solid_infill_fan_speed      != rhs.config->print_solid_infill_fan_speed
+            || config->print_bridge_fan_speed            != rhs.config->print_bridge_fan_speed
             || config->print_first_layer_temperature     != rhs.config->print_first_layer_temperature
             || config->print_retract_length              != rhs.config->print_retract_length
             || config->print_retract_lift                != rhs.config->print_retract_lift

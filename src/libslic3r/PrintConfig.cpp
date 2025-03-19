@@ -1698,7 +1698,7 @@ void PrintConfigDef::init_fff_params()
     def->label = L("force for all");
     def->full_label = L("External perimeters first: force for all");
     def->category = OptionCategory::perimeter;
-    def->tooltip = L("Print all external contours & periemter first, then the internal ones.");
+    def->tooltip = L("Print all external contours & perimeter first, then the internal ones.");
     def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -1731,10 +1731,10 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("external_perimeters_staggered", coFloatOrPercent);
-    def->label = L("Staggered external periemter");
+    def->label = L("Staggered external perimeter");
     // TRN PrintSettings: "Staggered inner seams"
     def->category = OptionCategory::perimeter;
-    def->tooltip = L("Print the external periemter a bit lower to avoid dragging the nozzle into it while printing other perimeters."
+    def->tooltip = L("Print the external perimeter a bit lower to avoid dragging the nozzle into it while printing other perimeters."
         "Can be a percentage of the current layer height.");
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
@@ -4909,10 +4909,49 @@ void PrintConfigDef::init_fff_params()
     def->can_be_disabled = true;
     def->set_default_value(disable_defaultoption(new ConfigOptionInt(60)));
 
+    def = this->add("print_bridge_fan_speed", coPercent);
+    def->label = L("Fan speed override for bridges");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Override the fan speed (to be used in modifiers) for bridge infill."
+                    "\nIt override the print_fan_speed general fan override."
+                    "\nIf disabled, uses the fan speed as specified for the current filament."
+                    "\nSet to 0 to disable the fan.");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comExpert | comSuSi;
+    def->can_be_disabled = true;
+    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+
     def = this->add("print_fan_speed", coPercent);
     def->label = L("Fan speed override");
     def->category = OptionCategory::filament;
     def->tooltip = L("Override the fan speed (to be used in modifiers)."
+                    "\nIf disabled, uses the fan speed as specified for the current filament."
+                    "\nSet to 0 to disable the fan.");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comExpert | comSuSi;
+    def->can_be_disabled = true;
+    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+
+    def = this->add("print_perimeters_fan_speed", coPercent);
+    def->label = L("Fan speed override for all perimeters");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Override the fan speed (to be used in modifiers) for internal and external perimeters."
+                    "\nIt override the print_fan_speed general fan override."
+                    "\nIf disabled, uses the fan speed as specified for the current filament."
+                    "\nSet to 0 to disable the fan.");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comExpert | comSuSi;
+    def->can_be_disabled = true;
+    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+
+    def = this->add("print_solid_infill_fan_speed", coPercent);
+    def->label = L("Fan speed override for top and solid infill");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Override the fan speed (to be used in modifiers) for solid and top infill."
+                    "\nIt override the print_fan_speed general fan override."
                     "\nIf disabled, uses the fan speed as specified for the current filament."
                     "\nSet to 0 to disable the fan.");
     def->min = 0;
@@ -6148,7 +6187,7 @@ void PrintConfigDef::init_fff_params()
     def->full_label = L("Stretch corners also for inner perimeters");
     def->category = OptionCategory::width;
     def->tooltip = L("Also appy the stretch corners for inner perimter and not only for the external ones."
-        "The percentage value scale the deviation an external periemter should have in the same situation."
+        "The percentage value scale the deviation an external perimeter should have in the same situation."
         "\nSet to zero to deactovate.");
     def->sidetext = L("%");
     def->min = 0;
@@ -10311,7 +10350,10 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "priming_position",
 "print_bed_temperature",
 "print_extrusion_multiplier",
+"print_bridge_fan_speed",
 "print_fan_speed",
+"print_perimeters_fan_speed",
+"print_solid_infill_fan_speed",
 "print_first_layer_bed_temperature",
 "print_first_layer_temperature",
 "print_custom_variables",

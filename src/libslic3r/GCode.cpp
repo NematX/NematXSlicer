@@ -5812,15 +5812,15 @@ void GCodeGenerator::set_region_for_extrude(const Print &print, const PrintObjec
     } else if (m_config.temperature.get_at(m_writer.tool()->id()) > 0) { // don't set it if disabled
         gcode += m_writer.set_temperature(m_config.temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
     }
-    if (m_config.print_fan_speed.is_enabled() && (m_print_fan_speed_override != m_config.print_fan_speed.value)) {
+    if (m_config.print_fan_speed.is_enabled() && (m_print_fan_speed_override != int(m_config.print_fan_speed.value))) {
         gcode += ";_SET_FAN_SPEED";
         assert(m_config.print_fan_speed.value >= 0 && m_config.print_fan_speed <= 100);
         gcode += std::to_string(int(m_config.print_fan_speed.value));
         gcode += "\n";
-        m_print_fan_speed_override = m_config.print_fan_speed.value;
-    } else if (!m_config.print_fan_speed.is_enabled() && m_print_fan_speed_override >= 0) {
+        m_print_fan_speed_override = int(m_config.print_fan_speed.value);
+    } else if (m_print_fan_speed_override >= 0 && !m_config.print_fan_speed.is_enabled()) {
         gcode += ";_RESET_FAN_SPEED\n";
-        m_print_fan_speed_override = (-1);
+        m_print_fan_speed_override = int(-1);
     }
     // apply region_gcode
     if (!region_config.region_gcode.value.empty()) {
@@ -6456,7 +6456,6 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
                         paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 0)}});
                         paths.back().polyline.append(pt_start);
                         paths.back().polyline.append(intermediate_start);
-                        assert(paths.back().length() > SCALED_EPSILON);
                         paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 1)}});
                         paths.back().polyline.append(intermediate_start);
                     }
@@ -7573,6 +7572,34 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
         if (m_overhang_fan_override >= 0) {
             gcode += ";_SET_MIN_FAN_SPEED" + std::to_string(int(m_overhang_fan_override)) + "\n";
         } else {
+            // check for fan speed override
+            bool set_override_fan = false;
+            if ((path.role() == ExtrusionRole::ExternalPerimeter || path.role() == ExtrusionRole::Perimeter) &&
+                m_config.print_perimeters_fan_speed.is_enabled() &&
+                int(m_config.print_perimeters_fan_speed.value) != m_print_fan_speed_override) {
+                if (m_print_fan_speed_override > 0) {
+                    // stop before restart? I don't think it's useful... cooling buffer doesn't pile them up like for TYPE_EXTRUDE_START/TYPE_EXTRUDE_END
+                }
+                m_print_fan_speed_override = int(m_config.print_perimeters_fan_speed.value);
+                set_override_fan = true;
+            } else if ((path.role().is_solid_infill() && !path.role().is_bridge()) &&
+                m_config.print_solid_infill_fan_speed.is_enabled() &&
+                int(m_config.print_solid_infill_fan_speed.value) != m_print_fan_speed_override) {
+                m_print_fan_speed_override = int(m_config.print_solid_infill_fan_speed.value);
+                set_override_fan = true;
+            } else if ((path.role().is_solid_infill() && path.role().is_bridge()) &&
+                m_config.print_bridge_fan_speed.is_enabled() &&
+                int(m_config.print_bridge_fan_speed.value) != m_print_fan_speed_override) {
+                m_print_fan_speed_override = int(m_config.print_bridge_fan_speed.value);
+                set_override_fan = true;
+            }
+            if (set_override_fan) {
+                gcode += ";_SET_FAN_SPEED";
+                assert(m_print_fan_speed_override >= 0 && m_print_fan_speed_override <= 100);
+                gcode += std::to_string(m_print_fan_speed_override);
+                gcode += "\n";
+            }
+
             // Send the current extrusion type to Coolingbuffer
             gcode += ";_EXTRUDETYPE_";
             gcode += char('A' + uint8_t(grole));

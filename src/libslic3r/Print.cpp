@@ -183,7 +183,6 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         "post_process",
         "print_custom_variables",
         "print_bed_temperature",
-        "print_fan_speed",
         "print_first_layer_bed_temperature",
         "printer_custom_variables",
         "perimeter_fan_speed",

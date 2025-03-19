@@ -730,6 +730,7 @@ void Layer::make_perimeters()
                             // print -modifier, because region are fused in gode wiew if not.
                             && config.print_extrusion_multiplier        == other_config.print_extrusion_multiplier
                             && config.print_fan_speed                   == other_config.print_fan_speed
+                            && config.print_perimeters_fan_speed        == other_config.print_perimeters_fan_speed
                             && config.print_first_layer_temperature     == other_config.print_first_layer_temperature
                             && config.print_retract_length              == other_config.print_retract_length
                             && config.print_retract_lift                == other_config.print_retract_lift
