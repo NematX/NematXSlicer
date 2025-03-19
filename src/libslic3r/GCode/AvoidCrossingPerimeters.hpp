@@ -63,9 +63,13 @@ public:
         {
             boundaries.clear();
             islands.clear();
+            bbox = BoundingBoxf();
             boundaries_params.clear();
+            grid = EdgeGrid::Grid();
+            island_to_grid.clear();
             boundary_growth.clear();
             to_avoid.clear();
+            to_avoid_grid = EdgeGrid::Grid();
         }
     };
 

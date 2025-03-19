@@ -191,10 +191,10 @@ public:
 		assert(p2.x() >= 0 && p2.x() < coord_t(m_cols) * m_resolution);
 		assert(p2.y() >= 0 && p2.y() < coord_t(m_rows) * m_resolution);
 		// Get the cells of the end points.
-		coord_t ix = p1(0) / m_resolution;
-		coord_t iy = p1(1) / m_resolution;
-		coord_t ixb = p2(0) / m_resolution;
-		coord_t iyb = p2(1) / m_resolution;
+		int64_t ix = p1(0) / m_resolution;
+		int64_t iy = p1(1) / m_resolution;
+		int64_t ixb = p2(0) / m_resolution;
+		int64_t iyb = p2(1) / m_resolution;
 		assert(ix >= 0 && size_t(ix) < m_cols);
 		assert(iy >= 0 && size_t(iy) < m_rows);
 		assert(ixb >= 0 && size_t(ixb) < m_cols);
@@ -359,7 +359,7 @@ public:
 		return bbox;
 	}
 
-    std::pair<std::vector<std::pair<size_t, size_t>>::const_iterator, std::vector<std::pair<size_t, size_t>>::const_iterator> cell_data_range(coord_t row, coord_t col) const
+    std::pair<std::vector<std::pair<size_t, size_t>>::const_iterator, std::vector<std::pair<size_t, size_t>>::const_iterator> cell_data_range(int64_t row, int64_t col) const
 	{
         assert(row >= 0 && size_t(row) < m_rows);
         assert(col >= 0 && size_t(col) < m_cols);

@@ -74,7 +74,7 @@ struct AllIntersectionsVisitor
         intersection_set.clear();
     }
 
-    bool operator()(coord_t iy, coord_t ix)
+    bool operator()(int64_t iy, int64_t ix)
     {
         // Called with a row and column of the grid cell, which is intersected by a line.
         auto cell_data_range = grid.cell_data_range(iy, ix);
@@ -754,19 +754,21 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
         // get intersections point that are on island_start or island_end, to uses them to check for inter-island
         // travel. also try to find nearest bridges between the islands.
         distf_t strait_dist = start.distance_to(end);
-        const Polygon &contour_start = boundary.boundaries[boundary.islands[intersections.front().border_idx]];
-        const Polygon &contour_end = boundary.boundaries[boundary.islands[intersections.back().border_idx]];
+        size_t start_island = boundary.islands[intersections.front().border_idx];
+        size_t end_island = boundary.islands[intersections.back().border_idx];
+        const Polygon &contour_start = boundary.boundaries[start_island];
+        const Polygon &contour_end = boundary.boundaries[end_island];
 
         auto time_start = std::chrono::high_resolution_clock::now();
 
         Intersection best_intersection_start;
-        best_intersection_start.border_idx = boundary.islands[intersections.front().border_idx];
+        best_intersection_start.border_idx = start_island;
         best_intersection_start.line_idx = -1;
         best_intersection_start.point = contour_start.points.front();
         best_intersection_start.distance = 0;
         best_intersection_start.do_not_remove = true;
         Intersection best_intersection_end;
-        best_intersection_end.border_idx = boundary.islands[intersections.back().border_idx];
+        best_intersection_end.border_idx = end_island;
         best_intersection_end.line_idx = -1;
         best_intersection_end.point = contour_end.points.front();
         best_intersection_end.distance = 0;
@@ -777,24 +779,24 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
         // create edgegrid if not present already
         // note: create & use the grid allow to increase the speed if the number of point is high enough
         // if notenough point, a brute-force algo is more time efficient.
-        if (boundary.island_to_grid.find(best_intersection_start.border_idx) == boundary.island_to_grid.end()) {
-            EdgeGrid::Grid &grid = boundary.island_to_grid[best_intersection_start.border_idx];
+        if (boundary.island_to_grid.find(int(start_island)) == boundary.island_to_grid.end()) {
+            EdgeGrid::Grid &grid = boundary.island_to_grid[int(start_island)];
             grid.set_bbox(boundary.grid.bbox());
             // reduce the resolution, to have less cells. there is a need to have a cell tree, with a higher level of cell to evict quicker.
-            grid.create(boundary.boundaries[best_intersection_start.border_idx], boundary.grid.resolution() * GRID_RESOLUTION_MULT);
+            grid.create(boundary.boundaries[start_island], boundary.grid.resolution() * GRID_RESOLUTION_MULT);
             // calculate sdf to use signed_distance_bilinear to evict candidate quicker.
             //grid.calculate_sdf();
         }
-        EdgeGrid::Grid &start_grid = boundary.island_to_grid[int(best_intersection_start.border_idx)];
+        EdgeGrid::Grid &start_grid = boundary.island_to_grid[int(start_island)];
 
-        if (boundary.island_to_grid.find(best_intersection_end.border_idx) == boundary.island_to_grid.end()) {
-            EdgeGrid::Grid &grid = boundary.island_to_grid[int(best_intersection_end.border_idx)];
+        if (boundary.island_to_grid.find(int(end_island)) == boundary.island_to_grid.end()) {
+            EdgeGrid::Grid &grid = boundary.island_to_grid[int(end_island)];
             grid.set_bbox(boundary.grid.bbox());
-            grid.create(boundary.boundaries[best_intersection_end.border_idx], boundary.grid.resolution() * GRID_RESOLUTION_MULT);
+            grid.create(boundary.boundaries[end_island], boundary.grid.resolution() * GRID_RESOLUTION_MULT);
             // calculate sdf to use signed_distance_bilinear to evict candidate quicker.
             //grid.calculate_sdf();
         }
-        EdgeGrid::Grid &end_grid = boundary.island_to_grid[int(best_intersection_end.border_idx)];
+        EdgeGrid::Grid &end_grid = boundary.island_to_grid[int(end_island)];
         size_t shortest_cell_dist = 1 + size_t(shortest_dist / start_grid.resolution());
 
         // compute the distance from start for each contour point
@@ -836,8 +838,10 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
         //    }
         //    for (distf_t d: dist_from_start) assert(d > 0);
         //}
-
+        
+#ifdef _DEBUG
         auto time_cell = std::chrono::high_resolution_clock::now();
+#endif
         // for each grid cell, if they are near enough
         //BoundingBox start_cells = start_grid.get_cells_intersecting_box(bb_start);
         //BoundingBox end_cells = end_grid.get_cells_intersecting_box(bb_end);
@@ -905,6 +909,8 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                                             best_intersection_end.point = res;
                                             best_intersection_end.distance = end_line.a.distance_to(res);
                                         }
+                                        assert(best_intersection_start.line_idx < contour_start.points.size() &&
+                                               contour_start.points[best_intersection_start.line_idx] == best_intersection_start.point);
                                         print_debug_cross(i_id_run, boundary, best_intersection_start,
                                                           best_intersection_end, start, end,
                                                           std::string("startpt_") + std::to_string(new_dist));
@@ -943,6 +949,8 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                                         best_intersection_end.line_idx = it_end_contour_and_segment->second;
                                         best_intersection_end.point = end_line.a;
                                         best_intersection_end.distance = 0;
+                                        assert(best_intersection_end.line_idx < contour_end.points.size() &&
+                                               contour_end.points[best_intersection_end.line_idx] == best_intersection_end.point);
                                         print_debug_cross(i_id_run, boundary, best_intersection_start,
                                                           best_intersection_end, start, end,
                                                           std::string("endpt_") + std::to_string(new_dist));
@@ -954,6 +962,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 }
             }
         }
+#ifdef _DEBUG
         std::chrono::time_point<std::chrono::high_resolution_clock> time_mid = std::chrono::high_resolution_clock::now();
 
         std::chrono::time_point<std::chrono::high_resolution_clock> time_end;
@@ -1049,7 +1058,6 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 }
             }
             time_end = std::chrono::high_resolution_clock::now();
-#ifdef _DEBUG
 
             assert(best_intersection_start.border_idx == best_intersection_start_dbg.border_idx);
             assert(best_intersection_start.line_idx == best_intersection_start_dbg.line_idx);
@@ -1078,8 +1086,8 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 assert(false);
                 return;
             }
-#endif
         }
+#endif
         
         assert(best_intersection_start.line_idx != size_t(-1) && best_intersection_end.line_idx != size_t(-1));
         // create intersections between start & best_intersection_start
