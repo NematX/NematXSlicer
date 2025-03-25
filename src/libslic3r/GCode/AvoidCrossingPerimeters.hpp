@@ -46,6 +46,7 @@ public:
         std::vector<size_t>             islands;
         // Bounding box of boundaries
         BoundingBoxf                    bbox;
+        std::vector<BoundingBox>        bboxes;
         // Precomputed distances of all points in boundaries
         std::vector<std::vector<float>> boundaries_params;
         // Used for detection of intersection between line and any polygon from boundaries
@@ -64,6 +65,7 @@ public:
             boundaries.clear();
             islands.clear();
             bbox = BoundingBoxf();
+            bboxes.clear();
             boundaries_params.clear();
             grid = EdgeGrid::Grid();
             island_to_grid.clear();

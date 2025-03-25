@@ -754,8 +754,38 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
         // get intersections point that are on island_start or island_end, to uses them to check for inter-island
         // travel. also try to find nearest bridges between the islands.
         distf_t strait_dist = start.distance_to(end);
+        // is one island inside a hole or not?
         size_t start_island = boundary.islands[intersections.front().border_idx];
         size_t end_island = boundary.islands[intersections.back().border_idx];
+        if (boundary.bboxes[start_island].contains(boundary.bboxes[end_island])) {
+            // find hole
+            size_t hole_contour = size_t(-1);
+            for (size_t hole_idx = start_island + 1;
+                 hole_idx < boundary.islands.size() && boundary.islands[hole_idx] == start_island; ++hole_idx) {
+                if (boundary.bboxes[hole_idx].contains(boundary.bboxes[end_island])) {
+                    hole_contour = hole_idx;
+                    break;
+                }
+            }
+            assert(hole_contour != size_t(-1));
+            if (hole_contour != size_t(-1)) {
+                start_island = hole_contour;
+            }
+        } else if (boundary.bboxes[end_island].contains(boundary.bboxes[start_island])) {
+            // find hole
+            size_t hole_contour = size_t(-1);
+            for (size_t hole_idx = end_island + 1;
+                 hole_idx < boundary.islands.size() && boundary.islands[hole_idx] == end_island; ++hole_idx) {
+                if (boundary.bboxes[hole_idx].contains(boundary.bboxes[start_island])) {
+                    hole_contour = hole_idx;
+                    break;
+                }
+            }
+            assert(hole_contour != size_t(-1));
+            if (hole_contour != size_t(-1)) {
+                end_island = hole_contour;
+            }
+        }
         const Polygon &contour_start = boundary.boundaries[start_island];
         const Polygon &contour_end = boundary.boundaries[end_island];
 
@@ -969,13 +999,13 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
         {
             //brute-force version, 
             Intersection best_intersection_start_dbg;
-            best_intersection_start_dbg.border_idx = boundary.islands[intersections.front().border_idx];
+            best_intersection_start_dbg.border_idx = start_island;
             best_intersection_start_dbg.line_idx = -1;
             best_intersection_start_dbg.point = contour_start.points.front();
             best_intersection_start_dbg.distance = 0;
             best_intersection_start_dbg.do_not_remove = true;
             Intersection best_intersection_end_dbg;
-            best_intersection_end_dbg.border_idx = boundary.islands[intersections.back().border_idx];
+            best_intersection_end_dbg.border_idx = end_island;
             best_intersection_end_dbg.line_idx = -1;
             best_intersection_end_dbg.point = contour_end.points.front();
             best_intersection_end_dbg.distance = 0;
@@ -1090,6 +1120,15 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
 #endif
         
         assert(best_intersection_start.line_idx != size_t(-1) && best_intersection_end.line_idx != size_t(-1));
+        if (best_intersection_start.line_idx == size_t(-1) || best_intersection_end.line_idx == size_t(-1)) {
+            SVG svg(debug_out_path("cannot_find_boundary.svg"));
+            svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
+            svg.draw(contour_start.split_at_first_point(), "red", scale_t(0.025));
+            svg.draw(contour_end.split_at_first_point(), "green", scale_t(0.025));
+            svg.draw(Polyline({start, end}), "blue", scale_t(0.02));
+            svg.Close();
+        }
+
         // create intersections between start & best_intersection_start
         std::vector<Intersection> intersections_start;
         {
@@ -1946,9 +1985,11 @@ static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygon
     size_t island_id = 0;
     for (ExPolygon &island : boundary_islands) {
         island_id = boundary->boundaries.size();
+        boundary->bboxes.emplace_back(island.contour.points);
         boundary->boundaries.push_back(std::move(island.contour));
         boundary->islands.push_back(island_id);
         for (Polygon &hole : island.holes) {
+            boundary->bboxes.emplace_back(hole.points);
             boundary->boundaries.push_back(std::move(hole));
             boundary->islands.push_back(island_id);
         }
