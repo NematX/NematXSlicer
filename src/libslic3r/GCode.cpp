@@ -6525,7 +6525,12 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
         double ratio_speed = ratio_flow < 0.1 ? 10 : 1. / ratio_flow;
         // Change to new speed & width (from ratio_flow)
         const double current_speed = this->m_writer.get_speed_mm_s();
+        // write speed, and the ratio for cooling buffer.
         gcode_str += this->m_writer.set_speed_mm_s(current_speed * ratio_speed);
+        gcode_str.back() = ' '; // remove '\n';
+        gcode_str += ";_EXTRUDE_PERCENT_RATIO ";
+        gcode_str += std::to_string(ratio_speed);
+        // write new width
         gcode_str += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width)
                + float_to_string_decimal_point(m_last_width * ratio_flow) + "\n";
 
@@ -6573,6 +6578,9 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
 
         //restore speed & width
         gcode_str += this->m_writer.set_speed_mm_s(current_speed);
+        gcode_str.back() = ' '; // remove '\n';
+        gcode_str += ";_EXTRUDE_PERCENT_RATIO 1";
+
         gcode_str += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Width)
                + float_to_string_decimal_point(m_last_width) + "\n";
         

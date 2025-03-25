@@ -98,7 +98,9 @@ struct CoolingLine
         TYPE_SET_FAN_SPEED      = 1 << 26,
         TYPE_RESET_FAN_SPEED    = 1 << 27,
         TYPE_SET_MIN_FAN_SPEED      = 1 << 28,
-        TYPE_RESET_MIN_FAN_SPEED    = 1 << 29,    };
+        TYPE_RESET_MIN_FAN_SPEED    = 1 << 29,
+        TYPE_EXTRUDE_PERCENT_RATIO    = 1 << 30,
+    };
     static inline GCodeExtrusionRole to_extrusion_role(uint32_t type) {
         return GCodeExtrusionRole(uint8_t(type & 0x1F));
     }
@@ -138,6 +140,9 @@ struct CoolingLine
     bool    slowdown;
     // for TYPE_SET_TOOL
     uint16_t new_tool;
+    // current speed is multiplied by this factor
+    // useless, alredy baked into time
+    float   speed_ratio = 1.f;
 };
 
 // Calculate the required per extruder time stretches.
@@ -438,6 +443,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
     // Index of an existing CoolingLine of the current adjustment, which holds the feedrate setting command
     // for a sequence of extrusion moves.
     size_t            active_speed_modifier = size_t(-1);
+    float             active_speed_ratio = 1.f;
     // type to add to each next G1 (just for adjustable for now)
     size_t            current_stamp = CoolingLine::TYPE_NONE;
 
@@ -478,6 +484,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
         if (*line_end == '\n')
             ++ line_end;
         CoolingLine line(0, line_start - gcode.c_str(), line_end - gcode.c_str());
+        line.speed_ratio = active_speed_ratio;
         if (boost::starts_with(sline, "G0 "))
             line.type = CoolingLine::TYPE_G0;
         else if (boost::starts_with(sline, "G1 "))
@@ -551,6 +558,15 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                     current_stamp |= CoolingLine::TYPE_ADJUSTABLE_MAYBE;
                 }
             }
+            if (size_t pos = sline.find(";_EXTRUDE_PERCENT_RATIO"); pos != std::string::npos){
+                line.type |= CoolingLine::TYPE_EXTRUDE_PERCENT_RATIO;
+                try {
+                    float parse_ratio = atof(sline.data() + pos + sizeof(";_EXTRUDE_PERCENT_RATIO"));
+                    line.speed_ratio = active_speed_ratio = parse_ratio;
+                } catch (std::exception) { assert(false); }
+            } else{
+                line.speed_ratio = active_speed_ratio;
+            }
             if ((line.type & CoolingLine::TYPE_G92) == 0) {
                 // G0, G1, G2, G3. Calculate the duration.
                 assert((line.type & CoolingLine::TYPE_G0) != 0 + (line.type & CoolingLine::TYPE_G1) != 0 + (line.type & CoolingLine::TYPE_G2G3_IJ) != 0 == 1);
@@ -593,19 +609,22 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
                 assert((line.type & CoolingLine::TYPE_ADJUSTABLE) == 0 || line.feedrate > 0.f);
                 if (line.length > 0) {
                     assert(line.feedrate > 0);
-                    line.time = line.length / line.feedrate;
+                    line.time = line.length / (line.feedrate * line.speed_ratio);
                     assert(line.time > 0);
                 }
                 line.time_max = line.time;
                 if ((line.type & CoolingLine::TYPE_ADJUSTABLE) || active_speed_modifier != size_t(-1)) {
                     assert(adjustment->min_print_speed >= 0);
-                    line.time_max = (adjustment->min_print_speed == 0.f) ? FLT_MAX : std::max(line.time, line.length / adjustment->min_print_speed);
+                    line.time_max = (adjustment->min_print_speed == 0.f) ? FLT_MAX : std::max(line.time, line.length / (adjustment->min_print_speed * line.speed_ratio));
                     if(adjustment->max_speed_reduction > 0)
                         line.time_max = std::min(line.time_max, line.time / (1- adjustment->max_speed_reduction));
                 }
-                if (active_speed_modifier < adjustment->lines.size() && (line.type & (CoolingLine::TYPE_G1 | CoolingLine::TYPE_G2G3))) {
+                assert((line.type & CoolingLine::TYPE_EXTRUDE_PERCENT_RATIO) == 0 || !line.has_move);
+                if (active_speed_modifier < adjustment->lines.size() &&
+                    (line.type & (CoolingLine::TYPE_G1 | CoolingLine::TYPE_G2G3)) &&
+                    (line.type & CoolingLine::TYPE_EXTRUDE_PERCENT_RATIO) == 0) {
                     // Inside the ";_EXTRUDE_SET_SPEED" blocks, there must not be a G1 Fxx entry.
-                    assert((line.type & CoolingLine::TYPE_HAS_F) == 0);
+                    assert((line.type & CoolingLine::TYPE_HAS_F) == 0); // ?
                     CoolingLine &sm = adjustment->lines[active_speed_modifier];
                     assert(sm.feedrate > 0.f);
                     sm.length   += line.length;
@@ -626,6 +645,7 @@ std::vector<PerExtruderAdjustments> CoolingBuffer::parse_layer_gcode(const std::
             line.type = CoolingLine::TYPE_EXTRUDE_END;
             finalize_sm(false);
             active_speed_modifier = size_t(-1);
+            line.speed_ratio = active_speed_ratio = 1.f;
             current_stamp         = CoolingLine::TYPE_NONE;
         } else if (boost::starts_with(sline, ";_TOOLCHANGE")) {
             //not using m_toolchange_prefix anymore because there is no use case for it, there is always a _TOOLCHANGE for when a fan change is needed.
