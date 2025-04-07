@@ -49,6 +49,7 @@ Polyline Polygon::split_at_vertex(const Point &point) const
 Polyline
 Polygon::split_at_index(size_t index) const
 {
+    assert(index < this->points.size());
     Polyline polyline;
     polyline.points.reserve(this->points.size() + 1);
     for (Points::const_iterator it = this->points.begin() + index; it != this->points.end(); ++it)
