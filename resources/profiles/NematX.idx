@@ -1,3 +1,4 @@
+1.0.18 disable min_length instead of setting it to 0
 1.0.17 set fan_printer_min_speed to 5, fix fan_speed disabled values
 1.0.16 define arc_fitting_resolution
 1.0.15 use M129 in start gcode if not using the first extruder
