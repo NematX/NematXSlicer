@@ -1327,7 +1327,8 @@ static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &bo
 #endif
 
     // modify intersections if jumping between island to choose the best points to jump
-    if (intersections.size() > 1) {
+    // note: boundary.islands.empty() => use_external_mp
+    if (intersections.size() > 1 && !boundary.islands.empty()) {
         bool has_avoid_travel_island = false;
         double avoid_travel_island_weight = 0;
         // avoid_travel_island only works for full layers, so find at least one.
