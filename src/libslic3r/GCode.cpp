@@ -8332,11 +8332,15 @@ bool GCodeGenerator::can_cross_perimeter(const Polyline& travel, bool offset)
                 ExPolygons slices_offsetted = offset_ex(m_last_object_layer->lslices(), -m_layer_slices_offseted.diameter * 1.5f);
                 //also offset in the other side, to avoid a travel that may cross it from the exterior
                 append(slices_offsetted, offset_ex(m_last_object_layer->lslices(), m_layer_slices_offseted.diameter * .5f));
+                slices_offsetted = union_ex(slices_offsetted);
+                slices = union_ex(slices);
                 // remove top surfaces
-                for (const LayerRegion *reg : m_last_object_layer->regions()) {
-                    m_throw_if_canceled();
-                    slices_offsetted = diff_ex(slices_offsetted, to_expolygons(reg->fill_surfaces().filter_by_type_flag(SurfaceType::stPosTop)));
-                    slices           = diff_ex(slices, to_expolygons(reg->fill_surfaces().filter_by_type_flag(SurfaceType::stPosTop)));
+                if (m_config.enforce_retract_top_surface.value) {
+                    for (const LayerRegion *reg : m_last_object_layer->regions()) {
+                        m_throw_if_canceled();
+                        slices_offsetted = diff_ex(slices_offsetted, to_expolygons(reg->fill_surfaces().filter_by_type_flag(SurfaceType::stPosTop)));
+                        slices           = diff_ex(slices, to_expolygons(reg->fill_surfaces().filter_by_type_flag(SurfaceType::stPosTop)));
+                    }
                 }
                 // create bb for speeding things up.
                 m_layer_slices_offseted.slices.clear();

@@ -1539,9 +1539,17 @@ void PrintConfigDef::init_fff_params()
     def = this->add("enforce_retract_first_layer", coBool);
     def->label = L("But on first layer");
     def->full_label = L("Don't check crossings for retraction on first layer");
-    def->category = OptionCategory::extruders;
-    def->tooltip = L("let the retraction happens on the first layer even if the travel path does not exceed the upper layer's perimeters.");
+    def->category = OptionCategory::infill;
+    def->tooltip = L("Let the retraction happens on the first layer even if the travel path does not exceed the layer's perimeters.");
     def->mode = comExpert | comPrusa;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("enforce_retract_top_surface", coBool);
+    def->label = L("But on top areas");
+    def->full_label = L("Don't check crossings for retraction on top areas");
+    def->category = OptionCategory::infill;
+    def->tooltip = L("Let the retraction happens if the travel path goes over a top area.");
+    def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionBool(true));
 
     def = this->add("ensure_vertical_shell_thickness", coEnum);
@@ -10208,6 +10216,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "curve_smoothing_precision",
 "default_speed",
 "enforce_full_fill_volume",
+"enforce_retract_top_surface",
 // "exact_last_layer_height",
 "external_infill_margin",
 "external_perimeter_cut_corners",

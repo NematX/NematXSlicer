@@ -241,6 +241,7 @@ group:sidetext_width$5:Advanced
 	line:Only retract when crossing perimeters
 		setting:label_width$0:label$_:only_retract_when_crossing_perimeters
 		setting:enforce_retract_first_layer
+		setting:enforce_retract_top_surface
 	end_line
 	setting:infill_first
 group:Advanced Infill options

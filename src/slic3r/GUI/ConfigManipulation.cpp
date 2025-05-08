@@ -643,6 +643,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
     toggle_field("avoid_travel_island_weight", have_avoid_crossing_perimeters && config->opt_bool("avoid_travel_island"));
     
     toggle_field("enforce_retract_first_layer", config->opt_bool("only_retract_when_crossing_perimeters"));
+    toggle_field("enforce_retract_top_surface", config->opt_bool("only_retract_when_crossing_perimeters"));
 
 
     for (auto el : { "fill_smooth_width", "fill_smooth_distribution" })

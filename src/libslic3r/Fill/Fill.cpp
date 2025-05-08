@@ -214,7 +214,7 @@ struct SurfaceFillParams : FillParams
         }
         if (config == nullptr || rhs.config == nullptr || max_sparse_infill_spacing == 0)
             RETURN_COMPARE_NON_EQUAL(flow.width());
-        assert(*this == rhs);
+        assert(*this == rhs || this->role != rhs.role);
         return this->role < rhs.role;
         // return this->extrusion_role.lower(rhs.extrusion_role);
     }
