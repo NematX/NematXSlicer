@@ -2406,13 +2406,13 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                     n_layers_total = n_layers_bot + n_layers_middle + n_layers_top;
                 } else {
                     //enough place of at least one normal support layer
-                    n_layers_middle = size_t(ceil((dist - height_top_interface - height_bot_interface) / support_layer_height));
+                    n_layers_middle = size_t(ceil((dist - height_top_interface - height_bot_interface - EPSILON) / support_layer_height));
                     n_layers_total = n_layers_bot + n_layers_middle + n_layers_top;
                     //compute the avg
                     step = dist / coordf_t(n_layers_total);
                     //it's not possible to have the average above both height.
-                    assert(step < support_layer_height || step < support_interface_layer_height);
-                    if (step < support_layer_height && step < support_interface_layer_height) {
+                    assert(step <= support_layer_height + EPSILON || step <= support_interface_layer_height + EPSILON);
+                    if (step <= support_layer_height && step <= support_interface_layer_height) {
                         // the average step is lower than the interface and the normal hiehgt, so use that
                         step_interface = step;
                     } else {
