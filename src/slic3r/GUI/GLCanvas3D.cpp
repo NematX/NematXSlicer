@@ -2728,8 +2728,8 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
         // Should the wipe tower be visualized ?
         unsigned int extruders_count = (unsigned int)m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
 
-        const bool wt = dynamic_cast<const ConfigOptionBool*>(m_config->option("wipe_tower"))->value;
-        const bool co = dynamic_cast<const ConfigOptionBool*>(m_config->option("complete_objects"))->value;
+        const bool wt = m_config->option("wipe_tower")->get_bool();
+        const bool co = m_config->option("complete_objects")->get_bool() || m_config->option("parallel_objects_step")->get_float() > 0;
 
         if (extruders_count > 1 && wt && !co) {
             // can't get these one from wipe_tower_data, as these use the platter's config, not the print one.
@@ -2906,10 +2906,10 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult     &gcode_result
     if (wxGetApp().is_editor()) {
         _set_warning_notification_if_needed(EWarning::ToolpathOutside);
         _set_warning_notification_if_needed(EWarning::GCodeConflict);
-        m_gcode_viewer.refresh(gcode_result, str_tool_colors);
-        set_as_dirty();
-        request_extra_frame();
     }
+    m_gcode_viewer.refresh(gcode_result, str_tool_colors);
+    set_as_dirty();
+    request_extra_frame();
 }
 
 void GLCanvas3D::refresh_gcode_preview_render_paths(bool keep_sequential_current_first, bool keep_sequential_current_last)
@@ -7132,7 +7132,7 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
                 if (!print_object->brim().empty())
                     for (const PrintInstance& inst : print_object->instances()) {
                         if (!print_object->brim().empty()) volume = ensure_volume_is_ready(volume, init_data);
-                        _3DScene::extrusionentity_to_verts(print_object->brim(), print_zs[i], print->config().complete_objects? inst.shift : Point(0, 0), init_data);
+                        _3DScene::extrusionentity_to_verts(print_object->brim(), print_zs[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
                     }
                 if (print_object->skirt_first_layer())
                     for (const PrintInstance& inst : print_object->instances()) {
@@ -7151,7 +7151,7 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
             if ( !print_object->skirt().empty() && (i != 0 || !print_object->skirt_first_layer()))
                 for (const PrintInstance& inst : print_object->instances()) {
                     if (!print_object->skirt().empty()) volume = ensure_volume_is_ready(volume, init_data);
-                    _3DScene::extrusionentity_to_verts(print_object->skirt(), print_zs[i], print->config().complete_objects? inst.shift : Point(0, 0), init_data);
+                    _3DScene::extrusionentity_to_verts(print_object->skirt(), print_zs[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
                 }
         }
     }

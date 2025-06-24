@@ -59,6 +59,8 @@
 
 #include <LibBGCode/convert/convert.hpp>
 
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Format/STL.hpp"
 #include "libslic3r/Format/AMF.hpp"
@@ -67,45 +69,55 @@
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/Model.hpp"
-#include "libslic3r/SLA/Hollowing.hpp"
-#include "libslic3r/SLA/SupportPoint.hpp"
-#include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
+#include "libslic3r/miniz_extension.hpp"
+#include "libslic3r/Platform.hpp"
 #include "libslic3r/Polygon.hpp"
+#include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintConfig.hpp"
 #include "libslic3r/SLAPrint.hpp"
+#include "libslic3r/SLA/Hollowing.hpp"
+#include "libslic3r/SLA/SupportPoint.hpp"
+#include "libslic3r/SLA/ReprojectPointsOnMesh.hpp"
 #include "libslic3r/Utils.hpp"
-#include "libslic3r/PresetBundle.hpp"
-#include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/miniz_extension.hpp"
 
 // For stl export
 #include "libslic3r/CSGMesh/ModelToCSGMesh.hpp"
 #include "libslic3r/CSGMesh/PerformCSGMeshBooleans.hpp"
 
+#include "3DBed.hpp"
+#include "3DScene.hpp"
+#include "BackgroundSlicingProcess.hpp"
+#include "Camera.hpp"
+#include "ConfigWizard.hpp"
+#include "FileArchiveDialog.hpp"
+#include "GLCanvas3D.hpp"
+#include "GLToolbar.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
+#include "GUI_Factories.hpp"
+#include "GUI_Geometry.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GUI_ObjectManipulation.hpp"
 #include "GUI_ObjectLayers.hpp"
-#include "GUI_Utils.hpp"
-#include "GUI_Geometry.hpp"
-#include "GUI_Factories.hpp"
-#include "wxExtensions.hpp"
-#include "MainFrame.hpp"
-#include "format.hpp"
-#include "3DScene.hpp"
-#include "GLCanvas3D.hpp"
-#include "Selection.hpp"
-#include "GLToolbar.hpp"
 #include "GUI_Preview.hpp"
-#include "3DBed.hpp"
-#include "Camera.hpp"
+#include "GUI_Utils.hpp"
+#include "InstanceCheck.hpp"
+#include "MainFrame.hpp"
 #include "Mouse3DController.hpp"
+#include "MsgDialog.hpp"
+#include "NotificationManager.hpp"
+#include "PresetComboBoxes.hpp"
+#include "PrintHostDialogs.hpp"
+#include "RemovableDriveManager.hpp"
+#include "Selection.hpp"
 #include "Tab.hpp"
+#include "WipeTowerDialog.hpp"
+#include "format.hpp"
+#include "wxExtensions.hpp"
+
 //#include "Jobs/ArrangeJob.hpp"
 #include "Jobs/ArrangeJob2.hpp"
-
 //#include "Jobs/FillBedJob.hpp"
 #include "Jobs/RotoptimizeJob.hpp"
 #include "Jobs/SLAImportJob.hpp"
@@ -113,36 +125,24 @@
 #include "Jobs/NotificationProgressIndicator.hpp"
 #include "Jobs/PlaterWorker.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
-#include "BackgroundSlicingProcess.hpp"
-#include "PrintHostDialogs.hpp"
-#include "ConfigWizard.hpp"
 #include "../Utils/ASCIIFolding.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/FixModelByWin10.hpp"
 #include "../Utils/UndoRedo.hpp"
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/Process.hpp"
-#include "RemovableDriveManager.hpp"
-#include "InstanceCheck.hpp"
-#include "NotificationManager.hpp"
-#include "PresetComboBoxes.hpp"
-#include "MsgDialog.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
 #include "Gizmos/GLGizmoCut.hpp"
-#include "FileArchiveDialog.hpp"
+#include "Widgets/CheckBox.hpp"
 
 #ifdef __APPLE__
 #include "Gizmos/GLGizmosManager.hpp"
 #endif // __APPLE__
 
 #include <wx/glcanvas.h>    // Needs to be last because reasons :-/
-#include "WipeTowerDialog.hpp"
 
-#include "libslic3r/CustomGCode.hpp"
-#include "libslic3r/Platform.hpp"
 
-#include "Widgets/CheckBox.hpp"
 
 using std::optional;
 namespace fs = boost::filesystem;
@@ -435,15 +435,15 @@ void FreqChangedParams::init()
             m_og = (tab_freq_fff->get_page(0)->m_optgroups[0]);
             m_og->set_config(config);
             m_og->hide_labels();
-            m_og->m_on_change =
-                Tab::set_or_add(m_og->m_on_change, [tab_freq_fff, this](t_config_option_key opt_key, bool enabled, boost::any value)
+            m_og->m_on_change = Tab::set_or_add(m_og->m_on_change,
+                                [tab_freq_fff, this](const OptionKeyIdx &opt_key_idx, bool enabled, const boost::any &value)
                                 {
                                     assert(enabled); //TODO fix & test
-                                    const Option *opt_def = this->m_og->get_option_def(opt_key);
+                                    const Option *opt_def = this->m_og->get_option_def(opt_key_idx);
                                     if (opt_def && !opt_def->opt.is_script) {
                                         tab_freq_fff->update_dirty();
                                         tab_freq_fff->reload_config();
-                                        static_cast<TabFrequent *>(tab_freq_fff)->update_changed_setting(opt_key);
+                                        static_cast<TabFrequent *>(tab_freq_fff)->update_changed_setting(opt_key_idx.key);
                                     }
                                 });
             assert(tab_freq_fff->get_page_count() == 1);
@@ -531,16 +531,16 @@ void FreqChangedParams::init()
                 (tab_freq_sla->get_page(0)->m_optgroups[0]);
             m_og_sla->set_config(config);
             m_og_sla->hide_labels();
-            m_og_sla->m_on_change = Tab::set_or_add(m_og_sla->m_on_change, [tab_freq_sla,
-                                                                            this](t_config_option_key opt_key,
-                                                                                  bool                enabled,
-                                                                                  boost::any          value) {
+            m_og_sla->m_on_change =
+                Tab::set_or_add(m_og_sla->m_on_change,
+                                [tab_freq_sla, this](const OptionKeyIdx &opt_key_idx, bool enabled,
+                                                     const boost::any &value) {
                 assert(enabled);
-                Option opt = this->m_og_other[ptSLA]->create_option_from_def(opt_key);
+                Option opt = this->m_og_other[ptSLA]->create_option_from_def(opt_key_idx.key, opt_key_idx.idx);
                 if (!opt.opt.is_script) {
                     tab_freq_sla->update_dirty();
                     tab_freq_sla->reload_config();
-                    static_cast<TabFrequent *>(tab_freq_sla)->update_changed_setting(opt_key);
+                    static_cast<TabFrequent *>(tab_freq_sla)->update_changed_setting(opt_key_idx.key);
                 }
             });
             assert(tab_freq_sla->get_page_count() == 1);
@@ -1243,8 +1243,13 @@ void Sidebar::search()
 void Sidebar::jump_to_option(const std::string& composite_key)
 {
     const auto        separator_pos = composite_key.find(";");
-    const std::string opt_key       = composite_key.substr(0, separator_pos);
+    std::string       opt_key       = composite_key.substr(0, separator_pos);
     const std::string tab_name      = composite_key.substr(separator_pos + 1, composite_key.length());
+    int32_t           opt_idx       = -1;
+    if (size_t hpos = opt_key.find("#"); hpos != std::string::npos) {
+        opt_idx = std::atoi(opt_key.substr(hpos + 1).c_str());
+        opt_key = opt_key.substr(0, hpos);
+    }
 
     for (Tab* tab : wxGetApp().tabs_list) {
         if (tab->name() == tab_name) {
@@ -1254,8 +1259,8 @@ void Sidebar::jump_to_option(const std::string& composite_key)
             // so resort searcher before get an option
             // p->searcher.sort_options_by_key();
             assert(p->searcher.is_sorted());
-            const Search::Option& opt = p->searcher.get_option(opt_key, tab->type());
-            tab->activate_option(opt_key, boost::nowide::narrow(opt.category));
+            const Slic3r::Search::SearchOption& opt = p->searcher.get_option(opt_key, opt_idx, tab->type());
+            tab->activate_option({opt_key, opt_idx}, boost::nowide::narrow(opt.category));
 
             // Revert sort of searcher back
             //p->searcher.sort_options_by_label();
@@ -1267,12 +1272,13 @@ void Sidebar::jump_to_option(const std::string& composite_key)
 void Sidebar::jump_to_option(const std::string& opt_key, Preset::Type type, const std::wstring& category)
 {
     //const Search::Option& opt = p->searcher.get_option(opt_key, type);
-    wxGetApp().get_tab(type)->activate_option(opt_key, category);
+    // note: not avaialble for indexed-options
+    wxGetApp().get_tab(type)->activate_option(OptionKeyIdx::scalar(opt_key), category);
 }
 
 void Sidebar::jump_to_option(size_t selected)
 {
-    const Search::Option& opt = p->searcher.get_option(selected);
+    const Slic3r::Search::SearchOption& opt = p->searcher.get_option(selected);
     if (opt.type == Preset::TYPE_PREFERENCES)
         wxGetApp().open_preferences(opt.opt_key(), boost::nowide::narrow(opt.group));
     else {
@@ -1301,7 +1307,7 @@ void Sidebar::jump_to_option(size_t selected)
         }
     }
 
-        wxGetApp().get_tab(opt.type, false)->activate_option(opt.opt_key_with_idx(), boost::nowide::narrow(opt.category));
+        wxGetApp().get_tab(opt.type, false)->activate_option({opt.opt_key(), opt.idx}, boost::nowide::narrow(opt.category));
     }
 
 }
@@ -2815,6 +2821,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     ConfigSubstitutionContext config_substitutions{ ForwardCompatibilitySubstitutionRule::Enable };
                     model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions, only_if(load_config, Model::LoadAttribute::CheckVersion));
                     if (load_config && !config_loaded.empty()) {
+                        // loaded: allow to ask again for support_material_overhangs
+                        wxGetApp().get_tab(Preset::TYPE_FFF_PRINT)->get_config_manipulation().initialize_support_material_overhangs_queried(false);
+
                         // Based on the printer technology field found in the loaded config, select the base for the config,
                         loaded_printer_technology = Preset::printer_technology(config_loaded);
 
@@ -3567,8 +3576,8 @@ void Plater::priv::process_validation_warning(const std::vector<std::string>& wa
                 DynamicPrintConfig& config = wxGetApp().preset_bundle->fff_prints.get_edited_preset().config;
                 config.set_key_value("support_material", new ConfigOptionBool(true));
                 config.set_key_value("support_material_auto", new ConfigOptionBool(false));
-                print_tab->on_value_change("support_material", config.opt_bool("support_material"));
-                print_tab->on_value_change("support_material_auto", config.opt_bool("support_material_auto"));
+                print_tab->on_value_change(OptionKeyIdx::scalar("support_material"), config.opt_bool("support_material"));
+                print_tab->on_value_change(OptionKeyIdx::scalar("support_material_auto"), config.opt_bool("support_material_auto"));
                 return true;
             };
         }
@@ -7944,7 +7953,7 @@ void Plater::send_gcode()
                                        wxGetApp().app_config->get_bool("use_binary_gcode_when_supported");
             const wxString error_str = check_binary_vs_ascii_gcode_extension(printer_technology(), ext, binary_output);
             if (! error_str.IsEmpty()) {
-                ErrorDialog(this, error_str, t_kill_focus([](const std::string& key) -> void { wxGetApp().sidebar().jump_to_option(key); })).ShowModal();
+                ErrorDialog(this, error_str, std::function<void(const std::string&)>([](const std::string& key) -> void { wxGetApp().sidebar().jump_to_option(key); })).ShowModal();
                 return;
             }
 

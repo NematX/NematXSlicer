@@ -486,7 +486,9 @@ private:
     // Current layer processed. In sequential printing mode, only a single copy will be printed.
     // In non-sequential mode, all its copies will be printed.
     const Layer*                        m_layer;
-    const Layer*                        m_last_object_layer;
+    // last layers printed at our current Z, to 
+    std::vector<const Layer*>           m_last_object_layers;
+    coordf_t                            m_last_layers_z{ 0.0 };
     const PrintRegion*                  m_region = nullptr;
     // m_layer is an object layer and it is being printed over raft surface.
     bool                                m_object_layer_over_raft;    // idx of the current instance printed. (or the last one)
@@ -507,7 +509,7 @@ private:
     struct SliceOffsetted {
         std::vector<SliceIsland> slices;
         std::vector<SliceIsland> slices_offsetted;
-        const Layer* layer;
+        const Layer* last_layer;
         coord_t diameter;
     }                                   m_layer_slices_offseted{ {},{},nullptr, 0};
     double                              m_volumetric_speed;
@@ -600,6 +602,7 @@ private:
     void                      _extrude_line_cut_corner(std::string& gcode_str, const Line& line, const double e_per_mm, const std::string_view comment, Point& last_pos, const double path_width);
     Point                     _extrude_line_stretch_corner(std::string& gcode_str, const ExtrusionRole path_role, const Point& last_pos, const Point& corner_point, const Point& next_point, const Point& after_point, const bool is_ccw, const double path_width, const double e_per_mm, const std::string_view comment);
     std::string               _before_extrude(const ExtrusionPath &path, const std::string_view description, double speed = -1);
+    std::string               _travel_before_extrude(const ExtrusionPath &path, const std::string_view description, double speed_mm_s = -1);
     double_t                  _compute_speed_mm_per_sec(const ExtrusionPath &path_attrs, const double speed, double &fan_speed, std::string *comment) const;
     std::pair<double, double> _compute_acceleration(const ExtrusionPath &path);
     std::string               _after_extrude(const ExtrusionPath &path);

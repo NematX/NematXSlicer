@@ -92,7 +92,7 @@ public:
     bool is_clockwise() const;
     bool make_counter_clockwise();
     bool make_clockwise();
-    bool is_valid() const { return this->points.size() >= 3; assert_valid(); }
+    bool is_valid() const { assert_valid(); return this->points.size() >= 3; }
     void douglas_peucker(coord_t tolerance) override;
 
     // Does an unoriented polygon contain a point?
@@ -287,12 +287,25 @@ inline Polyline to_polyline(const Polygon &polygon)
     return out;
 }
 
+// to have easier time with svg output.
+inline Polylines to_polylines(const Polygon &polygon)
+{
+    Polylines out;
+    assert(!polygon.empty());
+    if (!polygon.empty()) {
+        out.push_back(to_polyline(polygon));
+    }
+    return out;
+}
+
 inline Polylines to_polylines(const Polygons &polygons)
 {
     Polylines out;
     out.reserve(polygons.size());
-    for (const Polygon &polygon : polygons)
-        out.emplace_back(to_polyline(polygon));
+    for (const Polygon &polygon : polygons) {
+        assert(!polygon.empty());
+        out.push_back(to_polyline(polygon));
+    }
     return out;
 }
 
