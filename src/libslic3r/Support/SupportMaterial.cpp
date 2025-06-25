@@ -319,6 +319,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
         layer_storage, layer_support_areas);
 
     assert_check(bottom_contacts);
+    assert_z(bottom_contacts);
 #ifdef SLIC3R_DEBUG
     for (size_t layer_id = 0; layer_id < object.layers().size(); ++ layer_id)
         Slic3r::SVG::export_expolygons(
@@ -375,6 +376,8 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
 
     assert_check(bottom_contacts);
     assert_check(top_contacts);
+    assert_z(bottom_contacts);
+    assert_z(top_contacts);
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating interfaces";
 
@@ -1929,6 +1932,8 @@ static inline SupportGeneratorLayer* detect_bottom_contacts(
     layer_new.print_z = slicing_params.soluble_interface ? layer.upper_layer->print_z :
         layer.print_z + layer_new.height_block + slicing_params.gap_object_support;
     layer_new.bottom_z = layer.print_z;
+    //recompute layer height to be in synch with print & bottom
+    layer_new.height = layer_new.print_z - layer_new.bottom_z;
     layer_new.idx_object_layer_below = layer_id;
     layer_new.bridging = !slicing_params.soluble_interface;
     //FIXME how much to inflate the bottom surface, as it is being extruded with a bridging flow? The following line uses a normal flow.
@@ -1960,6 +1965,7 @@ static inline SupportGeneratorLayer* detect_bottom_contacts(
                     layer_new.print_z = top_contacts[top_idx]->print_z;
                     layer_new.height -= diff;
                 }
+                assert(is_approx(layer_new.print_z * 1., layer_new.height + layer_new.bottom_z * 1., EPSILON));
                 break;
             }
         }
