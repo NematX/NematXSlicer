@@ -3294,6 +3294,42 @@ ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &param
         return true;
     }());
 
+    //build perimeter_boundary
+    bool has_tw = false;
+    for (const Arachne::VariableWidthLines& perimeter : perimeters) {
+        for (const Arachne::ExtrusionLine &el : perimeter) {
+            // extrenal
+            if (el.inset_idx == 0) {
+                //add it
+                if (el.is_closed) {
+                    perimeter_boundary.emplace_back(el.toPolygon());
+                } else {
+                    // need to create a polygon
+                    coord_t biggest_width = 0;
+                    for (const Arachne::ExtrusionJunction &ej : el.junctions) {
+                        biggest_width = std::max(biggest_width, coord_t(ej.w));
+                    }
+                    Polyline polyline = el.toPolyline();
+                    biggest_width = std::min(biggest_width, coord_t(polyline.length() * 2) / 3);
+                    polyline.clip_start(biggest_width / 2);
+                    polyline.clip_end(biggest_width / 2);
+                    for (Polygon &polygon : offset(polyline, double(biggest_width / 2))) {
+                        perimeter_boundary.emplace_back(std::move(polygon));
+                    }
+                    has_tw = true;
+                }
+            }
+        }
+    }
+    if (perimeter_boundary.size() > 1) {
+        perimeter_boundary = union_ex(perimeter_boundary);
+    }
+    //offset2 to fusion, as the thin walls need to attach
+    if(has_tw) {
+        perimeter_boundary = offset2_ex(perimeter_boundary, params.get_ext_perimeter_spacing() / 8,
+                                        -params.get_ext_perimeter_spacing() / 8);
+    }
+
     int start_perimeter = int(perimeters.size()) - 1;
     int end_perimeter = -1;
     int direction = -1;
@@ -3802,6 +3838,10 @@ void PerimeterGenerator::process(// Input:
             nb_loop_holes = nb_loop_contour; // nb_loop_contour is in/out
         } else {
             surface_process_result = process_classic(params, nb_loop_contour, nb_loop_holes, surface, *loops, *gap_fill);
+        }
+        // boundaries if no perimeters
+        if (nb_loop_contour == 0 || nb_loop_holes == 0) {
+            perimeter_boundary = union_ex(perimeter_boundary, surface.expolygon);
         }
         this->throw_if_canceled();
         for(auto *peri : loops->entities()) assert(!peri->empty());
@@ -4787,11 +4827,16 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
                                     // the maximum thickness of our thin wall area is equal to the minimum thickness of a single loop (*1.2 because of circles approx. and enlrgment from 'div')
                                     Slic3r::Geometry::MedialAxis ma{ thin[0], (coord_t)((params.get_ext_perimeter_width() + params.get_ext_perimeter_spacing()) * 1.2),
                                         min_width, scale_t(params.layer->height) };
+                                    size_t next_thin_wall_idx = thin_walls_thickpolys.size();
                                     ma.use_bounds(bound)
                                         .use_min_real_width(scale_t(params.ext_perimeter_flow.nozzle_diameter()))
                                         .use_tapers(thin_walls_overlap)
                                         .set_min_length(params.get_ext_perimeter_width() + params.get_ext_perimeter_spacing())
                                         .build(thin_walls_thickpolys);
+                                    // store thin walls bound in boundary
+                                    if (next_thin_wall_idx < thin_walls_thickpolys.size()) {
+                                        perimeter_boundary.push_back(bound);
+                                    }
                                 }
                                 break;
                             }
@@ -4832,6 +4877,13 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
                     assert(contour_count > 0);
                     // Remove all but the largest area polygon.
                     keep_largest_contour_only(*all_next_onion);
+                }
+                //compute boundary
+                if (perimeter_boundary.empty()) {
+                    perimeter_boundary = offset_ex(next_onion, params.get_ext_perimeter_width() / 2);
+                } else {
+                    append(perimeter_boundary, offset_ex(next_onion, params.get_ext_perimeter_width() / 2));
+                    perimeter_boundary = union_ex(perimeter_boundary);
                 }
             } else {
                 //FIXME Is this offset correct if the line width of the inner perimeters differs
