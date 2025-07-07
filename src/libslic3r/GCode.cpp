@@ -2102,7 +2102,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     
     if (export_to_binary_gcode) {
         bgcode::binarize::BinaryData& binary_data = m_processor.get_binary_data();
-        if (status_monitor.stats().total_toolchanges > 0)
+        //if (status_monitor.stats().total_toolchanges > 0)
             binary_data.print_metadata.raw_data.emplace_back("total toolchanges", std::to_string(status_monitor.stats().total_toolchanges));
         char buf[1024];
         sprintf(buf, "%.2lf", m_max_layer_z);
@@ -2114,7 +2114,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
         file.write_format(PrintStatistics::TotalFilamentUsedGValueMask.c_str(), status_monitor.stats().total_weight);
         file.write_format(PrintStatistics::TotalFilamentCostValueMask.c_str(), status_monitor.stats().total_cost);
         file.write_format(PrintStatistics::TotalFilamentUsedWipeTowerValueMask.c_str(), status_monitor.stats().total_wipe_tower_filament_weight);
-        if (status_monitor.stats().total_toolchanges > 0)
+        //if (status_monitor.stats().total_toolchanges > 0) // always write the line, so the parser has something reliable to read.
             file.write_format("; total toolchanges = %i\n", status_monitor.stats().total_toolchanges);
         file.write_format("; objects layers count = %i\n", object_layer_count());
         file.write_format("; total layers count = %i\n", layer_count());
