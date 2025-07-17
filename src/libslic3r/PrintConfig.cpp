@@ -7542,10 +7542,10 @@ void PrintConfigDef::init_fff_params()
     def->graph_settings->label_max_y = L("Max compensation");
     def->graph_settings->min_x       = 0;
     def->graph_settings->max_x       = 10;
-    def->graph_settings->step_x      = 0.1;
+    def->graph_settings->step_x      = 0.01;
     def->graph_settings->min_y       = -10;
     def->graph_settings->max_y       = 10;
-    def->graph_settings->step_y      = 0.01;
+    def->graph_settings->step_y      = 0.001;
     def->graph_settings->allowed_types = {GraphData::GraphType::LINEAR, GraphData::GraphType::SQUARE};
 
     def = this->add("hole_size_threshold", coFloat);
