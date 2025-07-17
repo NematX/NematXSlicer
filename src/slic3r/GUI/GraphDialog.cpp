@@ -377,6 +377,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_x_label(_(settings.x_label), new_precision);
                 m_chart->set_xy_range(m_last_min_x, std::numeric_limits<float>::quiet_NaN(), m_last_max_x,
                                       std::numeric_limits<float>::quiet_NaN());
+                m_widget_x->SetRange(m_last_min_x, m_last_max_x);
             }
         });
         // m_widget_max_x->Bind(wxEVT_TEXT, [this, settings](wxCommandEvent &evt) {
@@ -402,6 +403,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_x_label(_(settings.x_label), new_precision);
                 m_chart->set_xy_range(m_last_min_x, std::numeric_limits<float>::quiet_NaN(), m_last_max_x,
                                       std::numeric_limits<float>::quiet_NaN());
+                m_widget_x->SetRange(m_last_min_x, m_last_max_x);
             }
         });
     }
@@ -424,6 +426,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_x_label(_(settings.x_label), new_precision);
                 m_chart->set_xy_range(m_last_min_x, std::numeric_limits<float>::quiet_NaN(), m_last_max_x,
                                       std::numeric_limits<float>::quiet_NaN());
+                m_widget_x->SetRange(m_last_min_x, m_last_max_x);
             }
         });
         // m_widget_min_x->Bind(wxEVT_TEXT, [this, settings](wxCommandEvent &evt) {
@@ -453,6 +456,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_x_label(_(settings.x_label), new_precision);
                 m_chart->set_xy_range(m_last_min_x, std::numeric_limits<float>::quiet_NaN(), m_last_max_x,
                                       std::numeric_limits<float>::quiet_NaN());
+                m_widget_x->SetRange(m_last_min_x, m_last_max_x);
             }
         });
     }
@@ -486,6 +490,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_y_label(_(settings.y_label), new_precision);
                 m_chart->set_xy_range(std::numeric_limits<float>::quiet_NaN(), m_last_min_y,
                                       std::numeric_limits<float>::quiet_NaN(), m_last_max_y);
+                m_widget_y->SetRange(m_last_min_y, m_last_max_y);
             }
         });
         m_widget_min_y->Bind(wxEVT_SPINCTRLDOUBLE, [this, settings](wxSpinDoubleEvent &evt) {
@@ -495,6 +500,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_y_label(_(settings.y_label), new_precision);
                 m_chart->set_xy_range(std::numeric_limits<float>::quiet_NaN(), m_last_min_y,
                                       std::numeric_limits<float>::quiet_NaN(), m_last_max_y);
+                m_widget_y->SetRange(m_last_min_y, m_last_max_y);
             }
         });
     }
@@ -507,6 +513,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_y_label(_(settings.y_label), new_precision);
                 m_chart->set_xy_range(std::numeric_limits<float>::quiet_NaN(), m_last_min_y,
                                       std::numeric_limits<float>::quiet_NaN(), m_last_max_y);
+                m_widget_y->SetRange(m_last_min_y, m_last_max_y);
             }
         });
         m_widget_max_y->Bind(wxEVT_SPINCTRLDOUBLE, [this, settings](wxSpinDoubleEvent &evt) {
@@ -516,6 +523,7 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
                 m_chart->set_y_label(_(settings.y_label), new_precision);
                 m_chart->set_xy_range(std::numeric_limits<float>::quiet_NaN(), m_last_min_y,
                                       std::numeric_limits<float>::quiet_NaN(), m_last_max_y);
+                m_widget_y->SetRange(m_last_min_y, m_last_max_y);
             }
         });
     }
@@ -538,8 +546,34 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
         m_chart->set_selected_point_position(pos);
     });
 
+    m_widget_x->Bind(wxEVT_TEXT_ENTER, [this, settings](wxCommandEvent &evt) {
+        double new_x = m_widget_x->GetValue();
+        double new_precision = text_enter_event(m_widget_x, new_x, m_last_min_x, m_last_max_x, settings.min_x,
+                                                settings.max_x, settings.step_x, evt);
+        new_x = int(new_x / m_widget_x->GetIncrement()) * m_widget_x->GetIncrement();
+        if (m_widget_x->GetValue() != new_x) {
+            m_widget_x->SetValue(new_x);
+        }
+        wxPoint2DDouble pos = m_chart->get_selected_point_position();
+        pos.m_x = new_x;
+        m_chart->set_selected_point_position(pos);
+    });
+
     m_widget_y->Bind(wxEVT_SPINCTRLDOUBLE, [this, settings](wxSpinDoubleEvent &evt) {
         double new_y = m_widget_y->GetValue();
+        new_y = int(new_y / m_widget_y->GetIncrement()) * m_widget_y->GetIncrement();
+        if (m_widget_y->GetValue() != new_y) {
+            m_widget_y->SetValue(new_y);
+        }
+        wxPoint2DDouble pos = m_chart->get_selected_point_position();
+        pos.m_y = new_y;
+        m_chart->set_selected_point_position(pos);
+    });
+
+    m_widget_y->Bind(wxEVT_TEXT_ENTER, [this, settings](wxCommandEvent &evt) {
+        double new_y = m_widget_y->GetValue();
+        double new_precision = text_enter_event(m_widget_y, new_y, m_last_min_y, m_last_max_y,
+                                                settings.min_y, settings.max_y, settings.step_y, evt);
         new_y = int(new_y / m_widget_y->GetIncrement()) * m_widget_y->GetIncrement();
         if (m_widget_y->GetValue() != new_y) {
             m_widget_y->SetValue(new_y);
@@ -585,7 +619,11 @@ GraphData GraphPanel::get_data()
     assert(m_chart->get_max_x() > m_chart->get_min_x());
     for (size_t idx = 0; idx < buttons.size(); ++idx) {
         const std::pair<float, float> &pt = buttons[idx];
-        data.graph_points.emplace_back(pt.first, pt.second);
+        // get good position, as the graph_points are ordered
+        size_t idx_insert = 0;
+        for (idx_insert = 0; idx_insert < data.graph_points.size() && data.graph_points[idx_insert].x() < pt.first;
+             idx_insert++) {}
+        data.graph_points.emplace(data.graph_points.begin() + idx_insert, pt.first, pt.second);
         if (data.begin_idx == size_t(-1) && m_chart->get_min_x() <= pt.first) {
             data.begin_idx = idx;
         }
