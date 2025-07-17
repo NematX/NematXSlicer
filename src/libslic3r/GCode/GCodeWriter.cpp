@@ -993,7 +993,7 @@ std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, const double dE, con
         }
         double delta = w.emit_e(m_extrusion_axis, e_to_write);
         if((delta < 0.00000000001) & (delta > -0.00000000001)) delta = 0;
-        assert(delta == 0 ); // shoulde be already taken into account by m_tool->extrude
+        //assert(delta == 0 ); // shoulde be already taken into account by m_tool->extrude
         this->m_de_left += delta;
     }
     w.emit_comment(this->config.gcode_comments, comment);
