@@ -1874,8 +1874,8 @@ std::tuple<bool,std::optional<Vec3f>> get_seam_from_modifier(const Layer& layer,
                 double sphere_radius = std::min(seam_mesh->bb_volume.size().x() / 2, seam_mesh->bb_volume.size().y() / 2);
                 if (model_volume->type() == ModelVolumeType::SEAM_POSITION_CENTER) {
                     test_lambda_z = std::abs(layer.print_z - center_pos.z());
-                } else if (v->type() == ModelVolumeType::SEAM_POSITION_CENTER_Z ||
-                    (v->type() == ModelVolumeType::SEAM_POSITION_INSIDE_CENTER && !loop.has_role(ExtrusionRole::ExternalPerimeter))) {
+                } else if (model_volume->type() == ModelVolumeType::SEAM_POSITION_CENTER_Z ||
+                    (model_volume->type() == ModelVolumeType::SEAM_POSITION_INSIDE_CENTER && !loop.has_role(ExtrusionRole::ExternalPerimeter))) {
                     double min_z = seam_mesh->bb_volume.min.z();
                     double max_z = seam_mesh->bb_volume.max.z();
                     assert(min_z < max_z);
