@@ -5156,41 +5156,48 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
         // fuzzify
         const bool fuzzify_gapfill = params.config.fuzzy_skin == FuzzySkinType::All && params.layer->id() > 0;
         // check for extracting extra perimeters from gapfill
-        if (!gaps.empty()) {
+        if (!gaps.empty() && params.config.gap_fill_perimeter.value) {
             // if needed, add it to the first empty contour list
             const size_t contours_size = contour_count;
             assert(contours.size() == contour_count);
             //first, find loops and try to extract a perimeter from them.
-            for (size_t gap_idx = 0; gap_idx < gaps.size(); gap_idx++) {
+            size_t looked_gap = gaps.size();
+            for (size_t gap_idx = 0; gap_idx < looked_gap; gap_idx++) {
                 ExPolygon& expoly = gaps[gap_idx];
-                if (!expoly.holes.empty()) {
+                if (expoly.holes.size() >= 1) {
                     //this is a a sort of a loop
                     //try to see if it's possible to add a "perimeter"
-                    ExPolygons contour_expolygon = offset_ex(expoly, -(float)(params.get_perimeter_spacing() / 2), ClipperLib::jtMiter, 3);
-                    if (contour_expolygon.size() == 1 && !contour_expolygon.front().holes.empty()) {
-                        //OK
-                        // update list & variable to let the new perimeter be taken into account
-                        contour_count = contours_size + 1;
-                        if (contours_size >= contours.size()) {
-                            contours.emplace_back();
-                            holes.emplace_back();
+                    //ExPolygons contour_expolygon = offset_ex(expoly, -(float)(params.get_perimeter_spacing() / 2), ClipperLib::jtMiter, 3);
+                    ExPolygons new_gaps =
+                        intersection_ex(expoly,
+                            offset_ex(expoly.contour, -(float) (params.get_perimeter_spacing())));
+                    if (new_gaps.size() == 1 && new_gaps.front().holes.size() >= 1) {
+                        // create centerline
+                        Polygons new_contour = offset(new_gaps.front().contour,
+                                                      (float) (params.get_perimeter_spacing() / 2));
+                        // there was an offset, simplify to avoid too small sections
+                        new_contour = new_contour.front().simplify(SCALED_EPSILON);
+                        if (new_contour.size() == 1) {
+                            // OK
+                            // gap fill outside of the new contour
+                            append(gaps, ensure_valid(diff_ex(expoly, offset_ex(new_gaps.front().contour, (float) (params.get_perimeter_spacing()))), resolution));
+                            // gapfill after the perimeter
+                            append(gaps, new_gaps);
+                            // remove our old gapfill
+                            gaps.erase(gaps.begin() + gap_idx);
+                            looked_gap--;
+                            gap_idx--;
+                            // update list & variable to let the new perimeter be taken into account
+                            contour_count = contours_size + 1;
+                            if (contours_size >= contours.size()) {
+                                contours.emplace_back();
+                                holes.emplace_back();
+                            }
+                            assert(contours.size() == contour_count);
+                            // Add the new perimeter
+                            contours[contours_size].emplace_back(new_contour.front(), contours_size,
+                                                                 true, has_steep_overhang, fuzzify_gapfill);
                         }
-                        assert(contours.size() == contour_count);
-                        //there was an offset, simplify to avoid too small sections
-                        contour_expolygon = contour_expolygon.front().simplify(SCALED_EPSILON);
-                        assert(contour_expolygon.size() == 1);
-                        //Add the new perimeter
-                        contours[contours_size].emplace_back(contour_expolygon.front().contour, contours_size, true, has_steep_overhang, fuzzify_gapfill);
-                        //create the new gapfills
-                        ExPolygons gapfill_area = offset_ex(Polygons{ expoly.contour }, -(float)(params.get_perimeter_spacing()));
-                        ExPolygons to_add = intersection_ex(ExPolygons{ expoly }, gapfill_area);
-                        //add the new gapfill
-                        if (to_add.size() == 0)
-                            expoly.clear();
-                        else
-                            expoly = to_add.front();
-                        for (size_t j = 1; j < to_add.size(); j++)
-                            gaps.push_back(to_add[j]);
                     }
                 }
             }
