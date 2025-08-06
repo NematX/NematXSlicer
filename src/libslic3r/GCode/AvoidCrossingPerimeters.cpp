@@ -904,6 +904,8 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             visitor.pt_current = &start;
             visitor.pt_next = &end;
             start_grid.visit_cells_intersecting_line(start, end, visitor);
+#ifdef _DEBUG
+            assert(visitor.intersect);
             if (!visitor.intersect) {
                 SVG svg(debug_out_path("cannot_find_boundary.svg"));
                 svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
@@ -912,7 +914,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 svg.draw(Polyline({start, end}), "blue", scale_t(0.02));
                 svg.Close();
             }
-            assert(visitor.intersect);
+#endif _DEBUG
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
                 best_intersection_start.line_idx = visitor.intersection_line_idx;
@@ -932,6 +934,8 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             visitor.pt_current = &start;
             visitor.pt_next = &end;
             end_grid.visit_cells_intersecting_line(start, end, visitor);
+#ifdef _DEBUG
+            assert(visitor.intersect);
             if (!visitor.intersect) {
                 SVG svg(debug_out_path("cannot_find_boundary.svg"));
                 svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
@@ -941,7 +945,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 svg.draw(Polyline({start, end}), "blue", scale_t(0.02));
                 svg.Close();
             }
-            assert(visitor.intersect);
+#endif _DEBUG
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
                 best_intersection_end.line_idx = visitor.intersection_line_idx;
@@ -1433,20 +1437,6 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 speedup += double(st2) / st1;
                 nb++;
             }
-            //std::cout << "speedup=" << (100 * (speedup / nb)) << "%\n";
-            //if ((best_intersection_start.line_idx == size_t(-1) || best_intersection_end.line_idx == size_t(-1)) &&
-            //    (best_intersection_start_dbg.line_idx != size_t(-1) && best_intersection_end_dbg.line_idx != size_t(-1))) {
-            //    SVG svg(debug_out_path("cannot_find_boundary.svg"));
-            //    svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
-            //    svg.draw(contour_start.split_at_first_point(), "red", scale_t(0.025));
-            //    svg.draw(contour_end.split_at_first_point(), "green", scale_t(0.025));
-            //    svg.draw(Polyline({start, end}), "blue", scale_t(0.02));
-            //    svg.draw(Polyline({start, best_intersection_start_dbg.point, best_intersection_end_dbg.point,end}), "cyan", scale_t(0.018));
-            //    svg.Close();
-            //}
-            //if (best_intersection_start.line_idx == size_t(-1) || best_intersection_end.line_idx == size_t(-1)) {
-            //    std::cout<<"error\n";
-            //}
             if (best_intersection_start.line_idx == size_t(-1)) {
                 // can't find any, it's not possible as the strait path exists.
                 assert(false);
