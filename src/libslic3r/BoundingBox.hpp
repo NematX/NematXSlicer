@@ -38,6 +38,7 @@ public:
     {}
 
     void reset() { this->defined = false; this->min = PointType::Zero(); this->max = PointType::Zero(); }
+    bool empty() const { return min == max; }
     void merge(const PointType &point);
     void merge(const PointsType &points);
     void merge(const BoundingBoxBase<PointType, PointsType> &bb);
@@ -316,13 +317,13 @@ inline double bbox_point_distance_squared(const BoundingBox &bbox, const Point &
     if (pt.x() < bbox.min.x())
         return pt.y() < bbox.min.y() ? (bbox.min - pt).cast<double>().squaredNorm() :
                pt.y() > bbox.max.y() ? (Point(bbox.min.x(), bbox.max.y()) - pt).cast<double>().squaredNorm() :
-               Slic3r::sqr(double(bbox.min.x() - pt.x()));
+               Slic3r::coord_sqr(bbox.min.x() - pt.x());
     else if (pt.x() > bbox.max.x())
         return pt.y() < bbox.min.y() ? (Point(bbox.max.x(), bbox.min.y()) - pt).cast<double>().squaredNorm() :
                pt.y() > bbox.max.y() ? (bbox.max - pt).cast<double>().squaredNorm() :
-               Slic3r::sqr<double>(pt.x() - bbox.max.x());
+               Slic3r::coord_sqr(pt.x() - bbox.max.x());
     else
-        return Slic3r::sqr<double>(pt.y() < bbox.min.y() ? bbox.min.y() - pt.y() :
+        return Slic3r::coord_sqr(pt.y() < bbox.min.y() ? bbox.min.y() - pt.y() :
                                    pt.y() > bbox.max.y() ? pt.y() - bbox.max.y() :
                                    coord_t(0));
 }

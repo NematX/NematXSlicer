@@ -126,14 +126,14 @@ enum class FuzzySkinType {
 };
 
 enum InfillPattern : uint8_t{
-    ipRectilinear, ipRectilinearWGapFill,
-    ipMonotonic, ipMonotonicWGapFill,
+    ipRectilinear,
+    ipMonotonic,
     ipAlignedRectilinear,
     ipGrid, ipGridVarSpeed,
     ipTriangles, ipStars, ipCubic,
     ipLine, ipMonotonicLines,
     ipRectilinearAroundHoles,
-    ipConcentric, ipConcentricGapFill,
+    ipConcentric,
     ipHoneycomb, ip3DHoneycomb,
     ipGyroid,
     ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
@@ -773,6 +773,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 first_layer_size_compensation_no_collapse))
     ((ConfigOptionFloatOrPercent,       first_layer_speed))
     ((ConfigOptionFloatOrPercent,       first_layer_speed_over_raft))
+    ((ConfigOptionPercent,              first_layer_strong_start))
     ((ConfigOptionFloat,                hole_size_compensation))
     ((ConfigOptionGraph,                hole_size_compensations_curve))
     ((ConfigOptionFloat,                hole_size_threshold))
@@ -902,6 +903,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent,       external_perimeters_staggered))
     ((ConfigOptionBool,                 external_perimeters_vase))
     ((ConfigOptionBool,                 extra_perimeters))
+    ((ConfigOptionFloatOrPercent,       extra_perimeters_below_area))
+    ((ConfigOptionInt,                  extra_perimeters_count))
     ((ConfigOptionBool,                 extra_perimeters_odd_layers))
     ((ConfigOptionBool,                 extra_perimeters_on_overhangs))
     ((ConfigOptionBool,                 only_one_perimeter_first_layer))
@@ -958,6 +961,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 infill_dense))
     ((ConfigOptionEnum<DenseInfillAlgo>,  infill_dense_algo))
     ((ConfigOptionBool,                 infill_first))
+    ((ConfigOptionBool,                 infill_filled_bottom))
+    ((ConfigOptionBool,                 infill_filled_solid))
+    ((ConfigOptionBool,                 infill_filled_top))
     ((ConfigOptionFloatOrPercent,       internal_bridge_acceleration))
     ((ConfigOptionBool,                 internal_bridge_expansion))
     ((ConfigOptionFloatOrPercent,       internal_bridge_min_width))
@@ -1012,6 +1018,8 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                print_retract_lift))
     ((ConfigOptionString,               region_gcode))
     ((ConfigOptionPercent,              second_layer_flow_ratio))
+    ((ConfigOptionFloatOrPercent,       slice_merge_dent))
+    ((ConfigOptionFloatOrPercent,       slice_merge_min_width))
     ((ConfigOptionGraph,                small_area_infill_flow_compensation_model))
     ((ConfigOptionFloatOrPercent,       small_perimeter_speed))
     ((ConfigOptionFloatOrPercent,       small_perimeter_min_length))
@@ -1101,6 +1109,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent,      arc_fitting_resolution))
     ((ConfigOptionFloatOrPercent,      arc_fitting_tolerance))
     ((ConfigOptionBool,                autoemit_temperature_commands))
+    ((ConfigOptionFloatOrPercent,      autospeed_min_thin_flow))
     ((ConfigOptionString,              before_layer_gcode))
     ((ConfigOptionString,              between_objects_gcode))
     ((ConfigOptionBool,                binary_gcode))
@@ -1123,6 +1132,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                fan_speedup_overhangs))
     ((ConfigOptionFloat,               fan_speedup_time))
     ((ConfigOptionString,              feature_gcode))
+    ((ConfigOptionFloatsOrPercents,    filament_bridge_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_bridge_internal_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_brim_pa))
     ((ConfigOptionFloats,              filament_cooling_final_speed))
     ((ConfigOptionFloats,              filament_cooling_initial_speed))
     ((ConfigOptionInts,                filament_cooling_moves))
@@ -1130,21 +1142,28 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_cost))
     ((ConfigOptionFloats,              filament_density))
     ((ConfigOptionFloats,              filament_diameter))
-    ((ConfigOptionFloats,              filament_max_speed))
-    ((ConfigOptionFloats,              filament_minimal_purge_on_wipe_tower))
-    ((ConfigOptionFloats,              filament_spool_weight))
-    ((ConfigOptionFloats,              filament_max_volumetric_speed))
-    ((ConfigOptionFloats,              filament_max_wipe_tower_speed))
-    ((ConfigOptionStrings,             filament_type))
-    ((ConfigOptionFloats,              filament_loading_speed))
+    ((ConfigOptionFloatsOrPercents,    filament_external_perimeter_pa))
     ((ConfigOptionPercents,            filament_fill_top_flow_ratio))
     ((ConfigOptionPercents,            filament_first_layer_flow_ratio))
+    ((ConfigOptionFloatsOrPercents,    filament_first_layer_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_first_layer_pa_over_raft))
+    ((ConfigOptionFloatsOrPercents,    filament_gap_fill_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_infill_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_ironing_pa))
     ((ConfigOptionFloats,              filament_load_time))
+    ((ConfigOptionFloats,              filament_loading_speed))
     ((ConfigOptionFloats,              filament_loading_speed_start))
+    ((ConfigOptionFloats,              filament_max_speed))
+    ((ConfigOptionFloats,              filament_max_volumetric_speed))
+    ((ConfigOptionFloats,              filament_max_wipe_tower_speed))
+    ((ConfigOptionFloats,              filament_minimal_purge_on_wipe_tower))
     ((ConfigOptionBools,               filament_multitool_ramming))
     ((ConfigOptionFloats,              filament_multitool_ramming_flow))
     ((ConfigOptionFloats,              filament_multitool_ramming_volume))
+    ((ConfigOptionFloatsOrPercents,    filament_overhangs_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_perimeter_pa))
     ((ConfigOptionStrings,             filament_ramming_parameters))
+    ((ConfigOptionFloats,              filament_spool_weight))
     ((ConfigOptionBools,               filament_use_skinnydip))     /* SKINNYDIP OPTIONS BEGIN */
     ((ConfigOptionBools,               filament_use_fast_skinnydip))
     ((ConfigOptionFloats,              filament_skinnydip_distance))
@@ -1157,8 +1176,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              filament_dip_insertion_speed))
     ((ConfigOptionFloats,              filament_dip_extraction_speed)) /* SKINNYDIP OPTIONS END */
     ((ConfigOptionFloats,              filament_pressure_advance))
+    ((ConfigOptionFloatsOrPercents,    filament_solid_infill_pa))
     ((ConfigOptionBools,               filament_soluble))
+    ((ConfigOptionFloatsOrPercents,    filament_support_material_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_support_material_interface_pa))
+    ((ConfigOptionFloatsOrPercents,    filament_thin_walls_pa))
     ((ConfigOptionFloats,              filament_toolchange_delay))
+    ((ConfigOptionFloatsOrPercents,    filament_top_solid_infill_pa))
+    ((ConfigOptionStrings,             filament_type))
+    ((ConfigOptionFloatsOrPercents,    filament_travel_pa))
     ((ConfigOptionFloats,              filament_unloading_speed))
     ((ConfigOptionFloats,              filament_unloading_speed_start))
     ((ConfigOptionFloats,              filament_unload_time))
@@ -1285,6 +1311,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,                 chamber_temperature))
     ((ConfigOptionBool,                 complete_objects))
     ((ConfigOptionFloat,                parallel_objects_step))
+    ((ConfigOptionFloat,                parallel_objects_step_max_z))
     ((ConfigOptionBool,                 complete_objects_one_skirt))
     ((ConfigOptionBool,                 complete_objects_one_brim))
     ((ConfigOptionEnum<CompleteObjectSort>, complete_objects_sort))

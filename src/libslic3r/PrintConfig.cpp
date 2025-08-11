@@ -171,10 +171,8 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(FuzzySkinType)
 static const t_config_enum_values s_keys_map_InfillPattern {
     {"rectilinear",         ipRectilinear},
     {"rectilineararoundholes", ipRectilinearAroundHoles},
-    {"rectilineargapfill",  ipRectilinearWGapFill},
     {"alignedrectilinear",  ipAlignedRectilinear},
     {"monotonic",           ipMonotonic},
-    {"monotonicgapfill",    ipMonotonicWGapFill},
     {"grid",                ipGrid},
     {"gridvarspeed",        ipGridVarSpeed},
     {"triangles",           ipTriangles},
@@ -183,7 +181,6 @@ static const t_config_enum_values s_keys_map_InfillPattern {
     {"line",                ipLine},
     {"monotoniclines",      ipMonotonicLines },
     {"concentric",          ipConcentric},
-    {"concentricgapfill",   ipConcentricGapFill},
     {"honeycomb",           ipHoneycomb},
     {"3dhoneycomb",         ip3DHoneycomb},
     {"gyroid",              ipGyroid},
@@ -402,12 +399,20 @@ namespace {
     const int max_temp = 1500;
 };
 
-ConfigOption *disable_defaultoption(ConfigOption *option, bool default_is_disabled = true) {
-    return option->set_can_be_disabled(default_is_disabled);
+ConfigOption *disable_default_option(ConfigOption *option) {
+    return option->set_can_be_disabled(true);
 }
 
-ConfigOptionVectorBase *disable_defaultoption(ConfigOptionVectorBase *option, bool default_is_disabled = true) {
-    return (ConfigOptionVectorBase *)option->set_can_be_disabled(default_is_disabled);
+ConfigOption *enable_default_option(ConfigOption *option) {
+    return option->set_can_be_disabled(false);
+}
+
+ConfigOptionVectorBase *disable_default_option(ConfigOptionVectorBase *option, bool default_is_disabled = true) {
+    return (ConfigOptionVectorBase *)option->set_can_be_disabled(true);
+}
+
+ConfigOptionVectorBase *enable_default_option(ConfigOptionVectorBase *option, bool default_is_disabled = true) {
+    return (ConfigOptionVectorBase *)option->set_can_be_disabled(false);
 }
 
 PrintConfigDef::PrintConfigDef()
@@ -541,17 +546,6 @@ void PrintConfigDef::init_common_params()
     def->min = 0;
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionFloat(200.0));
-
-    def = this->add("slice_closing_radius", coFloat);
-    def->label = L("Slice gap closing radius");
-    def->category = OptionCategory::slicing;
-    def->tooltip = L("Cracks smaller than 2x gap closing radius are being filled during the triangle mesh slicing. "
-        "The gap closing operation may reduce the final print resolution, therefore it is advisable to keep the value reasonably low.");
-    def->sidetext = L("mm");
-    def->min = 0;
-    def->precision = 8;
-    def->mode = comAdvancedE | comPrusa;
-    def->set_default_value(new ConfigOptionFloat(0.049));
 
     def = this->add("print_host", coString);
     def->label = L("Hostname, IP or URL");
@@ -706,6 +700,21 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->set_default_value(new ConfigOptionFloatOrPercent(5, true));
 
+    def = this->add("autospeed_min_thin_flow", coFloatOrPercent);
+    def->label = L("Minimum flow for thin extrusions");
+    def->category = OptionCategory::speed;
+    def->tooltip = L("Thin walls and gapfill have very thin extrusions (often at the ends)."
+        " Using these thin extrusions force the autospeed to have a very low average speed, as the maximum speed is used for the thinnest extrusion."
+        " This setting allow to have a threshold, enforcing the max speed to this flow."
+        " Any lower flow will still use the max speed, creating a difference in mm3/s for these but keeping a high speed for all others."
+        "\nTo keep the automatic computation for the Autospeed, but excluding the thin gap fill & thin wall from it, set this setting to 0."
+        "\nCan be a % of the maximum flow (compute from print's autopseed max volumetric flow and filament's max volumetric flow.");
+    def->sidetext = L("mm3/s or %");
+    def->mode = comAdvancedE | comSuSi;
+    def->min = 0;
+    def->can_be_disabled = true;
+    def->set_default_value(enable_default_option(new ConfigOptionFloatOrPercent(0, false)));
+
     def = this->add("avoid_crossing_curled_overhangs", coBool);
     def->label = L("Avoid crossing curled overhangs (Experimental)");
     def->category = OptionCategory::perimeter;
@@ -856,7 +865,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comPrusa;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloat(0.), false));
+    def->set_default_value(enable_default_option(new ConfigOptionFloat(0.)));
 
     def = this->add("bridged_infill_margin", coFloatOrPercent);
     def->label = L("Bridged");
@@ -883,7 +892,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comPrusa;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts{ 100 }, false));
+    def->set_default_value(enable_default_option(new ConfigOptionInts{ 100 }));
 
     def = this->add("bridge_fill_pattern", coEnum);
     def->label = L("Bridging fill pattern");
@@ -1206,6 +1215,14 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("parallel_objects_step_max_z", coFloat);
+    def->label = L("Max height for parallel printing step");
+    def->category = OptionCategory::output;
+    def->tooltip = L("If the nozzle print higher than taht, the print is switched back to normal printing. Allow to quicly print the first layer per object if these need quick printing.");
+    def->sidetext = L("mm");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("complete_objects_one_skirt", coBool);
     def->label = L("Allow only one skirt loop");
     def->category = OptionCategory::output;
@@ -1353,7 +1370,7 @@ void PrintConfigDef::init_fff_params()
     def->max                = 100;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
     def->aliases = { "min_fan_speed" }; // only if "fan_always_on"
 
     def = this->add("default_print_profile", coString);
@@ -1655,7 +1672,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
     def = this->add("external_perimeter_overlap", coPercent);
     def->label = L("external perimeter overlap");
@@ -1752,7 +1769,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("extra_perimeters", coBool);
     def->label = L("filling horizontal gaps on slopes");
-    def->full_label = L("Extra perimeters (do nothing)");
+    def->full_label = L("Add perimeters on slope (do nothing)");
     def->category = OptionCategory::perimeter;
     def->tooltip = L("Add more perimeters when needed for avoiding gaps in sloping walls. "
         "Slic3r keeps adding perimeters, until more than 70% of the loop immediately above "
@@ -1761,6 +1778,23 @@ void PrintConfigDef::init_fff_params()
         " Personally, I think it's useless.");
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("extra_perimeters_below_area", coFloatOrPercent);
+    def->label = L("Extra perimeters on small areas");
+    def->category = OptionCategory::perimeter;
+    def->tooltip = L("After laying all the perimeters, if there is an area smaler (in mm²) than this value, then fill it with more perimeters."
+                    "\nUseful if you want to fortify a small cylinder while not messing with the larger main object."
+                    "\nCan be a percentage of the perimeter width (squared)."
+                    "\nSet zero to disable.");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0,false));
+
+    def = this->add("extra_perimeters_count", coInt);
+    def->label = L("Extra perimeters");
+    def->category = OptionCategory::perimeter;
+    def->tooltip = L("To be used in modifiers, as long as periemeter contour & hole count split the perimeters.");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("extra_perimeters_on_overhangs", coBool);
     def->label = L("Extra perimeters on overhangs (Experimental)");
@@ -2317,7 +2351,7 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("filament_pressure_advance", coFloats);
     def->label = L("Pressure advance");
-    def->tooltip = L("Pressure advance value (Linear advance factor for Marlin)."
+    def->tooltip = L("Default pressure advance value (Linear advance factor for Marlin)."
            " If enabled, the gcode will emit a pressure advance value for this filament."
            "\nWith reprap and sprinter, 'M572 Dx Sx' is used."
            "\nWith klipper, 'SET_PRESSURE_ADVANCE ADVANCE=x EXTRUDER=x' is used."
@@ -2327,7 +2361,164 @@ void PrintConfigDef::init_fff_params()
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloats({0.02}), true));
+    def->set_default_value(enable_default_option(new ConfigOptionFloats({0.02})));
+    def->aliases = {"filament_default_pa"};
+
+    def = this->add("filament_bridge_pa", coFloatsOrPercents);
+    def->label = L("bridge");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for bridge sections. Can be a % over default pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_pressure_advance";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_bridge_internal_pa", coFloatsOrPercents);
+    def->label = L("internal bridge");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for internal bridge sections. Can be a % over default pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_pressure_advance";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_brim_pa", coFloatsOrPercents);
+    def->label = L("brim");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for brim. Can be a % over support pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_support_material_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_external_perimeter_pa", coFloatsOrPercents);
+    def->label = L("external perimeter");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for external perimeter. Can be a % over support pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_support_material_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_first_layer_pa", coFloatsOrPercents);
+    def->label = L("first layer");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for first layer sections. If %, it's a % over the current feature");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "depends";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_first_layer_pa_over_raft", coFloatsOrPercents);
+    def->label = L("over raft");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for first layer sections over raft . If %, it's a % over the current feature");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "depends";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_gap_fill_pa", coFloatsOrPercents);
+    def->label = L("gap fill");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for gap fill sections. Can be a % over perimeter pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_perimeter_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_infill_pa", coFloatsOrPercents);
+    def->label = L("infill");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for infill sections. Can be a % over solid infill pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_solid_infill_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_ironing_pa", coFloatsOrPercents);
+    def->label = L("ironing");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for ironing sections. Can be a % over top solid infill pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_top_solid_infill_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_overhangs_pa", coFloatsOrPercents);
+    def->label = L("overhangs");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for overhang sections. Can be a % over bridge pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_bridge_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_perimeter_pa", coFloatsOrPercents);
+    def->label = L("perimeters");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for perimeter sections. Can be a % over default pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_pressure_advance";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_solid_infill_pa", coFloatsOrPercents);
+    def->label = L("solid infill");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for solid infill sections. Can be a % over default pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_pressure_advance";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_support_material_pa", coFloatsOrPercents);
+    def->label = L("support");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for support sections. Can be a % over default pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_pressure_advance";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_support_material_interface_pa", coFloatsOrPercents);
+    def->label = L("support interface");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for support interface sections. Can be a % over support pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_support_material_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_thin_walls_pa", coFloatsOrPercents);
+    def->label = L("thin walls");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for thin wall sections. Can be a % over external perimeter pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_external_perimeter_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_top_solid_infill_pa", coFloatsOrPercents);
+    def->label = L("top solid infill");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for top solid infill sections. Can be a % over solid infill pa");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_solid_infill_pa";
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloatsOrPercents{ FloatOrPercent{100,true} });
+
+    def = this->add("filament_travel_pa", coFloatsOrPercents);
+    def->label = L("travel");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("Pressure advance for travel sections, may help retraction and unretraction."
+            " Can be a % over default pa."
+            "\nSet -1 to let the previous pa continue in the travel.");
+    def->mode = comExpert | comSuSi;
+    def->ratio_over = "filament_pressure_advance";
+    def->is_vector_extruder = true;
+    def->can_be_disabled = true;
+    def->set_default_value(disable_default_option(new ConfigOptionFloatsOrPercents({FloatOrPercent{0, false}})));
 
     def = this->add("filament_ramming_parameters", coStrings);
     def->label = L("Ramming parameters");
@@ -2722,6 +2913,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("first_layer_strong_start", coPercent);
+    def->label = L("First layer squished start point");
+    def->full_label = L("First layer squished start point");
+    def->sidetext = L("%");
+    def->category = OptionCategory::width;
+    def->tooltip = L("When on the first layer, to be sure the start of an extrusion attach to the build plate, the extrude will first extrude on place before to start moving."
+        " The amount extruded is deduced from the next extrusions (they will still extrude at 10%)."
+        " 100% is equivalent of the amount extruded for an extrusion of 'nozzle diameter' width over the distance of 'nozzle diameter'."
+    );
+    def->min = 0;
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionPercent(0));
+
     def = this->add("fill_rectilinearholes_travel_speed", coFloatOrPercent);
     def->label = L("Travel speed");
     def->full_label = L("Rectilinear around holes infill: travel speed");
@@ -2785,7 +2989,7 @@ void PrintConfigDef::init_fff_params()
                     "\nIt's always disabled on the first layer, to not compromise adhesion.");
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionGraph(GraphData(0,10, GraphData::GraphType::SPLINE,
+    def->set_default_value(disable_default_option(new ConfigOptionGraph(GraphData(0,10, GraphData::GraphType::SPLINE,
         {{0,0},{0.2,0.44},{0.4,0.61},{0.6,0.7},{0.8,0.76},{1.5,0.86},{2,0.89},{3,0.92},{5,0.95},{10,1}}
     ))));
     def->graph_settings = std::make_shared<GraphSettings>();
@@ -2865,7 +3069,7 @@ void PrintConfigDef::init_fff_params()
     def->can_phony = true;
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comPrusa;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloatOrPercent(140, true), false));
+    def->set_default_value(enable_default_option(new ConfigOptionFloatOrPercent(140, true)));
 
     def = this->add("first_layer_extrusion_spacing", coFloatOrPercent);
     def->label = L("First layer");
@@ -2904,7 +3108,7 @@ void PrintConfigDef::init_fff_params()
     def->can_phony = true;
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloatOrPercent(140, true)));
+    def->set_default_value(disable_default_option(new ConfigOptionFloatOrPercent(140, true)));
 
     def = this->add("first_layer_infill_extrusion_spacing", coFloatOrPercent);
     def->label = L("First layer");
@@ -3100,7 +3304,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
     def = this->add("gap_fill_flow_match_perimeter", coPercent);
     def->label = L("Cap with perimeter flow");
@@ -3378,7 +3582,7 @@ void PrintConfigDef::init_fff_params()
     def->can_be_disabled = true;
     def->mode = comSimpleAE | comPrusa;
     def->is_vector_extruder = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts{30}));
+    def->set_default_value(disable_default_option(new ConfigOptionInts{30}));
 
     auto def_infill_anchor_min = def = this->add("infill_anchor", coFloatOrPercent);
     def->label = L("Length of the infill anchor");
@@ -3592,7 +3796,28 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
+
+    def = this->add("infill_filled_bottom", coBool);
+    def->label = L("GapFill for bottom infill areas");
+    def->category = OptionCategory::infill;
+    def->tooltip = L("On bottom infill areas, add gapfill where the infill pattern can't go.");
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("infill_filled_solid", coBool);
+    def->label = L("GapFill for solid infill areas");
+    def->category = OptionCategory::infill;
+    def->tooltip = L("On solid infill areas, add gapfill where the infill pattern can't go.");
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionBool(true));
+
+    def = this->add("infill_filled_top", coBool);
+    def->label = L("GapFill for top infill areas");
+    def->category = OptionCategory::infill;
+    def->tooltip = L("On top infill areas, add gapfill where the infill pattern can't go.");
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("infill_first", coBool);
     def->label = L("Infill before perimeters");
@@ -3699,7 +3924,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
     def->aliases = { "bridge_internal_fan_speed" };
 
     def = this->add("internal_bridge_min_width", coFloatOrPercent);
@@ -4088,7 +4313,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloat(1500), true));
+    def->set_default_value(enable_default_option(new ConfigOptionFloat(1500)));
 
     def = this->add("max_fan_speed", coInts);
     def->label = L("Max");
@@ -4118,10 +4343,10 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimpleAE | comPrusa;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloatsOrPercents{ FloatOrPercent{ 75, true} }, false));
+    def->set_default_value(enable_default_option(new ConfigOptionFloatsOrPercents{ FloatOrPercent{ 75, true} }));
 
     def = this->add("max_print_speed", coFloatOrPercent);
-    def->label = L("Max auto-speed");
+    def->label = L("Max Autospeed");
     def->full_label = L("Max print speed for Autospeed");
     def->category = OptionCategory::speed;
     def->tooltip = L("When setting other speed settings to 0, Slic3r will autocalculate the optimal speed "
@@ -4149,7 +4374,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionPercents{ 90 });
 
     def = this->add("max_volumetric_speed", coFloat);
-    def->label = L("Volumetric auto-speed");
+    def->label = L("Maximum flow for Autospeed");
     def->full_label = L("Maximum Volumetric print speed for Autospeed");
     def->category = OptionCategory::extruders;
     def->tooltip = L("This setting allows you to set the maximum flowrate for your print, and so cap the desired flow rate for the autospeed algorithm."
@@ -4425,19 +4650,19 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->can_be_disabled = true;
     def->mode = comExpert | comSuSi;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloat(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionFloat(0)));
 
     def = this->add("overhangs_bridge_upper_layers", coInt);
     def->label = L("Consider upper bridges");
     def->category = OptionCategory::slicing;
-    def->tooltip = L("Don't put overhangs if the area will filled in next layer by bridges."
-                    "\nIf disabled, accept all upper layers."
-                    "\nSet to 0 to only consider our layer bridges.");
+    def->tooltip = L("Don't put overhangs in the area if it will be filled in next layer(s) by bridges."
+                    "\nIf set to 0, it will look all layers."
+                    "\nIf disabled, the current layer will still add overhangs, even if there's a bridge on top, reducing the bridge length.");
     def->sidetext = L("layers");
     def->min = 0;
     def->can_be_disabled = true;
     def->mode = comExpert | comSuSi;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInt(2), false));
+    def->set_default_value(enable_default_option(new ConfigOptionInt(2)));
 
     def             = this->add("overhangs_dynamic_fan_speed", coGraphs);
     def->label      = L("Dynamic overhang speeds");
@@ -4451,7 +4676,7 @@ void PrintConfigDef::init_fff_params()
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
     def->mode       = comExpert | comPrusa;
-    def->set_default_value(disable_defaultoption(new ConfigOptionGraphs({GraphData(0,5, GraphData::GraphType::LINEAR,
+    def->set_default_value(disable_default_option(new ConfigOptionGraphs({GraphData(0,5, GraphData::GraphType::LINEAR,
         {{0,100},{25,80},{50,60},{75,40},{100,20}}
     )})));
     def->graph_settings = std::make_shared<GraphSettings>();
@@ -4487,7 +4712,7 @@ void PrintConfigDef::init_fff_params()
     def->sidetext   = L("mm/s");
     def->can_be_disabled = true;
     def->mode       = comExpert | comPrusa;
-    def->set_default_value(disable_defaultoption(new ConfigOptionGraph(GraphData(0,5, GraphData::GraphType::LINEAR,
+    def->set_default_value(disable_default_option(new ConfigOptionGraph(GraphData(0,5, GraphData::GraphType::LINEAR,
         {{0,0},{25,10},{50,40},{75,70},{100,100}}
     ))));
     def->graph_settings = std::make_shared<GraphSettings>();
@@ -4525,7 +4750,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
     def = this->add("overhangs_max_slope", coFloatOrPercent);
     def->label = L("Overhangs max slope");
@@ -4581,7 +4806,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->can_be_disabled = true;
     def->mode = comExpert | comSuSi;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloatOrPercent(55,true), false));
+    def->set_default_value(enable_default_option(new ConfigOptionFloatOrPercent(55,true)));
 
     def = this->add("overhangs_width", coFloatOrPercent);
     def->label = L("'As bridge' flow threshold");
@@ -4598,7 +4823,7 @@ void PrintConfigDef::init_fff_params()
     def->max_literal = { 10, true };
     def->can_be_disabled = true;
     def->mode = comExpert | comSuSi;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloatOrPercent(75, true), false));
+    def->set_default_value(enable_default_option(new ConfigOptionFloatOrPercent(75, true)));
 
     def = this->add("overhangs_reverse", coBool);
     def->label = L("Reverse on even");
@@ -4726,7 +4951,6 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Like Perimeter width but spacing is the distance between two perimeter lines (as they overlap a bit, it's not the same)."
         "\nYou can set either 'Spacing', or 'Width'; the other will be calculated, using the perimeter 'Overlap' percentages and default layer height.");
     def->sidetext = L("mm or %");
-    def->aliases = { "perimeters_extrusion_width" };
     def->ratio_over = "nozzle_diameter";
     def->min = 0;
     def->max = 1000;
@@ -4775,7 +4999,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
     def = this->add("perimeter_loop", coBool);
     def->label = L("Perimeters loop");
@@ -4874,7 +5098,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 10000;
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInt(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionInt(0)));
 
     def = this->add("post_process", coStrings);
     def->label = L("Post-processing scripts");
@@ -4942,7 +5166,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInt(60)));
+    def->set_default_value(disable_default_option(new ConfigOptionInt(60)));
 
     def = this->add("print_bridge_fan_speed", coPercent);
     def->label = L("Fan speed override for bridges");
@@ -4955,7 +5179,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_fan_speed", coPercent);
     def->label = L("Fan speed override");
@@ -4967,7 +5191,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_perimeters_fan_speed", coPercent);
     def->label = L("Fan speed override for all perimeters");
@@ -4980,7 +5204,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_solid_infill_fan_speed", coPercent);
     def->label = L("Fan speed override for top and solid infill");
@@ -4993,7 +5217,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_first_layer_bed_temperature", coInt);
     def->label = L("First Layer Bed Temperature");
@@ -5005,7 +5229,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInt(60)));
+    def->set_default_value(disable_default_option(new ConfigOptionInt(60)));
 
     def = this->add("print_first_layer_temperature", coInt);
     def->label = L("First Layer Temperature");
@@ -5015,7 +5239,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInt(200)));
+    def->set_default_value(disable_default_option(new ConfigOptionInt(200)));
 
     def = this->add("print_retract_length", coFloat);
     def->label = L("Retraction length");
@@ -5024,7 +5248,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloat(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionFloat(0)));
 
     def = this->add("print_retract_lift", coFloat);
     def->label = L("Z-lift override");
@@ -5034,7 +5258,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloat(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionFloat(0)));
 
     def = this->add("print_temperature", coInt);
     def->label = L("Temperature");
@@ -5045,7 +5269,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInt(200)));
+    def->set_default_value(disable_default_option(new ConfigOptionInt(200)));
 
     def = this->add("printer_model", coString);
     def->label = L("Printer type");
@@ -5252,7 +5476,7 @@ void PrintConfigDef::init_fff_params()
     def->precision = 6;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionFloatOrPercent(0.02, false), false));
+    def->set_default_value(enable_default_option(new ConfigOptionFloatOrPercent(0.02, false)));
     def->aliases = {"min_length"};
 
     def = this->add("gcode_min_resolution", coFloatOrPercent);
@@ -5718,6 +5942,46 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimpleAE | comPrusa;
     def->set_default_value(new ConfigOptionInt(1));
 
+    def = this->add("slice_closing_radius", coFloat);
+    def->label = L("Slice gap closing radius");
+    def->category = OptionCategory::slicing;
+    def->tooltip = L("Cracks smaller than 2x gap closing radius are being filled during the triangle mesh slicing. "
+        "The gap closing operation may reduce the final print resolution, therefore it is advisable to keep the value reasonably low.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->precision = 8;
+    def->mode = comAdvancedE | comPrusa;
+    def->set_default_value(new ConfigOptionFloat(0.049));
+
+    def = this->add("slice_merge_dent", coFloatOrPercent);
+    def->label = L("Merge mmu with a dent");
+    def->full_label = L("Slice mmu merge: dent");
+    def->category = OptionCategory::slicing;
+    def->tooltip = L("When you have in an object multiple parts,"
+        " the last one in the list has the highest priority and will be used where it intersects other parts."
+        " This setting only works when the two parts are each assign to a different extruder."
+        " This setting allow the other parts to keep a little bit of their former surface by a certain amount."
+        "\nCan be a mm or a % of the exernal perimeter width");
+    def->sidetext = L("mm or %");
+    def->min = 0;
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
+
+    def = this->add("slice_merge_min_width", coFloatOrPercent);
+    def->label = L("Merge mmu with minimum width");
+    def->full_label = L("Slice mmu merge: min width");
+    def->category = OptionCategory::slicing;
+    def->tooltip = L("When you have in an object multiple parts,"
+        " the last one in the list has the highest priority and will be used where it intersects other parts."
+        " This setting only works when the two parts are each assign to a different extruder."
+        " This setting allow to collapse first thin areas of the part before removing it from the other parts,"
+        " as doing this can create holes without anything printed inside, as it's too thin."
+        "\nCan be a mm or a % of the exernal perimeter width");
+    def->sidetext = L("mm or %");
+    def->min = 0;
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(120, true));
+
     def = this->add("slicing_mode", coEnum);
     def->label = L("Slicing Mode");
     def->category = OptionCategory::slicing;
@@ -5905,7 +6169,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
     def = this->add("solid_infill_speed", coFloatOrPercent);
     def->label = L("Solid");
@@ -6434,7 +6698,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
     def = this->add("support_material_interface_angle", coFloat);
     def->label = L("Pattern angle");
@@ -6470,7 +6734,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
 
     def = this->add("support_material_interface_contact_loops", coBool);
@@ -6520,7 +6784,7 @@ void PrintConfigDef::init_fff_params()
         { "3", L("3 (heavy)") }
     });
     def->mode = comAdvancedE | comPrusa;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInt(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionInt(0)));
 
     def = this->add("support_material_closing_radius", coFloat);
     def->label = L("Closing radius");
@@ -6995,7 +7259,7 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionInts({ 100 })));
+    def->set_default_value(disable_default_option(new ConfigOptionInts({ 100 })));
 
     def = this->add("top_infill_extrusion_width", coFloatOrPercent);
     def->label = L("Top solid infill");
@@ -9168,6 +9432,7 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         } else if ("near" == value() || "nearest" == value()) {
             value() = "cost";
             // we change the cost
+            //note: modifying dict invalidate opt_key() & value()
             dict["seam_angle_cost"] = {"seam_angle_cost", "50%"};
             dict["seam_travel_cost"] = {"seam_travel_cost", "50%"};
         }
@@ -9181,6 +9446,7 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         opt_key() = "overhangs_width_speed";
         if (value() == "1") {
             value() = "50%";
+            //note: modifying dict invalidate opt_key() & value()
             dict["overhangs_width"] = {"overhangs_width", "50%"};
         } else {
             value() = "!50%";
@@ -9252,34 +9518,41 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
     //}
 
     // In PrusaSlicer 2.3.0-alpha0 the "monotonic" infill was introduced, which was later renamed to "monotonous".
-    for_ech_entry(dict, {"top_fill_pattern", "bottom_fill_pattern", "fill_pattern", "solid_fill_pattern", "bridge_fill_pattern", "support_material_interface_pattern"},
-                  [](Key &opt_key, Val &value) {
+    for_ech_entry(dict,
+                  {"top_fill_pattern", "bottom_fill_pattern", "fill_pattern", "solid_fill_pattern",
+                   "bridge_fill_pattern", "support_material_interface_pattern",
+                   "support_material_top_interface_pattern", "support_material_bottom_interface_pattern"},
+                  [&dict](Key &opt_key, Val &value) {
         // gcode_label_objects used to be a bool (the behavior was nothing or "octoprint"), it is
         // and enum since PrusaSlicer 2.6.2.
         if (value == "monotonous") {
             value = "monotonic";
         }
-    });
-
-    // some changes has occurs between rectilineargapfill and monotonicgapfill. Set them at the right value() for each type
-    for_ech_entry(dict, {"top_fill_pattern", "bottom_fill_pattern"},
-                  [](Key &opt_key, Val &value) {
-        // gcode_label_objects used to be a bool (the behavior was nothing or "octoprint"), it is
-        // and enum since PrusaSlicer 2.6.2.
-        if (value == "rectilineargapfill") {
-            value = "monotonicgapfill";
-        }
-    });
-    for_ech_entry(dict, {"fill_pattern", "support_material_interface_pattern", "support_material_top_interface_pattern", "support_material_bottom_interface_pattern"},
-                  [](Key &opt_key, Val &value) {
-        // gcode_label_objects used to be a bool (the behavior was nothing or "octoprint"), it is
-        // and enum since PrusaSlicer 2.6.2.
+        bool set_gapfill =false;
         if (value == "rectilineargapfill") {
             value = "rectilinear";
-        } else if (value == "monotonicgapfill") {
-            value = "monotonic";
+            set_gapfill = true;
+        }
+        if (value == "monotonicgapfill") {
+            value="monotonic";
+            set_gapfill = true;
+        }
+        if (value == "concentricgapfill") {
+            value="concentric";
+            set_gapfill = true;
+        }
+        if (set_gapfill) {
+            if (opt_key == "bottom_fill_pattern") {
+                //note: modifying dict invalidate opt_key & value
+                dict["infill_filled_bottom"] = {"infill_filled_bottom", "1"};
+            } else if (opt_key == "solid_fill_pattern") {
+                dict["infill_filled_solid"] = {"infill_filled_solid", "1"};
+            } else if (opt_key == "top_fill_pattern") {
+                dict["infill_filled_top"] = {"infill_filled_top", "1"};
+            }
         }
     });
+
     //in ps 2.4, the raft_first_layer_density is now more powerful than the support_material_solid_first_layer, also it always does the perimeter.
     if (has(dict, "support_material_solid_first_layer"s)) {
         opt_key() = "raft_first_layer_density"s;
@@ -10230,6 +10503,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "allow_empty_layers",
 "arc_fitting_resolution",
 "arc_fitting_tolerance",
+"autospeed_min_thin_flow",
 "avoid_crossing_not_first_layer",
 "avoid_crossing_top",
 "avoid_travel_island",
@@ -10271,6 +10545,8 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "external_perimeters_nothole",
 "external_perimeters_staggered",
 "external_perimeters_vase",
+"extra_perimeters_below_area",
+"extra_perimeters_count",
 "extra_perimeters_odd_layers",
 "extruder_extrusion_multiplier_speed",
 "extruder_fan_offset",
@@ -10297,6 +10573,23 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "filament_melt_zone_pause",
 "filament_max_overlap",
 "filament_pressure_advance",
+"filament_bridge_pa",
+"filament_bridge_internal_pa",
+"filament_brim_pa",
+"filament_external_perimeter_pa",
+"filament_first_layer_pa",
+"filament_first_layer_pa_over_raft",
+"filament_gap_fill_pa",
+"filament_infill_pa",
+"filament_ironing_pa",
+"filament_overhangs_pa",
+"filament_perimeter_pa",
+"filament_solid_infill_pa",
+"filament_support_material_pa",
+"filament_support_material_interface_pa",
+"filament_thin_walls_pa",
+"filament_top_solid_infill_pa",
+"filament_travel_pa",
 "filament_retract_lift_before_travel",
 "filament_shrink",
 "filament_skinnydip_distance",
@@ -10326,6 +10619,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "first_layer_min_speed",
 "first_layer_size_compensation_layers",
 "first_layer_size_compensation_no_collapse",
+"first_layer_strong_start",
 "gcode_ascii",
 "gcode_command_buffer",
 "gcode_min_length",
@@ -10364,6 +10658,9 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "infill_extrusion_change_odd_layers",
 "infill_extrusion_spacing",
 "infill_fan_speed",
+"infill_filled_bottom",
+"infill_filled_solid",
+"infill_filled_top",
 "init_z_rotate",
 "internal_bridge_acceleration",
 "internal_bridge_expansion",
@@ -10402,9 +10699,11 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "overhangs_bridge_upper_layers",
 "overhangs_reverse_threshold",
 "overhangs_reverse",
+"overhangs_spacing",
 "overhangs_speed_enforce",
 "overhangs_width_speed",
 "parallel_objects_step",
+"parallel_objects_step_max_z",
 "perimeter_bonding",
 "perimeter_extrusion_change_odd_layers",
 "perimeter_extrusion_spacing",
@@ -10454,6 +10753,8 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "seam_notch_outer",
 "seam_travel_cost",
 "seam_visibility",
+"slice_merge_dent",
+"slice_merge_min_width",
 "skirt_brim",
 "skirt_distance_from_brim",
 "skirt_extrusion_width",
@@ -11111,8 +11412,10 @@ void DynamicPrintConfig::normalize_fdm()
             // this->opt<ConfigOptionBool>("exact_last_layer_height", true)->value = false;
             this->opt<ConfigOptionBool>("infill_dense", true)->value = false;
             this->opt<ConfigOptionBool>("extra_perimeters", true)->value = false;
-            this->opt<ConfigOptionBool>("extra_perimeters_on_overhangs", true)->value = false;
+            this->opt<ConfigOptionFloatOrPercent>("extra_perimeters_below_area")->value = 0;
+            this->opt<ConfigOptionInt>("extra_perimeters_count")->value = 0;
             this->opt<ConfigOptionBool>("extra_perimeters_odd_layers", true)->value = false;
+            this->opt<ConfigOptionBool>("extra_perimeters_on_overhangs", true)->value = false;
             this->opt<ConfigOptionBool>("overhangs_reverse", true)->value = false; 
             this->opt<ConfigOptionBool>("perimeter_reverse", true)->value = false; 
         }
@@ -11753,7 +12056,7 @@ std::string validate(const FullPrintConfig& cfg)
             return "Spiral vase mode is not compatible with support material";
         if (cfg.infill_dense)
             return "Spiral vase mode can only print hollow objects and have no top surface, so you don't need any dense infill";
-        if (cfg.extra_perimeters || cfg.extra_perimeters_on_overhangs || cfg.extra_perimeters_odd_layers)
+        if (cfg.extra_perimeters || cfg.extra_perimeters_below_area.value > 0 || cfg.extra_perimeters_count.value > 0 || cfg.extra_perimeters_on_overhangs || cfg.extra_perimeters_odd_layers)
             return "Can't make more than one perimeter when spiral vase mode is enabled";
         if (cfg.overhangs_reverse)
             return "Can't reverse the direction of the overhangs every layer when spiral vase mode is enabled";
@@ -12423,12 +12726,12 @@ static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificP
     {"milling_toolchange_end_gcode",   {"layer_num", "layer_z", "previous_layer_z", "max_layer_z", "previous_extruder", "next_extruder"}},
     {"start_gcode",             {"start_gcode_bed_temperature"}},
     {"end_gcode",               {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id", "previous_extruder", "next_extruder"}},
-    {"before_layer_gcode",      {"layer_num", "layer_z", "previous_layer_z", "max_layer_z", "gcode_bed_temperature"}},
+    {"before_layer_gcode",      {"layer_num", "layer_z", "previous_layer_z", "max_layer_z", "gcode_bed_temperature", "layer_used_filament"}},
     {"layer_gcode",             {"layer_num", "layer_z", "previous_layer_z", "max_layer_z", "gcode_bed_temperature"}},
     {"feature_gcode",           {"layer_num", "layer_z", "max_layer_z", "previous_extrusion_role", "next_extrusion_role", /*deprecated*/"extrusion_role", "last_extrusion_role" /*deprecated*/}},
     {"toolchange_gcode",        {"layer_num", "layer_z", "max_layer_z", "previous_extruder", "next_extruder", "toolchange_z"}},
     {"color_change_gcode",      {"color_change_extruder", "next_color", "next_colour"}},
-    {"pause_print_gcode",       {"color_change_extruder"}},
+    {"pause_print_gcode",       {"color_change_extruder", "next_color", "next_colour"}},
     {"between_objects_gcode",   {"layer_num", "layer_z"}},
 };
 
@@ -12480,11 +12783,16 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
     // TRN: This is a label in custom g-code editor dialog, belonging to color_change_extruder. Denoted index of the extruder for which color change is performed.
     def->label = L("Color change extruder");
     def->tooltip = L("Index of the extruder for which color change will be performed. The index is zero based (first extruder has index 0).");
-
+    
     def = this->add("next_color", coString);
     // TRN: This is a label in custom g-code editor dialog, belonging to color_change_extruder. Denoted index of the extruder for which color change is performed.
     def->label = L("Next color");
     def->tooltip = L("Next color to display when a color change is performed, in #ffffff format.");
+
+    def = this->add("next_colour", coString);
+    // TRN: This is a label in custom g-code editor dialog, belonging to color_change_extruder. Denoted index of the extruder for which color change is performed.
+    def->label = L("Next colour");
+    def->tooltip = L("Like next_color, but for british people.\nNext color to display when a color change is performed, in #ffffff format.");
 
     def = this->add("previous_extrusion_role", coString);
     def->label = L("Previous extrusion role");
@@ -12509,6 +12817,11 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
     def = this->add("gcode_bed_temperature", coInt);
     def->label = L("Computed bed temperature");
     def->tooltip = L("It's the 'print_bed_temperature' if defined or the maximum of the 'bed_temperature'.");
+
+    def = this->add("layer_used_filament", coInt);
+    def->label = L("Computed used filaent for each extruder");
+    def->tooltip = L("It's an array of mm of extruded filament at this layer, the layer that ends now. The first extruder is at index 0, and this array has the same "
+                     "number of entries as the number of extruders as the printer.");
 }
 
 const CustomGcodeSpecificConfigDef custom_gcode_specific_config_def;

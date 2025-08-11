@@ -126,6 +126,7 @@ public:
     /// return number of point removed
     size_t remove_collinear(coord_t max_offset);
     size_t remove_collinear_angle(double angle);
+    void remove_point_too_close(const coord_t tolerance);
 
 #ifdef _DEBUGINFO
     void assert_valid() const override;
@@ -165,6 +166,8 @@ Polygons ensure_valid(Polygons &&polygons, coord_t resolution = SCALED_EPSILON);
 Polygons ensure_valid(coord_t resolution, Polygons &&polygons);
 // return false if the polygon isn't valid and need to be removed.
 bool ensure_valid(Polygon &polygon, coord_t resolution = SCALED_EPSILON);
+// like ensure_valid but you're sure it won't remove colinear points.
+void remove_point_too_close(Polygons &polygons, coord_t resolution = SCALED_EPSILON);
 #ifdef _DEBUGINFO
 void assert_valid(const Polygons &polygons);
 #else

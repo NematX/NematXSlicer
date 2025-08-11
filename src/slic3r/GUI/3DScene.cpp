@@ -309,7 +309,7 @@ ColorRGBA color_from_model_volume(const ModelVolume& model_volume)
         color = GLVolume::SUPPORT_BLOCKER_COLOR;
     else if (model_volume.is_support_enforcer())
         color = GLVolume::SUPPORT_ENFORCER_COLOR;
-    else if (model_volume.type() == ModelVolumeType::SEAM_POSITION_INSIDE_CENTER)
+    else if (model_volume.type() == ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z)
         color = GLVolume::SEAM_POSITION_INTERNAL_COLOR;
     else if (model_volume.is_seam_position())
         color = GLVolume::SEAM_POSITION_COLOR;

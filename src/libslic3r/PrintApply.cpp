@@ -1181,7 +1181,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         auto print_objects_range        = print_object_status_db.get_range(model_object);
         bool seam_position_differ       = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_CENTER)
             || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_CENTER_Z)
-            || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_INSIDE_CENTER)
+            || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z)
             || model_volume_list_changed(model_object, model_object_new, ModelVolumeType::SEAM_POSITION_INSIDE);
         bool brim_patch_differ          = model_volume_list_changed(model_object, model_object_new, ModelVolumeType::BRIM_PATCH) ||
                                           model_volume_list_changed(model_object, model_object_new, ModelVolumeType::BRIM_NEGATIVE);

@@ -697,26 +697,6 @@ static float get_external_perimeter_width(const Layer &layer)
         perimeter_width = get_default_perimeter_spacing(*layer.object());
     return perimeter_width;
 }
-
-static float get_external_perimeter_overlap(const Layer &layer)
-{
-    size_t regions_count     = 0;
-    float  ext_perimeter_overlap   = 0.f;
-    for (const LayerRegion *layer_region : layer.regions())
-        if (layer_region != nullptr && ! layer_region->slices().empty()) {
-            ext_perimeter_overlap += layer_region->region().config().external_perimeter_overlap.value;
-            ++regions_count;
-        }
-
-    assert(ext_perimeter_overlap >= 0.f);
-    if (regions_count != 0) {
-        ext_perimeter_overlap /= float(regions_count);
-    } else {
-        ext_perimeter_overlap = layer.object()->print()->default_region_config().external_perimeter_overlap.value;
-    }
-    return ext_perimeter_overlap;
-}
-
 std::vector<std::pair<int,int>> datapoints;
 void print_debug_cross( int id,
                         const AvoidCrossingPerimeters::Boundary &boundary,
@@ -724,8 +704,8 @@ void print_debug_cross( int id,
                        const Intersection &best_intersection_end,
                        const Point &start,
                        const Point &end,
-                       const std::string &suffix) {
- {
+                       const std::string &suffix)
+{
 #ifdef AVOID_CROSSING_PERIMETERS_DEBUG_OUTPUT
     coordf_t      stroke_width = scale_d(0.05);
     BoundingBox   bbox         = get_extents(boundary.boundaries);
@@ -754,8 +734,25 @@ void print_debug_cross( int id,
     svg.draw(Polyline({best_intersection_start.point, best_intersection_end.point}), "red", stroke_width - scale_d(0.02));
     svg.Close();
 #endif
- }
+}
 
+static float get_external_perimeter_overlap(const Layer &layer)
+{
+    size_t regions_count     = 0;
+    float  ext_perimeter_overlap   = 0.f;
+    for (const LayerRegion *layer_region : layer.regions())
+        if (layer_region != nullptr && ! layer_region->slices().empty()) {
+            ext_perimeter_overlap += layer_region->region().config().external_perimeter_overlap.value;
+            ++regions_count;
+        }
+
+    assert(ext_perimeter_overlap >= 0.f);
+    if (regions_count != 0) {
+        ext_perimeter_overlap /= float(regions_count);
+    } else {
+        ext_perimeter_overlap = layer.object()->print()->default_region_config().external_perimeter_overlap.value;
+    }
+    return ext_perimeter_overlap;
 }
 
 // TODO: avoid other islands in-between

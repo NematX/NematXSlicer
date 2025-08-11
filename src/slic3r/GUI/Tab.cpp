@@ -3471,7 +3471,7 @@ void TabFilament::toggle_options()
     if (!m_active_page)
         return;
 
-    //if ( std::find(m_active_page->descriptions.begin(), m_active_page->descriptions.end(), "cooling") != m_active_page->descriptions.end())
+    //if (std::find(m_active_page->descriptions.begin(), m_active_page->descriptions.end(), "cooling") != m_active_page->descriptions.end())
     {
         // bool fan_always_on = m_config->opt_bool("fan_always_on", 0);
 
@@ -3493,6 +3493,15 @@ void TabFilament::toggle_options()
             || m_config->opt_float("slowdown_below_layer_time", 0) > 0, 0);
 
         toggle_option("overhangs_fan_speed", !m_config->is_enabled("overhangs_dynamic_fan_speed", 0), 0);
+    }
+
+    bool use_pa = m_config->option("filament_pressure_advance")->is_enabled(0);
+    for (std::string field_name : {"filament_perimeter_pa", "filament_external_perimeter_pa", "filament_solid_infill_pa", "filament_infill_pa",
+        "filament_top_solid_infill_pa", "filament_support_material_pa", "filament_support_material_interface_pa",
+        "filament_brim_pa", "filament_bridge_pa", "filament_bridge_internal_pa", "filament_overhangs_pa",
+        "filament_gap_fill_pa", "filament_thin_walls_pa", "filament_ironing_pa", "filament_travel_pa",
+        "filament_first_layer_pa", "filament_first_layer_pa_over_raft"}) {
+        toggle_option(field_name, use_pa, 0);
     }
 
     //if (m_active_page->title() == "Advanced")

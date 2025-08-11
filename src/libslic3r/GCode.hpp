@@ -512,7 +512,8 @@ private:
         const Layer* last_layer;
         coord_t diameter;
     }                                   m_layer_slices_offseted{ {},{},nullptr, 0};
-    double                              m_volumetric_speed;
+    // one per extruder
+    std::vector<double>                 m_volumetric_speed_mm3_per_s;
     // Support for the extrusion role markers. Which marker is active?
     GCodeExtrusionRole                  m_last_extrusion_role;
     // Not know the gapfill role for retract_lift_top
@@ -522,6 +523,8 @@ private:
     double                              m_last_layer_z{ 0.0 };
     double                              m_max_layer_z{ 0.0 };
     double                              m_last_width{ 0.0 };
+    // filament used since the beginning for each extruder, updated after the before_layer_gcode. in mm
+    std::vector<double>                 m_last_layer_used_filament;
     // to pass between before_xtrude and after_extrude.
     double                              m_overhang_fan_override{ -1.0 };
     int                                 m_print_fan_speed_override{-1};
@@ -597,7 +600,7 @@ private:
     std::function<void()> m_throw_if_canceled = [](){};
 
     double                    _compute_e_per_mm(const ExtrusionPath &path);
-    std::string               _extrude(const ExtrusionPath &path, const std::string_view description, double speed = -1);
+    std::string               _extrude(ExtrusionPath &path, const std::string_view description, double speed = -1);
     void                      _extrude_line(std::string& gcode_str, const Line& line, const double e_per_mm, const std::string_view comment, ExtrusionRole role);
     void                      _extrude_line_cut_corner(std::string& gcode_str, const Line& line, const double e_per_mm, const std::string_view comment, Point& last_pos, const double path_width);
     Point                     _extrude_line_stretch_corner(std::string& gcode_str, const ExtrusionRole path_role, const Point& last_pos, const Point& corner_point, const Point& next_point, const Point& after_point, const bool is_ccw, const double path_width, const double e_per_mm, const std::string_view comment);
@@ -605,6 +608,7 @@ private:
     std::string               _travel_before_extrude(const ExtrusionPath &path, const std::string_view description, double speed_mm_s = -1);
     double_t                  _compute_speed_mm_per_sec(const ExtrusionPath &path_attrs, const double speed, double &fan_speed, std::string *comment) const;
     std::pair<double, double> _compute_acceleration(const ExtrusionPath &path);
+    std::pair<double, double> _compute_pressure_advance(const ExtrusionPath &path);
     std::string               _after_extrude(const ExtrusionPath &path);
     void print_machine_envelope(GCodeOutputStream &file, const Print &print);
     int32_t _compute_first_layer_bed_temperature(const Print &print);

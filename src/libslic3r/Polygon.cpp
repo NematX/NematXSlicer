@@ -229,8 +229,16 @@ bool Polygon::intersections(const Line &line, Points *intersections) const
     for (size_t i = 0; i < this->points.size(); ++ i) {
         l.b = this->points[i];
         Point intersection;
-        if (l.intersection(line, &intersection))
-            intersections->emplace_back(std::move(intersection));
+        if (l.intersection(line, &intersection)) {
+            if (intersection == l.b || intersection == l.a) {
+                // if on a corner, only keep one intersection
+                if (std::find(intersections->begin(), intersections->end(), intersection) == intersections->end()) {
+                    intersections->emplace_back(std::move(intersection));
+                }
+            } else {
+                intersections->emplace_back(std::move(intersection));
+            }
+        }
         l.a = l.b;
     }
     return intersections->size() > intersections_size;
@@ -709,6 +717,51 @@ bool ensure_valid(Polygon &polygon, coord_t resolution) {
     }
     return true;
 }
+
+void Polygon::remove_point_too_close(coord_t tolerance) {
+    const double tolerance_sq = tolerance * (double)tolerance;
+    size_t id = 1;
+    while (id < this->points.size() - 1) {
+        coord_t d_prev = this->points[id].distance_to_square(this->points[id - 1]);
+        coord_t d_next = this->points[id].distance_to_square(this->points[id + 1]);
+        if (d_prev < tolerance_sq && d_next < tolerance_sq) {
+            this->points.erase(this->points.begin() + id);
+            continue;
+        } else if (d_prev < tolerance_sq) {
+            this->points[id-1] += this->points[id];
+            this->points[id-1] /= 2;
+            this->points.erase(this->points.begin() + id);
+            continue;
+        } else if (d_next < tolerance_sq) {
+            this->points[id + 1] += this->points[id];
+            this->points[id + 1] /= 2;
+            this->points.erase(this->points.begin() + id);
+            continue;
+        }
+
+        //go to next one
+        ++id;
+    }
+    if (this->points.front().distance_to_square(this->points.back()) < tolerance_sq) {
+        this->points.erase(this->points.end() -1);
+    }
+
+    if (this->points.size() < 3) {
+        points.clear();
+    }
+}
+
+void remove_point_too_close(Polygons &polygons, coord_t resolution) {
+    for (auto it = polygons.begin(); it != polygons.end();) {
+        it->remove_point_too_close(resolution);
+        if (it->empty()) {
+            it = polygons.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 
 #ifdef _DEBUGINFO
 void assert_valid(const Polygons &polygons) {

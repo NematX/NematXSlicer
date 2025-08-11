@@ -12,6 +12,8 @@
 #include <utility> // pair, declval
 #include <valarray> // valarray
 
+#include <boost/filesystem.hpp>
+
 #include <nlohmann/detail/exceptions.hpp>
 #include <nlohmann/detail/macro_scope.hpp>
 #include <nlohmann/detail/meta/cpp_future.hpp>
@@ -19,9 +21,6 @@
 #include <nlohmann/detail/meta/type_traits.hpp>
 #include <nlohmann/detail/value_t.hpp>
 
-// #ifdef JSON_HAS_CPP_17
-    // #include <filesystem>
-// #endif
 
 namespace nlohmann
 {
@@ -448,9 +447,8 @@ void from_json(const BasicJsonType& j, std::unordered_map<Key, Value, Hash, KeyE
     }
 }
 
-#ifdef JSON_HAS_CPP_17
 template<typename BasicJsonType>
-void from_json(const BasicJsonType& j, std_path& p)
+void from_json(const BasicJsonType& j, boost::filesystem::path& p)
 {
     if (JSON_HEDLEY_UNLIKELY(!j.is_string()))
     {
@@ -458,7 +456,6 @@ void from_json(const BasicJsonType& j, std_path& p)
     }
     p = *j.template get_ptr<const typename BasicJsonType::string_t*>();
 }
-#endif
 
 struct from_json_fn
 {

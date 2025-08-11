@@ -162,7 +162,8 @@ struct SurfaceFillParams : FillParams
         RETURN_COMPARE_NON_EQUAL(monotonic);
         RETURN_COMPARE_NON_EQUAL(max_sparse_infill_spacing);
         RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, connection);
-        RETURN_COMPARE_NON_EQUAL_TYPED(unsigned, dont_adjust);
+        RETURN_COMPARE_NON_EQUAL(add_gap_fill);
+        RETURN_COMPARE_NON_EQUAL(dont_adjust);
 
         RETURN_COMPARE_NON_EQUAL(anchor_length);
         RETURN_COMPARE_NON_EQUAL(fill_exactly);
@@ -274,6 +275,7 @@ struct SurfaceFillParams : FillParams
                 this->density               == rhs.density          &&
                 this->monotonic             == rhs.monotonic        &&
                 this->connection            == rhs.connection       &&
+                this->add_gap_fill          == rhs.add_gap_fill     &&
                 this->dont_adjust           == rhs.dont_adjust      &&
                 this->anchor_length         == rhs.anchor_length    &&
                 this->anchor_length_max     == rhs.anchor_length_max&&
@@ -362,24 +364,25 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
 
                 if (surface.has_fill_solid()) {
                     params.density = 1.f;
-                    params.pattern = ipRectilinear;
+                    params.pattern = region_config.solid_fill_pattern.value;
                     params.connection = region_config.infill_connection_solid.value;
+                    params.add_gap_fill = region_config.infill_filled_solid.value;
                     if (surface.has_pos_top()) {
+                        params.pattern = region_config.top_fill_pattern.value;
                         params.connection = region_config.infill_connection_top.value;
+                        params.add_gap_fill = region_config.infill_filled_top.value;
                     }
                     if (surface.has_pos_bottom()) {
+                        params.pattern = region_config.bottom_fill_pattern.value;
                         params.connection = region_config.infill_connection_bottom.value;
+                        params.add_gap_fill = region_config.infill_filled_bottom.value;
                     }
                     //FIXME for non-thick bridges, shall we allow a bottom surface pattern?
                     if (is_bridge) {
                         params.pattern = region_config.bridge_fill_pattern.value;
                         params.connection = region_config.infill_connection_bridge.value;
+                        params.add_gap_fill = false;
                         params.bridge_type = region_config.bridge_type.value;
-                    }
-                    if (surface.has_pos_external() && !is_bridge) {
-                        params.pattern = surface.has_pos_top() ? region_config.top_fill_pattern.value : region_config.bottom_fill_pattern.value;
-                    } else if (!is_bridge) {
-                        params.pattern = region_config.solid_fill_pattern.value;
                     }
                 } else {
                     if (is_bridge) {
@@ -1308,12 +1311,10 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         case ipAdaptiveCubic:
         case ipSupportCubic:
         case ipRectilinear:
-        case ipRectilinearWGapFill:
         case ipRectiWithPerimeter:
         case ipSawtooth:
         case ipScatteredRectilinear:
         case ipMonotonic:
-        case ipMonotonicWGapFill:
         case ipMonotonicLines:
         case ipAlignedRectilinear:
         case ipGrid:
@@ -1322,7 +1323,6 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         case ipCubic:
         case ipLine:
         case ipConcentric:
-        case ipConcentricGapFill:
         case ipHoneycomb:
         case ip3DHoneycomb:
         case ipGyroid:

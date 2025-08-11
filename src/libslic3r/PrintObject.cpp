@@ -1544,6 +1544,9 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "infill_connection_bridge"
             || opt_key == "infill_connection_solid"
             || opt_key == "infill_connection_top"
+            || opt_key == "infill_filled_bottom"
+            || opt_key == "infill_filled_solid"
+            || opt_key == "infill_filled_top"
             || opt_key == "ironing_angle"
             || opt_key == "ironing_flowrate"
             || opt_key == "ironing_spacing"
@@ -1578,6 +1581,8 @@ bool PrintObject::invalidate_state_by_config_options(
                 opt_key == "bridge_angle"
                 || opt_key == "bridged_infill_margin"
                 || opt_key == "extra_perimeters"
+                || opt_key == "extra_perimeters_below_area"
+                || opt_key == "extra_perimeters_count"
                 || opt_key == "extra_perimeters_odd_layers"
                 || opt_key == "extra_perimeters_on_overhangs"
                 || opt_key == "external_infill_margin"
@@ -2886,6 +2891,9 @@ void PrintObject::discover_vertical_shells()
                     ExPolygons shell_ex;
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
                     float min_perimeter_infill_spacing = float(infill_line_spacing) * 1.05f;
+                    //TODO: if pattern has 'gapfill' -> decrease min_perimeter_infill_spacing else keep it at infill_line_spacing*1.05;
+                    // let the fil to decide if it's too small or not (only remove the very very small)
+                    min_perimeter_infill_spacing *= 0.5;
                     const int nb_perimeter_layers_for_solid_fill = region_config.solid_over_perimeters.value;
                     const int min_layer_no_solid = region_config.bottom_solid_layers.value - 1;
                     const int min_z_no_solid = region_config.bottom_solid_min_thickness;

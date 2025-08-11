@@ -18,6 +18,7 @@
 #include "GalleryDialog.hpp"
 #include "MainFrame.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
+#include "Gizmos/GLGizmosManager.hpp"
 #include "Gizmos/GLGizmoCut.hpp"
 #include "Gizmos/GLGizmoScale.hpp"
 
@@ -1810,7 +1811,7 @@ void ObjectList::load_shape_object_from_gallery(const wxArrayString& input_files
         snapshot_label += ", " + wxString::FromUTF8(paths[i].filename().string().c_str());
 
     take_snapshot(snapshot_label);
-    if (! wxGetApp().plater()->load_files(paths, true, false, true, false).empty())
+    if (! wxGetApp().plater()->load_files(paths, LoadFileOption::LoadModel).empty())
         wxGetApp().mainframe->update_title();
 }
 
@@ -2774,7 +2775,7 @@ void ObjectList::part_selection_changed()
                                                             info_type == InfoItemType::CustomSeam       ? GLGizmosManager::EType::Seam :
                                                             GLGizmosManager::EType::MmuSegmentation;
                         if (gizmos_mgr.get_current_type() != gizmo_type)
-                            gizmos_mgr.open_gizmo(gizmo_type);
+                            gizmos_mgr.open_gizmo(gizmo_type, false);
                         break;
                     }
                     case InfoItemType::Sinking:
@@ -4354,9 +4355,9 @@ void ObjectList::change_part_type()
         names.Add(_L("Seam Position (nearest, between min & max z)"));
         types.emplace_back(ModelVolumeType::SEAM_POSITION_CENTER_Z);
         names.Add(_L("Internal Seam Position (nearest, between min & max z)"));
-        types.emplace_back(ModelVolumeType::SEAM_POSITION_INSIDE_CENTER);
-        //names.Add(_L("Seam Position (inside shape)"));
-        //types.emplace_back(ModelVolumeType::SEAM_POSITION_INSIDE);
+        types.emplace_back(ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z);
+        names.Add(_L("Seam Position (inside shape)"));
+        types.emplace_back(ModelVolumeType::SEAM_POSITION_INSIDE);
         names.Add(_L("Brim Patch"));
         types.emplace_back(ModelVolumeType::BRIM_PATCH);
         names.Add(_L("Brim Blocker"));
@@ -4771,9 +4772,9 @@ void ObjectList::simplify()
 
     if (gizmos_mgr.get_current_type() == GLGizmosManager::Simplify) {
         // close first
-        gizmos_mgr.open_gizmo(GLGizmosManager::EType::Simplify);
+        gizmos_mgr.open_gizmo(GLGizmosManager::EType::Simplify, false);
     }
-    gizmos_mgr.open_gizmo(GLGizmosManager::EType::Simplify);
+    gizmos_mgr.open_gizmo(GLGizmosManager::EType::Simplify, true);
 }
 
 void ObjectList::update_item_error_icon(const int obj_idx, const int vol_idx) const 

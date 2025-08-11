@@ -167,8 +167,7 @@ Model Model::read_from_file(const std::string& input_file,
     else if (boost::algorithm::iends_with(input_file, ".amf") || boost::algorithm::iends_with(input_file, ".amf.xml"))
         result = load_amf(input_file.c_str(), config, config_substitutions, &model, options & LoadAttribute::CheckVersion);
     else if (boost::algorithm::iends_with(input_file, ".3mf") || boost::algorithm::iends_with(input_file, ".zip"))
-        //FIXME options & LoadAttribute::CheckVersion ? 
-        result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, false);
+        result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, options & LoadAttribute::CheckVersion, options & LoadAttribute::UnbakeTransformation);
     else if (boost::algorithm::iends_with(input_file, ".svg"))
         result = load_svg(input_file, model);
     else
@@ -207,7 +206,7 @@ Model Model::read_from_archive(const std::string& input_file,
 
     bool result = false;
     if (boost::algorithm::iends_with(input_file, ".3mf") || boost::algorithm::iends_with(input_file, ".zip"))
-        result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, options & LoadAttribute::CheckVersion);
+        result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, options & LoadAttribute::CheckVersion, options & LoadAttribute::UnbakeTransformation);
     else if (boost::algorithm::iends_with(input_file, ".zip.amf"))
         result = load_amf(input_file.c_str(), config, config_substitutions, &model, options & LoadAttribute::CheckVersion);
     else
@@ -1891,8 +1890,8 @@ ModelVolumeType ModelVolume::type_from_string(const std::string &s)
         return ModelVolumeType::SEAM_POSITION_CENTER;
     if (s == "SeamPositionCenterZ")
         return ModelVolumeType::SEAM_POSITION_CENTER_Z;
-    if (s == "SeamPositionInsideCenter")
-        return ModelVolumeType::SEAM_POSITION_INSIDE_CENTER;
+    if (s == "SeamPositionInternalCenterZ")
+        return ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z;
     if (s == "SeamPositionInside")
         return ModelVolumeType::SEAM_POSITION_INSIDE;
     if (s == "BrimPatch")
@@ -1914,7 +1913,7 @@ std::string ModelVolume::type_to_string(const ModelVolumeType t)
 	case ModelVolumeType::SUPPORT_BLOCKER:    return "SupportBlocker";
     case ModelVolumeType::SEAM_POSITION_CENTER:         return "SeamPositionCenter";
     case ModelVolumeType::SEAM_POSITION_CENTER_Z:       return "SeamPositionCenterZ";
-    case ModelVolumeType::SEAM_POSITION_INSIDE_CENTER:  return "SeamPositionInsideCenter";
+    case ModelVolumeType::SEAM_POSITION_INTERNAL_CENTER_Z: return "SeamPositionInternalCenterZ";
     case ModelVolumeType::SEAM_POSITION_INSIDE:         return "SeamPositionInside";
     case ModelVolumeType::BRIM_PATCH:         return "BrimPatch";
     case ModelVolumeType::BRIM_NEGATIVE:      return "BrimNegative";

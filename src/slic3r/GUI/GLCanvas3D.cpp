@@ -2272,7 +2272,7 @@ void GLCanvas3D::deselect_all()
     // close actual opened gizmo before deselection(m_selection.remove_all()) write to undo/redo snapshot
     if (GLGizmosManager::EType current_type = m_gizmos.get_current_type();
         current_type != GLGizmosManager::Undefined)
-        m_gizmos.open_gizmo(current_type);            
+        m_gizmos.open_gizmo(current_type, false);
 
     m_selection.remove_all();
     wxGetApp().obj_manipul()->set_dirty();
@@ -2729,7 +2729,9 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
         unsigned int extruders_count = (unsigned int)m_config->option<ConfigOptionFloats>("nozzle_diameter")->size();
 
         const bool wt = m_config->option("wipe_tower")->get_bool();
-        const bool co = m_config->option("complete_objects")->get_bool() || m_config->option("parallel_objects_step")->get_float() > 0;
+        const bool co = m_config->option("complete_objects")->get_bool() ||
+            (m_config->option("parallel_objects_step")->get_float() > 0 &&
+             m_config->option("parallel_objects_step_max_z")->get_float() == 0);
 
         if (extruders_count > 1 && wt && !co) {
             // can't get these one from wipe_tower_data, as these use the platter's config, not the print one.
@@ -4197,13 +4199,13 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             if (hover_volume->text_configuration.has_value()) {
                 m_selection.add_volumes(Selection::EMode::Volume, {(unsigned) hover_volume_id});
                 if (type != GLGizmosManager::EType::Emboss)
-                    m_gizmos.open_gizmo(GLGizmosManager::EType::Emboss);            
+                    m_gizmos.open_gizmo(GLGizmosManager::EType::Emboss, false);
                 wxGetApp().obj_list()->update_selections();
                 return;
             } else if (hover_volume->emboss_shape.has_value()) {
                 m_selection.add_volumes(Selection::EMode::Volume, {(unsigned) hover_volume_id});
                 if (type != GLGizmosManager::EType::Svg)
-                    m_gizmos.open_gizmo(GLGizmosManager::EType::Svg);
+                    m_gizmos.open_gizmo(GLGizmosManager::EType::Svg, false);
                 wxGetApp().obj_list()->update_selections();
                 return;
             }

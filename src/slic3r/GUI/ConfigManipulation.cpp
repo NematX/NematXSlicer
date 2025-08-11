@@ -85,8 +85,10 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         // && config->opt_bool("exact_last_layer_height") == false
         && config->opt_bool("infill_dense") == false
         && config->opt_bool("extra_perimeters") == false
-        && config->opt_bool("extra_perimeters_on_overhangs") == false
+        && config->option("extra_perimeters_below_area")->get_float() == 0
+        && config->opt_int("extra_perimeters_count") == 0
         && config->opt_bool("extra_perimeters_odd_layers") == false
+        && config->opt_bool("extra_perimeters_on_overhangs") == false
         && config->opt_bool("overhangs_reverse") == false
         && config->opt_bool("gap_fill_last") == false
         && config->opt_int("solid_infill_every_layers") == 0
@@ -134,10 +136,14 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
                 new_conf.set_key_value("infill_dense", new ConfigOptionBool(false));
             else if (this->local_config->get().optptr("extra_perimeters"))
                 new_conf.set_key_value("extra_perimeters", new ConfigOptionBool(false));
-            else if (this->local_config->get().optptr("extra_perimeters_on_overhangs"))
-                new_conf.set_key_value("extra_perimeters_on_overhangs", new ConfigOptionBool(false));
+            else if (this->local_config->get().optptr("extra_perimeters_below_area"))
+                new_conf.set_key_value("extra_perimeters_below_area", new ConfigOptionFloatOrPercent(0, false));
+            else if (this->local_config->get().optptr("extra_perimeters_count"))
+                new_conf.set_key_value("extra_perimeters_count", new ConfigOptionInt(0));
             else if (this->local_config->get().optptr("extra_perimeters_odd_layers"))
                 new_conf.set_key_value("extra_perimeters_odd_layers", new ConfigOptionBool(false));
+            else if (this->local_config->get().optptr("extra_perimeters_on_overhangs"))
+                new_conf.set_key_value("extra_perimeters_on_overhangs", new ConfigOptionBool(false));
             else if (this->local_config->get().optptr("overhangs_reverse"))
                 new_conf.set_key_value("overhangs_reverse", new ConfigOptionBool(false));
             else if (this->local_config->get().optptr("gap_fill_last"))
@@ -162,8 +168,10 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
             // new_conf.set_key_value("exact_last_layer_height", new ConfigOptionBool(false));
             new_conf.set_key_value("infill_dense", new ConfigOptionBool(false));
             new_conf.set_key_value("extra_perimeters", new ConfigOptionBool(false));
-            new_conf.set_key_value("extra_perimeters_on_overhangs", new ConfigOptionBool(false));
+            new_conf.set_key_value("extra_perimeters_below_area", new ConfigOptionFloatOrPercent(0, false));
+            new_conf.set_key_value("extra_perimeters_count", new ConfigOptionInt(0));
             new_conf.set_key_value("extra_perimeters_odd_layers", new ConfigOptionBool(false));
+            new_conf.set_key_value("extra_perimeters_on_overhangs", new ConfigOptionBool(false));
             new_conf.set_key_value("overhangs_reverse", new ConfigOptionBool(false));
             new_conf.set_key_value("gap_fill_last", new ConfigOptionBool(false));
             new_conf.set_key_value("solid_infill_every_layers", new ConfigOptionInt(0));
@@ -346,7 +354,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
 {
     bool have_perimeters = config->opt_int("perimeters") > 0;
     for (auto el : {
-        "extra_perimeters", "extra_perimeters_odd_layers", "extra_perimeters_on_overhangs",
+        "extra_perimeters", "extra_perimeters_below_area", "extra_perimeters_count", "extra_perimeters_odd_layers", "extra_perimeters_on_overhangs",
         "external_perimeters_first", "external_perimeter_extrusion_width", "external_perimeter_extrusion_spacing","external_perimeter_extrusion_change_odd_layers",
         "external_perimeters_staggered",
         "overhangs",
@@ -410,18 +418,11 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
 
     bool have_gap_fill = !have_arachne;
     toggle_field("gap_fill_enabled", have_gap_fill);
+    have_gap_fill &= config->opt_bool("gap_fill_enabled");
     for (auto el : { "gap_fill_last"})
-        toggle_field(el, have_gap_fill && config->opt_bool("gap_fill_enabled"));
-    if (have_gap_fill) {
-        have_gap_fill = config->opt_bool("gap_fill_enabled");
-        for (InfillPattern ip : {config->opt_enum<InfillPattern>("bottom_fill_pattern"),
-                                 config->opt_enum<InfillPattern>("solid_fill_pattern"),
-                                 config->opt_enum<InfillPattern>("top_fill_pattern")}) {
-            if (ip == InfillPattern::ipConcentricGapFill || ip == InfillPattern::ipRectilinearWGapFill ||
-                ip == InfillPattern::ipMonotonicWGapFill) {
-                have_gap_fill = true;
-            }
-        }
+        toggle_field(el, have_gap_fill);
+    if (!have_gap_fill) {
+        have_gap_fill = config->opt_bool("infill_filled_bottom") || config->opt_bool("infill_filled_solid") || config->opt_bool("infill_filled_top");
     }
     for (auto el : { "gap_fill_extension", "gap_fill_max_width", "gap_fill_min_area", "gap_fill_min_length", "gap_fill_min_width" })
         toggle_field(el, have_gap_fill);
@@ -622,6 +623,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
         "complete_objects_sort"})
         toggle_field(el, have_sequential_printing);
     toggle_field("parallel_objects_step", !config->opt_bool("complete_objects"));
+    toggle_field("parallel_objects_step_max_z", config->opt_float("parallel_objects_step") > 0);
 
     bool have_ooze_prevention = config->opt_bool("ooze_prevention");
     toggle_field("standby_temperature_delta", have_ooze_prevention);
@@ -681,6 +683,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
         config->option<ConfigOptionFloatOrPercent>("bridge_speed")->percent || 
         config->option<ConfigOptionFloatOrPercent>("support_material_speed")->percent);
     toggle_field("max_print_speed", config->opt_float("max_volumetric_speed") != 0);
+    toggle_field("autospeed_min_thin_flow", config->opt_float("max_volumetric_speed") != 0);
 }
 
 

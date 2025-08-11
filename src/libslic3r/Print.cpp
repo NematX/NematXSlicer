@@ -87,6 +87,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
     static std::unordered_set<std::string> steps_gcode = {
         "allow_empty_layers",
         "autoemit_temperature_commands",
+        "autospeed_min_thin_flow",
         "avoid_crossing_perimeters",
         "avoid_crossing_perimeters_max_detour",
         "avoid_crossing_not_first_layer",
@@ -180,6 +181,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         "output_filename_format",
         "overhangs_fan_speed",
         "parallel_objects_step",
+        "parallel_objects_step_max_z",
         "pause_print_gcode",
         "post_process",
         "print_custom_variables",
@@ -2103,13 +2105,63 @@ void Print::alert_when_supports_needed()
     }
 }
 
-// Wipe tower support.
-bool Print::has_wipe_tower() const
-{
-    return 
-        ! m_config.spiral_vase.value &&
-        m_config.wipe_tower.value && 
-        m_config.nozzle_diameter.size() > 1;
+bool Print::has_wipe_tower() const {
+    if (config().nozzle_diameter.size() <= 1 || !config().wipe_tower || config().complete_objects ||
+        config().spiral_vase.value) {
+        return false;
+    }
+    bool has_parallel_objects_step = config().parallel_objects_step.value > 0;
+    if (has_parallel_objects_step && config().parallel_objects_step.value > 0) {
+        // check if the print has multiple extruders below has_parallel_objects_step_max_z
+        const float max_z = config().parallel_objects_step.value + EPSILON;
+        bool can_wipe_tower = true;
+        int extruder = -1;
+        auto check_extruder = [&extruder, &can_wipe_tower](int extr) -> bool {
+            if (extr <= 0) {
+                return false;
+            }
+            if (extruder == -1) {
+                extruder = extr;
+                return false;
+            }
+            can_wipe_tower = extruder == extr;
+            return !can_wipe_tower;
+        };
+        for (const PrintObject *obj : this->objects()) {
+            for (const Layer *layer : obj->layers()) {
+                if (layer->print_z > max_z)
+                    continue;
+                for (const LayerRegion *lr : layer->regions()) {
+                    if (lr->has_extrusions()) {
+                        if (!lr->perimeters().empty() &&
+                            check_extruder(lr->region().config().perimeter_extruder.value)) {
+                            goto finish_search; // !can_wipe_tower
+                        } else if ((!lr->fills().empty() || !lr->ironings().empty() || !lr->thin_fills().empty()) &&
+                                   (check_extruder(lr->region().config().infill_extruder.value) ||
+                                    check_extruder(lr->region().config().solid_infill_extruder.value))) {
+                            goto finish_search; // !can_wipe_tower
+                        //} else if (lr->has_extrusions() && check_extruder(lr->region().extruder_id)) {
+                        //    goto finish_search; // !can_wipe_tower
+                        }
+                    }
+                }
+            }
+        }
+        for (const PrintObject *obj : this->objects()) {
+            for (const SupportLayer *slayer : obj->support_layers()) {
+                if (slayer->print_z > max_z)
+                    continue;
+                if (!slayer->support_fills.empty() &&
+                    (check_extruder(obj->config().support_material_extruder.value) ||
+                     check_extruder(obj->config().support_material_interface_extruder.value))) {
+                    goto finish_search; // !can_wipe_tower
+                }
+            }
+        }
+    finish_search:;
+        has_parallel_objects_step = !can_wipe_tower;
+    }
+    return !has_parallel_objects_step;
 }
 
 const WipeTowerData& Print::wipe_tower_data(const ConfigBase* config, double nozzle_diameter) const

@@ -582,11 +582,14 @@ static const FileWildcards file_wildcards_by_type[FT_SIZE] = {
     /* FT_STEP */    { "STEP files"sv,      { ".stp"sv, ".step"sv } },    
     /* FT_AMF */     { "AMF files"sv,       { ".amf"sv, ".zip.amf"sv, ".xml"sv } },
     /* FT_3MF */     { "3MF files"sv,       { ".3mf"sv } },
+    /* FT_3MF_TRSF */{ "3MF files for SuperSlicer only (no transformation baked into the mesh)"sv, { ".3mf"sv } },
+    /* FT_3MF_UNKBAKE */{ "3MF files (unbake the transformation into the mesh) "sv, { ".3mf"sv } },
     /* FT_GCODE */   { "G-code files"sv,    { ".gcode"sv, ".gco"sv, ".bgcode"sv, ".bgc"sv, ".g"sv, ".ngc"sv } },
     /* FT_MODEL */   { "Known files"sv,     { ".stl"sv, ".obj"sv, ".3mf"sv, ".amf"sv, ".zip.amf"sv, ".xml"sv, ".step"sv, ".stp"sv, ".svg"sv } },
     /* FT_PROJECT */ { "Project files"sv,   { ".3mf"sv, ".amf"sv, ".zip.amf"sv } },
     /* FT_FONTS */   { "Font files"sv,      { ".ttc"sv, ".ttf"sv } },
     /* FT_GALLERY */ { "Known files"sv,     { ".stl"sv, ".obj"sv } },
+    /* FT_HFP     */ { "HueForge files"sv,  { ".hfp"sv } },
 
     /* FT_INI */     { "INI files"sv,       { ".ini"sv } },
     /* FT_SVG */     { "SVG files"sv,       { ".svg"sv } },
@@ -653,7 +656,7 @@ static wxString file_wildcards(const FileWildcards &wildcards, const std::string
             add_single(wildcards.title, ext);
         }
 
-    return GUI::format_wxstr("%s (%s)|%s", wildcards.title, title, mask) + out_one_by_one;
+    return GUI::format_wxstr("%s (%s)|%s", wildcards.title, title, mask) /*+ out_one_by_one*/;
 }
 
 wxString file_wildcards(FileType file_type, const std::string &custom_extension)
@@ -2562,16 +2565,20 @@ void GUI_App::persist_window_geometry(wxTopLevelWindow *window, bool default_max
     });
 }
 
-void GUI_App::load_project(wxWindow *parent, wxString& input_file) const
+bool GUI_App::load_project(wxWindow *parent, wxString& input_file) const
 {
     input_file.Clear();
     wxFileDialog dialog(parent ? parent : GetTopWindow(),
         _L("Choose one file (3MF/AMF):"),
         app_config->get_last_dir(), "",
-        file_wildcards(FT_PROJECT), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+        file_wildcards(FT_PROJECT)+ "|" + file_wildcards(FT_3MF_UNKBAKE), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
 
-    if (dialog.ShowModal() == wxID_OK)
+    bool unbake_trsf = false;
+    if (dialog.ShowModal() == wxID_OK) {
         input_file = dialog.GetPath();
+        unbake_trsf = dialog.GetCurrentlySelectedFilterIndex() == 1;
+    }
+    return unbake_trsf;
 }
 
 void GUI_App::import_model(wxWindow *parent, wxArrayString& input_files) const
@@ -2584,6 +2591,21 @@ void GUI_App::import_model(wxWindow *parent, wxArrayString& input_files) const
 
     if (dialog.ShowModal() == wxID_OK)
         dialog.GetPaths(input_files);
+}
+
+void GUI_App::import_model_hueforge(wxWindow *parent, wxString& input_file) const {
+
+    // Clear the input file before importing
+    input_file.Clear();
+
+    // Open dialog to select the .HFP file
+    wxFileDialog dialog(parent ? parent : GetTopWindow(),
+            _L("Choose your modifier file (HFP):"),
+            from_u8(app_config->get_last_dir()), "",
+            file_wildcards(FT_HFP), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
+
+       if (dialog.ShowModal() == wxID_OK)
+           input_file = dialog.GetPath();
 }
 
 void GUI_App::import_zip(wxWindow* parent, wxString& input_file) const

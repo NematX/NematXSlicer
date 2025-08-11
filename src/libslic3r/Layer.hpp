@@ -166,6 +166,9 @@ public:
     void    make_perimeters(
         // Input slices for which the perimeters, gap fills and fill expolygons are to be generated.
         const SurfaceCollection                                &slices,
+        // all regions merged into us for creating perimeters.
+        // can be used to apply some configurations only on specific areas.
+        const std::set<LayerRegion*>                           &regions,
         // Ranges of perimeter extrusions and gap fill extrusions per suface, referencing
         // newly created extrusions stored at this LayerRegion.
         std::vector<std::pair<ExtrusionRange, ExtrusionRange>> &perimeter_and_gapfill_ranges,
@@ -391,7 +394,7 @@ public:
     // These lslices are also used to detect overhangs and overlaps between successive layers, therefore it is important
     // that the 1st lslice is not compensated by the Elephant foot compensation algorithm.
 protected:
-    ExPolygons 				m_lslices;
+    ExPolygons              m_lslices;
 public:
     const ExPolygons &      lslices() const { return m_lslices; }
     ExPolygons &            set_lslices() { return m_lslices; }

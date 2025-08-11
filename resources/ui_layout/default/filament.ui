@@ -26,17 +26,46 @@ group:Filament properties
 	setting:id$0:filament_soluble
 	setting:id$0:filament_shrink
 	setting:id$0:filament_max_overlap
-	setting:id$0:filament_pressure_advance
+
+page:Speed & Pressure advance:time
 group:Print speed override
 	setting:id$0:filament_max_speed
 	setting:id$0:filament_max_volumetric_speed
 	volumetric_speed_description
+group:Pressure/Linear advance
+	line:Default
+		setting:id$0:width$4:filament_pressure_advance
+	line:Perimeter pa
+		setting:id$0:width$4:filament_perimeter_pa
+		setting:id$0:width$4:filament_external_perimeter_pa
+	line:Infill pa
+		setting:id$0:width$4:filament_solid_infill_pa
+		setting:id$0:width$4:filament_infill_pa
+		setting:id$0:width$4:filament_top_solid_infill_pa
+	line:Support pa
+		setting:id$0:width$4:filament_support_material_pa
+		setting:id$0:width$4:filament_support_material_interface_pa
+		setting:id$0:width$4:filament_brim_pa
+	line:Bridge pa
+		setting:id$0:width$4:filament_bridge_pa
+		setting:id$0:width$4:filament_bridge_internal_pa
+		setting:id$0:width$4:filament_overhangs_pa
+	line:Other extrusions pa
+		setting:id$0:width$4:filament_gap_fill_pa
+		setting:id$0:width$4:filament_thin_walls_pa
+		setting:id$0:width$4:filament_ironing_pa
+	line:Travel pa
+		setting:id$0:width$4:filament_travel_pa
+	line:First layer pa
+		setting:id$0:width$4:filament_first_layer_pa
+		setting:id$0:label_width$35:width$4:filament_first_layer_pa_over_raft
+	end_line
 group:Filament
 	setting:tags$Simple:id$0:extrusion_multiplier
-    setting:tags$Simple:script:depends$temperature$first_layer_temperature:int:label$Temperature:tooltip$Temperature of the extruder:s_easy_temp
-    setting:tags$Simple:script:depends$bed_temperature$first_layer_bed_temperature:enum$custom$Custom$glue$With glue$noglue$Without glue:label$Bed:tooltip$Choose the bed type you installed. This will modify the bed temperature for all current filaments.:s_bed_fil_fff
+	setting:tags$Simple:script:depends$temperature$first_layer_temperature:int:label$Temperature:tooltip$Temperature of the extruder:s_easy_temp
+	setting:tags$Simple:script:depends$bed_temperature$first_layer_bed_temperature:enum$custom$Custom$glue$With glue$noglue$Without glue:label$Bed:tooltip$Choose the bed type you installed. This will modify the bed temperature for all current filaments.:s_bed_fil_fff
 end_group
-    
+
 
 page:Cooling:time
 group:Fan speed - default

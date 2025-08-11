@@ -66,8 +66,9 @@ void CalibrationPressureDialog::create_geometry(wxCommandEvent& event_args) {
         return;
 
     //GLCanvas3D::set_warning_freeze(true);
-    std::vector<size_t> objs_idx = plat->load_files(std::vector<std::string>{
-            (boost::filesystem::path(Slic3r::resources_dir()) / "calibration"/"pressure"/ "pressure_shape.stl").string()}, true, false, false, false);
+    std::vector<size_t> objs_idx = plat->load_files(
+                        std::vector<std::string>{(boost::filesystem::path(Slic3r::resources_dir()) / "calibration" / "pressure" / "pressure_shape.stl").string()},
+                         LoadFileOption::LoadModel | LoadFileOption::DontUpdateDirs);
 
     assert(objs_idx.size() == 1);
     const DynamicPrintConfig* print_config = this->gui_app->get_tab(Preset::TYPE_FFF_PRINT)->get_config();
