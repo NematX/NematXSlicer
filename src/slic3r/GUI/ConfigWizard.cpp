@@ -2465,7 +2465,8 @@ void ConfigWizard::priv::load_pages()
     btn_finish->Enable(any_fff_selected || any_sla_selected || custom_printer_selected || custom_printer_in_bundle);
 
     index->add_page(page_update);
-    index->add_page(page_downloader);
+    // no printables integration with nematxslicer
+    //index->add_page(page_downloader);
     index->add_page(page_reload_from_disk);
 #ifdef _WIN32
     index->add_page(page_files_association);
@@ -2860,11 +2861,12 @@ void ConfigWizard::priv::on_3rdparty_install(const VendorProfile *vendor, bool i
 bool ConfigWizard::priv::on_bnt_finish()
 {
     wxBusyCursor wait;
-
-    if (!page_downloader->on_finish_downloader()) {
-        index->go_to(page_downloader);
-        return false;
-    }
+    
+    // no printables integration with nematxslicer
+    //if (!page_downloader->on_finish_downloader()) {
+    //    index->go_to(page_downloader);
+    //    return false;
+    //}
 
     /* If some printers were added/deleted, but related MaterialPage wasn't activated,
      * than last changes wouldn't be updated for filaments/materials.
@@ -3161,8 +3163,9 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
     BOOST_LOG_TRIVIAL(debug) << "ConfigWizard::priv::apply_config integrate_desktop" << page_welcome->integrate_desktop()  << " perform_registration_linux " << page_downloader->m_downloader->get_perform_registration_linux();
     if (page_welcome->integrate_desktop())
         DesktopIntegrationDialog::perform_desktop_integration();
-    if (page_downloader->m_downloader->get_perform_registration_linux())
-        DesktopIntegrationDialog::perform_downloader_desktop_integration();
+    // no printables integration with nematxslicer
+    //if (page_downloader->m_downloader->get_perform_registration_linux())
+    //    DesktopIntegrationDialog::perform_downloader_desktop_integration();
 #endif
 
     // Decide whether to create snapshot based on run_reason and the reset profile checkbox
@@ -3559,7 +3562,8 @@ ConfigWizard::ConfigWizard(wxWindow *parent)
     p->add_page(p->page_custom   = new PageCustom(this));
     
     p->add_page(p->page_update   = new PageUpdate(this));
-    p->add_page(p->page_downloader = new PageDownloader(this));
+    // no printables integration with nematxslicer
+    //p->add_page(p->page_downloader = new PageDownloader(this));
     p->add_page(p->page_reload_from_disk = new PageReloadFromDisk(this));
 #ifdef _WIN32
     p->add_page(p->page_files_association = new PageFilesAssociation(this));

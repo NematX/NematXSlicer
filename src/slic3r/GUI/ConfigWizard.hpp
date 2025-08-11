@@ -31,7 +31,7 @@ namespace DownloaderUtils {
     {
         wxWindow*   m_parent{ nullptr };
         wxTextCtrl* m_input_path{ nullptr };
-        bool        downloader_checked{ false };
+        bool        downloader_checked{ true };
 #ifdef __linux__
         bool        perform_registration_linux{ false };
 #endif // __linux__
