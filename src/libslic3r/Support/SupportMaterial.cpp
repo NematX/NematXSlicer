@@ -2459,7 +2459,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
             // Insert intermediate layers.
             //compute the layers height
             size_t      n_layers_bot = 0;
-            size_t      n_layers_middle = size_t(ceil(coordf_t(dist) / coordf_t(support_layer_height)));
+            size_t      n_layers_middle = size_t(ceil((coordf_t(dist) - EPSILON) / coordf_t(support_layer_height)));
             size_t      n_layers_top = 0;
             size_t      n_layers_total = 0;
             coordf_t    step_interface = coordf_t(support_interface_layer_height);
@@ -2475,8 +2475,8 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                 n_layers_bot = std::max(size_t(0), n_layers_bot - 1); //the first bot layer is already in the extreme list.
                 coord_t height_bot_interface = (support_interface_layer_height * n_layers_bot);
                 if (dist <= height_top_interface + height_bot_interface - EPSILON) {
-                    // not enough height for a not-interface layer
-                    n_layers_top = size_t(ceil(coordf_t(dist) / coordf_t(support_interface_layer_height)));
+                    // not enough height for a not-interface layer (-EPSILON to avoid ceil() going one up because of float issues)
+                    n_layers_top = size_t(ceil((coordf_t(dist) - EPSILON) / coordf_t(support_interface_layer_height)));
                     step_interface = coordf_t(dist) / coordf_t(n_layers_top);
                     n_layers_middle = 0;
                     if (n_layers_bot > 0) {
@@ -2485,7 +2485,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                     }
                     n_layers_total = n_layers_bot + n_layers_middle + n_layers_top;
                 } else {
-                    //enough place of at least one normal support layer
+                    //enough place of at least one normal support layer (-EPSILON to avoid ceil() going one up because of float issues)
                     n_layers_middle = size_t(ceil((coordf_t(dist - height_top_interface - height_bot_interface) - EPSILON) / coordf_t(support_layer_height)));
                     n_layers_total = n_layers_bot + n_layers_middle + n_layers_top;
                     //compute the avg
@@ -2545,8 +2545,8 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                     coord_t height_top_interface = support_interface_layer_height * n_layers_top;
                     coord_t height_bot_interface =  support_interface_layer_height * n_layers_bot;
                     if (dist <= height_top_interface + height_bot_interface) {
-                        // not enough height for a not-interface layer
-                        n_layers_top = size_t(ceil(coordf_t(dist) / coordf_t(support_interface_layer_height)));
+                        // not enough height for a not-interface layer (-EPSILON to avoid ceil() going one up because of float issues)
+                        n_layers_top = size_t(ceil((coordf_t(dist) - EPSILON) / coordf_t(support_interface_layer_height)));
                         step_interface = dist / coordf_t(n_layers_top);
                         n_layers_middle = 0;
                         if (n_layers_bot > 0) {
@@ -2555,8 +2555,8 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                         }
                         n_layers_total = n_layers_bot + n_layers_middle + n_layers_top;
                     } else {
-                        //enough place of at least one normal support layer
-                        n_layers_middle = size_t(ceil(coordf_t(dist - height_top_interface - height_bot_interface) / coordf_t(support_layer_height)));
+                        //enough place of at least one normal support layer (-EPSILON to avoid ceil() going one up because of float issues)
+                        n_layers_middle = size_t(ceil((coordf_t(dist - height_top_interface - height_bot_interface) - EPSILON) / coordf_t(support_layer_height)));
                         n_layers_total = n_layers_bot + n_layers_middle + n_layers_top;
                         //compute the avg
                         step = coordf_t(dist) / coordf_t(n_layers_total);
