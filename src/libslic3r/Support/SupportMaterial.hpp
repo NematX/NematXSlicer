@@ -14,7 +14,8 @@
 #include "SupportParameters.hpp"
 
 namespace Slic3r {
-
+    
+#pragma UNOPTIMIZE
 class PrintObject;
 
 // This class manages raft and supports for a single PrintObject.

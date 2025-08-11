@@ -34,6 +34,7 @@
 #endif
 
 #include <cassert>
+#pragma UNOPTIMIZE
 
 namespace Slic3r::FFFSupport {
 
