@@ -35,6 +35,7 @@
 #include "Surface.hpp"
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/WipeTower.hpp"
+#include "GCode/WipeTower2.hpp"
 #include "GCode/ThumbnailData.hpp"
 #include "MultiMaterialSegmentation.hpp"
 
@@ -58,6 +59,7 @@ class ModelObject;
 class Print;
 class PrintObject;
 class SupportLayer;
+class WipeTower2;
 
 namespace FillAdaptive {
     struct Octree;
@@ -227,10 +229,10 @@ public:
     // clipped by a layer range modifier.
     // Only Eigen types of Nx16 size are vectorized. This bounding box will not be vectorized.
     static_assert(sizeof(Eigen::AlignedBox<float, 3>) == 24, "Eigen::AlignedBox<float, 3> is not being vectorized, thus it does not need to be aligned");
-    using BoundingBox = Eigen::AlignedBox<float, 3>;
+    using BoundingAlignedBox3f = Eigen::AlignedBox<float, 3>;
     struct VolumeExtents {
         ObjectID             volume_id;
-        BoundingBox          bbox;
+        BoundingAlignedBox3f          bbox;
     };
 
     struct VolumeRegion
@@ -242,7 +244,7 @@ public:
         // Pointer to PrintObjectRegions::all_regions, null for a negative volume.
         PrintRegion         *region { nullptr };
         // Pointer to VolumeExtents::bbox.
-        const BoundingBox   *bbox { nullptr };
+        const BoundingAlignedBox3f   *bbox { nullptr };
         // To speed up merging of same regions.
         const VolumeRegion  *prev_same_region { nullptr };
     };
@@ -261,7 +263,7 @@ public:
     // possibly clipped by the layer_height_range.
     struct LayerRangeRegions
     {
-        t_layer_height_range        layer_height_range;
+        std::pair<coord_t, coord_t> layer_height_range_;
         // Config of the layer range, null if there is just a single range with no config override.
         // Config is owned by the associated ModelObject.
         const DynamicPrintConfig*   config { nullptr };
@@ -293,8 +295,6 @@ public:
 
     std::optional<GeneratedSupportPoints> generated_support_points;
 
-    void ref_cnt_inc() { ++ m_ref_cnt; }
-    void ref_cnt_dec() { if (-- m_ref_cnt == 0) delete this; }
     void clear() {
         all_regions.clear();
         layer_ranges.clear();
@@ -351,24 +351,26 @@ public:
     const Layer* 	get_layer(int idx) const { return m_layers[idx]; }
     Layer* 			get_layer(int idx) 		 { return m_layers[idx]; }
     // Get a layer exactly at print_z.
-    const Layer*	get_layer_at_printz(coordf_t print_z) const;
-    Layer*			get_layer_at_printz(coordf_t print_z);
+    const Layer*    get_layer_at_printz(coord_t print_z) const;
+    Layer*          get_layer_at_printz(coord_t print_z);
     // Get a layer approximately at print_z.
-    const Layer*	get_layer_at_printz(coordf_t print_z, coordf_t epsilon) const;
-    Layer*			get_layer_at_printz(coordf_t print_z, coordf_t epsilon);
+    const Layer*    get_layer_at_printz(double print_z, double epsilon) const;
+    Layer*          get_layer_at_printz(double print_z, double epsilon);
     // Get the first layer approximately bellow print_z.
-    const Layer*	get_first_layer_bellow_printz(coordf_t print_z, coordf_t epsilon) const;
+    const Layer*    get_first_layer_below_printz(coord_t print_z) const;
+    const Layer*    get_first_layer_below_printz(double print_z, double epsilon) const;
     // For sparse infill, get the max spasing avaialable in this object (avaialable after prepare_infill)
     coord_t         get_sparse_max_spacing() const { return m_max_sparse_spacing; }
 
     // print_z: top of the layer; slice_z: center of the layer.
-    Layer*          add_layer(int id, coordf_t height, coordf_t print_z, coordf_t slice_z);
+    // Deprecated: not used
+    //Layer*          add_layer(int id, coord_t height, coord_t print_z, double slice_z);
 
     size_t          support_layer_count() const { return m_support_layers.size(); }
     void            clear_support_layers();
     const SupportLayer*   get_support_layer(int idx) { return m_support_layers[idx]; }
-    void            add_support_layer(int id, int interface_id, coordf_t height, coordf_t print_z);
-    SupportLayerPtrs::iterator insert_support_layer(SupportLayerPtrs::const_iterator pos, size_t id, size_t interface_id, coordf_t height, coordf_t print_z, coordf_t slice_z);
+    void            add_support_layer(int id, int interface_id, coord_t height, coord_t print_z);
+    SupportLayerPtrs::iterator insert_support_layer(SupportLayerPtrs::const_iterator pos, size_t id, size_t interface_id, coord_t height, coord_t print_z, double slice_z);
     //void            delete_support_layer(int idx);
     
     // Initialize the layer_height_profile from the model_object's layer_height_profile, from model_object's layer height table, or from slicing parameters.
@@ -382,11 +384,11 @@ public:
     const SlicingParameters&                    slicing_parameters() const { return *m_slicing_params; }
     static std::shared_ptr<SlicingParameters>   slicing_parameters(const DynamicPrintConfig &full_config, const ModelObject &model_object, float object_max_z);
 
-    size_t                      num_printing_regions() const throw() { assert(m_shared_regions); return m_shared_regions->all_regions.size(); }
-    const PrintRegion&          printing_region(size_t idx) const throw() { assert(m_shared_regions); return *m_shared_regions->all_regions[idx].get(); }
+    size_t                      num_printing_regions()  const throw() { assert(m_shared_regions); return m_shared_regions->all_regions.size(); }
+    const PrintRegion&          printing_region(size_t idx) const throw() { assert(m_shared_regions); return *(m_shared_regions->all_regions[idx].get()); }
     //FIXME returing all possible regions before slicing, thus some of the regions may not be slicing at the end.
     std::vector<std::reference_wrapper<const PrintRegion>> all_regions() const;
-    const PrintObjectRegions*   shared_regions() const throw() { return m_shared_regions; }
+    const PrintObjectRegions*   shared_regions()        const throw() { assert(m_shared_regions); return m_shared_regions.get(); }
 
     bool                        has_support()           const { return m_config.support_material || m_config.support_material_enforce_layers > 0; }
     bool                        has_raft()              const { return m_config.raft_layers > 0; }
@@ -421,8 +423,6 @@ protected:
 
 	PrintObject(Print* print, ModelObject* model_object, const Transform3d& trafo, PrintInstances&& instances);
     ~PrintObject() override {
-        if (m_shared_regions && --m_shared_regions->m_ref_cnt == 0)
-            delete m_shared_regions;
         clear_layers();
         clear_support_layers();
     }
@@ -478,7 +478,7 @@ private:
     void _generate_support_material();
     void _compute_max_sparse_spacing();
     std::pair<FillAdaptive::OctreePtr, FillAdaptive::OctreePtr> prepare_adaptive_infill_data(
-        const std::vector<std::pair<const Surface*, float>>& surfaces_w_bottom_z) const;
+        const std::vector<std::pair<const Surface*, coord_t>>& surfaces_w_bottom_z) const;
     FillLightning::GeneratorPtr prepare_lightning_infill_data();
 
     // XYZ in scaled coordinates
@@ -494,7 +494,7 @@ private:
 
     // Object split into layer ranges and regions with their associated configurations.
     // Shared among PrintObjects created for the same ModelObject.
-    PrintObjectRegions                     *m_shared_regions { nullptr };
+    std::shared_ptr<PrintObjectRegions>     m_shared_regions;
 
     std::shared_ptr<SlicingParameters>      m_slicing_params;
     LayerPtrs                               m_layers;
@@ -508,7 +508,7 @@ private:
 
     // this is set to true when LayerRegion->slices is split in top/internal/bottom
     // so that next call to make_perimeters() performs a union() before computing loops
-    bool                    				m_typed_slices = false;
+    bool                                  m_typed_slices = false;
 
     //this setting allow fill_aligned_z to get the max sparse spacing spacing.
     coord_t                                 m_max_sparse_spacing = 0;
@@ -526,7 +526,7 @@ struct WipeTowerData
     // Following section will be consumed by the GCodeGenerator.
     // Tool ordering of a non-sequential print has to be known to calculate the wipe tower.
     // Cache it here, so it does not need to be recalculated during the G-code generation.
-    ToolOrdering                                         &tool_ordering;
+    Print                                                *print;
     // Cache of tool changes per print layer.
     std::unique_ptr<std::vector<WipeTower::ToolChangeResult>> priming;
     std::vector<std::vector<WipeTower::ToolChangeResult>> tool_changes;
@@ -568,7 +568,7 @@ private:
 	// Only allow the WipeTowerData to be instantiated internally by Print, 
 	// as this WipeTowerData shares reference to Print::m_tool_ordering.
 	friend class Print;
-	WipeTowerData(ToolOrdering &tool_ordering) : tool_ordering(tool_ordering) { clear(); }
+	WipeTowerData(Print *print) : print(print) { clear(); }
 	WipeTowerData(const WipeTowerData & /* rhs */) = delete;
 	WipeTowerData &operator=(const WipeTowerData & /* rhs */) = delete;
 };
@@ -594,7 +594,7 @@ struct PrintStatistics
     std::string                     initial_filament_type;
     std::string                     printing_filament_types;
     std::map<size_t, double>        filament_stats; // extruder id -> volume in mm3
-    std::vector<std::pair<double, float>> layer_area_stats; // print_z to area
+    std::vector<std::pair<coord_t, float>> _layer_area_stats; // print_z to area
 
     std::atomic_bool is_computing_gcode;
 
@@ -678,9 +678,9 @@ public:
         m_default_object_config.parent = &m_config;
         m_default_region_config.parent = &m_default_object_config;
     };
-	virtual ~Print() { this->clear(); }
+    virtual ~Print() { this->clear(); }
 
-	PrinterTechnology	technology() const noexcept override { return ptFFF; }
+    PrinterTechnology	technology() const noexcept override { return ptFFF; }
 
     // Methods, which change the state of Print / PrintObject / PrintRegion.
     // The following methods are synchronized with process() and export_gcode(),
@@ -717,16 +717,16 @@ public:
     std::pair<PrintValidationError, std::string> validate(std::vector<std::string>* warnings = nullptr) const override;
     Flow                brim_flow(size_t extruder_id, const PrintObjectConfig &brim_config) const;
     Flow                skirt_flow(size_t extruder_id, bool first_layer=false) const;
-    double              get_min_first_layer_height() const;
-    double              get_object_first_layer_height(const PrintObject& object) const;
+    coord_t             get_min_first_layer_height() const;
+    coord_t             get_object_first_layer_height(const PrintObject& object) const;
 
     // get the extruders of these obejcts
-    std::set<uint16_t>  object_extruders(const PrintObjectPtrs &objects, float z = -1) const;
+    std::set<uint16_t>  object_extruders(const PrintObjectPtrs &objects, coord_t z = -1) const;
     // get all extruders from the list of objects in this print ( same as print.object_extruders(print.objects()) )
-    std::set<uint16_t>  object_extruders(float z = -1) const;
-    std::set<uint16_t>  support_material_extruders(float z = -1) const;
+    std::set<uint16_t>  object_extruders(coord_t z = -1) const;
+    std::set<uint16_t>  support_material_extruders(coord_t z = -1) const;
     // all extruder to print layers that extrude at this z.
-    std::set<uint16_t>  extruders(float z = -1) const;
+    std::set<uint16_t>  extruders(coord_t z = -1) const;
     double              max_allowed_layer_height() const;
     bool                has_support_material() const;
     // Make sure the background processing has no access to this model_object during this call!
@@ -753,6 +753,12 @@ public:
     // How many of PrintObject::copies() over all print objects are there?
     // If zero, then the print is empty and the print shall not be executed.
     uint16_t                    num_object_instances() const;
+    // Sort the PrintObjects by their increasing Z, likely useful for avoiding colisions on Deltas during sequential prints.
+    std::vector<const PrintInstance*> sort_object_instances_by_max_z() const;
+    // Sort the PrintObjects by their increasing Y, likely useful for avoiding colisions on printer with a x-bar during sequential prints.
+    std::vector<const PrintInstance*> sort_object_instances_by_max_y() const;
+    // Produce a vector of PrintObjects in the order of their respective ModelObjects in print.model().
+    std::vector<const PrintInstance*> sort_object_instances_by_model_order() const;
 
     const std::optional<ExtrusionEntityCollection>& skirt_first_layer() const { return m_skirt_first_layer; }
 
@@ -773,13 +779,13 @@ public:
     bool                        has_wipe_tower() const;
     const WipeTowerData&        wipe_tower_data(const ConfigBase* config, double nozzle_diameter) const;
     const WipeTowerData&        wipe_tower_data() const { return wipe_tower_data(&this->m_config,0); }
-    const ToolOrdering& 		tool_ordering() const { return m_tool_ordering; }
+    const WipeTower2*           wipe_tower2() const { return m_wipe_tower2.get(); }
+    const std::vector<ToolOrdering> &tool_orderings() const { return m_tool_orderings; }
 
-	std::string                 output_filename(const std::string &filename_base = std::string()) const override;
+    std::string                 output_filename(const std::string &filename_base = std::string()) const override;
 
     size_t                      num_print_regions() const throw() { return m_print_regions.size(); }
     const PrintRegion&          get_print_region(size_t idx) const  { return *m_print_regions[idx]; }
-    const ToolOrdering&         get_tool_ordering() const { return m_wipe_tower_data.tool_ordering; }
 
     const Polygons& get_sequential_print_clearance_contours() const { return m_sequential_print_clearance_contours; }
 //TODO: decide to use this one or the printconfig one.
@@ -852,8 +858,9 @@ private:
     Points                                  m_skirt_convex_hull;
 
     // Following section will be consumed by the GCodeGenerator.
-    ToolOrdering 							m_tool_ordering;
-    WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+    std::vector<ToolOrdering>               m_tool_orderings;
+    WipeTowerData                           m_wipe_tower_data {this};
+    std::unique_ptr<WipeTower2>             m_wipe_tower2;
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

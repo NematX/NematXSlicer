@@ -16,11 +16,11 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
     if (!path.role().is_overhang()) {
         return { path };
     } else {
-        assert(path.attributes().overhang_attributes);
-        if (path.attributes().overhang_attributes->start_distance_from_prev_layer != 0) {
+        assert(path.overhang_attributes());
+        if (path.overhang_attributes()->start_distance_from_prev_layer != 0) {
             // not inside the dynamic range
-            assert(path.attributes().overhang_attributes->start_distance_from_prev_layer == 1 ||
-                   path.attributes().overhang_attributes->start_distance_from_prev_layer == 2);
+            assert(path.overhang_attributes()->start_distance_from_prev_layer == 1 ||
+                   path.overhang_attributes()->start_distance_from_prev_layer == 2);
             return { path };
         }
     }
@@ -90,18 +90,17 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
     };
 
     ExtrusionPaths      result;
-    ExtrusionAttributes new_attrs = path.attributes();
-    new_attrs.overhang_attributes = std::optional<OverhangAttributes>(
-        {set_between_0_and_1(calculated_distances[0].first), 
-        set_between_0_and_1(calculated_distances[0].first), 
-        calculated_distances[0].second});
-    result.emplace_back(new_attrs);
+    result.emplace_back(path.attributes());
+    ExtrusionPropertyOverhang overhang_attributes(set_between_0_and_1(calculated_distances[0].first),
+                                                            set_between_0_and_1(calculated_distances[0].first),
+                                                            calculated_distances[0].second);
+    result.back().overhang_attributes_mutable() = overhang_attributes;
     result.back().polyline.append(Point::new_scale(extended_points[0].position));
     size_t sequence_start_index = 0;
     for (size_t i = 1; i < extended_points.size(); i++) {
         if (!result.back().polyline.back().coincides_with_epsilon(Point::new_scale(extended_points[i].position))) {
             result.back().polyline.append(Point::new_scale(extended_points[i].position));
-            result.back().overhang_attributes_mutable()->end_distance_from_prev_layer =  set_between_0_and_1(extended_points[i].distance);
+            result.back().overhang_attributes_mutable().end_distance_from_prev_layer =  set_between_0_and_1(extended_points[i].distance);
         }
         if (std::abs(calculated_distances[sequence_start_index].first - calculated_distances[i].first) < 0.001 * max_width &&
             std::abs(calculated_distances[sequence_start_index].second - calculated_distances[i].second) < 0.001) {
@@ -111,13 +110,14 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
         } else if (i + 1 < extended_points.size()) { // do not start new path if this is last point!
             // start new path, parameters differ
             //set all between 0 and 1
-            new_attrs.overhang_attributes->start_distance_from_prev_layer = set_between_0_and_1(calculated_distances[i].first);
-            new_attrs.overhang_attributes->end_distance_from_prev_layer   = set_between_0_and_1(calculated_distances[i].first);
+            overhang_attributes.start_distance_from_prev_layer = set_between_0_and_1(calculated_distances[i].first);
+            overhang_attributes.end_distance_from_prev_layer   = set_between_0_and_1(calculated_distances[i].first);
             //already between 0 and 1
-            new_attrs.overhang_attributes->proximity_to_curled_lines      = calculated_distances[i].second;
+            overhang_attributes.proximity_to_curled_lines      = calculated_distances[i].second;
             sequence_start_index                                          = i;
             if (result.back().size() > 1) {
-                result.emplace_back(new_attrs);
+                result.emplace_back(path.attributes());
+                result.back().overhang_attributes_mutable() = overhang_attributes;
                 result.back().polyline.append(Point::new_scale(extended_points[i].position));
             } else {
                 assert(result.back().size() == 1);
@@ -133,16 +133,16 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
     //remove overhang role, as it prevents placing seams on it.
     for (ExtrusionPath &res_path : result) {
         assert(res_path.role().is_overhang());
-        assert(res_path.attributes().overhang_attributes);
+        assert(res_path.overhang_attributes());
         res_path.attributes_mutable().role = (res_path.role() & ExtrusionRoleModifier(~ExtrusionRoleModifier::ERM_Bridge));
         assert(res_path.role() == ExtrusionRole::Perimeter || res_path.role() == ExtrusionRole::ExternalPerimeter);
     }
 #ifdef _DEBUG
     for (auto &path : result) {
-        assert(path.attributes().overhang_attributes.has_value());
-        assert((path.attributes().overhang_attributes->start_distance_from_prev_layer >= 0 &&
-               path.attributes().overhang_attributes->start_distance_from_prev_layer <= 1) ||
-               path.attributes().overhang_attributes->end_distance_from_prev_layer == 2);
+        assert(path.overhang_attributes());
+        assert((path.overhang_attributes()->start_distance_from_prev_layer >= 0 &&
+               path.overhang_attributes()->start_distance_from_prev_layer <= 1) ||
+               path.overhang_attributes()->end_distance_from_prev_layer == 2);
     }
     assert(is_approx(result.front().first_point(), path.first_point()));
     assert(is_approx(result.back().last_point(), path.last_point()));
@@ -221,12 +221,13 @@ ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(const Extru
 };
 
 
-std::pair<float,float> calculate_overhang_speed(const ExtrusionAttributes &attributes,
+std::pair<float,float> calculate_overhang_speed(const ExtrusionPath &path,
                               const FullPrintConfig     &config,
                               size_t                     extruder_id)
 {
-    assert(attributes.overhang_attributes.has_value());
-    if(!attributes.overhang_attributes.has_value())
+    const ExtrusionPropertyOverhang *overhang_attributes = path.overhang_attributes();
+    assert(overhang_attributes);
+    if(!overhang_attributes)
         return {-1, -1};
     float speed_ratio = 0; // 0: overhangs speed, 1= periemter/externalperiemter speed.
     float fan_speed = -1;
@@ -245,19 +246,19 @@ std::pair<float,float> calculate_overhang_speed(const ExtrusionAttributes &attri
         graph.graph_points[graph.begin_idx].x() = 0;
         graph.graph_points[graph.end_idx - 1].y() = 100;
         //interpolate
-        assert((attributes.overhang_attributes->start_distance_from_prev_layer >= 0 &&
-                attributes.overhang_attributes->start_distance_from_prev_layer <= 1) ||
-               attributes.overhang_attributes->start_distance_from_prev_layer == 2);
-        assert((attributes.overhang_attributes->end_distance_from_prev_layer >= 0 &&
-                attributes.overhang_attributes->end_distance_from_prev_layer <= 1) ||
-               attributes.overhang_attributes->end_distance_from_prev_layer == 2);
+        assert((overhang_attributes->start_distance_from_prev_layer >= 0 &&
+                overhang_attributes->start_distance_from_prev_layer <= 1) ||
+               overhang_attributes->start_distance_from_prev_layer == 2);
+        assert((overhang_attributes->end_distance_from_prev_layer >= 0 &&
+                overhang_attributes->end_distance_from_prev_layer <= 1) ||
+               overhang_attributes->end_distance_from_prev_layer == 2);
         float extrusion_ratio   = std::min(
-                     graph.interpolate(100 - 100 * std::min(1.f, attributes.overhang_attributes->start_distance_from_prev_layer)),
-                     graph.interpolate(100 - 100 * std::min(1.f, attributes.overhang_attributes->end_distance_from_prev_layer)));
-        assert(attributes.width * attributes.overhang_attributes->proximity_to_curled_lines >= 0 &&
-               attributes.width * attributes.overhang_attributes->proximity_to_curled_lines <= 1);
-        float curled_extrusion_ratio = graph.interpolate(100 - 100 * attributes.overhang_attributes->proximity_to_curled_lines);
-        //float curled_base_speed = interpolate_speed(speed_sections, attributes.width * attributes.overhang_attributes->proximity_to_curled_lines);
+                     graph.interpolate(100 - 100 * std::min(1.f, overhang_attributes->start_distance_from_prev_layer)),
+                     graph.interpolate(100 - 100 * std::min(1.f, overhang_attributes->end_distance_from_prev_layer)));
+        assert(path.width() * overhang_attributes->proximity_to_curled_lines >= 0 &&
+               path.width() * overhang_attributes->proximity_to_curled_lines <= 1);
+        float curled_extrusion_ratio = graph.interpolate(100 - 100 * overhang_attributes->proximity_to_curled_lines);
+        //float curled_base_speed = interpolate_speed(speed_sections, attributes.width * overhang_attributes->proximity_to_curled_lines);
         speed_ratio       = std::min(extrusion_ratio, curled_extrusion_ratio) / 100.0;
         assert(speed_ratio >= 0 && speed_ratio <= 1);
         //overhangs_with_speeds = {{0, config.overhang_speed_0},
@@ -269,21 +270,21 @@ std::pair<float,float> calculate_overhang_speed(const ExtrusionAttributes &attri
 
     std::vector<std::pair<int, ConfigOptionInts>> overhang_with_fan_speeds = {{100, ConfigOptionInts{0}}};
     if (config.overhangs_dynamic_fan_speed.is_enabled(extruder_id) &&
-        attributes.overhang_attributes->start_distance_from_prev_layer > 0 &&
-        attributes.overhang_attributes->end_distance_from_prev_layer > 0) {
+        overhang_attributes->start_distance_from_prev_layer > 0 &&
+        overhang_attributes->end_distance_from_prev_layer > 0) {
         GraphData graph = config.overhangs_dynamic_fan_speed.get_at(extruder_id);
         //interpolate
-        assert((attributes.overhang_attributes->start_distance_from_prev_layer >= 0 &&
-                attributes.overhang_attributes->start_distance_from_prev_layer <= 1) ||
-               attributes.overhang_attributes->start_distance_from_prev_layer == 2);
-        assert((attributes.overhang_attributes->end_distance_from_prev_layer >= 0 &&
-                attributes.overhang_attributes->end_distance_from_prev_layer <= 1) ||
-               attributes.overhang_attributes->end_distance_from_prev_layer == 2);
+        assert((overhang_attributes->start_distance_from_prev_layer >= 0 &&
+                overhang_attributes->start_distance_from_prev_layer <= 1) ||
+               overhang_attributes->start_distance_from_prev_layer == 2);
+        assert((overhang_attributes->end_distance_from_prev_layer >= 0 &&
+                overhang_attributes->end_distance_from_prev_layer <= 1) ||
+               overhang_attributes->end_distance_from_prev_layer == 2);
         fan_speed = std::min(
-                     graph.interpolate(100 - 100 * std::min(1.f, attributes.overhang_attributes->start_distance_from_prev_layer)),
-                     graph.interpolate(100 - 100 * std::min(1.f, attributes.overhang_attributes->end_distance_from_prev_layer)));
-        //float fan_speed = std::min(interpolate_speed(fan_speed_sections, attributes.overhang_attributes->start_distance_from_prev_layer),
-        //                       interpolate_speed(fan_speed_sections, attributes.overhang_attributes->end_distance_from_prev_layer));
+                     graph.interpolate(100 - 100 * std::min(1.f, overhang_attributes->start_distance_from_prev_layer)),
+                     graph.interpolate(100 - 100 * std::min(1.f, overhang_attributes->end_distance_from_prev_layer)));
+        //float fan_speed = std::min(interpolate_speed(fan_speed_sections, overhang_attributes->start_distance_from_prev_layer),
+        //                       interpolate_speed(fan_speed_sections, overhang_attributes->end_distance_from_prev_layer));
         assert(fan_speed >= 0 && fan_speed <= 100);
         //overhangs_with_speeds = {{0, config.overhang_speed_0},
         //                         {25, config.overhang_speed_1},
@@ -329,8 +330,8 @@ std::pair<float,float> calculate_overhang_speed(const ExtrusionAttributes &attri
     //    return (1.0f - t) * lower_dist->second + t * upper_dist->second;
     //};
 
-    //float fan_speed = std::min(interpolate_speed(fan_speed_sections, attributes.overhang_attributes->start_distance_from_prev_layer),
-    //                           interpolate_speed(fan_speed_sections, attributes.overhang_attributes->end_distance_from_prev_layer));
+    //float fan_speed = std::min(interpolate_speed(fan_speed_sections, overhang_attributes->start_distance_from_prev_layer),
+    //                           interpolate_speed(fan_speed_sections, overhang_attributes->end_distance_from_prev_layer));
 
     //if (!config.enable_dynamic_overhang_speeds) {
     //    final_speed = -1;

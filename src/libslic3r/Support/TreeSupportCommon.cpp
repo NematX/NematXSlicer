@@ -34,10 +34,10 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
         external_perimeter_width = std::max<double>(external_perimeter_width, region.flow(print_object, frExternalPerimeter, layer_height_mm, 2 /*not first layer, even layer*/).width());
     }
     
-    this->layer_height              = scale_t(layer_height_mm);
-    this->resolution                = scale_t(print_config.resolution_internal.value);
+    this->layer_height              = Layer::scale_to_layer_coord(layer_height_mm);
+    this->resolution                = Layer::scale_to_layer_coord(print_config.resolution_internal.value);
     // Arache feature <- why? it's not even editable when the organic support are activated! And it doesn't take into account the %! I'll fix it to 25% of external_perimeter_width. 
-    this->min_feature_size          = scale_t(external_perimeter_width * 0.25); //config.min_feature_size.value);
+    this->min_feature_size          = Layer::scale_to_layer_coord(external_perimeter_width * 0.25); //config.min_feature_size.value);
     // +1 makes the threshold inclusive
     this->support_angle             = 0.5 * M_PI - std::clamp<double>((config.support_material_threshold + 1) * M_PI / 180., 0., 0.5 * M_PI);
     this->support_line_width        = support_material_flow(&print_object, layer_height_mm).scaled_width();
@@ -67,8 +67,8 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
         //get one region, with organic support there is only one layer height anyway
         assert(print_object.num_printing_regions() > 0);
         const LayerRegion *lr = print_object.layers().front()->regions().front();
-        assert(is_approx(lr->layer()->height, layer_height_mm, EPSILON) || lr->layer()->id() == 0);
-        coord_t diff_lh_filamenth = scale_t(lr->bridging_height_avg()) - this->layer_height;
+        assert(is_approx(lr->layer()->unscaled_height(), layer_height_mm, EPSILON) || lr->layer()->id() == 0);
+        coord_t diff_lh_filamenth = Layer::scale_to_layer_coord(lr->bridging_height_avg_mm()) - this->layer_height;
         this->support_top_distance += diff_lh_filamenth;
         this->support_bottom_distance += diff_lh_filamenth;
     }
@@ -87,22 +87,22 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
 //    this->support_roof_angles       = 
     this->support_roof_pattern      = config.support_material_top_interface_pattern.value;
     this->support_pattern           = config.support_material_pattern;
-    this->support_line_spacing      = scaled<coord_t>(config.support_material_spacing.value);
+    this->support_line_spacing      = scale_t(config.support_material_spacing.value);
 //    this->support_bottom_offset     = 
 //    this->support_wall_count        = config.support_material_with_sheath ? 1 : 0;
     this->support_wall_count        = 1;
-    this->support_roof_line_distance = scaled<coord_t>(config.support_material_interface_spacing.value) + this->support_roof_line_width;
+    this->support_roof_line_distance = scale_t(config.support_material_interface_spacing.value) + this->support_roof_line_width;
 //    this->minimum_support_area      = 
 //    this->minimum_bottom_area       = 
 //    this->support_offset            = 
-    this->support_tree_branch_distance = scaled<coord_t>(config.support_tree_branch_distance.value);
+    this->support_tree_branch_distance = scale_t(config.support_tree_branch_distance.value);
     this->support_tree_angle          = std::clamp<double>(config.support_tree_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
     this->support_tree_angle_slow     = std::clamp<double>(config.support_tree_angle_slow * M_PI / 180., 0., this->support_tree_angle - EPSILON);
-    this->support_tree_branch_diameter = scaled<coord_t>(config.support_tree_branch_diameter.value);
+    this->support_tree_branch_diameter = scale_t(config.support_tree_branch_diameter.value);
     this->support_tree_branch_diameter_angle = std::clamp<double>(config.support_tree_branch_diameter_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
     this->support_tree_top_rate       = config.support_tree_top_rate.value; // percent
 //    this->support_tree_tip_diameter = this->support_line_width;
-    this->support_tree_tip_diameter = std::clamp(scaled<coord_t>(config.support_tree_tip_diameter.value), coord_t(0), this->support_tree_branch_diameter);
+    this->support_tree_tip_diameter = std::clamp(scale_t(config.support_tree_tip_diameter.value), coord_t(0), this->support_tree_branch_diameter);
 }
 
 TreeSupportSettings::TreeSupportSettings(const TreeSupportMeshGroupSettings &mesh_group_settings, const SlicingParameters &slicing_params)
@@ -150,7 +150,7 @@ TreeSupportSettings::TreeSupportSettings(const TreeSupportMeshGroupSettings &mes
         // safeOffsetInc can only work in steps of the size xy_min_distance in the worst case => xy_min_distance has to be a bit larger than 0 in this worst case and should be large enough for performance to not suffer extremely
         // When for all meshes the z bottom and top distance is more than one layer though the worst case is xy_min_distance + min_feature_size
         // This is not the best solution, but the only one to ensure areas can not lag though walls at high maximum_move_distance.
-        xy_min_distance = std::max(xy_min_distance, scaled<coord_t>(0.1));
+        xy_min_distance = std::max(xy_min_distance, scale_t(0.1));
         xy_distance     = std::max(xy_distance, xy_min_distance);
     }
 

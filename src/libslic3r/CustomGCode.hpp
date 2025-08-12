@@ -9,6 +9,8 @@
 #include <vector>
 #include <cstdint>
 
+#include "libslic3r.h"
+
 namespace Slic3r {
 
 class DynamicPrintConfig;
@@ -26,18 +28,18 @@ enum Type
 
 struct Item
 {
-    bool operator<(const Item& rhs) const { return this->print_z < rhs.print_z; }
+    bool operator<(const Item& rhs) const { return this->print_z_ < rhs.print_z_; }
     bool operator==(const Item& rhs) const
     {
-        return (rhs.print_z     == this->print_z    ) &&
+        return (rhs.print_z_     == this->print_z_    ) &&
                (rhs.type        == this->type       ) &&
                (rhs.extruder    == this->extruder   ) &&
                (rhs.color       == this->color      ) &&
                (rhs.extra       == this->extra      );
     }
     bool operator!=(const Item& rhs) const { return ! (*this == rhs); }
-    
-    double      print_z;
+
+    coord_t     print_z_;
     Type        type;
     int         extruder;   // Informative value for ColorChangeCode and ToolChangeCode
                             // "gcode" == ColorChangeCode   => M600 will be applied for "extruder" extruder
@@ -90,11 +92,11 @@ extern void check_mode_for_custom_gcode_per_print_z(Info& info);
 
 // Return pairs of <print_z, 1-based extruder ID> sorted by increasing print_z from custom_gcode_per_print_z.
 // print_z corresponds to the first layer printed with the new extruder.
-std::vector<std::pair<double, uint16_t>> custom_tool_changes(const Info& custom_gcode_per_print_z, size_t num_extruders);
+std::vector<std::pair<coord_t, uint16_t>> custom_tool_changes(const Info& custom_gcode_per_print_z, size_t num_extruders);
 
 // Return pairs of <print_z, 1-based extruder ID> sorted by increasing print_z from custom_gcode_per_print_z.
 // Where print_z corresponds to the layer on which we perform a color change for the specified extruder.
-std::vector<std::pair<double, uint16_t>> custom_color_changes(const Info& custom_gcode_per_print_z, size_t num_extruders);
+std::vector<std::pair<coord_t, uint16_t>> custom_color_changes(const Info& custom_gcode_per_print_z, size_t num_extruders);
 
 } // namespace CustomGCode
 

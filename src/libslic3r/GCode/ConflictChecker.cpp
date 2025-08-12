@@ -259,12 +259,18 @@ void getExtrusionPathsFromEntity(const ExtrusionEntityCollection *entity, Extrus
     getExtrusionPathImpl(entity, paths);
 }
 
-ExtrusionPaths getExtrusionPathsFromLayer(LayerRegionPtrs layerRegionPtrs)
+ExtrusionPaths getExtrusionPathsFromLayer(const std::vector<LayerSliceIslandPtr> &layer_islands)
 {
     ExtrusionPaths paths;
-    for (auto regionPtr : layerRegionPtrs) {
-        getExtrusionPathsFromEntity(&regionPtr->perimeters(), paths);
-        if (!regionPtr->perimeters().empty()) { getExtrusionPathsFromEntity(&regionPtr->fills(), paths); }
+    for (const LayerSliceIslandPtr &layer_island_ptr : layer_islands) {
+        for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+            if (region_island_ptr->has_extrusion(LayerRegionIsland::PERIMETERS)) {
+                getExtrusionPathsFromEntity(&region_island_ptr->extrusion(LayerRegionIsland::PERIMETERS), paths);
+                if (region_island_ptr->has_extrusion(LayerRegionIsland::INFILLS)) {
+                    getExtrusionPathsFromEntity(&region_island_ptr->extrusion(LayerRegionIsland::INFILLS), paths);
+                }
+            }
+        }
     }
     return paths;
 }
@@ -280,7 +286,7 @@ std::pair<std::vector<ExtrusionPaths>, std::vector<ExtrusionPaths>> getAllLayers
 {
     std::vector<ExtrusionPaths> objPaths, supportPaths;
 
-    for (auto layerPtr : obj->layers()) { objPaths.push_back(getExtrusionPathsFromLayer(layerPtr->regions())); }
+    for (auto layerPtr : obj->layers()) { objPaths.push_back(getExtrusionPathsFromLayer(layerPtr->islands())); }
 
     for (auto supportLayerPtr : obj->support_layers()) { supportPaths.push_back(getExtrusionPathsFromSupportLayer(supportLayerPtr)); }
 

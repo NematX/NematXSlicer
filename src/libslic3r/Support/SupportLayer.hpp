@@ -49,17 +49,17 @@ public:
 	}
 
 	bool operator==(const SupportGeneratorLayer &layer2) const {
-		return print_z == layer2.print_z && height == layer2.height && bridging == layer2.bridging;
+		return m_print_z == layer2.m_print_z && m_height == layer2.m_height && bridging == layer2.bridging;
 	}
 
 	// Order the layers by lexicographically by an increasing print_z and a decreasing layer height.
 	bool operator<(const SupportGeneratorLayer &layer2) const {
-		if (print_z < layer2.print_z) {
+		if (m_print_z < layer2.m_print_z) {
 			return true;
-		} else if (print_z == layer2.print_z) {
-		 	if (height > layer2.height)
+		} else if (m_print_z == layer2.m_print_z) {
+		 	if (m_height > layer2.m_height)
 		 		return true;
-		 	else if (height == layer2.height) {
+		 	else if (m_height == layer2.m_height) {
 		 		// Bridging layers first.
 		 	 	return bridging && ! layer2.bridging;
 		 	} else
@@ -85,21 +85,40 @@ public:
 
 	// For the bridging flow, bottom_print_z will be above bottom_z to account for the vertical separation.
 	// For the non-bridging flow, bottom_print_z will be equal to bottom_z.
-	coordf_t bottom_print_z() const { return print_z - height; }
+	coord_t scaled_bottom_print_z() const { return m_print_z - m_height; }
+	double  unscaled_bottom_print_z() const { return unscaled(m_print_z - m_height); }
 
 	// To sort the extremes of top / bottom interface layers.
-	coordf_t extreme_z() const { return (this->layer_type == SupporLayerType::TopContact) ? this->bottom_z : this->print_z; }
+    coord_t scaled_extreme_z() const {
+        return (this->layer_type == SupporLayerType::TopContact) ? this->scaled_bottom_z() : this->scaled_print_z();
+    }
 
 	SupporLayerType layer_type { SupporLayerType::Unknown };
-	// Z used for printing, in unscaled coordinates.
-	coordf_t print_z { 0 };
-	// Bottom Z of this layer. For soluble layers, bottom_z + height = print_z,
-	// otherwise bottom_z + gap + height = print_z.
-	coordf_t bottom_z { 0 };
-	// Layer height in unscaled coordinates.
-	coordf_t height { 0 };
+
+protected:
+    // Z used for printing, in unscaled coordinates.
+    coord_t m_print_z{0};
+    // Bottom Z of this layer. For soluble layers, bottom_z + height = print_z,
+    // otherwise bottom_z + gap + height = print_z.
+    coord_t m_bottom_z{0};
+    // Layer height in unscaled coordinates.
+    coord_t m_height{0};
     // Layer height for collision in unscaled coordinates.
-    coordf_t height_block { 0 };
+    coord_t m_height_block { 0 };
+
+public:
+    coord_t scaled_print_z() const { return m_print_z; }
+    double  unscaled_print_z() const { return unscaled(m_print_z); }
+    void set_scaled_print_z(coord_t print_z) { m_print_z = print_z; }
+    coord_t scaled_bottom_z() const { return m_bottom_z; }
+    double  unscaled_bottom_z() const { return m_bottom_z; }
+    void set_scaled_bottom_z(coord_t bottom_z) { m_bottom_z = bottom_z; }
+    coord_t scaled_height() const { return m_height; }
+    double  unscaled_height() const { return unscaled(m_height); }
+    void set_scaled_height(coord_t height) { m_height = height; }
+    coord_t scaled_height_block() const { return m_height_block; }
+    double  unscaled_height_block() const { return unscaled(m_height_block); }
+    void set_scaled_height_block(coord_t height_block) { m_height_block = height_block; }
 	// Index of a PrintObject layer_id supported by this layer. This will be set for top contact layers.
 	// If this is not a contact layer, it will be set to size_t(-1).
 	size_t 	 idx_object_layer_above { size_t(-1) };

@@ -149,13 +149,19 @@ std::string Wipe::wipe(GCodeGenerator &gcodegen, bool toolchange)
         double wipe_length = wipe_total_length;
         /*const*/double lift_length = extruder.id() < 0 ? 0 : gcodegen.config().wipe_lift_length.get_abs_value(extruder.id(), wipe_length);
         lift_length = std::min(lift_length, wipe_total_length);
+        if (gcodegen.writer().get_lift() > 0) {
+            // already lifted? weird, but don't lift more.
+            assert(false);
+            lift_length = 0;
+        }
         double no_lift_length = wipe_total_length - lift_length;
         assert(no_lift_length >= 0);
-        const double lift = extruder.id() < 0 ? 0 : gcodegen.config().wipe_lift.get_abs_value(extruder.id(), gcodegen.layer()->height);
-        const double lift_per_mm = lift / lift_length;
+        const double lift_mm = extruder.id() < 0 ? 0 : gcodegen.config().wipe_lift.get_abs_value(extruder.id(), gcodegen.layer()->unscaled_height());
+        const double lift_per_mm = lift_mm / lift_length;
         const double initial_z = gcodegen.writer().get_position().z();
+        assert(gcodegen.current_z_layer() && gcodegen.current_z_layer()->scaled_print_z() == Layer::scale_to_layer_coord(initial_z));
         double current_z = initial_z;
-        const double final_z = gcodegen.writer().get_position().z() + lift;
+        const double final_z = initial_z + lift_mm;
         auto         wipe_linear = [&gcode, &gcodegen, &retract_length, &wipe_length, &no_lift_length, &current_z, xy_to_e, use_firmware_retract, lift_per_mm, final_z]
         (const Vec2d &prev_quantized, Vec2d &p, bool &done)->bool { //return false if point is used, true if need to be recalled again
             bool partial_segment = false;

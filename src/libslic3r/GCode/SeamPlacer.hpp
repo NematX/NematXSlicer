@@ -41,7 +41,7 @@ struct TriangleMeshForSeam
     TriangleMesh mesh;
     BoundingBoxf3 bb_volume;
     //std::vector<Vec3i32> face_edge_ids;
-    std::vector<float> zs;
+    std::vector<float> zs; //TODO convert from float into coord_t
     std::vector<BoundingBox> layers_bb;
     std::vector<Polygon> layers_contour;
 };

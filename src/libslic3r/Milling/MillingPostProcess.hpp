@@ -13,7 +13,7 @@ namespace Slic3r {
 class MillingPostProcess {
 public:
     // Inputs:
-    const SurfaceCollection     *slices;
+    const ExPolygons            *slices;
     const ExPolygons            *lower_slices;
     const PrintRegionConfig     &config;
     const PrintObjectConfig     &object_config;
@@ -21,7 +21,7 @@ public:
     
     MillingPostProcess(
         // Input:
-        const SurfaceCollection*    slices,
+        const ExPolygons*           slices,
         const ExPolygons*           lower_slices,
         const PrintRegionConfig&    config,
         const PrintObjectConfig&    object_config,

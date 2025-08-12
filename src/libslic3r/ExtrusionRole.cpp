@@ -20,8 +20,7 @@ GCodeExtrusionRole extrusion_role_to_gcode_extrusion_role(ExtrusionRole role)
     if (role == ExtrusionRole::None)                return GCodeExtrusionRole::None;
     if (role == ExtrusionRole::ExternalPerimeter)   return GCodeExtrusionRole::ExternalPerimeter;
     if (role == ExtrusionRole::Perimeter)           return GCodeExtrusionRole::Perimeter;
-    if (role == ExtrusionRole::OverhangExternalPerimeter) return GCodeExtrusionRole::OverhangPerimeter;
-    if (role == ExtrusionRole::OverhangPerimeter)   return GCodeExtrusionRole::OverhangPerimeter;
+    if (role.is_overhang())                         return GCodeExtrusionRole::OverhangPerimeter;
     if (role == ExtrusionRole::InternalInfill)      return GCodeExtrusionRole::InternalInfill;
     if (role == ExtrusionRole::SolidInfill)         return GCodeExtrusionRole::SolidInfill;
     if (role == ExtrusionRole::TopSolidInfill)      return GCodeExtrusionRole::TopSolidInfill;
@@ -33,7 +32,7 @@ GCodeExtrusionRole extrusion_role_to_gcode_extrusion_role(ExtrusionRole role)
     if (role == ExtrusionRole::Skirt)               return GCodeExtrusionRole::Skirt;
     if (role == ExtrusionRole::SupportMaterial)     return GCodeExtrusionRole::SupportMaterial;
     if (role == ExtrusionRole::SupportMaterialInterface) return GCodeExtrusionRole::SupportMaterialInterface;
-    if (role == ExtrusionRole::WipeTower)           return GCodeExtrusionRole::WipeTower;
+    if (role.is_wipetower())                        return GCodeExtrusionRole::WipeTower;
     if (role == ExtrusionRole::Milling)             return GCodeExtrusionRole::Milling;
     if (role == ExtrusionRole::Travel)             return GCodeExtrusionRole::Travel;
     assert(false);
@@ -145,7 +144,7 @@ std::string role_to_code(ExtrusionRole role)
         return L("Supp");
     else if (role == ExtrusionRole::SupportMaterialInterface)
         return L("SuppI");
-    else if (role == ExtrusionRole::WipeTower)
+    else if (role.is_wipetower())
         return L("WTower");
     else if (role == ExtrusionRole::Milling)
         return L("Mill");

@@ -711,7 +711,7 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
 
     // With MM setups like Prusa MMU2, the filaments may be expected to be parked at the beginning.
     // Remember the parking position so the initial load is not included in filament estimate.
-    if (m_single_extruder_multi_material && extruders_count > 1 && config.wipe_tower) {
+    if (m_single_extruder_multi_material && extruders_count > 1 /*&& config.wipe_tower*/) {
         m_parking_position = float(config.parking_pos_retraction.value);
         m_extra_loading_move = float(config.extra_loading_move);
     }
@@ -2289,7 +2289,7 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (m_extruder_id == extruder_id) {
             m_cp_color.current = m_extruder_colors[extruder_id];
             store_move_vertex(EMoveType::Color_change);
-            CustomGCode::Item item = { static_cast<double>(m_end_position[2]), CustomGCode::ColorChange, extruder_id + 1, color, "" };
+            CustomGCode::Item item = { Layer::scale_to_layer_coord(m_end_position[2]), CustomGCode::ColorChange, extruder_id + 1, color, "" };
             m_result.custom_gcode_per_print_z.emplace_back(item);
             m_options_z_corrector.set();
             process_custom_gcode_time(CustomGCode::ColorChange);
@@ -2302,7 +2302,7 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // pause print tag
     if (comment == reserved_tag(ETags::Pause_Print)) {
         store_move_vertex(EMoveType::Pause_Print);
-        CustomGCode::Item item = { static_cast<double>(m_end_position[2]), CustomGCode::PausePrint, m_extruder_id + 1, "", "" };
+        CustomGCode::Item item = { Layer::scale_to_layer_coord(m_end_position[2]), CustomGCode::PausePrint, m_extruder_id + 1, "", "" };
         m_result.custom_gcode_per_print_z.emplace_back(item);
         m_options_z_corrector.set();
         process_custom_gcode_time(CustomGCode::PausePrint);
@@ -2312,7 +2312,7 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // custom code tag
     if (comment == reserved_tag(ETags::Custom_Code)) {
         store_move_vertex(EMoveType::Custom_GCode);
-        CustomGCode::Item item = { static_cast<double>(m_end_position[2]), CustomGCode::Custom, m_extruder_id + 1, "", "" };
+        CustomGCode::Item item = { Layer::scale_to_layer_coord(m_end_position[2]), CustomGCode::Custom, m_extruder_id + 1, "", "" };
         m_result.custom_gcode_per_print_z.emplace_back(item);
         m_options_z_corrector.set();
         return;

@@ -263,52 +263,56 @@ class LayerRanges
 {
 public:
     struct LayerRange {
-        t_layer_height_range        layer_height_range;
+        std::pair<coord_t, coord_t> _layer_height_range;
         // Config is owned by the associated ModelObject.
         const DynamicPrintConfig*   config { nullptr };
 
-        bool operator<(const LayerRange &rhs) const throw() { return this->layer_height_range < rhs.layer_height_range; }
+        bool operator<(const LayerRange &rhs) const throw() { return this->_layer_height_range < rhs._layer_height_range; }
     };
 
     LayerRanges() = default;
-    LayerRanges(const t_layer_config_ranges &in) { this->assign(in); }
+    LayerRanges(const t_layer_config_ranges &in_mm) { this->assign(in_mm); }
 
     // Convert input config ranges into continuous non-overlapping sorted vector of intervals and their configs.
-    void assign(const t_layer_config_ranges &in) {
+    void assign(const t_layer_config_ranges &in_mm) {
         m_ranges.clear();
-        m_ranges.reserve(in.size());
+        m_ranges.reserve(in_mm.size());
         // Input ranges are sorted lexicographically. First range trims the other ranges.
-        coordf_t last_z = 0;
-        for (const std::pair<const t_layer_height_range, ModelConfig> &range : in)
+        coord_t last_z = 0;
+        for (const std::pair<const t_layer_height_range, ModelConfig> &range : in_mm)
             if (range.first.second > last_z) {
-                coordf_t min_z = std::max(range.first.first, 0.);
+                coord_t min_z = std::max(Layer::scale_to_layer_coord(range.first.first), coord_t(0));
                 if (min_z > last_z + EPSILON) {
-                    m_ranges.push_back({ t_layer_height_range(last_z, min_z) });
+                    m_ranges.push_back({ std::pair<coord_t, coord_t>(last_z, min_z) });
                     last_z = min_z;
                 }
-                if (range.first.second > last_z + EPSILON) {
+                if (Layer::scale_to_layer_coord(range.first.second) > last_z) {
                     const DynamicPrintConfig *cfg = &range.second.get();
-                    m_ranges.push_back({ t_layer_height_range(last_z, range.first.second), cfg });
-                    last_z = range.first.second;
+                    m_ranges.push_back({ std::pair<coord_t, coord_t>(last_z, Layer::scale_to_layer_coord(range.first.second)), cfg });
+                    last_z = Layer::scale_to_layer_coord(range.first.second);
                 }
             }
         if (m_ranges.empty())
-            m_ranges.push_back({ t_layer_height_range(0, DBL_MAX) });
+            m_ranges.push_back({ std::pair<coord_t, coord_t>(0, std::numeric_limits<coord_t>::max()) });
         else if (m_ranges.back().config == nullptr)
-            m_ranges.back().layer_height_range.second = DBL_MAX;
+            m_ranges.back()._layer_height_range.second = std::numeric_limits<coord_t>::max();
         else
-            m_ranges.push_back({ t_layer_height_range(m_ranges.back().layer_height_range.second, DBL_MAX) });
+            m_ranges.push_back({ std::pair<coord_t, coord_t>(m_ranges.back()._layer_height_range.second, std::numeric_limits<coord_t>::max()) });
     }
 
-    const DynamicPrintConfig* config(const t_layer_height_range &range) const {
-        auto it = std::lower_bound(m_ranges.begin(), m_ranges.end(), LayerRange{ { range.first - EPSILON, range.second - EPSILON } });
+    const DynamicPrintConfig* config(const t_layer_height_range &range_mm) const {
+        coord_t z_start = Layer::scale_to_layer_coord(range_mm.first);
+        coord_t z_end = Layer::scale_to_layer_coord(range_mm.second);
+        auto it = std::lower_bound(m_ranges.begin(), m_ranges.end(), LayerRange{ { z_start, z_end } });
+        auto it2 = std::lower_bound(m_ranges.begin(), m_ranges.end(), LayerRange{ { z_start - SCALED_EPSILON, z_end - SCALED_EPSILON } });
+        assert(it == it2);
         // #ys_FIXME_COLOR
         // assert(it != m_ranges.end());
-        // assert(it == m_ranges.end() || std::abs(it->first.first  - range.first ) < EPSILON);
-        // assert(it == m_ranges.end() || std::abs(it->first.second - range.second) < EPSILON);
+        // assert(it == m_ranges.end() || std::abs(it->first.first  - z_start ) < EPSILON);
+        // assert(it == m_ranges.end() || std::abs(it->first.second - z_end) < EPSILON);
         if (it == m_ranges.end() ||
-            std::abs(it->layer_height_range.first - range.first) > EPSILON ||
-            std::abs(it->layer_height_range.second - range.second) > EPSILON )
+            it->_layer_height_range.first != z_start ||
+            it->_layer_height_range.second != z_end)
             return nullptr; // desired range doesn't found
         return it == m_ranges.end() ? nullptr : it->config;
     }
@@ -340,7 +344,6 @@ struct ModelObjectStatus {
     };
 
     ModelObjectStatus(ObjectID id, Status status = Unknown) : id(id), status(status) {}
-    ~ModelObjectStatus() { if (print_object_regions) print_object_regions->ref_cnt_dec(); }
 
     // Key of the set.
     ObjectID                                    id;
@@ -349,7 +352,7 @@ struct ModelObjectStatus {
     // PrintObjects to be generated for this ModelObject including their base transformation.
     std::vector<PrintObjectTrafoAndInstances>   print_instances;
     // Regions shared by the associated PrintObjects.
-    PrintObjectRegions                         *print_object_regions { nullptr };
+    std::shared_ptr<PrintObjectRegions>         print_object_regions;
     // Status of the above.
     PrintObjectRegionsStatus                    print_object_regions_status { PrintObjectRegionsStatus::Invalid };
 
@@ -497,11 +500,11 @@ static inline bool trafos_differ_in_rotation_by_z_and_mirroring_by_xy_only(const
     return std::abs(d * d) < EPSILON * lx2 * ly2;
 }
 
-static PrintObjectRegions::BoundingBox transformed_its_bbox2d(const indexed_triangle_set &its, const Transform3f &m, float offset)
+static PrintObjectRegions::BoundingAlignedBox3f transformed_its_bbox2d(const indexed_triangle_set &its, const Transform3f &m, float offset)
 {
     assert(! its.indices.empty());
 
-    PrintObjectRegions::BoundingBox bbox(m * its.vertices[its.indices.front()(0)]);
+    PrintObjectRegions::BoundingAlignedBox3f bbox(m * its.vertices[its.indices.front()(0)]);
     for (const stl_triangle_vertex_indices &tri : its.indices)
         for (int i = 0; i < 3; ++ i)
             bbox.extend(m * its.vertices[tri(i)]);
@@ -514,15 +517,15 @@ static void transformed_its_bboxes_in_z_ranges(
     const indexed_triangle_set                                    &its, 
     const Transform3f                                             &m,
     const std::vector<t_layer_height_range>                       &z_ranges,
-    std::vector<std::pair<PrintObjectRegions::BoundingBox, bool>> &bboxes,
+    std::vector<std::pair<PrintObjectRegions::BoundingAlignedBox3f, bool>> &bboxes,
     const float                                                    offset)
 {
-    bboxes.assign(z_ranges.size(), std::make_pair(PrintObjectRegions::BoundingBox(), false));
+    bboxes.assign(z_ranges.size(), std::make_pair(PrintObjectRegions::BoundingAlignedBox3f(), false));
     for (const stl_triangle_vertex_indices &tri : its.indices) {
         const Vec3f pts[3] = { m * its.vertices[tri(0)], m * its.vertices[tri(1)], m * its.vertices[tri(2)] };
         for (size_t irange = 0; irange < z_ranges.size(); ++ irange) {
             const t_layer_height_range                       &z_range = z_ranges[irange];
-            std::pair<PrintObjectRegions::BoundingBox, bool> &bbox    = bboxes[irange];
+            std::pair<PrintObjectRegions::BoundingAlignedBox3f, bool> &bbox    = bboxes[irange];
             auto bbox_extend = [&bbox](const Vec3f& p) {
                 if (bbox.second) {
                     bbox.first.extend(p);
@@ -573,7 +576,7 @@ static void transformed_its_bboxes_in_z_ranges(
         }
     }
 
-    for (std::pair<PrintObjectRegions::BoundingBox, bool> &bbox : bboxes) {
+    for (std::pair<PrintObjectRegions::BoundingAlignedBox3f, bool> &bbox : bboxes) {
         bbox.first.min() -= Vec3f(offset, offset, float(EPSILON));
         bbox.first.max() += Vec3f(offset, offset, float(EPSILON));
     }
@@ -614,25 +617,25 @@ void print_objects_regions_invalidate_keep_some_volumes(PrintObjectRegions &prin
 
 // Find a bounding box of a volume's part intersecting layer_range. Such a bounding box will likely be smaller in XY than the full bounding box,
 // thus it will intersect with lower number of other volumes.
-const PrintObjectRegions::BoundingBox* find_volume_extents(const PrintObjectRegions::LayerRangeRegions &layer_range, const ModelVolume &volume)
+const PrintObjectRegions::BoundingAlignedBox3f* find_volume_extents(const PrintObjectRegions::LayerRangeRegions &layer_range, const ModelVolume &volume)
 {
     auto it = lower_bound_by_predicate(layer_range.volumes.begin(), layer_range.volumes.end(), [&volume](const PrintObjectRegions::VolumeExtents &l){ return l.volume_id < volume.id(); });
     return it != layer_range.volumes.end() && it->volume_id == volume.id() ? &it->bbox : nullptr;
 }
 
 // Find a bounding box of a topmost printable volume referenced by this modifier given this_region_id.
-PrintObjectRegions::BoundingBox find_modifier_volume_extents(const PrintObjectRegions::LayerRangeRegions &layer_range, const int this_region_id)
+PrintObjectRegions::BoundingAlignedBox3f find_modifier_volume_extents(const PrintObjectRegions::LayerRangeRegions &layer_range, const int this_region_id)
 {
     // Find the top-most printable volume of this modifier, or the printable volume itself.
     const PrintObjectRegions::VolumeRegion &this_region = layer_range.volume_regions[this_region_id];
-    const PrintObjectRegions::BoundingBox *this_extents = find_volume_extents(layer_range, *this_region.model_volume);
+    const PrintObjectRegions::BoundingAlignedBox3f *this_extents = find_volume_extents(layer_range, *this_region.model_volume);
     assert(this_extents);
-    PrintObjectRegions::BoundingBox out { *this_extents };
+    PrintObjectRegions::BoundingAlignedBox3f out { *this_extents };
     if (! this_region.model_volume->is_model_part())
         for (int parent_region_id = this_region.parent;;) {
             assert(parent_region_id >= 0);
             const PrintObjectRegions::VolumeRegion &parent_region  = layer_range.volume_regions[parent_region_id];
-            const PrintObjectRegions::BoundingBox  *parent_extents = find_volume_extents(layer_range, *parent_region.model_volume);
+            const PrintObjectRegions::BoundingAlignedBox3f  *parent_extents = find_volume_extents(layer_range, *parent_region.model_volume);
             assert(parent_extents);
             out.clamp(*parent_extents);
             assert(! out.isEmpty());
@@ -684,7 +687,7 @@ bool verify_update_print_object_regions(
                     // which may require new regions to be created.
                     it_model_volume_modifier_last = it_model_volume;
                     int next_region_id = int(&region - layer_range.volume_regions.data());
-                    const PrintObjectRegions::BoundingBox *bbox = find_volume_extents(layer_range, *region.model_volume);
+                    const PrintObjectRegions::BoundingAlignedBox3f *bbox = find_volume_extents(layer_range, *region.model_volume);
                     assert(bbox);
                     for (int parent_region_id = next_region_id - 1; parent_region_id >= 0; -- parent_region_id) {
                         const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
@@ -700,7 +703,7 @@ bool verify_update_print_object_regions(
                                 layer_range.volume_regions[next_region_id].parent == parent_region_id) {
                                 // A parent region is already overridden.
                                 ++ next_region_id;
-                            } else if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox))
+                            } else if (PrintObjectRegions::BoundingAlignedBox3f parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox))
                                 // Such parent region does not exist. If it is needed, then we need to reslice.
                                 // Only create new region for a modifier, which actually modifies config of it's parent.
                                 if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, **it_model_volume, num_extruders);
@@ -813,11 +816,12 @@ void update_volume_bboxes(
                 volumes_old.emplace_back(std::move(layer_range.volumes));
         }
 
-        std::vector<std::pair<PrintObjectRegions::BoundingBox, bool>> bboxes;
+        std::vector<std::pair<PrintObjectRegions::BoundingAlignedBox3f, bool>> bboxes;
         std::vector<t_layer_height_range>                             ranges;
         ranges.reserve(layer_ranges.size());
         for (const PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges) {
-            t_layer_height_range r = layer_range.layer_height_range;
+            t_layer_height_range r(unscaled(layer_range.layer_height_range_.first),
+                                   unscaled(layer_range.layer_height_range_.second));
             r.first  -= EPSILON;
             r.second += EPSILON;
             ranges.emplace_back(r);
@@ -849,8 +853,8 @@ void update_volume_bboxes(
 
 // Either a fresh PrintObject, or PrintObject regions were invalidated (merged, split).
 // Generate PrintRegions from scratch.
-static PrintObjectRegions* generate_print_object_regions(
-    PrintObjectRegions                          *print_object_regions_old,
+static std::shared_ptr<PrintObjectRegions> generate_print_object_regions(
+    std::shared_ptr<PrintObjectRegions>          print_object_regions_old,
     const ModelVolumePtrs                       &model_volumes,
     const LayerRanges                           &model_layer_ranges,
     const PrintRegionConfig                     &default_region_config,
@@ -860,9 +864,9 @@ static PrintObjectRegions* generate_print_object_regions(
     const std::vector<unsigned int>             &painting_extruders)
 {
     // Reuse the old object or generate a new one.
-    auto out = print_object_regions_old ? std::unique_ptr<PrintObjectRegions>(print_object_regions_old) : std::make_unique<PrintObjectRegions>();
-    auto &all_regions          = out->all_regions;
-    auto &layer_ranges_regions = out->layer_ranges;
+    std::shared_ptr<PrintObjectRegions> print_object_regions = print_object_regions_old ? print_object_regions_old : std::make_shared<PrintObjectRegions>();
+    std::vector<std::unique_ptr<PrintRegion>> &all_regions          = print_object_regions->all_regions;
+    std::vector<PrintObjectRegions::LayerRangeRegions> &layer_ranges_regions = print_object_regions->layer_ranges;
 
     all_regions.clear();
 
@@ -874,21 +878,26 @@ static PrintObjectRegions* generate_print_object_regions(
         assert(model_layer_ranges.size() == layer_ranges_regions.size());
         for (const auto &range : model_layer_ranges) {
             PrintObjectRegions::LayerRangeRegions &r = layer_ranges_regions[&range - &*model_layer_ranges.begin()];
-            assert(range.layer_height_range == r.layer_height_range);
+            assert(range._layer_height_range.first == r.layer_height_range_.first &&
+                   range._layer_height_range.second == r.layer_height_range_.second);
             // If model::assign_copy() is called, layer_ranges_regions is copied thus the pointers to configs are lost.
             r.config = range.config;
             r.volume_regions.clear();
             r.painted_regions.clear();
         }
     } else {
-        out->trafo_bboxes = trafo;
+        print_object_regions->trafo_bboxes = trafo;
         layer_ranges_regions.reserve(model_layer_ranges.size());
         for (const auto &range : model_layer_ranges)
-            layer_ranges_regions.push_back({ range.layer_height_range, range.config });
+            layer_ranges_regions.push_back(PrintObjectRegions::LayerRangeRegions{ range._layer_height_range, range.config});
+            //layer_ranges_regions.emplace_back(
+            //    std::pair<coord_t, coord_t>((range._layer_height_range.first),
+            //                                 (range._layer_height_range.second)),
+            //     range.config);
     }
 
     const bool is_mm_painted = num_extruders > 1 && std::any_of(model_volumes.cbegin(), model_volumes.cend(), [](const ModelVolume *mv) { return mv->is_mm_painted(); });
-    update_volume_bboxes(layer_ranges_regions, out->cached_volume_ids, model_volumes, out->trafo_bboxes, is_mm_painted ? 0.f : std::max(0.f, xy_size_compensation));
+    update_volume_bboxes(layer_ranges_regions, print_object_regions->cached_volume_ids, model_volumes, print_object_regions->trafo_bboxes, is_mm_painted ? 0.f : std::max(0.f, xy_size_compensation));
 
     std::vector<PrintRegion*> region_set;
     auto get_create_region = [&region_set, &all_regions](PrintRegionConfig &&config) -> PrintRegion* {
@@ -909,7 +918,7 @@ static PrintObjectRegions* generate_print_object_regions(
         const ModelVolume &volume = *model_volumes[volume_id];
         if (model_volume_solid_or_modifier(volume)) {
             for (PrintObjectRegions::LayerRangeRegions &layer_range : layer_ranges_regions)
-                if (const PrintObjectRegions::BoundingBox *bbox = find_volume_extents(layer_range, volume); bbox) {
+                if (const PrintObjectRegions::BoundingAlignedBox3f *bbox = find_volume_extents(layer_range, volume); bbox) {
                     if (volume.is_model_part()) {
                         // Add a model volume, assign an existing region or generate a new one.
                         layer_range.volume_regions.push_back({
@@ -929,7 +938,7 @@ static PrintObjectRegions* generate_print_object_regions(
                             const PrintObjectRegions::VolumeRegion &parent_region = layer_range.volume_regions[parent_region_id];
                             const ModelVolume                      &parent_volume = *parent_region.model_volume;
                             if (parent_volume.is_model_part() || parent_volume.is_modifier())
-                                if (PrintObjectRegions::BoundingBox parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
+                                if (PrintObjectRegions::BoundingAlignedBox3f parent_bbox = find_modifier_volume_extents(layer_range, parent_region_id); parent_bbox.intersects(*bbox)) {
                                     // Only create new region for a modifier, which actually modifies config of it's parent.
                                     if (PrintRegionConfig config = region_config_from_model_volume(parent_region.region->config(), nullptr, volume, num_extruders); 
                                         config != parent_region.region->config()) {
@@ -967,7 +976,7 @@ static PrintObjectRegions* generate_print_object_regions(
             return lid < rid || (lid == rid && l.extruder_id < r.extruder_id); });
     }
 
-    return out.release();
+    return print_object_regions;
 }
 
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
@@ -1190,7 +1199,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         // All PrintObjects in print_objects_range shall point to the same prints_objects_regions
         if (print_objects_range.begin() != print_objects_range.end()) {
             model_object_status.print_object_regions = print_objects_range.begin()->print_object->m_shared_regions;
-            model_object_status.print_object_regions->ref_cnt_inc();
         }
         if (solid_or_modifier_differ || model_origin_translation_differ || layer_height_ranges_differ ||
             ! model_object.layer_height_profile.timestamp_matches(model_object_new.layer_height_profile)) {
@@ -1392,13 +1400,16 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         PrintObject        &print_object         = *(*it_print_object);
         const ModelObject  &model_object         = *print_object.model_object();
         ModelObjectStatus  &model_object_status  = const_cast<ModelObjectStatus&>(model_object_status_db.reuse(model_object));
-        PrintObjectRegions *print_object_regions = model_object_status.print_object_regions;
-        for (++ it_print_object_end; it_print_object_end != m_objects.end() && (*it_print_object)->model_object() == (*it_print_object_end)->model_object(); ++ it_print_object_end)
-            assert((*it_print_object_end)->m_shared_regions == nullptr || (*it_print_object_end)->m_shared_regions == print_object_regions);
-        if (print_object_regions == nullptr) {
-            print_object_regions = new PrintObjectRegions{};
+        std::shared_ptr<PrintObjectRegions> print_object_regions = model_object_status.print_object_regions;
+        for (++it_print_object_end; it_print_object_end != m_objects.end() &&
+             (*it_print_object)->model_object() == (*it_print_object_end)->model_object();
+             ++it_print_object_end) {
+            assert(!((*it_print_object_end)->m_shared_regions) ||
+                   (*it_print_object_end)->m_shared_regions == print_object_regions);
+        }
+        if (!print_object_regions) {
+            print_object_regions = std::make_shared<PrintObjectRegions>();
             model_object_status.print_object_regions = print_object_regions;
-            print_object_regions->ref_cnt_inc();
         }
         std::vector<unsigned int> painting_extruders;
         if (const auto &volumes = print_object.model_object()->volumes;
@@ -1441,7 +1452,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 print_regions_reshuffled = true;
             }
         }
-        if (print_object_regions == nullptr || model_object_status.print_object_regions_status != ModelObjectStatus::PrintObjectRegionsStatus::Valid) {
+        if (!print_object_regions || model_object_status.print_object_regions_status != ModelObjectStatus::PrintObjectRegionsStatus::Valid) {
             // Layer ranges with their associated configurations. Remove overlaps between the ranges
             // and create the regions from scratch.
             print_object_regions = generate_print_object_regions(
@@ -1454,13 +1465,13 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 print_object.is_mm_painted() ? 0.f : float(print_object.config().xy_size_compensation.value),
                 painting_extruders);
         }
-        for (auto it = it_print_object; it != it_print_object_end; ++it)
+        for (auto it = it_print_object; it != it_print_object_end; ++it) {
             if ((*it)->m_shared_regions) {
                 assert((*it)->m_shared_regions == print_object_regions);
             } else {
                 (*it)->m_shared_regions = print_object_regions;
-                print_object_regions->ref_cnt_inc();
             }
+        }
         it_print_object = it_print_object_end;
     }
 
@@ -1469,11 +1480,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         struct cmp { bool operator() (const PrintRegion *l, const PrintRegion *r) const { return l->config_hash() == r->config_hash() && l->config() == r->config(); } };
         std::set<const PrintRegion*, cmp> region_set;
         m_print_regions.clear();
-        PrintObjectRegions *print_object_regions = nullptr;
-        for (PrintObject *print_object : m_objects)
+        std::shared_ptr<PrintObjectRegions> print_object_regions;
+        for (PrintObject *print_object : m_objects) {
             if (print_object_regions != print_object->m_shared_regions) {
                 print_object_regions = print_object->m_shared_regions;
-                for (std::unique_ptr<Slic3r::PrintRegion> &print_region : print_object_regions->all_regions)
+                for (std::unique_ptr<Slic3r::PrintRegion> &print_region : print_object_regions->all_regions) {
                     if (auto it = region_set.find(print_region.get()); it == region_set.end()) {
                         int print_region_id = int(m_print_regions.size());
                         m_print_regions.emplace_back(print_region.get());
@@ -1481,7 +1492,9 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                     } else {
                         print_region->m_print_region_id = (*it)->print_region_id();
                     }
+                }
             }
+        }
     }
 
     // Update SlicingParameters for each object where the SlicingParameters is not valid.
@@ -1506,7 +1519,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
         this->m_timestamp_last_change = std::time(0);
     }
 
-	return static_cast<ApplyStatus>(apply_status);
+    return static_cast<ApplyStatus>(apply_status);
 }
 
 void Print::cleanup()
@@ -1516,15 +1529,15 @@ void Print::cleanup()
     std::vector<PrintObject*> all_objects(m_objects);
     std::sort(all_objects.begin(), all_objects.end(), [](const PrintObject *l, const PrintObject *r){ return l->shared_regions() < r->shared_regions(); } );
     for (auto it = all_objects.begin(); it != all_objects.end();) {
-        PrintObjectRegions *shared_regions = (*it)->m_shared_regions;
+        std::shared_ptr<PrintObjectRegions> &shared_regions = (*it)->m_shared_regions;
         auto it_begin = it;
-        for (; it != all_objects.end() && shared_regions == (*it)->shared_regions(); ++ it)
+        for (; it != all_objects.end() && shared_regions.get() == (*it)->shared_regions(); ++ it)
             // Let the PrintObject clean up its data with invalidated milestones.
             (*it)->cleanup();
         auto this_objects = SpanOfConstPtrs<PrintObject>(const_cast<const PrintObject* const* const>(&(*it_begin)), it - it_begin);
         if (! Print::is_shared_print_object_step_valid_unguarded(this_objects, posSupportSpotsSearch))
             shared_regions->generated_support_points.reset();
-    }    
+    }
 }
 
 bool Print::is_shared_print_object_step_valid_unguarded(SpanOfConstPtrs<PrintObject> print_objects, PrintObjectStep print_object_step)

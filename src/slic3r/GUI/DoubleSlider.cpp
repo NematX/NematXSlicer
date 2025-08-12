@@ -372,7 +372,7 @@ Info Control::GetTicksValues() const
         for (const TickCode& tick : m_ticks.ticks) {
             if (tick.tick > val_size)
                 break;
-            values.emplace_back(CustomGCode::Item{ m_values[tick.tick], tick.type, tick.extruder, tick.color, tick.extra });
+            values.push_back(CustomGCode::Item{ Layer::scale_to_layer_coord(m_values[tick.tick]), tick.type, tick.extruder, tick.color, tick.extra });
         }
 
     if (m_force_mode_apply)
@@ -392,10 +392,10 @@ void Control::SetTicksValues(const Info& custom_gcode_per_print_z)
 
     m_ticks.ticks.clear();
     const std::vector<CustomGCode::Item>& heights = custom_gcode_per_print_z.gcodes;
-    for (auto h : heights) {
-        int tick = get_tick_from_value(h.print_z);
+    for (const CustomGCode::Item &cgc_item : heights) {
+        int tick = get_tick_from_value(unscaled(cgc_item.print_z_));
         if (tick >=0)
-            m_ticks.ticks.emplace(TickCode{ tick, h.type, h.extruder, h.color, h.extra });
+            m_ticks.ticks.emplace(TickCode{ tick, cgc_item.type, cgc_item.extruder, cgc_item.color, cgc_item.extra });
     }
     
     if (!was_empty && m_ticks.empty())
@@ -2094,26 +2094,26 @@ std::array<int, 2> Control::get_active_extruders_for_tick(int tick) const
 
 // Get used extruders for tick. 
 // Means all extruders(tools) which will be used during printing from current tick to the end
-std::set<int> TickCodeInfo::get_used_extruders_for_tick(int tick, int only_extruder, double print_z, Mode force_mode/* = Undef*/) const
+std::set<int> TickCodeInfo::get_used_extruders_for_tick(int tick, int only_extruder, double print_z_mm, Mode force_mode/* = Undef*/) const
 {
     Mode e_mode = !force_mode ? mode : force_mode;
 
     if (e_mode == MultiExtruder) {
         // #ys_FIXME: get tool ordering from _correct_ place
-        const ToolOrdering& tool_ordering = GUI::wxGetApp().plater()->fff_print().get_tool_ordering();
-
-        if (tool_ordering.empty())
-            return {};
 
         std::set<int> used_extruders;
+        for (const ToolOrdering &tool_ordering : GUI::wxGetApp().plater()->fff_print().tool_orderings()) {
 
-        auto it_layer_tools = std::lower_bound(tool_ordering.begin(), tool_ordering.end(), print_z, [](const LayerTools &lhs, double rhs){ return lhs.print_z < rhs; });
-        for (; it_layer_tools != tool_ordering.end(); ++it_layer_tools) {
-            const std::vector<uint16_t>& extruders = it_layer_tools->extruders;
-            for (const uint16_t& extruder : extruders)
-                used_extruders.emplace(extruder+1);
+            auto it_layer_tools = std::lower_bound(tool_ordering.begin(), tool_ordering.end(), print_z_mm,
+                                                   [](const LayerTools &lhs, double rhs) {
+                                                       return unscaled(lhs._print_z) < rhs;
+                                                   });
+            for (; it_layer_tools != tool_ordering.end(); ++it_layer_tools) {
+                const std::vector<uint16_t> &extruders = it_layer_tools->extruders;
+                for (const uint16_t &extruder : extruders)
+                    used_extruders.emplace(extruder + 1);
+            }
         }
-
         return used_extruders;
     }
 
@@ -2294,11 +2294,11 @@ void Control::auto_color_change()
 
         check_color_change(object, 1, object->layers().size(), false, [this, extruders_cnt](const Layer* layer)
         {
-            int tick = get_tick_from_value(layer->print_z);
+            int tick = get_tick_from_value(layer->unscaled_print_z());
             if (tick >= 0 && !m_ticks.has_tick(tick)) {
                 if (m_mode == SingleExtruder) {
                     m_ticks.set_default_colors(true);
-                    m_ticks.add_tick(tick, ColorChange, 1, layer->print_z);
+                    m_ticks.add_tick(tick, ColorChange, 1, layer->unscaled_height());
                 }
                 else {
                     int extruder = 2;
@@ -2309,7 +2309,7 @@ void Control::auto_color_change()
                         if (extruder > extruders_cnt)
                             extruder = 1;
                     }
-                    m_ticks.add_tick(tick, ToolChange, extruder, layer->print_z);
+                    m_ticks.add_tick(tick, ToolChange, extruder, layer->unscaled_print_z());
                 }
             }
             // allow max 3 auto color changes
@@ -2865,19 +2865,19 @@ std::string TickCodeInfo::get_color_for_tick(TickCode tick, Type type, const int
     return color;
 }
 
-bool TickCodeInfo::add_tick(const int tick, Type type, const int extruder, double print_z)
+bool TickCodeInfo::add_tick(const int tick, Type type, const int extruder, double print_z_mm)
 {
     std::string color;
     std::string extra;
     if (type == Custom)           // custom Gcode
     {
-        extra = get_custom_code(custom_gcode, print_z);
+        extra = get_custom_code(custom_gcode, print_z_mm);
         if (extra.empty())
             return false;
         custom_gcode = extra;
     }
     else if (type == PausePrint) {
-        extra = get_pause_print_msg(pause_print_msg, print_z);
+        extra = get_pause_print_msg(pause_print_msg, print_z_mm);
         if (extra.empty())
             return false;
         pause_print_msg = extra;
@@ -2895,7 +2895,7 @@ bool TickCodeInfo::add_tick(const int tick, Type type, const int extruder, doubl
     return true;
 }
 
-bool TickCodeInfo::edit_tick(std::set<TickCode>::iterator it, double print_z)
+bool TickCodeInfo::edit_tick(std::set<TickCode>::iterator it, double print_z_mm)
 {
     // Save previously value of the tick before the call a Dialog from get_... functions,
     // otherwise a background process can change ticks values and current iterator wouldn't be valid for the moment of a Dialog close
@@ -2906,9 +2906,9 @@ bool TickCodeInfo::edit_tick(std::set<TickCode>::iterator it, double print_z)
     if (it->type == ColorChange)
         edited_value = get_new_color(it->color);
     else if (it->type == PausePrint)
-        edited_value = get_pause_print_msg(it->extra, print_z);
+        edited_value = get_pause_print_msg(it->extra, print_z_mm);
     else
-        edited_value = get_custom_code(it->type == Template ? gcode(Template) : it->extra, print_z);
+        edited_value = get_custom_code(it->type == Template ? gcode(Template) : it->extra, print_z_mm);
 
     if (edited_value.empty())
         return false;
@@ -2995,7 +2995,7 @@ bool TickCodeInfo::has_tick(int tick)
     return ticks.find(TickCode{ tick }) != ticks.end();
 }
 
-ConflictType TickCodeInfo::is_conflict_tick(const TickCode& tick, Mode out_mode, int only_extruder, double print_z)
+ConflictType TickCodeInfo::is_conflict_tick(const TickCode& tick, Mode out_mode, int only_extruder, double print_z_mm)
 {
     if ((tick.type == ColorChange && (
             (mode == SingleExtruder && out_mode == MultiExtruder ) ||
@@ -3008,7 +3008,7 @@ ConflictType TickCodeInfo::is_conflict_tick(const TickCode& tick, Mode out_mode,
     if (tick.type == ColorChange) {
         // We should mark a tick as a "MeaninglessColorChange", 
         // if it has a ColorChange for unused extruder from current print to end of the print
-        std::set<int> used_extruders_for_tick = get_used_extruders_for_tick(tick.tick, only_extruder, print_z, out_mode);
+        std::set<int> used_extruders_for_tick = get_used_extruders_for_tick(tick.tick, only_extruder, print_z_mm, out_mode);
 
         if (used_extruders_for_tick.find(tick.extruder) == used_extruders_for_tick.end())
             return ctMeaninglessColorChange;

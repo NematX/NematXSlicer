@@ -597,19 +597,25 @@ static coord_t get_perimeter_spacing_external(const Layer &layer)
 {
     size_t  regions_count     = 0;
     coord_t perimeter_spacing = 0.f;
-    for (const PrintObject *object : layer.object()->print()->objects())
-        if (const Layer *l = object->get_layer_at_printz(layer.print_z, EPSILON); l)
-            for (const LayerRegion *layer_region : l->regions())
-                if (layer_region != nullptr && ! layer_region->slices().empty()) {
+    for (const PrintObject *object : layer.object()->print()->objects()) {
+        assert(object->get_layer_at_printz(layer.unscaled_print_z(), EPSILON * 4) ==
+               object->get_layer_at_printz(layer.scaled_print_z()));
+        if (const Layer *l = object->get_layer_at_printz(layer.scaled_print_z()); l) {
+            for (const LayerRegion *layer_region : l->regions()) {
+                if (layer_region != nullptr && !layer_region->slices().empty()) {
                     perimeter_spacing += layer_region->flow(frPerimeter).scaled_spacing();
-                    ++ regions_count;
+                    ++regions_count;
                 }
+            }
+        }
+    }
 
     assert(perimeter_spacing >= 0.f);
-    if (regions_count != 0)
+    if (regions_count != 0) {
         perimeter_spacing /= regions_count;
-    else
+    } else {
         perimeter_spacing = get_default_perimeter_spacing(*layer.object());
+    }
     return perimeter_spacing;
 }
 
@@ -2162,8 +2168,8 @@ static ExPolygons get_boundary(const Layer &layer, std::vector<std::pair<ExPolyg
     ExPolygons  boundary;
 
     //get perimeter_boundary from layerregion
-    for (const LayerRegion *lregion : layer.regions()) {
-        append(perimeter_boundary, lregion->m_perimeter_slices);
+    for (const LayerSliceIslandPtr &island : layer.islands()) {
+        append(perimeter_boundary, island->perimeters_slices);
     }
     perimeter_boundary = union_ex(perimeter_boundary);
 
@@ -2178,12 +2184,13 @@ static ExPolygons get_boundary(const Layer &layer, std::vector<std::pair<ExPolyg
 #ifdef INCLUDE_SUPPORTS_IN_BOUNDARY
         append(boundary, inner_offset(support_layer->support_islands.expolygons, 1.5 * perimeter_spacing));
 #endif
-        auto *layer_below = layer.object()->get_first_layer_bellow_printz(layer.print_z, EPSILON);
+       assert(layer.object()->get_first_layer_below_printz(layer.unscaled_print_z(), EPSILON*4) == layer.object()->get_first_layer_below_printz(layer.scaled_print_z() + SCALED_EPSILON));
+        auto *layer_below = layer.object()->get_first_layer_below_printz(layer.scaled_print_z() + SCALED_EPSILON);
         if (layer_below) { // why?
             perimeter_boundary.clear();
             //get perimeter_boundary from layerregion
-            for (const LayerRegion *lregion : layer_below->regions()) {
-                append(perimeter_boundary, lregion->m_perimeter_slices);
+            for (const LayerSliceIslandPtr &island : layer_below->islands()) {
+                append(perimeter_boundary, island->perimeters_slices);
             }
             perimeter_boundary = union_ex(perimeter_boundary);
             auto old_2_new_expolygons_supp = inner_offset(perimeter_boundary, coordf_t(1.5 * perimeter_spacing));
@@ -2246,11 +2253,13 @@ static Polygons get_boundary_external(const Layer &layer)
 #ifdef INCLUDE_SUPPORTS_IN_BOUNDARY
         ExPolygons supports_per_obj;
 #endif
-        if (const Layer *l = object->get_layer_at_printz(layer.print_z, EPSILON); l)
+        assert(object->get_layer_at_printz(layer.unscaled_print_z(), EPSILON * 4) == object->get_layer_at_printz(layer.scaled_print_z()));
+        if (const Layer *l = object->get_layer_at_printz(layer.scaled_print_z()); l)
             for (const ExPolygon &island : l->lslices())
                 append(holes_per_obj, island.holes);
         if (support_layer) {
-            auto *layer_below = object->get_first_layer_bellow_printz(layer.print_z, EPSILON);
+            assert(layer.object()->get_first_layer_below_printz(layer.unscaled_print_z(), EPSILON*4) == layer.object()->get_first_layer_below_printz(layer.scaled_print_z() + SCALED_EPSILON));
+            auto *layer_below = object->get_first_layer_below_printz(layer.scaled_print_z() + SCALED_EPSILON);
             if (layer_below)
                 for (const ExPolygon &island : layer_below->lslices())
                     append(holes_per_obj, island.holes);
@@ -2465,8 +2474,8 @@ void AvoidCrossingPerimeters::init_layer(const Layer &layer)
 
     float ext_perimeter_width = get_external_perimeter_width(layer);
     //get perimeter_boundary from layerregion instead of layer.lslices()
-    for (const LayerRegion *lregion : layer.regions()) {
-        append(m_lslices_offset, lregion->m_perimeter_slices);
+    for (const LayerSliceIslandPtr &island : layer.islands()) {
+        append(m_lslices_offset, island->perimeters_slices);
     }
     m_lslices_offset = offset_ex(m_lslices_offset, -ext_perimeter_width / 2);
 
@@ -2818,7 +2827,8 @@ static ExPolygons get_boundary_external(const Layer &layer)
         ExPolygons polygons_per_obj;
         //FIXME with different layering, layers on other objects will not be found at this object's print_z.
         // Search an overlap of layers?
-        if (const Layer* l = object->get_layer_at_printz(layer.print_z, EPSILON); l)
+        assert(object->get_layer_at_printz(layer.unscaled_print_z(), EPSILON * 4) == object->get_layer_at_printz(layer.scaled_print_z()));
+        if (const Layer* l = object->get_layer_at_printz(layer.scaled_print_z()); l)
             for (const LayerRegion *layer_region : l->regions())
                 for (const Surface &surface : layer_region->slices.surfaces)
                     polygons_per_obj.emplace_back(surface.expolygon);

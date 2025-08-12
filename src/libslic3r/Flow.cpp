@@ -12,7 +12,6 @@
 #include "I18N.hpp"
 #include "Print.hpp"
 #include "Layer.hpp"
-#include "Layer.hpp"
 #include <cassert>
 #include <cmath>
 
@@ -26,6 +25,10 @@ FlowErrorNegativeSpacing::FlowErrorNegativeSpacing() :
 
 FlowErrorNegativeFlow::FlowErrorNegativeFlow() :
     FlowError("Flow::mm3_per_mm() produced negative flow. Did you set some extrusion width too small, or the (maximum) layer height too high?") {}
+
+coord_t Flow::scaled_height() const {
+    return Layer::scale_to_layer_coord(this->m_height);
+}
 
 // This static method returns a sane extrusion width default.
 float Flow::auto_extrusion_width(FlowRole role, float nozzle_diameter)
@@ -603,6 +606,17 @@ Flow support_material_flow(const PrintObject* object, float layer_height)
             extruder_id = object->layers().front()->get_region(0)->region().config().infill_extruder - 1;
         } else {
             extruder_id = object->default_region_config(object->print()->default_region_config()).infill_extruder - 1;
+        }
+    }
+    if (extruder_id < 0) {
+        // get biggest used for the print.
+        double biggest_nzl= 0 ;
+        for (uint16_t extr_id : object->object_extruders()) {
+            double new_nzl = object->print()->config().nozzle_diameter.get_at(extr_id);
+            if (new_nzl > biggest_nzl) {
+                extruder_id = extr_id;
+                biggest_nzl = new_nzl;
+            }
         }
     }
     double nzd = object->print()->config().nozzle_diameter.get_at(extruder_id);

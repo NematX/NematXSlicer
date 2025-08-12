@@ -661,15 +661,15 @@ WipeTower::WipeTower(const PrintConfig& config, const PrintObjectConfig& default
     m_object_config(&default_object_config),
     m_region_config(&default_region_config),
     m_semm(config.single_extruder_multi_material.value),
-    m_wipe_tower_pos(config.wipe_tower_x, config.wipe_tower_y),
-    m_wipe_tower_width(float(config.wipe_tower_width)),
-    m_wipe_tower_rotation_angle(float(config.wipe_tower_rotation_angle)),
+    m_wipe_tower_pos(default_object_config.wipe_tower_x, default_object_config.wipe_tower_y),
+    m_wipe_tower_width(float(default_object_config.wipe_tower_width)),
+    m_wipe_tower_rotation_angle(float(default_object_config.wipe_tower_rotation_angle)),
     m_speed(float(config.wipe_tower_speed)),
-    m_wipe_tower_cone_angle(float(config.wipe_tower_cone_angle)),
-    m_extra_spacing(float(config.wipe_tower_extra_spacing/100.)),
+    m_wipe_tower_cone_angle(float(default_object_config.wipe_tower_cone_angle)),
+    m_extra_spacing(float(default_object_config.wipe_tower_extra_spacing/100.)),
     m_y_shift(0.f),
     m_z_pos(0.f),
-    m_bridging(float(config.wipe_tower_bridging)),
+    m_bridging(float(default_object_config.wipe_tower_bridging)),
     m_no_sparse_layers(config.wipe_tower_no_sparse_layers),
     m_gcode_flavor(config.gcode_flavor),
     m_travel_speed(config.travel_speed),
@@ -737,10 +737,10 @@ void WipeTower::set_extruder(size_t idx)
     m_filpar.push_back(FilamentParameters());
 
     m_filpar[idx].material = m_config->filament_type.get_at(idx);
-    if (m_config->wipe_tower_extruder == 0) {
+    if (m_object_config->wipe_tower_extruder == 0) {
         m_filpar[idx].is_soluble = m_config->filament_soluble.get_at(idx);
     } else {
-        m_filpar[idx].is_soluble = (idx != size_t(m_config->wipe_tower_extruder - 1));
+        m_filpar[idx].is_soluble = (idx != size_t(m_object_config->wipe_tower_extruder - 1));
     }
     m_filpar[idx].temperature = m_config->temperature.get_at(idx);
     m_filpar[idx].first_layer_temperature = m_config->first_layer_temperature.get_at(idx);
@@ -783,7 +783,7 @@ void WipeTower::set_extruder(size_t idx)
         m_filpar[idx].max_e_speed = (max_vol_speed / filament_area());
 
     m_nozzle_diameter = nozzle_diameter; // all extruders are now assumed to have the same diameter
-    m_perimeter_width = m_config->wipe_tower_extrusion_width.get_abs_value(nozzle_diameter); // all extruders are now assumed to have the same diameter
+    m_perimeter_width = m_object_config->wipe_tower_extrusion_width.get_abs_value(nozzle_diameter); // all extruders are now assumed to have the same diameter
 
     if (m_semm) {
         std::istringstream stream{m_config->filament_ramming_parameters.get_at(idx)};
@@ -1655,7 +1655,7 @@ WipeTower::ToolChangeResult WipeTower::finish_layer()
         );
         const double spacing = brim_flow.spacing();
         // How many perimeters shall the brim have?
-        size_t loops_num = (m_config->wipe_tower_brim_width.get_abs_value(m_nozzle_diameter) + spacing / 2) / spacing;
+        size_t loops_num = (m_object_config->wipe_tower_brim_width.get_abs_value(m_nozzle_diameter) + spacing / 2) / spacing;
         
 
         writer.set_extrusion_flow(brim_flow.mm3_per_mm() / filament_area())

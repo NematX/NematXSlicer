@@ -76,7 +76,7 @@ auto angle_to_x(const L &l)
 
 // Distance to the closest point of line.
 template<class L>
-inline double distance_to_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &point, Vec<Dim<L>, Scalar<L>> *nearest_point)
+inline distsqrf_t distance_to_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &point, Vec<Dim<L>, Scalar<L>> *nearest_point)
 {
     using VecType = Vec<Dim<L>, double>;
     const VecType  v  = (get_b(line) - get_a(line)).template cast<double>();
@@ -108,14 +108,14 @@ inline double distance_to_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &p
 
 // Distance to the closest point of line.
 template<class L>
-double distance_to_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
+distsqrf_t distance_to_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
 {
     Vec<Dim<L>, Scalar<L>> nearest_point;
     return distance_to_squared<L>(line, point, &nearest_point);
 }
 
 template<class L>
-double distance_to(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
+distf_t distance_to(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
 {
     return std::sqrt(distance_to_squared(line, point));
 }
@@ -144,7 +144,7 @@ double distance_to_infinite_squared(const L &line, const Vec<Dim<L>, Scalar<L>> 
 // Returns a squared distance to the closest point on the infinite.
 // Closest point (and returned squared distance to this point) could be beyond the 'a' and 'b' ends of the segment.
 template<class L>
-double distance_to_infinite_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
+distsqrf_t distance_to_infinite_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
 {
     Vec<Dim<L>, Scalar<L>> nearest_point;
     return distance_to_infinite_squared<L>(line, point, &nearest_point);
@@ -153,7 +153,7 @@ double distance_to_infinite_squared(const L &line, const Vec<Dim<L>, Scalar<L>> 
 // Returns a distance to the closest point on the infinite.
 // Closest point (and returned squared distance to this point) could be beyond the 'a' and 'b' ends of the segment.
 template<class L>
-double distance_to_infinite(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
+distf_t distance_to_infinite(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
 {
     return std::sqrt(distance_to_infinite_squared(line, point));
 }
@@ -211,15 +211,15 @@ public:
     void   translate(double x, double y) { this->translate(Point(x, y)); }
     void   rotate(double angle, const Point &center) { this->a.rotate(angle, center); this->b.rotate(angle, center); }
     void   reverse() { std::swap(this->a, this->b); }
-    coordf_t length() const { return (b.cast<coordf_t>() - a.cast<coordf_t>()).norm(); }
+    distf_t length() const { return (b.cast<coordf_t>() - a.cast<coordf_t>()).norm(); }
     Point  midpoint() const { return (this->a + this->b) / 2; }
     bool   intersection_infinite(const Line &other, Point* point) const;
     bool   operator==(const Line &rhs) const { return this->a == rhs.a && this->b == rhs.b; }
-    double distance_to_squared(const Point &point) const { return distance_to_squared(point, this->a, this->b); }
-    double distance_to_squared(const Point &point, Point *closest_point) const { return line_alg::distance_to_squared(*this, point, closest_point); }
-    coordf_t distance_to(const Point &point) const { return distance_to(point, this->a, this->b); }
-    double distance_to_infinite_squared(const Point &point, Point *closest_point) const { return line_alg::distance_to_infinite_squared(*this, point, closest_point); }
-    coordf_t perp_distance_to(const Point &point) const;
+    distsqrf_t distance_to_squared(const Point &point) const { return distance_to_squared(point, this->a, this->b); }
+    distsqrf_t distance_to_squared(const Point &point, Point *closest_point) const { return line_alg::distance_to_squared(*this, point, closest_point); }
+    distf_t distance_to(const Point &point) const { return distance_to(point, this->a, this->b); }
+    distsqrf_t distance_to_infinite_squared(const Point &point, Point *closest_point) const { return line_alg::distance_to_infinite_squared(*this, point, closest_point); }
+    distf_t perp_distance_to(const Point &point) const;
     bool   parallel_to(double angle) const;
     bool   parallel_to(const Line& line) const;
     bool   perpendicular_to(double angle) const;
@@ -235,16 +235,16 @@ public:
     // Extend the line from both sides by an offset.
     void   extend(coordf_t offset);
 
-    static inline double distance_to_squared(const Point &point, const Point &a, const Point &b) { return line_alg::distance_to_squared(Line{a, b}, Vec<2, coord_t>{point}); }
-    static coordf_t distance_to(const Point &point, const Point &a, const Point &b) { return sqrt(distance_to_squared(point, a, b)); }
-    Point point_at(coordf_t distance) const;
+    static inline distsqrf_t distance_to_squared(const Point &point, const Point &a, const Point &b) { return line_alg::distance_to_squared(Line{a, b}, Vec<2, coord_t>{point}); }
+    static distf_t distance_to(const Point &point, const Point &a, const Point &b) { return sqrt(distance_to_squared(point, a, b)); }
+    Point point_at(distf_t distance) const;
     coord_t dot(const Line &l2) const { return vector().dot(l2.vector()); }
-    void extend_end(coordf_t distance) { Line line = *this; line.reverse(); this->b = line.point_at(-distance); }
-    void extend_start(coordf_t distance) { this->a = this->point_at(-distance); }
+    void extend_end(distf_t distance) { Line line = *this; line.reverse(); this->b = line.point_at(-distance); }
+    void extend_start(distf_t distance) { this->a = this->point_at(-distance); }
 
     // Returns a distance to the closest point on the infinite.
     // Closest point (and returned squared distance to this point) could be beyond the 'a' and 'b' ends of the segment.
-    static inline double distance_to_infinite_squared(const Point &point, const Point &a, const Point &b) { return line_alg::distance_to_infinite_squared(Line{a, b}, Vec<2, coord_t>{point}); }
+    static inline distsqrf_t distance_to_infinite_squared(const Point &point, const Point &a, const Point &b) { return line_alg::distance_to_infinite_squared(Line{a, b}, Vec<2, coord_t>{point}); }
     static coordf_t distance_to_infinite(const Point &point, const Point &a, const Point &b) { return sqrt(distance_to_infinite_squared(point, a, b)); }
 
     Point a;

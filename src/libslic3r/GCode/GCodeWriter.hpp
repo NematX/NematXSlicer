@@ -56,6 +56,7 @@ public:
     const Tool* get_tool(uint16_t id) const;
     std::string preamble();
     std::string postamble() const;
+    int16_t get_temperature(int tool = -1);
     std::string set_temperature(int16_t temperature, bool wait = false, int tool = -1);
     std::string set_bed_temperature(uint32_t temperature, bool wait = false);
     void set_pressure_advance(double pa);
@@ -85,9 +86,12 @@ public:
     std::string travel_arc_to_xy(const Vec2d& point, const Vec2d& center_offset, const bool is_ccw, const double speed, const std::string_view comment);
     std::string travel_to_xyz(const Vec3d &point, const bool is_lift, const double speed = 0.0, const std::string_view comment = {});
     std::string travel_to_z(const double z, const std::string_view comment = {});
+    // like travel_to_z, but force write the z to the current z (or z if higher)
+    std::string ensure_z(const double z = -1, const std::string_view comment = {});
     // low-level method to force a z travel, disregarding the lift and other thigns. Prefer using "travel_to_z" "lift" and "unlift".
     std::string get_travel_to_z_gcode(const double z, const std::string_view comment = {});
     bool        will_move_z(const double z) const;
+    std::string extrude_to_e(const double dE, const std::string_view comment = {});
     std::string extrude_to_xy(const Vec2d &point, const double dE, const std::string_view comment = {});
     std::string extrude_arc_to_xy(const Vec2d& point, const Vec2d& center_offset, const double dE, const bool is_ccw, const std::string_view comment = {}); //BBS: generate G2 or G3 extrude which moves by arc
     std::string extrude_arc_to_xyz(const Vec3d& point, const Vec2d& center_offset, const double dE, const bool is_ccw, const std::string_view comment = {}); //BBS: generate G2 or G3 extrude which moves by arc

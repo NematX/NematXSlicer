@@ -119,7 +119,6 @@ AABBTreeLines::LinesDistancer<ObjectOrExtrusionLinef> get_previous_layer_distanc
     return AABBTreeLines::LinesDistancer{std::move(lines)};
 }
 
-//note: using the third-level of extrusion from the layerm.perimeters() is extremly unsafe!
 std::pair<AABBTreeLines::LinesDistancer<ObjectOrExtrusionLinef>, size_t> TravelObstacleTracker::get_current_layer_distancer(const ObjectsLayerToPrint &objects_to_print)
 {
     std::vector<ObjectOrExtrusionLinef> lines;
@@ -134,20 +133,13 @@ std::pair<AABBTreeLines::LinesDistancer<ObjectOrExtrusionLinef>, size_t> TravelO
             for (const PrintInstance &instance : layer->object()->instances()) {
                 visitor.instance = &instance;
                 visitor.instance_idx = &instance - &layer->object()->instances().front();
-                for (const LayerSlice &lslice : layer->lslices_ex) {
-                    for (const LayerIsland &island : lslice.islands) {
-                        const LayerRegion &layerm = *layer->get_region(island.perimeters.region());
-                        for (uint32_t perimeter_id : island.perimeters) {
-                            assert(dynamic_cast<const ExtrusionEntityCollection *>(layerm.perimeters().entities()[perimeter_id]));
-                            const auto *eec = static_cast<const ExtrusionEntityCollection *>(layerm.perimeters().entities()[perimeter_id]);
-                            if (eec) {
-                                for (const ExtrusionEntity *ee : *eec) {
-                                    const LayerRegion &layerm = *layer->get_region(island.perimeters.region());
-                                    for (uint32_t perimeter_id : island.perimeters) {
-                                        visitor.process(ee);
-                                    }
-                                    ++extrusion_entity_cnt;
-                                }
+                for (const LayerSliceIslandPtr &layer_island_ptr : layer->islands()) {
+                    for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+                        const LayerRegion &layerm = **region_island_ptr->regions().begin(); // FIXME multiple regions
+                        if (region_island_ptr->has_extrusion(LayerRegionIsland::PERIMETERS)) {
+                            for (const ExtrusionEntity *ee : region_island_ptr->extrusion(LayerRegionIsland::PERIMETERS)) {
+                                visitor.process(ee);
+                                ++extrusion_entity_cnt;
                             }
                         }
                     }

@@ -15,13 +15,14 @@ class WipeTowerIntegration {
 public:
     WipeTowerIntegration(
         const PrintConfig                                           &print_config,
+        const PrintObjectConfig                                     &object_config,
         const std::vector<WipeTower::ToolChangeResult>              &priming,
         const std::vector<std::vector<WipeTower::ToolChangeResult>> &tool_changes,
         const WipeTower::ToolChangeResult                           &final_purge) :
         m_left(/*float(print_config.wipe_tower_x.value)*/ 0.f),
-        m_right(float(/*print_config.wipe_tower_x.value +*/ print_config.wipe_tower_width.value)),
-        m_wipe_tower_pos(float(print_config.wipe_tower_x.value), float(print_config.wipe_tower_y.value)),
-        m_wipe_tower_rotation(float(print_config.wipe_tower_rotation_angle)),
+        m_right(float(/*print_config.wipe_tower_x.value +*/ object_config.wipe_tower_width.value)),
+        m_wipe_tower_pos(float(object_config.wipe_tower_x.value), float(object_config.wipe_tower_y.value)),
+        m_wipe_tower_rotation(float(object_config.wipe_tower_rotation_angle)),
         m_extruder_offsets(print_config.extruder_offset.get_values()),
         m_priming(priming),
         m_tool_changes(tool_changes),

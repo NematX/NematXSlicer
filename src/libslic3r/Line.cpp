@@ -79,7 +79,7 @@ bool Line::intersection_infinite(const Line &other, Point* point) const
     return true;
 }
 
-coordf_t Line::perp_distance_to(const Point &point) const
+distf_t Line::perp_distance_to(const Point &point) const
 {
     const Line  &line = *this;
     const Vec2d  v  = (line.b - line.a).cast<double>();
@@ -169,7 +169,7 @@ BoundingBox get_extents(const Lines &lines)
 
 }
 
-Point Line::point_at(coordf_t distance) const {
+Point Line::point_at(distf_t distance) const {
     Point point;
     coordf_t len = this->length();
     point = this->a;

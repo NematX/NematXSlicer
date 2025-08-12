@@ -1648,7 +1648,12 @@ void ObjectList::load_from_files(const wxArrayString& input_files, ModelObject& 
 
 static TriangleMesh create_mesh(const std::string& type_name, const BoundingBoxf3& bb)
 {
-    const double side = wxGetApp().plater()->canvas3D()->get_size_proportional_to_max_bed_size(0.1);
+    const double side_from_bed = wxGetApp().plater()->canvas3D()->get_size_proportional_to_max_bed_size(0.2);
+
+    BoundingBoxf3 side_bb(Vec3d(0,0,0), Vec3d(10,10,10));
+    const double side_zoom = wxGetApp().plater()->get_camera().calc_zoom_to_bounding_box_factor(side_bb);
+    const double side_from_zoom = 3 * (side_zoom / wxGetApp().plater()->get_camera().get_zoom());
+    const double side = std::min(side_from_zoom, side_from_bed);
 
     indexed_triangle_set mesh;
     if (type_name == "Box")
@@ -1728,8 +1733,23 @@ void ObjectList::load_generic_subobject(const std::string& type_name, const Mode
         offset = Vec3d(inst_center.x(), inst_center.y(), 0.5 * mesh_bb.size().z() + instance_bb.min.z() - v->get_instance_offset().z());
     }
     else {
-        // Translate the new modifier to be pickable: move to the left front corner of the instance's bounding box, lift to print bed.
-        offset = Vec3d(instance_bb.max.x(), instance_bb.min.y(), instance_bb.min.z()) + 0.5 * mesh_bb.size() - v->get_instance_offset();
+        // if the center of view (camera target) is more or less near the object, use it.
+        const Vec3d &camera_target = wxGetApp().plater()->get_camera().get_target();
+        BoundingBoxf3 big_mesh_bb = selection.get_unscaled_instance_bounding_box();
+        Vec3d bb_size = big_mesh_bb.max - big_mesh_bb.min;
+        big_mesh_bb.min -= bb_size/2;
+        big_mesh_bb.max += bb_size/2;
+        big_mesh_bb.min.z() = -999999999;
+        big_mesh_bb.max.z() = 999999999;
+        big_mesh_bb.offset(wxGetApp().plater()->canvas3D()->get_size_proportional_to_max_bed_size(0.02));
+        if (big_mesh_bb.contains(camera_target)) {
+            offset = camera_target - v->get_instance_offset();//Vec3d(instance_bb.max.x(), instance_bb.min.y(), 0);
+        } else {
+            // Translate the new modifier to be pickable: move to the left front corner of the instance's bounding
+            // box, lift to print bed.
+            offset = Vec3d(instance_bb.max.x(), instance_bb.min.y(), instance_bb.min.z()) + 0.5 * mesh_bb.size() -
+                v->get_instance_offset();
+        }
     }
     new_volume->set_offset(v->get_instance_transformation().get_matrix_no_offset().inverse() * offset);
 

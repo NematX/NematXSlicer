@@ -71,6 +71,10 @@ Model& Model::assign_copy(const Model &rhs)
 
     // copy custom code per height
     this->custom_gcode_per_print_z = rhs.custom_gcode_per_print_z;
+
+    // copy extra properties
+    this->baked_transformation = rhs.baked_transformation;
+
     return *this;
 }
 
@@ -92,6 +96,10 @@ Model& Model::assign_copy(Model &&rhs)
 
     // copy custom code per height
     this->custom_gcode_per_print_z = std::move(rhs.custom_gcode_per_print_z);
+
+    // copy extra properties
+    this->baked_transformation = rhs.baked_transformation;
+
     return *this;
 }
 
@@ -138,6 +146,11 @@ bool Model::equals(const Model& rhs) const {
     // copy custom code per height
     if (this->custom_gcode_per_print_z != rhs.custom_gcode_per_print_z)
             return false;
+
+    // copy extra properties
+    if(this->baked_transformation != rhs.baked_transformation)
+        return false;
+
     return true;
 }
 

@@ -54,6 +54,7 @@ private:
     GLModel m_gridlines;
     GLModel m_gridlines_big;
     GLModel m_gridlines_small;
+    GLModel m_gridlines_camera;
     GLModel m_contourlines;
     mutable GLTexture m_texture;
     ColorRGBA m_model_color{ 0.235f, 0.235f, 0.235f, 1.0f };
@@ -93,7 +94,13 @@ public:
     bool contains(const Point& point) const;
     Point point_projection(const Point& point) const;
 
-    void render(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, float scale_factor, bool show_texture);
+    void render(GLCanvas3D &canvas,
+                const Transform3d &view_matrix,
+                const Transform3d &projection_matrix,
+                bool bottom,
+                float scale_factor,
+                bool show_texture,
+                double show_camera_grid = 0.);
     void render_axes();
     void render_for_picking(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, float scale_factor);
 
@@ -105,12 +112,13 @@ private:
     void init_contourlines();
     static std::tuple<Type, std::string, std::string, bool> detect_type(const Pointfs& shape);
     void render_internal(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, float scale_factor,
-        bool show_texture, bool picking);
-    void render_system(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_texture);
+        bool show_texture, bool picking, double show_camera_grid);
+    void render_system(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_texture, double show_camera_grid);
     void render_texture(bool bottom, GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix);
     void render_model(const Transform3d& view_matrix, const Transform3d& projection_matrix);
-    void render_custom(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_texture, bool picking);
+    void render_custom(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_texture, bool picking, double show_camera_grid);
     void render_default(bool bottom, bool picking, bool show_texture, const Transform3d& view_matrix, const Transform3d& projection_matrix);
+    void render_camera_grid(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, double camera_z);
     void render_contour(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     void render_grid(bool bottom, bool has_model);
     

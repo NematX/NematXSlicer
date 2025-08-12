@@ -1,11 +1,11 @@
+///|/ Copyright (c) SuperSlicer 2019-2025 Remi Durand @supermerill
 ///|/ Copyright (c) Prusa Research 2016 - 2023 Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv, Pavel Mikuš @Godrak, Lukáš Hejl @hejllukas
-///|/ Copyright (c) SuperSlicer 2023 Remi Durand @supermerill
 ///|/ Copyright (c) 2016 Sakari Kapanen @Flannelhead
 ///|/ Copyright (c) Slic3r 2011 - 2015 Alessandro Ranellucci @alranel
 ///|/ Copyright (c) 2013 Mark Hindess
 ///|/ Copyright (c) 2011 Michael Moon
 ///|/
-///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/ SuperSlicer, PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include <cassert>
 #include <cstdio>
@@ -175,6 +175,7 @@ struct SurfaceFillParams : FillParams
         assert(rhs.config != nullptr);
         if (config != nullptr && rhs.config != nullptr) {
             RETURN_COMPARE_NON_EQUAL(config->infill_acceleration);
+            RETURN_COMPARE_NON_EQUAL(config->infill_extruder);
             RETURN_COMPARE_NON_EQUAL(config->infill_speed);
             RETURN_COMPARE_NON_EQUAL(config->solid_infill_acceleration);
             RETURN_COMPARE_NON_EQUAL(config->solid_infill_speed);
@@ -192,6 +193,8 @@ struct SurfaceFillParams : FillParams
             RETURN_COMPARE_NON_EQUAL(config->region_gcode.value)
             RETURN_COMPARE_NON_EQUAL(config->small_area_infill_flow_compensation_model.is_enabled())
             RETURN_COMPARE_NON_EQUAL(config->small_area_infill_flow_compensation_model.value);
+            RETURN_COMPARE_NON_EQUAL(config->solid_infill_extruder);
+            RETURN_COMPARE_NON_EQUAL(config->wipe_into_infill);
             // print -modifier, because region are fused in gode wiew if not.
             RETURN_COMPARE_NON_EQUAL(config->print_extrusion_multiplier.value);
             RETURN_COMPARE_NON_EQUAL(config->print_fan_speed.value);
@@ -226,6 +229,7 @@ struct SurfaceFillParams : FillParams
             return false;
         if(config != nullptr && (
             config->infill_acceleration != rhs.config->infill_acceleration
+            || config->infill_extruder != rhs.config->infill_extruder
             || config->infill_speed != rhs.config->infill_speed
             || config->solid_infill_acceleration != rhs.config->solid_infill_acceleration
             || config->solid_infill_speed != rhs.config->solid_infill_speed
@@ -242,6 +246,8 @@ struct SurfaceFillParams : FillParams
             || config->print_extrusion_multiplier != rhs.config->print_extrusion_multiplier
             || config->region_gcode != rhs.config->region_gcode
             || config->small_area_infill_flow_compensation_model != rhs.config->small_area_infill_flow_compensation_model
+            || config->solid_infill_extruder != rhs.config->solid_infill_extruder
+            || config->wipe_into_infill != rhs.config->wipe_into_infill
             // print -modifier, because region are fused in gode wiew if not.
             || config->print_extrusion_multiplier        != rhs.config->print_extrusion_multiplier
             || config->print_fan_speed                   != rhs.config->print_fan_speed
@@ -288,12 +294,13 @@ struct SurfaceFillParams : FillParams
 };
 
 struct SurfaceFill {
-    SurfaceFill(const SurfaceFillParams& params) : region_id(size_t(-1)), surface(stNone, ExPolygon()), params(params) {}
+    SurfaceFill(const SurfaceFillParams& params) : /*region_id(size_t(-1)),*/ surface(stNone, ExPolygon()), params(params) {}
 
-    size_t               region_id;
+    //size_t               region_id;
     Surface              surface;
     ExPolygons           expolygons;
     SurfaceFillParams    params;
+    LayerRegionSetConstPtrs regions;
 };
 
 float compute_fill_angle(const PrintRegionConfig &region_config, size_t layer_id)
@@ -334,16 +341,16 @@ void export_group_fills_to_svg(const char *path, const std::vector<SurfaceFill> 
 }
 #endif
 
-std::vector<SurfaceFill> group_fills(const Layer &layer)
+std::vector<SurfaceFill> group_fills(const Layer &layer, const LayerSliceIsland& island)
 {
     std::vector<SurfaceFill> surface_fills;
-
+    std::vector<const LayerRegion*> ordered_regions(island.regions().begin(), island.regions().end());
     // Fill in a map of a region & surface to SurfaceFillParams.
     std::set<SurfaceFillParams>                         set_surface_params;
-    std::vector<std::vector<const SurfaceFillParams*>>  region_to_surface_params(layer.regions().size(), std::vector<const SurfaceFillParams*>());
+    std::vector<std::vector<const SurfaceFillParams*>>  region_to_surface_params(ordered_regions.size(), std::vector<const SurfaceFillParams*>());
     bool                                                has_internal_voids = false;
-    for (size_t region_id = 0; region_id < layer.regions().size(); ++ region_id) {
-        const LayerRegion  &layerm = *layer.regions()[region_id];
+    for (size_t region_id = 0; region_id < ordered_regions.size(); ++ region_id) {
+        const LayerRegion  &layerm = *ordered_regions[region_id];
         region_to_surface_params[region_id].assign(layerm.fill_surfaces().size(), nullptr);
         for (size_t idx_fill_srf=0; idx_fill_srf < layerm.fill_surfaces().size(); ++idx_fill_srf) {
             const Surface &surface = layerm.fill_surfaces().at(idx_fill_srf);
@@ -427,7 +434,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                 }
                 params.fill_exactly = region_config.enforce_full_fill_volume.get_bool();
                 params.bridge_angle = float(surface.bridge_angle);
-                params.angle         = (is_denser) ? 0 : compute_fill_angle(region_config, layerm.layer()->id());
+                params.angle         = (is_denser) ? 0 : compute_fill_angle(region_config, layer.id());
                 params.can_angle_cross = region_config.fill_angle_cross;
                 params.anchor_length = std::min(params.anchor_length, params.anchor_length_max);
 
@@ -451,7 +458,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                         Flow reference_flow = layerm.flow(FlowRole::frSolidInfill);
                         diameter = sqrt(4 * reference_flow.mm3_per_mm() / PI);
                     } else if (region_config.bridge_type == BridgeType::btFromHeight) {
-                        diameter = layerm.layer()->height;
+                        diameter = layer.unscaled_height();
                     } else /*if (region_config.bridge_type == BridgeType::btFromNozzle)*/ {
                         diameter = nozzle_diameter;
                     }
@@ -460,7 +467,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                     params.flow = layerm.region().flow(
                         *layer.object(),
                         extrusion_role,
-                        (surface.thickness == -1) ? layer.height : surface.thickness,   // extrusion height
+                        (float)(surface.scaled_thickness() == -1) ? layer.unscaled_height() : surface.unscaled_thickness(),   // extrusion height
                         layer.id()
                     );
                 }
@@ -484,7 +491,7 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                     Flow infill_flow = layerm.region().flow(
                             *layer.object(),
                             frInfill,
-                            layer.height,  // TODO: handle infill_every_layers?
+                            (float)layer.unscaled_height(),  // TODO: handle infill_every_layers?
                             layer.id()
                         );
                     params.spacing = infill_flow.spacing();
@@ -523,31 +530,37 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
         const_cast<SurfaceFillParams&>(params).idx = surface_fills.size();
         surface_fills.emplace_back(params);
     }
-    for (size_t region_id = 0; region_id < layer.regions().size(); ++region_id) {
-        const LayerRegion &layerm = *layer.regions()[region_id];
+    for (size_t region_id = 0; region_id < ordered_regions.size(); ++region_id) {
+        const LayerRegion &layerm = *ordered_regions[region_id];
         for (const Surface &surface : layerm.fill_surfaces()) {
             surface.expolygon.assert_valid();
         }
     }
 
-    for (size_t region_id = 0; region_id < layer.regions().size(); ++ region_id) {
-        const LayerRegion &layerm = *layer.regions()[region_id];
-        for (const Surface &surface : layerm.fill_surfaces())
-            if (surface.surface_type != (stPosInternal | stDensVoid)) {
-                const SurfaceFillParams *params = region_to_surface_params[region_id][&surface - &layerm.fill_surfaces().surfaces.front()];
+    for (size_t region_id = 0; region_id < ordered_regions.size(); ++ region_id) {
+        const LayerRegion &layerm = *ordered_regions[region_id];
+        for (const Surface &surface : layerm.fill_surfaces()) {
+            // if a fill is needed for this island in this surface.
+            if (surface.surface_type != (stPosInternal | stDensVoid) &&
+                island.is_expolygons_from_region(surface.expolygon)) {
+                const SurfaceFillParams *params =
+                    region_to_surface_params[region_id][&surface - &layerm.fill_surfaces().surfaces.front()];
                 if (params != nullptr) {
                     SurfaceFill &fill = surface_fills[params->idx];
-                    if (fill.region_id == size_t(-1)) {
-                        fill.region_id = region_id;
+                    if (fill.regions.empty()) {
+                        // fill.region_id = region_id;
                         fill.surface = surface;
                         fill.surface.expolygon.assert_valid();
                         fill.expolygons.emplace_back(std::move(fill.surface.expolygon));
+                        fill.regions.insert(&layerm);
                     } else {
                         surface.expolygon.assert_valid();
                         fill.expolygons.emplace_back(surface.expolygon);
+                        fill.regions.insert(&layerm);
                     }
                 }
             }
+        }
     }
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
     {
@@ -612,19 +625,19 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
         coord_t  distance_between_surfaces = 0;
         Polygons surfaces_polygons;
         Polygons voids;
-        int      region_internal_infill = -1;
-        int         region_solid_infill = -1;
-        int         region_some_infill = -1;
+        LayerRegionSetConstPtrs regions_internal_infill;
+        LayerRegionSetConstPtrs regions_solid_infill;
+        LayerRegionSetConstPtrs regions_some_infill;
         for (SurfaceFill &surface_fill : surface_fills)
             if (! surface_fill.expolygons.empty()) {
                 distance_between_surfaces = std::max(distance_between_surfaces, surface_fill.params.flow.scaled_spacing());
                 append((surface_fill.surface.surface_type == (stPosInternal | stDensVoid)) ? voids : surfaces_polygons, to_polygons(surface_fill.expolygons));
                 if (surface_fill.surface.surface_type == (stPosInternal | stDensSolid))
-                    region_internal_infill = (int)surface_fill.region_id;
+                    regions_internal_infill = surface_fill.regions;
                 if (surface_fill.surface.has_fill_solid())
-                    region_solid_infill = (int)surface_fill.region_id;
+                    regions_solid_infill = surface_fill.regions;
                 if (surface_fill.surface.surface_type != (stPosInternal | stDensVoid))
-                    region_some_infill = (int)surface_fill.region_id;
+                    regions_some_infill = surface_fill.regions;
             }
         if (! voids.empty() && ! surfaces_polygons.empty()) {
             // First clip voids by the printing polygons, as the voids were ignored by the loop above during mutual clipping.
@@ -642,48 +655,52 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
             ExPolygons extensions = intersection_ex(expand(collapsed, float(distance_between_surfaces)), voids, ApplySafetyOffset::Yes);
             // Now find an internal infill SurfaceFill to add these extrusions to.
             SurfaceFill *internal_solid_fill = nullptr;
-            unsigned int region_id = 0;
-            if (region_internal_infill != -1)
-                region_id = region_internal_infill;
-            else if (region_solid_infill != -1)
-                region_id = region_solid_infill;
-            else if (region_some_infill != -1)
-                region_id = region_some_infill;
-            const LayerRegion& layerm = *layer.regions()[region_id];
+            LayerRegionSetConstPtrs *regions = nullptr;
+            if (!regions_internal_infill.empty())
+                regions = &regions_internal_infill;
+            else if (!regions_solid_infill.empty())
+                regions = &regions_solid_infill;
+            else if (!regions_some_infill.empty())
+                regions = &regions_some_infill;
             for (SurfaceFill &surface_fill : surface_fills) {
                 if (surface_fill.surface.surface_type == (stPosInternal | stDensVoid) &&
-                    std::abs(layer.height - surface_fill.params.flow.height()) < EPSILON) {
+                    std::abs(layer.unscaled_height() - surface_fill.params.flow.height()) < EPSILON) {
                     internal_solid_fill = &surface_fill;
                     break;
                 }
             }
             if (internal_solid_fill == nullptr) {
+                // get one of them, ok as extruder, fill_angle & solid_fill_pattern must always be the same.
+                const LayerRegion *one_layerm = *regions->begin();
                 // Produce another solid fill.
                 SurfaceFillParams params;
-                params.extruder = layerm.region().extruder(frSolidInfill, *layer.object());
-                params.pattern  = layerm.region().config().solid_fill_pattern.value;
+                params.extruder = one_layerm->region().extruder(frSolidInfill, *layer.object());
+                params.pattern  = one_layerm->region().config().solid_fill_pattern.value;
                 params.density  = 100.f;
                 params.role     = ExtrusionRole::InternalInfill;
-                params.angle    = compute_fill_angle(layerm.region().config(), layerm.layer()->id());
+                params.angle    = compute_fill_angle(one_layerm->region().config(), layer.id());
                 //FIXME FLOW decide what to use
-                //params.flow = layerm.flow(frSolidInfill);
+                //params.flow = one_layerm->flow(frSolidInfill);
                 // calculate the actual flow we'll be using for this infill
-                params.flow = layerm.region().flow(
+                params.flow = one_layerm->region().flow(
                     *layer.object(),
                     frSolidInfill,
-                    layer.height,         // extrusion height
+                    (float)layer.unscaled_height(),         // extrusion height
                     layer.id()
                 );
                 params.spacing = params.flow.spacing();            
                 surface_fills.emplace_back(params);
                 surface_fills.back().surface.surface_type = (stPosInternal | stDensSolid);
-                surface_fills.back().surface.thickness = layer.height;
+                surface_fills.back().surface.set_scaled_thickness(layer.scaled_height());
                 assert_valid(extensions);
                 surface_fills.back().expolygons = std::move(extensions);
+                surface_fills.back().regions = *regions;
             } else {
-                append(extensions, std::move(internal_solid_fill->expolygons));
-                assert_valid(extensions);
-                internal_solid_fill->expolygons = union_ex(extensions);
+                //append(extensions, std::move(internal_solid_fill->expolygons));
+                //assert_valid(extensions);
+                //internal_solid_fill->expolygons = union_ex(extensions);
+                internal_solid_fill->expolygons = union_ex(extensions, internal_solid_fill->expolygons);
+                assert_valid(internal_solid_fill->expolygons);
             }
         }
     }
@@ -695,6 +712,14 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                 fill.params.pattern = ipEnsuring;
             }
     }*/
+    // remove empty fills
+    for (size_t i = 0; i < surface_fills.size(); i++) {
+        if (surface_fills[i].expolygons.empty()) {
+            surface_fills.erase(surface_fills.begin() + i);
+            i--;
+        }
+    }
+
     //union with safety offset to avoid separation from the appends of different surface with same settings.
     for (auto &surface_fill : surface_fills) {
         surface_fill.expolygons = union_safety_offset_ex(surface_fill.expolygons);
@@ -710,228 +735,46 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
     return surface_fills;
 }
 
-static LayerIsland *get_fill_island(Layer &layer,
-                                           uint32_t fill_region_id,
-                                           Point point) {
-        // Sort the extrusion range into its LayerIsland.
-        // Traverse the slices in an increasing order of bounding box size, so that the islands inside another islands are tested first,
-        // so we can just test a point inside ExPolygon::contour and we may skip testing the holes.
-        // That is because layer.lslices() is topologically sorted. 
-        auto point_inside_surface = [&layer](const size_t lslice_idx, const Point &point) {
-            const BoundingBox &bbox = layer.lslices_ex[lslice_idx].bbox;
-            return point.x() >= bbox.min.x() && point.x() < bbox.max.x() && point.y() >= bbox.min.y() && point.y() < bbox.max.y() &&
-                   layer.lslices()[lslice_idx].contour.contains(point);
-        };
-#ifdef _DEBUG
-        // check topological sort
-        if (layer.lslices().size() > 1) {
-            std::vector<BoundingBox> bboxes;
-            bboxes.emplace_back(layer.lslices()[0].contour.points);
-            for (size_t check_idx = 1; check_idx < layer.lslices().size(); ++check_idx) {
-                assert(bboxes.size() == check_idx);
-                bboxes.emplace_back(layer.lslices()[check_idx].contour.points);
-                for (size_t bigger_idx = 0; bigger_idx < check_idx; ++bigger_idx) {
-                    // higher idx can be inside holes, but not the opposite!
-                    if (bboxes[check_idx].contains(bboxes[bigger_idx])) {
-                        assert(!layer.lslices()[check_idx].contour.contains(layer.lslices()[bigger_idx].contour.first_point()));
-                    }
-                }
-            }
-        }
-#endif
-        int   lslice_idx = int(layer.lslices_ex.size()) - 1;
-        for (; lslice_idx >= 0; --lslice_idx)
-            if (point_inside_surface(lslice_idx, point))
-                break;
-        assert(lslice_idx >= 0);
-        if (lslice_idx >= 0) {
-            LayerSlice &lslice = layer.lslices_ex[lslice_idx];
-            // Find an island.
-            LayerIsland *island = nullptr;
-            if (lslice.islands.size() == 1) {
-                // Cool, just save the extrusions in there.
-                island = &lslice.islands.front();
-            } else {
-                // The infill was created for one of the infills.
-                // In case of ironing, the infill may not fall into any of the infill expolygons either.
-                // In case of some numerical error, the infill may not fall into any of the infill expolygons either.
-                // 1) Try an exact test, it should be cheaper than a closest region test.
-                for (LayerIsland &li : lslice.islands) {
-                    const BoundingBoxes &bboxes     = li.fill_expolygons_composite() ?
-                                                          layer.get_region(li.perimeters.region())->fill_expolygons_composite_bboxes() :
-                                                          layer.get_region(li.fill_region_id)->fill_expolygons_bboxes();
-                    const ExPolygons &   expolygons = li.fill_expolygons_composite() ?
-                                                          layer.get_region(li.perimeters.region())->fill_expolygons_composite() :
-                                                          layer.get_region(li.fill_region_id)->fill_expolygons();
-                    for (uint32_t fill_expolygon_id : li.fill_expolygons)
-                        if (bboxes[fill_expolygon_id].contains(point) && expolygons[fill_expolygon_id].contains(point)) {
-                            island = &li;
-                            goto found;
-                        }
-                }
-                // 2) Find closest fill_expolygon, branch and bound by distance to bounding box.
-                {
-                    struct Island
-                    {
-                        uint32_t island_idx;
-                        uint32_t expolygon_idx;
-                        double   distance2;
-                    };
-                    std::vector<Island> islands_sorted;
-                    for (uint32_t island_idx = 0; island_idx < uint32_t(lslice.islands.size()); ++island_idx) {
-                        const LayerIsland &  li     = lslice.islands[island_idx];
-                        const BoundingBoxes &bboxes = li.fill_expolygons_composite() ?
-                                                          layer.get_region(li.perimeters.region())->fill_expolygons_composite_bboxes() :
-                                                          layer.get_region(li.fill_region_id)->fill_expolygons_bboxes();
-                        for (uint32_t fill_expolygon_id : li.fill_expolygons)
-                            islands_sorted.push_back(
-                                {island_idx, fill_expolygon_id, bbox_point_distance_squared(bboxes[fill_expolygon_id], point)});
-                    }
-                    std::sort(islands_sorted.begin(), islands_sorted.end(), [](auto &l, auto &r) { return l.distance2 < r.distance2; });
-                    auto dist_min2 = std::numeric_limits<double>::max();
-                    for (uint32_t sorted_bbox_idx = 0; sorted_bbox_idx < uint32_t(islands_sorted.size()); ++sorted_bbox_idx) {
-                        const Island &isl = islands_sorted[sorted_bbox_idx];
-                        if (isl.distance2 > dist_min2)
-                            // Branch & bound condition.
-                            break;
-                        LayerIsland &     li         = lslice.islands[isl.island_idx];
-                        const ExPolygons &expolygons = li.fill_expolygons_composite() ?
-                                                           layer.get_region(li.perimeters.region())->fill_expolygons_composite() :
-                                                           layer.get_region(li.fill_region_id)->fill_expolygons();
-                        double            d2 = (expolygons[isl.expolygon_idx].point_projection(point) - point).cast<double>().squaredNorm();
-                        if (d2 < dist_min2) {
-                            dist_min2 = d2;
-                            island    = &li;
-                        }
-                    }
-                }
-            found:;
-            }
-            assert(island);
-            if (island)
-                return island;
-        }
-    assert(false);
-    return nullptr;
-}
-
-static void insert_ironings_into_islands(Layer &layer, uint32_t layer_region_id, uint32_t ironing_idx_begin, uint32_t ironing_idx_end)
-{
-	if (ironing_idx_begin < ironing_idx_end) {
-    	// Sort the extrusion range into its LayerIsland.
-	    // Traverse the slices in an increasing order of bounding box size, so that the islands inside another islands are tested first,
-	    // so we can just test a point inside ExPolygon::contour and we may skip testing the holes.
-        // That is because layer.lslices() is topologically sorted. 
-	    auto point_inside_surface = [&layer](const size_t lslice_idx, const Point &point) {
-	        const BoundingBox &bbox = layer.lslices_ex[lslice_idx].bbox;
-	        return point.x() >= bbox.min.x() && point.x() < bbox.max.x() &&
-	               point.y() >= bbox.min.y() && point.y() < bbox.max.y() &&
-	               layer.lslices()[lslice_idx].contour.contains(point);
-	    };
-	    Point point = layer.get_region(layer_region_id)->ironings().entities()[ironing_idx_begin]->first_point();
-	    int lslice_idx = int(layer.lslices_ex.size()) - 1;
-	    for (; lslice_idx >= 0; -- lslice_idx)
-	        if (point_inside_surface(lslice_idx, point))
-	        	break;
-	    assert(lslice_idx >= 0);
-	    if (lslice_idx >= 0) {
-	    	LayerSlice &lslice = layer.lslices_ex[lslice_idx];
-	    	// Find an island.
-	    	LayerIsland *island = nullptr;
-	    	if (lslice.islands.size() == 1) {
-	    		// Cool, just save the extrusions in there.
-	    		island = &lslice.islands.front();
-	    	} else {
-	    		// The infill was created for one of the infills.
-	    		// In case of ironing, the infill may not fall into any of the infill expolygons either.
-	    		// In case of some numerical error, the infill may not fall into any of the infill expolygons either.
-	    		// 1) Try an exact test, it should be cheaper than a closest region test.
-	    		for (LayerIsland &li : lslice.islands) {
-	    			const BoundingBoxes &bboxes     = li.fill_expolygons_composite() ?
-	    				layer.get_region(li.perimeters.region())->fill_expolygons_composite_bboxes() :
-	    				layer.get_region(li.fill_region_id)->fill_expolygons_bboxes();
-	    			const ExPolygons 	&expolygons = li.fill_expolygons_composite() ? 
-	    				layer.get_region(li.perimeters.region())->fill_expolygons_composite() :
-	    				layer.get_region(li.fill_region_id)->fill_expolygons();
-	    			for (uint32_t fill_expolygon_id : li.fill_expolygons)
-	    				if (bboxes[fill_expolygon_id].contains(point) && expolygons[fill_expolygon_id].contains(point)) {
-	    					island = &li;
-	    					goto found;
-	    				}
-	    		}
-	    		// 2) Find closest fill_expolygon, branch and bound by distance to bounding box.
-				{
-					struct Island {
-						uint32_t island_idx;
-						uint32_t expolygon_idx;
-						double   distance2;
-					};
-	    			std::vector<Island> islands_sorted;
-	    			for (uint32_t island_idx = 0; island_idx < uint32_t(lslice.islands.size()); ++ island_idx) {
-	    				const LayerIsland   &li     = lslice.islands[island_idx];
-	    				const BoundingBoxes &bboxes = li.fill_expolygons_composite() ?
-	    					layer.get_region(li.perimeters.region())->fill_expolygons_composite_bboxes() :
-	    					layer.get_region(li.fill_region_id)->fill_expolygons_bboxes();
-	    				for (uint32_t fill_expolygon_id : li.fill_expolygons)
-							islands_sorted.push_back({ island_idx, fill_expolygon_id, bbox_point_distance_squared(bboxes[fill_expolygon_id], point) });
-	    			}
-	    			std::sort(islands_sorted.begin(), islands_sorted.end(), [](auto &l, auto &r){ return l.distance2 < r.distance2; });
-	    			auto dist_min2 = std::numeric_limits<double>::max();
-	    			for (uint32_t sorted_bbox_idx = 0; sorted_bbox_idx < uint32_t(islands_sorted.size()); ++ sorted_bbox_idx) {
-	    				const Island &isl = islands_sorted[sorted_bbox_idx];
-	    				if (isl.distance2 > dist_min2)
-							// Branch & bound condition.
-	    					break;
-	    				LayerIsland		  &li         = lslice.islands[isl.island_idx];
-	    				const ExPolygons  &expolygons = li.fill_expolygons_composite() ?
-	    					layer.get_region(li.perimeters.region())->fill_expolygons_composite() :
-	    					layer.get_region(li.fill_region_id)->fill_expolygons();
-	    				double d2 = (expolygons[isl.expolygon_idx].point_projection(point) - point).cast<double>().squaredNorm();
-	    				if (d2 < dist_min2) {
-	    					dist_min2 = d2;
-	    					island = &li;
-	    				}
-	    			}
-				}
-	    	found:;
-	    	}
-	    	assert(island);
-	    	if (island)
-	    		island->add_ironing_range(LayerExtrusionRange{ layer_region_id, { ironing_idx_begin, ironing_idx_end }});
-	    }
-    }
-}
-
 void Layer::clear_fills()
 {
-    for (LayerRegion *layerm : m_regions) {
-        layerm->set_fills().clear();
-        layerm->set_ironings().clear();
-    }
-    for (LayerSlice &lslice : lslices_ex) {
-		for (LayerIsland &island : lslice.islands) {
-			island.fills.clear();
-			island.ironings.clear();
+    for (LayerSliceIslandPtr &layer_island_ptr : m_islands) {
+        for (LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+            region_island_ptr->m_extrusion_regions.erase(LayerRegionIsland::INFILLS);
+            region_island_ptr->m_extrusion_regions.erase(LayerRegionIsland::IRONINGS);
         }
     }
 }
 
-void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree, FillLightning::Generator* lightning_generator)
-{
-	this->clear_fills();
+void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree,
+                       FillAdaptive::Octree *support_fill_octree,
+                       FillLightning::Generator *lightning_generator) {
+    this->clear_fills();
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
     this->export_region_fill_surfaces_to_svg_debug("10_fill-initial");
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
 
-    std::vector<SurfaceFill>  surface_fills  = group_fills(*this);
+    for (LayerSliceIslandPtr &layer_island_ptr : m_islands) {
+        this->_make_fills(*layer_island_ptr, adaptive_fill_octree, support_fill_octree, lightning_generator);
+    }
+}
+
+void Layer::_make_fills(LayerSliceIsland& island,
+                        FillAdaptive::Octree *adaptive_fill_octree,
+                        FillAdaptive::Octree *support_fill_octree,
+                        FillLightning::Generator *lightning_generator)
+{
+    std::vector<SurfaceFill> surface_fills   = group_fills(*this, island);
+    if (surface_fills.empty()) {
+        return;
+    }
     const Slic3r::BoundingBox bbox           = this->object()->bounding_box();
 
     //sort by priority. Needed for dense support, as the order is very important.
     std::sort(surface_fills.begin(), surface_fills.end(), [](SurfaceFill& s1, SurfaceFill& s2) {
-        if (s1.region_id == s2.region_id)
+        if (s1.regions == s2.regions)
             return s1.params.priority < s2.params.priority;
-        return s1.region_id < s2.region_id;
+        return s1.regions < s2.regions;
         });
 
 #ifdef SLIC3R_DEBUG_SLICE_PROCESSING
@@ -940,81 +783,141 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         export_group_fills_to_svg(debug_out_path("Layer-fill_surfaces-10_fill-final-%d.svg", iRun ++).c_str(), surface_fills);
     }
 #endif /* SLIC3R_DEBUG_SLICE_PROCESSING */
-    std::vector<std::vector<ExtrusionEntityCollection*>> fills_by_priority;
-    auto store_fill = [&fills_by_priority, this](size_t region_id) {
-        LayerRegion *layerm = this->m_regions[region_id];
-        uint32_t     fill_begin = layerm->fills().size();
-        assert(!layerm->fills().can_reverse() && !layerm->fills().can_sort());
-        std::map<LayerIsland*, std::vector<std::vector<ExtrusionEntityCollection*>>> island_2_fillsby_priority;
-        for (size_t priority = 0; priority < fills_by_priority.size(); ++priority) {
-            for (size_t fill_idx = 0; fill_idx < fills_by_priority[priority].size(); ++fill_idx) {
-                if (fills_by_priority[priority][fill_idx]->empty()) {
-                    delete fills_by_priority[priority][fill_idx];
-                    fills_by_priority[priority][fill_idx] = nullptr;
-                    continue;
-                }
-                LayerIsland *island = get_fill_island(*this, uint32_t(region_id), fills_by_priority[priority][fill_idx]->first_point());
-                if (island == nullptr) {
-                    assert(false);
-                    assert(!this->lslices_ex.empty());
-                    assert(!this->lslices_ex.front().islands.empty());
-                    island = &this->lslices_ex.front().islands.front();
-                }
-                std::vector<std::vector<ExtrusionEntityCollection*>> &fillsbypriority = island_2_fillsby_priority[island];
-                while(fillsbypriority.size() < fills_by_priority.size())
-                    fillsbypriority.emplace_back();
-                assert(priority < fills_by_priority.size());
-                if (!fills_by_priority[priority][fill_idx]->empty()) {
-                    fillsbypriority[priority].push_back(fills_by_priority[priority][fill_idx]);
+    std::vector<std::vector<std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>>>> fills_by_priority;
+    auto store_fill = [&fills_by_priority, &island, this](LayerRegionSetConstPtrs regions) {
+        if (fills_by_priority.empty()) {
+            assert(false);//not possible
+        }
+        int nb_sparse = 0;
+        int nb_solid = 0;
+        int nb_others = 0;
+        for (std::vector<std::pair<const SurfaceFill *, std::unique_ptr<ExtrusionEntityCollection>>>
+                 &fills_same_prio : fills_by_priority) {
+            for (std::pair<const SurfaceFill *, std::unique_ptr<ExtrusionEntityCollection>> &ecc : fills_same_prio) {
+                if (ecc.first->surface.has_fill_sparse()) {
+                    nb_sparse++;
+                } else if (ecc.first->surface.has_fill_solid()) {
+                    nb_solid++;
                 } else {
-                    assert(false);
+                    nb_others++;
                 }
             }
         }
-        //now it's ordered, by island and then by priority
-        for (auto &[island, prio2fills] : island_2_fillsby_priority) {
-            if (prio2fills.empty()) {
-                assert(false);//not possible
-            } else {
-                ExtrusionEntityCollection eec_priority;
-                eec_priority.set_can_sort_reverse(false, false);
-                for (std::vector<ExtrusionEntityCollection*> &fills_same_prio : prio2fills) {
-                    if (fills_same_prio.size() == 1) {
-                        assert(!fills_same_prio.front()->empty());
-                        eec_priority.append(ExtrusionEntitiesPtr{fills_same_prio.front()});
-                    } else if (fills_same_prio.size() > 1) {
-                        ExtrusionEntityCollection eec_same_prio;
-                        for (ExtrusionEntityCollection *ecc : fills_same_prio) {
-                            assert(!ecc->empty());
-                            eec_same_prio.append(ExtrusionEntitiesPtr{ecc});
+        assert(nb_others == 0);
+        // find our LayerRegionIsland or create it
+        assert(!regions.empty());
+        int16_t sparse_fill_extruder = int16_t((*regions.begin())->region().config().infill_extruder.value - 1);
+        int16_t solid_fill_extruder = int16_t((*regions.begin())->region().config().solid_infill_extruder.value - 1);
+        assert(sparse_fill_extruder >= 0);
+        assert(solid_fill_extruder >= 0);
+        LayerRegionIsland *region_island_sparse = nb_sparse == 0 ?
+            nullptr :
+            &island.get_or_add_region_island(regions, uint16_t(sparse_fill_extruder));
+        LayerRegionIsland *region_island_solid = nb_solid == 0 ?
+            nullptr :
+            &island.get_or_add_region_island(regions, uint16_t(solid_fill_extruder));
+        if (region_island_sparse && (*regions.begin())->region().config().wipe_into_infill) {
+            region_island_sparse->can_be_used_to_wipe = true;
+        }
+        assert(!region_island_sparse || !region_island_sparse->has_extrusion(LayerRegionIsland::INFILLS));
+        assert(!region_island_solid || !region_island_solid->has_extrusion(LayerRegionIsland::INFILLS));
+        ExtrusionEntityCollection *root_sparse = region_island_sparse ?
+            &region_island_sparse->mutable_extrusion(LayerRegionIsland::INFILLS) :
+            nullptr;
+        ExtrusionEntityCollection *root_solid = region_island_solid ?
+            &region_island_solid->mutable_extrusion(LayerRegionIsland::INFILLS) :
+            nullptr;
+        if (fills_by_priority.size() > 1) {
+            // multiple priority, create an intermediate collection
+            if (root_sparse) {
+                root_sparse->set_can_sort_reverse(false, false);
+                assert(root_sparse->empty());
+            }
+            if (root_solid) {
+                root_solid->set_can_sort_reverse(false, false);
+                assert(root_solid->empty());
+            }
+            // note: it's a bit complicated because can be  root_sparse == root_solid
+            for (std::vector<std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>>> &fills_same_prio : fills_by_priority) {
+                if (fills_same_prio.size() == 1) {
+                    if (!fills_same_prio.front().second->empty()) {
+                        assert(fills_same_prio.front().first->surface.has_fill_sparse() ? root_sparse : root_solid);
+                        (fills_same_prio.front().first->surface.has_fill_sparse() ? root_sparse : root_solid)->append(fills_same_prio.front().second);
+                    }
+                } else if (fills_same_prio.size() > 1) {
+                    ExtrusionEntityCollection eec_same_prio_sparse;
+                    ExtrusionEntityCollection eec_same_prio_solid;
+                    for (std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>> &ecc : fills_same_prio) {
+                        if (!ecc.second->empty()) {
+                            // if sparse_fill_extruder == solid_fill_extruder, force to go in the same collection
+                            ((ecc.first->surface.has_fill_sparse() || root_solid == root_sparse) ?
+                                 eec_same_prio_sparse :
+                                 eec_same_prio_solid)
+                                .append(ecc.second);
                         }
-                        assert(!eec_same_prio.empty());
-                        eec_priority.append(eec_same_prio);
+                    }
+                    assert(!eec_same_prio_sparse.empty() || !eec_same_prio_solid.empty());
+                    if (!eec_same_prio_sparse.empty()) {
+                        if (root_sparse) {
+                            root_sparse->append(eec_same_prio_sparse);
+                        } else {
+                            assert(root_solid);
+                            // if sparse_fill_extruder == solid_fill_extruder and nb_sparse == 0
+                            root_solid->append(eec_same_prio_sparse);
+                        }
+                    }
+                    if (!eec_same_prio_solid.empty()) {
+                        assert(root_solid);
+                        root_solid->append(eec_same_prio_solid);
                     }
                 }
-                assert(!eec_priority.empty());
-                // add the new fill collection
-                layerm->set_fills().append(eec_priority);
-                // affect it to the island
-                island->add_fill_range(LayerExtrusionRange{uint32_t(region_id),
-                                                            {uint32_t(layerm->fills().size() - 1),
-                                                            uint32_t(layerm->fills().size())}});
+            }
+            assert(!root_sparse || !root_sparse->empty());
+            assert(!root_solid || !root_solid->empty());
+        } else {
+            std::vector<std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>>> &fills_same_prio = fills_by_priority.front();
+            if (fills_same_prio.size() == 1) {
+                if (fills_same_prio.front().first->surface.has_fill_sparse()) {
+                    assert(root_sparse);
+                    root_sparse->append_move_from(*fills_same_prio.front().second);
+                } else {
+                    assert(root_solid);
+                    root_solid->append_move_from(*fills_same_prio.front().second);
+                }
+            } else {
+                for (std::pair<const SurfaceFill*, std::unique_ptr<ExtrusionEntityCollection>> &ecc : fills_same_prio) {
+                    if (!ecc.second->empty()) {
+                        if (ecc.first->surface.has_fill_sparse()) {
+                            assert(root_sparse);
+                            root_sparse->append(ecc.second);
+                        } else {
+                            assert(root_solid);
+                            root_solid->append(ecc.second);
+                        }
+                    }
+                }
             }
         }
         fills_by_priority.clear();
     };
     //surface_fills is sorted by region_id
-    size_t current_region_id = -1;
+    LayerRegionSetConstPtrs current_regions;
     uint16_t current_extruder = -1;
     size_t first_object_layer_id = this->object()->get_layer(0)->id();
     for (SurfaceFill &surface_fill : surface_fills) {
         // store the region fill when changing region. 
-        if (current_region_id != size_t(-1) && (current_region_id != surface_fill.region_id || current_extruder != surface_fill.params.extruder)) {
-            store_fill(current_region_id);
+        if (current_regions != surface_fill.regions || current_extruder != surface_fill.params.extruder) {
+            if (!current_regions.empty()) {
+                store_fill(current_regions);
+            }
+            //current_regions.clear();
+            //current_regions.insert(current_regions.end(), surface_fill.regions.begin(), surface_fill.regions.end());
+            current_regions = surface_fill.regions;
+            current_extruder = surface_fill.params.extruder;
         }
-        current_region_id = surface_fill.region_id;
-        current_extruder = surface_fill.params.extruder;
-        const LayerRegion* layerm = this->m_regions[surface_fill.region_id];
+        assert(!surface_fill.regions.empty());
+        const LayerRegion *layerm_for_flow = *surface_fill.regions.begin();
+        const PrintRegionConfig &common_region_config = layerm_for_flow->region().config();
 
         // Create the filler object.
         std::unique_ptr<Fill> f = std::unique_ptr<Fill>(Fill::new_from_type(surface_fill.params.pattern));
@@ -1023,7 +926,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         // Layer::id() returns layer ID including raft layers, subtract them to make the infill direction independent
         // from raft.
         f->layer_id = this->id() - first_object_layer_id;
-        f->z        = this->print_z;
+        f->z        = this->unscaled_print_z();
         f->angle    = surface_fill.params.angle;
         f->can_angle_cross   = surface_fill.params.can_angle_cross;
         f->adapt_fill_octree = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
@@ -1041,7 +944,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         if (surface_fill.params.pattern == ipEnsuring) {
             auto *fill_ensuring = dynamic_cast<FillEnsuring *>(f.get());
             assert(fill_ensuring != nullptr);
-            fill_ensuring->print_region_config = &m_regions[surface_fill.region_id]->region().config();
+            fill_ensuring->print_region_config = &common_region_config;
         }
 
         // calculate flow spacing for infill pattern generation
@@ -1054,7 +957,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         //FIXME FLOW decide if using surface_fill.params.flow.bridge() or surface_fill.params.bridge (default but deleted)
         if (! surface_fill.params.flow.bridge()) {
 #if 0
-            link_max_length = layerm.region().config().get_abs_value(surface.is_external() ? "external_fill_link_max_length" : "fill_link_max_length", flow.spacing());
+            link_max_length = common_region_config.get_abs_value(surface.is_external() ? "external_fill_link_max_length" : "fill_link_max_length", flow.spacing());
 //            printf("flow spacing: %f,  is_external: %d, link_max_length: %lf\n", flow.spacing(), int(surface.is_external()), link_max_length);
 #else
             if (surface_fill.params.density > .8) // 80%
@@ -1068,16 +971,16 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         //give the overlap size to let the infill do his overlap
         //add overlap if at least one perimeter
         float perimeter_spacing = 0;
-        if(layerm->region().config().perimeters == 1)
-            perimeter_spacing = layerm->flow(frExternalPerimeter).spacing();
-        else if(layerm->region().config().only_one_perimeter_top)
+        if(common_region_config.perimeters == 1)
+            perimeter_spacing = layerm_for_flow->flow(frExternalPerimeter).spacing();
+        else if(common_region_config.only_one_perimeter_top)
             //note: use the min of the two to avoid overextrusion if only one perimeter top
-            perimeter_spacing = std::min(layerm->flow(frPerimeter).spacing(), layerm->flow(frExternalPerimeter).spacing());
-        else //if(layerm->region().config().perimeters > 1)
-            perimeter_spacing = layerm->flow(frPerimeter).spacing();
+            perimeter_spacing = std::min(layerm_for_flow->flow(frPerimeter).spacing(), layerm_for_flow->flow(frExternalPerimeter).spacing());
+        else //if(common_region_config.perimeters > 1)
+            perimeter_spacing = layerm_for_flow->flow(frPerimeter).spacing();
 
         // Used by the concentric infill pattern to clip the loops to create extrusion paths.
-        f->loop_clipping = scale_t(layerm->region().config().get_computed_value("seam_gap", surface_fill.params.extruder - 1) * surface_fill.params.flow.nozzle_diameter());
+        f->loop_clipping = scale_t(common_region_config.get_computed_value("seam_gap", surface_fill.params.extruder - 1) * surface_fill.params.flow.nozzle_diameter());
 
         // apply half spacing using this flow's own spacing and generate infill
         //FillParams params;
@@ -1087,7 +990,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
         //params.anchor_length_max = surface_fill.params.anchor_length_max;
         //params.resolution        = resolution;
         //params.use_arachne       = (perimeter_generator == PerimeterGeneratorType::Arachne && surface_fill.params.pattern == ipConcentric) || surface_fill.params.pattern == ipEnsuring;
-        //params.layer_height      = layerm->layer()->height;
+        //params.layer_height      = this->height;
         surface_fill.params.fill_resolution = std::min(surface_fill.params.flow.scaled_width() / 16, 
             std::max(SCALED_EPSILON, scale_t(this->object()->print()->config().resolution_internal.value)));
 
@@ -1101,7 +1004,7 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             if (surface_fill.params.config->perimeters > 0) {
                 f->overlap = surface_fill.params.config->infill_overlap.get_abs_value((perimeter_spacing + (f->get_spacing())) / 2);
                 if (f->overlap != 0) {
-                    f->no_overlap_expolygons = intersection_ex(layerm->fill_no_overlap_expolygons(), ExPolygons() = {expoly});
+                    f->no_overlap_expolygons = intersection_ex(island.fill_no_overlap_expolygons(), ExPolygons() = {expoly});
                 } else {
                     f->no_overlap_expolygons.push_back(expoly);
                 }
@@ -1114,8 +1017,8 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             surface_fill.params.dont_adjust = dont_adjust;
             surface_fill.params.bridge_offset = 0;
             surface_fill.params.density = density;
-            surface_fill.params.layer_height = m_regions[surface_fill.region_id]->layer()->height;
-            surface_fill.params.use_arachne   = (layerm->region().config().perimeter_generator == PerimeterGeneratorType::Arachne &&
+            surface_fill.params.layer_height = float(this->unscaled_height());
+            surface_fill.params.use_arachne   = (common_region_config.perimeter_generator == PerimeterGeneratorType::Arachne &&
                                                surface_fill.params.pattern == ipConcentric) ||
                                               surface_fill.params.pattern == ipEnsuring;
 
@@ -1124,11 +1027,11 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                 surface_fill.surface.expolygon = std::move(expoly);
 
                 //adjust the bridge density
-                if (surface_fill.params.flow.bridge() && surface_fill.params.density > 0.99 /*&& layerm->region()->config().bridge_overlap.get_abs_value(1) != 1*/) {
+                if (surface_fill.params.flow.bridge() && surface_fill.params.density > 0.99 /*&& common_region_config.bridge_overlap.get_abs_value(1) != 1*/) {
                     // bridge have their own spacing, don't try to align it with normal infill.
                     surface_fill.params.max_sparse_infill_spacing = 0;
                     ////varies the overlap to have the best coverage for the bridge
-                    //surface_fill.params.density *= float(layerm->region()->config().bridge_overlap.get_abs_value(1));
+                    //surface_fill.params.density *= float(common_region_config.bridge_overlap.get_abs_value(1));
                     double min_spacing = 0.999 * surface_fill.params.spacing / surface_fill.params.config->bridge_overlap.get_abs_value(surface_fill.params.density);
                     double max_spacing = 1.001 * surface_fill.params.spacing / surface_fill.params.config->bridge_overlap_min.get_abs_value(surface_fill.params.density);
                     double factor = 1.00001;
@@ -1191,10 +1094,10 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     fills_by_priority.emplace_back();
                 // note: fills_by_priority[idx] is a vector that store all the entities of this priority, but that can be in multiple islands
                 //       the collection in fills_by_priority[idx][idx2) can be reordered, so put evrythgin in a new unorderable collection if it'ts needed
-                fills_by_priority[(size_t)surface_fill.params.priority].push_back(new ExtrusionEntityCollection());
-                f->fill_surface_extrusion(&surface_fill.surface, surface_fill.params, fills_by_priority[(size_t)surface_fill.params.priority].back()->set_entities());
+                fills_by_priority[(size_t)surface_fill.params.priority].emplace_back(&surface_fill, new ExtrusionEntityCollection());
+                f->fill_surface_extrusion(&surface_fill.surface, surface_fill.params, fills_by_priority[(size_t)surface_fill.params.priority].back().second->set_entities());
                 // normalize result, just in case the filling algorihtm is messing things up (some are).
-                fills_by_priority[(size_t)surface_fill.params.priority].back()->visit(normalize_visitor);
+                fills_by_priority[(size_t)surface_fill.params.priority].back().second->visit(normalize_visitor);
 #if _DEBUG
                 //check no over or underextrusion if fill_exactly
                 if (surface_fill.params.fill_exactly && surface_fill.params.density == 1 && !surface_fill.params.flow.bridge()) {
@@ -1210,10 +1113,10 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
                     }
                     GetPathsVisitor get_path;
                     //check that it doesn't overextrude
-                    for(size_t idx = 0; idx < fills_by_priority[(size_t)surface_fill.params.priority].back()->size(); ++idx){
-                        fills_by_priority[(size_t)surface_fill.params.priority].back()->entities()[idx]->visit(compute_volume);
-                        fills_by_priority[(size_t)surface_fill.params.priority].back()->entities()[idx]->visit(compute_volume_no_gap_fill);
-                        fills_by_priority[(size_t)surface_fill.params.priority].back()->entities()[idx]->visit(get_path);
+                    for(size_t idx = 0; idx < fills_by_priority[(size_t)surface_fill.params.priority].back().second->size(); ++idx){
+                        fills_by_priority[(size_t)surface_fill.params.priority].back().second->entities()[idx]->visit(compute_volume);
+                        fills_by_priority[(size_t)surface_fill.params.priority].back().second->entities()[idx]->visit(compute_volume_no_gap_fill);
+                        fills_by_priority[(size_t)surface_fill.params.priority].back().second->entities()[idx]->visit(get_path);
                     }
                     ExPolygons temp = f->no_overlap_expolygons.empty() ?
                                         ExPolygons{surface_fill.surface.expolygon} :
@@ -1242,53 +1145,28 @@ void Layer::make_fills(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive:
             }
         }
     }
-    if(current_region_id != size_t(-1))
-        store_fill(current_region_id);
-    
-    // add thin fill regions
-    // i.e, move from layerm.m_thin_fills to layerm.m_fills
-    // note: if some need to be ordered, please put them into an unsaortable collection before.
-	for (LayerSlice &lslice : this->lslices_ex) {
-		for (LayerIsland &island : lslice.islands) {
-			if (! island.thin_fills.empty()) {
-				// Copy thin fills into fills packed as a collection.
-				// Fills are always stored as collections, the rest of the pipeline (wipe into infill, G-code generator) relies on it.
-				LayerRegion				  &layerm	  = *this->get_region(island.perimeters.region());
-				ExtrusionEntityCollection &collection = *(new ExtrusionEntityCollection());
-				layerm.set_fills().set_entities().push_back(&collection);
-                collection.set_entities().reserve(island.thin_fills.size());
-                for (uint32_t fill_id : island.thin_fills) {
-                    collection.set_entities().push_back(layerm.thin_fills().entities()[fill_id]->clone());
-                    // normalize result, just in case the filling algorihtm is messing things up (some are).
-                    collection.set_entities().back()->visit(normalize_visitor);
-                }
-				island.add_fill_range({ island.perimeters.region(), { uint32_t(layerm.fills().entities().size() - 1), uint32_t(layerm.fills().entities().size()) } });
-			}
-			// Sort the fills by region ID.
-			std::sort(island.fills.begin(), island.fills.end(), [](auto &l, auto &r){ return l.region() < r.region() || (l.region() == r.region() && *l.begin() < *r.begin()); });
-			// Compress continuous fill ranges of the same region.
-			{
-				size_t k = 0;
-				for (size_t i = 0; i < island.fills.size();) {
-					uint32_t region_id = island.fills[i].region();
-					uint32_t begin     = *island.fills[i].begin();
-					uint32_t end       = *island.fills[i].end();
-					size_t   j         = i + 1;
-					for (; j < island.fills.size() && island.fills[j].region() == region_id && *island.fills[j].begin() == end; ++ j)
-						end = *island.fills[j].end();
-					island.fills[k ++] = { region_id, { begin, end } };
-					i = j;
-				}
-				island.fills.erase(island.fills.begin() + k, island.fills.end());
-			}
-		}
-    }
+    if(!current_regions.empty())
+        store_fill(current_regions);
 }
 
 //TODO: 
-Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Octree* adaptive_fill_octree, FillAdaptive::Octree* support_fill_octree,  FillLightning::Generator* lightning_generator) const
-{
-    std::vector<SurfaceFill>  surface_fills = group_fills(*this);
+Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Octree *adaptive_fill_octree,
+                                                                FillAdaptive::Octree *support_fill_octree,
+                                                                FillLightning::Generator *lightning_generator) const {
+    Polylines all_polylines;
+    for (const LayerSliceIslandPtr &island_ptr : islands()) {
+        append(all_polylines,
+               this->_generate_sparse_infill_polylines_for_anchoring(*island_ptr, adaptive_fill_octree,
+                                                                     support_fill_octree, lightning_generator));
+    }
+    return all_polylines;
+}
+
+Polylines Layer::_generate_sparse_infill_polylines_for_anchoring(const LayerSliceIsland &island,
+                                                                FillAdaptive::Octree *adaptive_fill_octree,
+                                                                FillAdaptive::Octree *support_fill_octree,
+                                                                FillLightning::Generator *lightning_generator) const {
+    std::vector<SurfaceFill>  surface_fills = group_fills(*this, island);
     const Slic3r::BoundingBox bbox          = this->object()->bounding_box();
     const coord_t             resolution    = std::max(SCALED_EPSILON, scale_t(this->object()->print()->config().resolution_internal.value));
 
@@ -1335,7 +1213,10 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
                 continue; break;
             }
         }
-        LayerRegion &layerm = *m_regions[surface_fill.region_id];
+        //LayerRegion &layerm = *m_regions[surface_fill.region_id];
+        assert(!surface_fill.regions.empty());
+        const LayerRegion *layerm_for_flow = *surface_fill.regions.begin();
+        const PrintRegionConfig &common_region_config = layerm_for_flow->region().config();
 
         // Create the filler object.
         std::unique_ptr<Fill> f = std::unique_ptr<Fill>(Fill::new_from_type(surface_fill.params.pattern));
@@ -1349,7 +1230,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         }
         f->set_bounding_box(bbox);
         f->layer_id = this->id() - this->object()->get_layer(0)->id(); // We need to subtract raft layers.
-        f->z        = this->print_z;
+        f->z        = this->unscaled_print_z();
         f->angle    = surface_fill.params.angle;
         f->adapt_fill_octree   = (surface_fill.params.pattern == ipSupportCubic) ? support_fill_octree : adaptive_fill_octree;
         f->set_config(&this->object()->print()->config(), &this->object()->config());
@@ -1363,7 +1244,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         double link_max_length = 0.;
         if (!surface_fill.params.flow.bridge()) {
 #if 0
-            link_max_length = layerm.region()->config().get_abs_value(surface.is_external() ? "external_fill_link_max_length" : "fill_link_max_length", flow.spacing());
+            link_max_length = common_region_config.get_abs_value(surface.is_external() ? "external_fill_link_max_length" : "fill_link_max_length", flow.spacing());
 //            printf("flow spacing: %f,  is_external: %d, link_max_length: %lf\n", flow.spacing(), int(surface.is_external()), link_max_length);
 #else
             if (surface_fill.params.density > .8) // 80%
@@ -1374,7 +1255,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         // Maximum length of the perimeter segment linking two infill lines.
         f->link_max_length = scale_t(link_max_length);
         // Used by the concentric infill pattern to clip the loops to create extrusion paths.
-        f->loop_clipping = scale_t(layerm.region().config().get_computed_value("seam_gap", surface_fill.params.extruder - 1) * surface_fill.params.flow.nozzle_diameter());
+        f->loop_clipping = scale_t(common_region_config.get_computed_value("seam_gap", surface_fill.params.extruder - 1) * surface_fill.params.flow.nozzle_diameter());
 
 
         // apply half spacing using this flow's own spacing and generate infill
@@ -1385,7 +1266,7 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
         params.anchor_length_max = surface_fill.params.anchor_length_max;
         params.fill_resolution   = resolution;
         params.use_arachne       = false;
-        params.layer_height      = layerm.layer()->height;
+        params.layer_height      = (float)this->unscaled_height();
 
         for (ExPolygon &expoly : surface_fill.expolygons) {
             surface_fill.surface.expolygon = std::move(expoly);
@@ -1414,8 +1295,14 @@ Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Oc
     return sparse_infill_polylines;
 }
 
+
+void Layer::make_ironing() {
+    for (LayerSliceIslandPtr &layer_island_ptr : m_islands) {
+        this->_make_ironing(*layer_island_ptr);
+    }
+}
 // Create ironing extrusions over top surfaces.
-void Layer::make_ironing()
+void Layer::_make_ironing(LayerSliceIsland &island)
 {
     // LayerRegion::slices contains surfaces marked with SurfaceType.
     // Here we want to collect top surfaces extruded with the same extruder.
@@ -1474,9 +1361,10 @@ void Layer::make_ironing()
                    this->angle == rhs.angle && this->type == rhs.type;
         }
 
-		LayerRegion *layerm;
+        const LayerRegion *layerm;
         // id of the region into the layer where the fill is made.
-		uint32_t     layer_region_id;
+        // uint32_t     layer_region_id;
+        //LayerRegionSetConstPtrs lregions;
 
         // IdeaMaker: ironing
         // ironing flowrate (5% percent)
@@ -1493,12 +1381,12 @@ void Layer::make_ironing()
         // speed: 20 mm/sec
     };
 
-
     std::vector<IroningParams> by_extruder;
     // not using layer.height?
     double default_layer_height = this->object()->config().layer_height;
-    for (uint32_t layer_region_id = 0; layer_region_id < uint32_t(this->m_regions.size()); ++layer_region_id) {
-        LayerRegion *layerm = m_regions[layer_region_id];
+    //for (uint32_t layer_region_id = 0; layer_region_id < uint32_t(this->m_regions.size()); ++layer_region_id) {
+        //LayerRegion *layerm = m_regions[layer_region_id];
+    for (const LayerRegion *layerm : island.regions()) {
         if (! layerm->slices().empty()) {
             IroningParams ironing_params;
             const PrintRegionConfig &config = layerm->region().config();
@@ -1506,7 +1394,7 @@ void Layer::make_ironing()
                 (config.ironing_type == IroningType::AllSolid ||
                      ((config.top_solid_layers > 0 || (config.solid_infill_every_layers.value == 1 && config.fill_density.value > 0)) && 
                         (config.ironing_type == IroningType::TopSurfaces ||
-                         (config.ironing_type == IroningType::TopmostOnly && layerm->layer()->upper_layer == nullptr))))) {
+                         (config.ironing_type == IroningType::TopmostOnly && this->upper_layer == nullptr))))) {
                 if (config.perimeter_extruder == config.solid_infill_extruder || config.perimeters == 0) {
                     // Iron the whole face.
                     ironing_params.extruder = config.solid_infill_extruder;
@@ -1526,13 +1414,14 @@ void Layer::make_ironing()
                 if (config.ironing_angle.value >= 0) {
                     ironing_params.angle = float(Geometry::deg2rad(config.ironing_angle.value));
                 } else {
-                    ironing_params.angle = compute_fill_angle(config, layerm->layer()->id());
+                    ironing_params.angle = compute_fill_angle(config, this->id());
                     if (config.ironing_angle.value < -1) {
                         ironing_params.angle += float(Geometry::deg2rad(-config.ironing_angle.value));
                     }
                 }
                 ironing_params.layerm         = layerm;
-                ironing_params.layer_region_id= layer_region_id;
+                //ironing_params.layer_region_id= layer_region_id;
+                //ironing_params.lregions.insert(layerm);
                 by_extruder.emplace_back(ironing_params);
             }
         }
@@ -1547,7 +1436,7 @@ void Layer::make_ironing()
 	// from raft.
 	//FIXME ironing does not take fill angle into account. Shall it? Does it matter?
 	fill.layer_id 			 = this->id() - this->object()->get_layer(0)->id();
-    fill.z                  = this->print_z;
+    fill.z                  = this->unscaled_print_z();
     fill.overlap            = 0;
     fill_params.density     = 1.;
     fill_params.connection  = InfillConnection::icConnected;
@@ -1561,10 +1450,11 @@ void Layer::make_ironing()
 
         // Create the ironing extrusions for regions <i, j)
         ExPolygons ironing_areas;
+        LayerRegionSetConstPtrs region_ironed;
         double nozzle_dmr = this->object()->print()->config().nozzle_diameter.get_at(ironing_params.extruder - 1);
         const PrintRegionConfig& region_config = ironing_params.layerm->region().config();
         if (ironing_params.just_infill) {
-			//TODO just_infill is currently not used.
+            // TODO just_infill is currently not used.
             // Just infill.
         } else {
             // Infill and perimeter.
@@ -1573,12 +1463,13 @@ void Layer::make_ironing()
             Polygons infills;
             for (size_t k = i; k < j; ++k) {
                 const IroningParams& ironing_params = by_extruder[k];
-                bool					  iron_everything = region_config.ironing_type == IroningType::AllSolid;
-                bool					  iron_completely = iron_everything;
+                region_ironed.insert(ironing_params.layerm);
+                bool iron_everything = region_config.ironing_type == IroningType::AllSolid;
+                bool iron_completely = iron_everything;
                 if (iron_everything) {
                     // Check whether there is any non-solid hole in the regions.
                     bool internal_infill_solid = region_config.fill_density.value > 95.;
-					for (const Surface &surface : ironing_params.layerm->fill_surfaces())
+                    for (const Surface &surface : ironing_params.layerm->fill_surfaces())
                         // stInternal or stInternalBridge or stInternalVoid
                         if ((!internal_infill_solid && surface.has(stPosInternal | stDensSparse)) ||
                             surface.surface_type == (stPosInternal | stDensSolid | stModBridge) ||
@@ -1590,18 +1481,18 @@ void Layer::make_ironing()
                 }
                 if (iron_completely) {
                     // Iron everything. This is likely only good for solid transparent objects.
-					for (const Surface &surface : ironing_params.layerm->slices())
+                    for (const Surface &surface : ironing_params.layerm->slices())
                         polygons_append(polys, surface.expolygon);
                 } else {
-					for (const Surface &surface : ironing_params.layerm->slices())
+                    for (const Surface &surface : ironing_params.layerm->slices())
                         if (surface.surface_type == (stPosTop | stDensSolid) || (iron_everything && surface.surface_type == (stPosBottom | stDensSolid)))
                             // stBottomBridge is not being ironed on purpose, as it would likely destroy the bridges.
                             polygons_append(polys, surface.expolygon);
                 }
-				if (iron_everything && ! iron_completely) {
+                if (iron_everything && !iron_completely) {
                     // Add solid fill surfaces. This may not be ideal, as one will not iron perimeters touching these
                     // solid fill surfaces, but it is likely better than nothing.
-					for (const Surface &surface : ironing_params.layerm->fill_surfaces())
+                    for (const Surface &surface : ironing_params.layerm->fill_surfaces())
                         if (surface.surface_type == (stPosInternal | stDensSolid))
                             polygons_append(infills, surface.expolygon);
                 }
@@ -1616,7 +1507,7 @@ void Layer::make_ironing()
                 polys = union_safety_offset(polys);
             }
             // Trim the top surfaces with half the nozzle diameter.
-            ironing_areas = intersection_ex(polys, offset(this->lslices(), -float(scale_(0.5 * nozzle_dmr))));
+            ironing_areas = intersection_ex(polys, offset(island.get_slice(), -float(scale_(0.5 * nozzle_dmr))));
         }
 
         // Create the filler object.
@@ -1633,6 +1524,13 @@ void Layer::make_ironing()
         //Flow flow = Flow::new_from_spacing(float(nozzle_dmr), 0., float(height), 1.f, false);
         //double flow_mm3_per_mm = flow.mm3_per_mm();
         Surface surface_fill((stPosTop | stDensSolid), ExPolygon());
+        // get or create the LayerRegionIsland
+        int16_t fill_extruder = int16_t(region_config.solid_infill_extruder.value - 1);
+        assert(fill_extruder >= 0);
+        LayerRegionIsland &region_island = island.get_or_add_region_island(region_ironed, fill_extruder);
+        ExtrusionEntityCollection &eec_root = region_island.mutable_extrusion(LayerRegionIsland::IRONINGS);
+        assert(eec_root.empty());
+        eec_root.set_can_sort_reverse(true, true);
         for (ExPolygon &expoly : ironing_areas) {
             surface_fill.expolygon = std::move(expoly);
             Polylines polylines;
@@ -1643,19 +1541,18 @@ void Layer::make_ironing()
             }
             if (! polylines.empty()) {
                 // Save into layer.
-				uint32_t ironing_begin = uint32_t(ironing_params.layerm->ironings().size());
-				ExtrusionEntityCollection *eec = nullptr;
-		        ironing_params.layerm->set_ironings().set_entities().push_back(eec = new ExtrusionEntityCollection());
+                ExtrusionEntityCollection *eec = &eec_root;
+                if (ironing_areas.size() > 1) {
+                    eec = new ExtrusionEntityCollection();
+                    eec_root.set_entities().push_back(eec);
+                }
                 // Don't sort the ironing infill lines as they are monotonicly ordered.
                 eec->set_can_sort_reverse(false, false);
                 extrusion_entities_append_paths(
                     *eec, std::move(polylines),
-					ExtrusionAttributes{ ExtrusionRole::Ironing,
-                        //TODO check FLOW, decide if it's good for an ironing?
-						ExtrusionFlow{ flow_mm3_per_mm, extrusion_width, float(extrusion_height) }
-					});
-                // set the ironing indexes into the island tree, but it may doesn't belong to a region anyway...
-				insert_ironings_into_islands(*this, ironing_params.layer_region_id, ironing_begin, uint32_t(ironing_params.layerm->ironings().size()));
+                    ExtrusionAttributes{ExtrusionRole::Ironing,
+                                        // TODO check FLOW, decide if it's good for an ironing?
+                                        ExtrusionFlow{flow_mm3_per_mm, extrusion_width, float(extrusion_height)}});
             }
         }
         // Regions up to j were processed.

@@ -26,6 +26,7 @@ void ExtrusionVisitor::use(ExtrusionMultiPath &multipath) { default_use(multipat
 void ExtrusionVisitor::use(ExtrusionMultiPath3D &multipath3D) { default_use(multipath3D); }
 void ExtrusionVisitor::use(ExtrusionLoop &loop) { default_use(loop); }
 void ExtrusionVisitor::use(ExtrusionEntityCollection &collection) { default_use(collection); }
+void ExtrusionVisitor::use(ExtrusionNop &nop) { default_use(nop); }
 
 void ExtrusionVisitorConst::use(const ExtrusionPath &path) { default_use(path); }
 void ExtrusionVisitorConst::use(const ExtrusionPath3D &path3D) { default_use(path3D); }
@@ -33,12 +34,98 @@ void ExtrusionVisitorConst::use(const ExtrusionMultiPath &multipath) { default_u
 void ExtrusionVisitorConst::use(const ExtrusionMultiPath3D &multipath3D) { default_use(multipath3D); }
 void ExtrusionVisitorConst::use(const ExtrusionLoop &loop) { default_use(loop); }
 void ExtrusionVisitorConst::use(const ExtrusionEntityCollection &collection) { default_use(collection); }
+void ExtrusionVisitorConst::use(const ExtrusionNop &nop) { default_use(nop); }
 
 void ExtrusionEntity::visit(ExtrusionVisitor &&visitor) {
     this->visit(visitor);
 }
 void ExtrusionEntity::visit(ExtrusionVisitorConst &&visitor) const {
     this->visit(visitor);
+}
+
+ExtrusionPropertyNone &ExtrusionPropertyNone::instance() {
+  static ExtrusionPropertyNone instance;
+  return instance;
+}
+void ExtrusionPropertyVisitor::default_use(ExtrusionProperty& thing) { assert(dynamic_cast<ExtrusionPropertyNone*>(&thing) != nullptr); };
+void ExtrusionPropertyVisitor::use(ExtrusionMultiProperties& thing) { 
+    for (std::unique_ptr<ExtrusionProperty> &prop : thing.properties)
+        prop->visit(*this);
+};
+void ExtrusionPropertyVisitor::use(ExtrusionPropertySpeed& thing) { default_use(thing); };
+void ExtrusionPropertyVisitor::use(ExtrusionPropertyCustomGcode& thing) { default_use(thing); };
+void ExtrusionPropertyVisitor::use(ExtrusionPropertySpecialCommand& thing) { default_use(thing); };
+void ExtrusionPropertyVisitor::use(ExtrusionPropertyOverhang& thing) { default_use(thing); };
+
+void ExtrusionPropertyVisitorConst::default_use(const ExtrusionProperty& thing) { assert(dynamic_cast<const ExtrusionPropertyNone*>(&thing) != nullptr); };
+void ExtrusionPropertyVisitorConst::use(const ExtrusionMultiProperties &thing) {
+    for (const std::unique_ptr<ExtrusionProperty> &prop : thing.properties)
+        prop->visit(*this);
+};
+void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpeed& thing) { default_use(thing); };
+void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyCustomGcode& thing) { default_use(thing); };
+void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpecialCommand& thing) { default_use(thing); };
+void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyOverhang& thing) { default_use(thing); };
+
+ExtrusionProperty *ExtrusionEntity::get_root_property() {
+    return m_property.get();
+}
+
+const ExtrusionProperty *ExtrusionEntity::get_root_property() const {
+    return m_property.get();
+}
+
+ExtrusionProperty& ExtrusionEntity::add_property(const ExtrusionProperty &attr) {
+    if (!m_property) {
+        m_property = attr.clone();
+        return *m_property;
+    } else {
+        ExtrusionMultiProperties* vec = dynamic_cast<ExtrusionMultiProperties*>(m_property.get());
+        if (vec == nullptr) {
+            vec = new ExtrusionMultiProperties();
+            vec->properties.push_back(std::move(m_property));
+            m_property = std::unique_ptr<ExtrusionProperty>(vec);
+        }
+        return vec->push_back(attr);
+    }
+}
+
+void ExtrusionEntity::add_property(std::unique_ptr<ExtrusionProperty> &&attr) {
+    if (!m_property) {
+        m_property = std::move(attr);
+    } else {
+        ExtrusionMultiProperties* vec = dynamic_cast<ExtrusionMultiProperties*>(m_property.get());
+        if (vec == nullptr) {
+            vec = new ExtrusionMultiProperties();
+            vec->properties.push_back(std::move(m_property));
+            m_property = std::unique_ptr<ExtrusionProperty>(vec);
+        }
+        vec->push_back(std::move(attr));
+    }
+}
+
+Point ExtrusionNop::NOT_A_POINT = Point((std::numeric_limits<coord_t>::max)(), (std::numeric_limits<coord_t>::max)());
+ExtrusionPropertyOverhang &ExtrusionPath::overhang_attributes_mutable() {
+    if (!m_property) {
+        m_property = std::make_unique<ExtrusionPropertyOverhang>();
+        return *static_cast<ExtrusionPropertyOverhang*>(m_property.get());
+    } else if (auto ptr = dynamic_cast<ExtrusionPropertyOverhang*>(m_property.get()); ptr) {
+        // quick test, instead of going trough the visitor, as this should be the case for most of overhangs.
+        return *ptr;
+    } else {
+        return AddGetEEAttribute<ExtrusionPropertyOverhang>().add_or_get(*this);
+    }
+}
+
+const ExtrusionPropertyOverhang *ExtrusionPath::overhang_attributes() const {
+    if (!m_property) {
+        return nullptr;
+    } else if (auto ptr = dynamic_cast<const ExtrusionPropertyOverhang*>(m_property.get()); ptr) {
+        // quick test, instead of going trough the visitor, as this should be the case for most of overhangs.
+        return ptr;
+    } else {
+        return GetEEAttribute<ExtrusionPropertyOverhang>().get(*this);
+    }
 }
 
 void ExtrusionPath::intersect_expolygons(const ExPolygons &collection, ExtrusionEntityCollection *retval) const
@@ -742,7 +829,7 @@ void LoopAssertVisitor::use(const ExtrusionLoop& loop) {
     Point last_pt = loop.last_point();
     for (const ExtrusionPath &path : loop.paths) {
         release_assert(path.polyline.size() >= 2);
-        release_assert(!m_check_length || path.length() >= SCALED_EPSILON);
+        release_assert(!m_check_length || path.length() >= SCALED_EPSILON / 2);
         release_assert(path.first_point() == last_pt);
         if(m_check_length)
             for (size_t idx = 1; idx < path.size(); ++idx)

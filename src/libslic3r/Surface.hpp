@@ -67,11 +67,14 @@ std::string surfaceType_to_string(SurfaceType st);
 
 class Surface
 {
+    coord_t          m_thickness        { -1 };
 public:
     SurfaceType     surface_type;
     ExPolygon       expolygon;
-    double          thickness        { -1 };  // in mm
     uint16_t        thickness_layers{1_u}; // in layers
+    void    set_scaled_thickness(coord_t layer_height) { m_thickness = layer_height; assert(layer_height > 100); }
+    coord_t scaled_thickness() const { return m_thickness; }
+    double  unscaled_thickness() const { return unscaled(m_thickness); }
     double          bridge_angle     { -1. }; // in radians, ccw, 0 = East, only 0+ (negative means undefined)
     uint16_t        extra_perimeters{0_u};
     //for dense infill
@@ -80,7 +83,7 @@ public:
     
     Surface(const Surface &rhs) :
         surface_type(rhs.surface_type), expolygon(rhs.expolygon),
-            thickness(rhs.thickness), thickness_layers(rhs.thickness_layers), 
+            m_thickness(rhs.m_thickness), thickness_layers(rhs.thickness_layers), 
             bridge_angle(rhs.bridge_angle), extra_perimeters(rhs.extra_perimeters),
             maxNbSolidLayersOnTop(rhs.maxNbSolidLayersOnTop),
             priority(rhs.priority) {};
@@ -89,13 +92,13 @@ public:
         : surface_type(_surface_type), expolygon(_expolygon) {};
     Surface(const Surface &other, const ExPolygon &_expolygon)
         : surface_type(other.surface_type), expolygon(_expolygon),
-            thickness(other.thickness), thickness_layers(other.thickness_layers), 
+            m_thickness(other.m_thickness), thickness_layers(other.thickness_layers), 
             bridge_angle(other.bridge_angle), extra_perimeters(other.extra_perimeters),
             maxNbSolidLayersOnTop(other.maxNbSolidLayersOnTop),
             priority(other.priority) {};
     Surface(Surface &&rhs)
         : surface_type(rhs.surface_type), expolygon(std::move(rhs.expolygon)),
-            thickness(rhs.thickness), thickness_layers(rhs.thickness_layers), 
+            m_thickness(rhs.m_thickness), thickness_layers(rhs.thickness_layers), 
             bridge_angle(rhs.bridge_angle), extra_perimeters(rhs.extra_perimeters),
             maxNbSolidLayersOnTop(rhs.maxNbSolidLayersOnTop),
             priority(rhs.priority) {};
@@ -103,7 +106,7 @@ public:
         : surface_type(_surface_type), expolygon(std::move(_expolygon)) {};
     Surface(const Surface &other, const ExPolygon &&_expolygon)
         : surface_type(other.surface_type), expolygon(std::move(_expolygon)),
-            thickness(other.thickness), thickness_layers(other.thickness_layers), 
+            m_thickness(other.m_thickness), thickness_layers(other.thickness_layers), 
             bridge_angle(other.bridge_angle), extra_perimeters(other.extra_perimeters),
             maxNbSolidLayersOnTop(other.maxNbSolidLayersOnTop),
             priority(other.priority) {};
@@ -112,7 +115,7 @@ public:
     {
         surface_type     = rhs.surface_type;
         expolygon        = rhs.expolygon;
-        thickness        = rhs.thickness;
+        m_thickness      = rhs.m_thickness;
         thickness_layers = rhs.thickness_layers;
         bridge_angle     = rhs.bridge_angle;
         extra_perimeters = rhs.extra_perimeters;
@@ -125,7 +128,7 @@ public:
     {
         surface_type     = rhs.surface_type;
         expolygon        = std::move(rhs.expolygon);
-        thickness        = rhs.thickness;
+        m_thickness      = rhs.m_thickness;
         thickness_layers = rhs.thickness_layers;
         bridge_angle     = rhs.bridge_angle;
         extra_perimeters = rhs.extra_perimeters;
@@ -334,7 +337,7 @@ inline bool surfaces_could_merge(const Surface &s1, const Surface &s2)
 {
     return 
         s1.surface_type      == s2.surface_type     &&
-        s1.thickness         == s2.thickness        &&
+        s1.scaled_thickness()== s2.scaled_thickness()&&
         s1.thickness_layers  == s2.thickness_layers &&
         s1.bridge_angle      == s2.bridge_angle;
 }

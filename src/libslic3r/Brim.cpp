@@ -827,7 +827,7 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
     //def: push into extrusions, in the right order
     float mm3_per_mm = float(flow.mm3_per_mm());
     float width = float(flow.width());
-    float height = float(print.get_min_first_layer_height());
+    float height = float(unscaled(print.get_min_first_layer_height()));
     int nextIdx = 0;
     std::function<void(BrimLoop&, ExtrusionEntityCollection*)>* extrude_ptr;
     std::function<void(BrimLoop&, ExtrusionEntityCollection*) > extrude = [&mm3_per_mm, &width, &height, &extrude_ptr, &nextIdx, extrude_cw](BrimLoop& to_cut, ExtrusionEntityCollection* parent) {

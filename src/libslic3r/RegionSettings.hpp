@@ -124,7 +124,11 @@ public:
         return it->second.begin()->first;
     }
 
-    void segregate_regions(const ExPolygon &my_srf, const std::set<LayerRegion *> regions);
+    void segregate_regions(const ExPolygon &my_srf, const LayerRegionSetConstPtrs &regions);
+
+    std::map<SettingsValue, ClipExpoly>& create_extra_setting(const ConfigOption *opt) {
+        return key_areas[opt];
+    }
 
 private:
     // region-specific parameters

@@ -56,21 +56,35 @@ SupportParameters::SupportParameters(const PrintObject &object)
     this->resolution                         = scale_t(object.print()->config().resolution_internal);
 
     // Calculate a minimum support layer height as a minimum over all extruders, but not smaller than 10um.
-    this->support_layer_height_min                       = 1000000.;
+    this->_support_layer_height_min                      = std::numeric_limits<coord_t>::max();
     const ConfigOptionFloatsOrPercents &min_layer_height = print_config.min_layer_height;
     const ConfigOptionFloats           &nozzle_diameter  = print_config.nozzle_diameter;
     for (int extr_id = 0; extr_id < min_layer_height.size(); ++extr_id) {
-        double min_from_extr = min_layer_height.get_abs_value(extr_id, nozzle_diameter.get_at(extr_id));
+        coord_t min_from_extr = Layer::scale_to_layer_coord(min_layer_height.get_abs_value(extr_id, nozzle_diameter.get_at(extr_id)));
         if (min_from_extr > 0)
-            this->support_layer_height_min = std::min(this->support_layer_height_min, min_from_extr);
+            this->_support_layer_height_min = std::min(this->_support_layer_height_min, min_from_extr);
     }
     for (const Layer *layer : object.layers()) {
-        if (layer->height > 0)
-            this->support_layer_height_min = std::min(this->support_layer_height_min, layer->height);
+        if (layer->scaled_height() > 0)
+            this->_support_layer_height_min = std::min(this->_support_layer_height_min, layer->scaled_height());
     }
-    if (support_layer_height_min >= 1000000.) {
+    if (this->_support_layer_height_min == std::numeric_limits<coord_t>::max()) {
+        double max = unscaled(this->_support_layer_height_min);
+        double best = unscaled(this->_support_layer_height_min);
+        double min = 0;
         for (int extr_id = 0; extr_id < min_layer_height.size(); ++extr_id) {
-            support_layer_height_min = std::max(0.01, std::min(support_layer_height_min, nozzle_diameter.get_at(extr_id) / 10));
+            max = std::min(max, nozzle_diameter.get_at(extr_id) * 0.95);
+            best = std::min(best, nozzle_diameter.get_at(extr_id) * 0.75);
+            min = std::max(min, nozzle_diameter.get_at(extr_id) / 10);
+        }
+        if (best == this->_support_layer_height_min) {
+            best = 0.2;
+            assert(false);
+        }
+        if (min > best) {
+            this->_support_layer_height_min = Layer::scale_to_layer_coord(std::min(min, max));
+        } else {
+            this->_support_layer_height_min = Layer::scale_to_layer_coord(best);
         }
     }
     if (object_config.support_material_interface_layers.value == 0) {
@@ -88,7 +102,7 @@ SupportParameters::SupportParameters(const PrintObject &object)
         external_perimeter_width = std::max(external_perimeter_width, coordf_t(region.flow(object, frExternalPerimeter, slicing_params.layer_height, 2 /*not first layer, even layer*/).width()));
         bridge_flow_ratio += region.config().bridge_flow_ratio.get_abs_value(1.);
     }
-    this->gap_xy = object_config.support_material_xy_spacing.get_abs_value(external_perimeter_width);
+    this->_gap_xy = Layer::scale_to_layer_coord(object_config.support_material_xy_spacing.get_abs_value(external_perimeter_width));
     bridge_flow_ratio /= object.num_printing_regions();
 
     this->support_material_bottom_interface_flow = slicing_params.soluble_interface ?

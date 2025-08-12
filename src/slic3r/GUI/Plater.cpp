@@ -126,6 +126,7 @@
 #include "Jobs/NotificationProgressIndicator.hpp"
 #include "Jobs/PlaterWorker.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
+#include "Jobs/OrientJob.hpp"
 #include "../Utils/ASCIIFolding.hpp"
 #include "../Utils/PrintHost.hpp"
 #include "../Utils/FixModelByWin10.hpp"
@@ -2241,6 +2242,7 @@ struct Plater::priv
     bool can_split_to_objects() const;
     bool can_split_to_volumes() const;
     bool can_arrange() const;
+    bool can_orient() const;
     bool can_layers_editing() const;
     bool can_fix_through_winsdk() const;
     bool can_simplify() const;
@@ -2787,7 +2789,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
     wxBusyCursor busy;
 
-    auto *new_model = (!load_model || one_by_one) ? nullptr : new Slic3r::Model();
+    std::optional<Model> new_model;
+    if (load_model && !one_by_one) {
+        new_model = Slic3r::Model();
+    }
     std::vector<size_t> obj_idxs;
 
     int answer_convert_from_meters          = wxOK_DEFAULT;
@@ -2839,7 +2844,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         }
         
         
-        Slic3r::Model model;
+        Slic3r::Model loaded_model;
         bool is_project_file = type_prusa;
         try {
             if (type_3mf || type_zip_amf) {
@@ -2860,7 +2865,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 {
                     DynamicPrintConfig config_loaded;
                     ConfigSubstitutionContext config_substitutions{ ForwardCompatibilitySubstitutionRule::Enable };
-                    model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions,
+                    loaded_model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions,
                                                              only_if(load_config, Model::LoadAttribute::CheckVersion) |
                                                              only_if(unbake_trsf, Model::LoadAttribute::UnbakeTransformation));
                     if (load_config && !config_loaded.empty()) {
@@ -2894,7 +2899,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     if (! config_substitutions.empty())
                         show_substitutions_info(config_substitutions.get(), filename.string());
 
-                    this->model.custom_gcode_per_print_z = model.custom_gcode_per_print_z;
+                    this->model.custom_gcode_per_print_z = loaded_model.custom_gcode_per_print_z;
                 }
 
                 if (load_config) {
@@ -2926,7 +2931,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         q->notify_about_installed_presets();
 
                         if (loaded_printer_technology == ptFFF)
-                            CustomGCode::update_custom_gcode_per_print_z_from_config(model.custom_gcode_per_print_z, &preset_bundle->project_config);
+                            CustomGCode::update_custom_gcode_per_print_z_from_config(loaded_model.custom_gcode_per_print_z, &preset_bundle->project_config);
 
                         // For exporting from the amf/3mf we shouldn't check printer_presets for the containing information about "Print Host upload"
                         wxGetApp().load_current_presets(false);
@@ -2947,14 +2952,14 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         load_config = false;
                         double linear_precision = string_to_double_decimal_point(wxGetApp().app_config->get("linear_precision"));
                         double angle_precision = string_to_double_decimal_point(wxGetApp().app_config->get("angle_precision"));
-                        model = Slic3r::Model::read_from_file(path.string(),
+                        loaded_model = Slic3r::Model::read_from_file(path.string(),
                                                                  nullptr,
                                                                  nullptr,
                                                                  only_if(load_config, Model::LoadAttribute::CheckVersion) |
                                                                  only_if(unbake_trsf, Model::LoadAttribute::UnbakeTransformation),
                                                                  std::make_pair(linear_precision, angle_precision));
                   } else {
-                        model = Slic3r::Model::read_from_file(path.string(),
+                        loaded_model = Slic3r::Model::read_from_file(path.string(),
                                           nullptr,
                                           nullptr,
                                           only_if(load_config, Model::LoadAttribute::CheckVersion) |
@@ -2962,7 +2967,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                   }
                }
                
-                for (auto obj : model.objects) {
+                for (auto obj : loaded_model.objects) {
                     if (obj->name.empty()) {
                         obj->name = fs::path(obj->input_file).filename().string();
                     }
@@ -2979,16 +2984,19 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         }
 
         if (load_model) {
-            // The model should now be initialized
+            // The inner model should now be initialized
 
-            auto convert_from_imperial_units = [](Model& model, bool only_small_volumes) {
-                model.convert_from_imperial_units(only_small_volumes);
+            // copy extra fields
+            this->model.baked_transformation = loaded_model.baked_transformation;
+
+            auto convert_from_imperial_units = [](Model& model_to_convert, bool only_small_volumes) {
+                model_to_convert.convert_from_imperial_units(only_small_volumes);
 //                wxGetApp().app_config->set("use_inches", "1");
 //                wxGetApp().sidebar().update_ui_from_settings();
             };
 
             if (!is_project_file) {
-                if (int deleted_objects = model.removed_objects_with_zero_volume(); deleted_objects > 0) {
+                if (int deleted_objects = loaded_model.removed_objects_with_zero_volume(); deleted_objects > 0) {
                     MessageDialog(q, format_wxstr(_L_PLURAL(
                         "Object size from file %s appears to be zero.\n"
                         "This object has been removed from the model",
@@ -2998,53 +3006,53 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 }
                 if (imperial_units)
                     // Convert even if the object is big.
-                    convert_from_imperial_units(model, false);
-                else if (!type_3mf && model.looks_like_saved_in_meters()) {
-                    auto convert_model_if = [](Model& model, bool condition) {
+                    convert_from_imperial_units(loaded_model, false);
+                else if (!type_3mf && loaded_model.looks_like_saved_in_meters()) {
+                    auto convert_model_if = [](Model& model_to_convert, bool condition) {
                         if (condition)
                             //FIXME up-scale only the small parts?
-                            model.convert_from_meters(true);
+                            model_to_convert.convert_from_meters(true);
                     };
                     if (answer_convert_from_meters == wxOK_DEFAULT) {
                         RichMessageDialog dlg(q, format_wxstr(_L_PLURAL(
                             "The dimensions of the object from file %1% seem to be defined in meters.\n"
                             "The internal unit of %2% is a millimeter. Do you want to recalculate the dimensions of the object?",
                             "The dimensions of some objects from file %1% seem to be defined in meters.\n"
-                            "The internal unit of %2% is a millimeter. Do you want to recalculate the dimensions of these objects?", model.objects.size()), from_path(filename), SLIC3R_APP_NAME) + "\n",
+                            "The internal unit of %2% is a millimeter. Do you want to recalculate the dimensions of these objects?", loaded_model.objects.size()), from_path(filename), SLIC3R_APP_NAME) + "\n",
                             _L("The object is too small"), wxICON_QUESTION | wxYES_NO);
                         dlg.ShowCheckBox(_L("Apply to all the remaining small objects being loaded."));
                         int answer = dlg.ShowModal();
                         if (dlg.IsCheckBoxChecked())
                             answer_convert_from_meters = answer;
                         else 
-                            convert_model_if(model, answer == wxID_YES);
+                            convert_model_if(loaded_model, answer == wxID_YES);
                     }
-                    convert_model_if(model, answer_convert_from_meters == wxID_YES);
+                    convert_model_if(loaded_model, answer_convert_from_meters == wxID_YES);
                 }
-                else if (!type_3mf && model.looks_like_imperial_units() && false) { // don't do that, as it can be annoying (but usa).
-                    auto convert_model_if = [convert_from_imperial_units](Model& model, bool condition) {
+                else if (!type_3mf && loaded_model.looks_like_imperial_units() && false) { // don't do that, as it can be annoying (but usa).
+                    auto convert_model_if = [convert_from_imperial_units](Model& model_to_convert, bool condition) {
                         if (condition)
                             //FIXME up-scale only the small parts?
-                            convert_from_imperial_units(model, true);
+                            convert_from_imperial_units(model_to_convert, true);
                     };
                     if (answer_convert_from_imperial_units == wxOK_DEFAULT) {
                         RichMessageDialog dlg(q, format_wxstr(_L_PLURAL(
                             "The dimensions of the object from file %1% seem to be defined in inches.\n"
                             "The internal unit of %2% is a millimeter. Do you want to recalculate the dimensions of the object?",
                             "The dimensions of some objects from file %1% seem to be defined in inches.\n"
-                            "The internal unit of %2% is a millimeter. Do you want to recalculate the dimensions of these objects?", model.objects.size()), from_path(filename), SLIC3R_APP_NAME) + "\n",
+                            "The internal unit of %2% is a millimeter. Do you want to recalculate the dimensions of these objects?", loaded_model.objects.size()), from_path(filename), SLIC3R_APP_NAME) + "\n",
                             _L("The object is too small"), wxICON_QUESTION | wxYES_NO);
                         dlg.ShowCheckBox(_L("Apply to all the remaining small objects being loaded."));
                         int answer = dlg.ShowModal();
                         if (dlg.IsCheckBoxChecked())
                             answer_convert_from_imperial_units = answer;
                         else 
-                            convert_model_if(model, answer == wxID_YES);
+                            convert_model_if(loaded_model, answer == wxID_YES);
                     }
-                    convert_model_if(model, answer_convert_from_imperial_units == wxID_YES);
+                    convert_model_if(loaded_model, answer_convert_from_imperial_units == wxID_YES);
                 }
 
-                if (model.looks_like_multipart_object()) {
+                if (loaded_model.looks_like_multipart_object()) {
                     if (answer_consider_as_multi_part_objects == wxOK_DEFAULT) {
                         RichMessageDialog dlg(q, _L(
                         "This file contains several objects positioned at multiple heights.\n"
@@ -3056,14 +3064,14 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         if (dlg.IsCheckBoxChecked())
                             answer_consider_as_multi_part_objects = answer;
                         if (answer == wxID_YES)
-                        model.convert_multipart_object(nozzle_dmrs->size());
+                            loaded_model.convert_multipart_object(nozzle_dmrs->size());
                     }
                     else if (answer_consider_as_multi_part_objects == wxID_YES)
-                        model.convert_multipart_object(nozzle_dmrs->size());
+                        loaded_model.convert_multipart_object(nozzle_dmrs->size());
                 }
             }
             if ((wxGetApp().get_mode() == comSimple && !get_app_config()->get_bool("objects_always_expert"))
-                && (type_3mf || type_any_amf) && model_has_advanced_features(model)) {
+                && (type_3mf || type_any_amf) && model_has_advanced_features(loaded_model)) {
                 MessageDialog msg_dlg(q, _L("This file cannot be loaded in a simple mode. Do you want to switch to an advanced mode?")+"\n",
                     _L("Detected advanced data"), wxICON_WARNING | wxOK | wxCANCEL);
                 if (msg_dlg.ShowModal() == wxID_OK) {
@@ -3074,7 +3082,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                     return obj_idxs;
             }
 
-            for (ModelObject* model_object : model.objects) {
+            for (ModelObject* model_object : loaded_model.objects) {
                 if (!type_3mf && !type_zip_amf) {
                     model_object->center_around_origin(false);
                     if (type_any_amf && model_object->instances.empty()) {
@@ -3088,13 +3096,16 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
             if (one_by_one) {
                 if ((type_3mf && !is_project_file) || (type_any_amf && !type_zip_amf))
-                    model.center_instances_around_point(this->bed.build_volume().bed_center());
-                auto loaded_idxs = load_model_objects(model.objects, is_project_file);
+                    loaded_model.center_instances_around_point(this->bed.build_volume().bed_center());
+                auto loaded_idxs = load_model_objects(loaded_model.objects, is_project_file);
                 obj_idxs.insert(obj_idxs.end(), loaded_idxs.begin(), loaded_idxs.end());
             } else {
-                // This must be an .stl or .obj file, which may contain a maximum of one volume.
-                for (const ModelObject* model_object : model.objects) {
-                    new_model->add_object(*model_object);
+                assert(new_model);
+                if (new_model) {
+                    // This must be an .stl or .obj file, which may contain a maximum of one volume.
+                    for (const ModelObject *model_object : loaded_model.objects) {
+                        new_model->add_object(*model_object);
+                    }
                 }
             }
 
@@ -3103,7 +3114,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
         }
     }
 
-    if (new_model != nullptr && new_model->objects.size() > 1) {
+    if (new_model && new_model->objects.size() > 1) {
         //wxMessageDialog msg_dlg(q, _L(
         MessageDialog msg_dlg(q, nozzle_dmrs->size() > 1 ? _L(
                 "Multiple objects were loaded for a multi-material printer.\n"
@@ -3219,7 +3230,7 @@ std::vector<size_t> Plater::priv::load_model_objects(const ModelObjectPtrs& mode
 
     std::pair<bool, GLCanvas3D::WipeTowerInfo> wti = view3D->get_canvas3d()->get_wipe_tower_info();
 
-    arr::find_new_position(model, new_instances, min_obj_distance, bed, wti);
+    arr::find_new_position(this->model, new_instances, min_obj_distance, bed, wti);
 
     // it remains to move the wipe tower:
     view3D->get_canvas3d()->arrange_wipe_tower(wti);
@@ -5037,6 +5048,15 @@ void Plater::priv::set_project_filename(const wxString& filename)
         wxGetApp().mainframe->add_to_recent_projects(filename);
 }
 
+void Plater::orient()
+{
+    auto &w = get_ui_job_worker();
+    if (w.is_idle()) {
+        p->take_snapshot(_u8L("Orient"));
+        replace_job(w, std::make_unique<OrientJob>());
+    }
+}
+
 void Plater::priv::init_notification_manager()
 {
     if (!notification_manager)
@@ -5373,6 +5393,12 @@ bool Plater::priv::can_split_to_volumes() const
 bool Plater::priv::can_arrange() const
 {
     if (model.objects.empty() || !m_worker.is_idle()) return false;
+    return q->canvas3D()->get_gizmos_manager().get_current_type() == GLGizmosManager::Undefined;
+}
+
+bool Plater::priv::can_orient() const
+{
+    if (model.objects.empty() || !m_worker.is_idle() || get_selection().is_empty() || get_selection().is_wipe_tower()) return false;
     return q->canvas3D()->get_gizmos_manager().get_current_type() == GLGizmosManager::Undefined;
 }
 
@@ -7901,11 +7927,13 @@ bool Plater::export_3mf(const boost::filesystem::path& output_path)
     }
 
     wxString path;
-    bool merge_transformation = false;
+    bool merge_transformation = p->model.baked_transformation;
     if (output_path.empty()) {
-        std::pair<wxString,int> result = p->get_export_file({FT_3MF, FT_3MF_TRSF});
+        std::pair<wxString, int> result = p->get_export_file(merge_transformation ?
+                                                                 std::vector<GUI::FileType>{FT_3MF, FT_3MF_TRSF} :
+                                                                 std::vector<GUI::FileType>{FT_3MF_TRSF, FT_3MF});
         path = result.first;
-        merge_transformation = result.second == 0;
+        merge_transformation = result.second == (merge_transformation ? 0 : 1);
         if (path.empty()) {
             return false;
         }
@@ -9025,6 +9053,7 @@ bool Plater::can_simplify() const { return p->can_simplify(); }
 bool Plater::can_split_to_objects() const { return p->can_split_to_objects(); }
 bool Plater::can_split_to_volumes() const { return p->can_split_to_volumes(); }
 bool Plater::can_arrange() const { return p->can_arrange(); }
+bool Plater::can_orient() const { return p->can_orient(); }
 bool Plater::can_layers_editing() const { return p->can_layers_editing(); }
 bool Plater::can_paste_from_clipboard() const
 {

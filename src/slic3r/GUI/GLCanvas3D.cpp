@@ -2023,6 +2023,7 @@ void GLCanvas3D::update_volumes_colors_by_extruder()
 
 void GLCanvas3D::render()
 {
+
     if (m_in_render) {
         // if called recursively, return
         m_dirty = true;
@@ -2108,6 +2109,8 @@ void GLCanvas3D::render()
     _render_background();
     // render bed first as grid lines may be rendred without GL_DEPTH
     _render_bed_axes();
+    if(m_show_position_axle)
+        camera.render_axes();
     if (is_looking_downward)
         _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), false);
     if(m_show_objects)
@@ -2322,7 +2325,13 @@ const std::vector<double>& GLCanvas3D::get_gcode_layers_zs() const
 
 std::vector<double> GLCanvas3D::get_volumes_print_zs(bool active_only) const
 {
-    return m_volumes.get_current_print_zs(active_only);
+    std::vector<double> print_zs_mm;
+    std::vector<coord_t> print_zs = m_volumes.get_current_print_zs(active_only);
+    print_zs_mm.reserve(print_zs.size());
+    for (coord_t z : print_zs) {
+        print_zs_mm.push_back(unscaled(z));
+    }
+    return print_zs_mm;
 }
 
 void GLCanvas3D::set_gcode_options_visibility_from_flags(unsigned int flags)
@@ -3448,6 +3457,9 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
                     }
                     m_ctrl_kar_filter.reset_count();
                     m_dirty = true;
+                } else if (keyCode == 'X') {
+                    m_dirty = m_show_position_axle;
+                    m_show_position_axle = false;
                 }
                 else if (m_gizmos.is_enabled() && !m_selection.is_empty()) {
                     translationProcessor.process(evt);
@@ -3499,6 +3511,9 @@ void GLCanvas3D::on_key(wxKeyEvent& evt)
                         m_dirty = true;
 
                     m_ctrl_kar_filter.increase_count();
+                } else if (keyCode == 'X') {
+                    m_dirty = !m_show_position_axle;
+                    m_show_position_axle = true;
                 }
                 else if (m_gizmos.is_enabled() && !m_selection.is_empty()) {
                     auto do_rotate = [this](double angle_z_rad) {
@@ -3633,6 +3648,11 @@ void GLCanvas3D::on_render_timer(wxTimerEvent& evt)
     // right after this event, idle event is fired
     // m_dirty = true; 
     // wxWakeUpIdle(); 
+    if (still_mouse_down && !m_show_z_axle && !m_show_xy_plane) {
+            m_show_z_axle = true;
+            m_show_xy_plane = true;
+            m_dirty = true;
+    }
 }
 
 // can be only called from main thread
@@ -3650,17 +3670,17 @@ void GLCanvas3D::schedule_extra_frame(int miliseconds)
             return;
         }
     } 
-    int remaining_time = m_render_timer.GetInterval();
-    // Timer is not running
-    if (!m_render_timer.IsRunning()) {
-        m_render_timer.StartOnce(miliseconds);
-    // Timer is running - restart only if new period is shorter than remaning period
-    } else {
-        if (miliseconds + 20 < remaining_time) {
-            m_render_timer.Stop(); 
-            m_render_timer.StartOnce(miliseconds);
-        }
-    }
+    //int remaining_time = m_render_timer.GetInterval();
+    //// Timer is not running
+    //if (!m_render_timer.IsRunning()) {
+    //    m_render_timer.StartOnce(miliseconds);
+    //// Timer is running - restart only if new period is shorter than remaning period
+    //} else {
+    //    if (miliseconds + 20 < remaining_time) {
+    //        m_render_timer.Stop(); 
+    //        m_render_timer.StartOnce(miliseconds);
+    //    }
+    //}
 }
 
 #ifndef NDEBUG
@@ -3850,9 +3870,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
         m_mouse.set_move_start_threshold_position_2D_as_invalid();
     }
 
-    if (evt.ButtonDown() && wxWindow::FindFocus() != m_canvas)
+    if (evt.ButtonDown() && wxWindow::FindFocus() != m_canvas) {
         // Grab keyboard focus on any mouse click event.
         m_canvas->SetFocus();
+    }
 
     if (evt.Entering()) {
         if (m_mouse.dragging && !evt.LeftIsDown() && !evt.RightIsDown() && !evt.MiddleIsDown()) {
@@ -3980,8 +4001,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                             // The dragging operation is initiated.
                             m_mouse.drag.move_volume_idx = volume_idx;
                             m_selection.setup_cache();
-                            if (!evt.CmdDown())
+                            if (!evt.CmdDown()) {
                                 m_mouse.drag.start_position_3D = m_mouse.scene_position;
+                                m_mouse.drag.start_position_2D = pos;
+                            }
                             m_sequential_print_clearance_first_displacement = true;
                             m_sequential_print_clearance.start_dragging();
                         }
@@ -3989,16 +4012,36 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                 }
             }
         }
+        if (evt.RightDown() && !wxGetApp().app_config->get_bool("3D_mouse_drag")) {
+            still_mouse_down = true;
+            //const std::chrono::system_clock::time_point time_now = std::chrono::system_clock::now();
+            //if (m_date_mouse_bt_pressed == 0) {
+            //    m_date_mouse_bt_pressed = std::chrono::system_clock::to_time_t(time_now);
+            //    std::cout<<"down "<<m_date_mouse_bt_pressed<<"\n";
+                if (!m_render_timer.IsRunning()) {
+                    m_render_timer.StartOnce(600);
+                }
+            //}
+        }
+        if (evt.MiddleDown() && wxGetApp().app_config->get_bool("mouse_middle_target")) {
+            // set camera target to ray pos at z=0
+            Camera& camera = wxGetApp().plater()->get_camera();
+            camera.set_target(_mouse_to_bed_3d(pos));
+            m_show_z_axle = true;
+            m_show_xy_plane = true;
+            m_dirty = true;
+        }
     }
-    else if (evt.Dragging() && evt.LeftIsDown() && !evt.CmdDown() && m_layers_editing.state == LayersEditing::Unknown &&
+    else if (evt.Dragging() && evt.LeftIsDown() /*&& !evt.CmdDown()*/ && m_layers_editing.state == LayersEditing::Unknown &&
              m_mouse.drag.move_volume_idx != -1 && m_mouse.is_start_position_3D_defined()) {
         if (!m_mouse.drag.move_requires_threshold) {
             m_mouse.dragging = true;
             Vec3d cur_pos = m_mouse.drag.start_position_3D;
+            Vec3d cur_scale(1,1,1);
             // we do not want to translate objects if the user just clicked on an object while pressing shift to remove it from the selection and then drag
             if (m_selection.contains_volume(get_first_hover_volume_idx())) {
                 const Camera& camera = wxGetApp().plater()->get_camera();
-                if (std::abs(camera.get_dir_forward().z()) < EPSILON) {
+                if (!evt.CmdDown() && (std::abs(camera.get_dir_forward().z()) < EPSILON || evt.ShiftDown())) {
                     // side view -> move selected volumes orthogonally to camera view direction
                     const Linef3 ray = mouse_ray(pos);
                     const Vec3d dir = ray.unit_vector();
@@ -4018,9 +4061,27 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                     const double projection_z = inters_vec.dot(camera_up);
 
                     // apply offset
-                    cur_pos = m_mouse.drag.start_position_3D + projection_x * camera_right + projection_z * camera_up;
-                }
-                else {
+                    if (std::abs(camera.get_dir_forward().z()) < EPSILON) {
+                        cur_pos = m_mouse.drag.start_position_3D + projection_x * camera_right +
+                            projection_z * camera_up;
+                    } else if (evt.ShiftDown()) {
+                        cur_pos = m_mouse.drag.start_position_3D + Vec3d(0,0,projection_z);
+                    }
+                } else if(evt.CmdDown()) {
+                    assert(m_mouse.is_start_position_2D_defined());
+                    if (m_mouse.is_start_position_2D_defined()) {
+                        cur_pos = m_mouse.drag.start_position_3D;
+                        auto val_fit = [](double val)->double {
+                            val /= 100;
+                            if (val > 0) {val -= 1; if(val < 0) val = 0;}
+                            if (val < 0) {val += 1; if(val > 0) val = 0;}
+                            return std::exp(val/2);
+                        };
+                        double xy = val_fit(pos.x() - m_mouse.drag.start_position_2D.x());
+                        double z = val_fit(m_mouse.drag.start_position_2D.y() - pos.y());
+                        cur_scale = Vec3d(xy, xy, z);
+                    }
+                } else {
                     // Generic view
                     // Get new position at the same Z of the initial click point.
                     cur_pos = mouse_ray(pos).intersect_plane(m_mouse.drag.start_position_3D.z());
@@ -4031,6 +4092,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             TransformationType trafo_type;
             trafo_type.set_relative();
             m_selection.translate(cur_pos - m_mouse.drag.start_position_3D, trafo_type);
+            if (cur_scale != Vec3d(1, 1, 1)) {
+                m_selection.scale(cur_scale, trafo_type);
+            }
             if (current_printer_technology() == ptFFF && (fff_print()->config().complete_objects || fff_print()->config().parallel_objects_step > 0))
                 update_sequential_clearance(false);
             wxGetApp().obj_manipul()->set_dirty();
@@ -4058,10 +4122,10 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             if (!m_moving) {
                 if ((any_gizmo_active || evt.CmdDown() || m_hover_volume_idxs.empty()) && m_mouse.is_start_position_3D_defined()) {
                     const Vec3d rot = (Vec3d(pos.x(), pos.y(), 0.0) - m_mouse.drag.start_position_3D) * (PI * TRACKBALLSIZE / 180.0);
-                    if (wxGetApp().app_config->get_bool("use_free_camera"))
+                    if (wxGetApp().app_config->get_bool("use_free_camera")) {
                         // Virtual track ball (similar to the 3DConnexion mouse).
                         wxGetApp().plater()->get_camera().rotate_local_around_target(Vec3d(rot.y(), rot.x(), 0.0));
-                    else {
+                    } else {
                         // Forces camera right vector to be parallel to XY plane in case it has been misaligned using the 3D mouse free rotation.
                         // It is cheaper to call this function right away instead of testing wxGetApp().plater()->get_mouse3d_controller().connected(),
                         // which checks an atomics (flushes CPU caches).
@@ -4076,28 +4140,106 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                 m_mouse.drag.start_position_3D = Vec3d((double)pos.x(), (double)pos.y(), 0.0);
             }
         }
-        else if (evt.MiddleIsDown() || evt.RightIsDown()) {
-            // If dragging over blank area with right/middle button, pan.
+        else if (evt.RightIsDown() || (evt.MiddleIsDown() && !wxGetApp().app_config->get_bool("mouse_middle_target"))) {
+            // If dragging over blank area with right button, pan.
             if (m_mouse.is_start_position_2D_defined()) {
-                // get point in model space at Z = 0
-                float z = 0.0f;
-                const Vec3d cur_pos = _mouse_to_3d(pos, &z);
-                const Vec3d orig = _mouse_to_3d(m_mouse.drag.start_position_2D, &z);
-                Camera& camera = wxGetApp().plater()->get_camera();
-                if (!wxGetApp().app_config->get_bool("use_free_camera"))
-                    // Forces camera right vector to be parallel to XY plane in case it has been misaligned using the 3D mouse free rotation.
-                    // It is cheaper to call this function right away instead of testing wxGetApp().plater()->get_mouse3d_controller().connected(),
-                    // which checks an atomics (flushes CPU caches).
-                    // See GH issue #3816.
+                    // get point in model space at Z = 0
+                Camera &camera = wxGetApp().plater()->get_camera();
+                if (!wxGetApp().app_config->get_bool("use_free_camera")) {
+                    // Forces camera right vector to be parallel to XY plane in case it has been misaligned using
+                    // the 3D mouse free rotation. It is cheaper to call this function right away instead of
+                    // testing wxGetApp().plater()->get_mouse3d_controller().connected(), which checks an atomics
+                    // (flushes CPU caches). See GH issue #3816.
                     camera.recover_from_free_camera();
+                }
+                if (wxGetApp().app_config->get_bool("3D_mouse_drag")) {
+                    float z = 0.0f;
+                    const Vec3d cur_pos = _mouse_to_3d(pos, &z);
+                    const Vec3d orig = _mouse_to_3d(m_mouse.drag.start_position_2D, &z);
+                    camera.set_target(camera.get_target() + orig - cur_pos);
+                } else {
+                    if (!evt.ShiftDown()) {
+                        m_show_z_axle = true;
+                        m_show_xy_plane = false;
+                        const Vec3d cur_pos = _mouse_to_bed_3d(pos);
+                        const Vec3d orig = _mouse_to_bed_3d(m_mouse.drag.start_position_2D);
+                        Vec3d delta = orig - cur_pos;
+                        delta.z() = 0;
+                        camera.set_target(camera.get_target() + delta);
+                    } else {
+                        m_show_z_axle = false;
+                        m_show_xy_plane = true;
+                        float z = 0.0f;
+                        const Vec3d orig = _mouse_to_3d(m_mouse.drag.start_position_2D, &z);
+                        // Ideally, we should project the into a plane that pass by the _mouse_to_bed_3d(pos)
+                        // and has the vector (0,0,1) and (mouse_ray(mouse_pos) CROSS (0,0,1))
+                        
+                        // Here, reusing the algo for the object x/z pan, the mouse isn't lock to the bed like for XY pan.
+                        // because we're just transfering the 2D pan into the Z component.
+                        const Linef3 ray = mouse_ray(pos);
+                        const Vec3d dir = ray.unit_vector();
+                        // finds the intersection of the mouse ray with the plane parallel to the camera viewport and passing throught the starting position
+                        // use ray-plane intersection see i.e. https://en.wikipedia.org/wiki/Line%E2%80%93plane_intersection algebric form
+                        // in our case plane normal and ray direction are the same (orthogonal view)
+                        // when moving to perspective camera the negative z unit axis of the camera needs to be transformed in world space and used as plane normal
+                        const Vec3d inters = ray.a + (orig/*m_mouse.drag.start_position_3D*/ - ray.a).dot(dir) / dir.squaredNorm() * dir;
+                        // vector from the starting position to the found intersection
+                        const Vec3d inters_vec = inters - orig/*m_mouse.drag.start_position_3D*/;
 
-                camera.set_target(camera.get_target() + orig - cur_pos);
+                        const Vec3d camera_right = camera.get_dir_right();
+                        const Vec3d camera_up = camera.get_dir_up();
+
+                        // finds projection of the vector along the camera axes
+                        const double projection_x = inters_vec.dot(camera_right);
+                        const double projection_z = inters_vec.dot(camera_up);
+                        //const Vec3d cur_pos = _mouse_to_3d(pos, &z);
+                        //Vec3d delta = orig - cur_pos;
+                        //camera.set_target(camera.get_target() + Vec3d(0.,0., delta.z() >= 0 ? delta.norm() : - delta.norm()) );
+                        camera.set_target(camera.get_target() + Vec3d(0.,0., -projection_z) );
+                    }
+                }
                 m_dirty = true;
             }
 
             m_mouse.drag.start_position_2D = pos;
+        } else if (evt.MiddleIsDown() && wxGetApp().app_config->get_bool("mouse_middle_target")) {
+            // If dragging over blank area with middle button, pan z.
+            if (m_mouse.is_start_position_2D_defined()) {
+                Camera &camera = wxGetApp().plater()->get_camera();
+                m_show_z_axle = false;
+                m_show_xy_plane = true;
+                float z = 0.0f;
+                const Vec3d orig = _mouse_to_3d(m_mouse.drag.start_position_2D, &z);
+                // Ideally, we should project the into a plane that pass by the _mouse_to_bed_3d(pos)
+                // and has the vector (0,0,1) and (mouse_ray(mouse_pos) CROSS (0,0,1))
+                        
+                // Here, reusing the algo for the object x/z pan, the mouse isn't lock to the bed like for XY pan.
+                // because we're just transfering the 2D pan into the Z component.
+                const Linef3 ray = mouse_ray(pos);
+                const Vec3d dir = ray.unit_vector();
+                // finds the intersection of the mouse ray with the plane parallel to the camera viewport and passing throught the starting position
+                // use ray-plane intersection see i.e. https://en.wikipedia.org/wiki/Line%E2%80%93plane_intersection algebric form
+                // in our case plane normal and ray direction are the same (orthogonal view)
+                // when moving to perspective camera the negative z unit axis of the camera needs to be transformed in world space and used as plane normal
+                const Vec3d inters = ray.a + (orig/*m_mouse.drag.start_position_3D*/ - ray.a).dot(dir) / dir.squaredNorm() * dir;
+                // vector from the starting position to the found intersection
+                const Vec3d inters_vec = inters - orig/*m_mouse.drag.start_position_3D*/;
+
+                const Vec3d camera_right = camera.get_dir_right();
+                const Vec3d camera_up = camera.get_dir_up();
+
+                // finds projection of the vector along the camera axes
+                const double projection_x = inters_vec.dot(camera_right);
+                const double projection_z = inters_vec.dot(camera_up);
+                //const Vec3d cur_pos = _mouse_to_3d(pos, &z);
+                //Vec3d delta = orig - cur_pos;
+                //camera.set_target(camera.get_target() + Vec3d(0.,0., delta.z() >= 0 ? delta.norm() : - delta.norm()) );
+                camera.set_target(camera.get_target() + Vec3d(0.,0., -projection_z) );
+                m_dirty = true;
+            }
+            m_mouse.drag.start_position_2D = pos;
         }
-    }
+    } 
     else if (evt.LeftUp() || evt.MiddleUp() || evt.RightUp()) {
         m_mouse.position = pos.cast<double>();
 
@@ -4780,6 +4922,10 @@ void GLCanvas3D::mouse_up_cleanup()
     m_mouse.dragging = false;
     m_mouse.ignore_left_up = false;
     m_dirty = true;
+    m_show_z_axle = false;
+    m_show_xy_plane = false;
+    still_mouse_down = false;
+    m_z_axle.reset();
 
     if (m_canvas->HasCapture())
         m_canvas->ReleaseMouse();
@@ -5075,6 +5221,91 @@ bool GLCanvas3D::_render_arrange_menu(float pos_x)
     return true;
 }
 
+// orient button from BambuSlicer
+bool GLCanvas3D::_render_orient_menu(float left, float right, float bottom, float top, bool current_bed)
+{
+    ImGuiWrapper* imgui = wxGetApp().imgui();
+
+    auto canvas_w = float(get_canvas_size().get_width());
+    auto canvas_h = float(get_canvas_size().get_height());
+    //BBS: GUI refactor: move main toolbar to the right
+    //original use center as {0.0}, and top is (canvas_h/2), bottom is (-canvas_h/2), also plus inv_camera
+    //now change to left_up as {0,0}, and top is 0, bottom is canvas_h
+#if BBS_TOOLBAR_ON_TOP
+    const float x = (1 + left) * canvas_w / 2;
+    ImGuiWrapper::push_toolbar_style(get_scale());
+    imgui->set_next_window_pos(x, m_main_toolbar.get_height(), ImGuiCond_Always, 0.5f, 0.0f);
+#else
+    const float x = canvas_w - m_main_toolbar.get_width();
+    const float y = 0.5f * canvas_h - top * float(wxGetApp().plater()->get_camera().get_zoom());
+    imgui->set_next_window_pos(x, y, ImGuiCond_Always, 1.0f, 0.0f);
+#endif
+
+    //imgui->begin(_L("Auto Orientation options"), ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoCollapse);
+
+    OrientSettings settings = get_orient_settings();
+    OrientSettings& settings_out = get_orient_settings();
+
+    auto& appcfg = wxGetApp().app_config;
+    PrinterTechnology ptech = current_printer_technology();
+
+    bool settings_changed = false;
+    float angle_min = 45.f;
+    std::string angle_key = "overhang_angle", rot_key = "enable_rotation";
+    std::string key_min_area = "min_area";
+    std::string postfix = "_fff";
+
+    if (ptech == ptSLA) {
+        angle_min = 45.f;
+        postfix = "_sla";
+    }
+
+
+    angle_key += postfix;
+    rot_key += postfix;
+
+    //if (imgui->slider_float(_L("Overhang Angle"), &settings.overhang_angle, angle_min, 90.0f, "%5.2f") || angle_min > settings.overhang_angle) {
+    //    settings.overhang_angle = std::max(angle_min, settings.overhang_angle);
+    //    settings_out.overhang_angle = settings.overhang_angle;
+    //    appcfg->set("orient", angle_key, std::to_string(settings_out.overhang_angle));
+    //    settings_changed = true;
+    //}
+
+    if (imgui->checkbox(_L("Enable rotation"), settings.enable_rotation)) {
+        settings_out.enable_rotation = settings.enable_rotation;
+        appcfg->set("orient", rot_key, settings_out.enable_rotation ? "1" : "0");
+        settings_changed = true;
+    }
+
+    if (imgui->checkbox(_L("Optimize support interface area"), settings.min_area)) {
+        settings_out.min_area = settings.min_area;
+        appcfg->set("orient", key_min_area, settings_out.min_area ? "1" : "0");
+        settings_changed = true;
+    }
+
+    ImGui::Separator();
+
+    if (imgui->button(_L("Orient"))) {
+        //wxGetApp().plater()->set_prepare_state(Job::PREPARE_STATE_DEFAULT);
+        wxGetApp().plater()->orient();
+    }
+
+    ImGui::SameLine();
+
+    if (imgui->button(_L("Reset"))) {
+        settings_out = OrientSettings{};
+        settings_out.overhang_angle = 60.f;
+        appcfg->set("orient", angle_key, std::to_string(settings_out.overhang_angle));
+        appcfg->set("orient", rot_key, settings_out.enable_rotation ? "1" : "0");
+        appcfg->set("orient", key_min_area, settings_out.min_area? "1" : "0");
+        settings_changed = true;
+    }
+
+    imgui->end();
+    //ImGuiWrapper::pop_toolbar_style();
+    return settings_changed;
+}
+
 #define ENABLE_THUMBNAIL_GENERATOR_DEBUG_OUTPUT 0
 #if ENABLE_THUMBNAIL_GENERATOR_DEBUG_OUTPUT
 static void debug_output_thumbnail(const ThumbnailData& thumbnail_data)
@@ -5097,6 +5328,9 @@ static void debug_output_thumbnail(const ThumbnailData& thumbnail_data)
     image.SaveFile("C:/prusa/test/test.png", wxBITMAP_TYPE_PNG);
 }
 #endif // ENABLE_THUMBNAIL_GENERATOR_DEBUG_OUTPUT
+
+
+
 
 void GLCanvas3D::_render_thumbnail_internal(ThumbnailData& thumbnail_data, const ThumbnailsParams& thumbnail_params, const GLVolumeCollection& volumes, Camera::EType camera_type)
 {
@@ -5531,11 +5765,12 @@ bool GLCanvas3D::_init_main_toolbar()
     m_main_toolbar.set_gap_size(4);
 
     GLToolbarItem::Data item;
+    int sprite_id = 0;
 
     item.name = "add";
     item.icon_filename = "add.svg";
     item.tooltip = _u8L("Add...") + " [" + GUI::shortkey_ctrl_prefix() + "I]";
-    item.sprite_id = 0;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_ADD)); };
     if (!m_main_toolbar.add_item(item))
         return false;
@@ -5543,7 +5778,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "delete";
     item.icon_filename = "remove.svg";
     item.tooltip = _u8L("Delete") + " [Del]";
-    item.sprite_id = 1;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_DELETE)); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_delete(); };
     if (!m_main_toolbar.add_item(item))
@@ -5552,16 +5787,35 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "deleteall";
     item.icon_filename = "delete_all.svg";
     item.tooltip = _u8L("Delete all") + " [" + GUI::shortkey_ctrl_prefix() + "Del]";
-    item.sprite_id = 2;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_DELETE_ALL)); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()/*->can_delete_all()*/; };
+    if (!m_main_toolbar.add_item(item))
+        return false;
+
+    item.name = "orient";
+    item.icon_filename = "toolbar_orient.svg";
+    item.tooltip = _u8L("Auto orient");
+    item.sprite_id = sprite_id++;
+    item.left.render_callback = nullptr;
+    item.enabling_callback = []()->bool { return wxGetApp().plater()->can_orient(); };
+    item.left.toggable = false;  // allow right mouse click
+    //BBS: GUI refactor: adjust the main toolbar position
+    item.left.action_callback = [this]() {
+        if (m_canvas != nullptr)
+        {
+            wxGetApp().plater()->orient();
+            //BBS do not show orient menu
+           // _render_orient_menu(left, right, bottom, top, false);
+        }
+    };
     if (!m_main_toolbar.add_item(item))
         return false;
 
     item.name = "arrange";
     item.icon_filename = "arrange.svg";
     item.tooltip = _u8L("Arrange") + " [A]\n" + _u8L("Arrange selection") + " [Shift+A]\n" + _u8L("Click right mouse button to show arrangement options");
-    item.sprite_id = 3;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_ARRANGE)); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_arrange(); };
     item.right.toggable = true;
@@ -5581,7 +5835,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "copy";
     item.icon_filename = "copy.svg";
     item.tooltip = _u8L("Copy") + " [" + GUI::shortkey_ctrl_prefix() + "C]";
-    item.sprite_id = 4;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_COPY)); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_copy_to_clipboard(); };
     if (!m_main_toolbar.add_item(item))
@@ -5590,7 +5844,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "paste";
     item.icon_filename = "paste.svg";
     item.tooltip = _u8L("Paste") + " [" + GUI::shortkey_ctrl_prefix() + "V]";
-    item.sprite_id = 5;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_PASTE)); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_paste_from_clipboard(); };
     if (!m_main_toolbar.add_item(item))
@@ -5602,7 +5856,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "more";
     item.icon_filename = "instance_add.svg";
     item.tooltip = _u8L("Add instance") + " [+]";
-    item.sprite_id = 6;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_MORE)); };
     item.visibility_callback = []()->bool { return wxGetApp().get_mode() != comSimple || get_app_config()->get_bool("objects_always_expert"); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_increase_instances(); };
@@ -5613,7 +5867,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "fewer";
     item.icon_filename = "instance_remove.svg";
     item.tooltip = _u8L("Remove instance") + " [-]";
-    item.sprite_id = 7;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_FEWER)); };
     item.visibility_callback = []()->bool { return wxGetApp().get_mode() != comSimple || get_app_config()->get_bool("objects_always_expert"); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_decrease_instances(); };
@@ -5626,7 +5880,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "splitobjects";
     item.icon_filename = "split_objects.svg";
     item.tooltip = _u8L("Split to objects");
-    item.sprite_id = 8;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_SPLIT_OBJECTS)); };
     item.visibility_callback = []()->bool { return wxGetApp().get_mode() != comSimple || get_app_config()->get_bool("objects_always_expert"); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_split_to_objects(); };
@@ -5636,7 +5890,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "splitvolumes";
     item.icon_filename = "split_parts.svg";
     item.tooltip = _u8L("Split to parts");
-    item.sprite_id = 9;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_SPLIT_VOLUMES)); };
     item.visibility_callback = []()->bool { return wxGetApp().get_mode() != comSimple || get_app_config()->get_bool("objects_always_expert"); };
     item.enabling_callback = []()->bool { return wxGetApp().plater()->can_split_to_volumes(); };
@@ -5651,7 +5905,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.tooltip = _u8L("Switch to Settings") + "\n" + "[" + GUI::shortkey_ctrl_prefix() + "4] - " + _u8L("Print Settings Tab")    + 
                                                 "\n" + "[" + GUI::shortkey_ctrl_prefix() + "5] - " + (current_printer_technology() == ptFFF ? _u8L("Filament Settings Tab") : _u8L("Material Settings Tab") +
                                                 "\n" + "[" + GUI::shortkey_ctrl_prefix() + "6] - " + _u8L("Printer Settings Tab")) ;
-    item.sprite_id = 10;
+    item.sprite_id = sprite_id++;
     item.enabling_callback    = GLToolbarItem::Default_Enabling_Callback;
     item.visibility_callback  = []() { return get_app_config()->get_bool("new_settings_layout_mode") ||
                                                    get_app_config()->get_bool("dlg_settings_layout_mode"); };
@@ -5667,7 +5921,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "search";
     item.icon_filename = "search_.svg";
     item.tooltip = _u8L("Search") + " [" + GUI::shortkey_ctrl_prefix() + "F]";
-    item.sprite_id = 11;
+    item.sprite_id = sprite_id++;
     item.left.toggable = true;
     item.left.render_callback = [this](float left, float right, float, float) {
         if (m_canvas != nullptr) {
@@ -5689,7 +5943,7 @@ bool GLCanvas3D::_init_main_toolbar()
     item.name = "layersediting";
     item.icon_filename = "layers_white.svg";
     item.tooltip = _u8L("Variable layer height");
-    item.sprite_id = 12;
+    item.sprite_id = sprite_id++;
     item.left.action_callback = [this]() { if (m_canvas != nullptr) wxPostEvent(m_canvas, SimpleEvent(EVT_GLTOOLBAR_LAYERSEDITING)); };
     item.visibility_callback = [this]()->bool {
         bool res = current_printer_technology() == ptFFF;
@@ -6334,12 +6588,59 @@ void GLCanvas3D::_render_bed(const Transform3d& view_matrix, const Transform3d& 
           && m_gizmos.get_current_type() != GLGizmosManager::Seam
           && m_gizmos.get_current_type() != GLGizmosManager::MmuSegmentation);
 
-    m_bed.render(*this, view_matrix, projection_matrix, bottom, scale_factor, show_texture);
+    double show_xy_plane = 0.;
+    if (m_show_xy_plane) {
+        const Camera& camera = wxGetApp().plater()->get_camera();
+        show_xy_plane = camera.get_target().z();
+    }
+    m_bed.render(*this, view_matrix, projection_matrix, bottom, scale_factor, show_texture, show_xy_plane);
 }
 
 void GLCanvas3D::_render_bed_axes()
 {
-  m_bed.render_axes();
+    m_bed.render_axes();
+    if (m_show_z_axle) {
+        const Camera& camera = wxGetApp().plater()->get_camera();
+        GLShaderProgram *curr_shader = wxGetApp().get_current_shader();
+        GLShaderProgram *shader = wxGetApp().get_shader("gouraud_light");
+        if (shader == nullptr)
+            return;
+
+        if (curr_shader != nullptr)
+            curr_shader->stop_using();
+
+        shader->start_using();
+        shader->set_uniform("emission_factor", 0.25f);
+
+        if (m_show_z_axle) {
+            if (!m_z_axle.is_initialized()) {
+                    // construct an axle that is the right size for our zoom & position
+                    BoundingBoxf3 side_bb(Vec3d(0, 0, 0), Vec3d(10, 10, 10));
+                    const double length_zoom = camera.calc_zoom_to_bounding_box_factor(side_bb);
+                    m_z_axle_length = 17 * (length_zoom / camera.get_zoom());
+                    m_z_axle.init_from(stilized_arrow(16, m_z_axle_length / 300, m_z_axle_length / 50, m_z_axle_length / 300, m_z_axle_length));
+                    m_z_axle.set_color(ColorRGBA::Z());
+            }
+            Transform3d scale_tr = Transform3d::Identity();
+            scale_tr.scale(std::min(1., camera.get_inv_zoom() * 10.));
+
+            Transform3d trafo = camera.get_view_matrix();
+            Vec3d position = camera.get_target();
+            position.z() -= m_z_axle_length / 2;
+            const Transform3d &transform = Geometry::translation_transform(position);
+            const Transform3d &view_matrix = camera.get_view_matrix();
+            const Transform3d matrix = view_matrix * transform;
+            shader->set_uniform("view_model_matrix", matrix);
+            shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+            shader->set_uniform("view_normal_matrix",
+                               (Matrix3d) (view_matrix.matrix().block(0, 0, 3, 3) *
+                                           transform.matrix().block(0, 0, 3, 3).inverse().transpose()));
+            m_z_axle.render();
+        }
+        shader->stop_using();
+        if (curr_shader != nullptr)
+            curr_shader->start_using();
+    }
 }
 
 void GLCanvas3D::_render_bed_for_picking(const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom)
@@ -7091,16 +7392,16 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
     //FIXME This code is fishy. It may not work for multiple objects with different layering due to variable layer height feature.
     // This is not critical as this is just an initial preview.
     const PrintObject* highest_object = *std::max_element(print->objects().begin(), print->objects().end(), [](auto l, auto r){ return l->layers().size() < r->layers().size(); });
-    std::vector<float> print_zs;
-    print_zs.reserve(skirt_height * 2);
+    std::vector<float> print_zs_mm;
+    print_zs_mm.reserve(skirt_height * 2);
     for (size_t i = 0; i < std::min(skirt_height, highest_object->layers().size()); ++ i)
-        print_zs.push_back(float(highest_object->layers()[i]->print_z));
+        print_zs_mm.push_back(float(highest_object->layers()[i]->unscaled_print_z()));
     // Only add skirt for the raft layers.
     for (size_t i = 0; i < std::min(skirt_height, std::min(highest_object->slicing_parameters().raft_layers(), highest_object->support_layers().size())); ++ i)
-        print_zs.push_back(float(highest_object->support_layers()[i]->print_z));
-    sort_remove_duplicates(print_zs);
-    skirt_height = std::min(skirt_height, print_zs.size());
-    print_zs.erase(print_zs.begin() + skirt_height, print_zs.end());
+        print_zs_mm.push_back(float(highest_object->support_layers()[i]->unscaled_print_z()));
+    sort_remove_duplicates(print_zs_mm);
+    skirt_height = std::min(skirt_height, print_zs_mm.size());
+    print_zs_mm.erase(print_zs_mm.begin() + skirt_height, print_zs_mm.end());
 
     // Ensure that no volume grows over the limits. If the volume is too large, allocate a new one. (on-demand)
     auto ensure_volume_is_ready = [&build_volume, this](GLVolume* vol, GLModel::Geometry& init_vol_data) -> GLVolume*{
@@ -7119,41 +7420,41 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
     GLModel::Geometry init_data;
     init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles, GLModel::Geometry::EVertexLayout::P3N3 };
     for (size_t i = 0; i < skirt_height; ++ i) {
-        volume->print_zs.emplace_back(print_zs[i]);
-        volume->offsets.emplace_back(init_data.indices_count());
+        volume->_print_zs.push_back(Layer::scale_to_layer_coord(print_zs_mm[i]));
+        volume->offsets.push_back(init_data.indices_count());
         if (i == 0) {
             //skirt & brim from print
             if (!print->brim().empty()) volume = ensure_volume_is_ready(volume, init_data);
-            _3DScene::extrusionentity_to_verts(print->brim(), print_zs[i], Point(0, 0), init_data);
+            _3DScene::extrusionentity_to_verts(print->brim(), print_zs_mm[i], Point(0, 0), init_data);
             if (print->skirt_first_layer()) {
                 if (!print->skirt_first_layer()->empty()) volume = ensure_volume_is_ready(volume, init_data);
-                _3DScene::extrusionentity_to_verts(*print->skirt_first_layer(), print_zs[i], Point(0, 0), init_data);
+                _3DScene::extrusionentity_to_verts(*print->skirt_first_layer(), print_zs_mm[i], Point(0, 0), init_data);
             }
             //skirt & brim from objects
             for (const PrintObject* print_object : print->objects()) {
                 if (!print_object->brim().empty())
                     for (const PrintInstance& inst : print_object->instances()) {
                         if (!print_object->brim().empty()) volume = ensure_volume_is_ready(volume, init_data);
-                        _3DScene::extrusionentity_to_verts(print_object->brim(), print_zs[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
+                        _3DScene::extrusionentity_to_verts(print_object->brim(), print_zs_mm[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
                     }
                 if (print_object->skirt_first_layer())
                     for (const PrintInstance& inst : print_object->instances()) {
                         if (!print_object->skirt_first_layer()->empty()) volume = ensure_volume_is_ready(volume, init_data);
-                        _3DScene::extrusionentity_to_verts(*print_object->skirt_first_layer(), print_zs[i], inst.shift, init_data);
+                        _3DScene::extrusionentity_to_verts(*print_object->skirt_first_layer(), print_zs_mm[i], inst.shift, init_data);
                     }
             }
         }
         //skirts from print
         if (i != 0 || !print->skirt_first_layer()) {
             if (!print->skirt().empty()) volume = ensure_volume_is_ready(volume, init_data);
-            _3DScene::extrusionentity_to_verts(print->skirt(), print_zs[i], Point(0, 0), init_data);
+            _3DScene::extrusionentity_to_verts(print->skirt(), print_zs_mm[i], Point(0, 0), init_data);
         }
         //skirts from objects
         for (const PrintObject* print_object : print->objects()) {
             if ( !print_object->skirt().empty() && (i != 0 || !print_object->skirt_first_layer()))
                 for (const PrintInstance& inst : print_object->instances()) {
                     if (!print_object->skirt().empty()) volume = ensure_volume_is_ready(volume, init_data);
-                    _3DScene::extrusionentity_to_verts(print_object->skirt(), print_zs[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
+                    _3DScene::extrusionentity_to_verts(print_object->skirt(), print_zs_mm[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
                 }
         }
     }
@@ -7196,18 +7497,18 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
         // For coloring by a color_print(M600), return a parsed color.
         bool                         color_by_color_print() const { return color_print_values!=nullptr; }
         const size_t                 color_print_color_idx_by_layer_idx(const size_t layer_idx) const {
-            const CustomGCode::Item value{layers[layer_idx]->print_z + EPSILON, CustomGCode::Custom, 0, ""};
+            const CustomGCode::Item value{layers[layer_idx]->scaled_print_z(), CustomGCode::Custom, 0, ""};
             auto it = std::lower_bound(color_print_values->begin(), color_print_values->end(), value);
             return (it - color_print_values->begin()) % number_tools();
         }
 
         const size_t                 color_print_color_idx_by_layer_idx_and_extruder(const size_t layer_idx, const int extruder) const
         {
-            const coordf_t print_z = layers[layer_idx]->print_z;
+            const coord_t print_z = layers[layer_idx]->scaled_print_z();
 
             auto it = std::find_if(color_print_values->begin(), color_print_values->end(),
                 [print_z](const CustomGCode::Item& code)
-                { return fabs(code.print_z - print_z) < EPSILON; });
+                { return code.print_z_ == print_z; });
             if (it != color_print_values->end()) {
                 CustomGCode::Type type = it->type;
                 // pause print or custom Gcode
@@ -7226,7 +7527,7 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
                 }
             }
 
-            const CustomGCode::Item value{print_z + EPSILON, CustomGCode::Custom, 0, ""};
+            const CustomGCode::Item value{print_z, CustomGCode::Custom, 0, ""};
             it = std::lower_bound(color_print_values->begin(), color_print_values->end(), value);
             while (it != color_print_values->begin()) {
                 --it;
@@ -7323,7 +7624,7 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
     if (ctxt.has_support)
         for (const Layer *layer : print_object.support_layers())
             ctxt.layers.push_back(layer);
-    std::sort(ctxt.layers.begin(), ctxt.layers.end(), [](const Layer *l1, const Layer *l2) { return l1->print_z < l2->print_z; });
+    std::sort(ctxt.layers.begin(), ctxt.layers.end(), [](const Layer *l1, const Layer *l2) { return l1->scaled_print_z() < l2->scaled_print_z(); });
 
     // Maximum size of an allocation block: 32MB / sizeof(float)
     BOOST_LOG_TRIVIAL(debug) << "Loading print object toolpaths in parallel - start" << m_volumes.log_memory_info() << log_memory_info();
@@ -7441,42 +7742,65 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
             }
 
             for (GeoStorage &geo_storage : geo_vols) {
-                if (geo_storage.volume_ptr->print_zs.empty() || geo_storage.volume_ptr->print_zs.back() != layer->print_z) {
-                    geo_storage.volume_ptr->print_zs.push_back(layer->print_z);
+                if (geo_storage.volume_ptr->_print_zs.empty() || geo_storage.volume_ptr->_print_zs.back() != layer->scaled_print_z()) {
+                    geo_storage.volume_ptr->_print_zs.push_back(layer->scaled_print_z());
                     geo_storage.volume_ptr->offsets.push_back(geo_storage.geometry_storage->indices_count());
                 }
             }
 
             for (const PrintInstance &instance : *ctxt.shifted_copies) {
                 const Point &copy = instance.shift;
-                for (const LayerRegion *layerm : layer->regions()) {
-                    if (is_selected_separate_extruder) {
-                        const PrintRegionConfig& cfg = layerm->region().config();
-                        if (cfg.perimeter_extruder.value    != m_selected_extruder ||
-                            cfg.infill_extruder.value       != m_selected_extruder ||
-                            cfg.solid_infill_extruder.value != m_selected_extruder)
-                            continue;
-                    }
-                    if (ctxt.has_perimeters)
-                        _3DScene::extrusionentity_to_verts(layerm->perimeters(), float(layer->print_z), copy,
-                                                           select_geometry(idx_layer, layerm->region().config().perimeter_extruder.value,
-                                                                           GCodeExtrusionRole::Perimeter),
-                                                           feature_to_geometry_map);
-                    if (ctxt.has_infill) {
-                        for (const ExtrusionEntity *ee : layerm->fills()) {
+                for (const LayerSliceIslandPtr &layer_island_ptr : layer->islands()) {
+                    for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+                        if (ctxt.has_perimeters && region_island_ptr->has_extrusion(LayerRegionIsland::PERIMETERS)) {
+                            const LayerRegion *one_lregion = *region_island_ptr->regions().begin();
+                            if (is_selected_separate_extruder) {
+                                const PrintRegionConfig &cfg = one_lregion->region().config();
+                                if (cfg.perimeter_extruder.value != m_selected_extruder)
+                                    continue;
+                            }
+                                _3DScene::extrusionentity_to_verts(
+                                    region_island_ptr->extrusion(LayerRegionIsland::PERIMETERS), float(layer->unscaled_print_z()), copy,
+                                    select_geometry(idx_layer, one_lregion->region().config().perimeter_extruder.value,
+                                                    GCodeExtrusionRole::Perimeter),
+                                    feature_to_geometry_map);
+                        }
+                        if (ctxt.has_perimeters && region_island_ptr->has_extrusion(LayerRegionIsland::GAP_FILLS)) {
+                            const LayerRegion *one_lregion = *region_island_ptr->regions().begin();
+                            if (is_selected_separate_extruder) {
+                                const PrintRegionConfig &cfg = one_lregion->region().config();
+                                if (cfg.perimeter_extruder.value != m_selected_extruder)
+                                    continue;
+                            }
+                                _3DScene::extrusionentity_to_verts(
+                                    region_island_ptr->extrusion(LayerRegionIsland::GAP_FILLS), float(layer->unscaled_print_z()), copy,
+                                    select_geometry(idx_layer, one_lregion->region().config().perimeter_extruder.value,
+                                                    GCodeExtrusionRole::Perimeter),
+                                    feature_to_geometry_map);
+                        }
+                        if (ctxt.has_infill && region_island_ptr->has_extrusion(LayerRegionIsland::INFILLS)) {
+                            const LayerRegion *one_lregion = *region_island_ptr->regions().begin();
+                            if (is_selected_separate_extruder) {
+                                const PrintRegionConfig &cfg = one_lregion->region().config();
+                                if (cfg.infill_extruder.value != m_selected_extruder ||
+                                    cfg.solid_infill_extruder.value != m_selected_extruder)
+                                    continue;
+                            }
                             // fill represents infill extrusions of a single island.
-                            const auto *fill = dynamic_cast<const ExtrusionEntityCollection*>(ee);
-                            if (fill != nullptr && !fill->entities().empty()) {
-                                bool has_solid_infill = HasRoleVisitor::search(fill->entities(), HasSolidInfillVisitor{});
-                                _3DScene::extrusionentity_to_verts(*fill, float(layer->print_z), copy,
-                                                                   select_geometry(idx_layer,
-                                                                                   has_solid_infill ?
-                                                                                       layerm->region().config().solid_infill_extruder :
-                                                                                       layerm->region().config().infill_extruder,
-                                                                                   has_solid_infill ?
-                                                                                       GCodeExtrusionRole::SolidInfill :
-                                                                                       GCodeExtrusionRole::InternalInfill),
-                                                                   feature_to_geometry_map);
+                            const ExtrusionEntityCollection &fill = region_island_ptr->extrusion(
+                                LayerRegionIsland::INFILLS);
+                            if (!fill.entities().empty()) {
+                                bool has_solid_infill = HasRoleVisitor::search(fill.entities(),
+                                                                               HasSolidInfillVisitor{});
+                                _3DScene::extrusionentity_to_verts(
+                                    fill, float(layer->unscaled_print_z()), copy,
+                                    select_geometry(idx_layer,
+                                                    has_solid_infill ?
+                                                        one_lregion->region().config().solid_infill_extruder :
+                                                        one_lregion->region().config().infill_extruder,
+                                                    has_solid_infill ? GCodeExtrusionRole::SolidInfill :
+                                                                       GCodeExtrusionRole::InternalInfill),
+                                    feature_to_geometry_map);
                             }
                         }
                     }
@@ -7486,7 +7810,7 @@ void GLCanvas3D::_load_print_object_toolpaths(const PrintObject &               
                     if (support_layer) {
                         for (const ExtrusionEntity *extrusion_entity : support_layer->support_fills.entities())
                             _3DScene::extrusionentity_to_verts(
-                                *extrusion_entity, float(layer->print_z), copy,
+                                *extrusion_entity, float(layer->unscaled_print_z()), copy,
                                 select_geometry(idx_layer,
                                                 (extrusion_entity->role() == ExtrusionRole::SupportMaterial) ?
                                                     support_layer->object()->config().support_material_extruder :
@@ -7591,8 +7915,8 @@ void GLCanvas3D::_load_wipe_tower_toolpaths(const BuildVolume& build_volume, con
     if (print->wipe_tower_data().final_purge)
         ctxt.final.emplace_back(*print->wipe_tower_data().final_purge.get());
 
-    ctxt.wipe_tower_angle = ctxt.print->config().wipe_tower_rotation_angle.value/180.f * PI;
-    ctxt.wipe_tower_pos = Vec2f(ctxt.print->config().wipe_tower_x.value, ctxt.print->config().wipe_tower_y.value);
+    ctxt.wipe_tower_angle = ctxt.print->default_object_config().wipe_tower_rotation_angle.value/180.f * PI;
+    ctxt.wipe_tower_pos = Vec2f(ctxt.print->default_object_config().wipe_tower_x.value, ctxt.print->default_object_config().wipe_tower_y.value);
 
     ctxt.color_support = m_gcode_viewer.get_extrusion_colors()[uint8_t(GCodeExtrusionRole::WipeTower)];
 
@@ -7641,8 +7965,8 @@ void GLCanvas3D::_load_wipe_tower_toolpaths(const BuildVolume& build_volume, con
             const std::vector<WipeTower::ToolChangeResult> &layer = ctxt.tool_change(idx_layer);
             for (size_t i = 0; i < vols.size(); ++i) {
                 GLVolume &vol = *vols[i];
-                if (vol.print_zs.empty() || vol.print_zs.back() != layer.front().print_z) {
-                    vol.print_zs.push_back(layer.front().print_z);
+                if (vol._print_zs.empty() || vol._print_zs.back() != Layer::scale_to_layer_coord(layer.front().print_z)) {
+                    vol._print_zs.push_back(Layer::scale_to_layer_coord(layer.front().print_z));
                     vol.offsets.push_back(geometries[i].indices_count());
                 }
             }

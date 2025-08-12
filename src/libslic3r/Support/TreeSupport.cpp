@@ -163,7 +163,7 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
             grouped_meshes.emplace_back(next_settings, std::vector<size_t>{ object_id });
 
         // no need to do this per mesh group as adaptive layers and raft setting are not setable per mesh.
-        if (print.get_object(largest_printed_mesh_idx)->layers().back()->print_z < print_object.layers().back()->print_z)
+        if (print.get_object(largest_printed_mesh_idx)->layers().back()->scaled_print_z() < print_object.layers().back()->scaled_print_z())
             largest_printed_mesh_idx = object_id;
     }
 
@@ -256,7 +256,7 @@ ExPolygons to_expolys(Polygons polys) {
             // For how many layers full overhangs shall be supported.
             const bool     enforced_layer = layer_id < support_enforce_layers;
             if (support_auto || enforced_layer) {
-                float lower_layer_offset;
+                coord_t lower_layer_offset;
                 if (enforced_layer) {
                     lower_layer_offset = 0;
                 } else if (support_threshold_auto) {
@@ -265,13 +265,13 @@ ExPolygons to_expolys(Polygons polys) {
                         external_perimeter_width += layerm->flow(frExternalPerimeter).scaled_width();
                     }
                     external_perimeter_width /= lower_layer.region_count();
-                    lower_layer_offset = float(0.5 * external_perimeter_width);
+                    lower_layer_offset = scale_t(0.5 * external_perimeter_width);
                 } else {
-                    lower_layer_offset = scaled<float>(lower_layer.height / tan_threshold);
+                    lower_layer_offset = scale_t(lower_layer.unscaled_height() / tan_threshold);
                 }
                 overhangs = lower_layer_offset == 0 ?
                     diff_ex(current_layer.lslices(), lower_layer.lslices()) :
-                    diff_ex(current_layer.lslices(), offset_ex(lower_layer.lslices(), lower_layer_offset));
+                    diff_ex(current_layer.lslices(), offset_ex(lower_layer.lslices(), (coordf_t)lower_layer_offset));
                 if (lower_layer_offset == 0) {
                     raw_overhangs = overhangs;
                     raw_overhangs_calculated = true;
@@ -307,7 +307,7 @@ ExPolygons to_expolys(Polygons polys) {
                 if (config.dont_support_bridges) {
                     for (const LayerRegion *layerm : current_layer.regions())
                         remove_bridges_from_contacts(print_config, lower_layer, *layerm,
-                                                     float(layerm->flow(frExternalPerimeter).scaled_width()),
+                                                     layerm->flow(frExternalPerimeter).scaled_width(),
                                                      overhangs);
                 }
             }
@@ -1141,7 +1141,7 @@ void finalize_raft_contact(
             double threshold = scaled<double>(print_object.config().raft_expansion.value) * 2.;
             first_layer_move_bounds.erase(std::remove_if(first_layer_move_bounds.begin(), first_layer_move_bounds.end(),
                 [&grid, threshold](const SupportElement &el) {
-                    coordf_t dist;
+                    distf_t dist;
                     if (grid.signed_distance_edges(el.state.result_on_layer, threshold, dist)) {
                         assert(std::abs(dist) < threshold + SCALED_EPSILON);
                         // Support point is inside the expanded raft, remove it.
@@ -3719,17 +3719,17 @@ static void generate_support_areas(Print &print,
                 // Find the last layer with roughly the same print_z, find the minimum layer height of all.
                 // Due to the floating point inaccuracies, the print_z may not be the same even if in theory they should.
                 int j = i + 1;
-                coordf_t zmax = layers_sorted[i]->print_z + EPSILON;
+                coord_t zmax = layers_sorted[i]->scaled_print_z()/* + EPSILON*/;
                 bool empty = layers_sorted[i]->polygons.empty();
-                for (; j < layers_sorted.size() && layers_sorted[j]->print_z <= zmax; ++j)
+                for (; j < layers_sorted.size() && layers_sorted[j]->scaled_print_z() <= zmax; ++j)
                     if (!layers_sorted[j]->polygons.empty())
                         empty = false;
                 if (!empty) {
                     export_print_z_polygons_to_svg(
-                        debug_out_path("support-%d-%lf.svg", iRun, layers_sorted[i]->print_z).c_str(),
+                        debug_out_path("support-%d-%lf.svg", iRun, layers_sorted[i]->unscaled_print_z()).c_str(),
                         layers_sorted.data() + i, j - i);
                     export_print_z_polygons_and_extrusions_to_svg(
-                        debug_out_path("support-w-fills-%d-%lf.svg", iRun, layers_sorted[i]->print_z).c_str(),
+                        debug_out_path("support-w-fills-%d-%lf.svg", iRun, layers_sorted[i]->unscaled_print_z()).c_str(),
                         layers_sorted.data() + i, j - i,
                         *print_object.support_layers()[layer_id]);
                     ++layer_id;

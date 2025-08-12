@@ -76,6 +76,7 @@ public:
     // Non bridging flow: Layer height.
     // Bridging flow: Bridge thread diameter = layer height.
     float   height()          const { return m_height; }
+    coord_t scaled_height()   const;
     // Spacing between the extrusion centerlines.
     float   spacing()         const;// { return m_spacing; } use the compute, as I can't be 100% sure yet that this cachced value is good.
     coord_t scaled_spacing()  const { return scale_t(spacing()); }
@@ -163,7 +164,7 @@ private:
     //        // Gap fill violates this condition.
     //        //assert(width >= height); 
     //    }
-
+    //TODO: change from float to coord_t
     float       m_width { 0 };
     float       m_height { 0 };
     float       m_spacing { 0 };

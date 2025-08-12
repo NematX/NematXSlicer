@@ -258,7 +258,7 @@ ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(
     const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
     const double max_width);
 
-std::pair<float, float> calculate_overhang_speed(const ExtrusionAttributes &attributes,
+std::pair<float, float> calculate_overhang_speed(const ExtrusionPath &path,
                                                  const FullPrintConfig     &config,
                                                  size_t                     extruder_id);
 

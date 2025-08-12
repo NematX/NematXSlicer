@@ -35,7 +35,8 @@ std::string WipeTowerIntegration::toolchange_gcode_from_wipe_tower_generator(GCo
     if (tcr.priming || (new_extruder_id >= 0)) {
         if (is_ramming)
             gcodegen.m_wipe.reset_path(); // We don't want wiping on the ramming lines.
-        toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id, tcr.print_z); // TODO: toolchange_z vs print_z
+        toolchange_gcode_str = gcodegen.set_extruder(new_extruder_id,
+                                                     scale_t(tcr.print_z + EPSILON)); // TODO: toolchange_z vs print_z
     }
     assert(toolchange_gcode_str.empty() || toolchange_gcode_str.back() == '\n');
     return toolchange_gcode_str;
@@ -101,7 +102,7 @@ std::string WipeTowerIntegration::append_tcr(GCodeGenerator &gcodegen, const Wip
                                          || will_go_down);       // don't dig into the print
     if (should_travel_to_tower) {
         const Point xy_point = wipe_tower_point_to_object_point(gcodegen, start_pos);
-        gcode += gcodegen.retract_and_wipe();
+        gcode += gcodegen.retract_and_wipe(needs_toolchange);
         gcodegen.m_avoid_crossing_perimeters.use_external_mp_once();
         const std::string comment{"Travel to a Wipe Tower"};
         Polyline travel_path = gcodegen.travel_to(gcode, xy_point, ExtrusionRole::Mixed);

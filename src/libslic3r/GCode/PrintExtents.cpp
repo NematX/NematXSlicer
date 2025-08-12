@@ -110,18 +110,22 @@ BoundingBoxf get_print_extrusions_extents(const Print &print)
     return bbox;
 }
 
-BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object, const coordf_t max_print_z)
+BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object, const coord_t max_print_z)
 {
     BoundingBoxf bbox;
     for (const Layer *layer : print_object.layers()) {
-        if (layer->print_z > max_print_z)
+        if (layer->scaled_print_z() > max_print_z)
             break;
         BoundingBoxf bbox_this;
-        for (const LayerRegion *layerm : layer->regions()) {
-            bbox_this.merge(extrusionentity_extents(layerm->perimeters()));
-            for (const ExtrusionEntity *ee : layerm->fills())
-                // fill represents infill extrusions of a single island.
-                bbox_this.merge(extrusionentity_extents(*dynamic_cast<const ExtrusionEntityCollection*>(ee)));
+        for (const LayerSliceIslandPtr &layer_island_ptr : layer->islands()) {
+            for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+                if (region_island_ptr->has_extrusion(LayerRegionIsland::PERIMETERS)) {
+                    bbox_this.merge(extrusionentity_extents(region_island_ptr->extrusion(LayerRegionIsland::PERIMETERS)));
+                }
+                if (region_island_ptr->has_extrusion(LayerRegionIsland::INFILLS)) {
+                    bbox_this.merge(extrusionentity_extents(region_island_ptr->extrusion(LayerRegionIsland::INFILLS)));
+                }
+            }
         }
         const SupportLayer *support_layer = dynamic_cast<const SupportLayer*>(layer);
         if (support_layer)
@@ -138,17 +142,17 @@ BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object
 
 // Returns a bounding box of a projection of the wipe tower for the layers <= max_print_z.
 // The projection does not contain the priming regions.
-BoundingBoxf get_wipe_tower_extrusions_extents(const Print &print, const coordf_t max_print_z)
+BoundingBoxf get_wipe_tower_extrusions_extents(const Print &print, const coord_t max_print_z)
 {
     // Wipe tower extrusions are saved as if the tower was at the origin with no rotation
     // We need to get position and angle of the wipe tower to transform them to actual position.
     Transform2d trafo =
-        Eigen::Translation2d(print.config().wipe_tower_x.value, print.config().wipe_tower_y.value) *
-        Eigen::Rotation2Dd(Geometry::deg2rad(print.config().wipe_tower_rotation_angle.value));
+        Eigen::Translation2d(print.default_object_config().wipe_tower_x.value, print.default_object_config().wipe_tower_y.value) *
+        Eigen::Rotation2Dd(Geometry::deg2rad(print.default_object_config().wipe_tower_rotation_angle.value));
 
     BoundingBoxf bbox;
     for (const std::vector<WipeTower::ToolChangeResult> &tool_changes : print.wipe_tower_data().tool_changes) {
-        if (! tool_changes.empty() && tool_changes.front().print_z > max_print_z)
+        if (! tool_changes.empty() && Layer::scale_to_layer_coord(tool_changes.front().print_z) > max_print_z)
             break;
         for (const WipeTower::ToolChangeResult &tcr : tool_changes) {
             for (size_t i = 1; i < tcr.extrusions.size(); ++ i) {

@@ -643,7 +643,7 @@ namespace Slic3r {
         bool _handle_start_config_metadata(const char** attributes, unsigned int num_attributes);
         bool _handle_end_config_metadata();
 
-        bool _generate_volumes(ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions, DynamicPrintConfig& global_config);
+        bool _generate_volumes(Model& model, ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions, DynamicPrintConfig& global_config);
 
         // callbacks to parse the .model file
         static void XMLCALL _handle_start_model_xml_element(void* userData, const char* name, const char** attributes);
@@ -986,7 +986,7 @@ namespace Slic3r {
                         new_model_object->clear_instances();
                         new_model_object->add_instance(*model_object->instances.back());
                         model_object->delete_last_instance();
-                        if (!_generate_volumes(*new_model_object, *geometry, volumes, config_substitutions, config))
+                        if (!_generate_volumes(model, *new_model_object, *geometry, volumes, config_substitutions, config))
                             return false;
                     }
                 }
@@ -1059,7 +1059,7 @@ namespace Slic3r {
                 volumes_ptr = &volumes;
             }
 
-            if (!_generate_volumes(*model_object, obj_geometry->second, *volumes_ptr, config_substitutions, config))
+            if (!_generate_volumes(model, *model_object, obj_geometry->second, *volumes_ptr, config_substitutions, config))
                 return false;
 
             // convert from prusa if needed
@@ -1703,7 +1703,7 @@ namespace Slic3r {
                     type  = static_cast<CustomGCode::Type>(tree.get<int>("<xmlattr>.type"));
                     extra = tree.get<std::string>("<xmlattr>.extra", "");
                 }
-                m_model->custom_gcode_per_print_z.gcodes.push_back(CustomGCode::Item{print_z, type, extruder, color, extra}) ;
+                m_model->custom_gcode_per_print_z.gcodes.push_back(CustomGCode::Item{Layer::scale_to_layer_coord(print_z), type, extruder, color, extra}) ;
             }
         }
     }
@@ -2435,7 +2435,7 @@ namespace Slic3r {
         return true;
     }
 
-    bool _3MF_Importer::_generate_volumes(ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions, DynamicPrintConfig& global_config)
+    bool _3MF_Importer::_generate_volumes(Model& model, ModelObject& object, const Geometry& geometry, const ObjectMetadata::VolumeMetadataList& volumes, ConfigSubstitutionContext& config_substitutions, DynamicPrintConfig& global_config)
     {
         if (!object.volumes.empty()) {
             add_error("Found invalid volumes count");
@@ -2465,6 +2465,7 @@ namespace Slic3r {
                 if (metadata.key == TRANSFORM_KEY) {
                     volume_transformation   = Slic3r::Geometry::transform3d_from_string(metadata.value);
                     has_transform           = true;
+                    model.baked_transformation = false;
                 }
             }
             // has_transform -> SuperSlicer only, transformation not baked into the mesh. => volume_matrix_to_object shoud be identity => has_pre_transform should be false
@@ -2521,7 +2522,7 @@ namespace Slic3r {
 
             if (triangle_mesh.volume() < 0)
                 triangle_mesh.flip_triangles();
-            
+
             ModelVolume* volume;
             if (!has_transform && !this->unbake_transformation) {
                 volume = object.add_volume(std::move(triangle_mesh), ModelVolumeType::MODEL_PART,
@@ -2761,6 +2762,17 @@ namespace Slic3r {
     {
         clear_errors();
         m_options = options;
+
+        // check bake_transformation_in_mesh validity
+        if (m_options.bake_transformation_in_mesh < 0) {
+            // undecided -> get the saved one from model
+            m_options.bake_transformation_in_mesh = model.baked_transformation;
+        } else {
+            // enforced -> save it into the model
+            model.baked_transformation = m_options.bake_transformation_in_mesh == 1;
+        }
+
+        // save
         return _save_model_to_file(filename, model, config);
     }
 
@@ -3215,7 +3227,7 @@ namespace Slic3r {
             const Transform3d& matrix = volume->get_matrix();
             for (const auto& vertex: its.vertices) {
                 Vec3f v;
-                if (m_options.bake_transformation_in_mesh) {
+                if (m_options.bake_transformation_in_mesh != 0) {
                     v = (matrix * vertex.cast<double>()).cast<float>();
                 } else {
                     v = vertex;
@@ -3808,7 +3820,7 @@ namespace Slic3r {
                                      ModelVolume::type_to_string(volume->type()));
 
                         // is the transform is baked in the mesh ?
-                        if (m_options.bake_transformation_in_mesh) {
+                        if (m_options.bake_transformation_in_mesh != 0) {
                             // old prusaslicer bake the transform in the mesh.
                             // stores volume's local matrix
                             stream << "   <" << METADATA_TAG << " " << TYPE_ATTR << "=\"" << VOLUME_TYPE << "\" "
@@ -3999,7 +4011,7 @@ bool _3MF_Exporter::_add_custom_gcode_per_print_z_file_to_archive( mz_zip_archiv
             pt::ptree& code_tree = main_tree.add("code", "");
 
             // store data of custom_gcode_per_print_z
-            code_tree.put("<xmlattr>.print_z"   , code.print_z  );
+            code_tree.put("<xmlattr>.print_z"   , unscaled(code.print_z_)  );
             code_tree.put("<xmlattr>.type"      , static_cast<int>(code.type));
             code_tree.put("<xmlattr>.extruder"  , code.extruder );
             code_tree.put("<xmlattr>.color"     , code.color    );

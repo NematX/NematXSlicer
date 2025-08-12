@@ -123,7 +123,8 @@ enum ExtrusionRoleModifier : uint16_t {
     // Support material extrusion
     ERM_Support = 1 << 2, //4
     ERM_Skirt = 1 << 3, //8 //(brim if not external)
-    ERM_Wipe = 1 << 4, //16
+    // wipe tower alone -> moves.. ; with ERM_Solid -> wiping ; with ERM_Bridge -> ramming
+    ERM_WipeTower = 1 << 4, //16
     ERM_Mill = 1 << 5, //32
     // 2) Extrusion modifiers
     ERM_External = 1 << 6, //64
@@ -180,7 +181,7 @@ struct ExtrusionRole
 {
 private:
     ExtrusionRoleModifier m;
-    static constexpr const ExtrusionRoleModifier BaseType{ERM_Perimeter | ERM_Infill | ERM_Support | ERM_Skirt | ERM_Wipe | ERM_Mill | ERM_Travel | ERM_Mixed};
+    static constexpr const ExtrusionRoleModifier BaseType{ERM_Perimeter | ERM_Infill | ERM_Support | ERM_Skirt | ERM_WipeTower | ERM_Mill | ERM_Travel | ERM_Mixed};
 public:
     ExtrusionRole() = delete;
     ExtrusionRole(ExtrusionRoleModifier mods) : m(mods) {
@@ -237,14 +238,21 @@ public:
     // Support interface material, printed with soluble plastic.
     static constexpr const ExtrusionRoleModifier SupportMaterialInterface{ExtrusionRoleModifier::ERM_Support |
                                                                           ExtrusionRoleModifier::ERM_External};
-    // Wipe tower material.
-    static constexpr const ExtrusionRoleModifier WipeTower{ExtrusionRoleModifier::ERM_Wipe};
     // Milling
     static constexpr const ExtrusionRoleModifier Milling{ExtrusionRoleModifier::ERM_Mill};
     // Extrusion role for a collection with multiple extrusion roles.
     static constexpr const ExtrusionRoleModifier Mixed{ExtrusionRoleModifier::ERM_Mixed};
     // Travel
     static constexpr const ExtrusionRoleModifier Travel{ExtrusionRoleModifier::ERM_Travel};
+    // Wipe tower material.
+    // wieptower thingy
+    static constexpr const ExtrusionRoleModifier WipeTower{ExtrusionRoleModifier::ERM_WipeTower};
+    // wieptower ramming
+    static constexpr const ExtrusionRoleModifier WipeTowerRamming{ExtrusionRoleModifier::ERM_WipeTower |
+                                                                          ExtrusionRoleModifier::ERM_Bridge};
+    // wipetower wiping
+    static constexpr const ExtrusionRoleModifier WipeTowerWipe{ExtrusionRoleModifier::ERM_WipeTower |
+                                                                          ExtrusionRoleModifier::ERM_Solid};
     // special Travel
     static constexpr const ExtrusionRoleModifier RectilinearAroundHoleInfillTravel{ExtrusionRoleModifier::ERM_Infill |
                                                                           ExtrusionRoleModifier::ERM_Travel};
@@ -265,7 +273,8 @@ public:
 
     // Brim is currently marked as skirt.
     bool is_skirt() const { return (m & ExtrusionRoleModifier::ERM_Skirt); }
-
+    
+    bool is_wipetower() const { return (m & ExtrusionRoleModifier::ERM_WipeTower); }
     
     ExtrusionRole operator|(ExtrusionRole b) const { return ExtrusionRole(this->m | b.m); }
     ExtrusionRole operator&(ExtrusionRole b) const { return ExtrusionRole(this->m & b.m); }

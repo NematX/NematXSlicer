@@ -36,6 +36,7 @@ struct Parameters
     const PrintConfig &      print_config;
     const bool               spiral_vase;
     const bool               use_arachne;
+    const bool               use_bridge;
 
     // computed parameters (from config)
     const double  m_ext_mm3_per_mm;
@@ -77,7 +78,10 @@ struct Parameters
 
     static const std::vector<t_config_option_keys> perimeter_keys;
     RegionSettings region_setting;
+    static inline ConfigOptionInt OPT_EXTRA_PERIMETER;
+    std::vector<ConfigOptionInt> extra_perimeters_storage;
 
+    void segregate_extra_perimeters(const ExPolygon &my_srf, const LayerRegionSetConstPtrs &lregions);
     Parameters(Layer *layer,
                Flow perimeter_flow,
                Flow ext_perimeter_flow,
@@ -85,9 +89,10 @@ struct Parameters
                Flow solid_infill_flow,
                const PrintRegionConfig &config,
                const PrintObjectConfig &object_config,
-               const PrintConfig &print_config,
-               const bool spiral_vase,
-               const bool arachne)
+               const PrintConfig &      print_config,
+               const bool               spiral_vase,
+               const bool               arachne,
+               const bool               surface_bridge)
         : layer(layer)
         , perimeter_flow(perimeter_flow)
         , ext_perimeter_flow(ext_perimeter_flow)
@@ -98,6 +103,7 @@ struct Parameters
         , print_config(print_config)
         , spiral_vase(spiral_vase)
         , use_arachne(arachne)
+        , use_bridge(surface_bridge)
         , region_setting(config, perimeter_keys),
         // other perimeters
         m_mm3_per_mm(perimeter_flow.mm3_per_mm()),
@@ -192,7 +198,7 @@ class PerimeterGenerator {
 public:
     // Inputs:
     const ExPolygons            *lower_slices;
-    const SurfaceCollection     *slices;
+    const ExPolygons            *slices; // only used by miller
     const ExPolygons            *upper_slices;
     //const Surface               *surface;
     BoundingBox                 surface_bbox;
@@ -205,9 +211,10 @@ public:
     PerimeterGenerator(const Parameters &params) : params(params) {}
 
     void process( // Input:
-            const Surface           &srf_to_use,
+            const ExPolygon         &island_polygon,
+            //LayerRegionIsland        &region_island,
             const ExPolygons *       lower_slices,
-            const SurfaceCollection &slices,
+            const ExPolygons        &slices,
             const ExPolygons *       upper_slices,
             // Output:
             // Loops with the external thin walls
@@ -219,7 +226,7 @@ public:
             // mask for "no overlap" area
             ExPolygons &fill_no_overlap);
 
-    coord_t     get_resolution(size_t perimeter_id, bool is_overhang, const Surface* srf) const;
+    coord_t     get_resolution(size_t perimeter_id, bool is_overhang) const;
 
 private:
     ClipperLib_Z::Paths m_lower_slices_clipperpaths;
@@ -233,10 +240,10 @@ private:
     ExPolygons unmillable;
     coord_t mill_extra_size;
 
-    ProcessSurfaceResult process_classic(const Parameters &params, int& contour_count, int& holes_count, const Surface& surface, ExtrusionEntityCollection &loops, ExtrusionEntityCollection &gapfill);
-    ProcessSurfaceResult process_arachne(const Parameters &params, int& loop_number, const Surface& surface, ExtrusionEntityCollection &loops);
+    ProcessSurfaceResult process_classic(const Parameters &params, int& contour_count, int& holes_count, const ExPolygon& surface_expolygon, ExtrusionEntityCollection &loops, ExtrusionEntityCollection &gapfill);
+    ProcessSurfaceResult process_arachne(const Parameters &params, int& loop_number, const ExPolygon& surface_expolygon, ExtrusionEntityCollection &loops);
     
-    void        processs_no_bridge(const Parameters params, Surfaces& all_surfaces, ExPolygons &fill_surfaces);
+    ExPolygons processs_no_bridge(const Parameters params, const ExPolygon& island_expolygon, ExPolygons &fill_surfaces);
     ExtrusionPaths create_overhangs_classic(const Parameters &params,
         const Polyline& loop_polygons, const ExtrusionRole role, const bool is_external) const;
     // the bbox is here to accelerate the diffs, loop_polygons is inside it.

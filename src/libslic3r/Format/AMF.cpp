@@ -715,7 +715,7 @@ void AMFParserContext::endElement(const char * /* name */)
         CustomGCode::Type type  = static_cast<CustomGCode::Type>(atoi(m_value[3].c_str()));
         const std::string& extra= m_value[4];
 
-        m_model.custom_gcode_per_print_z.gcodes.push_back(CustomGCode::Item{print_z, type, extruder, color, extra});
+        m_model.custom_gcode_per_print_z.gcodes.push_back(CustomGCode::Item{Layer::scale_to_layer_coord(print_z), type, extruder, color, extra});
 
         for (std::string& val: m_value)
             val.clear();
@@ -1354,7 +1354,7 @@ bool store_amf(std::string &path, Model *model, const DynamicPrintConfig *config
         {
             pt::ptree& code_tree = main_tree.add("code", "");
             // store custom_gcode_per_print_z gcodes information 
-            code_tree.put("<xmlattr>.print_z"   , code.print_z  );
+            code_tree.put("<xmlattr>.print_z"   , unscaled(code.print_z_)  );
             code_tree.put("<xmlattr>.type"      , static_cast<int>(code.type));
             code_tree.put("<xmlattr>.extruder"  , code.extruder );
             code_tree.put("<xmlattr>.info"      , code.color    );

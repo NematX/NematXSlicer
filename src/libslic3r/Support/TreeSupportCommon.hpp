@@ -456,11 +456,13 @@ static constexpr const auto tiny_area_threshold = sqr(scaled<double>(0.001));
 
 void tree_supports_show_error(std::string_view message, bool critical);
 
-inline double layer_z(const SlicingParameters &slicing_params, const TreeSupportSettings &config, const size_t layer_idx)
+inline coord_t layer_z(const SlicingParameters &slicing_params, const TreeSupportSettings &config, const size_t layer_idx)
 {
-    return layer_idx >= config.raft_layers.size() ? 
+    double layer_z_mm = layer_idx >= config.raft_layers.size() ? 
         slicing_params.object_print_z_min + slicing_params.first_object_layer_height + (layer_idx - config.raft_layers.size()) * slicing_params.layer_height :
         config.raft_layers[layer_idx];
+
+    return Layer::scale_to_layer_coord(layer_z_mm);
 }
 // Lowest collision layer
 inline LayerIndex layer_idx_ceil(const SlicingParameters &slicing_params, const TreeSupportSettings &config, const double z)
@@ -483,9 +485,9 @@ inline SupportGeneratorLayer& layer_initialize(
     const TreeSupportSettings &config, 
     const size_t               layer_idx)
 {
-    layer_new.print_z  = layer_z(slicing_params, config, layer_idx);
-    layer_new.bottom_z = layer_idx > 0 ? layer_z(slicing_params, config, layer_idx - 1) : 0;
-    layer_new.height   = layer_new.print_z - layer_new.bottom_z;
+    layer_new.set_scaled_print_z(layer_z(slicing_params, config, layer_idx));
+    layer_new.set_scaled_bottom_z(layer_idx > 0 ? layer_z(slicing_params, config, layer_idx - 1) : 0);
+    layer_new.set_scaled_height(layer_new.scaled_print_z() - layer_new.scaled_bottom_z());
     return layer_new;
 }
 

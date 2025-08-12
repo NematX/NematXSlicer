@@ -1,3 +1,4 @@
+///|/ Copyright (c) superslicer 2019 - 2025 Durand Rémi @supermerill
 ///|/ Copyright (c) Prusa Research 2016 - 2023 Vojtěch Bubník @bubnikv, Pavel Mikuš @Godrak, Lukáš Hejl @hejllukas
 ///|/ Copyright (c) Slic3r 2014 - 2015 Alessandro Ranellucci @alranel
 ///|/ Copyright (c) 2015 Maksim Derbasov @ntfshard
@@ -6,15 +7,18 @@
 ///|/ Copyright (c) Prusa Research 2016 - 2022 Vojtěch Bubník @bubnikv
 ///|/ Copyright (c) Slic3r 2011 - 2016 Alessandro Ranellucci @alranel
 ///|/
-///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/ SuperSlicer, PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "Layer.hpp"
 #include "ClipperZUtils.hpp"
 #include "ClipperUtils.hpp"
+#include "Milling/MillingPostProcess.hpp"
+#include "PerimeterGenerator.hpp"
 #include "Point.hpp"
 #include "Polygon.hpp"
 #include "Print.hpp"
 #include "ShortestPath.hpp"
+#include "Surface.hpp"
 #include "SVG.hpp"
 #include "BoundingBox.hpp"
 #include "ExtrusionEntity.hpp"
@@ -24,6 +28,112 @@
 
 namespace Slic3r {
 
+LayerSliceIsland::LayerSliceIsland(const ExPolygon &slice) {
+    m_slice = slice;
+    m_bbox = get_extents(m_slice);
+}
+
+void LayerSliceIsland::fill_regions(Layer &layer) {
+    assert(!layer.regions().empty());
+    // not sure if the offset is really needed
+    BoundingBox bb_bigger = m_bbox;
+    bb_bigger.offset(SCALED_EPSILON * 10);
+    for (const LayerRegion *lr : layer.regions()) {
+        // intersection
+        for (const ExPolygon &region_expoly : lr->get_raw_slices()) {
+            if (bb_bigger.contains(region_expoly.contour.front())) {
+                ExPolygons intersections = intersection_ex(m_slice, region_expoly);
+                if (!intersections.empty()) {
+                    this->m_regions.insert(lr);
+                }
+            }
+        }
+    }
+    m_layer = &layer;
+}
+
+bool LayerSliceIsland::is_expolygons_from_region(const ExPolygon &expolygon) const {
+    assert(!expolygon.contour.empty());
+    BoundingBox bb_bigger = m_bbox;
+    bb_bigger.offset(scale_t(0.2));
+
+    //quick check
+    if (!bb_bigger.contains(expolygon.contour.points.front())) {
+        return false;
+    }
+
+    // check if not outside of the island's contour
+    BoundingBox bb_expoly(expolygon.contour.points);
+    if (!bb_bigger.contains(bb_expoly)) {
+        return false;
+    }
+
+    ExPolygons intersection = intersection_ex(expolygon, m_slice);
+    if (intersection.empty()) {
+        return false;
+    }
+    ExPolygons difference = diff_ex(expolygon, m_slice);
+    if (difference.empty()) {
+        return true;
+    }
+    // shouldn't happen, but it's possible with precision issues
+    double area_inter = 0;
+    double area_diff = 0;
+    for (ExPolygon &inter : intersection) {
+        area_inter += inter.area();
+    }
+    for (ExPolygon &diff : difference) {
+        area_diff += diff.area();
+    }
+    return area_inter > area_diff;
+}
+
+void LayerRegionIsland::remove_empty_extrusions() {
+    std::vector<ExtrusionRole> to_del;
+    for (auto &entry : m_extrusion_regions) {
+        if (entry.second.empty()) {
+            to_del.push_back(entry.first);
+        }
+    }
+    for (ExtrusionRole role : to_del) {
+        m_extrusion_regions.erase(role);
+    }
+}
+
+void LayerRegionIsland::simplify_extrusion_entity(const Layer& layer)
+{
+    const PrintConfig& print_config = layer.object()->print()->config();
+    const bool spiral_mode = print_config.spiral_vase;
+    ArcFittingType enable_arc_fitting = print_config.arc_fitting.value;
+    if (spiral_mode)
+        enable_arc_fitting = ArcFittingType::Disabled;
+    coordf_t scaled_resolution = scale_d(print_config.resolution.value);
+    if (enable_arc_fitting != ArcFittingType::Disabled) {
+        scaled_resolution = scale_d(print_config.arc_fitting_resolution.get_abs_value(std::max(EPSILON, unscaled(scaled_resolution))));
+    }
+    if (scaled_resolution == 0) scaled_resolution = enable_arc_fitting != ArcFittingType::Disabled ? SCALED_EPSILON * 2 : SCALED_EPSILON;
+    scaled_resolution = std::max(double(SCALED_EPSILON), scaled_resolution);
+
+	//Ligne 652:     SimplifyVisitor(coordf_t scaled_resolution, ArcFittingType use_arc_fitting, const ConfigOptionFloatOrPercent *arc_fitting_tolearance)
+    //call simplify for all paths
+    Slic3r::SimplifyVisitor visitor{ scaled_resolution , enable_arc_fitting, &print_config.arc_fitting_tolerance, enable_arc_fitting != ArcFittingType::Disabled ? SCALED_EPSILON * 2 : SCALED_EPSILON };
+    if (this->has_extrusion(LayerRegionIsland::PERIMETERS)) {
+        this->mutable_extrusion(LayerRegionIsland::PERIMETERS).visit(visitor);
+    }
+    if (this->has_extrusion(LayerRegionIsland::GAP_FILLS)) {
+        this->mutable_extrusion(LayerRegionIsland::GAP_FILLS).visit(visitor);
+    }
+    if (this->has_extrusion(LayerRegionIsland::INFILLS)) {
+        this->mutable_extrusion(LayerRegionIsland::INFILLS).visit(visitor);
+    }
+    if (this->has_extrusion(LayerRegionIsland::IRONINGS)) {
+        this->mutable_extrusion(LayerRegionIsland::IRONINGS).visit(visitor);
+    }
+    if (this->has_extrusion(LayerRegionIsland::MILLS)) {
+        this->mutable_extrusion(LayerRegionIsland::MILLS).visit(visitor);
+    }
+}
+
 Layer::~Layer()
 {
     this->lower_layer = this->upper_layer = nullptr;
@@ -32,11 +142,86 @@ Layer::~Layer()
     m_regions.clear();
 }
 
+coord_t Layer::scale_to_layer_coord(double z) {
+    assert(z < 10000);
+    assert(z >= 0);
+    // round it via EPSILON/2
+    coord_t coord_z = scale_t(z + EPSILON/2);
+    // remove epsilon part
+    coord_z /= SCALED_EPSILON;
+    coord_z *= SCALED_EPSILON;
+    return coord_z;
+}
+
+void Layer::set_islands(ExPolygons &&new_islands) {
+    assert(!this->m_islands_locked);
+    m_lslices = std::move(new_islands);
+    m_islands.clear();
+    for (size_t i = 0; i < m_lslices.size(); ++i) {
+        m_islands.emplace_back(new LayerSliceIsland(m_lslices[i]));
+    }
+    assert(this->lslices().size() == this->m_islands.size());
+}
+
+void Layer::add_regions_to_islands() {
+    assert(!this->m_islands_locked);
+    //  note: regions taht don't intersect with this layer are kept (even if empty) to keep region-index ordering.
+
+    // fill LayerRegion's m_slices
+    for (LayerRegion *lr : m_regions) {
+#if _DEBUG
+        lr->surfaces_filled = true;
+#endif
+    }
+    // create RegionIsland 
+    assert(!m_islands.empty());
+    for (LayerSliceIslandPtr &li_ptr : m_islands) {
+        li_ptr->fill_regions(*this);
+    }
+
+    this->m_islands_locked = true;
+}
+
+LayerRegionIsland &LayerSliceIsland::add_new_region_island(const LayerRegionSetConstPtrs &region_set,
+                                                            uint16_t extruder_id) {
+    // these region are all inside this islands
+    for (auto regionptr : region_set) {
+        assert(this->regions().find(regionptr) != this->regions().end());
+    }
+    // add it
+    m_extrusions.emplace_back(new LayerRegionIsland(region_set, extruder_id));
+    return *m_extrusions.back();
+}
+
+LayerRegionIsland &LayerSliceIsland::get_or_add_region_island(const LayerRegionSetConstPtrs &region_set,
+                                                            uint16_t extruder_id) {
+    LayerRegionIsland *region_island = nullptr;
+    for (LayerRegionIslandPtr &ri : this->regions_islands()) {
+        if (ri->regions() == region_set && ri->extruder_id() == extruder_id) {
+            region_island = ri.get();
+            break;
+        }
+    }
+    if (region_island == nullptr) {
+        region_island = &this->add_new_region_island(region_set, extruder_id);
+    }
+    return *region_island;
+}
+
+bool LayerRegionIsland::has_extrusions() const {
+    for (auto &entry : this->m_extrusion_regions) {
+        if (!entry.second.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Test whether whether there are any slices assigned to this layer.
 bool Layer::empty() const
 {
     for (const LayerRegion *layerm : m_regions)
-        if (layerm != nullptr && ! layerm->slices().empty())
+        if (layerm != nullptr && ! layerm->has_slices())
             // Non empty layer.
             return false;
     return true;
@@ -44,8 +229,20 @@ bool Layer::empty() const
 
 LayerRegion* Layer::add_region(const PrintRegion *print_region)
 {
-    m_regions.emplace_back(new LayerRegion(this, print_region));
-    return m_regions.back();
+    LayerRegion* lr = new LayerRegion(this, print_region);
+    m_regions.emplace_back(lr);
+    return lr;
+}
+
+bool Layer::has_extrusions() const {
+    for (const LayerSliceIslandPtr &layer_island_ptr : this->islands()) {
+        for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+            if (region_island_ptr->has_extrusions()) {
+                return true;
+            }
+        }
+    }
+    return false;
 }
 
 // merge all regions' slices to get islands
@@ -84,12 +281,13 @@ void Layer::make_slices()
             }
         }
 #endif
-        this->set_lslices() = slices;
+        this->set_islands(std::move(slices));
     }
 
-    this->lslice_indices_sorted_by_print_order = chain_expolygons(this->lslices());
-    assert(this->lslices().size() == this->lslice_indices_sorted_by_print_order.size());
+    //this->lslice_indices_sorted_by_print_order = chain_expolygons(this->lslices());
+    //assert(this->lslices().size() == this->lslice_indices_sorted_by_print_order.size());
 }
+
 
 // used by Layer::build_up_down_graph()
 // Shrink source polygons one by one, so that they will be separated if they were touching
@@ -270,43 +468,43 @@ static void connect_layer_slices(
                     assert(assert_intersection_valid(i, j));
                     i -= m_offset_below;
                     j -= m_offset_above;
-                    assert(i >= 0 && i < m_below.lslices_ex.size());
-                    assert(j >= 0 && j < m_above.lslices_ex.size());
+                    assert(i >= 0 && i < m_below.islands().size());
+                    assert(j >= 0 && j < m_above.islands().size());
                     found = true;
                 }
                 if (found) {
-                    assert(i >= 0 && i < m_below.lslices_ex.size());
-                    assert(j >= 0 && j < m_above.lslices_ex.size());
+                    assert(i >= 0 && i < m_below.islands().size());
+                    assert(j >= 0 && j < m_above.islands().size());
                     // Subtract area of holes from the area of outer contour.
                     double area = ClipperLib_Z::Area(polynode.Contour);
                     for (int icontour = 0; icontour < polynode.ChildCount(); ++ icontour)
                         area -= ClipperLib_Z::Area(polynode.Childs[icontour]->Contour);
                     // Store the links and area into the contours.
-                    LayerSlice::Links &links_below = m_below.lslices_ex[i].overlaps_above;
-                    LayerSlice::Links &links_above = m_above.lslices_ex[j].overlaps_below;
-                    LayerSlice::Link key{ j };
-                    auto it_below = std::lower_bound(links_below.begin(), links_below.end(), key, [](auto &l, auto &r){ return l.slice_idx < r.slice_idx; });
-                    if (it_below != links_below.end() && it_below->slice_idx == j) {
+                    std::vector<LayerSliceIsland::Link> &links_below = m_below.get_mutable_island(i).overlaps_above;
+                    std::vector<LayerSliceIsland::Link> &links_above = m_above.get_mutable_island(j).overlaps_below;
+                    auto it_below = std::find_if(links_below.begin(), links_below.end(),
+                        [&] (const LayerSliceIsland::Link& lsi) { return m_above.islands()[j].get() == lsi.to; });
+                    if (it_below != links_below.end()/* && it_below->slice_idx == j*/) {
                         it_below->area += area;
                     } else {
-                        key = LayerSlice::Link{i};
-                        auto it_above = std::lower_bound(links_above.begin(), links_above.end(), key, [](auto &l, auto &r){ return l.slice_idx < r.slice_idx; });
-                        if (it_above != links_above.end() && it_above->slice_idx == i) {
+                        auto it_above = std::find_if(links_above.begin(), links_above.end(),
+                            [&] (const LayerSliceIsland::Link& lsi) { return m_below.islands()[i].get() == lsi.to; });
+                        if (it_above != links_above.end()/* && it_above->slice_idx == i*/) {
                             it_above->area += area;
                         } else {
                             // Insert into one of the two vectors.
                             bool take_below = false;
-                            if (links_below.size() < LayerSlice::LinksStaticSize)
+                            if (links_below.size() < /*LayerSlice::LinksStaticSize*/4)
                                 take_below = false;
-                            else if (links_above.size() >= LayerSlice::LinksStaticSize) {
+                            else if (links_above.size() >= /*LayerSlice::LinksStaticSize*/ 4) {
                                 size_t shift_below = links_below.end() - it_below;
                                 size_t shift_above = links_above.end() - it_above;
                                 take_below = shift_below < shift_above;
                             }
                             if (take_below)
-                                links_below.insert(it_below, { j, float(area) });
+                                links_below.insert(it_below, { &m_above.get_mutable_island(j), float(area) });
                             else
-                                links_above.insert(it_above, { i, float(area) });
+                                links_above.insert(it_above, { &m_below.get_mutable_island(i), float(area) });
                         }
                     }
                 }
@@ -457,8 +655,8 @@ static void connect_layer_slices(
             if (! other_has_duplicates) {
                 // The contour below is likely completely inside another contour above. Look-it up in the island above.
                 Point pt(polynode.Contour.front().x(), polynode.Contour.front().y());
-                for (int i = int(other_layer.lslices_ex.size()) - 1; i >= 0; -- i)
-                    if (other_layer.lslices_ex[i].bbox.contains(pt) && other_layer.lslices()[i].contains(pt))
+                for (int i = int(other_layer.islands().size()) - 1; i >= 0; -- i)
+                    if (other_layer.islands()[i]->get_bounding_box().contains(pt) && other_layer.lslices()[i].contains(pt))
                         return i;
                 // The following shall not happen now as the source expolygons are being shrunk a bit before intersecting,
                 // thus each point of each intersection polygon should fit completely inside one of the original (unshrunk) expolygons.
@@ -478,8 +676,8 @@ static void connect_layer_slices(
             BoundingBox contour_aabb{contour_poly.front().points};
             int32_t i_largest = -1;
             double  a_largest = 0;
-            for (int i = int(other_layer.lslices_ex.size()) - 1; i >= 0; -- i)
-                if (contour_aabb.overlap(other_layer.lslices_ex[i].bbox))
+            for (int i = int(other_layer.islands().size()) - 1; i >= 0; -- i)
+                if (contour_aabb.overlap(other_layer.islands()[i]->get_bounding_box()))
                     // it is potentially slow, but should be executed rarely
                     if (Polygons overlap = intersection(contour_poly, other_layer.lslices()[i]); ! overlap.empty()) {
                         if (other_has_duplicates) {
@@ -518,34 +716,38 @@ static void connect_layer_slices(
 
 #ifndef NDEBUG
     // Verify that only one directional link is stored: either from bottom slice up or from upper slice down.
-    for (int32_t islice = 0; islice < below.lslices_ex.size(); ++ islice) {
-        LayerSlice::Links &links1 = below.lslices_ex[islice].overlaps_above;
-        for (LayerSlice::Link &link1 : links1) {
-            LayerSlice::Links &links2 = above.lslices_ex[link1.slice_idx].overlaps_below;
-            assert(! std::binary_search(links2.begin(), links2.end(), link1, [](auto &l, auto &r){ return l.slice_idx < r.slice_idx; }));
+    for (int32_t islice = 0; islice < below.islands().size(); ++ islice) {
+        std::vector<LayerSliceIsland::Link> &links1 = below.get_mutable_island(islice).overlaps_above;
+        for (LayerSliceIsland::Link &link1 : links1) {
+            std::vector<LayerSliceIsland::Link> &links2 = link1.to->overlaps_below;
+            assert(! std::binary_search(links2.begin(), links2.end(), link1, [](auto &l, auto &r){ return uint64_t(l.to) < uint64_t(r.to); }));
         }
     }
-    for (int32_t islice = 0; islice < above.lslices_ex.size(); ++ islice) {
-        LayerSlice::Links &links1 = above.lslices_ex[islice].overlaps_below;
-        for (LayerSlice::Link &link1 : links1) {
-            LayerSlice::Links &links2 = below.lslices_ex[link1.slice_idx].overlaps_above;
-            assert(! std::binary_search(links2.begin(), links2.end(), link1, [](auto &l, auto &r){ return l.slice_idx < r.slice_idx; }));
+    for (int32_t islice = 0; islice < above.islands().size(); ++ islice) {
+        std::vector<LayerSliceIsland::Link> &links1 = above.get_mutable_island(islice).overlaps_below;
+        for (LayerSliceIsland::Link &link1 : links1) {
+            std::vector<LayerSliceIsland::Link> &links2 = link1.to->overlaps_above;
+            assert(! std::binary_search(links2.begin(), links2.end(), link1, [](auto &l, auto &r){ return uint64_t(l.to) < uint64_t(r.to); }));
         }
     }
 #endif // NDEBUG
 
     // Scatter the links, but don't sort them yet.
-    for (int32_t islice = 0; islice < int32_t(below.lslices_ex.size()); ++ islice)
-        for (LayerSlice::Link &link : below.lslices_ex[islice].overlaps_above)
-            above.lslices_ex[link.slice_idx].overlaps_below.push_back({ islice, link.area });
-    for (int32_t islice = 0; islice < int32_t(above.lslices_ex.size()); ++ islice)
-        for (LayerSlice::Link &link : above.lslices_ex[islice].overlaps_below)
-            below.lslices_ex[link.slice_idx].overlaps_above.push_back({ islice, link.area });
+    for (int32_t islice = 0; islice < int32_t(below.islands().size()); ++ islice)
+        for (LayerSliceIsland::Link &link : below.get_mutable_island(islice).overlaps_above)
+            link.to->overlaps_below.push_back({ &below.get_mutable_island(islice), link.area });
+    for (int32_t islice = 0; islice < int32_t(above.islands().size()); ++ islice)
+        for (LayerSliceIsland::Link &link : above.get_mutable_island(islice).overlaps_below)
+            link.to->overlaps_above.push_back({ &above.get_mutable_island(islice), link.area });
     // Sort the links.
-    for (LayerSlice &lslice : below.lslices_ex)
-        std::sort(lslice.overlaps_above.begin(), lslice.overlaps_above.end(), [](const LayerSlice::Link &l, const LayerSlice::Link &r){ return l.slice_idx < r.slice_idx; });
-    for (LayerSlice &lslice : above.lslices_ex)
-        std::sort(lslice.overlaps_below.begin(), lslice.overlaps_below.end(), [](const LayerSlice::Link &l, const LayerSlice::Link &r){ return l.slice_idx < r.slice_idx; });
+    for (size_t i = 0; i < below.islands().size(); ++i) {
+        LayerSliceIsland &lslice = below.get_mutable_island(i);
+        std::sort(lslice.overlaps_above.begin(), lslice.overlaps_above.end(), [](const LayerSliceIsland::Link &l, const LayerSliceIsland::Link &r){ return uint64_t(l.to) < uint64_t(r.to); });
+    }
+    for (size_t i = 0; i < above.islands().size(); ++i) {
+        LayerSliceIsland &lslice = above.get_mutable_island(i);
+        std::sort(lslice.overlaps_below.begin(), lslice.overlaps_below.end(), [](const LayerSliceIsland::Link &l, const LayerSliceIsland::Link &r){ return uint64_t(l.to) < uint64_t(r.to); });
+    }
 }
 
 void Layer::build_up_down_graph(Layer& below, Layer& above)
@@ -574,60 +776,12 @@ void Layer::build_up_down_graph(Layer& below, Layer& above)
         );
 }
 
-static inline bool layer_needs_raw_backup(const Layer *layer)
-{
-    return true;
-    // return ! (layer->regions().size() == 1 && (layer->id() >= layer->object()->config().first_layer_size_compensation_layers.value || layer->object()->config().first_layer_size_compensation.value == 0));
-}
-
-void Layer::backup_untyped_slices()
-{
-    if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions)
-            layerm->m_raw_slices = to_expolygons(layerm->slices().surfaces);
-    } else {
-        assert(m_regions.size() == 1);
-        m_regions.front()->m_raw_slices.clear();
+void Layer::restore_untyped_slices() {
+    for (LayerRegion *layerm : m_regions) {
+        layerm->m_slices.set(layerm->m_raw_slices, stPosInternal | stDensSparse);
+        for (auto &srf : layerm->m_slices)
+            srf.expolygon.assert_valid();
     }
-}
-
-void Layer::restore_untyped_slices()
-{
-    if (layer_needs_raw_backup(this)) {
-        for (LayerRegion *layerm : m_regions) {
-            layerm->m_slices.set(layerm->m_raw_slices, stPosInternal | stDensSparse);
-            for(auto &srf : layerm->m_slices) srf.expolygon.assert_valid();
-        }
-    } else {
-        assert(m_regions.size() == 1);
-        m_regions.front()->m_slices.set(this->lslices(), stPosInternal | stDensSparse);
-        for(auto &srf :  m_regions.front()->m_slices) srf.expolygon.assert_valid();
-    }
-}
-
-// Similar to Layer::restore_untyped_slices()
-// To improve robustness of detect_surfaces_type() when reslicing (working with typed slices), see GH issue #7442.
-// Only resetting layerm->slices if Slice::extra_perimeters is always zero or it will not be used anymore
-// after the perimeter generator.
-// there is now much more things used by prepare_infill, i'm not confident on this optimisation.
-void Layer::restore_untyped_slices_no_extra_perimeters()
-{
-    restore_untyped_slices();
-    for (LayerRegion *lr : m_regions) {
-        lr->set_fill_surfaces().clear();
-    }
-
-//    if (layer_needs_raw_backup(this)) {
-//        for (LayerRegion *layerm : m_regions)
-//        	if (! layerm->region().config().extra_perimeters.value)
-//            	layerm->m_slices.set(layerm->m_raw_slices, stPosInternal | stDensSparse);
-//    } else {
-//    	assert(m_regions.size() == 1);
-//    	LayerRegion *layerm = m_regions.front();
-//    	// This optimization is correct, as extra_perimeters are only reused by prepare_infill() with multi-regions.
-//        //if (! layerm->region().config().extra_perimeters.value)
-//        	layerm->m_slices.set(this->lslices(), stPosInternal | stDensSparse);
-//    }
 }
 
 ExPolygons Layer::merged(coordf_t offset_scaled) const
@@ -652,11 +806,97 @@ ExPolygons Layer::merged(coordf_t offset_scaled) const
     return out;
 }
 
+bool config_compatible_for_perimeter(const PrintRegionConfig &config, const PrintRegionConfig &other_config, bool is_first_layer) {
+    if (config.perimeter_extruder             == other_config.perimeter_extruder
+        && config.perimeters                  == other_config.perimeters
+        && config.external_perimeter_acceleration == other_config.external_perimeter_acceleration
+        && config.external_perimeter_extrusion_width == other_config.external_perimeter_extrusion_width
+        && config.external_perimeter_overlap == other_config.external_perimeter_overlap
+        && config.external_perimeter_speed == other_config.external_perimeter_speed // it os mandatory? can't this be set at gcode.cpp?
+        && config.external_perimeters_first == other_config.external_perimeters_first
+        && config.external_perimeters_first_force == other_config.external_perimeters_first_force
+        && config.external_perimeters_hole  == other_config.external_perimeters_hole
+        && config.external_perimeters_nothole == other_config.external_perimeters_nothole
+        && config.external_perimeters_vase == other_config.external_perimeters_vase
+        //&& config.extra_perimeters_below_area == other_config.extra_perimeters_below_area // can be used in modifiers
+        //&& config.extra_perimeters_odd_layers == other_config.extra_perimeters_odd_layers // can be used in modifiers
+        //&& config.extra_perimeters_on_overhangs == other_config.extra_perimeters_on_overhangs // can be used in modifiers
+        && config.gap_fill_enabled          == other_config.gap_fill_enabled
+        && ((config.gap_fill_speed          == other_config.gap_fill_speed) || !config.gap_fill_enabled)
+        && config.gap_fill_acceleration     == other_config.gap_fill_acceleration
+        && config.gap_fill_last             == other_config.gap_fill_last
+        && config.gap_fill_flow_match_perimeter == other_config.gap_fill_flow_match_perimeter
+        && config.gap_fill_extension         == other_config.gap_fill_extension
+        && config.gap_fill_max_width         == other_config.gap_fill_max_width
+        && config.gap_fill_min_area         == other_config.gap_fill_min_area
+        && config.gap_fill_min_length         == other_config.gap_fill_min_length
+        && config.gap_fill_min_width         == other_config.gap_fill_min_width
+        && config.gap_fill_overlap          == other_config.gap_fill_overlap
+        && config.gap_fill_perimeter          == other_config.gap_fill_perimeter
+        && config.infill_dense              == other_config.infill_dense
+        && config.infill_dense_algo         == other_config.infill_dense_algo
+        && config.infill_overlap            == other_config.infill_overlap
+        && config.no_perimeter_unsupported_algo == other_config.no_perimeter_unsupported_algo
+        //&& config.min_width_top_surface == other_config.min_width_top_surface // can be used in modifiers with only_one_perimeter_top
+        && (!is_first_layer || config.only_one_perimeter_first_layer == other_config.only_one_perimeter_first_layer)
+        //&& config.only_one_perimeter_top    == other_config.only_one_perimeter_top // can be used in modifiers
+        //&& config.only_one_perimeter_top_other_algo == other_config.only_one_perimeter_top_other_algo // can be used in modifiers with only_one_perimeter_top
+        && config.overhangs_acceleration    == other_config.overhangs_acceleration
+        && config.overhangs_dynamic_speed   == other_config.overhangs_dynamic_speed
+        && config.overhangs_width_speed     == other_config.overhangs_width_speed
+        && config.overhangs_width           == other_config.overhangs_width
+     // && config.overhangs_speed_enforce   == other_config.overhangs_speed_enforce
+        && config.overhangs_reverse         == other_config.overhangs_reverse
+        && config.overhangs_reverse_threshold == other_config.overhangs_reverse_threshold
+        && config.perimeter_acceleration    == other_config.perimeter_acceleration
+        && config.perimeter_direction       == other_config.perimeter_direction
+        && config.perimeter_extrusion_width == other_config.perimeter_extrusion_width
+        && config.perimeter_generator       == other_config.perimeter_generator
+        && config.perimeter_loop            == other_config.perimeter_loop
+        && config.perimeter_loop_seam       == other_config.perimeter_loop_seam
+        && config.perimeter_overlap         == other_config.perimeter_overlap
+        && config.perimeter_reverse         == other_config.perimeter_reverse
+        && config.perimeter_speed           == other_config.perimeter_speed // it is mandatory? can't this be set at gcode.cpp?
+        // print -modifier, because region are fused in gode wiew if not.
+        && config.print_extrusion_multiplier        == other_config.print_extrusion_multiplier
+        && config.print_first_layer_temperature     == other_config.print_first_layer_temperature
+        && config.print_retract_length              == other_config.print_retract_length
+        && config.print_retract_lift                == other_config.print_retract_lift
+        && config.print_temperature                 == other_config.print_temperature
+        // end print modifier
+        && config.region_gcode              == other_config.region_gcode
+        && config.small_perimeter_speed     == other_config.small_perimeter_speed
+        && config.small_perimeter_min_length == other_config.small_perimeter_min_length
+        && config.small_perimeter_max_length == other_config.small_perimeter_max_length
+        //&& config.thin_walls                == other_config.thin_walls // can be used in modifiers
+        && config.thin_walls_acceleration   == other_config.thin_walls_acceleration
+        //&& config.thin_walls_min_width      == other_config.thin_walls_min_width // can be used in modifiers with thin_walls
+        //&& config.thin_walls_overlap        == other_config.thin_walls_overlap // can be used in modifiers with thin_walls
+        && config.thin_perimeters           == other_config.thin_perimeters
+        && config.thin_perimeters_all       == other_config.thin_perimeters_all
+        && config.thin_walls_speed          == other_config.thin_walls_speed
+        && config.fuzzy_skin                == other_config.fuzzy_skin
+        && config.fuzzy_skin_thickness      == other_config.fuzzy_skin_thickness
+        && config.fuzzy_skin_point_dist     == other_config.fuzzy_skin_point_dist)
+    {
+        if (config.perimeter_generator != PerimeterGeneratorType::Arachne || (
+                config.min_bead_width                    == other_config.min_bead_width
+            && config.min_feature_size                  == other_config.min_feature_size
+            && config.wall_distribution_count           == other_config.wall_distribution_count
+            && config.wall_transition_angle             == other_config.wall_transition_angle
+            && config.wall_transition_filter_deviation  == other_config.wall_transition_filter_deviation
+            && config.wall_transition_length            == other_config.wall_transition_length
+            )) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // Here the perimeters are created cummulatively for all layer regions sharing the same parameters influencing the perimeters.
 // The perimeter paths and the thin fills (ExtrusionEntityCollection) are assigned to the first compatible layer region.
 // The resulting fill surface is split back among the originating regions.
-void Layer::make_perimeters()
-{
+void Layer::make_perimeters() {
     BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id();
 
     if (lslices().empty()) {
@@ -664,222 +904,205 @@ void Layer::make_perimeters()
         // there is nothing to make perimeter with.
         return;
     }
-    
-    // keep track of regions whose perimeters we have already generated
-    std::vector<unsigned char>                              done(m_regions.size(), false);
-    std::vector<uint32_t>                                   layer_region_ids;
-    std::vector<std::pair<ExtrusionRange, ExtrusionRange>>  perimeter_and_gapfill_ranges;
-    ExPolygons                                              fill_expolygons;
-    std::vector<ExPolygonRange>                             fill_expolygons_ranges;
-    SurfacesPtr                                             surfaces_to_merge;
-    SurfacesPtr                                             surfaces_to_merge_temp;
 
-    auto layer_region_reset_perimeters = [](LayerRegion &layerm) {
-        layerm.clear();
-    };
 
-    // Remove layer islands, remove references to perimeters and fills from these layer islands to LayerRegion ExtrusionEntities.
-    for (LayerSlice &lslice : this->lslices_ex)
-        lslice.islands.clear();
+    //auto layer_region_reset_perimeters = [](LayerRegion &lregion) { lregion.clear(); };
 
-    for (LayerRegionPtrs::iterator layerm = m_regions.begin(); layerm != m_regions.end(); ++ layerm)
-        if (size_t region_id = layerm - m_regions.begin(); ! done[region_id]) {
-            layer_region_reset_perimeters(**layerm);
-            if (! (*layerm)->slices().empty()) {
-                BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id() << ", region " << region_id;
-                done[region_id] = true;
-                const PrintRegionConfig &config = (*layerm)->region().config();
-                
-                perimeter_and_gapfill_ranges.clear();
-                fill_expolygons.clear();
-                fill_expolygons_ranges.clear();
-                surfaces_to_merge.clear();
+    // Remove layer islands, remove references to perimeters and fills from these layer islands to LayerRegion
+    // ExtrusionEntities.
+    // clear
+    for (LayerSliceIslandPtr &island : this->m_islands) {
+        island->regions_islands().clear();
+    }
+    ExPolygons all_fill_no_overlap_expolygon;
+    ExPolygons all_fill_expolygon;
 
-                // find compatible regions
-                layer_region_ids.clear();
-                layer_region_ids.push_back(region_id);
-                for (LayerRegionPtrs::const_iterator it = layerm + 1; it != m_regions.end(); ++it)
-                    if (! (*it)->slices().empty()) {
-                        LayerRegion             *other_layerm                         = *it;
-                        const PrintRegionConfig &other_config                         = other_layerm->region().config();
-                        /// !!! add here the settings you want to be added in the per-object menu.
-                        /// if you don't do that, objects will share the same region, and the same settings.
-                        if (config.perimeter_extruder             == other_config.perimeter_extruder
-                            && config.perimeters                  == other_config.perimeters
-                            && config.external_perimeter_acceleration == other_config.external_perimeter_acceleration
-                            && config.external_perimeter_extrusion_width == other_config.external_perimeter_extrusion_width
-                            && config.external_perimeter_overlap == other_config.external_perimeter_overlap
-                            && config.external_perimeter_speed == other_config.external_perimeter_speed // it os mandatory? can't this be set at gcode.cpp?
-                            && config.external_perimeters_first == other_config.external_perimeters_first
-                            && config.external_perimeters_first_force == other_config.external_perimeters_first_force
-                            && config.external_perimeters_hole  == other_config.external_perimeters_hole
-                            && config.external_perimeters_nothole == other_config.external_perimeters_nothole
-                            && config.external_perimeters_vase == other_config.external_perimeters_vase
-                            //&& config.extra_perimeters_below_area == other_config.extra_perimeters_below_area // can be used in modifiers
-                            //&& config.extra_perimeters_odd_layers == other_config.extra_perimeters_odd_layers // can be used in modifiers
-                            //&& config.extra_perimeters_on_overhangs == other_config.extra_perimeters_on_overhangs // can be used in modifiers
-                            && config.gap_fill_enabled          == other_config.gap_fill_enabled
-                            && ((config.gap_fill_speed          == other_config.gap_fill_speed) || !config.gap_fill_enabled)
-                            && config.gap_fill_acceleration     == other_config.gap_fill_acceleration
-                            && config.gap_fill_last             == other_config.gap_fill_last
-                            && config.gap_fill_flow_match_perimeter == other_config.gap_fill_flow_match_perimeter
-                            && config.gap_fill_extension         == other_config.gap_fill_extension
-                            && config.gap_fill_max_width         == other_config.gap_fill_max_width
-                            && config.gap_fill_min_area         == other_config.gap_fill_min_area
-                            && config.gap_fill_min_length         == other_config.gap_fill_min_length
-                            && config.gap_fill_min_width         == other_config.gap_fill_min_width
-                            && config.gap_fill_overlap          == other_config.gap_fill_overlap
-                            && config.gap_fill_perimeter          == other_config.gap_fill_perimeter
-                            && config.infill_dense              == other_config.infill_dense
-                            && config.infill_dense_algo         == other_config.infill_dense_algo
-                            && config.infill_overlap            == other_config.infill_overlap
-                            && config.no_perimeter_unsupported_algo == other_config.no_perimeter_unsupported_algo
-                            //&& config.min_width_top_surface == other_config.min_width_top_surface // can be used in modifiers with only_one_perimeter_top
-                            && (this->id() == 0 || config.only_one_perimeter_first_layer == other_config.only_one_perimeter_first_layer)
-                            //&& config.only_one_perimeter_top    == other_config.only_one_perimeter_top // can be used in modifiers
-                            //&& config.only_one_perimeter_top_other_algo == other_config.only_one_perimeter_top_other_algo // can be used in modifiers with only_one_perimeter_top
-                            && config.overhangs_acceleration    == other_config.overhangs_acceleration
-                            && config.overhangs_dynamic_speed   == other_config.overhangs_dynamic_speed
-                            && config.overhangs_width_speed     == other_config.overhangs_width_speed
-                            && config.overhangs_width           == other_config.overhangs_width
-                            // && config.overhangs_speed_enforce   == other_config.overhangs_speed_enforce
-                            && config.overhangs_reverse         == other_config.overhangs_reverse
-                            && config.overhangs_reverse_threshold == other_config.overhangs_reverse_threshold
-                            && config.perimeter_acceleration    == other_config.perimeter_acceleration
-                            && config.perimeter_direction       == other_config.perimeter_direction
-                            && config.perimeter_extrusion_width == other_config.perimeter_extrusion_width
-                            && config.perimeter_generator       == other_config.perimeter_generator
-                            && config.perimeter_loop            == other_config.perimeter_loop
-                            && config.perimeter_loop_seam       == other_config.perimeter_loop_seam
-                            && config.perimeter_overlap         == other_config.perimeter_overlap
-                            && config.perimeter_reverse         == other_config.perimeter_reverse
-                            && config.perimeter_speed           == other_config.perimeter_speed // it is mandatory? can't this be set at gcode.cpp?
-                            // print -modifier, because region are fused in gode wiew if not.
-                            && config.print_extrusion_multiplier        == other_config.print_extrusion_multiplier
-                            && config.print_fan_speed                   == other_config.print_fan_speed
-                            && config.print_perimeters_fan_speed        == other_config.print_perimeters_fan_speed
-                            && config.print_first_layer_temperature     == other_config.print_first_layer_temperature
-                            && config.print_retract_length              == other_config.print_retract_length
-                            && config.print_retract_lift                == other_config.print_retract_lift
-                            && config.print_temperature                 == other_config.print_temperature
-                            // end print modifier
-                            && config.region_gcode              == other_config.region_gcode
-                            && config.small_perimeter_speed     == other_config.small_perimeter_speed
-                            && config.small_perimeter_min_length == other_config.small_perimeter_min_length
-                            && config.small_perimeter_max_length == other_config.small_perimeter_max_length
-                            //&& config.thin_walls                == other_config.thin_walls // can be used in modifiers
-                            && config.thin_walls_acceleration   == other_config.thin_walls_acceleration
-                            //&& config.thin_walls_min_width      == other_config.thin_walls_min_width // can be used in modifiers with thin_walls
-                            //&& config.thin_walls_overlap        == other_config.thin_walls_overlap // can be used in modifiers with thin_walls
-                            && config.thin_perimeters           == other_config.thin_perimeters
-                            && config.thin_perimeters_all       == other_config.thin_perimeters_all
-                            && config.thin_walls_speed          == other_config.thin_walls_speed
-                            && config.fuzzy_skin                == other_config.fuzzy_skin
-                            && config.fuzzy_skin_thickness      == other_config.fuzzy_skin_thickness
-                            && config.fuzzy_skin_point_dist     == other_config.fuzzy_skin_point_dist)
-                        {
-                            
-                            if (config.stretch_corners || (
-                                   config.stretch_corners_arc                   == other_config.stretch_corners_arc
-                                && config.stretch_corners_deviation_concave     == other_config.stretch_corners_deviation_concave
-                                && config.stretch_corners_deviation_convex      == other_config.stretch_corners_deviation_convex
-                                && config.stretch_corners_deviation_first_layer == other_config.stretch_corners_deviation_first_layer
-                                && config.stretch_corners_distance_concave      == other_config.stretch_corners_distance_concave
-                                && config.stretch_corners_distance_convex       == other_config.stretch_corners_distance_convex
-                                && config.stretch_corners_distance_first_layer  == other_config.stretch_corners_distance_first_layer
-                                && config.stretch_corners_entering_section  == other_config.stretch_corners_entering_section
-                                && config.stretch_corners_exiting_section  == other_config.stretch_corners_exiting_section
-                                && config.stretch_corners_inner_perimeters  == other_config.stretch_corners_inner_perimeters
-                                && config.stretch_corners_max_angle             == other_config.stretch_corners_max_angle
-                                ))
-                            if (config.perimeter_generator != PerimeterGeneratorType::Arachne || (
-                                   config.min_bead_width                    == other_config.min_bead_width
-                                && config.min_feature_size                  == other_config.min_feature_size
-                                && config.wall_distribution_count           == other_config.wall_distribution_count
-                                && config.wall_transition_angle             == other_config.wall_transition_angle
-                                && config.wall_transition_filter_deviation  == other_config.wall_transition_filter_deviation
-                                && config.wall_transition_length            == other_config.wall_transition_length
-                              )) {
-                                layer_region_reset_perimeters(*other_layerm);
-                                layer_region_ids.push_back(it - m_regions.begin());
-                                done[it - m_regions.begin()] = true;
-                            }
-                        }
-                    }
-
-                if (layer_region_ids.size() == 1) {  // optimization
-                    (*layerm)->make_perimeters((*layerm)->slices(), {} , perimeter_and_gapfill_ranges, fill_expolygons,
-                                               fill_expolygons_ranges);
-                    this->sort_perimeters_into_islands((*layerm)->slices(), region_id, perimeter_and_gapfill_ranges, std::move(fill_expolygons), fill_expolygons_ranges, layer_region_ids);
-                } else {
-                    SurfaceCollection new_slices;
-                    std::set<LayerRegion*> regions;
-                    // Use the region with highest infill rate, as the make_perimeters() function below decides on the gap fill based on the infill existence.
-                    uint32_t     region_id_config = layer_region_ids.front();
-                    LayerRegion* layerm_config = m_regions[region_id_config];
-                    {
-                        // Merge slices (surfaces) according to number of extra perimeters.
-                        for (uint32_t region_id : layer_region_ids) {
-                            LayerRegion &layerm = *m_regions[region_id];
-                            regions.insert(&layerm);
-                            for (const Surface &surface : layerm.slices())
-                                surfaces_to_merge.emplace_back(&surface);
-                            if (layerm.region().config().fill_density > layerm_config->region().config().fill_density) {
-                                region_id_config = region_id;
-                                layerm_config    = &layerm;
-                            }
-                        }
-                        std::sort(surfaces_to_merge.begin(), surfaces_to_merge.end(), [](const Surface *l, const Surface *r){ return l->extra_perimeters < r->extra_perimeters; });
-                        for (size_t i = 0; i < surfaces_to_merge.size();) {
-                            size_t j = i;
-                            const Surface &first = *surfaces_to_merge[i];
-                            size_t extra_perimeters = first.extra_perimeters;
-                            for (; j < surfaces_to_merge.size() && surfaces_to_merge[j]->extra_perimeters == extra_perimeters; ++ j) ;
-                            if (i + 1 == j) {
-                                // Nothing to merge, just copy.
-                                new_slices.surfaces.emplace_back(*surfaces_to_merge[i]);
-                            } else {
-                                surfaces_to_merge_temp.assign(surfaces_to_merge.begin() + i, surfaces_to_merge.begin() + j);
-                                new_slices.append(offset_ex(surfaces_to_merge_temp, ClipperSafetyOffset), first);
-                            }
-                            i = j;
-                        }
-                    }
-                    // make perimeters
-                    assert(fill_expolygons_ranges.empty()); // merill test
-                    this->m_object->print()->throw_if_canceled();
-                    layerm_config->make_perimeters(new_slices, regions, perimeter_and_gapfill_ranges, fill_expolygons, fill_expolygons_ranges);
-
-                    //// TODO: review if it's not useless or creates bugs.
-                    //// assign fill_expolygons to each LayerRegion
-                    //if (!fill_expolygons.empty()) { 
-                    //    for (uint32_t layer_region_id : layer_region_ids) {
-                    //        LayerRegion &layerm = *m_regions[region_id];
-                    //        // Separate the fill surfaces.
-                    //        ExPolygons expp = intersection_ex(to_expolygons(new_slices.surfaces), fill_expolygons);
-                    //        ensure_valid(expp, scaled_resolution);
-                    //        layerm.m_fill_expolygons = expp;
-                    //        if (layerm_config != m_regions[region_id]) {
-                    //            layerm.m_fill_no_overlap_expolygons = (layerm_config)->fill_no_overlap_expolygons();
-                    //            // layerm.perimeters = (layerm_config)->perimeters;
-                    //            // layerm.thin_fills = (layerm_config)->thin_fills;
-                    //        }
-                    //        layerm.set_fill_surfaces().clear();
-                    //        for (Surface &surf: new_slices.surfaces) {
-                    //            ExPolygons exp = intersection_ex(ExPolygons{ surf.expolygon }, fill_expolygons);
-                    //            assert_valid(exp);
-                    //            layerm.set_fill_surfaces().append(std::move(exp), surf);
-                    //        }
-                    //    }
-                    //}
-
-                    this->sort_perimeters_into_islands(new_slices, region_id_config, perimeter_and_gapfill_ranges, std::move(fill_expolygons), fill_expolygons_ranges, layer_region_ids);
+    for (LayerSliceIslandPtr &island : this->m_islands) {
+        // try to merge layerregions
+        std::vector<LayerRegionSetConstPtrs> regions_groups;
+        for (const LayerRegion *lregion : island->regions()) {
+            const PrintRegionConfig &config = lregion->region().config();
+            // check if compatible with an existing region
+            for (LayerRegionSetConstPtrs &layer_group : regions_groups) {
+                const LayerRegion *other_layerm = *layer_group.begin();
+                const PrintRegionConfig &other_config = other_layerm->region().config();
+                if (config_compatible_for_perimeter(config, other_config, this->id() == 0)) {
+                    layer_group.insert(lregion);
+                    goto finished_merging;
                 }
             }
+            // didn't found any merge, create my own
+            regions_groups.emplace_back();
+            regions_groups.back().insert(lregion);
+        finished_merging:;
         }
+        // now do periemter for each group
+        //if (regions_groups.size() == 1) {
+        //    // use the island expolygon
+        //} else {
+            for (LayerRegionSetConstPtrs &regions : regions_groups) {
+                int16_t perimeter_extruder = int16_t((*regions.begin())->region().config().perimeter_extruder) - 1;
+                assert(perimeter_extruder >= 0);
+                LayerRegionIsland &region_island = island->get_or_add_region_island(regions, uint16_t(perimeter_extruder));
+                island->make_perimeters(region_island);
+            }
+            append(all_fill_expolygon, island->fill_expolygons());
+            if (island->fill_no_overlap_expolygons().empty()) {
+                append(all_fill_no_overlap_expolygon, island->fill_expolygons());
+            } else {
+                append(all_fill_no_overlap_expolygon, island->fill_no_overlap_expolygons());
+            }
+        //}
+    }
+    // fill layerregion surfaces.
+    // It's put inside layerregion, because it's easier to do manipulation wher ethe settings are, and merge afterwards.
+    // or maybe because it's how it's done and it needs to be revamp.
+    all_fill_no_overlap_expolygon = union_safety_offset_ex(all_fill_no_overlap_expolygon);
+    for (LayerRegion *lregion : this->regions()) {
+        lregion->set_fill_surfaces().clear();
+        for (const Surface &raw_srf : lregion->slices()) {
+            ExPolygons exp = intersection_ex({raw_srf.expolygon}, all_fill_expolygon);
+            lregion->set_fill_surfaces().append(std::move(exp), raw_srf);
+        }
+        // create all fill_no_overlap_expolygon for LayerRegion (to simplify some computation afterwards)
+        lregion->m_fill_no_overlap_expolygons = intersection_ex(lregion->get_raw_slices(), all_fill_no_overlap_expolygon);
+        if (lregion->m_fill_no_overlap_expolygons == lregion->get_raw_slices()) {
+            ensure_valid(lregion->m_fill_no_overlap_expolygons);
+        }
+    }
     BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id() << " - Done";
+
 }
 
+void LayerSliceIsland::make_perimeters(LayerRegionIsland &region_island) {
+
+    const PrintConfig       &print_config  = this->m_layer->object()->print()->config();
+    const LayerRegion &default_layerm = **region_island.regions().begin();
+    const PrintRegionConfig &region_config = default_layerm.region().config();
+    // This needs to be in sync with PrintObject::_slice() slicing_mode_normal_below_layer!
+    bool spiral_vase = print_config.spiral_vase &&
+        //FIXME account for raft layers.
+        (m_layer->id() >= size_t(region_config.bottom_solid_layers.value) &&
+         m_layer->scaled_print_z() >= Layer::scale_to_layer_coord(region_config.bottom_solid_min_thickness.value));
+
+    //this is a factory, the content will be copied into the PerimeterGenerator
+    PerimeterGenerator::Parameters params(
+        m_layer,
+        default_layerm.flow(frPerimeter),
+        default_layerm.flow(frExternalPerimeter),
+        default_layerm.bridging_flow(frPerimeter),
+        default_layerm.flow(frSolidInfill),
+        region_config,
+        m_layer->object()->config(),
+        print_config,
+        spiral_vase,
+        (region_config.perimeter_generator.value == PerimeterGeneratorType::Arachne), //use_arachne
+        false //has_mod_bridge (don't know yet, toremove)
+    );
+
+    // perimeter bonding set.
+    if (params.perimeter_flow.spacing_ratio() == 1
+        && params.ext_perimeter_flow.spacing_ratio() == 1
+        && params.config.external_perimeters_first
+        && params.object_config.perimeter_bonding.value > 0) {
+        params.infill_gap = (1 - params.object_config.perimeter_bonding.get_abs_value(1)) * params.get_ext_perimeter_spacing();
+        params.ext_perimeter_spacing2 -= params.infill_gap;
+    }
+
+    //TODO: only get the upper/lower islands taht intersect us (from overlaps_above / overlaps_below)
+    const ExPolygons *lower_slices = m_layer->lower_layer ? &m_layer->lower_layer->lslices() : nullptr;
+    const ExPolygons *upper_slices = m_layer->upper_layer ? &m_layer->upper_layer->lslices() : nullptr;
+    std::vector<BoundingBox> lower_bbox;
+    std::vector<BoundingBox> upper_bbox;
+    if (lower_slices != nullptr) {
+        for (const ExPolygon &lowerp : *lower_slices) {
+            lower_bbox.emplace_back(lowerp.contour.points);
+        }
+    }
+    if (upper_slices != nullptr) {
+        for (const ExPolygon &upperp : *upper_slices) {
+            upper_bbox.emplace_back(upperp.contour.points);
+        }
+    }
+    assert((lower_slices == nullptr && lower_bbox.empty()) || (lower_slices->size() == lower_bbox.size()));
+    assert((upper_slices == nullptr && upper_bbox.empty()) || (upper_slices->size() == upper_bbox.size()));
+
+    ExPolygons slices;
+    if (region_island.regions() == this->regions()) {
+        slices.push_back(this->get_slice());
+    } else {
+        ExPolygons region_area;
+        for (const LayerRegion *lregion : region_island.regions()) {
+            append(region_area, lregion->get_raw_slices());
+        }
+        region_area = union_safety_offset_ex(region_area);
+        slices = intersection_ex(region_area, {this->get_slice()});
+    }
+    for (const ExPolygon &expolygon : slices) {
+
+        // should be on PerimeterGenerator, as it's dependant on the expolygon
+        params.region_setting.segregate_regions(expolygon, region_island.regions());
+        params.segregate_extra_perimeters(expolygon, region_island.regions());
+
+        PerimeterGenerator::PerimeterGenerator g{params};
+        g.throw_if_canceled = [this]() { m_layer->object()->print()->throw_if_canceled(); };
+
+        // only send lower & upper slcies that are overlapping the surfaces bb
+        BoundingBox surface_bbox(expolygon.contour.points);
+        ExPolygons lower_slices_srf;
+        for (size_t i = 0; i < lower_bbox.size(); ++i) {
+            if (lower_bbox[i].overlap(surface_bbox)) {
+                lower_slices_srf.push_back((*lower_slices)[i]);
+            }
+        }
+        ExPolygons upper_slices_srf;
+        for (size_t i = 0; i < upper_bbox.size(); ++i) {
+            if (upper_bbox[i].overlap(surface_bbox)) {
+                upper_slices_srf.push_back((*upper_slices)[i]);
+            }
+        }
+
+        ExtrusionEntityCollection &perimeters = region_island.mutable_extrusion(LayerRegionIsland::PERIMETERS);
+        ExtrusionEntityCollection &gap_fills = region_island.mutable_extrusion(LayerRegionIsland::GAP_FILLS);
+
+        g.process(
+            // input:
+            expolygon, &lower_slices_srf, slices, &upper_slices_srf,
+            // output:
+                // Loops with the external thin walls
+            &perimeters,
+                // Gaps without the thin walls
+            &gap_fills,
+                // Infills without the gap fills
+            m_fill_expolygons,
+                // mask for "no overlap" area
+            m_fill_no_overlap_expolygons
+        );
+
+        //remove extrusion collection if empty
+        if (perimeters.empty()) {
+            assert(gap_fills.empty());
+        }
+        region_island.remove_empty_extrusions();
+        append(perimeters_slices, g.perimeter_boundary);
+
+    }
+    perimeters_slices = union_ex(perimeters_slices);
+}
+
+bool config_compatible_for_milling(const PrintConfig &print_config, coord_t bottom_z, const PrintRegionConfig &config, const PrintRegionConfig &other_config) {
+    if (config.milling_post_process == other_config.milling_post_process &&
+        config.milling_extra_size == other_config.milling_extra_size &&
+        (config.milling_after_z == other_config.milling_after_z ||
+         bottom_z > Layer::scale_to_layer_coord(
+                                       std::min(config.milling_after_z.get_abs_value(
+                                                    print_config.milling_diameter.get_at(0)),
+                                                other_config.milling_after_z.get_abs_value(
+                                                    print_config.milling_diameter.get_at(0)))))) {
+        return true;
+    }
+    return false;
+}
 void Layer::make_milling_post_process() {
     if (this->object()->print()->config().milling_diameter.empty()) return;
 
@@ -888,403 +1111,55 @@ void Layer::make_milling_post_process() {
     // keep track of regions whose perimeters we have already generated
     std::vector<unsigned char> done(m_regions.size(), false);
 
-    for (LayerRegionPtrs::iterator layerm = m_regions.begin(); layerm != m_regions.end(); ++layerm) {
-        if ((*layerm)->slices().empty()) {
-            (*layerm)->m_millings.clear();
-        } else {
-            size_t region_id = layerm - m_regions.begin();
-            if (done[region_id])
-                continue;
-            BOOST_LOG_TRIVIAL(trace) << "Generating milling_post_process for layer " << this->id() << ", region " << region_id;
-            done[region_id] = true;
-            const PrintRegionConfig& config = (*layerm)->region().config();
 
-            // find compatible regions
-            LayerRegionPtrs layerms;
-            layerms.push_back(*layerm);
-            for (LayerRegionPtrs::const_iterator it = layerm + 1; it != m_regions.end(); ++it) {
-                LayerRegion* other_layerm = *it;
-                const PrintRegionConfig& other_config = other_layerm->region().config();
-                if (other_layerm->slices().empty()) continue;
-                /// !!! add here the settings you want to be added in the per-object menu.
-                /// if you don't do that, objects will share the same region, and the same settings.
-                if (config.milling_post_process == other_config.milling_post_process
-                    && config.milling_extra_size == other_config.milling_extra_size
-                    && (config.milling_after_z == other_config.milling_after_z ||
-                        this->bottom_z() > std::min(config.milling_after_z.get_abs_value(this->object()->print()->config().milling_diameter.get_at(0)),
-                            other_config.milling_after_z.get_abs_value(this->object()->print()->config().milling_diameter.get_at(0))))) {
-                    layerms.push_back(other_layerm);
-                    done[it - m_regions.begin()] = true;
+    for (LayerSliceIslandPtr &island : this->m_islands) {
+        // try to merge layerregions
+        std::vector<LayerRegionSetConstPtrs> regions_groups;
+        for (const LayerRegion *layerm : island->regions()) {
+            const PrintRegionConfig &config = layerm->region().config();
+            // check if compatible with an existing region
+            for (LayerRegionSetConstPtrs &layer_group : regions_groups) {
+                const LayerRegion *other_layerm = *layer_group.begin();
+                const PrintRegionConfig &other_config = other_layerm->region().config();
+                if (config_compatible_for_milling(this->object()->print()->config(), this->scaled_bottom_z(), config, other_config)) {
+                    layer_group.insert(layerm);
+                    goto finished_merging;
                 }
             }
-
-            if (layerms.size() == 1) {  // optimization
-                (*layerm)->make_milling_post_process((*layerm)->slices());
-            } else {
-                SurfaceCollection new_slices;
-                // Use a region if you ned a specific settgin, be sure to choose the good one, curtly there is o need.
-                LayerRegion* layerm_config = layerms.front();
-                {
-                    // group slices (surfaces) according to number of extra perimeters
-                    std::map<unsigned short, Surfaces> slices;  // extra_perimeters => [ surface, surface... ]
-                    for (LayerRegion* layerm : layerms) {
-                        for (const Surface& surface : layerm->slices().surfaces)
-                            slices[surface.extra_perimeters].emplace_back(surface);
-                        layerm->m_millings.clear();
+            // didn't found any merge, create my own
+            regions_groups.emplace_back();
+            regions_groups.back().insert(layerm);
+        finished_merging:;
+        }
+        // now do periemter for each group
+        if (regions_groups.size() == 1) {
+            // use the island expolygon
+        } else {
+            for (LayerRegionSetConstPtrs &regions : regions_groups) {
+                LayerRegionIsland &region_island = island->get_or_add_region_island(regions);
+                ExPolygons slices;
+                if (region_island.regions() == island->regions()) {
+                    slices.push_back(island->get_slice());
+                } else {
+                    ExPolygons region_area;
+                    for (const LayerRegion *lregion : region_island.regions()) {
+                        append(region_area, lregion->get_raw_slices());
                     }
-                    // merge the surfaces assigned to each group
-                    for (std::pair<const unsigned short, Surfaces>& surfaces_with_extra_perimeters : slices)
-                        new_slices.append(union_safety_offset_ex(to_expolygons(surfaces_with_extra_perimeters.second)), surfaces_with_extra_perimeters.second.front());
+                    region_area = union_safety_offset_ex(region_area);
+                    slices = intersection_ex(region_area, {island->get_slice()});
                 }
-
-                // make perimeters
-                layerm_config->make_milling_post_process(new_slices);
-
+                MillingPostProcess mill(// input:
+                    &slices,
+                    (this->lower_layer != nullptr) ? &this->lower_layer->lslices() : nullptr,
+                    (*regions.begin())->region().config(),
+                    this->object()->config(),
+                    this->object()->print()->config()
+                );
+                region_island.mutable_extrusion(LayerRegionIsland::MILLS) = mill.process(this);
             }
         }
     }
     BOOST_LOG_TRIVIAL(trace) << "Generating milling_post_process for layer " << this->id() << " - Done";
-}
-
-void Layer::sort_perimeters_into_islands(
-    // Slices for which perimeters and fill_expolygons were just created.
-    // The slices may have been created by merging multiple source slices with the same perimeter parameters.
-    const SurfaceCollection                                         &slices,
-    // Region where the perimeters, gap fills and fill expolygons are stored.
-    const uint32_t                                                   region_id,
-    // Perimeters and gap fills produced by the perimeter generator for the slices,
-    // sorted by the source slices.
-    const std::vector<std::pair<ExtrusionRange, ExtrusionRange>>    &perimeter_and_gapfill_ranges,
-    // Fill expolygons produced for all source slices above.
-    ExPolygons                                                      &&fill_expolygons,
-    // Fill expolygon ranges sorted by the source slices.
-    const std::vector<ExPolygonRange>                               &fill_expolygons_ranges,
-    // If the current layer consists of multiple regions, then the fill_expolygons above are split by the source LayerRegion surfaces.
-    const std::vector<uint32_t>                                     &layer_region_ids)
-{
-    assert(perimeter_and_gapfill_ranges.size() == fill_expolygons_ranges.size());
-    assert(perimeter_and_gapfill_ranges.size() == slices.size()); // not sureab
-    assert(! layer_region_ids.empty());
-
-    LayerRegion &this_layer_region = *m_regions[region_id];
-
-    // Bounding boxes of fill_expolygons.
-    BoundingBoxes fill_expolygons_bboxes;
-    fill_expolygons_bboxes.reserve(fill_expolygons.size());
-    for (const ExPolygon &expolygon : fill_expolygons)
-        fill_expolygons_bboxes.emplace_back(get_extents(expolygon));
-
-    // Take one sample point for each source slice, to be used to sort source slices into layer slices.
-    // source slice index + its sample.
-    std::vector<std::pair<uint32_t, Point>> perimeter_slices_queue;
-    perimeter_slices_queue.reserve(slices.size());
-    for (uint32_t islice = 0; islice < uint32_t(slices.size()); ++ islice) {
-        const std::pair<ExtrusionRange, ExtrusionRange> &extrusions = perimeter_and_gapfill_ranges[islice];
-        Point sample;
-        bool  sample_set = false;
-        // Take a sample deep inside its island if available. Infills are usually quite far from the island boundary.
-        for (uint32_t iexpoly : fill_expolygons_ranges[islice])
-            if (const ExPolygon &expoly = fill_expolygons[iexpoly]; ! expoly.empty()) {
-                sample     = expoly.contour.points[expoly.contour.points.size() / 2];
-                sample_set = true;
-                break;
-            }
-        if (! sample_set) {
-            // If there is no infill, take a sample of some inner perimeter.
-            for (uint32_t iperimeter : extrusions.first) {
-                const ExtrusionEntity &ee = *this_layer_region.perimeters().entities()[iperimeter];
-                if (ee.is_collection()) {
-                    for (const ExtrusionEntity *ee2 : dynamic_cast<const ExtrusionEntityCollection&>(ee).entities())
-                        if (! ee2->role().is_external()) {
-                            sample     = ee2->middle_point();
-                            sample_set = true;
-                            goto loop_end;
-                        }
-                } else if (! ee.role().is_external()) {
-                    sample = ee.middle_point();
-                    sample_set = true;
-                    break;
-                }
-            }
-        loop_end:
-            if (! sample_set) {
-                if (! extrusions.second.empty()) {
-                    // If there is no inner perimeter, take a sample of some gap fill extrusion.
-                    sample     = this_layer_region.thin_fills().entities()[*extrusions.second.begin()]->middle_point();
-                    sample_set = true;
-                }
-                if (! sample_set && ! extrusions.first.empty()) {
-                    // As a last resort, take a sample of some external perimeter.
-                    sample     = this_layer_region.perimeters().entities()[*extrusions.first.begin()]->middle_point();
-                    sample_set = true;
-                }
-            }
-        }
-        // There may be a valid empty island.
-        // assert(sample_set);
-        if (sample_set)
-            perimeter_slices_queue.emplace_back(islice, sample);
-    }
-
-    // Map of source fill_expolygon into region and fill_expolygon of that region.
-    // -1: not set
-    struct RegionWithFillIndex {
-        int region_id{ -1 };
-        int fill_in_region_id{ -1 };
-    };
-    std::vector<RegionWithFillIndex> map_expolygon_to_region_and_fill;
-    const bool                       has_multiple_regions = layer_region_ids.size() > 1;
-    assert(has_multiple_regions || layer_region_ids.size() == 1);
-    coord_t scaled_resolution = std::max(SCALED_EPSILON , scale_t(this->object()->print()->config().resolution.value));
-    // assign fill_surfaces to each layer
-    if (! fill_expolygons.empty()) {
-        if (has_multiple_regions) {
-            // Sort the bounding boxes lexicographically.
-            std::vector<uint32_t> fill_expolygons_bboxes_sorted(fill_expolygons_bboxes.size());
-            std::iota(fill_expolygons_bboxes_sorted.begin(), fill_expolygons_bboxes_sorted.end(), 0);
-            std::sort(fill_expolygons_bboxes_sorted.begin(), fill_expolygons_bboxes_sorted.end(), [&fill_expolygons_bboxes](uint32_t lhs, uint32_t rhs){
-                const BoundingBox &bbl = fill_expolygons_bboxes[lhs];
-                const BoundingBox &bbr = fill_expolygons_bboxes[rhs];
-                return bbl.min < bbr.min || (bbl.min == bbr.min && bbl.max < bbr.max);
-            });
-            map_expolygon_to_region_and_fill.assign(fill_expolygons.size(), {});
-            for (uint32_t region_idx : layer_region_ids) {
-                LayerRegion &layer_region = *m_regions[region_idx];
-                ExPolygons l_slices_exp = to_expolygons(layer_region.slices().surfaces);
-                layer_region.m_fill_expolygons = intersection_ex(l_slices_exp, fill_expolygons);
-                ensure_valid(layer_region.m_fill_expolygons);
-                //copy m_fill_no_overlap_expolygons in sister LayerRegion. It will serve as a mask (with intersection). TODO: maybe to intersection(m_fill_no_overlap_expolygons, layer_region.slices().surfaces)
-                if (&this_layer_region != &layer_region) {
-                    assert(layer_region.m_fill_no_overlap_expolygons.empty());
-                    layer_region.m_fill_no_overlap_expolygons = this_layer_region.m_fill_no_overlap_expolygons;
-                }
-                // ensure fill_surface is good (this was deleted in prusa2.7, i wonder if prusa ever used fill_surfaces after perimetergeneration)
-                layer_region.set_fill_surfaces().clear();
-                for (const Surface &surf: slices) {
-                    ExPolygons exp = intersection_ex(ExPolygons{ surf.expolygon }, l_slices_exp);
-                    ensure_valid(exp);
-                    layer_region.set_fill_surfaces().append(std::move(exp), surf);
-                }
-                //bounding boxes
-                layer_region.m_fill_expolygons_bboxes.reserve(layer_region.fill_expolygons().size());
-                for (const ExPolygon &expolygon : layer_region.fill_expolygons()) {
-                    BoundingBox bbox = get_extents(expolygon);
-                    layer_region.m_fill_expolygons_bboxes.emplace_back(bbox);
-                    auto it_bbox = std::lower_bound(fill_expolygons_bboxes_sorted.begin(),
-                                                    fill_expolygons_bboxes_sorted.end(), bbox,
-                                                    [&fill_expolygons_bboxes](uint32_t lhs, const BoundingBox &bbr) {
-                        const BoundingBox &bbl = fill_expolygons_bboxes[lhs];
-                        return bbl.min < bbr.min || (bbl.min == bbr.min && bbl.max < bbr.max);
-                    });
-                    if (it_bbox != fill_expolygons_bboxes_sorted.end())
-                        if (uint32_t fill_id = *it_bbox; fill_expolygons_bboxes[fill_id] == bbox) {
-                            // With a very high probability the two expolygons match exactly. Confirm that.
-                            if (expolygons_match(expolygon, fill_expolygons[fill_id])) {
-                                RegionWithFillIndex &ref = map_expolygon_to_region_and_fill[fill_id];
-                                // Only one expolygon produced by intersection with LayerRegion surface may match an expolygon of fill_expolygons.
-                                assert(ref.region_id == -1 && ref.fill_in_region_id == -1);
-                                ref.region_id         = region_idx;
-                                ref.fill_in_region_id = int(&expolygon - layer_region.fill_expolygons().data());
-                            }
-                        }
-                }
-            }
-            // Check whether any island contains multiple fills that fall into the same region, but not they are not contiguous.
-            // If so, sort fills in that particular region so that fills of an island become contiguous.
-            // Index of a region to sort.
-            int              sort_region_id = -1;
-            // Temporary vector of fills for reordering.
-            ExPolygons       fills_temp;
-            // Temporary vector of fill_bboxes for reordering.
-            BoundingBoxes    fill_bboxes_temp;
-            // Vector of new positions of the above.
-            std::vector<int> new_positions;
-            do {
-                sort_region_id = -1;
-                for (size_t source_slice_idx = 0; source_slice_idx < fill_expolygons_ranges.size(); ++ source_slice_idx)
-                    if (const ExPolygonRange fill_range = fill_expolygons_ranges[source_slice_idx]; fill_range.size() > 1) {
-                        // More than one expolygon exists for a single island. Check whether they are contiguous inside a single LayerRegion::fill_expolygons() vector.
-                        uint32_t fill_idx = *fill_range.begin();
-                        if (const int fill_regon_id = map_expolygon_to_region_and_fill[fill_idx].region_id; fill_regon_id != -1) {
-                            int fill_in_region_id = map_expolygon_to_region_and_fill[fill_idx].fill_in_region_id;
-                            bool needs_sorting = false;
-                            for (++ fill_idx; fill_idx != *fill_range.end(); ++ fill_idx) {
-                                if (const RegionWithFillIndex &ref = map_expolygon_to_region_and_fill[fill_idx]; ref.region_id != fill_regon_id) {
-                                    // This island has expolygons split among multiple regions.
-                                    needs_sorting = false;
-                                    break;
-                                } else if (ref.fill_in_region_id != ++ fill_in_region_id) {
-                                    // This island has all expolygons stored inside the same region, but not sorted.
-                                    needs_sorting = true;
-                                }
-                            }
-                            if (needs_sorting) {
-                                sort_region_id = fill_regon_id;
-                                break;
-                            }
-                        }
-                    }
-                if (sort_region_id != -1) {
-                    // Reorder fills in region with sort_region index.
-                    LayerRegion &layerm = *m_regions[sort_region_id];
-                    new_positions.assign(layerm.fill_expolygons().size(), -1);
-                    int last = 0;
-                    for (RegionWithFillIndex &ref : map_expolygon_to_region_and_fill)
-                        if (ref.region_id == sort_region_id) {
-                            new_positions[ref.fill_in_region_id] = last;
-                            ref.fill_in_region_id = last ++;
-                        }
-                    for (auto &new_pos : new_positions)
-                        if (new_pos == -1)
-                            // Not referenced by any map_expolygon_to_region_and_fill.
-                            new_pos = last ++;
-                    // Move just the content of m_fill_expolygons to fills_temp, but don't move the container vector.
-                    auto &fills       = layerm.m_fill_expolygons;
-                    auto &fill_bboxes = layerm.m_fill_expolygons_bboxes;
-
-                    assert(fills.size() == fill_bboxes.size());
-                    assert(last == int(fills.size()));
-
-                    fills_temp.resize(fills.size());
-                    fills_temp.assign(std::make_move_iterator(fills.begin()), std::make_move_iterator(fills.end()));
-
-                    fill_bboxes_temp.resize(fill_bboxes.size());
-                    fill_bboxes_temp.assign(std::make_move_iterator(fill_bboxes.begin()), std::make_move_iterator(fill_bboxes.end()));
-
-                    // Move / reorder the ExPolygons and BoundingBoxes back into m_fill_expolygons and m_fill_expolygons_bboxes.
-                    for (size_t old_pos = 0; old_pos < new_positions.size(); ++old_pos) {
-                        fills[new_positions[old_pos]]       = std::move(fills_temp[old_pos]);
-                        fill_bboxes[new_positions[old_pos]] = std::move(fill_bboxes_temp[old_pos]);
-                    }
-                    assert_valid(fills);
-                }
-            } while (sort_region_id != -1);
-        } else {
-            ensure_valid(fill_expolygons, scaled_resolution);
-            this_layer_region.m_fill_expolygons        = std::move(fill_expolygons);
-            this_layer_region.m_fill_expolygons_bboxes = std::move(fill_expolygons_bboxes);
-        }
-    }
-
-    auto insert_into_island = [
-        // Region where the perimeters, gap fills and fill expolygons are stored.
-        region_id, 
-        // Whether there are infills with different regions generated for this LayerSlice.
-        has_multiple_regions,
-        // Perimeters and gap fills to be sorted into islands.
-        &perimeter_and_gapfill_ranges,
-        // Infill regions to be sorted into islands.
-        &fill_expolygons, &fill_expolygons_bboxes, &fill_expolygons_ranges,
-        // Mapping of fill_expolygon to region and its infill.
-        &map_expolygon_to_region_and_fill,
-        // Output
-        &regions = m_regions, &lslices_ex = this->lslices_ex]
-        (int lslice_idx, int source_slice_idx) {
-        lslices_ex[lslice_idx].islands.push_back({});
-        LayerIsland &island = lslices_ex[lslice_idx].islands.back();
-        island.perimeters = LayerExtrusionRange(region_id, perimeter_and_gapfill_ranges[source_slice_idx].first);
-        island.thin_fills = perimeter_and_gapfill_ranges[source_slice_idx].second;
-        if (ExPolygonRange fill_range = fill_expolygons_ranges[source_slice_idx]; ! fill_range.empty()) {
-            if (has_multiple_regions) {
-                // Check whether the fill expolygons of this island were split into multiple regions.
-                island.fill_region_id = LayerIsland::fill_region_composite_id;
-                for (uint32_t fill_idx : fill_range) {
-                    if (const int fill_regon_id = map_expolygon_to_region_and_fill[fill_idx].region_id;
-                        fill_regon_id == -1 || (island.fill_region_id != LayerIsland::fill_region_composite_id && int(island.fill_region_id) != fill_regon_id)) {
-                        island.fill_region_id = LayerIsland::fill_region_composite_id;
-                        break;
-                    } else
-                        island.fill_region_id = fill_regon_id;
-                }
-                if (island.fill_expolygons_composite()) {
-                    // They were split, thus store the unsplit "composite" expolygons into the region of perimeters.
-                    LayerRegion &this_layer_region = *regions[region_id];
-                    auto begin = uint32_t(this_layer_region.fill_expolygons_composite().size());
-                    this_layer_region.m_fill_expolygons_composite.reserve(this_layer_region.fill_expolygons_composite().size() + fill_range.size());
-                    std::move(fill_expolygons.begin() + *fill_range.begin(), fill_expolygons.begin() + *fill_range.end(), std::back_inserter(this_layer_region.m_fill_expolygons_composite));
-                    this_layer_region.m_fill_expolygons_composite_bboxes.insert(this_layer_region.m_fill_expolygons_composite_bboxes.end(), 
-                        fill_expolygons_bboxes.begin() + *fill_range.begin(), fill_expolygons_bboxes.begin() + *fill_range.end());
-                    island.fill_expolygons = ExPolygonRange(begin, uint32_t(this_layer_region.fill_expolygons_composite().size()));
-                } else {
-                    // All expolygons are stored inside a single LayerRegion in a contiguous range.
-                    island.fill_expolygons = ExPolygonRange(
-                        map_expolygon_to_region_and_fill[*fill_range.begin()].fill_in_region_id,
-                        map_expolygon_to_region_and_fill[*fill_range.end() - 1].fill_in_region_id + 1);
-                }
-            } else {
-                // Layer island is made of one fill region only.
-                island.fill_expolygons = fill_range;
-                island.fill_region_id  = region_id;
-            }
-        }
-    };
-
-    // First sort into islands using exact fit.
-    // Traverse the slices in an increasing order of bounding box size, so that the islands inside another islands are tested first,
-    // so we can just test a point inside ExPolygon::contour and we may skip testing the holes.
-    auto point_inside_surface = [&lslices = this->lslices(), &lslices_ex = this->lslices_ex](size_t lslice_idx, const Point &point) {
-        const BoundingBox &bbox = lslices_ex[lslice_idx].bbox;
-        return point.x() >= bbox.min.x() && point.x() < bbox.max.x() &&
-               point.y() >= bbox.min.y() && point.y() < bbox.max.y() &&
-               // Exact match: Don't just test whether a point is inside the outer contour of an island,
-               // test also whether the point is not inside some hole of the same expolygon.
-               // This is unfortunatelly necessary because the point may be inside an expolygon of one of this expolygon's hole
-               // and missed due to numerical issues.
-               lslices[lslice_idx].contains(point);
-    };
-    for (int lslice_idx = int(lslices_ex.size()) - 1; lslice_idx >= 0 && ! perimeter_slices_queue.empty(); -- lslice_idx)
-        for (auto it_source_slice = perimeter_slices_queue.begin(); it_source_slice != perimeter_slices_queue.end(); ++ it_source_slice)
-            if (point_inside_surface(lslice_idx, it_source_slice->second)) {
-                insert_into_island(lslice_idx, it_source_slice->first);
-                if (std::next(it_source_slice) != perimeter_slices_queue.end())
-                    // Remove the current slice & point pair from the queue.
-                    *it_source_slice = perimeter_slices_queue.back();
-                perimeter_slices_queue.pop_back();
-                break;
-            }
-    if (! perimeter_slices_queue.empty()) {
-        // If the slice sample was not fitted into any slice using exact fit, try to find a closest island as a last resort.
-        // This should be a rare event especially if the sample point was taken from infill or inner perimeter,
-        // however we may land here for external perimeter only islands with fuzzy skin applied.
-        // Check whether fuzzy skin was enabled and adjust the bounding box accordingly.
-        const PrintConfig       &print_config  = this->object()->print()->config();
-        const PrintRegionConfig &region_config = this_layer_region.region().config();
-        const auto               bbox_eps      = scaled<coord_t>(
-            EPSILON + print_config.gcode_min_resolution.value +
-            (region_config.fuzzy_skin.value == FuzzySkinType::None ? 0. : region_config.fuzzy_skin_thickness.value 
-                //FIXME it looks as if Arachne could extend open lines by fuzzy_skin_point_dist, which does not seem right.
-                + region_config.fuzzy_skin_point_dist.value));
-        auto point_inside_surface_dist2 =
-            [&lslices = this->lslices(), &lslices_ex = this->lslices_ex, bbox_eps]
-            (const size_t lslice_idx, const Point &point) {
-            const BoundingBox &bbox = lslices_ex[lslice_idx].bbox;
-            return 
-                point.x() < bbox.min.x() - bbox_eps || point.x() > bbox.max.x() + bbox_eps ||
-                point.y() < bbox.min.y() - bbox_eps || point.y() > bbox.max.y() + bbox_eps ?
-                std::numeric_limits<double>::max() :
-                (lslices[lslice_idx].point_projection(point) - point).cast<double>().squaredNorm();
-        };
-        for (auto it_source_slice  = perimeter_slices_queue.begin(); it_source_slice != perimeter_slices_queue.end(); ++ it_source_slice) {
-            double d2min = std::numeric_limits<double>::max();
-            int    lslice_idx_min = -1;
-            for (int lslice_idx = int(lslices_ex.size()) - 1; lslice_idx >= 0; -- lslice_idx)
-                if (double d2 = point_inside_surface_dist2(lslice_idx, it_source_slice->second); d2 < d2min) {
-                    d2min = d2;
-                    lslice_idx_min = lslice_idx;
-                }
-            if (lslice_idx_min == -1) {
-                // This should not happen, but Arachne seems to produce a perimeter point far outside its source contour.
-                // As a last resort, find the closest source contours to the sample point.
-                for (int lslice_idx = int(lslices_ex.size()) - 1; lslice_idx >= 0; -- lslice_idx)
-                    if (double d2 = (lslices()[lslice_idx].point_projection(it_source_slice->second) - it_source_slice->second).cast<double>().squaredNorm(); d2 < d2min) {
-                        d2min = d2;
-                        lslice_idx_min = lslice_idx;
-                    }
-            }
-            assert(lslice_idx_min != -1);
-            insert_into_island(lslice_idx_min, it_source_slice->first);
-        }
-    }
 }
 
 void Layer::export_region_slices_to_svg(const char *path) const

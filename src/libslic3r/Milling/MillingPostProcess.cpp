@@ -64,7 +64,7 @@ namespace Slic3r {
                 ExtrusionPath contour({ExtrusionRole::Milling});
                 contour.attributes_mutable().mm3_per_mm = 0;
                 contour.attributes_mutable().width = (float)this->print_config.milling_diameter.get_at(0);
-                contour.attributes_mutable().height = (float)layer->height;
+                contour.attributes_mutable().height = (float)layer->unscaled_height();
                 contour.polyline.append(best_polyline.points[first_point_extract_idx]);
                 for (int32_t idx = first_point_idx; idx < poly.points.size(); idx++) {
                     contour.polyline.append(poly.points[idx]);
@@ -93,7 +93,7 @@ namespace Slic3r {
             contour.polyline.append(contour.polyline.get_point(1));
         contour.attributes_mutable().mm3_per_mm = 0;
         contour.attributes_mutable().width = (float)this->print_config.milling_diameter.get_at(0);
-        contour.attributes_mutable().height = (float)layer->height;
+        contour.attributes_mutable().height = (float)layer->unscaled_height();
         out_coll.append(std::move(contour));
         return;
 
@@ -106,8 +106,8 @@ namespace Slic3r {
         const coord_t milling_diameter = scale_t(this->print_config.milling_diameter.get_at(0));
 
         ExPolygons milling_lines;
-        for (const Surface& surf : slices->surfaces) {
-            ExPolygons surf_milling = offset_ex(surf.expolygon, double(milling_diameter / 2), ClipperLib::jtRound);
+        for (const ExPolygon& surf_expolygon : *slices) {
+            ExPolygons surf_milling = offset_ex(surf_expolygon, double(milling_diameter / 2), ClipperLib::jtRound);
             for (const ExPolygon& expoly : surf_milling)
 //                expoly.simplify(SCALED_RESOLUTION, &milling_lines); // should already be done
                 milling_lines.push_back(expoly);
@@ -138,11 +138,14 @@ namespace Slic3r {
     }
 
     bool MillingPostProcess::can_be_milled(const Layer* layer) {
-        double max_first_layer = 0;
+        coord_t max_first_layer = 0;
+        //TODO zstep
         for (double diam : this->print_config.nozzle_diameter.get_values())
-            max_first_layer = std::max(max_first_layer, this->config.milling_after_z.get_abs_value(this->object_config.first_layer_height.get_abs_value(diam)));
+            max_first_layer = std::max(max_first_layer,
+                                       Layer::scale_to_layer_coord(this->config.milling_after_z.get_abs_value(
+                                           this->object_config.first_layer_height.get_abs_value(diam))));
         return !this->print_config.milling_diameter.empty() && this->config.milling_post_process
-            && layer->bottom_z() >= max_first_layer;
+            && layer->scaled_bottom_z() >= max_first_layer;
     }
 
     ExPolygons MillingPostProcess::get_unmillable_areas(const Layer* layer)
@@ -153,12 +156,12 @@ namespace Slic3r {
 
         ExPolygons milling_lines;
         ExPolygons surfaces;
-        for (const Surface& surf : slices->surfaces) {
-            ExPolygons surf_milling = offset_ex(surf.expolygon, milling_radius, ClipperLib::jtRound);
+        for (const ExPolygon& surf_expolygon : *slices) {
+            ExPolygons surf_milling = offset_ex(surf_expolygon, milling_radius, ClipperLib::jtRound);
             for (const ExPolygon& expoly : surf_milling)
 //                expoly.simplify(SCALED_RESOLUTION, &milling_lines); // should already be done
                 milling_lines.push_back(expoly);
-            surfaces.push_back(surf.expolygon);
+            surfaces.push_back(surf_expolygon);
         }
         union_safety_offset_ex(milling_lines);
         union_safety_offset_ex(surfaces);

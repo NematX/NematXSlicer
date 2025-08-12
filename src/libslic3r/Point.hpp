@@ -278,8 +278,9 @@ public:
     template<typename OtherDerived>
     Point(const Eigen::MatrixBase<OtherDerived> &other) : Vec2crd(other) {}
     static Point round(const Vec2d& rhs) { return Point(coord_t(std::round(rhs.x())), coord_t(std::round(rhs.y()))); }
-    static Point new_scale(coordf_t x, coordf_t y) { return Point(coord_t(scale_(x)), coord_t(scale_(y))); }
-    static Point new_scale(const Point &p) { return Point(scale_t(p.x()), scale_t(p.y())); }
+    static Point new_scale(double x, double y) { return Point(scale_d(x), scale_d(y)); }
+    // this one shouldn't exist.
+    //static Point new_scale(const Point &p) { return Point(scale_t(p.x()), scale_t(p.y())); }
     template<typename OtherDerived>
     static Point new_scale(const Eigen::MatrixBase<OtherDerived> &v) { return Point(scale_t(v.x()), scale_t(v.y())); }
 
@@ -311,8 +312,8 @@ public:
     Point  projection_onto(const Point &line_pa, const Point &line_pb) const;
     Point  interpolate(const double percent, const Point &p) const;
 
-    coordf_t distance_to(const Point &point) const { return (point - *this).cast<coordf_t>().norm(); }
-    coordf_t distance_to_square(const Point &point) const {
+    distf_t distance_to(const Point &point) const { return (point - *this).cast<distf_t>().norm(); }
+    distsqrf_t distance_to_square(const Point &point) const {
         coordf_t dx = double(point.x() - this->x());
         coordf_t dy = double(point.y() - this->y());
         return dx*dx + dy*dy;

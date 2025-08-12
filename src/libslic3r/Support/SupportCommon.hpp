@@ -25,7 +25,7 @@ void remove_bridges_from_contacts(
     const PrintConfig   &print_config, 
     const Layer         &lower_layer,
     const LayerRegion   &layerm,
-    float                fw, 
+    coord_t              flow_width,
     ExPolygons          &contact_polygons);
 
 // Turn some of the base layers into base interface layers.

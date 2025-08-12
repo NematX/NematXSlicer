@@ -35,7 +35,7 @@ bool RegionSettings::SettingsValue::operator<(const SettingsValue &rhs) const {
     return false;
 }
 
-void RegionSettings::segregate_regions(const ExPolygon &my_srf, const std::set<LayerRegion *> lregions) {
+void RegionSettings::segregate_regions(const ExPolygon &my_srf, const LayerRegionSetConstPtrs &lregions) {
     this->key_areas.clear();
     BoundingBox my_srf_bb(my_srf.contour.points);
     my_srf_bb.offset(SCALED_EPSILON * 3);
@@ -106,12 +106,14 @@ void RegionSettings::segregate_regions(const ExPolygon &my_srf, const std::set<L
         }
     }
 }
+
 void RegionSettings::ClipExpoly::compute_bb() {
     for (ExPolygon &expoly : this->expolys) {
         bboxes.emplace_back(expoly.contour.points);
     }
     assert(bboxes.size() == expolys.size());
 }
+
 ExPolygons RegionSettings::ClipExpoly::intersections(const ExPolygons &to_clip) const {
     if (this->expolys.empty()) {
         return to_clip;
@@ -145,6 +147,7 @@ ExPolygons RegionSettings::ClipExpoly::intersections(coord_t offset, const ExPol
     }
     return intersections;
 }
+
 void RegionSettings::ClipExpoly::clear() {
     expolys.clear();
     bboxes.clear();

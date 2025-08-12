@@ -20,7 +20,7 @@ class JPSPathFinder
 {
     using Pixel = Point;
     std::unordered_set<Pixel, PointHash> inpassable;
-    coordf_t print_z;
+    coord_t print_z;
     BoundingBox max_search_box;
     Lines bed_shape;
 

@@ -889,7 +889,7 @@ static inline std::vector<std::vector<ExPolygons>> mm_segmentation_top_and_botto
     // Project upwards pointing painted triangles over top surfaces,
     // project downards pointing painted triangles over bottom surfaces.
     std::vector<std::vector<Polygons>> top_raw(num_extruders), bottom_raw(num_extruders);
-    std::vector<float> zs = zs_from_layers(layers);
+    std::vector<float> zs = slice_z_from_layers(layers);
     Transform3d        object_trafo = print_object.trafo_centered();
 
 #ifdef MM_SEGMENTATION_DEBUG_TOP_BOTTOM
@@ -995,9 +995,9 @@ static inline std::vector<std::vector<ExPolygons>> mm_segmentation_top_and_botto
         // Number of regions for a queried color.
         int     num_regions             { 0 };
         // Maximum perimeter extrusion width for a queried color.
-        coordf_t extrusion_width         { 0.f };
+        double extrusion_width          { 0.};
         // Minimum radius of a region to be printable. Used to filter regions by morphological opening.
-        coordf_t small_region_threshold  { 0.f };
+        double small_region_threshold   { 0.};
         // Maximum number of top layers for a queried color.
         int     top_solid_layers        { 0 };
         // Maximum number of bottom layers for a queried color.
@@ -1024,7 +1024,7 @@ static inline std::vector<std::vector<ExPolygons>> mm_segmentation_top_and_botto
                                              // Gap fill enabled. Enable a single line of 1/2 extrusion width.
                                              0.5f * (perimeter_extrusion_width) :
                                              // Gap fill disabled. Enable two lines slightly overlapping.
-                                             (perimeter_extrusion_width) + 0.7f * Flow::rounded_rectangle_extrusion_spacing(perimeter_extrusion_width, float(layer.height), 1.f);
+                                             (perimeter_extrusion_width) + 0.7f * Flow::rounded_rectangle_extrusion_spacing(perimeter_extrusion_width, float(layer.unscaled_height()), 1.f);
                 out.small_region_threshold = scale_d(out.small_region_threshold * 0.5f);
                 ++ out.num_regions;
             }

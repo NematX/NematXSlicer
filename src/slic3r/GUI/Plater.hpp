@@ -382,8 +382,9 @@ public:
     GLCanvas3D* canvas3D();
     const GLCanvas3D * canvas3D() const;
     GLCanvas3D* get_current_canvas3D();
-    
+
     void arrange();
+    void orient();
     void arrange(Worker &w, bool selected);
 
     void set_current_canvas_as_dirty();
@@ -411,6 +412,7 @@ public:
     bool can_split_to_objects() const;
     bool can_split_to_volumes() const;
     bool can_arrange() const;
+    bool can_orient() const;
     bool can_layers_editing() const;
     bool can_paste_from_clipboard() const;
     bool can_copy_to_clipboard() const;

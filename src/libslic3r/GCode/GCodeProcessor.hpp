@@ -491,7 +491,7 @@ namespace Slic3r {
                 move.position = position;
                 move.height = height;
                 m_result.moves.erase(m_result.moves.begin() + *m_move_id);
-                m_result.custom_gcode_per_print_z[*m_custom_gcode_per_print_z_id].print_z = position.z();
+                m_result.custom_gcode_per_print_z[*m_custom_gcode_per_print_z_id].print_z_ = Layer::scale_to_layer_coord(position.z());
                 reset();
             }
 

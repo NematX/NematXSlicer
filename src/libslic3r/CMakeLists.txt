@@ -210,6 +210,8 @@ set(SLIC3R_SOURCES
     GCode/Wipe.hpp
     GCode/WipeTower.cpp
     GCode/WipeTower.hpp
+    GCode/WipeTower2.cpp
+    GCode/WipeTower2.hpp
     GCode/WipeTowerIntegration.cpp
     GCode/WipeTowerIntegration.hpp
     GCode/GCodeProcessor.cpp
@@ -447,6 +449,8 @@ set(SLIC3R_SOURCES
     MTUtils.hpp
     Zipper.hpp
     Zipper.cpp
+    Orient.cpp
+    Orient.hpp
     MinAreaBoundingBox.hpp
     MinAreaBoundingBox.cpp
     miniz_extension.hpp

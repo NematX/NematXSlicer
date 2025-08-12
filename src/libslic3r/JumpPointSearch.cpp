@@ -215,7 +215,7 @@ void JPSPathFinder::add_obstacles(const Layer *layer, const Point &global_origin
 {
     if (layer == nullptr) return;
 
-    this->print_z = layer->print_z;
+    this->print_z = layer->scaled_print_z();
     Lines obstacles;
     obstacles.reserve(layer->curled_lines.size());
     for (const Line &l : layer->curled_lines) { obstacles.push_back(Line{l.a + global_origin, l.b + global_origin}); }
@@ -303,7 +303,7 @@ Polyline JPSPathFinder::find_path(const Point &p0, const Point &p1)
         return r;
     };
     auto          scaled_point = [](const Point &p) { return Point::new_scale(p.x(), p.y()); };
-    ::Slic3r::SVG svg(debug_out_path(("path_jps" + std::to_string(print_z) + "_" + std::to_string(safe_rand(1000))).c_str()).c_str(),
+    ::Slic3r::SVG svg(debug_out_path(("path_jps" + std::to_string(unscaled(print_z)) + "_" + std::to_string(safe_rand(1000))).c_str()).c_str(),
                       BoundingBox(scaled_point(search_box.min), scaled_point(search_box.max)));
     for (const auto &p : inpassable) { svg.draw(scaled_point(p), "black", scale_(0.4)); }
     for (const auto &qn : astar_cache) { svg.draw(scaled_point(qn.second.node.position), "blue", scale_(0.3)); }
