@@ -2604,7 +2604,8 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
             coord_t extr2z_large_steps = extr2z;
             // Take the largest allowed step in the Z axis until extr2z_large_steps is reached.
             coord_t last_z = extr1z;
-            coord_t wanted_z = extr1z;
+            //coord_t wanted_z = extr1z;
+            double wanted_z_mm = unscaled(extr1z);
             for (size_t i = 0; i < n_layers_total; ++ i) {
                 SupportGeneratorLayer &layer_new = layer_storage.allocate_unguarded(SupporLayerType::Intermediate);
                 if (i + 1 == n_layers_total) {
@@ -2617,20 +2618,20 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                     layer_new.set_scaled_bottom_z(last_z);
                     if (i < n_layers_bot || i >= n_layers_total - n_layers_top) {
                         // Interface
-                        wanted_z += step_interface;
+                        wanted_z_mm += unscaled(step_interface);
                         // ensure the height is multuiple of z_step, and don't go higher than support_interface_layer_height
                         //taht work because support_interface_layer_height is a multiple of z_step, so it's not possible to accumulate a big wanted_z
                         layer_new.set_scaled_height(
-                            std::min(check_z_step(wanted_z - last_z,
+                            std::min(check_z_step(Layer::scale_to_layer_coord(wanted_z_mm) - last_z,
                                                   Layer::scale_to_layer_coord(this->m_slicing_params->z_step)),
                                      support_interface_layer_height));
                     } else {
                         // Intermediate layer, not the last added.
-                        wanted_z += step;
+                        wanted_z_mm += unscaled(step);
                         // ensure the height is multuiple of z_step, and don't go higher than support_layer_height
                         //taht work because support_layer_height is a multiple of z_step, so it's not possible to accumulate a big wanted_z
                         layer_new.set_scaled_height(
-                            std::min(check_z_step(wanted_z - last_z,
+                            std::min(check_z_step(Layer::scale_to_layer_coord(wanted_z_mm) - last_z,
                                                   Layer::scale_to_layer_coord(this->m_slicing_params->z_step)),
                                      support_layer_height));
                     }

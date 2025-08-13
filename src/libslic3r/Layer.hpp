@@ -311,8 +311,8 @@ public:
     // heights
     static coord_t      scale_to_layer_coord(double z);
     double              slice_z;       // Z used for slicing, in unscaled coordinates
-    coord_t             scaled_print_z() const { return m_print_z; }
-    double              unscaled_print_z() const { return unscaled(m_print_z); }
+    coord_t             scaled_print_z() const { assert(scale_to_layer_coord(unscaled(m_print_z)) == m_print_z); return m_print_z; }
+    double              unscaled_print_z() const { assert(scale_to_layer_coord(unscaled(m_print_z)) == m_print_z); return unscaled(m_print_z); }
     coord_t             scaled_height() const { return m_height; }
     double              unscaled_height() const { return unscaled(m_height); }
     coord_t             scaled_bottom_z() const { return this->m_print_z - this->m_height; }
@@ -411,6 +411,7 @@ protected:
         m_id(id), m_object(object) {
         assert(print_z > 100);
         assert(height > 100);
+        assert(scale_to_layer_coord(unscaled(print_z)) == print_z);
     }
     virtual ~Layer();
     // Clear fill extrusions, remove them from layer islands.
