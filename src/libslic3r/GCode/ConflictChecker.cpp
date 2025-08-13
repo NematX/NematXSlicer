@@ -128,7 +128,7 @@ static std::vector<ExtrusionPaths> getFakeExtrusionPathsFromWipeTower(const Wipe
 
 
         ExtrusionPath path(ArcPolyline(Points{minCorner, {maxCorner.x(), minCorner.y()}, maxCorner, {minCorner.x(), maxCorner.y()}, minCorner }),
-            ExtrusionAttributes{ ExtrusionRole::WipeTower, ExtrusionFlow{ 0.0, 0.0, lh } });
+            ExtrusionAttributes{ ExtrusionRole::WipeTower, ExtrusionFlow{ 0.0, 0.0, lh } }, nullptr);
         paths.push_back({ path });
 
         // We added the border, now add several parallel lines so we can detect an object that is fully inside the tower.

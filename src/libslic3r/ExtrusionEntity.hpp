@@ -312,6 +312,7 @@ public:
     void visit(ExtrusionVisitorConst &&visitor) const;
 
     bool               has_properties() const { return m_property.operator bool(); }
+    std::unique_ptr<ExtrusionProperty> clone_properties() const;
     ExtrusionProperty *get_root_property();
     const ExtrusionProperty *get_root_property() const;
     // take ownership
@@ -429,15 +430,19 @@ class ExtrusionPath : public ExtrusionEntity
 {
 public:
     ArcPolyline polyline; //TODO: protected
-
+    // force to set the ExtrusionProperty (to nullptr) to be sure you didn't forget it
     //ExtrusionPath(ExtrusionRole role) : ExtrusionEntity(true), m_attributes{role} {}
-    ExtrusionPath(const ExtrusionAttributes &attributes, bool can_reverse = true) : ExtrusionEntity(can_reverse), m_attributes(attributes) {}
+    //ExtrusionPath(const ExtrusionAttributes &attributes, bool can_reverse = true) : ExtrusionEntity(can_reverse), m_attributes(attributes) {}
+    ExtrusionPath(const ExtrusionAttributes &attributes,
+                  std::unique_ptr<ExtrusionProperty> &&eprop,
+                  bool can_reverse = true)
+        : ExtrusionEntity(std::move(eprop), can_reverse), m_attributes(attributes) {}
     ExtrusionPath(const ExtrusionPath &rhs) : ExtrusionEntity(rhs), polyline(rhs.polyline), m_attributes(rhs.m_attributes) {}
     ExtrusionPath(ExtrusionPath &&rhs) : ExtrusionEntity(rhs), polyline(std::move(rhs.polyline)), m_attributes(rhs.m_attributes) {}
-    ExtrusionPath(const ArcPolyline &polyline, const ExtrusionAttributes &attribs, bool can_reverse = true)
-        : ExtrusionEntity(can_reverse), polyline(polyline), m_attributes(attribs) {}
-    ExtrusionPath(ArcPolyline &&polyline, const ExtrusionAttributes &attribs, bool can_reverse = true)
-        : ExtrusionEntity(can_reverse), polyline(std::move(polyline)), m_attributes(attribs) {}
+    //ExtrusionPath(const ArcPolyline &polyline, const ExtrusionAttributes &attribs, bool can_reverse = true)
+        //: ExtrusionEntity(can_reverse), polyline(polyline), m_attributes(attribs) {}
+    //ExtrusionPath(ArcPolyline &&polyline, const ExtrusionAttributes &attribs, bool can_reverse = true)
+        //: ExtrusionEntity(can_reverse), polyline(std::move(polyline)), m_attributes(attribs) {}
     ExtrusionPath(const ArcPolyline &polyline,
                   const ExtrusionAttributes &attribs,
                   std::unique_ptr<ExtrusionProperty> &&eprop,
@@ -552,7 +557,12 @@ public:
     std::vector<coord_t> z_offsets;
 
     //ExtrusionPath3D(ExtrusionRole role) : ExtrusionPath(role) { /*std::cout << "new path3D\n"; */};
-    ExtrusionPath3D(const ExtrusionAttributes &attributes, bool can_reverse) : ExtrusionPath(attributes, can_reverse) { init(); };
+    ExtrusionPath3D(const ExtrusionAttributes &attributes,
+                    std::unique_ptr<ExtrusionProperty> &&eprop,
+                    bool can_reverse)
+        : ExtrusionPath(attributes, std::move(eprop), can_reverse) {
+        init();
+    };
     ExtrusionPath3D(const ExtrusionPath &rhs) : ExtrusionPath(rhs) { init();  }
     ExtrusionPath3D(ExtrusionPath &&rhs) : ExtrusionPath(rhs) { init();  }
     ExtrusionPath3D(const ExtrusionPath3D &rhs) : ExtrusionPath(rhs), z_offsets(rhs.z_offsets) { init();  }
@@ -889,7 +899,7 @@ inline void extrusion_paths_append(ExtrusionPaths &dst, Polylines &polylines, co
     for (Polyline &polyline : polylines) {
         assert(polyline.is_valid());
         if (polyline.is_valid())
-            dst.emplace_back(polyline, attributes, can_reverse);
+            dst.emplace_back(polyline, attributes, nullptr, can_reverse);
     }
 }
 
@@ -899,7 +909,7 @@ inline void extrusion_paths_append(ExtrusionPaths &dst, Polylines &&polylines, c
     for (Polyline &polyline : polylines) {
         assert(polyline.is_valid());
         if (polyline.is_valid())
-            dst.emplace_back(std::move(polyline), attributes, can_reverse);
+            dst.emplace_back(std::move(polyline), attributes, nullptr, can_reverse);
     }
     polylines.clear();
 }

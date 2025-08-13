@@ -777,7 +777,7 @@ GCodeGenerator::GCodeGenerator() :
     m_second_layer_things_done(false),
     m_silent_time_estimator_enabled(false),
     m_current_instance({nullptr, -1}),
-    m_last_too_small(ExtrusionPath{ExtrusionAttributes{ExtrusionRole::None}})
+    m_last_too_small(ExtrusionPath{ExtrusionAttributes{ExtrusionRole::None}, nullptr})
     {
         cooldown_marker_init();
     }
@@ -3700,8 +3700,8 @@ LayerResult GCodeGenerator::process_layer(
         assert(!layer_tools.extruders.empty());
         if (m_writer.tool() && !layer_tools.extruders.empty() &&
             m_writer.tool()->id() != layer_tools.extruders.front()) {
-            assert(std::find(layer_tools.extruders.begin(), layer_tools.extruders.end(), m_writer.tool()->id()) == layer_tools.extruders.end());
             // last extruder don't print anything here, plan to change to another one right away.
+            // note: the extruders may not be used in this layer, and so not present in layer_tools
             std::vector<uint16_t> extruder_with_empty_first;
             extruder_with_empty_first.push_back(m_writer.tool()->id());
             extruder_with_empty_first.insert(extruder_with_empty_first.end(), layer_tools.extruders.begin(), layer_tools.extruders.end());
@@ -4343,7 +4343,7 @@ std::string GCodeGenerator::change_layer(coord_t from_z, coord_t to_z) {
         if (BOOL_EXTRUDER_CONFIG(retract_layer_change) && m_writer.will_move_z(unscaled_to_print_z))
             gcode += this->retract_and_wipe();
         gcode += m_writer.travel_to_z(unscaled_to_print_z, std::string("move to next layer (") + std::to_string(m_layer_index) + ", "+  to_string_nozero(unscaled_to_print_z, 5) + ")");
-        assert(!_m_force_move_z_from);
+        assert(!_m_force_move_z_from || *_m_force_move_z_from <= 0);
         _m_force_move_z_from.reset();
         m_pos_layer = m_layer;
     } else {
@@ -4906,6 +4906,7 @@ void GCodeGenerator::seam_notch(const ExtrusionLoop& original_loop,
             if (length > dist + SCALED_EPSILON) {
                 // found the place to split
                 notch_extrusion_start.emplace_back(building_paths.front().attributes(),
+                                                   building_paths.front().clone_properties(),
                                                    building_paths.front().can_reverse());
                 ArcPolyline ap2;
                 building_paths.front().as_polyline().split_at(dist, notch_extrusion_start.back().polyline, ap2);
@@ -4930,6 +4931,7 @@ void GCodeGenerator::seam_notch(const ExtrusionLoop& original_loop,
             if (length > dist + SCALED_EPSILON) {
                 // found the place to split
                 notch_extrusion_end.emplace_back(building_paths.back().attributes(),
+                                                 building_paths.front().clone_properties(),
                                                  building_paths.back().can_reverse());
                 ArcPolyline ap2;
                 building_paths.back().polyline.split_at(length - dist, ap2, notch_extrusion_end.back().polyline);
@@ -5345,7 +5347,7 @@ std::string GCodeGenerator::extrude_loop(const ExtrusionLoop &original_loop, con
         //gcode += m_writer.travel_to_xy(this->point_to_gcode(pt), 0.0, "move inwards before retraction/seam");
         //this->set_last_pos(pt);
         // use extrude instead of travel_to_xy to trigger the unretract
-        ExtrusionPath fake_path_wipe(ArcPolyline(Polyline{ pt , current_point }), wipe_paths.front().attributes(), wipe_paths.front().can_reverse());
+        ExtrusionPath fake_path_wipe(ArcPolyline(Polyline{ pt , current_point }), wipe_paths.front().attributes(),  wipe_paths.front().clone_properties(), wipe_paths.front().can_reverse());
         fake_path_wipe.attributes_mutable().mm3_per_mm = 0;
         assert(!fake_path_wipe.can_reverse());
         // put travel before wipe (if ensure extrude_path don't do anything, then it's just an extra travel lost in the gcode).
@@ -7199,7 +7201,7 @@ std::string GCodeGenerator::_extrude(ExtrusionPath &path, const std::string_view
     if (this->m_layer->scaled_bottom_z() == 0 && config().first_layer_strong_start.value > 0) {
         double nozzle_diameter = EXTRUDER_CONFIG_WITH_DEFAULT(nozzle_diameter, 0.4);
         Flow flow = Flow::new_from_width(nozzle_diameter, nozzle_diameter, path.attributes().height, 1);
-        ExtrusionPath fake_path(ExtrusionAttributes{ExtrusionRole::ExternalPerimeter, flow});
+        ExtrusionPath fake_path(ExtrusionAttributes{ExtrusionRole::ExternalPerimeter, flow}, nullptr);
         double my_e_per_mm = _compute_e_per_mm(fake_path);
         my_e_per_mm *= this->config().first_layer_flow_ratio.get_abs_value(1);
         my_e_per_mm *= EXTRUDER_CONFIG_WITH_DEFAULT(filament_first_layer_flow_ratio, 100) * 0.01;

@@ -220,11 +220,11 @@ inline void extrusion_entities_append_paths(ExtrusionEntityCollection &dst, Poly
     for (Polyline &polyline : polylines)
         if (polyline.is_valid()) {
             if (polyline.back() == polyline.front()) {
-                ExtrusionPath path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), can_reverse);
+                ExtrusionPath path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), nullptr, can_reverse);
                 path.polyline = polyline;
                 dst.append(ExtrusionLoop(std::move(path)));
             } else {
-                ExtrusionPath extrusion_path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), can_reverse);
+                ExtrusionPath extrusion_path(ExtrusionAttributes(role, ExtrusionFlow(mm3_per_mm, width, height)), nullptr, can_reverse);
                 extrusion_path.polyline = polyline;
                 dst.append(std::move(extrusion_path));
             }
@@ -237,11 +237,11 @@ inline void extrusion_entities_append_paths(ExtrusionEntityCollection &dst, Poly
     for (Polyline &polyline : polylines)
         if (polyline.is_valid()) {
             if (polyline.back() == polyline.front()) {
-                ExtrusionPath path(path_attr, can_reverse);
+                ExtrusionPath path(path_attr, nullptr, can_reverse);
                 path.polyline = polyline;
                 dst.append(ExtrusionLoop(std::move(path)));
             } else {
-                ExtrusionPath extrusion_path(path_attr, can_reverse);
+                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
                 extrusion_path.polyline = std::move(polyline);
                 dst.append(std::move(extrusion_path));
             }
@@ -253,7 +253,7 @@ inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Poly
     //dst.reserve(dst.size() + loops.size());
     for (Polygon & polygon : loops) {
         if (polygon.is_valid()) {
-            ExtrusionPath path(path_attr, can_reverse);
+            ExtrusionPath path(path_attr, nullptr, can_reverse);
             path.polyline.append(polygon.points);
             path.polyline.append(path.polyline.front());
             dst.append(ExtrusionLoop(std::move(path)));
@@ -266,7 +266,7 @@ inline void extrusion_entities_append_loops(ExtrusionEntityCollection &dst, Poly
     //dst.reserve(dst.size() + loops.size());
     for (Polygon &polygon : loops) {
         if (polygon.is_valid()) {
-            ExtrusionPath path(path_attr, can_reverse);
+            ExtrusionPath path(path_attr, nullptr, can_reverse);
             path.polyline.append(std::move(polygon.points));
             path.polyline.append(path.polyline.front());
             ExtrusionLoop loop(std::move(path));
@@ -284,11 +284,11 @@ inline void extrusion_entities_append_loops_and_paths(ExtrusionEntityCollection 
     for (Polyline &polyline : polylines) {
         if (polyline.is_valid()) {
             if (polyline.is_closed()) {
-                ExtrusionPath extrusion_path(path_attr, can_reverse);
+                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
                 extrusion_path.polyline = std::move(polyline);
                 dst.append(ExtrusionLoop(std::move(extrusion_path)));
             } else {
-                ExtrusionPath extrusion_path(path_attr, can_reverse);
+                ExtrusionPath extrusion_path(path_attr, nullptr, can_reverse);
                 extrusion_path.polyline = std::move(polyline);
                 dst.append(std::move(extrusion_path));
             }

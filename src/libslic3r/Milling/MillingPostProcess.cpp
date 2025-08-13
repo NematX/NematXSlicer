@@ -61,7 +61,7 @@ namespace Slic3r {
                     }
                 }
 
-                ExtrusionPath contour({ExtrusionRole::Milling});
+                ExtrusionPath contour({ExtrusionRole::Milling}, nullptr);
                 contour.attributes_mutable().mm3_per_mm = 0;
                 contour.attributes_mutable().width = (float)this->print_config.milling_diameter.get_at(0);
                 contour.attributes_mutable().height = (float)layer->unscaled_height();
@@ -86,7 +86,7 @@ namespace Slic3r {
             }
         }
         //default path, without safe-guard up-down.
-        ExtrusionPath contour({ExtrusionRole::Milling});
+        ExtrusionPath contour({ExtrusionRole::Milling}, nullptr);
         contour.polyline = ArcPolyline(poly.split_at_first_point());
         //do a second pass on the first segment
         if (contour.polyline.size() > 2)

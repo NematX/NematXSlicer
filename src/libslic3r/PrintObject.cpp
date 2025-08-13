@@ -1105,6 +1105,7 @@ void PrintObject::estimate_curled_extrusions()
         }
     }
 }
+
 void _calculate_overhanging_perimeters(
     const Layer &layer,
     LayerRegionIsland &lri,
@@ -1167,6 +1168,7 @@ void _calculate_overhanging_perimeters(
             if (max_width < 0) {
                 max_width = nozzle_diameter_overhangs;
             }
+            DEBUG_VISIT(lri.extrusion(LayerRegionIsland::PERIMETERS), LoopAssertVisitor());
             lri.mutable_extrusion(LayerRegionIsland::PERIMETERS) =
                 ExtrusionProcessor::calculate_and_split_overhanging_extrusions(&lri.extrusion(LayerRegionIsland::PERIMETERS),
                                                                                unscaled_polygons_lines[prev_layer_id],
@@ -1914,6 +1916,10 @@ ExPolygon try_fit_to_size2(ExPolygon polygon_to_check, const ExPolygon& allowedP
         }
         if ((best_point - polygon_reduced.contour.points[pos_check]).norm() < scale_(0.01)) ++pos_check;
         else polygon_reduced.contour.points.erase(polygon_reduced.contour.points.begin() + pos_check);
+    }
+    // edge case
+    if (polygon_reduced.contour.size() == 1) {
+        polygon_reduced.clear();
     }
     polygon_reduced.holes.clear();
     return polygon_reduced;

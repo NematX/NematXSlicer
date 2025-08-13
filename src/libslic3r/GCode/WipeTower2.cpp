@@ -142,165 +142,153 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
     assert(ordered_layers.size() < 2 || ordered_layers[0]->scaled_print_z() <= ordered_layers[1]->scaled_print_z());
 
     // check that we have the same as ordering
-    std::vector<coord_t> ordered_layers_z;
+    std::map<coord_t, std::vector<const Layer *>> ordered_layers_z;
     for (size_t i = 0; i < ordered_layers.size(); i++) {
-        if (ordered_layers_z.empty() || ordered_layers_z.back() < ordered_layers[i]->scaled_print_z()) {
-            ordered_layers_z.push_back(ordered_layers[i]->scaled_print_z());
-        }
+        ordered_layers_z[ordered_layers[i]->scaled_print_z()].push_back(ordered_layers[i]);
     }
     // layers in ordered_layers can have no extrusion, and so aren't in layer_tools
-    assert(ordered_layers.size() == ordered_layers_z.size());
     assert(ordering.layer_tools().size() == ordered_layers_z.size());
     for (size_t i = 0; i < ordering.layer_tools().size(); i++) {
         const LayerTools &ordering_l = ordering.layer_tools()[i];
-        assert(ordering_l._print_z == ordered_layers_z[i]);
+        assert(ordered_layers_z.find(ordering_l._print_z) != ordered_layers_z.end());
     }
 
     //now create layer info
     int16_t last_extruder_id = -1;
-    for (size_t layer_id = 0; layer_id < ordered_layers.size(); layer_id++) {
-        const Layer *layer = ordered_layers[layer_id];
-        const LayerTools &layer_tools = ordering.layer_tools()[layer_id];
-        //{
-        //    std::set<uint16_t> extruders;
-        //    // for each region
-        //    for (const LayerRegion *lr : layer->regions()) {
-        //        // get extruders
-        //        lr->region().collect_object_printing_extruders(*print, extruders);
-        //    }
-        //    std::set<uint16_t> layer_tools_set_extruders(layer_tools.extruders.begin(), layer_tools.extruders.end());
-        //    assert(extruders == layer_tools_set_extruders);
-        //}
-        // init new extruders
-        for (uint16_t extr_id : layer_tools.extruders) {
-            if (init_extruders.find(extr_id) == init_extruders.end()) {
-                init_extruders.insert(extr_id);
-                // compute width
-                const double nozzle_diameter = m_config->nozzle_diameter.get_at(extr_id);
-                coord_t line_width = scale_t(line_width_config.get_abs_value(nozzle_diameter));
-                if (line_width == 0) {
-                    line_width = scale_t(nozzle_diameter * 1.25);
-                }
-
-                // store min/max width
-                if (max_line_width < 0) {
-                    max_line_width = (line_width);
-                } else {
-                    max_line_width = std::max(max_line_width, (line_width));
-                }
-                if (min_line_width < 0) {
-                    min_line_width = (line_width);
-                } else {
-                    min_line_width = std::min(min_line_width, (line_width));
-                }
-
-                // compute filament change data
-                while (m_filament_change_data.size() <= extr_id) {
-                    m_filament_change_data.emplace_back();
-                }
-                if (m_filament_change_data[extr_id].tool_id <= size_t(-1)) {
-                    FilamentToolchangeInfo &fil = m_filament_change_data[extr_id];
-                    fil.tool_id = extr_id;
-                    // purge
-                    fil.purge_volume = 0;
-                    fil.purge_flow_mm3_sec = 0;
-                    if (m_config->filament_multitool_ramming.get_at(extr_id)) {
-                        fil.purge_flow_mm3_sec = m_config->filament_multitool_ramming_flow
-                                                                               .get_at(extr_id);
-                        fil.purge_volume = m_config->filament_multitool_ramming_volume
-                                                                         .get_at(extr_id);
+    int previous_layer_id = -1;
+    for (auto &ordered_layer_z : ordered_layers_z) {
+        assert(!ordered_layer_z.second.empty());
+        size_t layer_id = ordered_layer_z.second.front()->id();
+        assert(layer_id == previous_layer_id + 1);
+        for (const Layer *layer : ordered_layer_z.second) {
+            const LayerTools &layer_tools = ordering.layer_tools()[layer_id];
+            // init new extruders
+            for (uint16_t extr_id : layer_tools.extruders) {
+                if (init_extruders.find(extr_id) == init_extruders.end()) {
+                    init_extruders.insert(extr_id);
+                    // compute width
+                    const double nozzle_diameter = m_config->nozzle_diameter.get_at(extr_id);
+                    coord_t line_width = scale_t(line_width_config.get_abs_value(nozzle_diameter));
+                    if (line_width == 0) {
+                        line_width = scale_t(nozzle_diameter * 1.25);
                     }
-                    fil.purge_width = line_width;
-                    fil.purge_spacing = m_object_config->wipe_tower_extra_spacing.get_abs_value(
-                        fil.purge_width);
-                    // wipe
-                    fil.wipe_speed = m_config->wipe_tower_speed.value;
-                    if (m_config->filament_max_wipe_tower_speed.get_at(extr_id) > 0) {
-                        fil.wipe_speed =
-                            std::min(fil.wipe_speed,
-                                     m_config->filament_max_wipe_tower_speed.get_at(extr_id));
+
+                    // store min/max width
+                    if (max_line_width < 0) {
+                        max_line_width = (line_width);
+                    } else {
+                        max_line_width = std::max(max_line_width, (line_width));
                     }
-                    assert(fil.wipe_speed > 0);
-                    fil.wipe_width = line_width;
-                    fil.wipe_volume_min = m_config->filament_minimal_purge_on_wipe_tower
-                                                                          .get_at(extr_id);
-                    fil.wipe_spacing = m_object_config->wipe_tower_extra_spacing.get_abs_value(
-                        fil.wipe_width);
+                    if (min_line_width < 0) {
+                        min_line_width = (line_width);
+                    } else {
+                        min_line_width = std::min(min_line_width, (line_width));
+                    }
+
+                    // compute filament change data
+                    while (m_filament_change_data.size() <= extr_id) {
+                        m_filament_change_data.emplace_back();
+                    }
+                    if (m_filament_change_data[extr_id].tool_id <= size_t(-1)) {
+                        FilamentToolchangeInfo &fil = m_filament_change_data[extr_id];
+                        fil.tool_id = extr_id;
+                        // purge
+                        fil.purge_volume = 0;
+                        fil.purge_flow_mm3_sec = 0;
+                        if (m_config->filament_multitool_ramming.get_at(extr_id)) {
+                            fil.purge_flow_mm3_sec = m_config->filament_multitool_ramming_flow.get_at(extr_id);
+                            fil.purge_volume = m_config->filament_multitool_ramming_volume.get_at(extr_id);
+                        }
+                        fil.purge_width = line_width;
+                        fil.purge_spacing = m_object_config->wipe_tower_extra_spacing.get_abs_value(fil.purge_width);
+                        // wipe
+                        fil.wipe_speed = m_config->wipe_tower_speed.value;
+                        if (m_config->filament_max_wipe_tower_speed.get_at(extr_id) > 0) {
+                            fil.wipe_speed = std::min(fil.wipe_speed,
+                                                      m_config->filament_max_wipe_tower_speed.get_at(extr_id));
+                        }
+                        assert(fil.wipe_speed > 0);
+                        fil.wipe_width = line_width;
+                        fil.wipe_volume_min = m_config->filament_minimal_purge_on_wipe_tower.get_at(extr_id);
+                        fil.wipe_spacing = m_object_config->wipe_tower_extra_spacing.get_abs_value(fil.wipe_width);
+                    }
                 }
             }
-        }
 
-        // check if m_layer_data exists
-        coord_t layer_z = layer->scaled_print_z();
-        coord_t layer_height = std::max(min_wipe_tower_height, layer->scaled_height());
-        coord_t layer_bot = layer_z - layer_height;
-        int64_t layer_key = ObjectLayerData::compute_layer_key(layer_z, layer_height);
-        assert(layer_bot >= 0);
+            // check if m_layer_data exists
+            coord_t layer_z = layer->scaled_print_z();
+            coord_t layer_height = std::max(min_wipe_tower_height, layer->scaled_height());
+            coord_t layer_bot = layer_z - layer_height;
+            int64_t layer_key = ObjectLayerData::compute_layer_key(layer_z, layer_height);
+            assert(layer_bot >= 0);
 
-        // this layer is already here?
-        auto it_layer = m_layer_data.find(layer_key);
-        WipeTowerLayerData *wp_layer = nullptr;
-        if (it_layer == m_layer_data.end()) {
-            // add it
-            for (auto &wp_layer_search : m_printz_to_WTLayer_data) {
-                if (wp_layer_search.second.extrusion_z - wp_layer_search.second.extrusion_height >= layer_z) {
-                    // if bot of the wp_layer is higher than our topz -> stop search, we are already too high.
-                    break;
-                } else if (wp_layer_search.second.extrusion_z > layer_bot) {
+            // this layer is already here?
+            auto it_layer = m_layer_data.find(layer_key);
+            WipeTowerLayerData *wp_layer = nullptr;
+            if (it_layer == m_layer_data.end()) {
+                // add it
+                for (auto &wp_layer_search : m_printz_to_WTLayer_data) {
+                    if (wp_layer_search.second.extrusion_z - wp_layer_search.second.extrusion_height >= layer_z) {
+                        // if bot of the wp_layer is higher than our topz -> stop search, we are already too high.
+                        break;
+                    } else if (wp_layer_search.second.extrusion_z > layer_bot) {
                         // if top is over our bot, then we are in the same WipeTowerLayerData
                         wp_layer = &wp_layer_search.second;
                         break;
                     }
-            }
-            if (wp_layer == nullptr) {
-                // create WipeTowerLayerData
-                wp_layer = &m_printz_to_WTLayer_data[layer_z];
-                wp_layer->extrusion_z = layer_z;
-                wp_layer->extrusion_height = layer_height;
-                // create LayerData
-                std::unique_ptr<ObjectLayerData> &ld = m_layer_data[layer_key];
-                assert(!ld);
-                ld.reset(new ObjectLayerData());
-                ld->real_z = layer_z;
-                ld->real_height = layer_height;
-                ld->my_layers.push_back(layer);
-                wp_layer->fused_with.push_back(ld.get());
-            } else {
-                // fuse
-                // do we increase layer height?
-                if (wp_layer->extrusion_height < layer_height) {
-                    // works because ordered_layers is ordered
-                    wp_layer->extrusion_z += layer_height - wp_layer->extrusion_height;
-                    wp_layer->extrusion_height = layer_height;
                 }
-                // add it
-                // create LayerData
-                std::unique_ptr<ObjectLayerData> &ld = m_layer_data[layer_key];
-                assert(!ld);
-                ld.reset(new ObjectLayerData());
-                ld->real_z = layer_z;
-                ld->real_height = layer_height;
-                ld->my_layers.push_back(layer);
-                wp_layer->fused_with.push_back(ld.get());
+                if (wp_layer == nullptr) {
+                    // create WipeTowerLayerData
+                    wp_layer = &m_printz_to_WTLayer_data[layer_z];
+                    wp_layer->extrusion_z = layer_z;
+                    wp_layer->extrusion_height = layer_height;
+                    // create LayerData
+                    std::unique_ptr<ObjectLayerData> &ld = m_layer_data[layer_key];
+                    assert(!ld);
+                    ld.reset(new ObjectLayerData());
+                    ld->real_z = layer_z;
+                    ld->real_height = layer_height;
+                    ld->my_layers.push_back(layer);
+                    wp_layer->fused_with.push_back(ld.get());
+                } else {
+                    // fuse
+                    // do we increase layer height?
+                    if (wp_layer->extrusion_height < layer_height) {
+                        // works because ordered_layers is ordered
+                        wp_layer->extrusion_z += layer_height - wp_layer->extrusion_height;
+                        wp_layer->extrusion_height = layer_height;
+                    }
+                    // add it
+                    // create LayerData
+                    std::unique_ptr<ObjectLayerData> &ld = m_layer_data[layer_key];
+                    assert(!ld);
+                    ld.reset(new ObjectLayerData());
+                    ld->real_z = layer_z;
+                    ld->real_height = layer_height;
+                    ld->my_layers.push_back(layer);
+                    wp_layer->fused_with.push_back(ld.get());
+                }
+                it_layer = m_layer_data.find(layer_key);
+            } else {
+                // z already here. just add extruders
+                assert(m_printz_to_WTLayer_data.find(layer_z) != m_printz_to_WTLayer_data.end());
+                wp_layer = &m_printz_to_WTLayer_data[layer_z];
+                assert(std::find(it_layer->second->my_layers.begin(), it_layer->second->my_layers.end(), layer) ==
+                       it_layer->second->my_layers.end());
+                it_layer->second->my_layers.push_back(layer);
             }
-            it_layer = m_layer_data.find(layer_key);
-        } else {
-            // z already here. just add extruders
-            assert(m_printz_to_WTLayer_data.find(layer_z) != m_printz_to_WTLayer_data.end());
-            wp_layer = &m_printz_to_WTLayer_data[layer_z];
-            assert(std::find(it_layer->second->my_layers.begin(), it_layer->second->my_layers.end(), layer) == it_layer->second->my_layers.end());
-            it_layer->second->my_layers.push_back(layer);
-        }
 
-        // set extruders for the WipeTowerLayerData
-        ZLayerData &extruder_data = wp_layer->extruders_data[layer_z];
-        extruder_data.real_z = layer_z;
-        extruder_data.extruders = layer_tools.extruders;
-        if (last_extruder_id >= 0 && last_extruder_id != layer_tools.extruders.front()) {
-            //add previous extruder as the first to be changed.
-            extruder_data.extruders.insert(extruder_data.extruders.begin(), last_extruder_id);
+            // set extruders for the WipeTowerLayerData
+            ZLayerData &extruder_data = wp_layer->extruders_data[layer_z];
+            extruder_data.real_z = layer_z;
+            extruder_data.extruders = layer_tools.extruders;
+            if (last_extruder_id >= 0 && last_extruder_id != layer_tools.extruders.front()) {
+                // add previous extruder as the first to be changed.
+                extruder_data.extruders.insert(extruder_data.extruders.begin(), last_extruder_id);
+            }
+            last_extruder_id = layer_tools.extruders.back();
         }
-        last_extruder_id = layer_tools.extruders.back();
+        previous_layer_id = layer_id;
     }
     //it_layer->extruders.insert(extruders.begin(), extruders.end());
 
@@ -575,7 +563,7 @@ ExtrusionEntityCollection WipeTower2::prime(
         // create loading path
         Polyline priming_start = path_around_bed.split_at(dist_load);
         multipaths.paths.emplace_back(ArcPolyline(path_around_bed),
-                           ExtrusionAttributes{ExtrusionRole::WipeTower, tool_2_flow[tool_id]}, false);
+                           ExtrusionAttributes{ExtrusionRole::WipeTower, tool_2_flow[tool_id]}, nullptr, false);
         multipaths.paths.back().add_property(
             ExtrusionPropertySpeed(this->get_loading_speed(tool_id), this->get_first_layer_acceleration(tool_id),
                                    this->get_first_layer_pa(tool_id), this->get_first_layer_fan_speed(tool_id)));
@@ -585,7 +573,7 @@ ExtrusionEntityCollection WipeTower2::prime(
         if (dist_prime > SCALED_EPSILON) {
             unloading_start = priming_start.split_at(dist_prime);
             multipaths.paths.emplace_back(ArcPolyline(priming_start),
-                               ExtrusionAttributes{ExtrusionRole::WipeTower, tool_2_flow[tool_id]}, false);
+                               ExtrusionAttributes{ExtrusionRole::WipeTower, tool_2_flow[tool_id]}, nullptr, false);
             multipaths.paths.back().add_property(
                 ExtrusionPropertySpeed(this->get_prime_speed(tool_id), this->get_first_layer_acceleration(tool_id),
                                        this->get_first_layer_pa(tool_id), this->get_first_layer_fan_speed(tool_id)));
@@ -598,7 +586,7 @@ ExtrusionEntityCollection WipeTower2::prime(
         // (give unsued part to next tool -> path_around_bed)
         path_around_bed = unloading_start.split_at(dist_unload);
         multipaths.paths.emplace_back(ArcPolyline(unloading_start),
-                           ExtrusionAttributes{ExtrusionRole::WipeTower, tool_2_flow[tool_id]}, false);
+                           ExtrusionAttributes{ExtrusionRole::WipeTower, tool_2_flow[tool_id]}, nullptr, false);
         multipaths.paths.back().add_property(
             ExtrusionPropertySpeed(this->get_unloading_speed(tool_id), this->get_first_layer_acceleration(tool_id),
                                    this->get_first_layer_pa(tool_id), this->get_first_layer_fan_speed(tool_id)));
@@ -894,7 +882,7 @@ Polyline load_move_x_advanced(ExtrusionEntityCollection &coll, Polyline polyline
         x_speed = max_x_speed;
     }
     ExtrusionPath extrusion_path(ArcPolyline(polyline),
-                                    ExtrusionAttributes{ExtrusionRole::WipeTower, ExtrusionFlow{0, 0, 0}}, false);
+                                    ExtrusionAttributes{ExtrusionRole::WipeTower, ExtrusionFlow{0, 0, 0}}, nullptr, false);
     extrusion_path.add_property(ExtrusionPropertySpeed(x_speed));
     // use ExtrusionPropertySpecialCommand::EXTRUSION instead of ExtrusionFlow to be sure i have the exact amount of mm of extruder
     extrusion_path.add_property(
@@ -973,7 +961,7 @@ void WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
     // change_analyzer_line_width -> done by writer on the fly
     if (ramming_flow.width() != 0 /*!ramming_lines.empty()*/) {
         // can set speed/pa via property or via role.
-        ExtrusionPath ramming_path(ExtrusionAttributes(ExtrusionRole(ExtrusionRole::WipeTowerRamming), ramming_flow));
+        ExtrusionPath ramming_path(ExtrusionAttributes(ExtrusionRole(ExtrusionRole::WipeTowerRamming), ramming_flow), nullptr);
         // the ramming distance should be exactly cleaning_lines length
         ramming_path.polyline = ramming_lines;
         unload_collection.append(std::move(ramming_path));
@@ -1198,7 +1186,7 @@ void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection, Poly
     }
     
     // now the wiping itself:
-    ExtrusionPath path(wipe_lines, extr_flow_attr, false);
+    ExtrusionPath path(wipe_lines, extr_flow_attr, nullptr, false);
     collection.append(std::move(path));
 
     // We may be going back to the model - wipe the nozzle. If this is followed
@@ -1232,10 +1220,10 @@ bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection) {
         for (size_t i = 1; i < brim.size(); i++) {
             if (brim[i].front() == brim[i].back()) {
                 ExtrusionLoop loop;
-                loop.paths.emplace_back(ArcPolyline(brim[i]), extr_flow_attr, true);
+                loop.paths.emplace_back(ArcPolyline(brim[i]), extr_flow_attr, nullptr, true);
                 brim_coll.append(std::move(loop));
             } else {
-                brim_coll.append(ExtrusionPath(ArcPolyline(brim[i]), extr_flow_attr, true));
+                brim_coll.append(ExtrusionPath(ArcPolyline(brim[i]), extr_flow_attr, nullptr, true));
             }
         }
         collection.append(std::move(brim_coll));
@@ -1249,10 +1237,10 @@ bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection) {
     for (size_t i = 0; i < tower_perimeters.size(); i++) {
         if (tower_perimeters[i].front() == tower_perimeters[i].back()) {
             ExtrusionLoop loop;
-            loop.paths.emplace_back(ArcPolyline(tower_perimeters[i]), extr_flow_attr, true);
+            loop.paths.emplace_back(ArcPolyline(tower_perimeters[i]), extr_flow_attr, nullptr, true);
             collection.append(std::move(loop));
         } else {
-            collection.append(ExtrusionPath(ArcPolyline(tower_perimeters[i]), extr_flow_attr, true));
+            collection.append(ExtrusionPath(ArcPolyline(tower_perimeters[i]), extr_flow_attr, nullptr, true));
         }
     }
     perimeter_done = true;

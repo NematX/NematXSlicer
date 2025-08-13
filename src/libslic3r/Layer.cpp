@@ -1079,6 +1079,8 @@ void LayerSliceIsland::make_perimeters(LayerRegionIsland &region_island) {
             m_fill_no_overlap_expolygons
         );
 
+        DEBUG_VISIT(perimeters, LoopAssertVisitor());
+
         //remove extrusion collection if empty
         if (perimeters.empty()) {
             assert(gap_fills.empty());

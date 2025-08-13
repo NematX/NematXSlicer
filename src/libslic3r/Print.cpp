@@ -1918,7 +1918,7 @@ void Print::_make_skirt(const PrintObjectPtrs &objects, ExtrusionEntityCollectio
                     flow.width(),
                     float(unscaled(get_min_first_layer_height())) // this will be overridden at G-code export time
                 }
-            },
+            }, nullptr,
             false
         );
         eloop.paths.back().polyline = loop.split_at_first_point();

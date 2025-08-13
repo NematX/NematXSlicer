@@ -700,7 +700,7 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
 			    	for (; i < j; ++ i) {
                         this_loop_trimmed.entities.emplace_back(new ExtrusionPath({
                             ExtrusionRole::Skirt,
-                            ExtrusionFlow{ float(flow.mm3_per_mm()), float(flow.width()), float(print.skirt_first_layer_height()) } }));
+                            ExtrusionFlow{ float(flow.mm3_per_mm()), float(flow.width()), float(print.skirt_first_layer_height()) } }, nullptr));
 						const ClipperLib_Z::Path &path = *loops_trimmed_order[i].first;
 			            Points &points = dynamic_cast<ExtrusionPath*>(this_loop_trimmed.entities.back())->polyline.points;
 			            points.reserve(path.size());
@@ -846,11 +846,11 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
                     pline.reverse();
                 }
                 if (pline.back() == pline.front()) {
-                    ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, false);
+                    ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     path.polyline = pline;
                     to_add.push_back(new ExtrusionLoop(std::move(path), elrSkirt));
                 } else {
-                    ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, false);
+                    ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     extrusion_path->polyline = pline;
                     to_add.push_back(extrusion_path);
                 }
@@ -889,11 +889,11 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
                     pline.reverse();
                 }
                 if (pline.back() == pline.front()) {
-                    ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, false);
+                    ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     path.polyline = pline;
                     to_add.push_back(new ExtrusionLoop(std::move(path), elrSkirt));
                 } else {
-                    ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, false);
+                    ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     extrusion_path->polyline = pline;
                     to_add.push_back(extrusion_path);
                 }

@@ -90,7 +90,7 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
     };
 
     ExtrusionPaths      result;
-    result.emplace_back(path.attributes());
+    result.emplace_back(path.attributes(), path.clone_properties(), path.can_reverse());
     ExtrusionPropertyOverhang overhang_attributes(set_between_0_and_1(calculated_distances[0].first),
                                                             set_between_0_and_1(calculated_distances[0].first),
                                                             calculated_distances[0].second);
@@ -116,7 +116,7 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
             overhang_attributes.proximity_to_curled_lines      = calculated_distances[i].second;
             sequence_start_index                                          = i;
             if (result.back().size() > 1) {
-                result.emplace_back(path.attributes());
+                result.emplace_back(path.attributes(), path.clone_properties(), path.can_reverse());
                 result.back().overhang_attributes_mutable() = overhang_attributes;
                 result.back().polyline.append(Point::new_scale(extended_points[i].position));
             } else {
@@ -164,6 +164,22 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
     result.back().polyline.set_back(path.last_point());
     return result;
 };
+
+//class CalculateSplitOverhangVisitor : public ExtrusionVisitorRecursiveConst {
+//public:
+//    ExtrusionEntities current_collection;
+//    const AABBTreeLines::LinesDistancer<Linef> &unscaled_prev_layer;
+//    const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines;
+//    const double max_width
+//    using ExtrusionVisitorRecursiveConst::use;
+//    CalculateSplitOverhangVisitor() {
+//    }
+//    void use(const ExtrusionPath &path) override { volume += unscaled(path3D.length()) * path3D.mm3_per_mm(); }
+//    void use(const ExtrusionPath3D &path3D) override { 
+//            result.append(std::move(new_mp)); //TODO split
+//    }
+//    double get(const ExtrusionEntityCollection &coll);
+//};
 
 ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(const ExtrusionEntityCollection            *ecc,
                                                                      const AABBTreeLines::LinesDistancer<Linef> &unscaled_prev_layer,

@@ -899,8 +899,7 @@ float CoolingBuffer::calculate_layer_slowdown(std::vector<PerExtruderAdjustments
         float total = elapsed_time_total0;
         for (auto it = cur_begin; it != by_slowdown_time.end(); ++ it)
             total += (*it)->time_total;
-        float slowdown_below_layer_time = adj.slowdown_below_layer_time * 1.001f;
-        if (total > slowdown_below_layer_time) {
+        if (total * 1.001f >= adj.slowdown_below_layer_time) {
             // The current total time is above the minimum threshold of the rest of the extruders, don't adjust anything.
         } else {
             // Adjust this and all the following (higher m_config.slowdown_below_layer_time) extruders.
@@ -908,11 +907,11 @@ float CoolingBuffer::calculate_layer_slowdown(std::vector<PerExtruderAdjustments
             float max_time = elapsed_time_total0;
             for (auto it = cur_begin; it != by_slowdown_time.end(); ++ it)
                 max_time += (*it)->time_maximum;
-            if (max_time > slowdown_below_layer_time) {
+            if (max_time > adj.slowdown_below_layer_time) {
                 if (m_cooling_logic_proportional)
-                    extruder_range_slow_down_proportional(cur_begin, by_slowdown_time.end(), elapsed_time_total0, total, slowdown_below_layer_time);
+                    extruder_range_slow_down_proportional(cur_begin, by_slowdown_time.end(), elapsed_time_total0, total, adj.slowdown_below_layer_time);
                 else
-                    extruder_range_slow_down_non_proportional(cur_begin, by_slowdown_time.end(), slowdown_below_layer_time - total);
+                    extruder_range_slow_down_non_proportional(cur_begin, by_slowdown_time.end(), adj.slowdown_below_layer_time - total);
             } else {
                 // Slow down to maximum possible.
                 for (auto it = cur_begin; it != by_slowdown_time.end(); ++ it)

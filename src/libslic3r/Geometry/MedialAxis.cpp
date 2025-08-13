@@ -502,7 +502,7 @@ get_coeff_from_angle_countour(Point& point, const ExPolygon& contour, coord_t mi
     angle = angle_ccw(point_before - point_nearest, \
                    point_after - point_nearest); // point_nearest.ccw_angle(point_before, point_after);if (angle >=
                                                  // PI) angle = 2 * PI - angle;
-    assert(angle < PI);
+    assert(angle <= PI);
     //compute the diff from 90°
     angle = abs(angle - PI / 2);
     if (point_near.coincides_with_epsilon(point_nearest) && std::max(nearest_dist, near_dist) + SCALED_EPSILON < point_nearest.distance_to(point_near)) {
@@ -2502,7 +2502,7 @@ unsafe_variable_width(const ThickPolyline& polyline, const ExtrusionRole role, c
 #endif
 
     ExtrusionPaths paths;
-    ExtrusionPath path(role, false);
+    ExtrusionPath path(role, nullptr, false);
     ThickLines lines = polyline.thicklines();
     Flow current_flow = flow;
 
@@ -2531,7 +2531,11 @@ unsafe_variable_width(const ThickPolyline& polyline, const ExtrusionRole role, c
         // split lines ?
         if (resolution_internal < line_len) {
             if (thickness_delta > tolerance && ceil(float(thickness_delta) / float(tolerance)) > 2) {
-                const uint16_t segments = 1 + (uint16_t)std::min((uint32_t)16000, (uint32_t)ceil(float(thickness_delta) / float(tolerance)));
+                const uint32_t max_segments = std::min(1 + int(line_len / resolution_internal),
+                                                       int(line_len / (SCALED_EPSILON * 2)));
+                const uint16_t segments = 1 +
+                    (uint16_t) std::min(std::min(max_segments, (uint32_t) 16000),
+                                        (uint32_t) ceil(float(thickness_delta) / float(tolerance)));
                 Points pp;
                 std::vector<coordf_t> width;
                 {
@@ -2729,7 +2733,7 @@ unsafe_variable_width(const ThickPolyline& polyline, const ExtrusionRole role, c
             assert(!std::isnan(current_flow.mm3_per_mm()));
             assert(!std::isnan(current_flow.width()));
             assert(!std::isnan(current_flow.height()));
-			path = { ExtrusionAttributes{ role, current_flow }, false };
+            path = ExtrusionPath( ExtrusionAttributes{ role, current_flow }, nullptr, false );
             path.polyline.append(line.a);
             path.polyline.append(line.b);
             assert(path.polyline.is_valid());
@@ -2754,7 +2758,7 @@ unsafe_variable_width(const ThickPolyline& polyline, const ExtrusionRole role, c
                 assert(!std::isnan(current_flow.mm3_per_mm()));
                 assert(!std::isnan(current_flow.width()));
                 assert(!std::isnan(current_flow.height()));
-				path = { ExtrusionAttributes{ role, current_flow }, false };
+                path = ExtrusionPath( ExtrusionAttributes{ role, current_flow }, nullptr, false );
                 path.polyline.append(line.a);
                 path.polyline.append(line.b);
                 assert(path.polyline.is_valid());
@@ -2784,8 +2788,10 @@ ExtrusionEntitiesPtr
     ExtrusionEntitiesPtr coll;
     for (const ThickPolyline& p : polylines) {
 #if _DEBUG
-        for (size_t idx_pt = 1; idx_pt < p.size(); ++idx_pt)
+        for (size_t idx_pt = 1; idx_pt < p.size(); ++idx_pt) {
             assert(!p.points[idx_pt - 1].coincides_with_epsilon(p.points[idx_pt]));
+            assert(p.points[idx_pt - 1].distance_to(p.points[idx_pt]) >= SCALED_EPSILON);
+        }
 #endif
         ExtrusionMultiPath multi_paths = variable_width(p, role, flow, resolution_internal, tolerance, can_reverse);
         // Append paths to collection.
@@ -2800,7 +2806,23 @@ ExtrusionEntitiesPtr
                     assert(!it->polyline.get_point(idx_pt - 1).coincides_with_epsilon(it->polyline.get_point(idx_pt)));
 #endif
             if (multi_paths.paths.front().first_point().coincides_with_epsilon(multi_paths.paths.back().last_point())) {
-                coll.push_back(new ExtrusionLoop(std::move(multi_paths.paths)));
+                // check if real loop or fluke
+                int nb_points = 0;
+                for (ExtrusionPath &path : multi_paths.paths) {
+                    nb_points += path.size() -1;
+                }
+                if (nb_points > 2) {
+                    // good enough
+                    coll.push_back(new ExtrusionLoop(std::move(multi_paths.paths)));
+                } else {
+                    // fluke, not big enough
+                    assert(multi_paths.paths.size() <= 2);
+                    assert(multi_paths.paths.front().size() > 1);
+                    if (multi_paths.paths.front().size() > 2) {
+                        multi_paths.paths.front().polyline.pop_back();
+                    }
+                    coll.push_back(multi_paths.paths.front().clone_move());
+                }
             } else {
                 if (role == ExtrusionRole::ThinWall) {
                     //thin walls : avoid to cut them, please.

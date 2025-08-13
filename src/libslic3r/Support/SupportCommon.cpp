@@ -1521,7 +1521,7 @@ static void modulate_extrusion_by_overlapping_layers(
             }
             if (path == nullptr) {
                 // Allocate a new path.
-                multipath.paths.emplace_back(ExtrusionAttributes{extrusion_role, frag.flow}, multipath.can_reverse());
+                multipath.paths.emplace_back(ExtrusionAttributes{extrusion_role, frag.flow}, nullptr, multipath.can_reverse());
                 path = &multipath.paths.back();
             }
             // The Clipper library may flip the order of the clipped polylines arbitrarily.
