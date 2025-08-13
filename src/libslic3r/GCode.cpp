@@ -102,7 +102,6 @@ using namespace std::literals::string_view_literals;
 #define _DEBUG
 #undef NDEBUG
 #endif
-#pragma UNOPTIMIZE
 
 namespace Slic3r {
 
