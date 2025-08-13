@@ -155,13 +155,14 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
 
     //now create layer info
     int16_t last_extruder_id = -1;
-    int previous_layer_id = -1;
+    size_t idx_layer = 0;
     for (auto &ordered_layer_z : ordered_layers_z) {
+        assert(idx_layer < ordering.layer_tools().size());
+        const LayerTools &layer_tools = ordering.layer_tools()[idx_layer];
+        assert(ordered_layer_z.first == layer_tools._print_z);
         assert(!ordered_layer_z.second.empty());
-        size_t layer_id = ordered_layer_z.second.front()->id();
-        assert(layer_id == previous_layer_id + 1);
+        const size_t layer_id = ordered_layer_z.second.front()->id();
         for (const Layer *layer : ordered_layer_z.second) {
-            const LayerTools &layer_tools = ordering.layer_tools()[layer_id];
             // init new extruders
             for (uint16_t extr_id : layer_tools.extruders) {
                 if (init_extruders.find(extr_id) == init_extruders.end()) {
@@ -288,7 +289,8 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
             }
             last_extruder_id = layer_tools.extruders.back();
         }
-        previous_layer_id = layer_id;
+        //next item
+        idx_layer++;
     }
     //it_layer->extruders.insert(extruders.begin(), extruders.end());
 
