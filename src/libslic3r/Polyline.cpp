@@ -633,8 +633,11 @@ void ArcPolyline::clear() {
 
 void ArcPolyline::append(const Points &src)
 {
-    assert(this->empty() || src.empty() || src.front().coincides_with_epsilon(this->back()));
-    for (size_t i = 1; i < src.size(); ++i) {
+    size_t i = 0;
+    if (!m_path.empty() && !src.empty() && m_path.back().point.coincides_with_epsilon(src.front())) {
+        i++;
+    }
+    for (; i < src.size(); ++i) {
         const Point &point = src[i];
         m_path.emplace_back(point, 0.f, Geometry::ArcWelder::Orientation::Unknown);
     }
@@ -643,8 +646,11 @@ void ArcPolyline::append(const Points &src)
 
 void ArcPolyline::append(Points &&src)
 {
-    assert(this->empty() || src.empty() || src.front().coincides_with_epsilon(this->back()));
-    for (size_t i = 1; i < src.size(); ++i) {
+    size_t i = 0;
+    if (!m_path.empty() && !src.empty() && m_path.back().point.coincides_with_epsilon(src.front())) {
+        i++;
+    }
+    for (; i < src.size(); ++i) {
         const Point &point = src[i];
         m_path.emplace_back(std::move(point), 0, Geometry::ArcWelder::Orientation::Unknown);
     }

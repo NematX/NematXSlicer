@@ -763,7 +763,7 @@ GCodeGenerator::GCodeGenerator() :
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     m_last_mm3_per_mm(0.0),
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
-    m_brim_done(false),
+    m_brim_done(),
     m_second_layer_things_done(false),
     m_silent_time_estimator_enabled(false),
     m_current_instance({nullptr, -1}),
@@ -3571,7 +3571,7 @@ LayerResult GCodeGenerator::process_layer(
         }
 
         // Extrude brim with the extruder of the 1st region.
-        if (! m_brim_done) {
+        if (!m_brim_done[{nullptr, 0}]) {
             //global skirt & brim use the global settings.
             m_config.apply(print.default_object_config(), true);
             this->set_origin(0., 0.);
@@ -3584,7 +3584,7 @@ LayerResult GCodeGenerator::process_layer(
                 gcode += this->extrude_entity({*brim_entity, false}, "Brim"sv);
             }
             m_last_too_small.polyline.clear();
-            m_brim_done = true;
+            m_brim_done[{nullptr, 0}] = true;
             m_avoid_crossing_perimeters.use_external_mp(false);
             // Allow a straight travel move to the first object point.
             m_avoid_crossing_perimeters.disable_once();
@@ -3614,8 +3614,8 @@ LayerResult GCodeGenerator::process_layer(
             }
         }
         //extrude object-only brim (for sequential)
-        if (print_object_skirtbrim_start && !layers.front().object()->brim().empty()
-            && extruder_id == layer_tools.extruders.front() && object_layer) {
+        if (print_object_skirtbrim_start && !layers.front().object()->brim().empty() &&
+            extruder_id == layer_tools.extruders.front() && object_layer && !m_brim_done[{layers.front().object(), 0}]) {
 
             const PrintObject* print_object = layers.front().object();
             //object skirt & brim use the object settings.
@@ -3630,7 +3630,8 @@ LayerResult GCodeGenerator::process_layer(
                 m_avoid_crossing_perimeters.disable_once();
                 m_last_too_small.polyline.clear();
             }
-            
+
+            m_brim_done[{layers.front().object(), 0}] = true;
         }
 
         std::vector<InstanceToPrint> instances_to_print = sort_print_object_instances(layers, ordering, single_object_instance_idx);
@@ -3797,7 +3798,8 @@ void GCodeGenerator::process_layer_single_object(
 
     //extrude instance-only brim
     bool print_object_skirtbrim_start = print.config().complete_objects.value || print.config().parallel_objects_step > 0;
-    if (!print_object_skirtbrim_start && this->m_layer != nullptr && this->m_layer->id() == 0 && !print_args.print_instance.print_object.brim().empty()) {
+    if (!print_object_skirtbrim_start && this->m_layer != nullptr && this->m_layer->id() == 0 && !print_args.print_instance.print_object.brim().empty()
+        && !m_brim_done[{&print_args.print_instance.print_object, print_args.print_instance.instance_id}]) {
         assert(print_args.print_instance.instance_id < print_args.print_instance.print_object.brim().items_count());
         Vec2d offset = this->origin(); 
         this->set_origin(0., 0.);
@@ -3814,6 +3816,7 @@ void GCodeGenerator::process_layer_single_object(
             m_last_too_small.polyline.clear();
         }
         this->set_origin(offset);
+        m_brim_done[{&print_args.print_instance.print_object, print_args.print_instance.instance_id}] = true;
     }
 
     if (const Layer *layer = layer_to_print.object_layer; layer) {
