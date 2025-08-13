@@ -4963,7 +4963,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_fan_speed", coPercent);
     def->label = L("Fan speed override");
@@ -4975,7 +4975,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_perimeters_fan_speed", coPercent);
     def->label = L("Fan speed override for all perimeters");
@@ -4988,7 +4988,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_solid_infill_fan_speed", coPercent);
     def->label = L("Fan speed override for top and solid infill");
@@ -5001,7 +5001,7 @@ void PrintConfigDef::init_fff_params()
     def->max = 100;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(disable_defaultoption(new ConfigOptionPercent(0)));
+    def->set_default_value(disable_default_option(new ConfigOptionPercent(0)));
 
     def = this->add("print_first_layer_bed_temperature", coInt);
     def->label = L("First Layer Bed Temperature");
