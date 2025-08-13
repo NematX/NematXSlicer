@@ -3475,7 +3475,7 @@ void FillRectilinear::change_flow_intersection(const Polylines &polylines_first_
                 multi_path.paths.back().polyline.append(std::move(pts));
             } else {
                 // create new
-                multi_path.paths.push_back(ExtrusionPath(std::move(pts), attr, !params.monotonic));
+                multi_path.paths.push_back(ExtrusionPath(std::move(pts), attr, nullptr, !params.monotonic));
                 if (multi_path.paths.size() > 1)
                     assert(std::abs(multi_path.paths[multi_path.paths.size() - 2].mm3_per_mm() -
                                     multi_path.paths[multi_path.paths.size() - 1].mm3_per_mm()) >
@@ -3484,7 +3484,7 @@ void FillRectilinear::change_flow_intersection(const Polylines &polylines_first_
             assert(multi_path.paths.back().polyline.is_valid());
         };
         // create an extrusionpath
-        ExtrusionPath path(default_attr);
+        ExtrusionPath path(default_attr, nullptr);
         // for each line of the polyline
         Point pt_previous = polyline.points.front();
         path.polyline.append(pt_previous);
@@ -3693,7 +3693,7 @@ void FillRectilinear::change_flow_intersection(const Polylines &polylines_first_
                 }
 
                 // reset current path
-                path = ExtrusionPath(default_attr);
+                path = ExtrusionPath(default_attr, nullptr);
                 path.polyline.append(pt_current);
             }
 
@@ -4085,7 +4085,7 @@ void FillRectilinearAroundHoles::fill_surface_extrusion(const Surface* surface, 
                 new ExtrusionPath({good_role,
                                    {params.flow.mm3_per_mm() * params.flow_mult,
                                     (float) (params.flow.width() * params.flow_mult), (float) params.flow.height()}},
-                                  true));
+                                  nullptr, true));
             path->polyline = poly;
             current_paths->append(path);
             // Create travel
@@ -4154,7 +4154,7 @@ void FillRectilinearAroundHoles::fill_surface_extrusion(const Surface* surface, 
                                                            {params.flow.mm3_per_mm() * params.flow_mult,
                                                             (float) (params.flow.width() * params.flow_mult),
                                                             (float) params.flow.height()}},
-                                                          true));
+                                                          nullptr, true));
                                     last_length    = poly_other.length();
                                     path->polyline = std::move(poly_other);
                                     bunch_paths->append(path);
@@ -4327,13 +4327,13 @@ void FillRectilinearAroundHoles::fill_surface_extrusion(const Surface* surface, 
                     if (params.config->fill_rectilinearholes_travel_flow_ratio == 0) {
                         path = new ExtrusionPath({ExtrusionRole::RectilinearAroundHoleInfillTravel,
                                                   {0, 0, (float) params.flow.height()}},
-                                                 true);
+                                                 nullptr, true);
                     } else {
                         path = new ExtrusionPath({ExtrusionRole::RectilinearAroundHoleInfillTravel,
                                                   {params.config->fill_rectilinearholes_travel_flow_ratio
                                                        .get_abs_value(params.flow.mm3_per_mm() * params.flow_mult),
                                                    (float) (params.flow.width() * 0.1), (float) params.flow.height()}},
-                                                 true);
+                                                 nullptr, true);
                     }
                     path->polyline = std::move(poly);
                     current_paths->set_entities().push_back(path);

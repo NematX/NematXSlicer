@@ -6978,13 +6978,13 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
                 if (lstart.intersection_infinite(lend, &center)) {
                     // create arc
                     if (intermediate_start.coincides_with_epsilon(pt_start)) {
-                        paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 1)}});
+                        paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 1)}}, nullptr);
                         paths.back().polyline.append(pt_start);
                     } else {
-                        paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 0)}});
+                        paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 0)}}, nullptr);
                         paths.back().polyline.append(pt_start);
                         paths.back().polyline.append(intermediate_start);
-                        paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 1)}});
+                        paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 1)}}, nullptr);
                         paths.back().polyline.append(intermediate_start);
                     }
                     Geometry::ArcWelder::Segment arc;
@@ -6998,7 +6998,7 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
                             paths.back().polyline.append(arc);
                         } else {
                             paths.back().polyline.append(arc);
-                            paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 2)}});
+                            paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 2)}}, nullptr);
                             paths.back().polyline.append(arc.point);
                             paths.back().polyline.append(pt_end);
                         }
@@ -7009,7 +7009,7 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
                 }
             }
             if (need_extrude_strait) {
-                paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 1)}});
+                paths.emplace_back(ExtrusionAttributes{ExtrusionRole::None, ExtrusionFlow{e_per_mm, float(path_width), float(path_type_idx + 1)}}, nullptr);
                 paths.back().polyline.append(pt_start);
                 paths.back().polyline.append(pt_end);
             }
