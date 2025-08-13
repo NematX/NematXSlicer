@@ -1090,6 +1090,9 @@ Slic3r::Polygons offset(const Slic3r::Polyline &polyline, const double delta, Cl
 Slic3r::Polygons offset(const Slic3r::Polylines &polylines, const double delta, ClipperLib::JoinType joinType, double miterLimit, ClipperLib::EndType end_type)
     { assert(delta > 0); return to_polygons(clipper_union<ClipperLib::Paths>(raw_offset_polyline(ClipperUtils::PolylinesProvider(polylines), delta, joinType, miterLimit, end_type))); }
 
+Slic3r::ExPolygons offset_ex(const Slic3r::Polyline &polyline, const double delta, ClipperLib::JoinType joinType, double miterLimit, ClipperLib::EndType end_type)
+    { assert(delta > 0); return PolyTreeToExPolygons(clipper_union<ClipperLib::PolyTree>(raw_offset_polyline(ClipperUtils::SinglePathProvider(polyline.points), delta, joinType, miterLimit, end_type))); }
+
 Polygons contour_to_polygons(const Polygon &polygon, const float line_width, ClipperLib::JoinType join_type, double miter_limit){
     assert(line_width > 1.f); return to_polygons(clipper_union<ClipperLib::Paths>(
         raw_offset(ClipperUtils::SinglePathProvider(polygon.points), line_width/2, join_type, miter_limit, ClipperLib::etClosedLine)));}
