@@ -101,15 +101,16 @@ std::vector<const Layer *> WipeTower2::WipeTowerLayerData::layers() const {
 }
 std::vector<const PrintObject *> WipeTower2::WipeTowerLayerData::objects() const {
     //std::vector<const Layer *> my_layers = this->layers();
-    std::vector<const PrintObject *> my_objects;
+    //std::vector<const PrintObject *> my_objects;
     std::set<const PrintObject *> all_objects;
     for (const ObjectLayerData *layers : fused_with) {
         for (const Layer *layer : layers->my_layers) {
-            my_objects.push_back(layer->object());
+            //my_objects.push_back(layer->object());
             all_objects.insert(layer->object());
         }
     }
-    assert(all_objects.size() == my_objects.size());
+    //assert(all_objects.size() == my_objects.size());
+    std::vector<const PrintObject *> my_objects(all_objects.begin(), all_objects.end());
     return my_objects;
 }
 
@@ -228,30 +229,38 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
             WipeTowerLayerData *wp_layer = nullptr;
             if (it_layer == m_layer_data.end()) {
                 // add it
-                for (auto &wp_layer_search : m_printz_to_WTLayer_data) {
-                    if (wp_layer_search.second.extrusion_z - wp_layer_search.second.extrusion_height >= layer_z) {
-                        // if bot of the wp_layer is higher than our topz -> stop search, we are already too high.
-                        break;
-                    } else if (wp_layer_search.second.extrusion_z > layer_bot) {
-                        // if top is over our bot, then we are in the same WipeTowerLayerData
-                        wp_layer = &wp_layer_search.second;
-                        break;
+                //find our WTlayer
+                auto search_wp_layer = m_printz_to_WTLayer_data.find(layer_z);
+                if (search_wp_layer == m_printz_to_WTLayer_data.end()) {
+                    // search for compatible layer
+                    for (auto &wp_layer_search : m_printz_to_WTLayer_data) {
+                        if (wp_layer_search.second->extrusion_z - wp_layer_search.second->extrusion_height >= layer_z) {
+                            // if bot of the wp_layer is higher than our topz -> stop search, we are already too high.
+                            break;
+                        } else if (wp_layer_search.second->extrusion_z > layer_bot) {
+                            // if top is over our bot, then we are in the same WipeTowerLayerData
+                            wp_layer = wp_layer_search.second;
+                            break;
+                        }
                     }
+                    if (wp_layer != nullptr) {
+                        // register it for our z
+                        m_printz_to_WTLayer_data[layer_z] = wp_layer;
+                    }
+                } else {
+                    // found it
+                    wp_layer = search_wp_layer->second;
                 }
                 if (wp_layer == nullptr) {
                     // create WipeTowerLayerData
-                    wp_layer = &m_printz_to_WTLayer_data[layer_z];
+                    m_WTLayer_data.emplace_back(new WipeTowerLayerData());
+                    wp_layer = m_WTLayer_data.back().get();
                     wp_layer->extrusion_z = layer_z;
                     wp_layer->extrusion_height = layer_height;
-                    // create LayerData
-                    std::unique_ptr<ObjectLayerData> &ld = m_layer_data[layer_key];
-                    assert(!ld);
-                    ld.reset(new ObjectLayerData());
-                    ld->real_z = layer_z;
-                    ld->real_height = layer_height;
-                    ld->my_layers.push_back(layer);
-                    wp_layer->fused_with.push_back(ld.get());
+                    m_printz_to_WTLayer_data[layer_z] = wp_layer;
                 } else {
+                    assert(m_printz_to_WTLayer_data.find(layer_z) != m_printz_to_WTLayer_data.end() &&
+                           m_printz_to_WTLayer_data.find(layer_z)->second == wp_layer);
                     // fuse
                     // do we increase layer height?
                     if (wp_layer->extrusion_height < layer_height) {
@@ -260,20 +269,20 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                         wp_layer->extrusion_height = layer_height;
                     }
                     // add it
-                    // create LayerData
-                    std::unique_ptr<ObjectLayerData> &ld = m_layer_data[layer_key];
-                    assert(!ld);
-                    ld.reset(new ObjectLayerData());
-                    ld->real_z = layer_z;
-                    ld->real_height = layer_height;
-                    ld->my_layers.push_back(layer);
-                    wp_layer->fused_with.push_back(ld.get());
                 }
+                // create LayerData
+                std::unique_ptr<ObjectLayerData> &ld = m_layer_data[layer_key];
+                assert(!ld);
+                ld.reset(new ObjectLayerData());
+                ld->real_z = layer_z;
+                ld->real_height = layer_height;
+                ld->my_layers.push_back(layer);
+                wp_layer->fused_with.push_back(ld.get());
                 it_layer = m_layer_data.find(layer_key);
             } else {
                 // z already here. just add extruders
                 assert(m_printz_to_WTLayer_data.find(layer_z) != m_printz_to_WTLayer_data.end());
-                wp_layer = &m_printz_to_WTLayer_data[layer_z];
+                wp_layer = m_printz_to_WTLayer_data[layer_z];
                 assert(std::find(it_layer->second->my_layers.begin(), it_layer->second->my_layers.end(), layer) ==
                        it_layer->second->my_layers.end());
                 it_layer->second->my_layers.push_back(layer);
@@ -300,7 +309,7 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
 
     // compute estimated tower length for each layer
     for (auto &entry : m_printz_to_WTLayer_data) {
-        WipeTowerLayerData &wp_layer = entry.second;
+        WipeTowerLayerData &wp_layer = *entry.second;
         const size_t nb_toolchange = 0;
         coord_t total_wipe_tower_length = 0;
         for (auto &entry : wp_layer.extruders_data) {
@@ -339,15 +348,15 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
     auto it_current = it_previous;
     for (it_current++; it_current != m_printz_to_WTLayer_data.rend();
          it_previous = it_current, it_current++) {
-        WipeTowerLayerData &wp_layer_prev = it_previous->second;
-        WipeTowerLayerData &wp_layer_curr = it_current->second;
+        WipeTowerLayerData &wp_layer_prev = *it_previous->second;
+        WipeTowerLayerData &wp_layer_curr = *it_current->second;
         wp_layer_curr.estimated_wipe_tower_length = std::max(wp_layer_curr.estimated_wipe_tower_length,
                                                              wp_layer_prev.estimated_wipe_tower_length);
     }
 
     //create WipeTowerLayer for each WipeTowerLayerData
-    for (auto &entry : m_printz_to_WTLayer_data) {
-        WipeTowerLayerData &wp_layer = entry.second;
+    for (auto &ptr : m_WTLayer_data) {
+        WipeTowerLayerData &wp_layer = *ptr;
         std::shared_ptr<WipeTowerLayer> wipe_tower_layer(new WipeTowerLayer(this));
         wipe_tower_layer->extrusion_z = wp_layer.extrusion_z;
         wipe_tower_layer->extrusion_height = wp_layer.extrusion_height;
@@ -372,8 +381,8 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
 
 
 bool WipeTower2::has_toolchange() const {
-    for (auto &z_to_WTLD : m_printz_to_WTLayer_data) {
-        for (auto &z_to_ZLD : z_to_WTLD.second.extruders_data) {
+    for (auto &WTLD_ptr : m_WTLayer_data) {
+        for (auto &z_to_ZLD : WTLD_ptr->extruders_data) {
             if (z_to_ZLD.second.extruders.size() > 1) {
                 return true;
             }
@@ -610,7 +619,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
     // create Toolchange & Purge
     assert(m_wipe_tower_info);
     assert(m_wipe_tower_info->m_printz_to_WTLayer_data.find(extrusion_z) != m_wipe_tower_info->m_printz_to_WTLayer_data.end());
-    const WipeTower2::WipeTowerLayerData &data = m_wipe_tower_info->m_printz_to_WTLayer_data.at(extrusion_z);
+    const WipeTower2::WipeTowerLayerData &data = *m_wipe_tower_info->m_printz_to_WTLayer_data.at(extrusion_z);
 
     assert(!layers.empty());
     assert(!ordered_extruders.empty());
@@ -716,7 +725,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                                                         unscaled(data.estimated_wipe_tower_length),
                                                         m_object_config->wipe_tower_cone_angle.value);
 
-        coord_t wipe_tower_max_z = m_wipe_tower_info->m_printz_to_WTLayer_data.rbegin()->second.extrusion_z;
+        coord_t wipe_tower_max_z = m_wipe_tower_info->m_printz_to_WTLayer_data.rbegin()->second->extrusion_z;
         double r = std::tan(Geometry::deg2rad(m_object_config->wipe_tower_cone_angle.value/2.f)) * unscaled(wipe_tower_max_z - extrusion_z);
         Vec2f center;
         center.y() += unscaled(data.estimated_wipe_tower_length / 2);

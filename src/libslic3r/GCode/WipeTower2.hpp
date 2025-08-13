@@ -145,7 +145,8 @@ public:
         std::vector<const Layer *> layers() const;
         std::vector<const PrintObject *> objects() const;
     };
-    std::map<coord_t, WipeTowerLayerData> m_printz_to_WTLayer_data;
+    std::vector<std::unique_ptr<WipeTowerLayerData>> m_WTLayer_data;
+    std::map<coord_t, WipeTowerLayerData*> m_printz_to_WTLayer_data;
 
     // init m_filament_change_data and m_layer_data, m_printz_to_WTLayer_data
     void init(const Print *print, const SpanOfConstPtrs<PrintObject> &objects, ToolOrdering &ordering);

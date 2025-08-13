@@ -3686,7 +3686,7 @@ LayerResult GCodeGenerator::process_layer(
     if (print.wipe_tower2()->has_toolchange()) {
         // find our WipeTowerLayer
         for (const auto &z_to_WTLD : print.wipe_tower2()->m_printz_to_WTLayer_data) {
-            for (WipeTower2::ObjectLayerData *z_to_OLD : z_to_WTLD.second.fused_with) {
+            for (WipeTower2::ObjectLayerData *z_to_OLD : z_to_WTLD.second->fused_with) {
                 if (z_to_OLD->real_z == print_z && z_to_OLD->real_height == layer.scaled_height()) {
                     wtl = std::move(z_to_OLD->create_wipe_tower_layer());
                     goto found_WTL;
