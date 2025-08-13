@@ -12,8 +12,7 @@
 #include "SupportParameters.hpp"
 
 namespace Slic3r {
-    
-#pragma UNOPTIMIZE
+
 class PrintObject;
 class SupportLayer;
 
