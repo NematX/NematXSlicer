@@ -201,11 +201,27 @@ bool remove_small(Polygons &polys, double min_area);
 void remove_collinear(Polygon &poly, coord_t max_offset = SCALED_EPSILON);
 void remove_collinear(Polygons &polys, coord_t max_offset = SCALED_EPSILON);
 
+//don't append polygons! or only not-hole polygons!
+//prefer appending expolygon, it's safer
+// because if you append a big hole at the end of the list, you erase evrything.
+
 // Append a vector of polygons at the end of another vector of polygons.
-inline void polygons_append(Polygons &dst, const Polygons &src) { dst.insert(dst.end(), src.begin(), src.end()); }
+inline void polygons_append(Polygons &dst, const Polygons &src) {
+#ifdef _DEBUG
+    for (const Polygon &poly : src) {
+        assert(poly.is_counter_clockwise());
+    }
+#endif
+    dst.insert(dst.end(), src.begin(), src.end());
+}
 
 inline void polygons_append(Polygons &dst, Polygons &&src) 
 {
+#ifdef _DEBUG
+    for (const Polygon &poly : src) {
+        assert(poly.is_counter_clockwise());
+    }
+#endif
     if (dst.empty()) {
         dst = std::move(src);
     } else {
