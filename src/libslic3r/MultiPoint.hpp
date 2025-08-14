@@ -168,7 +168,9 @@ inline OutputIterator douglas_peucker_double(InputIterator begin, InputIterator 
                     if ( length_squared_d == 0) {
                         // Zero length segment, find the furthest point between anchor and floater.
                         for (InputIterator it = std::next(anchor); it != floater; ++it) {
-                            double dist_sq_d = (point_getter(*it) - pt_start).cast<double>().squaredNorm();
+                            const Point ptit = point_getter(*it);
+                            const Vec2d pttemp = (ptit - pt_start).cast<double>();
+                            double dist_sq_d = pttemp.squaredNorm();
                             if (dist_sq_d > max_dist_sq_d) {
                                 max_dist_sq_d = dist_sq_d;
                                 furthest = it;
@@ -275,7 +277,9 @@ inline OutputIterator douglas_peucker_int(InputIterator begin, InputIterator end
                         // Zero length segment, find the furthest point between anchor and floater.
                         for (InputIterator it = std::next(anchor); it != floater; ++it) {
                             lengthsqr_t dist_sq = squared_int_norm(point_getter(*it) - pt_start);
-                            double dist_sq_d = (point_getter(*it) - pt_start).cast<double>().squaredNorm();
+                            const Vec2crd tempcrd = (point_getter(*it) - pt_start);
+                            const Vec2d temppt = tempcrd.cast<double>();
+                            const double dist_sq_d = temppt.squaredNorm();
                             if ( dist_sq > max_dist_sq) {
                                 assert(dist_sq_d > max_dist_sq_d);
                                 max_dist_sq_d = dist_sq_d;
