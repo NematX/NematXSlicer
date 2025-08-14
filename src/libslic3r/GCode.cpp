@@ -3726,9 +3726,8 @@ LayerResult GCodeGenerator::process_layer(
     for (const uint16_t extruder_id : layer_tools.extruders)
     {
         if (m_wipe_tower_current_layer) {
-            ExtrusionEntityCollection wt_extrusions;
             uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : -1);
-            m_wipe_tower_current_layer->tool_change(wt_extrusions, &layer, old_extruder_id, extruder_id);
+            ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id);
             if (extruder_id == layer_tools.extruders.back()) {
                 m_wipe_tower_current_layer->finish_layer(wt_extrusions, extruder_id, true);
             }
@@ -3752,13 +3751,15 @@ LayerResult GCodeGenerator::process_layer(
             assert(m_speed_override.empty());
             this->set_origin(old_origin);
             gcode += this->visitor_gcode;
+        } else {
+            gcode += this->set_extruder(extruder_id, print_z, true);
         }
 
         assert(extruder_id == m_writer.tool()->id());
 
-        gcode += (layer_tools.has_wipe_tower && m_wipe_tower) ?
-            m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_tools.extruders.back()) :
-            this->set_extruder(extruder_id, print_z, true);
+        //gcode += (layer_tools.has_wipe_tower && m_wipe_tower) ?
+        //    m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_tools.extruders.back()) :
+        //    this->set_extruder(extruder_id, print_z, true);
 
         // let analyzer tag generator aware of a role type change
         if (layer_tools.has_wipe_tower && m_wipe_tower)
@@ -5979,6 +5980,14 @@ void GCodeGenerator::end_using_extrusion(const ExtrusionEntity &entity) {
         }
         m_speed_override.pop_back();
     }
+    if (!m_z_override.empty() && m_z_override.back().first == &entity) {
+        // move up right away if possible
+        if (m_layer && m_z_override.back().second < m_layer->scaled_print_z()) {
+        //    visitor_gcode += m_writer.travel_to_z(m_layer->scaled_print_z(), "recover from 3D move");
+            _m_force_move_z_from = -1;
+        }
+        m_z_override.pop_back();
+    }
     assert(!m_current_entity.empty() && m_current_entity.back() == &entity);
     m_current_entity.pop_back();
 }
@@ -6086,6 +6095,19 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
     }
 }
 
+void GCodeGenerator::use(const ExtrusionPropertyZOffset& zmove) {
+    assert(visitor_in_use);
+    if (!m_layer) {
+        assert(false);
+        return;
+    }
+    m_z_override.emplace_back(m_current_entity.back(), m_layer->scaled_print_z() + zmove.z_offset);
+    // move up right away if possible
+    if (m_z_override.back().second > m_layer->scaled_print_z()) {
+        //visitor_gcode += m_writer.travel_to_z(m_z_override.back().second, " 3D move");
+        _m_force_move_z_from = -1;
+    }
+}
 
 std::string GCodeGenerator::extrude_path(const ExtrusionPath &path, const std::string_view description, double speed_mm_per_sec) {
     std::string gcode;
@@ -7186,8 +7208,6 @@ double GCodeGenerator::_compute_e_per_mm(const ExtrusionPath &path) {
 
 std::string GCodeGenerator::_extrude(ExtrusionPath &path, const std::string_view description, double speed) {
 
-    assert(is_approx(m_writer.get_position().z(), m_layer->unscaled_print_z(), EPSILON));
-
     std::string descr = description.empty() ? gcode_extrusion_role_to_string(extrusion_role_to_gcode_extrusion_role(path.role())) : std::string(description);
     // external_perimeters_staggered
     std::optional<double> saved_z;
@@ -7200,6 +7220,10 @@ std::string GCodeGenerator::_extrude(ExtrusionPath &path, const std::string_view
     // end external_perimeters_staggered
 
     std::string gcode = this->_before_extrude(path, descr, speed);
+
+    assert(is_approx(m_writer.get_position().z(), m_layer->unscaled_print_z(), EPSILON) ||
+           (!m_z_override.empty() &&
+            m_z_override.back().second == Layer::scale_to_layer_coord(m_writer.get_position().z())));
 
     if (saved_z) {
         gcode += m_writer.extrude_to_xyz(m_writer.get_position(), 0, "ensure end of staggered z");
@@ -8607,6 +8631,23 @@ std::vector<coord_t> GCodeGenerator::get_travel_elevation(Polyline& travel, coor
 
 void GCodeGenerator::write_travel_to(std::string &gcode, Polyline& travel, std::string comment)
 {
+    assert(m_layer);
+    // compute our needed z 
+    coord_t target_z = 0;
+    if (!m_z_override.empty()) {
+        target_z = m_z_override.back().second;
+    } else if (m_layer) {
+        target_z = m_layer->scaled_print_z();
+    }
+    if (target_z != Layer::scale_to_layer_coord(m_writer.get_position().z())) {
+        if (target_z < Layer::scale_to_layer_coord(m_writer.get_position().z())) {
+            // if z 'down' travel needed, do it after the travel.
+            _m_force_move_z_from.reset();
+        } else if (!_m_force_move_z_from) {
+            // if z 'up' travel needed, do it before the travel.
+            _m_force_move_z_from = -1;
+        }
+    }
     // Note: if last_pos is undefined, then travel.size() == 1
     // ramping travel?
     //TODO: ramp up for the first half, then ramp down.
@@ -8617,16 +8658,16 @@ void GCodeGenerator::write_travel_to(std::string &gcode, Polyline& travel, std::
         bool no_ramping = false;
         // from layer change?
         if (_m_force_move_z_from && travel.size() > 1 && *_m_force_move_z_from > 0) {
-            assert(*_m_force_move_z_from < m_layer->scaled_print_z());
+            assert(*_m_force_move_z_from < target_z);
             // get zdiff
-            coord_t layer_change_diff = m_layer->scaled_print_z() -
+            coord_t layer_change_diff = target_z -
                 Layer::scale_to_layer_coord(m_writer.get_unlifted_position().z());
             // move layer_change_diff into lift & z_diff_layer_and_lift
             z_diff_layer_and_lift += layer_change_diff;
         }
         if (travel.size() <= 1 || (_m_force_move_z_from && *_m_force_move_z_from <= 0)) {
             // do a strait z-move (as we can't see the previous point.
-            gcode += m_writer.ensure_z(m_layer->unscaled_print_z(), "strait z-move, as the travel is undefined.");
+            gcode += m_writer.ensure_z(unscaled(target_z), "strait z-move, as the travel is undefined.");
             no_ramping = true;
         }
         // register get_extra_lift for our ramping lift (ramping lift + lift_min)
@@ -8654,7 +8695,7 @@ void GCodeGenerator::write_travel_to(std::string &gcode, Polyline& travel, std::
             gcode += "; use enforce z\n";
             assert(*_m_force_move_z_from <= 0);
             // enforce current z
-            gcode += m_writer.ensure_z(m_layer->unscaled_print_z(), comment);
+            gcode += m_writer.ensure_z(unscaled(target_z), comment);
             _m_force_move_z_from.reset();
         }
     //    // lift(...) has already been called
@@ -8767,12 +8808,16 @@ void GCodeGenerator::write_travel_to(std::string &gcode, Polyline& travel, std::
     
     // ramping travel (in a new layer) -> set lift if needed (so unlift() works)
     if (_m_force_move_z_from) {
-        assert(this->writer().get_position().z() + EPSILON > m_layer->unscaled_print_z());
-        this->writer().set_lift(this->writer().get_position().z() - m_layer->unscaled_print_z());
+        assert(this->writer().get_position().z() + EPSILON > unscaled(target_z));
+        this->writer().set_lift(this->writer().get_position().z() - unscaled(target_z));
         m_pos_layer = m_layer;
         _m_force_move_z_from.reset();
     }
-    assert(!m_layer || m_need_z_reset_after_path_3D || is_approx(this->writer().get_unlifted_position().z(), m_layer->unscaled_print_z(), EPSILON) || comment.find("Wipe tower") != std::string::npos ||
+    // if z 'down travel needed, do it after the travel.
+    if (target_z < Layer::scale_to_layer_coord(m_writer.get_position().z())) {
+        gcode += m_writer.travel_to_z(unscaled(target_z), "3D move");
+    }
+    assert(!m_layer || m_need_z_reset_after_path_3D || is_approx(this->writer().get_unlifted_position().z(), unscaled(target_z), EPSILON) || comment.find("Wipe tower") != std::string::npos ||
                (config().external_perimeters_first && config().external_perimeters_staggered));
 }
 
@@ -9356,7 +9401,7 @@ std::string GCodeGenerator::set_extruder(uint16_t extruder_id, coord_t print_z, 
 
     //just for testing
     assert(m_layer == nullptr || is_approx(this->writer().get_position().z(), unscaled(print_z), EPSILON) ||
-           _m_force_move_z_from);
+           _m_force_move_z_from || (!m_z_override.empty() && (m_z_override.back().second == Layer::scale_to_layer_coord(this->writer().get_position().z()))));
 
     // if we are running a single-extruder setup, just set the extruder and return nothing (if no_toolchange)
     if (!m_writer.multiple_extruders) {

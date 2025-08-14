@@ -216,9 +216,8 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
             // check if m_layer_data exists
             coord_t layer_z = layer->scaled_print_z();
             coord_t layer_height = std::max(min_wipe_tower_height, layer->scaled_height());
-            coord_t layer_bot = layer_z - layer_height;
+            coord_t layer_max_bot = std::max(coord_t(0), layer_z - layer_height);
             int64_t layer_key = ObjectLayerData::compute_layer_key(layer_z, layer_height);
-            assert(layer_bot >= 0);
 
             // this layer is already here?
             auto it_layer = m_layer_data.find(layer_key);
@@ -229,15 +228,11 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                 auto search_wp_layer = m_printz_to_WTLayer_data.find(layer_z);
                 if (search_wp_layer == m_printz_to_WTLayer_data.end()) {
                     // search for compatible layer
-                    for (auto &wp_layer_search : m_printz_to_WTLayer_data) {
-                        if (wp_layer_search.second->extrusion_z - wp_layer_search.second->extrusion_height >=
-                            layer_z) {
-                            // if bot of the wp_layer is higher than our topz -> stop search, we are already too high.
-                            break;
-                        } else if (wp_layer_search.second->extrusion_z > layer_bot) {
-                            // if top is over our bot, then we are in the same WipeTowerLayerData
-                            wp_layer = wp_layer_search.second;
-                            break;
+                    // as they are aordered by z, it has to be the last one (if okay)
+                    if (!m_printz_to_WTLayer_data.empty()) {
+                        const coord_t last_wp_layer_z = m_printz_to_WTLayer_data.rbegin()->second->extrusion_z;
+                        if (layer_max_bot < last_wp_layer_z && last_wp_layer_z <= layer_z) {
+                            wp_layer = m_printz_to_WTLayer_data.rbegin()->second;
                         }
                     }
                     if (wp_layer != nullptr) {
@@ -260,12 +255,12 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                            m_printz_to_WTLayer_data.find(layer_z)->second == wp_layer);
                     // fuse
                     assert(wp_layer->extrusion_z <= layer_z);
-                    // do we increase layer height?
-                    if (wp_layer->extrusion_height < layer_height) {
-                        // works because ordered_layers is ordered
-                        wp_layer->extrusion_z += layer_height - wp_layer->extrusion_height;
-                        wp_layer->extrusion_height = layer_height;
-                    }
+                    // do we increase layer height? => never
+                    //if (wp_layer->extrusion_height < layer_height) {
+                    //    // works because ordered_layers is ordered
+                    //    wp_layer->extrusion_z += layer_height - wp_layer->extrusion_height;
+                    //    wp_layer->extrusion_height = layer_height;
+                    //}
                     // add it
                 }
                 // create LayerData
@@ -830,20 +825,24 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
     }
 }
 
-void WipeTowerLayer::tool_change(ExtrusionEntityCollection &collection,
-                                 const Layer *layer,
-                                 uint16_t old_tool,
-                                 uint16_t new_tool) {
+ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer, uint16_t old_tool, uint16_t new_tool) {
     assert(layer);
     assert(!initialized_z.empty());
     assert(initialized_z.back() == layer->scaled_print_z());
     assert(!m_is_finished || old_tool == new_tool);
     if (m_is_finished) {
-        return;
+        return {};
     }
+    ExtrusionEntityCollection collection;
     collection.set_can_sort_reverse(false,false);
     assert(!collection.can_sort());
-
+    assert(this->extrusion_z <= layer->scaled_print_z());
+    bool need_move_into_wp = false;
+    if(this->extrusion_z < layer->scaled_print_z()){
+        // extrude at the wipetower's z
+        collection.add_property(ExtrusionPropertyZOffset(this->extrusion_z - layer->scaled_print_z()));
+        need_move_into_wp = true;
+    }
 
     if (old_tool != new_tool) {
         // find the toolchange
@@ -852,7 +851,14 @@ void WipeTowerLayer::tool_change(ExtrusionEntityCollection &collection,
         if (auto it = m_toolchanges.find(key); it != m_toolchanges.end()) {
             const Toolchange &toolchange = it->second;
             assert(layer == toolchange.layer);
-            toolchange_Unload(collection, toolchange.purge_lines, toolchange.from_tool_id, toolchange.purge_flow);
+            // unload can be made in-place. if a move is made, it's only in the wipetower and so the travel will take care of the z offset
+            bool moved_into_wp = toolchange_Unload(collection, toolchange.purge_lines, toolchange.from_tool_id, toolchange.purge_flow);
+            if (need_move_into_wp && !moved_into_wp) {
+                // empty move to trigger the travel, to ensure the z is good before doing the toolchange, just in case.
+                const Point left_pos( extrusion_height, m_current_y_pos);
+                const Point right_pos(0, m_current_y_pos);
+                collection.append(ExtrusionPath(ArcPolyline(Points{left_pos, right_pos}), ExtrusionAttributes{ExtrusionRole::WipeTower, ExtrusionFlow{0, 0, 0}}, nullptr, true));
+            }
             toolchange_Change(collection, new_tool);
             toolchange_load(collection, toolchange.wipe_lines, toolchange.to_tool_id);
             toolchange_Wipe(collection, toolchange.wipe_lines, toolchange.wipe_flow);
@@ -861,6 +867,7 @@ void WipeTowerLayer::tool_change(ExtrusionEntityCollection &collection,
     }
 
     finish_layer(collection, new_tool);
+    return collection;
 }
 
 Flow WipeTower2::get_ramming_flow(const uint16_t tool_id, const bool first_layer, const double layer_height) {
@@ -966,12 +973,13 @@ void WipeTowerLayer::toolchange_load(ExtrusionEntityCollection &collection,
 }
 
 // Ram the hot material out of the melt zone, retract the filament into the cooling tubes and let it cool.
-void WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
+bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
                                   const Polyline &ramming_lines,
                                   const uint16_t tool_id,
                                   const Flow &ramming_flow) {
     assert(!collection.can_sort() && !collection.can_reverse());
     // cleaning_lines needs to be far apart enough so my flow doesn't create any issues. Caller's problem
+    bool has_moved_into_wipetower = false;
 
     ExtrusionEntityCollection unload_collection(false, false);
     assert(!unload_collection.can_sort() && !unload_collection.can_reverse());
@@ -983,13 +991,14 @@ void WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
     collection.append(ExtrusionNop(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::SAVE_AND_RESET_SPEED_RATIO, 1.)));
     Polyline lines_for_wipe = ramming_lines;
     // change_analyzer_line_width -> done by writer on the fly
-    if (ramming_flow.width() != 0 /*!ramming_lines.empty()*/) {
+    if (ramming_flow.width() != 0 && !ramming_lines.empty()) {
         // can set speed/pa via property or via role.
         ExtrusionPath ramming_path(ExtrusionAttributes(ExtrusionRole(ExtrusionRole::WipeTowerRamming), ramming_flow), nullptr);
         // the ramming distance should be exactly cleaning_lines length
         ramming_path.polyline = ramming_lines;
         unload_collection.append(std::move(ramming_path));
         lines_for_wipe = reverse_polyline(ramming_lines);
+        has_moved_into_wipetower = true;
     }
 
     // ask for forced retraction
@@ -1188,6 +1197,7 @@ void WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
 
     collection.append(std::move(unload_collection));
     collection.append(ExtrusionNop(ExtrusionPropertyCustomGcode("; CP TOOLCHANGE UNLOAD END\n")));
+    return has_moved_into_wipetower;
 }
 
 // Wipe the newly loaded filament until the end of the assigned wipe area.
