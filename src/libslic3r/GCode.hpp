@@ -586,6 +586,8 @@ private:
     std::unique_ptr<GCodeFindReplace>   m_find_replace;
     std::unique_ptr<PressureEqualizer>  m_pressure_equalizer;
     std::unique_ptr<GCode::WipeTowerIntegration> m_wipe_tower;
+    std::map<coord_t, std::shared_ptr<WipeTowerLayer>> m_wipe_tower_layers;
+    std::shared_ptr<WipeTowerLayer>     m_wipe_tower_current_layer;
     // to get extruded volume, for stats
     const WipeTowerData                *m_wipe_tower_data;
     std::unique_ptr<AddLineNumber>        m_add_line_number;
