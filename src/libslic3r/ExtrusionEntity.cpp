@@ -54,6 +54,7 @@ void ExtrusionPropertyVisitor::use(ExtrusionPropertySpeed &thing) { default_use(
 void ExtrusionPropertyVisitor::use(ExtrusionPropertyCustomGcode &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertySpecialCommand &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertyOverhang &thing) { default_use(thing); };
+void ExtrusionPropertyVisitor::use(ExtrusionPropertyZOffset &thing) { default_use(thing); };
 
 void ExtrusionPropertyVisitorConst::default_use(const ExtrusionProperty &thing) {
     assert(dynamic_cast<const ExtrusionPropertyNone *>(&thing) != nullptr);
@@ -66,6 +67,7 @@ void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpeed &thing) { d
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyCustomGcode &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpecialCommand &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyOverhang &thing) { default_use(thing); };
+void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyZOffset &thing) { default_use(thing); };
 
 std::unique_ptr<ExtrusionProperty> ExtrusionEntity::clone_properties() const {
     return m_property ? m_property->clone() : nullptr;

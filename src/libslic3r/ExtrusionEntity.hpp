@@ -67,6 +67,7 @@ class ExtrusionPropertySpeed;
 class ExtrusionPropertyCustomGcode;
 class ExtrusionPropertySpecialCommand;
 class ExtrusionPropertyOverhang;
+class ExtrusionPropertyZOffset;
 class ExtrusionPropertyVisitor {
 public:
     virtual void default_use(ExtrusionProperty&);
@@ -75,6 +76,7 @@ public:
     virtual void use(ExtrusionPropertyCustomGcode&);
     virtual void use(ExtrusionPropertySpecialCommand&);
     virtual void use(ExtrusionPropertyOverhang&);
+    virtual void use(ExtrusionPropertyZOffset&);
 };
 class ExtrusionPropertyVisitorConst {
 public:
@@ -84,6 +86,7 @@ public:
     virtual void use(const ExtrusionPropertyCustomGcode&);
     virtual void use(const ExtrusionPropertySpecialCommand&);
     virtual void use(const ExtrusionPropertyOverhang&);
+    virtual void use(const ExtrusionPropertyZOffset&);
 };
 
 // std::variant or class heirachy?
@@ -235,6 +238,20 @@ public:
         , end_distance_from_prev_layer(end_dist)
         , proximity_to_curled_lines(curled_ratio) {}
     std::unique_ptr<ExtrusionProperty> clone() const override { return std::make_unique<ExtrusionPropertyOverhang>(*this); }
+    void visit(ExtrusionPropertyVisitor &visitor) override { visitor.use(*this); }
+    void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this);}
+};
+
+// Old ExtruionPath3D offset are now blended in the ExtrusionPath (the ArcPolyline has the offsets
+// this property is to change the plane of an ee.
+class ExtrusionPropertyZOffset : public ExtrusionProperty
+{
+public:
+    coord_t z_offset; // 1 offset for evrything or an offset for each point
+    ExtrusionPropertyZOffset() {}
+    // one z for the whole entity
+    ExtrusionPropertyZOffset(coord_t offset) : z_offset(offset) {}
+    std::unique_ptr<ExtrusionProperty> clone() const override { return std::make_unique<ExtrusionPropertyZOffset>(*this); }
     void visit(ExtrusionPropertyVisitor &visitor) override { visitor.use(*this); }
     void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this);}
 };
@@ -546,6 +563,7 @@ public:
 typedef std::vector<ExtrusionPath> ExtrusionPaths;
 ExtrusionPaths clip_end(ExtrusionPaths& paths, coordf_t distance);
 
+//TODO remove, replaced by ExtrusionPropertyZOffset
 class ExtrusionPath3D : public ExtrusionPath {
 protected:
     void init() {

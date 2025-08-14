@@ -214,7 +214,7 @@ public:
     const PrintObjectConfig *m_object_config;
 
     const WipeTower2* m_wipe_tower_info;
-    const WipeTower2::WipeTowerLayerData* m_layer_data;
+    //const WipeTower2::WipeTowerLayerData* m_layer_data;
 
     // all layer z purged in this layer; 
     std::set<coord_t> layers_z;
@@ -279,14 +279,14 @@ public:
     //ExtrusionEntityCollection create_toolchange(uint16_t from, uint16_t to, Point current_pos);
     //ExtrusionEntityCollection create_purge(uint16_t toolid, Point current_pos);
 
-    void tool_change(ExtrusionEntityCollection &collection, const Layer *layer, uint16_t old_tool, uint16_t new_tool);
+    ExtrusionEntityCollection tool_change(const Layer *layer, uint16_t old_tool, uint16_t new_tool);
     bool finish_layer(ExtrusionEntityCollection &collection, uint16_t current_extruder, bool force = false);
 
 protected:
     void toolchange_load(ExtrusionEntityCollection &collection,
                             const Polyline &loading_lines,
                             const uint16_t tool_id);
-    void toolchange_Unload(ExtrusionEntityCollection &collection,
+    bool toolchange_Unload(ExtrusionEntityCollection &collection,
                             const Polyline &ramming_lines,
                             const uint16_t tool_id,
                             const Flow &ramming_flow);
