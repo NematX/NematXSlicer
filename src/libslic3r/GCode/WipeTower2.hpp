@@ -69,8 +69,8 @@ protected:
     coord_t min_line_width = -1;
 
 public:
-    std::vector<std::shared_ptr<WipeTowerLayer>> wipe_tower_layers;
-    std::map<coord_t, std::shared_ptr<WipeTowerLayer>> print_z_to_wipe_tower_layer;
+    //std::vector<std::shared_ptr<WipeTowerLayer>> wipe_tower_layers;
+    //std::map<coord_t, std::shared_ptr<WipeTowerLayer>> print_z_to_wipe_tower_layer;
 
     // ===== for print =====
     void set_config(const PrintConfig *config, const PrintObjectConfig *object_config, const PrintRegionConfig *region_config);
@@ -111,14 +111,14 @@ public:
     // fused layers (with same z & height) info (general layer, can have multiple object or only one)
     struct ObjectLayerData
     {
-        WipeTowerLayer *wipe_tower_layer;
+        //WipeTowerLayer *wipe_tower_layer;
         coord_t real_z;
         coord_t real_height;
         // when the real_height is too low, it's merged with previous layer(s).
         // this vector stores the layer order (this is present inside)
         std::vector<const Layer *> my_layers;
         static int64_t compute_layer_key(coord_t z, coord_t height);
-        std::unique_ptr<WipeTowerLayer> create_wipe_tower_layer();
+        //std::unique_ptr<WipeTowerLayer> create_wipe_tower_layer();
     };
     // layer_key (z & height) to LayerData
     std::map<int64_t, std::unique_ptr<ObjectLayerData>> m_layer_data;
@@ -150,6 +150,7 @@ public:
 
     // init m_filament_change_data and m_layer_data, m_printz_to_WTLayer_data
     void init(const Print *print, const SpanOfConstPtrs<PrintObject> &objects, ToolOrdering &ordering);
+    std::map<coord_t, std::shared_ptr<WipeTowerLayer>> create_layers() const;
 
     // get tower width at this z (if nothing at this width, return 0)
     //distf_t get_max_length(coord_t z);
@@ -213,6 +214,7 @@ public:
     const PrintObjectConfig *m_object_config;
 
     const WipeTower2* m_wipe_tower_info;
+    const WipeTower2::WipeTowerLayerData* m_layer_data;
 
     // all layer z purged in this layer; 
     std::set<coord_t> layers_z;
@@ -221,7 +223,9 @@ public:
     // this layer extrusion information
     coord_t extrusion_z;
     coord_t extrusion_height;
-    bool m_is_init = false;
+    std::vector<coord_t> uninitialized_z;
+    std::vector<coord_t> initialized_z;
+
     bool m_is_finished = false;
     coord_t m_current_y_pos = 0;
     coord_t m_max_y_pos = 0;

@@ -1557,6 +1557,10 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
             }
         }
     }
+
+    //reset wipe tower layers
+    m_wipe_tower_layers = print.wipe_tower2()->create_layers();
+
     if (print.config().complete_objects.value || print.config().parallel_objects_step.value > 0) {
         // Order object instances for sequential print.
         if(print.config().complete_objects_sort.value == cosObject)
@@ -3681,19 +3685,26 @@ LayerResult GCodeGenerator::process_layer(
         }
     }
 
-    std::unique_ptr<WipeTowerLayer> wtl;
     if (print.wipe_tower2()->has_toolchange()) {
         // find our WipeTowerLayer
-        for (const auto &z_to_WTLD : print.wipe_tower2()->m_printz_to_WTLayer_data) {
-            for (WipeTower2::ObjectLayerData *z_to_OLD : z_to_WTLD.second->fused_with) {
-                if (z_to_OLD->real_z == print_z && z_to_OLD->real_height == layer.scaled_height()) {
-                    wtl = std::move(z_to_OLD->create_wipe_tower_layer());
-                    goto found_WTL;
-                }
-            }
+        //auto it_WTLD_search = print.wipe_tower2()->m_printz_to_WTLayer_data.find(layer.scaled_print_z());
+        //assert(it_search != print.wipe_tower2()->m_printz_to_WTLayer_data.end());
+        //int64_t layer_key = WipeTower2::ObjectLayerData::compute_layer_key(layer.scaled_print_z(), layer.scaled_height());
+        //auto it_OLD_search = print.wipe_tower2()->m_layer_data.find(layer_key);
+        //assert(it_OLD_search != print.wipe_tower2()->m_layer_data.end());
+        //wtl = it_OLD_search->second->create_wipe_tower_layer();
+        //for (WipeTower2::ObjectLayerData *z_to_OLD : it_search->second->fused_with) {
+            //if (z_to_OLD->real_z == print_z && z_to_OLD->real_height == layer.scaled_height()) {
+                //wtl = std::move(z_to_OLD->create_wipe_tower_layer());
+                //break;
+            //}
+        //}
+        auto search_wtl = m_wipe_tower_layers.find(layer.scaled_print_z());
+        assert(search_wtl != m_wipe_tower_layers.end());
+        if (m_wipe_tower_current_layer != search_wtl->second) {
+            m_wipe_tower_current_layer = search_wtl->second;
         }
-    found_WTL:;
-        assert(wtl);
+        assert(m_wipe_tower_current_layer);
         std::vector<const Layer *> layers;
         layers.push_back(&layer);
         assert(!layer_tools.extruders.empty());
@@ -3703,22 +3714,23 @@ LayerResult GCodeGenerator::process_layer(
             // note: the extruders may not be used in this layer, and so not present in layer_tools
             std::vector<uint16_t> extruder_with_empty_first;
             extruder_with_empty_first.push_back(m_writer.tool()->id());
-            extruder_with_empty_first.insert(extruder_with_empty_first.end(), layer_tools.extruders.begin(), layer_tools.extruders.end());
-            wtl->init(layers, extruder_with_empty_first, std::vector<uint16_t>{});
+            extruder_with_empty_first.insert(extruder_with_empty_first.end(), layer_tools.extruders.begin(),
+                                                layer_tools.extruders.end());
+            m_wipe_tower_current_layer->init(layers, extruder_with_empty_first, std::vector<uint16_t>{});
         } else {
-            wtl->init(layers, layer_tools.extruders, std::vector<uint16_t>{});
+            m_wipe_tower_current_layer->init(layers, layer_tools.extruders, std::vector<uint16_t>{});
         }
     }
 
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (const uint16_t extruder_id : layer_tools.extruders)
     {
-        if (wtl) {
+        if (m_wipe_tower_current_layer) {
             ExtrusionEntityCollection wt_extrusions;
             uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : -1);
-            wtl->tool_change(wt_extrusions, &layer, old_extruder_id, extruder_id);
+            m_wipe_tower_current_layer->tool_change(wt_extrusions, &layer, old_extruder_id, extruder_id);
             if (extruder_id == layer_tools.extruders.back()) {
-                wtl->finish_layer(wt_extrusions, extruder_id, true);
+                m_wipe_tower_current_layer->finish_layer(wt_extrusions, extruder_id, true);
             }
 
             Vec2d old_origin = this->origin();
