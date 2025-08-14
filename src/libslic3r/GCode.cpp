@@ -5983,11 +5983,13 @@ void GCodeGenerator::end_using_extrusion(const ExtrusionEntity &entity) {
     m_current_entity.pop_back();
 }
 
-void GCodeGenerator::default_use(const ExtrusionProperty &) { assert(false); }
+void GCodeGenerator::default_use(const ExtrusionProperty &ep) { assert(dynamic_cast<const ExtrusionPropertyOverhang*>(&ep)); }
+
 void GCodeGenerator::use(const ExtrusionMultiProperties & thing) {
     for (const std::unique_ptr<ExtrusionProperty> &prop : thing.properties)
         prop->visit(*this);
 }
+
 void GCodeGenerator::use(const ExtrusionPropertySpeed& speed_override) {
     assert(visitor_in_use);
     assert(!m_current_entity.empty() && (m_speed_override.empty() || m_speed_override.back().first != m_current_entity.back()));
@@ -5997,6 +5999,7 @@ void GCodeGenerator::use(const ExtrusionPropertySpeed& speed_override) {
         visitor_gcode += m_writer.set_temperature(m_speed_override.back().second->temperature_C, false);
     }
 }
+
 void GCodeGenerator::use(const ExtrusionPropertyCustomGcode& custom_gcode) {
     if (custom_gcode.gcode.empty()) {
         return;
@@ -6012,6 +6015,7 @@ void GCodeGenerator::use(const ExtrusionPropertyCustomGcode& custom_gcode) {
         visitor_gcode += "\n";
     }
 }
+
 void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
     //TODO move into new firware-specific gcode writer
     assert(visitor_in_use);
