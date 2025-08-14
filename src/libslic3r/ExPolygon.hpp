@@ -374,9 +374,9 @@ inline Polygons to_polygons(const ExPolygon &src)
 }
 
 
-inline Polygons to_polygons_unsafe(const ExPolygons &src) {
-    // can be used for asserts, dsiplay, when it isn't fed into clipper
-}
+//inline Polygons to_polygons_unsafe(const ExPolygons &src) {
+//    // can be used for asserts, dsiplay, when it isn't fed into clipper
+//}
 
 inline Polygons to_polygons(const ExPolygons &src)
 {
