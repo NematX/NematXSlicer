@@ -42,6 +42,19 @@ bool Layer::empty() const
     return true;
 }
 
+const PrintRegionConfig &Layer::default_region_config() const {
+    std::vector<const LayerRegion*> useful_regions;
+    for (const LayerRegion *lregion : m_regions) {
+        if (lregion->has_extrusions()) {
+            useful_regions.push_back(lregion);
+        }
+    }
+    if (useful_regions.size() == 1) {
+        return useful_regions.front()->region().config();
+    }
+    return m_object->default_region_config(m_object->print()->default_region_config());
+}
+
 LayerRegion* Layer::add_region(const PrintRegion *print_region)
 {
     m_regions.emplace_back(new LayerRegion(this, print_region));

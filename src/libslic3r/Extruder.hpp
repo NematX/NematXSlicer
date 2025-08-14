@@ -113,6 +113,16 @@ protected:
     double       m_e_per_mm3;
     // to quantize E
     GCodeFormatter m_formatter;
+
+public:
+    // temperature control
+    int16_t         m_last_temperature = 0;
+    int16_t         m_last_temperature_with_offset = 0;
+    bool            m_last_temperature_with_offset_waited = false;
+    // for print_temperature_smooth_change
+    float           temperature_float = (-1);
+    float           temperature_delta = (-1);
+    int             temperature_target = 0;
 };
 
 

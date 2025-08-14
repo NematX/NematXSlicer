@@ -53,9 +53,11 @@ public:
     uint16_t first_mill() const;
     bool tool_is_extruder() const;
     const Tool* get_tool(uint16_t id) const;
+    Tool* get_mutable_tool(uint16_t id);
     std::string preamble();
     std::string postamble() const;
-    std::string set_temperature(int16_t temperature, bool wait = false, int tool = -1);
+    std::string set_temperature(int16_t temperature, bool wait = false, uint16_t tool_id = -1);
+    int16_t get_temperature(uint16_t tool_id = -1) const;
     std::string set_bed_temperature(uint32_t temperature, bool wait = false);
     std::string set_pressure_advance(double pa) const;
     std::string set_chamber_temperature(uint32_t temperature, bool wait = false);
@@ -148,9 +150,6 @@ private:
     //uint32_t        m_max_travel_acceleration;
     double          m_current_speed = 0;
     uint8_t         m_last_fan_speed = 0;
-    int16_t         m_last_temperature = 0;
-    int16_t         m_last_temperature_with_offset = 0;
-    bool            m_last_temperature_with_offset_waited = false;
     int16_t         m_last_bed_temperature = 0;
     bool            m_last_bed_temperature_reached = true;
     int16_t         m_last_chamber_temperature = 0;
@@ -165,8 +164,8 @@ private:
     std::string     m_pos_str_z;
     // stored de that wasn't written, because of the rounding
     double          m_de_left = 0;
-    
-    
+
+
     GCodeFormatter  m_formatter {0,0};
     
     std::string _retract(double length, std::optional<double> restart_extra, std::optional<double> restart_extra_toolchange, const std::string_view comment = {});

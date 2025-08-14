@@ -1047,6 +1047,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionPercent,              print_solid_infill_fan_speed))
     ((ConfigOptionInt,                  print_first_layer_temperature))
     ((ConfigOptionInt,                  print_temperature))
+    ((ConfigOptionInt,                  print_temperature_smooth_change))
     ((ConfigOptionPercent,              thin_perimeters))
     ((ConfigOptionPercent,              thin_perimeters_all))
     ((ConfigOptionBool,                 thin_walls))

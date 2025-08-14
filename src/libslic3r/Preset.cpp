@@ -795,6 +795,7 @@ static std::vector<std::string> s_Preset_print_options {
         "print_first_layer_temperature",
         "print_retract_length",
         "print_temperature",
+        "print_temperature_smooth_change",
         "print_bed_temperature",
         "print_bridge_fan_speed",
         "print_fan_speed",

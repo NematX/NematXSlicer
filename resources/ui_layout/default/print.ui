@@ -610,6 +610,7 @@ group:Output file
 	setting:gcode_label_objects
 	setting:full_width:output_filename_format
 group:Other
+	setting:print_temperature_smooth_change
 	gcode_substitutions
 group:Post-processing script
 	setting:full_width:height$5:post_process

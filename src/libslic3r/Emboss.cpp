@@ -275,7 +275,7 @@ fontinfo_opt load_font_info(
     const unsigned char *data, unsigned int index)
 {
     try {
-        if (stbtt_tag4(data, '1', 0, 0, 0)) {
+        if (stbtt_tag4(data, '1', 0, 0, 0) || stbtt_tag(data, "ttcf")) {
             BOOST_LOG_TRIVIAL(debug) << "Loading TrueType file: start with '1'000";
         } else if (stbtt_tag(data, "typ1")) {
             BOOST_LOG_TRIVIAL(debug) << "Loading TrueType with type 1 font file: start with 'typ1'";

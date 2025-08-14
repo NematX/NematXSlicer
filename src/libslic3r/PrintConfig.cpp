@@ -5055,6 +5055,16 @@ void PrintConfigDef::init_fff_params()
     def->can_be_disabled = true;
     def->set_default_value(disable_default_option(new ConfigOptionInt(200)));
 
+    def = this->add("print_temperature_smooth_change", coInt);
+    def->label = L("Temperature smoothing layers");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("When the temperature changes, it gradually change over this number of layers instead of going directly to the desired value."
+                        "\nNote: does smooth first layer -> other layer transition if set in the second layer.");
+    def->sidetext = L("layers");
+    def->min = 0;
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionInt(0));
+
     def = this->add("printer_model", coString);
     def->label = L("Printer type");
     def->tooltip = L("Type of the printer.");
@@ -10437,6 +10447,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "print_retract_length",
 "print_retract_lift",
 "print_temperature",
+"print_temperature_smooth_change",
 "printer_custom_variables",
 "printhost_client_cert",
 "printhost_client_cert_password",

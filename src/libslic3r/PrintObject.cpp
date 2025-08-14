@@ -1247,7 +1247,7 @@ FillLightning::GeneratorPtr PrintObject::prepare_lightning_infill_data()
 
 const PrintRegionConfig &PrintObject::default_region_config(const PrintRegionConfig &from_print) const {
     //TODO check if a regionconfig set in an object modifier go through
-    if (this->m_shared_regions && num_printing_regions() > 0) {
+    if (this->m_shared_regions && num_printing_regions() == 1) {
         return printing_region(0).config();
     }
     return from_print;
@@ -1667,6 +1667,7 @@ bool PrintObject::invalidate_state_by_config_options(
                 || opt_key == "print_perimeters_fan_speed"
                 || opt_key == "print_solid_infill_fan_speed"
                 || opt_key == "print_temperature"
+                || opt_key == "print_temperature_smooth_change"
                 || opt_key == "region_gcode"
                 || opt_key == "seam_position"
                 //|| opt_key == "seam_preferred_direction"

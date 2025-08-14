@@ -137,6 +137,16 @@ const Tool* GCodeWriter::get_tool(uint16_t id) const{
     return nullptr;
 }
 
+Tool* GCodeWriter::get_mutable_tool(uint16_t id) {
+    for (Extruder& e : m_extruders)
+        if (id == e.id())
+            return &e;
+    for (Tool& e : m_millers)
+        if (id == e.id())
+            return &e;
+    return nullptr;
+}
+
 void GCodeWriter::set_extruders(std::vector<uint16_t> extruder_ids)
 {
     std::sort(extruder_ids.begin(), extruder_ids.end());
@@ -246,16 +256,22 @@ std::string GCodeWriter::set_pressure_advance(double pa) const {
     return gcode + "\n";
 }
 
-
-std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, int tool)
+std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, uint16_t tool_id)
 {
     //use m_tool if tool isn't set
-    if (tool < 0 && m_tool != nullptr)
-        tool = m_tool->id();
+    if (tool_id == uint16_t(-1) && m_tool != nullptr) {
+        tool_id = m_tool->id();
+    }
+
+    Tool *tool = get_mutable_tool(tool_id);
+    if (tool == nullptr) {
+        assert(false);
+        return "";
+    }
 
     //add offset
     int16_t temp_w_offset = temperature;
-    temp_w_offset += int16_t(get_tool(tool)->temp_offset());
+    temp_w_offset += int16_t(get_tool(tool_id)->temp_offset());
     temp_w_offset = std::max(int16_t(0), std::min(int16_t(2000), temp_w_offset));
 
     // gcfMakerWare and gcfSailfish can't wait for temp
@@ -263,11 +279,11 @@ std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, i
         wait = false;
 
     // temp_w_offset has an effective minimum value of 0, so this cast is safe.
-    if (m_last_temperature_with_offset == temp_w_offset && (!wait || m_last_temperature_with_offset_waited))
+    if (tool->m_last_temperature_with_offset == temp_w_offset && (!wait || tool->m_last_temperature_with_offset_waited))
         return "";
     
     // some firmwares need to emit temp to wait for temp
-    bool need_emit_temp = m_last_temperature_with_offset != temp_w_offset;
+    bool need_emit_temp = tool->m_last_temperature_with_offset != temp_w_offset;
     bool can_M109 = FLAVOR_IS_NOT(gcfTeacup) && FLAVOR_IS_NOT(gcfRepRap) && FLAVOR_IS_NOT(gcfNematX);
     if (wait && can_M109) {
         need_emit_temp = true;
@@ -281,7 +297,7 @@ std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, i
             code = "M109"sv;
             comment = "set temperature and wait for it to be reached"sv;
         } else if (FLAVOR_IS(gcfNematX)) {
-            if (tool == 0) {
+            if (tool_id == 0) {
                 code = "M104"sv;
             } else {
                 code = "M124"sv;
@@ -300,9 +316,9 @@ std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, i
         if (FLAVOR_IS(gcfMach3) || FLAVOR_IS(gcfMachinekit)) {
             gcode << " P";
         } else if (FLAVOR_IS(gcfRepRap)) {
-            gcode << " P" << tool << " S";
+            gcode << " P" << tool_id << " S";
         } else if (wait && (FLAVOR_IS(gcfMarlinFirmware) || FLAVOR_IS(gcfMarlinLegacy)) &&
-                   temp_w_offset < m_last_temperature_with_offset) {
+                   temp_w_offset < tool->m_last_temperature_with_offset) {
             gcode << " R"; // marlin doesn't wait with S if it's a cooling change, it needs a R
         } else if (FLAVOR_IS(gcfNematX)) {
             gcode << "=";
@@ -311,9 +327,9 @@ std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, i
         }
         gcode << temp_w_offset;
         bool multiple_tools = this->multiple_extruders && !m_single_extruder_multi_material;
-        if (tool != -1 && (multiple_tools || FLAVOR_IS(gcfMakerWare) || FLAVOR_IS(gcfSailfish)) &&
+        if (tool_id != -1 && (multiple_tools || FLAVOR_IS(gcfMakerWare) || FLAVOR_IS(gcfSailfish)) &&
             FLAVOR_IS_NOT(gcfRepRap) && FLAVOR_IS_NOT(gcfNematX)) {
-            gcode << " T" << tool;
+            gcode << " T" << tool_id;
         }
         if (this->config.gcode_comments && !comment.empty()) {
             gcode << " ; " << comment;
@@ -330,24 +346,36 @@ std::string GCodeWriter::set_temperature(const int16_t temperature, bool wait, i
             gcode << "\n";
         }
         if (FLAVOR_IS(gcfNematX)) {
-            if (tool == 0)
+            if (tool_id == 0)
                 gcode << "M109 ; wait for extruder 1 temperature to be reached\n";
             else
                 gcode << "M129 ; wait for extruder 2 temperature to be reached\n";
             if (this->config.gcode_comments) {
-                if (this->config.tool_name.size() > tool) {
-                    gcode << " ; wait for extruder " << this->config.tool_name.get_at(tool) << " temperature to be reached\n";
+                if (this->config.tool_name.size() > tool_id) {
+                    gcode << " ; wait for extruder " << this->config.tool_name.get_at(tool_id) << " temperature to be reached\n";
                 } else {
-                    gcode << " ; wait for extruder " << tool << " temperature to be reached\n";
+                    gcode << " ; wait for extruder " << tool_id << " temperature to be reached\n";
                 }
             }
         }
     }
     // update internal var to prevent repeat
-    m_last_temperature = temperature;
-    m_last_temperature_with_offset = temp_w_offset;
-    m_last_temperature_with_offset_waited  = wait;
+    tool->m_last_temperature = temperature;
+    tool->m_last_temperature_with_offset = temp_w_offset;
+    tool->m_last_temperature_with_offset_waited  = wait;
     return gcode.str();
+}
+
+int16_t GCodeWriter::get_temperature(uint16_t tool_id) const {
+    //use m_tool if tool_id isn't set
+    if (tool_id == uint16_t(-1) && m_tool != nullptr) {
+        tool_id = m_tool->id();
+    }
+    if (!get_tool(tool_id)) {
+        assert(false);
+        return 0;
+    }
+    return get_tool(tool_id)->m_last_temperature;
 }
 
 std::string GCodeWriter::set_bed_temperature(uint32_t temperature, bool wait)
