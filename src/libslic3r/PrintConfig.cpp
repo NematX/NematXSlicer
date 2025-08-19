@@ -1806,6 +1806,7 @@ void PrintConfigDef::init_fff_params()
     def->category = OptionCategory::extruders;
     def->tooltip = L("The extruder to use (unless more specific extruder settings are specified) for the first layer.");
     def->min = 0;  // 0 = inherit defaults
+    def->mode = comExpert | comSuSi;
     def->set_enum_labels(ConfigOptionDef::GUIType::i_enum_open, 
         { L("default"), "1", "2", "3", "4", "5", "6", "7", "8", "9" }); // override label for item 0
 
@@ -10336,6 +10337,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "fill_smooth_width",
 "fill_top_flow_ratio",
 "fill_top_flow_ratio",
+"first_layer_extruder",
 "first_layer_extrusion_spacing",
 "first_layer_infill_extrusion_width",
 "first_layer_infill_extrusion_spacing",
