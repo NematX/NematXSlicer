@@ -255,7 +255,7 @@ Node::RectilinearJunction Node::straighten(
             const NodeSPtr& parent_node = m_parent.lock();
             if (parent_node &&
                 (child_p->m_p - parent_node->m_p).cast<int64_t>().squaredNorm() < max_remove_colinear_dist2 &&
-                Line::distance_to_squared(m_p, parent_node->m_p, child_p->m_p) < close_enough * close_enough) {
+                Line::distance_to_squared_abp(parent_node->m_p, child_p->m_p, m_p) < close_enough * close_enough) {
                 child_p->m_parent = m_parent;
                 for (auto& sibling : parent_node->m_children)
                 { // find this node among siblings

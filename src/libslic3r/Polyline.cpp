@@ -172,7 +172,7 @@ void Polyline::split_at(const Point &point, Polyline* p1, Polyline* p2) const
     Point  prev = this->points.front();
     for (auto it = this->points.cbegin() + 1; it != this->points.cend(); ++it) {
         Point proj;
-        if (double d2 = line_alg::distance_to_squared(Line(prev, *it), point, &proj); d2 < min_dist2) {
+        if (double d2 = Line::distance_to_squared_abp(prev, *it, point, &proj); d2 < min_dist2) {
             min_dist2 = d2;
             min_point_it = it;
         }
@@ -328,7 +328,7 @@ std::pair<int, Point> foot_pt(const Points &polyline, const Point &pt)
     auto  it_proj = polyline.begin();
     for (++ it; it != polyline.end(); ++ it) {
         Point foot_pt;
-        if (double d2 = line_alg::distance_to_squared(Line(prev, *it), pt, &foot_pt); d2 < d2_min) {
+        if (double d2 = Line::distance_to_squared_abp(prev, *it, pt, &foot_pt); d2 < d2_min) {
             d2_min      = d2;
             foot_pt_min = foot_pt;
             it_proj     = it;
@@ -842,7 +842,7 @@ std::pair<int, Point> ArcPolyline::foot_pt(const Point &pt) const
         Point prev    = m_path.front().point;
         for (size_t idx = 1; idx < m_path.size(); ++idx) {
             Point foot_pt;
-            if (double d2 = line_alg::distance_to_squared(Line(prev, m_path[idx].point), pt, &foot_pt); d2 < d2_min) {
+            if (double d2 = Line::distance_to_squared_abp(prev, m_path[idx].point, pt, &foot_pt); d2 < d2_min) {
                 d2_min      = d2;
                 foot_pt_min = foot_pt;
                 foot_idx_min = idx;
@@ -1493,7 +1493,7 @@ int ArcPolyline::simplify_straits(coordf_t min_tolerance,
                     Point current = m_path[idxs[i+1]].point;
                     Point next = m_path[idxs[i+2]].point;
                     // check deviation
-                    coordf_t deviation = Line::distance_to(current, previous, next);
+                    coordf_t deviation = std::sqrt(Line::distance_to_squared_abp(previous, next, current));
                     if (deviation > min_tolerance) {
                         weights[i] = 0;
                     } else {
@@ -1671,7 +1671,7 @@ void ArcPolyline::simplify_straits(const coordf_t min_tolerance,
             Point current = m_path[idx_pt].point;
             Point next = m_path[idx_pt + 1].point;
             // check deviation
-            coordf_t deviation = Line::distance_to(current, previous, next);
+            coordf_t deviation = std::sqrt(Line::distance_to_squared_abp(previous, next, current));
             //if deviation is small enough and the distance is too small
             if (deviation < min_tolerance &&
                 (min_point_distance_sqr < previous.distance_to_square(current) ||

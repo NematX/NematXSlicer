@@ -751,7 +751,7 @@ Path fit_path(const Points &src_in, double tolerance, double fit_circle_percent_
                     Line line(arc->start_point, arc->end_point);
                     bool arc_valid = false;
                     for (auto it2 = std::next(begin); it2 != std::prev(end); ++ it2)
-                        if (line_alg::distance_to_squared(line, *it2) > tolerance2) {
+                        if (line.distance_to_squared(*it2) > tolerance2) {
                             // Polyline could not be fitted by a line segment, thus the arc is considered valid.
                             arc_valid = true;
                             break;
@@ -1063,7 +1063,7 @@ PathSegmentProjection point_to_path_projection(const Path &path, const Point &po
                 // Linear segment
                 Point proj;
                 // distance_to_squared() will possibly return the start or end point of a line segment.
-                if (double d2 = line_alg::distance_to_squared(Line(prev, it->point), point, &proj); d2 < out.distance2) {
+                if (double d2 = Line::distance_to_squared_abp(prev, it->point, point, &proj); d2 < out.distance2) {
                     out.point     = proj;
                     out.distance2 = d2;
                     out.center = {0, 0};

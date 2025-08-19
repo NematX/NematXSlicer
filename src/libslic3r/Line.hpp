@@ -114,11 +114,11 @@ double distance_to_squared(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
     return distance_to_squared<L>(line, point, &nearest_point);
 }
 
-template<class L>
-double distance_to(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
-{
-    return std::sqrt(distance_to_squared(line, point));
-}
+//template<class L>
+//double distance_to(const L &line, const Vec<Dim<L>, Scalar<L>> &point)
+//{
+//    return std::sqrt(distance_to_squared(line, point));
+//}
 
 // Returns a squared distance to the closest point on the infinite.
 // Returned nearest_point (and returned squared distance to this point) could be beyond the 'a' and 'b' ends of the segment.
@@ -215,9 +215,9 @@ public:
     Point  midpoint() const { return (this->a + this->b) / 2; }
     bool   intersection_infinite(const Line &other, Point* point) const;
     bool   operator==(const Line &rhs) const { return this->a == rhs.a && this->b == rhs.b; }
-    double distance_to_squared(const Point &point) const { return distance_to_squared(point, this->a, this->b); }
-    double distance_to_squared(const Point &point, Point *closest_point) const { return line_alg::distance_to_squared(*this, point, closest_point); }
-    coordf_t distance_to(const Point &point) const { return distance_to(point, this->a, this->b); }
+    double distance_to_squared(const Point &point) const { return distance_to_squared_abp(this->a, this->b, point); }
+    double distance_to_squared(const Point &point, Point *closest_point) const { return distance_to_squared_abp(this->a, this->b, point, closest_point); }
+    coordf_t distance_to(const Point &point) const { return std::sqrt(distance_to_squared_abp(this->a, this->b, point)); }
     double distance_to_infinite_squared(const Point &point, Point *closest_point) const { return line_alg::distance_to_infinite_squared(*this, point, closest_point); }
     coordf_t perp_distance_to(const Point &point) const;
     bool   parallel_to(double angle) const;
@@ -235,8 +235,10 @@ public:
     // Extend the line from both sides by an offset.
     void   extend(coordf_t offset);
 
-    static inline double distance_to_squared(const Point &point, const Point &a, const Point &b) { return line_alg::distance_to_squared(Line{a, b}, Vec<2, coord_t>{point}); }
-    static coordf_t distance_to(const Point &point, const Point &a, const Point &b) { return sqrt(distance_to_squared(point, a, b)); }
+    static double distance_to_squared_abp(const Point &a, const Point &b, const Point &point, Point *nearest_point = nullptr);
+    // not precise enough. somethign is lost int he abstraction.
+    // { return line_alg::distance_to_squared(Line{a, b}, Vec<2, coord_t>{point}); }
+    //static coordf_t distance_to_abp(const Point &a, const Point &b, const Point &point) { return sqrt(distance_to_squared_abp(a, b, point)); }
     Point point_at(coordf_t distance) const;
     coord_t dot(const Line &l2) const { return vector().dot(l2.vector()); }
     void extend_end(coordf_t distance) { Line line = *this; line.reverse(); this->b = line.point_at(-distance); }
