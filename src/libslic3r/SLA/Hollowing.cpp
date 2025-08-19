@@ -697,7 +697,7 @@ std::vector<bool> create_exclude_mask(const indexed_triangle_set   &its,
 
             Linef3 holeaxis{dhpos, dhend};
 
-            double D_hole_center = line_alg::distance_to(holeaxis, tr_center);
+            double D_hole_center = std::sqrt(line_alg::distance_to_squared(holeaxis, tr_center));
             double D_hole        = std::abs(D_hole_center - dh.radius);
             float dot            = dh.normal.dot(face_normal);
 

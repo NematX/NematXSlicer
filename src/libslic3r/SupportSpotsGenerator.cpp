@@ -666,9 +666,9 @@ float ObjectPart::compute_elastic_section_modulus(
     if (second_moment_of_area < EPSILON) { return 0.0f; }
 
     Vec2f centroid                = integrals.x_i / integrals.area;
-    float extreme_fiber_dist      = line_alg::distance_to(Linef(centroid.head<2>().cast<double>(),
+    float extreme_fiber_dist      = std::sqrt(line_alg::distance_to_squared(Linef(centroid.head<2>().cast<double>(),
                                                                 (centroid.head<2>() + Vec2f(line_dir.y(), -line_dir.x())).cast<double>()),
-                                                          extreme_point.head<2>().cast<double>());
+                                                          extreme_point.head<2>().cast<double>()));
 
     float elastic_section_modulus = second_moment_of_area / extreme_fiber_dist;
 

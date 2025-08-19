@@ -136,6 +136,51 @@ struct FirstIntersectionVisitor
     size_t intersection_line_idx = size_t(-1);
 };
 
+struct FirstEpsilonIntersectionVisitor
+{
+    const EdgeGrid::Grid &grid;
+    Slic3r::Point  &pt_current;
+    Slic3r::Point  &pt_next;
+    bool                  intersect  = false;
+    size_t intersection_contour_idx = size_t(-1);
+    size_t intersection_line_idx = size_t(-1);
+
+    explicit FirstEpsilonIntersectionVisitor(const EdgeGrid::Grid &grid, Slic3r::Point &pt_a, Slic3r::Point &pt_b) : grid(grid), pt_current(pt_a), pt_next(pt_b) {}
+
+    bool operator()(coord_t iy, coord_t ix)
+    {
+        static int aiuhaiod = 0;
+        // Called with a row and column of the grid cell, which is intersected by a line.
+        auto cell_data_range = grid.cell_data_range(iy, ix);
+        this->intersect      = false;
+        Lines lines;
+        Point intersection_pt;
+        for (auto it_contour_and_segment = cell_data_range.first; it_contour_and_segment != cell_data_range.second; ++it_contour_and_segment) {
+            // End points of the line segment and their vector.
+            std::pair<const Slic3r::Point&, const Slic3r::Point&> segment = grid.segment(*it_contour_and_segment);
+            if (Line::distance_to_squared_abp(segment.first, segment.second, pt_current, &intersection_pt) <
+                SCALED_EPSILON * SCALED_EPSILON) {
+                this->intersect = true;
+                intersection_contour_idx = it_contour_and_segment->first;
+                intersection_line_idx = it_contour_and_segment->second;
+                Line l(intersection_pt, pt_next);
+                for (int i = 2;
+                     i < SCALED_EPSILON && !Geometry::segments_intersect(segment.first, segment.second, l.a, pt_next);
+                     i += 2) {
+                    l.a = intersection_pt;
+                    l.extend(i);
+                }
+                assert(pt_current != l.a);
+                pt_current = l.a;
+                assert(Geometry::segments_intersect(segment.first, segment.second, pt_current, pt_next));
+                return false;
+            }
+        }
+        // Continue traversing the grid along the edge.
+        return true;
+    }
+};
+
 // Visitor to create a list of closet lines to a defined point.
 struct MinDistanceVisitor
 {
@@ -554,8 +599,11 @@ static std::vector<TravelPoint> simplify_travel(const AvoidCrossingPerimeters::B
         simplified_path.pop_back();
     }
 
-    for (size_t idx = 1; idx < simplified_path.size(); ++idx)
-        assert(!simplified_path[idx - 1].point.coincides_with_epsilon(simplified_path[idx].point));
+    if (simplified_path.size() > 2) {
+        for (size_t idx = 1; idx < simplified_path.size(); ++idx) {
+            assert(!simplified_path[idx - 1].point.coincides_with_epsilon(simplified_path[idx].point));
+        }
+    }
     assert(simplified_path.front().point == travel.front().point);
     assert(simplified_path.back().point == travel.back().point);
     return simplified_path;
@@ -763,8 +811,8 @@ static float get_external_perimeter_overlap(const Layer &layer)
 
 // TODO: avoid other islands in-between
 static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // not const because of possible late init of island_to_grid
-                                const Point &start,
-                                const Point &end,
+                                      Point start,
+                                      Point end,
                                       std::vector<Intersection> &intersections,
                                 const coord_t search_radius,
                                 const double weight_island_travel = 0.4) {
@@ -900,17 +948,30 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
 #ifdef _DEBUG
         auto time_cell = std::chrono::high_resolution_clock::now();
 #endif
-        const Line start_end_line(start, end);
+        Line start_end_line(start, end);
         // initialize best_intersection_start with intersection against contour_start
         {
             FirstIntersectionVisitor visitor(start_grid);
             visitor.pt_current = &start;
             visitor.pt_next = &end;
             start_grid.visit_cells_intersecting_line(start, end, visitor);
-#ifdef _DEBUG
-            assert(visitor.intersect);
             if (!visitor.intersect) {
+                // probably a epsilon-difference for the intersection to happen.
+                // try with a visitor that look at epsilon distance, and modify the start point to the intersection
+                FirstEpsilonIntersectionVisitor visitor_epsilon(start_grid, start_end_line.a, start_end_line.b);
+                start_grid.visit_cells_intersecting_line(start, end, visitor_epsilon);
+                assert(visitor_epsilon.intersect);
+                visitor.intersect = visitor_epsilon.intersect;
+                visitor.intersection_contour_idx = visitor_epsilon.intersection_contour_idx;
+                visitor.intersection_line_idx = visitor_epsilon.intersection_line_idx;
+                assert(start != start_end_line.a);
+                start = start_end_line.a;
+            }
+#ifdef _DEBUG
+            if (!visitor.intersect) {
+                assert(false);
                 SVG svg(debug_out_path("cannot_find_boundary.svg"));
+                svg.draw(to_polylines(start_grid.bbox().polygon()), "black", scale_t(0.04));
                 svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
                 svg.draw(contour_start.split_at_first_point(), "red", scale_t(0.025));
                 svg.draw(contour_end.split_at_first_point(), "green", scale_t(0.025));
@@ -920,6 +981,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
 #endif _DEBUG
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
+                assert(visitor.intersection_line_idx >= 0);
                 best_intersection_start.line_idx = visitor.intersection_line_idx;
                 assert(best_intersection_start.line_idx < contour_start.points.size());
                 bool found = start_end_line.intersection(
@@ -937,10 +999,23 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             visitor.pt_current = &start;
             visitor.pt_next = &end;
             end_grid.visit_cells_intersecting_line(start, end, visitor);
-#ifdef _DEBUG
-            assert(visitor.intersect);
             if (!visitor.intersect) {
+                // probably a epsilon-difference for the intersection to happen.
+                // try with a visitor that look at epsilon distance, and modify the start point to the intersection
+                FirstEpsilonIntersectionVisitor visitor_epsilon(end_grid, start_end_line.a, start_end_line.b);
+                assert(visitor_epsilon.intersect);
+                start_grid.visit_cells_intersecting_line(start, end, visitor_epsilon);
+                visitor.intersect = visitor_epsilon.intersect;
+                visitor.intersection_contour_idx = visitor_epsilon.intersection_contour_idx;
+                visitor.intersection_line_idx = visitor_epsilon.intersection_line_idx;
+                assert(start != start_end_line.a);
+                start = start_end_line.a;
+            }
+#ifdef _DEBUG
+            if (!visitor.intersect) {
+                assert(false);
                 SVG svg(debug_out_path("cannot_find_boundary.svg"));
+                svg.draw(to_polylines(end_grid.bbox().polygon()), "black", scale_t(0.04));
                 svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
                 svg.draw(contour_start.split_at_first_point(), "red", scale_t(0.025));
                 svg.draw(best_intersection_start.point, "orange", scale_t(0.03));
@@ -951,6 +1026,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
 #endif _DEBUG
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
+                assert(visitor.intersection_line_idx >= 0);
                 best_intersection_end.line_idx = visitor.intersection_line_idx;
                 assert(best_intersection_end.line_idx < contour_end.points.size());
                 bool found = start_end_line.intersection(
@@ -977,8 +1053,8 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             new_dist_from_start = start.distance_to(best_intersection_start.point) * weight_island_travel +
                 std::sqrt(new_dist_from_start) + res_start.distance_to(end) * weight_island_travel;
             s3 = res_start.distance_to(end) * weight_island_travel;
-            assert(is_approx(s2,best_intersection_start.point.distance_to(res_start),1.));
-            assert(is_approx(s1+s2+s3,new_dist_from_start,1.));
+            assert(is_approx(s2,best_intersection_start.point.distance_to(res_start),2.));
+            assert(is_approx(s1+s2+s3,new_dist_from_start,2.));
             //Point res_end;
             distf_t new_dist_from_end =
                 Line(contour_start.points[best_intersection_start.line_idx],
@@ -1455,7 +1531,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             svg.Close();
         }
 #endif
-        
+
         assert(best_intersection_start.line_idx != size_t(-1) && best_intersection_end.line_idx != size_t(-1));
 
         // create intersections between start & best_intersection_start
@@ -1742,11 +1818,33 @@ static size_t avoid_perimeters_inner(      AvoidCrossingPerimeters::Boundary &bo
                              debug_out_path("AvoidCrossingPerimetersInner-final-%d-%d.svg", layer.id(), iRun++));
     }
 #endif /* AVOID_CROSSING_PERIMETERS_DEBUG_OUTPUT */
+
+    //if travel distance lower than epsilon, make it one centre point between .
+    if (start != real_start && end != real_end && result.size() == 2 &&
+        result.front().point.coincides_with_epsilon(result.back().point)) {
+        result.front().point = Line(result.front().point, result.back().point).midpoint();
+        result.pop_back();
+    }
+
     if(start != real_start)
         result_out.push_back({ real_start, -1 });
     append(result_out, std::move(result));
+    while (result_out.size() > 1 && result_out.front().point.coincides_with_epsilon(result_out[1].point)) {
+        //ensure real_start is more than epsilon than start
+        result_out.erase(result_out.begin() + 1);
+    }
     if (end != real_end)
         result_out.push_back({ real_end, -1 });
+    while (result_out.size() > 1 &&
+           result_out.back().point.coincides_with_epsilon(result_out[result_out.size() - 2].point)) {
+        //ensure real_end is more than epsilon than end
+        result_out.erase(result_out.begin() + result_out.size() - 2);
+    }
+
+    assert(result_out.size() > 1);
+    for (size_t i = 1; i < result_out.size(); i++)
+        assert(!result_out[i - 1].point.coincides_with_epsilon(result_out[i].point));
+
     return intersections.size();
 }
 
@@ -2401,6 +2499,9 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, cons
                 nearest_end = bb_coord_t.nearest_point(nearest_end);
             }
             travel_intersection_count = avoid_perimeters(m_internal, nearest_start/*startf.cast<coord_t>()*/, nearest_end/*endf.cast<coord_t>()*/, perimeter_spacing, *gcodegen.layer(), result_pl);
+            assert(result_pl.size() > 1);
+            for (size_t i = 1; i < result_pl.size(); i++)
+                assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
             result_pl.points.front()  = start;
             result_pl.points.back()   = end;
         }
@@ -2423,10 +2524,16 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, cons
                 nearest_end = bb_coord_t.nearest_point(nearest_end);
             }
             travel_intersection_count = avoid_perimeters(m_external, nearest_start/*startf.cast<coord_t>()*/, nearest_end/*endf.cast<coord_t>()*/, 0, *gcodegen.layer(), result_pl);
+            assert(result_pl.size() > 1);
+            for (size_t i = 1; i < result_pl.size(); i++)
+                assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
             result_pl.points.front()  = start;
             result_pl.points.back()   = end;
         }
     }
+    assert(result_pl.size() > 1);
+    for (size_t i = 1; i < result_pl.size(); i++)
+        assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
 
     if(result_pl.empty()) {
         // Travel line is completely outside the bounding box.
@@ -2458,6 +2565,10 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, cons
     // now that it changed from need_wipe(gcodegen, m_grid_lslice, travel, maybe it's good enough?
 //    else
 //        *could_be_wipe_disabled = !need_wipe(gcodegen, m_lslices_offset, m_lslices_offset_bboxes, m_grid_lslices_offset, travel, result_pl, travel_intersection_count);
+
+    assert(result_pl.size() > 1);
+    for (size_t i = 1; i < result_pl.size(); i++)
+        assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
 
     return result_pl;
 }

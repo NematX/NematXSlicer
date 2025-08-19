@@ -3319,11 +3319,13 @@ static double evaluate_support_arch_cost(const Polyline &pl)
     if (ymin > ymax)
         std::swap(ymin, ymax);
 
-    double dmax = 0;
+    distf_t dmax = 0;
     // Maximum distance in Y axis out of the (ymin, ymax) band and from the (front, back) line.
     Linef line { front.cast<double>(), back.cast<double>() };
-    for (const Point &pt : pl.points)
-        dmax = std::max<double>(std::max(dmax, line_alg::distance_to(line, Vec2d(pt.cast<double>()))), std::max(pt.y() - ymax, ymin - pt.y()));
+    for (const Point &pt : pl.points) {
+        distf_t dist = std::sqrt(line_alg::distance_to_squared(line, Vec2d(pt.cast<double>())));
+        dmax = std::max<distf_t>(std::max(dmax, dist), distf_t(std::max(pt.y() - ymax, ymin - pt.y())));
+    }
     return dmax;
 }
 

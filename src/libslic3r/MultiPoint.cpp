@@ -437,7 +437,7 @@ Points MultiPoint::_douglas_peucker_plus(const Points& pts, const double toleran
                 size_t furthest_idx = anchor_idx;
                 // find point furthest from line seg created by (anchor, floater) and note it
                 for (size_t i = anchor_idx + 1; i < floater_idx; ++i) {
-                    double dist_sq = Line::distance_to_squared(pts[i], *anchor, *floater);
+                    double dist_sq = Line::distance_to_squared_abp(*anchor, *floater, pts[i]);
                     if (dist_sq > max_dist_sq) {
                         max_dist_sq = dist_sq;
                         furthest_idx = i;
@@ -492,7 +492,7 @@ Points MultiPoint::_douglas_peucker_plus(const Points& pts, const double toleran
             // find point furthest from line seg created by (anchor, floater) and note it
             for (size_t i = start_idx + 1; i < end_idx; ++i) {
                 if (start_point->distance_to_square(pts[i]) > half_min_length_sq && end_point->distance_to_square(pts[i]) > half_min_length_sq) {
-                    double dist_sq = Line::distance_to_squared(pts[i], *start_point, *end_point);
+                    double dist_sq = Line::distance_to_squared_abp(*start_point, *end_point, pts[i]);
                     if (dist_sq > max_dist_sq) {
                         max_dist_sq = dist_sq;
                         furthest_idx = i;
