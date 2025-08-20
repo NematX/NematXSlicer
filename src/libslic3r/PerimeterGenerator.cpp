@@ -3952,18 +3952,12 @@ void PerimeterGenerator::process(// Input:
         //special branch if gap : don't inset away from gaps!
         ExPolygons gap_fill_exps;
         if (!surface_process_result.gap_srf.empty()) {
-            //not_filled_exp = union_ex(not_filled_p);
-            infill_exp = offset2_ex(not_filled_exp,
-                double(- min_perimeter_infill_spacing / 2 + infill_peri_overlap - params.get_infill_gap()),
-                double(min_perimeter_infill_spacing / 2));
             //remove gaps surfaces
             not_filled_p.clear();
-            //for (ExPolygon& ex : surface_process_result.gap_srf)
-            //    ex.simplify_p(scale_t(std::max(params.print_config.resolution.value, params.print_config.resolution_internal / 4)), &not_filled_p);
-            //gap_fill_exps = union_ex(not_filled_p);
             gap_fill_exps = surface_process_result.gap_srf;
             ensure_valid(gap_fill_exps, scaled_resolution_infill);
-            gap_fill_exps = offset_ex(gap_fill_exps, -infill_peri_overlap);
+            // infill_exp is already offseted by infill_peri_overlap, so we need to offset ourself by that much.
+            gap_fill_exps = offset_ex(gap_fill_exps, infill_peri_overlap);
             infill_exp = diff_ex(infill_exp, gap_fill_exps);
         }
         for(auto *peri : loops->entities()) assert(!peri->empty());
@@ -3980,7 +3974,7 @@ void PerimeterGenerator::process(// Input:
             if (min_perimeter_infill_spacing / 2 > infill_peri_overlap)
                 polyWithoutOverlap = offset2_ex(
                     not_filled_exp,
-                    double(- params.infill_gap - min_perimeter_infill_spacing / 2 + infill_peri_overlap),
+                    double(- params.get_infill_gap() - min_perimeter_infill_spacing / 2 + infill_peri_overlap),
                     double(min_perimeter_infill_spacing / 2 - infill_peri_overlap));
             else
                 polyWithoutOverlap = offset_ex(
