@@ -6809,8 +6809,9 @@ std::string GCodeGenerator::_extrude(const ExtrusionPath &path, const std::strin
             Point last_pos    = polyline.front();
             Point current_pos = polyline.front();
             for (size_t idx = 1; idx < polyline.size(); ++idx) {
-                if ((path.role().is_external_perimeter() && config().stretch_corners.value) ||
-                    (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0)) {
+                if (config().stretch_corners.value &&
+                    (path.role().is_external_perimeter() ||
+                     (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0))) {
                     if (idx + 1 < polyline.size()) {
                         if (!is_ccw) {
                             assert(m_current_loop_reversed);
@@ -6861,8 +6862,9 @@ std::string GCodeGenerator::_extrude(const ExtrusionPath &path, const std::strin
                         radius = 0;
                 }
                 if (radius == 0) {
-                    if ((path.role().is_external_perimeter() && config().stretch_corners.value) ||
-                        (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0)) {
+                    if (config().stretch_corners.value &&
+                        (path.role().is_external_perimeter() ||
+                         (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0))) {
                         last_pos    = current_pos;
                         // TODO: check what angle arcs make with each other, and modify them if a stretch is needed
                         // For now, it's only possible between two strait segment.
