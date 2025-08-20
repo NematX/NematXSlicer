@@ -6636,6 +6636,15 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
     def->aliases = {"support_material_interface_pattern"};
 
+    def = this->add("support_material_layer_expansion", coFloat);
+    def->label = L("Support expansion");
+    def->category = OptionCategory::support;
+    def->tooltip = L("Make the support wider than they need to be");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = this->add("support_material_layer_height", coFloatOrPercent);
     def->label = L("Support layer height");
     def->category = OptionCategory::support;
@@ -10504,6 +10513,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "stretch_corners_inner_perimeters",
 "support_material_angle_height",
 "support_material_acceleration",
+"support_material_bottom_interface_pattern",
 "support_material_contact_distance_type",
 "support_material_fan_speed",
 "support_material_interface_acceleration",
@@ -10511,7 +10521,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "support_material_interface_angle_increment",
 "support_material_interface_fan_speed",
 "support_material_interface_layer_height",
-"support_material_bottom_interface_pattern",
+"support_material_layer_expansion",
 "support_material_layer_height",
 "thin_perimeters_all",
 "thin_perimeters",

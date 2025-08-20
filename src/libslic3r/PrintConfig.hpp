@@ -835,6 +835,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent,       support_material_interface_speed))
     ((ConfigOptionEnum<SupportMaterialPattern>,  support_material_pattern))
     ((ConfigOptionFloatOrPercent,       support_material_layer_height))
+    ((ConfigOptionFloat,                support_material_layer_expansion))
     // Spacing between support material lines (the hatching distance).
     ((ConfigOptionFloat,                support_material_spacing))
     ((ConfigOptionFloatOrPercent,       support_material_speed))
