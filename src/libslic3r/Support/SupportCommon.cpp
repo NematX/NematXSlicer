@@ -2184,11 +2184,14 @@ void generate_support_toolpaths(
 
             // Collect the support areas with this print_z into islands, as there is no need
             // for retraction over these islands.
-            Polygons polys;
+            ExPolygons islands_expolys;
             // Collect the extrusions, sorted by the bottom extrusion height.
             for (LayerCacheItem &layer_cache_item : layer_cache.nonempty) {
                 // Collect islands to polys.
-                layer_cache_item.layer_extruded->polygons_append(polys);
+                if (layer_cache_item.layer_extruded->layer != nullptr &&
+                    !layer_cache_item.layer_extruded->layer->polygons.empty()) {
+                    islands_expolys = union_ex(islands_expolys, layer_cache_item.layer_extruded->layer->polygons);
+                }
                 // The print_z of the top contact surfaces and bottom_z of the bottom contact surfaces are "free"
                 // in a sense that they are not synchronized with other support layers. As the top and bottom contact surfaces
                 // are inflated to achieve a better anchoring, it may happen, that these surfaces will at least partially
@@ -2215,8 +2218,8 @@ void generate_support_toolpaths(
                 std::stable_sort(layer_cache_item.overlapping.begin(), layer_cache_item.overlapping.end(), [](auto *l1, auto *l2) { return *l1 < *l2; });
             }
             assert(support_layer.support_islands.empty());
-            if (! polys.empty()) {
-                support_layer.support_islands = union_ex(polys);
+            if (!islands_expolys.empty()) {
+                support_layer.support_islands = std::move(islands_expolys);
                 support_layer.support_islands_bboxes.reserve(support_layer.support_islands.size());
                 for (const ExPolygon &expoly : support_layer.support_islands)
                     support_layer.support_islands_bboxes.emplace_back(get_extents(expoly).inflated(SCALED_EPSILON));

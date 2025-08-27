@@ -1048,52 +1048,55 @@ void LayerRegion::process_external_surfaces_old(const Layer *lower_layer, const 
     const coord_t scaled_resolution = std::max(SCALED_EPSILON, scale_t(this->layer()->object()->print()->config().resolution.value));
     {
         // Intersect the grown surfaces with the actual fill boundaries.
-        Polygons bottom_polygons = to_polygons(bottom);
+        ExPolygons bottom_expolygons = to_expolygons(bottom);
         // Merge top and bottom in a single collection.
         surfaces_append(top, std::move(bottom));
         for (size_t i = 0; i < top.size(); ++ i) {
             Surface &s1 = top[i];
             if (s1.empty())
                 continue;
-            Polygons polys;
-            polygons_append(polys, to_polygons(std::move(s1)));
+            ExPolygons expolys;
+            expolys.push_back(std::move(s1.expolygon));
             for (size_t j = i + 1; j < top.size(); ++ j) {
                 Surface &s2 = top[j];
                 if (! s2.empty() && surfaces_could_merge(s1, s2)) {
-                    polygons_append(polys, to_polygons(std::move(s2)));
+                    //polygons_append(polys, to_polygons(std::move(s2)));
+                    expolys.push_back(std::move(s2.expolygon));
                     s2.clear();
                 }
             }
             if (s1.has_pos_top()) {
                 // Trim the top surfaces by the bottom surfaces. This gives the priority to the bottom surfaces.
-                polys = diff(polys, bottom_polygons);
+                expolys = diff_ex(expolys, bottom_expolygons);
             }
             surfaces_append(
                 new_surfaces,
                 // Don't use a safety offset as fill_boundaries were already united using the safety offset.
-                ensure_valid(intersection_ex(polys, fill_boundaries)/*, scaled_resolution*/),
+                ensure_valid(intersection_ex(expolys, fill_boundaries)/*, scaled_resolution*/),
                 s1);
+            //s1.clear();
         }
     }
 
     // Subtract the new top surfaces from the other non-top surfaces and re-add them.
-    Polygons new_polygons = to_polygons(new_surfaces);
+    ExPolygons new_expolygons = to_expolygons(new_surfaces);
     for (size_t i = 0; i < internal.size(); ++ i) {
         Surface &s1 = internal[i];
         if (s1.empty())
             continue;
-        Polygons polys;
-        polygons_append(polys, to_polygons(std::move(s1)));
+        ExPolygons expolys;
+        expolys.push_back(std::move(s1.expolygon));
         for (size_t j = i + 1; j < internal.size(); ++ j) {
             Surface &s2 = internal[j];
             if (! s2.empty() && surfaces_could_merge(s1, s2)) {
-                polygons_append(polys, to_polygons(std::move(s2)));
+                expolys.push_back(std::move(s2.expolygon));
                 s2.clear();
             }
         }
-        ExPolygons new_expolys = diff_ex(polys, new_polygons);
-        polygons_append(new_polygons, to_polygons(new_expolys));
+        ExPolygons new_expolys = diff_ex(expolys, new_expolygons);
+        new_expolygons = union_ex(new_expolygons, new_expolys);
         surfaces_append(new_surfaces, ensure_valid(std::move(new_expolys)/*, scaled_resolution*/), s1);
+        //s1.clear();
     }
     
     set_fill_surfaces().surfaces = std::move(new_surfaces);
