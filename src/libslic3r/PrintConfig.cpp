@@ -403,15 +403,15 @@ ConfigOption *disable_default_option(ConfigOption *option) {
     return option->set_can_be_disabled(true);
 }
 
+ConfigOptionVectorBase *disable_default_option(ConfigOptionVectorBase *option) {
+    return (ConfigOptionVectorBase *)option->set_can_be_disabled(true);
+}
+
 ConfigOption *enable_default_option(ConfigOption *option) {
     return option->set_can_be_disabled(false);
 }
 
-ConfigOptionVectorBase *disable_default_option(ConfigOptionVectorBase *option, bool default_is_disabled = true) {
-    return (ConfigOptionVectorBase *)option->set_can_be_disabled(true);
-}
-
-ConfigOptionVectorBase *enable_default_option(ConfigOptionVectorBase *option, bool default_is_disabled = true) {
+ConfigOptionVectorBase *enable_default_option(ConfigOptionVectorBase *option) {
     return (ConfigOptionVectorBase *)option->set_can_be_disabled(false);
 }
 
@@ -1832,6 +1832,7 @@ void PrintConfigDef::init_fff_params()
     def->category = OptionCategory::extruders;
     def->tooltip = L("The extruder to use (unless more specific extruder settings are specified) for the first layer.");
     def->min = 0;  // 0 = inherit defaults
+    def->mode = comExpert | comSuSi;
     def->set_enum_labels(ConfigOptionDef::GUIType::i_enum_open, 
         { L("default"), "1", "2", "3", "4", "5", "6", "7", "8", "9" }); // override label for item 0
 
@@ -2361,7 +2362,7 @@ void PrintConfigDef::init_fff_params()
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comSuSi;
     def->is_vector_extruder = true;
-    def->set_default_value(enable_default_option(new ConfigOptionFloats({0.02})));
+    def->set_default_value(disable_default_option(new ConfigOptionFloats({0.02})));
     def->aliases = {"filament_default_pa"};
 
     def = this->add("filament_bridge_pa", coFloatsOrPercents);
@@ -4313,7 +4314,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
-    def->set_default_value(enable_default_option(new ConfigOptionFloat(1500)));
+    def->set_default_value(disable_default_option(new ConfigOptionFloat(1500)));
 
     def = this->add("max_fan_speed", coInts);
     def->label = L("Max");
@@ -5270,6 +5271,16 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comSuSi;
     def->can_be_disabled = true;
     def->set_default_value(disable_default_option(new ConfigOptionInt(200)));
+
+    def = this->add("print_temperature_smooth_change", coInt);
+    def->label = L("Temperature smoothing layers");
+    def->category = OptionCategory::filament;
+    def->tooltip = L("When the temperature changes, it gradually change over this number of layers instead of going directly to the desired value."
+                        "\nNote: does smooth first layer -> other layer transition if set in the second layer.");
+    def->sidetext = L("layers");
+    def->min = 0;
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionInt(0));
 
     def = this->add("printer_model", coString);
     def->label = L("Printer type");
@@ -6878,6 +6889,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionEnum<InfillPattern>(ipRectilinear));
     def->aliases = {"support_material_interface_pattern"};
+
+    def = this->add("support_material_layer_expansion", coFloat);
+    def->label = L("Support expansion");
+    def->category = OptionCategory::support;
+    def->tooltip = L("Make the support wider than they need to be");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloat(0));
 
     def = this->add("support_material_layer_height", coFloatOrPercent);
     def->label = L("Support layer height");
@@ -10611,6 +10631,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "fill_smooth_width",
 "fill_top_flow_ratio",
 "fill_top_flow_ratio",
+"first_layer_extruder",
 "first_layer_extrusion_spacing",
 "first_layer_infill_extrusion_width",
 "first_layer_infill_extrusion_spacing",
@@ -10728,6 +10749,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "print_retract_length",
 "print_retract_lift",
 "print_temperature",
+"print_temperature_smooth_change",
 "printer_custom_variables",
 "printhost_client_cert",
 "printhost_client_cert_password",
@@ -10784,6 +10806,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "stretch_corners_inner_perimeters",
 "support_material_angle_height",
 "support_material_acceleration",
+"support_material_bottom_interface_pattern",
 "support_material_contact_distance_type",
 "support_material_fan_speed",
 "support_material_interface_acceleration",
@@ -10791,7 +10814,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "support_material_interface_angle_increment",
 "support_material_interface_fan_speed",
 "support_material_interface_layer_height",
-"support_material_bottom_interface_pattern",
+"support_material_layer_expansion",
 "support_material_layer_height",
 "thin_perimeters_all",
 "thin_perimeters",
@@ -11077,7 +11100,13 @@ std::map<std::string, std::string> PrintConfigDef::to_prusa(t_config_option_key&
     if ("arc_fitting" == opt_key && "bambu" == value) {
         value = "emit_center";
     }
-    
+    if ("wipe_tower_brim_width" == opt_key && value.find("%") != std::string::npos) {
+        const ConfigOptionFloatOrPercent *current_opt = all_conf.option<ConfigOptionFloatOrPercent>(opt_key);
+        assert(current_opt && current_opt->percent);
+        const ConfigOptionFloats *nozzle_diameters = all_conf.option<ConfigOptionFloats>("nozzle_diameter");
+        value = std::to_string(current_opt->get_abs_value(nozzle_diameters->get_at(0)));
+    }
+
     if ("thumbnails" == opt_key) {
     // add format to thumbnails
         const ConfigOptionEnum<GCodeThumbnailsFormat> *format_opt = all_conf.option<ConfigOptionEnum<GCodeThumbnailsFormat>>("thumbnails_format");

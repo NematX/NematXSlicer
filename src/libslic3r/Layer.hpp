@@ -34,6 +34,7 @@ using LayerRegionPtrs = std::vector<LayerRegion*>;
 using LayerRegionSetConstPtrs = std::set<const LayerRegion*>;
 class PrintRegion;
 class PrintObject;
+class PrintRegionConfig;
 
 namespace FillAdaptive {
     struct Octree;
@@ -304,6 +305,8 @@ public:
     void                set_id(size_t id)   { m_id = id; }
     PrintObject*        object()            { return m_object; }
     const PrintObject*  object() const      { return m_object; }
+    // get PrintRegionConfig from the region if there is only one, or from object's default_region_config 
+    const PrintRegionConfig &default_region_config() const;
 
     Layer              *upper_layer;
     Layer              *lower_layer;

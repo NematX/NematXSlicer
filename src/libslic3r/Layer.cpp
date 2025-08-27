@@ -227,6 +227,23 @@ bool Layer::empty() const
     return true;
 }
 
+const PrintRegionConfig &Layer::default_region_config() const {
+    std::set<const LayerRegion*> useful_regions;
+    for (const LayerSliceIslandPtr &layer_island_ptr : this->islands()) {
+        for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+            if (region_island_ptr->has_extrusions()) {
+                for (const LayerRegion *region : region_island_ptr->regions()) {
+                    useful_regions.insert(region);
+                }
+            }
+        }
+    }
+    if (useful_regions.size() == 1) {
+        return (*useful_regions.begin())->region().config();
+    }
+    return m_object->default_region_config(m_object->print()->default_region_config());
+}
+
 LayerRegion* Layer::add_region(const PrintRegion *print_region)
 {
     LayerRegion* lr = new LayerRegion(this, print_region);

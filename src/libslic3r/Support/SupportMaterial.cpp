@@ -1847,6 +1847,36 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
 
                 // Now apply the contact areas to the layer where they need to be made.
                 if (! contact_polygons.empty() || ! overhang_polygons.empty()) {
+                    //enlarge
+                    auto enlarge =
+                        [](Polygons &to_enlarge, const Polygons &limits, coordf_t scaled_expansion) {
+                            ExPolygons overhang_expolygons = union_ex(to_enlarge);
+                            ExPolygons overhang_expolygons_out;
+                            for (ExPolygon &expoly : overhang_expolygons) {
+                                ExPolygons enlarged = //offset_ex(expoly, scaled_expansion);
+                                    diff_ex(offset_ex(expoly, scaled_expansion), limits);
+                                if (enlarged.size() > 1) {
+                                    bool found = false;
+                                    for (ExPolygon &bigex : enlarged) {
+                                        if (bigex.contains(expoly.contour.front())) {
+                                            found = true;
+                                            overhang_expolygons_out.push_back(bigex);
+                                        }
+                                    }
+                                    if (!found) {
+                                        overhang_expolygons_out.push_back(expoly);
+                                    }
+                                } else {
+                                    overhang_expolygons_out.push_back(enlarged.front());
+                                }
+                            }
+                            assert(overhang_expolygons_out.size() == overhang_expolygons.size());
+                            to_enlarge = union_(overhang_expolygons_out);
+                        };
+                    Polygons not_overhangs = diff(to_polygons(layer.lslices()), overhang_polygons);
+                    enlarge(overhang_polygons, not_overhangs, scale_d(m_object_config->support_material_layer_expansion.value));
+                    enlarge(contact_polygons, not_overhangs, scale_d(m_object_config->support_material_layer_expansion.value));
+
                     // Allocate the two empty layers.
                     auto [new_layer, bridging_layer] = new_contact_layer(*m_print_config, *m_object_config,
                                                                          *m_slicing_params,
@@ -1863,6 +1893,9 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
                     #endif // SLIC3R_DEBUG
                             );
                         assert_valid(new_layer->polygons);
+                        //enlarge(new_layer->polygons, to_polygons(layer.lslices()));
+
+
                         // Insert new layer even if there is no interface generated: Likely the support angle is not steep enough to require dense interface,
                         // however generating a sparse support will be useful for the object stability.
                         // if (! new_layer->polygons.empty())

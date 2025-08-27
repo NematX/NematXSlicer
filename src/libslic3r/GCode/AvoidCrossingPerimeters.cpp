@@ -1352,7 +1352,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                         }
                     }
                 }
-                std::cout<<" -"<<type_dbg<<" : "<<shortest_dist_dbg<<"\n";
+                //std::cout<<" -"<<type_dbg<<" : "<<shortest_dist_dbg<<"\n";
                 //for (size_t i_start = 0; i_start < contour_start.size(); i_start++)
                 best_intersection_start_dbg_saved2 = best_intersection_start_dbg;
                 {

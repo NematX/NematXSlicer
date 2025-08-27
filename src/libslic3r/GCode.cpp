@@ -3085,18 +3085,20 @@ void GCodeGenerator::_print_first_layer_extruder_temperatures(std::string &out, 
                         temp += print.config().standby_temperature_delta.value;
                     }
                 }
-                if (temp > 0)
+                if (temp > 0) {
                     out += (m_writer.set_temperature(temp, false, tool.id()));
             }
+        }
         }
         if (wait || print.config().single_extruder_multi_material.value) {
             // Set temperature of the first printing extruder only.
             int temp = print.config().first_layer_temperature.get_at(first_printing_extruder_id);
             if (temp == 0)
                 temp = print.config().temperature.get_at(first_printing_extruder_id);
-            if (temp > 0)
+            if (temp > 0) {
                 out += (m_writer.set_temperature(temp, wait, first_printing_extruder_id));
         }
+    }
     }
 }
 
@@ -3626,7 +3628,7 @@ LayerResult GCodeGenerator::process_layer(
         }
     }
 
-    if (! first_layer && ! m_second_layer_things_done) {
+    if (! first_layer && !m_second_layer_things_done) {
         // Transition from 1st to 2nd layer. Adjust nozzle temperatures as prescribed by the nozzle dependent
         // first_layer_temperature vs. temperature settings.
         for (const Extruder &extruder : m_writer.extruders()) {
@@ -3637,8 +3639,20 @@ LayerResult GCodeGenerator::process_layer(
                     continue;
             }
             int temperature = print.config().temperature.get_at(extruder.id());
-            if (temperature > 0) // don't set it if disabled
+            if (temperature > 0) { // don't set it if disabled
+                if (m_config.print_temperature_smooth_change.value > 0 &&
+                    temperature != m_writer.get_temperature(extruder.id())) {
+                    if (temperature != m_writer.get_tool(extruder.id())->temperature_target) {
+                        m_writer.get_mutable_tool(extruder.id())->temperature_float = m_writer.get_temperature();
+                        m_writer.get_mutable_tool(extruder.id())->temperature_delta = std::abs(
+                            float(temperature - m_writer.get_temperature()) /
+                            float(m_config.print_temperature_smooth_change.value + 1));
+                        m_writer.get_mutable_tool(extruder.id())->temperature_target = temperature;
+                    }
+                } else {
                 gcode += m_writer.set_temperature(temperature, false, extruder.id());
+        }
+            }
         }
         _print_second_layer_bed_temperature(gcode, print, print.config().before_layer_gcode.value +"\n" + print.config().layer_gcode.value, first_extruder_id, /*wait=*/false);
         //if (print.config().bed_temperature.get_at(first_extruder_id) > 0)  // don't set it if disabled
@@ -3731,6 +3745,24 @@ LayerResult GCodeGenerator::process_layer(
             if (extruder_id == layer_tools.extruders.back()) {
                 m_wipe_tower_current_layer->finish_layer(wt_extrusions, extruder_id, true);
             }
+
+        // print_temperature_smooth_change
+        if (m_writer.tool()->temperature_delta > 0) {
+            if ( std::abs(m_writer.get_temperature()- m_writer.tool()->temperature_target) <= m_writer.tool()->temperature_delta) {
+                gcode += m_writer.set_temperature(m_writer.tool()->temperature_target);
+                m_writer.tool()->temperature_target = 0;
+                m_writer.tool()->temperature_delta = (-1);
+            } else {
+                assert(int(m_writer.tool()->temperature_float) == m_writer.get_temperature());
+                if (m_writer.get_temperature() < m_writer.tool()->temperature_target) {
+                    m_writer.tool()->temperature_float += m_writer.tool()->temperature_delta;
+                    gcode += m_writer.set_temperature(int(m_writer.tool()->temperature_float));
+                } else {
+                    m_writer.tool()->temperature_float -= m_writer.tool()->temperature_delta;
+                    gcode += m_writer.set_temperature(int(m_writer.tool()->temperature_float));
+                }
+            }
+        }
 
             Vec2d old_origin = this->origin();
             this->set_origin(print.wipe_tower2()->position());
@@ -4026,14 +4058,33 @@ void GCodeGenerator::process_layer_single_object(
                         if (ee->role() == role)
                             entities_cache.emplace_back(ee);
                 }
-                if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 && m_config.print_first_layer_temperature.is_enabled())
-                    gcode += m_writer.set_temperature(m_config.print_first_layer_temperature.value, false, m_writer.tool()->id());
-                else if (m_config.print_temperature.is_enabled())
-                    gcode += m_writer.set_temperature(m_config.print_temperature.value, false, m_writer.tool()->id());
-                else if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 && m_config.first_layer_temperature.get_at(m_writer.tool()->id()) > 0)
-                        gcode += m_writer.set_temperature(m_config.first_layer_temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
-                else if (m_config.temperature.get_at(m_writer.tool()->id()) > 0) // don't set it if disabled
-                    gcode += m_writer.set_temperature(m_config.temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
+                int new_temperature = (-1);
+                if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 &&
+                    m_config.print_first_layer_temperature.is_enabled()) {
+                    new_temperature = m_config.print_first_layer_temperature.value;
+                } else if (m_config.print_temperature.is_enabled()) {
+                    new_temperature = m_config.print_temperature.value;
+                } else if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 &&
+                           m_config.first_layer_temperature.get_at(m_writer.tool()->id()) > 0) {
+                    new_temperature = m_config.first_layer_temperature.get_at(m_writer.tool()->id());
+                } else if (m_config.temperature.get_at(m_writer.tool()->id()) > 0) { // don't set it if disabled
+                    new_temperature = m_config.temperature.get_at(m_writer.tool()->id());
+                }
+                if (new_temperature >= 0 && new_temperature != m_writer.get_temperature()) {
+                    if (m_config.print_temperature_smooth_change.value > 0) {
+                        if (new_temperature != m_writer.tool()->temperature_target) {
+                            m_writer.tool()->temperature_float = m_writer.get_temperature();
+                            m_writer.tool()->temperature_delta = std::abs(
+                                float(new_temperature - m_writer.get_temperature()) /
+                                float(m_config.print_temperature_smooth_change.value + 1));
+                            m_writer.tool()->temperature_target = new_temperature;
+                        }
+                    } else {
+                        m_writer.tool()->temperature_target = 0;
+                        m_writer.tool()->temperature_delta = (-1);
+                        gcode += m_writer.set_temperature(new_temperature, false, m_writer.tool()->id());
+                    }
+                }
                 gcode += this->extrude_support(chain_extrusion_references(entities, last_pos_defined()?&last_pos():nullptr));
             }
         }
@@ -6354,26 +6405,50 @@ std::string GCodeGenerator::extrude_path_3D(const ExtrusionPath3D &path, const s
 
 void GCodeGenerator::set_region_for_extrude(const Print &print, const PrintObject *print_object, const LayerRegion *layerm, std::string &gcode)
 {
-    const PrintRegionConfig &region_config = this->m_region == nullptr ? 
-        //FIXME
-        (print_object == nullptr ? print.default_region_config() : print_object->default_region_config(print.default_region_config()) ) :
-        //print.default_region_config() :
-        m_region->config();
+    const PrintRegionConfig *region_config;
+    if (layerm) {
+        region_config = &layerm->region().config();
+    } else if (m_region) {
+        region_config = &m_region->config();
+    } else if (m_layer) {
+        region_config = &m_layer->default_region_config();
+    } else if(print_object){
+        region_config = &print_object->default_region_config(print.default_region_config());
+    } else {
+        region_config = &print.default_region_config();
+    }
     // modify our fullprintconfig with it. (works as all items avaialable in the regionconfig are present in this config, ie: it write everything region-defined)
-    m_config.apply(region_config);
+    m_config.apply(*region_config);
     // pass our region config to the gcode writer
-    m_writer.apply_print_region_config(region_config);
+    m_writer.apply_print_region_config(*region_config);
     // perimeter-only (but won't break anything if done also in infill & ironing): pass needed settings to seam placer.
-    m_seam_placer.external_perimeters_first = region_config.external_perimeters_first.value;
+    m_seam_placer.external_perimeters_first = region_config->external_perimeters_first.value;
     // temperature override from region
+    int new_temperature = (-1);
     if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 && m_config.print_first_layer_temperature.is_enabled()) {
-        gcode += m_writer.set_temperature(m_config.print_first_layer_temperature.value, false, m_writer.tool()->id());
+        new_temperature = m_config.print_first_layer_temperature.value;
     } else if (m_config.print_temperature.is_enabled()) {
-        gcode += m_writer.set_temperature(m_config.print_temperature.value, false, m_writer.tool()->id());
+        new_temperature = m_config.print_temperature.value;
     } else if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 && m_config.first_layer_temperature.get_at(m_writer.tool()->id()) > 0) {
-        gcode += m_writer.set_temperature(m_config.first_layer_temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
+        new_temperature = m_config.first_layer_temperature.get_at(m_writer.tool()->id());
     } else if (m_config.temperature.get_at(m_writer.tool()->id()) > 0) { // don't set it if disabled
-        gcode += m_writer.set_temperature(m_config.temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
+        new_temperature = m_config.temperature.get_at(m_writer.tool()->id());
+    }
+    if (new_temperature >= 0 && new_temperature != m_writer.get_temperature()) {
+        if (m_config.print_temperature_smooth_change.value > 0) {
+            if (new_temperature != m_writer.tool()->temperature_target) {
+                m_writer.tool()->temperature_float = m_writer.get_temperature();
+                // compute delta
+                m_writer.tool()->temperature_delta = std::abs(
+                    float(new_temperature - m_writer.get_temperature()) /
+                    float(m_config.print_temperature_smooth_change.value + 1));
+                m_writer.tool()->temperature_target = new_temperature;
+            }
+        } else {
+            m_writer.tool()->temperature_target = 0;
+            m_writer.tool()->temperature_delta = (-1);
+            gcode += m_writer.set_temperature(new_temperature, false);
+        }
     }
     if (m_config.print_fan_speed.is_enabled() && (m_print_fan_speed_override != int(m_config.print_fan_speed.value))) {
         gcode += ";_SET_FAN_SPEED";
@@ -6386,12 +6461,12 @@ void GCodeGenerator::set_region_for_extrude(const Print &print, const PrintObjec
         m_print_fan_speed_override = int(-1);
     }
     // apply region_gcode
-    if (!region_config.region_gcode.value.empty()) {
+    if (!region_config->region_gcode.value.empty()) {
 //TODO 2.7: new placeholder_parser_process call
         DynamicConfig config;
         assert(!m_gcode_label_objects_in_session || !m_gcode_label_objects_start.empty());
         m_gcode_label_objects_start += this->placeholder_parser_process("region_gcode",
-                                                                        region_config.region_gcode.value,
+                                                                        region_config->region_gcode.value,
                                                                         m_writer.tool()->id(), &config) +
                                        "\n";
     }
@@ -7278,8 +7353,9 @@ std::string GCodeGenerator::_extrude(ExtrusionPath &path, const std::string_view
             Point last_pos    = polyline.front();
             Point current_pos = polyline.front();
             for (size_t idx = 1; idx < polyline.size(); ++idx) {
-                if ((path.role().is_external_perimeter() && config().stretch_corners.value) ||
-                    (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0)) {
+                if (config().stretch_corners.value &&
+                    (path.role().is_external_perimeter() ||
+                     (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0))) {
                     if (idx + 1 < polyline.size()) {
                         if (!is_ccw) {
                             assert(m_current_loop_reversed);
@@ -7330,8 +7406,9 @@ std::string GCodeGenerator::_extrude(ExtrusionPath &path, const std::string_view
                         radius = 0;
                 }
                 if (radius == 0) {
-                    if ((path.role().is_external_perimeter() && config().stretch_corners.value) ||
-                        (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0)) {
+                    if (config().stretch_corners.value &&
+                        (path.role().is_external_perimeter() ||
+                         (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0))) {
                         last_pos    = current_pos;
                         // TODO: check what angle arcs make with each other, and modify them if a stretch is needed
                         // For now, it's only possible between two strait segment.
