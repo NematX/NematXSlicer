@@ -132,7 +132,7 @@ using Trees  = std::vector<Tree>;
 Element to_tree_element(const TreeSupportSettings &config, const SlicingParameters &slicing_params, SupportElement &element, bool is_root)
 {
     Element out;
-    out.position        = to_3d(unscaled<float>(element.state.result_on_layer), float(layer_z(slicing_params, config, element.state.layer_idx)));
+    out.position        = to_3d(unscaled<float>(element.state.result_on_layer), float(layer_z_mm(slicing_params, config, element.state.layer_idx)));
     out.radius          = support_element_radius(config, element);
     out.layer_idx       = element.state.layer_idx;
     out.influence_area  = std::move(element.influence_area);
@@ -613,8 +613,8 @@ static std::pair<float, float> extrude_branch(
         const SupportElement &prev    = *path[ipath - 1];
         const SupportElement &current = *path[ipath];
         assert(prev.state.layer_idx + 1 == current.state.layer_idx);
-        p1 = to_3d(unscaled<double>(prev   .state.result_on_layer), layer_z(slicing_params, config, prev   .state.layer_idx));
-        p2 = to_3d(unscaled<double>(current.state.result_on_layer), layer_z(slicing_params, config, current.state.layer_idx));
+        p1 = to_3d(unscaled<double>(prev   .state.result_on_layer), layer_z_mm(slicing_params, config, prev   .state.layer_idx));
+        p2 = to_3d(unscaled<double>(current.state.result_on_layer), layer_z_mm(slicing_params, config, current.state.layer_idx));
         v1 = (p2 - p1).normalized();
         if (ipath == 1) {
             nprev = v1;
@@ -626,6 +626,7 @@ static std::pair<float, float> extrude_branch(
             int   ifan       = int(result.vertices.size());
             result.vertices.emplace_back((p1 - nprev * radius).cast<float>());
             zmin = result.vertices.back().z();
+            assert(/*zmin > 0 &&*/ zmin < 1000);
             float angle = angle_step;
             for (int i = 1; i < nsteps; ++ i, angle += angle_step) {
                 std::pair<int, int> strip = discretize_circle((p1 - nprev * radius * cos(angle)).cast<float>(), nprev.cast<float>(), radius * sin(angle), eps, result.vertices);
@@ -657,13 +658,14 @@ static std::pair<float, float> extrude_branch(
             int ifan = int(result.vertices.size());
             result.vertices.emplace_back((p2 + ncurrent * radius).cast<float>());
             zmax = result.vertices.back().z();
+            assert(zmax > 0 && zmax < 1000);
             triangulate_fan<true>(result, ifan, prev_strip.first, prev_strip.second);
 //            sprintf(fname, "d:\\temp\\meshes\\tree-partial-%d.obj", ++ irun);
 //            its_write_obj(result, fname);
         } else {
             const SupportElement &next = *path[ipath + 1];
             assert(current.state.layer_idx + 1 == next.state.layer_idx);
-            p3 = to_3d(unscaled<double>(next.state.result_on_layer), layer_z(slicing_params, config, next.state.layer_idx));
+            p3 = to_3d(unscaled<double>(next.state.result_on_layer), layer_z_mm(slicing_params, config, next.state.layer_idx));
             v2 = (p3 - p2).normalized();
             ncurrent = (v1 + v2).normalized();
             float radius = unscaled<float>(support_element_radius(config, current));
@@ -775,7 +777,7 @@ static void organic_smooth_branches_avoid_collisions(
             element.parents.empty() || (link_down == -1 && element.state.layer_idx > 0),
             unscaled<float>(support_element_radius(config, element)),
             // 3D position
-            to_3d(unscaled<float>(element.state.result_on_layer), float(layer_z(slicing_params, config, element.state.layer_idx)))
+            to_3d(unscaled<float>(element.state.result_on_layer), float(layer_z_mm(slicing_params, config, element.state.layer_idx)))
         });
         // Update min_z coordinate to min_z of the tree below.
         CollisionSphere &collision_sphere = collision_spheres.back();
@@ -840,7 +842,7 @@ static void organic_smooth_branches_avoid_collisions(
                                     double collision_depth = sqrt(r2) - dist;
                                     if (collision_depth > collision_sphere.last_collision_depth) {
                                         collision_sphere.last_collision_depth = collision_depth;
-                                        collision_sphere.last_collision = to_3d(hit_point_out.cast<float>(), float(layer_z(slicing_params, config, layer_id)));
+                                        collision_sphere.last_collision = to_3d(hit_point_out.cast<float>(), float(layer_z_mm(slicing_params, config, layer_id)));
                                     }
                                 }
                             }
@@ -920,7 +922,7 @@ static void organic_smooth_branches_avoid_collisions(
     std::vector<openvdb::Vec3R> pts, prev, projections;
     std::vector<float> distances;
     for (const std::pair<SupportElement*, int>& element : elements_with_link_down) {
-        Vec3d pt = to_3d(unscaled<double>(element.first->state.result_on_layer), layer_z(print_object.slicing_parameters(), config, element.first->state.layer_idx)) * scale;
+        Vec3d pt = to_3d(unscaled<double>(element.first->state.result_on_layer), layer_z_mm(print_object.slicing_parameters(), config, element.first->state.layer_idx)) * scale;
         pts.push_back({ pt.x(), pt.y(), pt.z() });
     }
 
@@ -1193,7 +1195,7 @@ void organic_draw_branches(
     tbb::parallel_for(tbb::blocked_range<size_t>(0, trees.size(), 1),
         [&trees, &volumes, &config, &slicing_params, &move_bounds, &mesh_slicing_params, &throw_on_cancel](const tbb::blocked_range<size_t> &range) {
             indexed_triangle_set    partial_mesh;
-            std::vector<float>      slice_z;
+            std::vector<float>      slice_z_mm;
             std::vector<Polygons>   bottom_contacts;
             for (size_t tree_id = range.begin(); tree_id < range.end(); ++ tree_id) {
                 Tree &tree = trees[tree_id];
@@ -1207,13 +1209,13 @@ void organic_draw_branches(
                     LayerIndex layer_end   = (branch.has_tip ?
                         branch.path.back()->state.layer_idx :
                         std::max(branch.path.back()->state.layer_idx, layer_idx_floor(slicing_params, config, zspan.second))) + 1;
-                    slice_z.clear();
+                    slice_z_mm.clear();
                     for (LayerIndex layer_idx = layer_begin; layer_idx < layer_end; ++ layer_idx) {
-                        const double print_z  = layer_z(slicing_params, config, layer_idx);
-                        const double bottom_z = layer_idx > 0 ? layer_z(slicing_params, config, layer_idx - 1) : 0.;
-                        slice_z.emplace_back(float(0.5 * (bottom_z + print_z)));
+                        const double print_z_mm  = layer_z_mm(slicing_params, config, layer_idx);
+                        const double bottom_z_mm = layer_idx > 0 ? layer_z_mm(slicing_params, config, layer_idx - 1) : 0.;
+                        slice_z_mm.emplace_back(float(0.5 * (bottom_z_mm + print_z_mm)));
                     }
-                    std::vector<Polygons> slices = slice_mesh(partial_mesh, slice_z, mesh_slicing_params, throw_on_cancel);
+                    std::vector<Polygons> slices = slice_mesh(partial_mesh, slice_z_mm, mesh_slicing_params, throw_on_cancel);
                     bottom_contacts.clear();
                     //FIXME parallelize?
                     for (LayerIndex i = 0; i < LayerIndex(slices.size()); ++ i)

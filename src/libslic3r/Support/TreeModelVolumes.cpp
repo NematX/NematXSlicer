@@ -545,6 +545,8 @@ void TreeModelVolumes::calculateCollision(const coord_t radius, const LayerIndex
                     for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
                         LayerIndex layer_idx_below = layer_idx - z_distance_bottom_layers - 1;
                         assert(layer_idx_below >= 0);
+                        assert(layer_idx < collision_areas_offsetted.end());
+                        assert(layer_idx_below < outlines.size());
                         const Polygons &current = collision_areas_offsetted[layer_idx];
                         const Polygons &below   = outlines[layer_idx_below];
                         Polygons placable = diff(
