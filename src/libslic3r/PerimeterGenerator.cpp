@@ -1227,7 +1227,7 @@ void PerimeterGenerator::_sort_overhangs(const Parameters &params,
     if (overhang_params.is_loop) {
         ExtrusionLoop loop_test;
         loop_test.paths = paths;
-        loop_test.visit(LoopAssertVisitor(true)); // there can't have some very small paths
+        loop_test.visit(LoopAssertVisitor(SCALED_EPSILON / 2)); // there can't have some very small paths
         assert(!paths.empty());
     }
 #endif

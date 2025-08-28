@@ -1110,9 +1110,9 @@ public:
 #ifdef _DEBUGINFO
 struct LoopAssertVisitor : public ExtrusionVisitorRecursiveConst {
     using ExtrusionVisitorRecursiveConst::use;
-    bool m_check_length;
-    LoopAssertVisitor() : m_check_length(true) {}
-    LoopAssertVisitor(bool check_length) : m_check_length(check_length) {}
+    coord_t m_check_length;
+    LoopAssertVisitor() : m_check_length(SCALED_EPSILON) {}
+    LoopAssertVisitor(coord_t check_length) : m_check_length(check_length) {}
     virtual void default_use(const ExtrusionEntity& entity) override {};
     virtual void use(const ExtrusionPath &path) override;
     virtual void use(const ExtrusionLoop& loop) override;

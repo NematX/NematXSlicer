@@ -196,7 +196,14 @@ void ExtrusionPath::polygons_covered_by_spacing(Polygons &out, const float spaci
     // TODO: check BRIDGE_FLOW here
     auto flow = bridge ? Flow::bridging_flow(m_attributes.width, 0.f) :
                          Flow::new_from_width(m_attributes.width, 0.f, m_attributes.height, spacing_ratio);
-    polygons_append(out, offset(this->polyline.to_polyline(), 0.5f * float(flow.scaled_spacing()) + scaled_epsilon, Slic3r::ClipperLib::jtMiter, 10));
+    if (out.empty()) {
+        out = offset(this->polyline.to_polyline(), 0.5f * float(flow.scaled_spacing()) + scaled_epsilon,
+                     Slic3r::ClipperLib::jtMiter, 10);
+    } else {
+        out = union_(out,
+                     offset(this->polyline.to_polyline(), 0.5f * float(flow.scaled_spacing()) + scaled_epsilon,
+                            Slic3r::ClipperLib::jtMiter, 10));
+    }
 }
 
 //note: don't suppport arc
@@ -825,11 +832,11 @@ void SimplifyVisitor::use(ExtrusionEntityCollection &collection)
 #ifdef _DEBUGINFO
 void LoopAssertVisitor::use(const ExtrusionPath &path) {
     release_assert (!path.role().is_overhang() || path.overhang_attributes());
-    if (!m_check_length)
+    if (m_check_length <= 0)
         return;
     release_assert(!path.empty());
     release_assert(path.mm3_per_mm() > 0.000001 || path.role() == ExtrusionRole::Travel);
-    release_assert(path.length() > SCALED_EPSILON);
+    release_assert(path.length() > m_check_length);
     for (size_t idx = 1; idx < path.size(); ++idx)
         release_assert(!path.polyline.get_point(idx - 1).coincides_with_epsilon(path.polyline.get_point(idx)));
 }
@@ -842,7 +849,7 @@ void LoopAssertVisitor::use(const ExtrusionLoop& loop) {
     for (const ExtrusionPath &path : loop.paths) {
         release_assert (!path.role().is_overhang() || path.overhang_attributes());
         release_assert(path.polyline.size() >= 2);
-        release_assert(!m_check_length || path.length() >= SCALED_EPSILON / 2);
+        release_assert(path.length() >= m_check_length);
         release_assert(path.first_point() == last_pt);
         use(path);
         last_pt = path.last_point();
