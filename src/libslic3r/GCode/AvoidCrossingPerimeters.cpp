@@ -842,11 +842,12 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                     break;
                 }
             }
-            assert(hole_contour != size_t(-1));
+            // if in a hole (and not next to the contour in the bbox)
             if (hole_contour != size_t(-1)) {
                 start_island = hole_contour;
             }
-        } else if (boundary.bboxes[end_island].contains(boundary.bboxes[start_island])) {
+        }
+        if (boundary.bboxes[end_island].contains(boundary.bboxes[start_island])) {
             // find hole
             size_t hole_contour = size_t(-1);
             for (size_t hole_idx = end_island + 1;
@@ -856,7 +857,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                     break;
                 }
             }
-            assert(hole_contour != size_t(-1));
+            // if in a hole (and not next to the contour in the bbox)
             if (hole_contour != size_t(-1)) {
                 end_island = hole_contour;
             }
@@ -1241,7 +1242,8 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 }
             }
         }
-#ifdef _DEBUG
+//#ifdef _DEBUG
+#ifdef false
         std::chrono::time_point<std::chrono::high_resolution_clock> time_mid = std::chrono::high_resolution_clock::now();
 
         std::chrono::time_point<std::chrono::high_resolution_clock> time_end;
