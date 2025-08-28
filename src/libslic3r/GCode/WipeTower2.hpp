@@ -235,6 +235,7 @@ public:
     bool brim_done = false;
     Flow tower_perimeter_flow;
     Polylines tower_perimeters;
+    uint16_t perimeter_tool_idx = uint16_t(-1);
     bool perimeter_done = false;
 
     struct Toolchange

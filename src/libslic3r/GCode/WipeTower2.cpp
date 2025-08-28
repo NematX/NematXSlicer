@@ -720,6 +720,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
 
     // create perimeter (from first extruder encountered)
     if (tower_perimeters.empty()) {
+        perimeter_tool_idx = ordered_extruders.front();
         const WipeTower2::FilamentToolchangeInfo &fil_info_next =
             m_wipe_tower_info->m_filament_change_data[ordered_extruders.front()];
         tower_perimeter_flow = Flow::new_from_width(unscaled(fil_info_next.wipe_width),
@@ -755,7 +756,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
 
         perimeter = offset(perimeter, (tower_perimeter_flow.scaled_width())/2).front();
         tower_perimeters.push_back(perimeter.split_at_first_point());
-        
+
         // brim (first layer only)
         if (extrusion_z == extrusion_height) {
             // same as print::brimflow()
@@ -844,6 +845,10 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer, uint16
         need_move_into_wp = true;
     }
 
+    if (old_tool == perimeter_tool_idx) {
+        print_perimeter(collection); 
+    }
+
     if (old_tool != new_tool) {
         // find the toolchange
         std::tuple<coord_t, uint16_t, uint16_t> key(layer->scaled_print_z(), old_tool, new_tool);
@@ -862,8 +867,10 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer, uint16
             toolchange_Change(collection, new_tool);
             toolchange_load(collection, toolchange.wipe_lines, toolchange.to_tool_id);
             toolchange_Wipe(collection, toolchange.wipe_lines, toolchange.wipe_flow);
-            print_perimeter(collection); 
         }
+    }
+    if (new_tool == perimeter_tool_idx) {
+        print_perimeter(collection); 
     }
 
     finish_layer(collection, new_tool);
@@ -1319,9 +1326,15 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
 
     uint16_t old_tool = current_extruder;
 
+    const WipeTower2::FilamentToolchangeInfo &fil_info =
+        m_wipe_tower_info->m_filament_change_data[current_extruder];
+    Flow infill_flow = Flow::new_from_width(unscaled(fil_info.wipe_width),
+                                                m_config->nozzle_diameter.get_at(current_extruder),
+                                                unscaled(extrusion_height), 1.f, false);
+
     // just in case
     bool smthg_printed = print_perimeter(collection); 
-    ExtrusionAttributes extr_flow_attr (ExtrusionRole::WipeTower, ExtrusionFlow{tower_perimeter_flow.mm3_per_mm(), tower_perimeter_flow.width(), tower_perimeter_flow.height()});
+    ExtrusionAttributes extr_flow_attr (ExtrusionRole::WipeTower, ExtrusionFlow{infill_flow.mm3_per_mm(), infill_flow.width(), infill_flow.height()});
 
     // infill the space that wasn't used for purge.
 
@@ -1339,7 +1352,7 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
     }
 
     //if nothing to fill
-    if (m_current_y_pos + tower_perimeter_flow.scaled_width() >= m_max_y_pos) {
+    if (m_current_y_pos + infill_flow.scaled_width() >= m_max_y_pos) {
         return smthg_printed;
     }
     
@@ -1351,9 +1364,9 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
     std::unique_ptr<Fill> filler;
     FillParams params;
     params.role = ExtrusionRole::WipeTower;
-    params.flow = tower_perimeter_flow;
+    params.flow = infill_flow;
     Polygon wt_rectangle(Points{wipe_tower_right_pos, wipe_tower_right_bot_pos, wipe_tower_left_bot_pos, wipe_tower_left_pos});
-    wt_rectangle = offset(wt_rectangle, tower_perimeter_flow.scaled_spacing()/4).front();
+    wt_rectangle = offset(wt_rectangle, infill_flow.scaled_spacing()/4).front();
     Surface surface(stPosBottom | stDensSolid, ExPolygon(wt_rectangle));
     if (extrusion_z == extrusion_height) {
         // infill
@@ -1369,7 +1382,7 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
         surface = Surface(stPosInternal | stDensSparse, ExPolygon(wt_rectangle));
     }
     filler->bounding_box = get_extents(surface.expolygon);
-    filler->init_spacing(tower_perimeter_flow.spacing(), params);
+    filler->init_spacing(infill_flow.spacing(), params);
     filler->fill_surface_extrusion(&surface, params, collection.set_entities());
 
     return true;
