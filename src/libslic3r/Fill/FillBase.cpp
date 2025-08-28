@@ -185,11 +185,11 @@ double Fill::compute_unscaled_volume_to_fill(const Surface &surface, const FillP
     if (this->no_overlap_expolygons.empty()) {
         polyline_volume = unscaled(unscaled(surface.area())) * params.flow.height();
     } else {
-        for (const ExPolygon& poly : intersection_ex(ExPolygons{ surface.expolygon }, this->no_overlap_expolygons)) {
+        for (const ExPolygon &poly : intersection_ex(ExPolygons{surface.expolygon}, this->no_overlap_expolygons)) {
             polyline_volume += params.flow.height() * unscaled(unscaled(poly.area()));
-            //note: the no_overlap_expolygons is already at spacing from the centerline of the perimeter.
-            }
+            // note: the no_overlap_expolygons is already at spacing from the centerline of the perimeter.
         }
+    }
     return polyline_volume;
 }
 
@@ -310,7 +310,12 @@ void Fill::fill_surface_extrusion_with_gap_fill(const Surface *surface,
         // check if not over-extruding
         if (!params.dont_adjust && params.full_infill() && !params.flow.bridge() && params.fill_exactly) {
             // compute the path of the nozzle -> extruded volume
-            double extruded_volume = ExtrusionVolume{}.get(*coll_nosort);
+            ExtrusionVolume compute_volume;
+            if (params.flow.spacing_ratio() != 1) {
+                Flow bigger_flow = Flow::new_from_spacing(params.flow.spacing(), params.flow.nozzle_diameter(), params.flow.height(), 1.f , false);
+                compute_volume.set_flow_mult(bigger_flow.mm3_per_mm() / params.flow.mm3_per_mm());
+            }
+            double extruded_volume = compute_volume.get(*coll_nosort);
             // compute flow to remove spacing_ratio from the equation
             // compute real volume to fill
             double polyline_volume = compute_unscaled_volume_to_fill(*surface, params);
@@ -327,11 +332,11 @@ void Fill::fill_surface_extrusion_with_gap_fill(const Surface *surface,
 #if _DEBUG
             this->debug_verify_flow_mult = mult_flow;
 #endif
-        }
-        mult_flow *= params.flow_mult;
-        if (mult_flow != 1) {
-            // apply to extrusions
-            ExtrusionModifyFlow{mult_flow}.set(*coll_nosort);
+            mult_flow *= params.flow_mult;
+            if (mult_flow != 1) {
+                // apply to extrusions
+                ExtrusionModifyFlow{mult_flow}.set(*coll_nosort);
+            }
         }
     } else {
 #if _DEBUG

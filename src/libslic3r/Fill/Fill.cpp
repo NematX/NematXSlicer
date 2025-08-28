@@ -1130,7 +1130,8 @@ void Layer::_make_fills(LayerSliceIsland& island,
                         area *= surface_fill.params.config->fill_top_flow_ratio.get_abs_value(1);
                     //TODO: over-bridge mod
                     if(surface_fill.params.config->over_bridge_flow_ratio.get_abs_value(1) == 1){
-                        assert(compute_volume.volume <= area * surface_fill.params.layer_height * 1.001 || f->debug_verify_flow_mult <= 0.8);
+                        assert(compute_volume.volume <= area * surface_fill.params.layer_height * 1.001 ||
+                                f->debug_verify_flow_mult <= 0.8);
                         if(compute_volume.volume > 0) //can fail for thin regions
                             assert(
                                 compute_volume.volume >= area * surface_fill.params.layer_height * 0.999 ||
