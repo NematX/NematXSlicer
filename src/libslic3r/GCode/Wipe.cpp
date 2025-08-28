@@ -159,7 +159,9 @@ std::string Wipe::wipe(GCodeGenerator &gcodegen, bool toolchange)
         const double lift_mm = extruder.id() < 0 ? 0 : gcodegen.config().wipe_lift.get_abs_value(extruder.id(), gcodegen.layer()->unscaled_height());
         const double lift_per_mm = lift_mm / lift_length;
         const double initial_z = gcodegen.writer().get_position().z();
-        assert(gcodegen.current_z_layer() && gcodegen.current_z_layer()->scaled_print_z() == Layer::scale_to_layer_coord(initial_z));
+        assert((gcodegen.current_z_layer() &&
+                gcodegen.current_z_layer()->scaled_print_z() == Layer::scale_to_layer_coord(initial_z)) ||
+                gcodegen.config().external_perimeters_staggered.value > 0);
         double current_z = initial_z;
         const double final_z = initial_z + lift_mm;
         auto         wipe_linear = [&gcode, &gcodegen, &retract_length, &wipe_length, &no_lift_length, &current_z, xy_to_e, use_firmware_retract, lift_per_mm, final_z]

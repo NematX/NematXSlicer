@@ -7298,7 +7298,8 @@ std::string GCodeGenerator::_extrude(ExtrusionPath &path, const std::string_view
 
     assert(is_approx(m_writer.get_position().z(), m_layer->unscaled_print_z(), EPSILON) ||
            (!m_z_override.empty() &&
-            m_z_override.back().second == Layer::scale_to_layer_coord(m_writer.get_position().z())));
+            m_z_override.back().second == Layer::scale_to_layer_coord(m_writer.get_position().z())) ||
+           config().external_perimeters_staggered.value > 0);
 
     if (saved_z) {
         gcode += m_writer.extrude_to_xyz(m_writer.get_position(), 0, "ensure end of staggered z");
