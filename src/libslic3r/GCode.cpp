@@ -6102,6 +6102,7 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
     case ExtrusionPropertySpecialCommand::Code::RESTORE_SPEED_RATIO:
         if (config().gcode_flavor.value == gcfNematX) {
             // unsuported
+            break;
         }
         // Let the firmware restore the active speed override value.
         else if (config().gcode_flavor.value == gcfMarlinLegacy || config().gcode_flavor.value == gcfMarlinFirmware) {
@@ -6111,6 +6112,10 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
         }
         break;
     case ExtrusionPropertySpecialCommand::Code::FLUSH_PLANNER_QUEUE:
+        if (config().gcode_flavor.value == gcfNematX) {
+            // unsuported
+            break;
+        }
         visitor_gcode += "G4 S0\n";
         break;
     case ExtrusionPropertySpecialCommand::Code::EXTRUSION: // only e move: by extra_data mm
@@ -6118,6 +6123,10 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
         break;
     case ExtrusionPropertySpecialCommand::Code::PAUSE: // pause (G4) for extra_data miliseconds (int)
         visitor_gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Pause_Print) + "\n";
+        if (config().gcode_flavor.value == gcfNematX) {
+            // unsuported
+            break;
+        }
         if (config().pause_print_gcode.value.empty()) {
             visitor_gcode += "G4 P";
             visitor_gcode += std::to_string(int(command.extra_data));
@@ -6143,6 +6152,7 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
     case ExtrusionPropertySpecialCommand::Code::EXTRUDER_CURRENT: // set extruder trimpot to extra_data
         if (config().gcode_flavor.value == gcfKlipper || config().gcode_flavor.value == gcfNematX) {
             // unsupported
+            break;
         } else {
             if (config().gcode_flavor.value == gcfRepRap || config().gcode_flavor.value == gcfSprinter) {
                 visitor_gcode += "M906 E";
