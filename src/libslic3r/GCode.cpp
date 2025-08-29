@@ -6086,17 +6086,25 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
     case ExtrusionPropertySpecialCommand::Code::SAVE_AND_RESET_SPEED_RATIO: // also set new speed ratio to extra_data
                                                                             // (1 = 100%)
         // backup speed_override
+        if (config().gcode_flavor.value == gcfNematX) {
+            //unsuported
+        }
         // This is only supported by Prusa at this point (https://github.com/prusa3d/PrusaSlicer/issues/3114)
-        if (config().gcode_flavor.value == gcfMarlinLegacy || config().gcode_flavor.value == gcfMarlinFirmware)
-            visitor_gcode += "M220 B\n";
-        // set speed override
-        {
-            visitor_gcode += "M220 S" + std::to_string(int(command.extra_data*100)) + "\n";
+        else {
+            if (config().gcode_flavor.value == gcfMarlinLegacy || config().gcode_flavor.value == gcfMarlinFirmware) {
+                // backup speed override
+                visitor_gcode += "M220 B\n";
+            }
+            // set speed override
+            visitor_gcode += "M220 S" + std::to_string(int(command.extra_data * 100)) + "\n";
         }
         break;
     case ExtrusionPropertySpecialCommand::Code::RESTORE_SPEED_RATIO:
+        if (config().gcode_flavor.value == gcfNematX) {
+            // unsuported
+        }
         // Let the firmware restore the active speed override value.
-        if (config().gcode_flavor.value == gcfMarlinLegacy || config().gcode_flavor.value == gcfMarlinFirmware) {
+        else if (config().gcode_flavor.value == gcfMarlinLegacy || config().gcode_flavor.value == gcfMarlinFirmware) {
             visitor_gcode += "M220 R\n";
         } else {
             visitor_gcode += "M220 S100\n";
@@ -6133,7 +6141,9 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
     case ExtrusionPropertySpecialCommand::Code::ENABLE_PREVIEW:
         m_no_gcodeviewer_tag = false; break;
     case ExtrusionPropertySpecialCommand::Code::EXTRUDER_CURRENT: // set extruder trimpot to extra_data
-        if (config().gcode_flavor.value != gcfKlipper) {
+        if (config().gcode_flavor.value == gcfKlipper || config().gcode_flavor.value == gcfNematX) {
+            // unsupported
+        } else {
             if (config().gcode_flavor.value == gcfRepRap || config().gcode_flavor.value == gcfSprinter) {
                 visitor_gcode += "M906 E";
             } else {
