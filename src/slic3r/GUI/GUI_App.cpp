@@ -13,6 +13,7 @@
 #include "GUI_ObjectManipulation.hpp"
 #include "GUI_Factories.hpp"
 #include "format.hpp"
+#include "InstanceCheck.hpp" 
 
 // Localization headers: include libslic3r version first so everything in this file
 // uses the slic3r/GUI version (the macros will take precedence over the functions).
@@ -506,8 +507,6 @@ bool static check_old_linux_datadir(const wxString& app_name) {
     // To be precise, the datadir should exist, it is created when single instance
     // lock happens. Instead of checking for existence, check the contents.
 
-    namespace fs = boost::filesystem;
-
     std::string new_path = Slic3r::data_dir();
 
     wxString dir;
@@ -521,16 +520,16 @@ bool static check_old_linux_datadir(const wxString& app_name) {
         return true;
     }
 
-    fs::path data_dir = fs::path(new_path);
-    if (! fs::is_directory(data_dir))
+    boost::filesystem::path data_dir = boost::filesystem::path(new_path);
+    if (! boost::filesystem::is_directory(data_dir))
         return true; // This should not happen.
 
-    int file_count = std::distance(fs::directory_iterator(data_dir), fs::directory_iterator());
+    int file_count = std::distance(boost::filesystem::directory_iterator(data_dir), boost::filesystem::directory_iterator());
 
     if (file_count <= 1) { // just cache dir with an instance lock
         std::string old_path = wxStandardPaths::Get().GetUserDataDir().ToUTF8().data();
 
-        if (fs::is_directory(old_path)) {
+        if (boost::filesystem::is_directory(old_path)) {
             wxString msg = from_u8((boost::format(_u8L("Starting with %1% 2.3, configuration "
                 "directory on Linux has changed (according to XDG Base Directory Specification) to \n%2%.\n\n"
                 "This directory did not exist yet (maybe you run the new version for the first time).\nHowever, "
@@ -961,12 +960,7 @@ GUI_App::GUI_App(EAppMode mode)
 	, m_other_instance_message_handler(std::make_unique<OtherInstanceMessageHandler>())
     , m_downloader(std::make_unique<Downloader>())
 {
-	//app config initializes early becasuse it is used in instance checking in PrusaSlicer.cpp
-	this->init_app_config();
-    //ImGuiWrapper need the app config to get the colors
-    m_imgui.reset(new ImGuiWrapper{});
-    // init app downloader after path to datadir is set
-    m_app_updater = std::make_unique<AppUpdater>();
+    // all initailisation is reported into GUI_App::OnInit() to be able to have the gui set up and be abel to display messages.
 }
 
 // If formatted for github, plaintext with OpenGL extensions enclosed into <details>.
@@ -1040,6 +1034,138 @@ static std::optional<Semver> parse_semver_from_ini(std::string path)
     return Semver::parse(body);
 }
 
+void choose_app_dir(GUI_App &app) {
+    assert(app.app_config->data_dir().empty());
+
+    // find ourself inside m_all_slic3r_installed
+    std::vector<const AppConfig::ConfigurationEntry*> same_exe_path;
+    std::vector<const AppConfig::ConfigurationEntry*> old_versions;
+    std::vector<const AppConfig::ConfigurationEntry*> same_version;
+    std::set<std::string> already_used_name;
+    for (const AppConfig::ConfigurationEntry &installed : app.app_config->get_all_slicer_installed()) {
+        already_used_name.insert(installed.installed_name);
+        if (installed.version == Semver(SLIC3R_VERSION_FULL)) {
+            same_version.push_back(&installed);
+        } else {
+            old_versions.push_back(&installed);
+            if (boost::filesystem::exists(installed.exe_path) && boost::filesystem::equivalent(binary_dir().parent_path(), installed.exe_path)) {
+                same_exe_path.push_back(&installed);
+            }
+        }
+    }
+
+    std::sort(old_versions.begin(), old_versions.end(), [](const AppConfig::ConfigurationEntry *a, const AppConfig::ConfigurationEntry *b) { return a->version < b->version; });
+
+    int choice = 0;
+    if (same_version.size() > 0 || old_versions.size() > 0) {
+        wxArrayString choices;
+        choices.Add(_L("New configuration"));
+        for (const AppConfig::ConfigurationEntry *samev : same_version) {
+            choices.Add(
+                format_wxstr(_L("Use same configuration as %1% ; path: (%2%)"), samev->installed_name, samev->config_path));
+        }
+        for (const AppConfig::ConfigurationEntry *samev : same_version) {
+            choices.Add(
+                format_wxstr(_L("Copy configuration %1% ; path: (%2%)"), samev->installed_name, samev->config_path));
+        }
+        for (const AppConfig::ConfigurationEntry *oldv : old_versions) {
+            choices.Add(
+                format_wxstr(_L("Copy old configuration %1% ; path: (%2%)"), oldv->installed_name, oldv->config_path));
+        }
+        // reuse existing one?
+        wxSingleChoiceDialog dialog(nullptr, _L("This is the first time you're running this version of the slicer from this location.."
+            "\nWould you like to reuse a configuration that already exists on this computer?"
+            "\nYou can either create a new empty configuration, use the same configuration as another installation, or copy an existing one."),
+                                    _L("New configuration directory"),
+                                    choices);
+        dialog.SetSelection(0);
+        int res = dialog.ShowModal();
+        if (res == wxID_CANCEL) {
+            // cancel: dont run
+            std::exit(EXIT_FAILURE);
+        }
+        choice = dialog.GetSelection();
+    }
+
+    // ask for the name & location
+    //TODO
+
+    AppConfig::ConfigurationEntry my_default_installation;
+    my_default_installation.installed_name = SLIC3R_BUILD_ID;
+    for (int i = 1; already_used_name.find(my_default_installation.installed_name) != already_used_name.end(); ++i) {
+        my_default_installation.installed_name = format("%1%_(%2%)", SLIC3R_BUILD_ID, i);
+    }
+    my_default_installation.exe_path = binary_dir().parent_path();
+    my_default_installation.other_keys["exe_path_relative"] = "0";
+    my_default_installation.config_path = my_default_installation.installed_name;
+    my_default_installation.other_keys["config_path_relative"] = "1";
+    assert(!boost::filesystem::exists(my_default_installation.get_config_path(app.app_config->get_root_data_dir())));
+    my_default_installation.version = Semver(SLIC3R_VERSION_FULL);
+    
+    AppConfig::ConfigurationEntry my_new_installation = my_default_installation;
+    if (choice > 0) {
+        choice--;
+        if (choice < same_version.size()) {
+            my_new_installation = *same_version[choice];
+            my_new_installation.installed_name = my_default_installation.installed_name;
+            my_new_installation.exe_path = my_default_installation.exe_path;
+            //dir already created & in use
+        } else if (choice < same_version.size() * 2) {
+            choice -=  same_version.size();
+            // create dir & copy
+            boost::filesystem::path path = my_default_installation.get_config_path(app.app_config->get_root_data_dir());
+            boost::filesystem::create_directories(path);
+            boost::filesystem::copy(same_version[choice]->get_config_path(app.app_config->get_root_data_dir()), path,
+                                  boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+        } else {
+            assert(choice < old_versions.size() * 2 + old_versions.size());
+            choice -= same_version.size() * 2;
+            assert(choice < old_versions.size());
+            boost::filesystem::path path = my_default_installation.get_config_path(app.app_config->get_root_data_dir());
+            boost::filesystem::create_directories(path);
+            auto it_is_legacy = old_versions[choice]->other_keys.find("legacy");
+            if (it_is_legacy != old_versions[choice]->other_keys.end() && it_is_legacy->second == "1") {
+                boost::filesystem::path dir(app.app_config->get_root_data_dir());
+                assert(dir == old_versions[choice]->get_config_path(app.app_config->get_root_data_dir()));
+                boost::filesystem::copy(dir / (SLIC3R_APP_KEY ".ini"), path / (SLIC3R_APP_KEY ".ini"),
+                                      boost::filesystem::copy_options::update_existing);
+                boost::filesystem::copy(dir / "cache", path / "cache",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "filament", path / "filament",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "physical_printer", path / "physical_printer",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "print", path / "print",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "printer", path / "printer",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "shapes", path / "shapes",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "sla_material", path / "sla_material",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "sla_print", path / "sla_print",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "snapshots", path / "snapshots",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "ui_layout", path / "ui_layout",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                boost::filesystem::copy(dir / "vendor", path / "vendor",
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+            } else {
+                boost::filesystem::copy(old_versions[choice]->get_config_path(app.app_config->get_root_data_dir()), path,
+                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+            }
+        }
+    }
+    my_new_installation.other_keys["installed_name"] = my_new_installation.installed_name;
+    my_new_installation.other_keys["exe_path"] = my_new_installation.exe_path.string();
+    my_new_installation.other_keys["config_path"] = my_new_installation.config_path.string();
+    my_new_installation.other_keys["version"] = my_new_installation.version.to_string();
+
+    app.app_config->set_new_installation(my_new_installation);
+
+}
+
 void GUI_App::init_app_config()
 {
     #ifdef SLIC3R_ALPHA
@@ -1052,38 +1178,6 @@ void GUI_App::init_app_config()
 
 //	SetAppDisplayName(SLIC3R_APP_NAME);
 
-	// Set the Slic3r data directory at the Slic3r XS module.
-	// Unix: ~/ .Slic3rP
-	// Windows : "C:\Users\username\AppData\Roaming\Slic3r" or "C:\Documents and Settings\username\Application Data\Slic3r"
-	// Mac : "~/Library/Application Support/Slic3r"
-
-    if (data_dir().empty()) {
-        //check if there is a "configuration" directory
-#ifdef __APPLE__
-        //... next to the app bundle on MacOs
-        if (boost::filesystem::exists(boost::filesystem::path{ resources_dir() } / ".." / ".." / ".." / "configuration")) {
-            set_data_dir((boost::filesystem::path{ resources_dir() } / ".." / ".." / ".." / "configuration").string());
-        } else
-#endif
-        //... next to the resources directory
-        if (boost::filesystem::exists(boost::filesystem::path{ resources_dir() } / ".." / "configuration")) {
-            set_data_dir((boost::filesystem::path{ resources_dir() } / ".." / "configuration").string());
-        } else {
-#ifndef __linux__
-            set_data_dir(wxStandardPaths::Get().GetUserDataDir().ToUTF8().data());
-        }
-#else
-            // Since version 2.3, config dir on Linux is in ${XDG_CONFIG_HOME}.
-            // https://github.com/prusa3d/PrusaSlicer/issues/2911
-            wxString dir;
-            if (!wxGetEnv(wxS("XDG_CONFIG_HOME"), &dir) || dir.empty())
-                dir = wxFileName::GetHomeDir() + wxS("/.config");
-            set_data_dir((dir + "/" + GetAppName()).ToUTF8().data());
-        }
-#endif
-    } else {
-        m_datadir_redefined = true;
-    }
 
 	if (!app_config) {
         app_config.reset(new AppConfig(is_editor() ? AppConfig::EAppMode::Editor : AppConfig::EAppMode::GCodeViewer));
@@ -1106,9 +1200,29 @@ void GUI_App::init_app_config()
         //can't know the gpu before the openg init, so it's delayed. until it
 #endif
     }
-	// load settings
-	m_app_conf_exists = app_config->exists();
-	if (m_app_conf_exists) {
+
+    //init appconfig (find configuration folder)
+    std::string appdata_path;
+#ifndef __linux__
+        appdata_path = wxStandardPaths::Get().GetUserDataDir().ToUTF8().data();
+#else
+        // Since version 2.3, config dir on Linux is in ${XDG_CONFIG_HOME}.
+        // https://github.com/prusa3d/PrusaSlicer/issues/2911
+        wxString dir;
+        if (!wxGetEnv(wxS("XDG_CONFIG_HOME"), &dir) || dir.empty())
+            dir = wxFileName::GetHomeDir() + wxS("/.config");
+        appdata_path = (dir + "/" + GetAppName()).ToUTF8().data();
+#endif
+    m_datadir_redefined = !app_config->init_root_data_dir(appdata_path);
+    if (!has_data_dir()) {
+        choose_app_dir(*this);
+    }
+
+    app_config->init_ui_layout();
+
+    // load settings
+    m_app_conf_exists = app_config->exists();
+    if (m_app_conf_exists) {
         std::string error = app_config->load();
         if (!error.empty()) {
             // Error while parsing config file. We'll customize the error message and rethrow to be displayed.
@@ -1240,6 +1354,20 @@ void GUI_App::init_single_instance_checker(const std::string &name, const std::s
 bool GUI_App::OnInit()
 {
     try {
+        //app config initializes early becasuse it is used in instance checking in PrusaSlicer.cpp
+        this->init_app_config();
+        //ImGuiWrapper need the app config to get the colors
+        m_imgui.reset(new ImGuiWrapper{});
+        // init app downloader after path to datadir is set
+        m_app_updater = std::make_unique<AppUpdater>();
+        if (this->get_app_mode() != GUI::GUI_App::EAppMode::GCodeViewer) {
+            // G-code viewer is currently not performing instance check, a new G-code viewer is started every time.
+            bool gui_single_instance_setting = this->app_config->get_bool("single_instance");
+            if (Slic3r::instance_check(this->init_params->argc, this->init_params->argv, gui_single_instance_setting)) {
+                //TODO: do we have delete gui and other stuff?
+                std::exit(EXIT_FAILURE);
+            }
+        }
         return on_init_inner();
     } catch (const std::exception&) {
         generic_exception_handle();
