@@ -745,6 +745,7 @@ void ArcPolyline::append(ArcPolyline &&src) {
     assert(is_valid());
     assert(m_path.back().point == pt_back);
 }
+
 void ArcPolyline::append(const Geometry::ArcWelder::Segment &arc)
 {
     assert(arc.radius == 0 || !this->empty());
@@ -921,6 +922,8 @@ void ArcPolyline::clip_end(coordf_t dist)
 
 void ArcPolyline::split_at(coordf_t distance, ArcPolyline &p1, ArcPolyline &p2) const
 {
+    assert(p1.empty());
+    assert(p2.empty());
     if (m_path.empty()) return;
     assert(distance > SCALED_EPSILON);
     if (distance < SCALED_EPSILON) return;
@@ -949,6 +952,10 @@ void ArcPolyline::split_at(coordf_t distance, ArcPolyline &p1, ArcPolyline &p2) 
             } else {
                 p1.m_path.push_back(current);
                 distance -= sqrt(lsqr);
+                if (distance < SCALED_EPSILON) {
+                    p2.m_path.push_back(current);
+                    distance = 0;
+                }
             }
         } else {
 #ifdef _DEBUG
@@ -1005,15 +1012,20 @@ void ArcPolyline::split_at(coordf_t distance, ArcPolyline &p1, ArcPolyline &p2) 
             } else {
                 p1.m_path.push_back(current);
                 distance -= len;
+                if (distance < SCALED_EPSILON) {
+                    p2.m_path.push_back(current);
+                    distance = 0;
+                }
             }
         }
         //increment
         ++idx;
     }
     assert(!p2.empty());
-    assert(p1.m_path.back().point == p2.m_path[0].point);
+    assert(p1.m_path.back().point == p2.m_path.front().point);
     //now fill p2
     while (idx < m_path.size()) {
+        assert(!p2.m_path.back().point.coincides_with_epsilon(m_path[idx].point));
         p2.m_path.push_back(m_path[idx]);
         // increment
         ++idx;

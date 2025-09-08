@@ -1691,7 +1691,7 @@ void PrintObject::slice_volumes()
                                 //trimming = Slic3r::elephant_foot_compensation(expolygons_first_layer,
                                 //    layer->regions().front()->flow(frExternalPerimeter), unscaled(-first_layer_compensation));
                             } else {
-                                trimming = layer->merged();
+                                trimming = merged_poly;
                             }
                             if (first_layer_compensation < 0) {
                                 Flow min_ext_peri_flow = layer->regions().front()->flow(frExternalPerimeter);
