@@ -44,9 +44,9 @@ const std::string& var_dir();
 std::string var(const std::string &file_name);
 
 // Set the path of the binary that execute this code
-void set_binary_dir(const boost::filesystem::path &path);
+void set_binary_file(const boost::filesystem::path &path);
 // Return a full path to the binary directory.
-const boost::filesystem::path& binary_dir();
+const boost::filesystem::path& binary_file();
 
 // Set a path with various static definition data (for example the initial config bundles).
 void set_resources_dir(const std::string &path);

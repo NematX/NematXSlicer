@@ -148,14 +148,38 @@ AppUpdateDownloadDialog::AppUpdateDownloadDialog( const Semver& ver_online, boos
 	content_sizer->Add(versions);
 	content_sizer->AddSpacer(VERT_SPACING);
 #ifndef __linux__
-	cbox_run = new wxCheckBox(this, wxID_ANY, _(L("Run installer after download. (Otherwise file explorer will be opened)")));
-	content_sizer->Add(cbox_run);
+#ifdef _WIN32
+    cbox_replace = new wxCheckBox(this, wxID_ANY, _(L("Upgrade current installation")));
+    content_sizer->Add(cbox_replace);
+    cbox_replace->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent &event) { this->cbox_run->Enable(!event.IsChecked()); });
+    cbox_replace->SetToolTip(_L(
+        "This option makes the slicer download the zip bundle instead of the executable msi, extracting the files "
+        "and replacing the current ones by the new ones. Note that the user need to have the right to write on the "
+        "current directory, if not this option is disabled. It will also delete the downloaded zip after the upgrade "
+        "if it succeed."));
+    // test if possible
+    bool can_write_install = false;
+    try {
+        boost::filesystem::path my_dir = binary_file().parent_path();
+        boost::filesystem::create_directory(my_dir / "test_writep");
+        boost::filesystem::remove(my_dir / "test_writep");
+        can_write_install = true;
+    } catch (std::exception) {
+    }
+    cbox_replace->Enable(can_write_install);
+#endif
+    cbox_run = new wxCheckBox(this, wxID_ANY, _(L("Run installer after download. (Otherwise file explorer will be opened)")));
+    content_sizer->Add(cbox_run);
+    cbox_run->SetToolTip(
+        _L("This option makes the slicer download the latest release and execute it (.msi on windows, .dmg on macos)."));
 #endif
 	content_sizer->AddSpacer(VERT_SPACING);
 	content_sizer->AddSpacer(VERT_SPACING);
 	content_sizer->Add(new wxStaticText(this, wxID_ANY, _L("Target directory") + ":"));
 	content_sizer->AddSpacer(VERT_SPACING);
 	txtctrl_path = new wxTextCtrl(this, wxID_ANY, GUI::format_wxstr(path.parent_path().string()));
+    txtctrl_path->SetToolTip(
+        _L("The directory the release is downloded to."));
 	filename = GUI::format_wxstr(path.filename().string());
 	content_sizer->Add(txtctrl_path, 1, wxEXPAND);
 	content_sizer->AddSpacer(VERT_SPACING);
@@ -254,9 +278,17 @@ AppUpdateDownloadDialog::~AppUpdateDownloadDialog() {}
 bool AppUpdateDownloadDialog::run_after_download() const
 {
 #ifndef __linux__
-	return cbox_run->GetValue();
+    return cbox_run ? cbox_run->GetValue() : false;
 #endif
-	return false;
+    return false;
+}
+
+bool AppUpdateDownloadDialog::replace_current_after_download() const
+{
+#ifdef _WIN32
+    return cbox_replace ? cbox_replace->GetValue() : false;
+#endif
+    return false;
 }
 
 boost::filesystem::path AppUpdateDownloadDialog::get_download_path() const

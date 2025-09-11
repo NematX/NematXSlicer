@@ -2493,6 +2493,22 @@ void NotificationManager::set_download_progress_percentage(float percentage)
 		}
 	}
 }
+void NotificationManager::set_download_progress_text(const std::string &updated_text) {
+    for (std::unique_ptr<PopNotification> &notification : m_pop_notifications) {
+        if (notification->get_type() == NotificationType::AppDownload) {
+            ProgressBarWithCancelNotification *pbwcn = dynamic_cast<ProgressBarWithCancelNotification *>(
+                notification.get());
+            auto percentage = pbwcn->get_percentage();
+            if (!updated_text.empty()) {
+                pbwcn->update(NotificationData{NotificationType::AppDownload,
+                                               NotificationLevel::ProgressBarNotificationLevel, 10, updated_text});
+            }
+            pbwcn->set_percentage(percentage);
+            wxGetApp().plater()->get_current_canvas3D()->schedule_extra_frame(0);
+            return;
+        }
+    }
+}
 
 void NotificationManager::push_download_URL_progress_notification(size_t id, const std::string& text, std::function<bool(DownloaderUserAction, int)> user_action_callback)
 {

@@ -72,9 +72,11 @@ public:
 
 	// Tells whether the user checked the "don't bother me again" checkbox
 	bool		run_after_download() const;
+	bool		replace_current_after_download() const;
 	boost::filesystem::path	get_download_path() const;
 
 private:
+	wxCheckBox* cbox_replace;
 	wxCheckBox* cbox_run;
 	wxTextCtrl* txtctrl_path;
 	wxString filename;

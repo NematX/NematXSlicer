@@ -231,6 +231,7 @@ public:
 	// Download App progress
 	void push_download_progress_notification(const std::string& text, std::function<bool()>	cancel_callback);
 	void set_download_progress_percentage(float percentage);
+    void set_download_progress_text(const std::string& updated_text);
 	// Download URL progress notif
 	void push_download_URL_progress_notification(size_t id, const std::string& text, std::function<bool(DownloaderUserAction, int)> user_action_callback);
 	void set_download_URL_progress(size_t id, float percentage);

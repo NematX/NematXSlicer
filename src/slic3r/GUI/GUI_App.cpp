@@ -7,6 +7,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "libslic3r/Technologies.hpp"
+#include "libslic3r/Thread.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Init.hpp"
 #include "GUI_ObjectList.hpp"
@@ -1048,7 +1049,7 @@ void choose_app_dir(GUI_App &app) {
             same_version.push_back(&installed);
         } else {
             old_versions.push_back(&installed);
-            if (boost::filesystem::exists(installed.exe_path) && boost::filesystem::equivalent(binary_dir().parent_path(), installed.exe_path)) {
+            if (boost::filesystem::exists(installed.exe_path) && boost::filesystem::equivalent(binary_file().parent_path(), installed.exe_path)) {
                 same_exe_path.push_back(&installed);
             }
         }
@@ -1095,7 +1096,7 @@ void choose_app_dir(GUI_App &app) {
     for (int i = 1; already_used_name.find(my_default_installation.installed_name) != already_used_name.end(); ++i) {
         my_default_installation.installed_name = format("%1%_(%2%)", SLIC3R_BUILD_ID, i);
     }
-    my_default_installation.exe_path = binary_dir().parent_path();
+    my_default_installation.exe_path = binary_file().parent_path();
     my_default_installation.other_keys["exe_path_relative"] = "0";
     my_default_installation.config_path = my_default_installation.installed_name;
     my_default_installation.other_keys["config_path_relative"] = "1";
@@ -1628,6 +1629,11 @@ bool GUI_App::on_init_inner()
             if (this->plater_ != nullptr)
                 this->plater_->get_notification_manager()->set_download_progress_percentage((float)std::stoi(into_u8(evt.GetString())) / 100.f );
         });
+        Bind(EVT_SLIC3R_APP_DOWNLOAD_NAME, [this](const wxCommandEvent& evt) {
+            //lm:This does not force a render. The progress bar only updateswhen the mouse is moved.
+            if (this->plater_ != nullptr)
+                this->plater_->get_notification_manager()->set_download_progress_text(into_u8(evt.GetString()));
+        });
 
         Bind(EVT_SLIC3R_APP_DOWNLOAD_FAILED, [this](const wxCommandEvent& evt) {
             if (this->plater_ != nullptr)
@@ -1638,6 +1644,46 @@ bool GUI_App::on_init_inner()
 
         Bind(EVT_SLIC3R_APP_OPEN_FAILED, [](const wxCommandEvent& evt) {
             show_error(nullptr, evt.GetString());
+        }); 
+
+        Bind(EVT_SLIC3R_APP_REPLACE_SUCCESS, [this](const wxCommandEvent& evt) {
+                wxString title = wxString(SLIC3R_APP_NAME);
+                title += " - " + _L("upgrade to newer version");
+                // wxMessageDialog becasue we may not have the icons anymore.
+                wxMessageDialog dialog(nullptr,
+                    _L("The new version is installed, do you want to restart now?"),
+                    title,
+                    wxICON_QUESTION | wxOK | wxCANCEL);
+                if (dialog.ShowModal() == wxID_OK) {
+#ifdef _WIN32
+                    //this current work
+                    int saved_project = wxID_NO;
+                    if (this->plater_) {
+                        int saved_project = this->plater_->save_project_if_dirty(
+                            format_wxstr(_L("Closing %1%. Current project is modified."), SLIC3R_APP_NAME));
+                        if (saved_project == wxID_CANCEL) {
+                            return;
+                        }
+                        if (saved_project == wxID_NO && this->plater_->is_presets_dirty()) {
+                            if (!this->check_and_save_current_preset_changes(
+                                    format_wxstr(_L("%1% is closing"), SLIC3R_APP_NAME),
+                                    format_wxstr(_L("Closing %1% while some presets are modified."),
+                                                 SLIC3R_APP_NAME))) {
+                                //cancel
+                                return;
+                            }
+                        }
+                    }
+                    // "restart"
+                    Slic3r::win_exec(binary_file().string());
+                    //FIXME: call Close (or another gentler way to close)
+                    //std::exit(EXIT_FAILURE);
+                    if(this->mainframe)
+                        this->mainframe->Close(true);
+#else
+                    assert(false);
+#endif
+                }
         }); 
 
         Bind(EVT_CONFIG_UPDATER_SYNC_DONE, [this](const wxCommandEvent& evt) {
@@ -4256,10 +4302,11 @@ void GUI_App::app_updater(bool from_user)
     if (dialog_result != wxID_OK) {
         return;
     }
-    app_data.target_path =dwnld_dlg.get_download_path();
+    app_data.target_path = dwnld_dlg.get_download_path();
     // start download
     this->plater_->get_notification_manager()->push_download_progress_notification(GUI::format(_L("Downloading %1%"), app_data.target_path.filename().string()), std::bind(&AppUpdater::cancel_callback, this->m_app_updater.get()));
     app_data.start_after = dwnld_dlg.run_after_download();
+    app_data.replace_current = dwnld_dlg.replace_current_after_download();
     m_app_updater->set_app_data(std::move(app_data));
     m_app_updater->sync_download();
 }

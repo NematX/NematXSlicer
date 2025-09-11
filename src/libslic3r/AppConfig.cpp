@@ -44,7 +44,7 @@ namespace Slic3r {
 
 static const std::string VENDOR_PREFIX = "vendor:";
 static const std::string MODEL_PREFIX = "model:";
-static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/" SLIC3R_GITHUB "/releases";
+static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/" "supermerill/superslicer" "/releases";
 // Url to index archive zip that contains latest indicies
 static const std::string INDEX_ARCHIVE_URL= "https://api.github.com/repos/" SLIC3R_GITHUB "-profiles/releases";
 //to get the slic3r idx: look at the json from INDEX_ARCHIVE_URL, and request the assets_url
@@ -562,7 +562,7 @@ bool AppConfig::init_root_data_dir(const std::string &default_app_data_path) {
         m_data_dir.other_keys["installed_name"] = m_data_dir.installed_name = "command_line";
         m_data_dir.other_keys["config_path"] = (m_data_dir.config_path = data_dir()).string();
         m_data_dir.other_keys["config_path_relative"] = "0";
-        m_data_dir.other_keys["exe_path"] = (m_data_dir.exe_path = binary_dir().parent_path()).string();
+        m_data_dir.other_keys["exe_path"] = (m_data_dir.exe_path = binary_file().parent_path()).string();
         m_data_dir.other_keys["exe_path_relative"] = "0";
         m_data_dir.other_keys["version"] = (m_data_dir.version = Semver(SLIC3R_VERSION_FULL)).to_string();
         return false;
@@ -604,7 +604,7 @@ bool AppConfig::init_root_data_dir(const std::string &default_app_data_path) {
     }
     m_data_dir.config_path.clear();
     for (ConfigurationEntry *installed : same_version) {
-        if (boost::filesystem::exists(installed->exe_path) && boost::filesystem::equivalent(binary_dir().parent_path(), installed->exe_path)) {
+        if (boost::filesystem::exists(installed->exe_path) && boost::filesystem::equivalent(binary_file().parent_path(), installed->exe_path)) {
             m_data_dir = *installed;
             set_data_dir(m_data_dir.get_config_path(this->get_root_data_dir()).string());
         }
