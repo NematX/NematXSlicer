@@ -1,3 +1,6 @@
+min_slic3r_version = 2.7.61.9
+1.1.1 fix missing anti-slashes for windows paths
+1.1.0 updated toolchange gcode, new profiles
 1.0.18 disable min_length instead of setting it to 0
 1.0.17 set fan_printer_min_speed to 5, fix fan_speed disabled values
 1.0.16 define arc_fitting_resolution
