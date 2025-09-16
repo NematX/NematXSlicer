@@ -269,32 +269,32 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
     // Check "support_material" and "overhangs" relations only on global settings level
     if (is_global_config && config->opt_bool("support_material")) {
         // Ask only once.
-        if (!m_support_material_overhangs_queried) {
-            m_support_material_overhangs_queried = true;
-            if (!config->option("overhangs_width_speed")->is_enabled()) {
-                wxString msg_text = _(L("Supports work better, if the following feature is enabled:\n"
-                    "- overhangs threshold for speed & fan\n"
-                    "- overhangs threshold for flow"));
-                if (is_global_config) {
-                    msg_text += "\n\n" + _(L("Shall I adjust those settings for supports?"));
-                    MessageDialog dialog(m_msg_dlg_parent, msg_text, _L("Support Generator"), wxICON_WARNING | wxYES | wxNO);
-                        DynamicPrintConfig new_conf = *config;
-                        auto answer = dialog.ShowModal();
-                    if (answer == wxID_YES) {
-                        // Enable "detect bridging perimeters".
-                        new_conf.set_key_value("overhangs_width_speed", config->option("overhangs_width_speed")->clone()->set_enabled(true));
-                        new_conf.set_key_value("overhangs_width", config->option("overhangs_width")->clone()->set_enabled(true));
-                    } else if (answer == wxID_NO) {
-                        // Do nothing, leave supports on and "detect bridging perimeters" off.
-                    } else if (answer == wxID_CANCEL) {
-                        // Disable supports.
-                        new_conf.set_key_value("support_material", new ConfigOptionBool(false));
-                        m_support_material_overhangs_queried = false;
-                    }
-                    apply(config, &new_conf);
-                }
-            }
-        }
+        //if (!m_support_material_overhangs_queried) {
+        //    m_support_material_overhangs_queried = true;
+        //    if (!config->option("overhangs_width_speed")->is_enabled()) {
+        //        wxString msg_text = _(L("Supports work better, if the following feature is enabled:\n"
+        //            "- overhangs threshold for speed & fan\n"
+        //            "- overhangs threshold for flow"));
+        //        if (is_global_config) {
+        //            msg_text += "\n\n" + _(L("Shall I adjust those settings for supports?"));
+        //            MessageDialog dialog(m_msg_dlg_parent, msg_text, _L("Support Generator"), wxICON_WARNING | wxYES | wxNO);
+        //                DynamicPrintConfig new_conf = *config;
+        //                auto answer = dialog.ShowModal();
+        //            if (answer == wxID_YES) {
+        //                // Enable "detect bridging perimeters".
+        //                new_conf.set_key_value("overhangs_width_speed", config->option("overhangs_width_speed")->clone()->set_enabled(true));
+        //                new_conf.set_key_value("overhangs_width", config->option("overhangs_width")->clone()->set_enabled(true));
+        //            } else if (answer == wxID_NO) {
+        //                // Do nothing, leave supports on and "detect bridging perimeters" off.
+        //            } else if (answer == wxID_CANCEL) {
+        //                // Disable supports.
+        //                new_conf.set_key_value("support_material", new ConfigOptionBool(false));
+        //                m_support_material_overhangs_queried = false;
+        //            }
+        //            apply(config, &new_conf);
+        //        }
+        //    }
+        //}
     }
     else {
         m_support_material_overhangs_queried = false;
