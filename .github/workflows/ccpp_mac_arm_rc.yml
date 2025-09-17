@@ -19,7 +19,7 @@ jobs:
       run: autoconf --version
     - name: update automake for mpfr
       run: |
-        curl -O -L http://ftpmirror.gnu.org/automake/automake-1.16.5.tar.gz
+        curl -O -L https://github.com/supermerill/SuperSlicer_deps/releases/download/automake/automake-1.16.5.tar.gz
         tar -xzf automake-1.16.5.tar.gz
         cd automake-*
         ./configure

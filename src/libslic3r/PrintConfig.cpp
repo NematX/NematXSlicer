@@ -864,7 +864,7 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->can_be_disabled = true;
     def->mode = comAdvancedE | comPrusa;
-    def->set_default_value(enable_default_option(new ConfigOptionFloat(0.)));
+    def->set_default_value(disable_default_option(new ConfigOptionFloat(0.)));
 
     def = this->add("bridged_infill_margin", coFloatOrPercent);
     def->label = L("Bridged");
@@ -9898,13 +9898,33 @@ std::map<std::string,std::string> PrintConfigDef::from_prusa(t_config_option_key
         }
     }
     if ("max_layer_height" == opt_key) {
-        double dbl_val = std::atof(value.c_str());
         double min = 10;
-        if (all_conf.has("nozzle_diameter")) {
-            min = all_conf.option("nozzle_diameter")->get_float();
+        bool changed = false;
+        std::vector<std::string> value_array;
+        boost::split(value_array, value, boost::is_any_of(","), boost::token_compress_off);
+        for (size_t i = 0; i < value_array.size(); ++i) {
+            std::string &val = value_array[i];
+            double dbl_val = std::atof(value.c_str());
+            if (all_conf.has("nozzle_diameter")) {
+                min = all_conf.option("nozzle_diameter")->get_float(i);
+            }
+            if (dbl_val > min) {
+                if (dbl_val > 10) {
+                    val += "%";
+                    changed = true;
+                } else {
+                    val = to_string_nozero(min, 5);
+                }
+            }
         }
-        if (dbl_val > min) {
-            value += "%";
+        if (changed) {
+            value = "";
+            for (const std::string &val : value_array) {
+                if (!value.empty()) {
+                    value += ",";
+                }
+                value += val;
+            }
         }
     }
     if ("resolution" == opt_key && value == "0") {
