@@ -11204,7 +11204,6 @@ void  handle_legacy_sla(DynamicPrintConfig& config)
 
 void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
 {
-    const auto &defaults = FullPrintConfig::defaults();
     for (const std::string &key : print_config_def.extruder_option_keys()) {
         if (key == "default_filament_profile")
             // Don't resize this field, as it is presented to the user at the "Dependencies" page of the Printer profile and we don't want to present
@@ -11212,20 +11211,25 @@ void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
             continue;
         auto *opt = this->option(key, false);
         assert(opt != nullptr && opt->is_vector());
-        if (opt != nullptr && opt->is_vector())
-            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_extruders, defaults.option(key));
+        if (opt != nullptr && opt->is_vector()) {
+            auto default_opt_it = print_config_def.options.find(key);
+            assert(default_opt_it != print_config_def.options.end());
+            static_cast<ConfigOptionVectorBase *>(opt)->resize(num_extruders, default_opt_it->second.default_value.get());
+        }
     }
 }
 
 void DynamicPrintConfig::set_num_milling(unsigned int num_milling)
 {
-    const auto& defaults = FullPrintConfig::defaults();
     for (const std::string& key : print_config_def.milling_option_keys()) {
         auto* opt = this->option(key, false);
         assert(opt != nullptr);
         assert(opt->is_vector());
-        if (opt != nullptr && opt->is_vector())
-            static_cast<ConfigOptionVectorBase*>(opt)->resize(num_milling, defaults.option(key));
+        if (opt != nullptr && opt->is_vector()) {
+            auto default_opt_it = print_config_def.options.find(key);
+            assert(default_opt_it != print_config_def.options.end());
+            static_cast<ConfigOptionVectorBase *>(opt)->resize(num_milling, default_opt_it->second.default_value.get());
+        }
     }
 }
 

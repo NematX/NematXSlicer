@@ -7,13 +7,13 @@ set(SLIC3R_APP_NAME "NematXSlicer")
 set(SLIC3R_APP_KEY "NematXSlicer")
 # exe name of the slicer, should be lowercase and valid in all os
 set(SLIC3R_APP_CMD "nematxslicer")
-# id for windows registry
+# id for windows registry ([a-z] [A-Z] [0-9] '_' and '.' only)
 set(SLIC3R_APP_PROG_ID "Slic3r.1")
 # versions
 set(SLIC3R_VERSION "2.7+UNKNOWN")
-set(SLIC3R_VERSION_FULL "2.7.61.9")
+set(SLIC3R_VERSION_FULL "2.7.61.10")
 set(SLIC3R_BUILD_ID "${SLIC3R_APP_KEY}_${SLIC3R_VERSION_FULL}+UNKNOWN")
-set(SLIC3R_RC_VERSION "2,7,61,9")
+set(SLIC3R_RC_VERSION "2,7,61,10")
 set(SLIC3R_RC_VERSION_DOTS "${SLIC3R_VERSION_FULL}")
 
 # Same as the slicer name but for gcodeviewer
