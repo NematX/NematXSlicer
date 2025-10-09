@@ -1058,36 +1058,60 @@ void choose_app_dir(GUI_App &app) {
     std::sort(old_versions.begin(), old_versions.end(), [](const AppConfig::ConfigurationEntry *a, const AppConfig::ConfigurationEntry *b) { return a->version < b->version; });
 
     int choice = 0;
-    if (same_version.size() > 0 || old_versions.size() > 0) {
-        wxArrayString choices;
-        choices.Add(_L("New configuration"));
-        for (const AppConfig::ConfigurationEntry *samev : same_version) {
-            choices.Add(
-                format_wxstr(_L("Use same configuration as %1% ; path: (%2%)"), samev->installed_name, samev->config_path));
-        }
-        for (const AppConfig::ConfigurationEntry *samev : same_version) {
-            choices.Add(
-                format_wxstr(_L("Copy configuration %1% ; path: (%2%)"), samev->installed_name, samev->config_path));
-        }
-        for (const AppConfig::ConfigurationEntry *oldv : old_versions) {
-            choices.Add(
-                format_wxstr(_L("Copy old configuration %1% ; path: (%2%)"), oldv->installed_name, oldv->config_path));
-        }
-        // reuse existing one?
-        wxSingleChoiceDialog dialog(nullptr, _L("This is the first time you're running this version of the slicer from this location.."
-            "\nWould you like to reuse a configuration that already exists on this computer?"
-            "\nYou can either create a new empty configuration, use the same configuration as another installation, or copy an existing one."),
-                                    _L("New configuration directory"),
-                                    choices);
-        dialog.SetSelection(0);
-        int res = dialog.ShowModal();
-        if (res == wxID_CANCEL) {
+    //if no installation: start a new one.
+    if (same_version.size() + old_versions.size() == 0) {
+        choice = 0;
+    } else {
+        //need fonts for MessageDialog
+        app.init_fonts();
+        // else, reuse by default
+        MessageDialog first_dialog(nullptr,
+                                   _L("This is the first detected launch of this version. Would you like to copy the "
+                                      "existing configuration for reuse?"),
+                                   _L("First launch"), wxICON_QUESTION | wxYES_NO | wxCANCEL);
+
+        first_dialog.SetButtonLabel(wxID_NO, _L("Let me choose"));
+
+        int result = first_dialog.ShowModal();
+        if (result == wxID_CANCEL) {
             // cancel: dont run
             std::exit(EXIT_FAILURE);
+        } else if (result == wxID_YES) {
+            choice = same_version.size() + 1;
+        } else {
+            if (same_version.size() > 0 || old_versions.size() > 0) {
+                wxArrayString choices;
+                choices.Add(_L("New configuration"));
+                for (const AppConfig::ConfigurationEntry *samev : same_version) {
+                    choices.Add(format_wxstr(_L("Use same configuration as %1% ; path: (%2%)"), samev->installed_name,
+                                             samev->config_path));
+                }
+                for (const AppConfig::ConfigurationEntry *samev : same_version) {
+                    choices.Add(format_wxstr(_L("Copy configuration %1% ; path: (%2%)"), samev->installed_name,
+                                             samev->config_path));
+                }
+                for (const AppConfig::ConfigurationEntry *oldv : old_versions) {
+                    choices.Add(format_wxstr(_L("Copy old configuration %1% ; path: (%2%)"), oldv->installed_name,
+                                             oldv->config_path));
+                }
+                // reuse existing one?
+                wxSingleChoiceDialog dialog(
+                    nullptr,
+                    _L("This is the first time you're running this version of the slicer from this location."
+                       "\nWould you like to reuse a configuration that already exists on this computer?"
+                       "\nYou can either create a new empty configuration, use the same configuration as another "
+                       "installation, or copy an existing one."),
+                    _L("New configuration directory"), choices);
+                dialog.SetSelection(0);
+                int res = dialog.ShowModal();
+                if (res == wxID_CANCEL) {
+                    // cancel: dont run
+                    std::exit(EXIT_FAILURE);
+                }
+                choice = dialog.GetSelection();
+            }
         }
-        choice = dialog.GetSelection();
     }
-
     // ask for the name & location
     //TODO
 
@@ -1119,7 +1143,7 @@ void choose_app_dir(GUI_App &app) {
             boost::filesystem::copy(same_version[choice]->get_config_path(app.app_config->get_root_data_dir()), path,
                                   boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
         } else {
-            assert(choice < old_versions.size() * 2 + old_versions.size());
+            assert(choice < same_version.size() * 2 + old_versions.size());
             choice -= same_version.size() * 2;
             assert(choice < old_versions.size());
             boost::filesystem::path path = my_default_installation.get_config_path(app.app_config->get_root_data_dir());
