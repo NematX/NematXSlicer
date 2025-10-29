@@ -973,6 +973,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "color_change_gcode", "pause_print_gcode", "template_custom_gcode","feature_gcode",
     "between_objects_gcode",
     //printer fields
+    "nexus_version",
     "printer_custom_variables",
     "printer_vendor",
     "printer_model", 

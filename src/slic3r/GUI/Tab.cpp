@@ -1876,6 +1876,9 @@ void Tab::update_preset_description_line()
             }
             default: break;
             }
+            if (std::string nexus_version = preset.config.opt_string("nexus_version"); !nexus_version.empty()) {
+                    description_line += "\n\n\t" + _(L("NematX Nexus version")) + ": \n\t\t" + nexus_version;
+            }
         }
         else if (!preset.alias.empty())
         {

@@ -1329,6 +1329,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloatsOrPercents,     min_layer_height))
     ((ConfigOptionFloats,               min_print_speed))
     ((ConfigOptionFloat,                min_skirt_length))
+    ((ConfigOptionString,               nexus_version))
     ((ConfigOptionString,               notes))
     ((ConfigOptionFloats,               nozzle_diameter))
     ((ConfigOptionBool,                 only_retract_when_crossing_perimeters))

@@ -447,6 +447,11 @@ void PrintConfigDef::init_common_params()
     def->cli = ConfigOptionDef::nocli;
     def->can_phony = true;
 
+    def = this->add("nexus_version", coString);
+    // defautl to none : only set if loaded. only write our version
+    def->set_default_value(new ConfigOptionString("1.0.0"));
+    def->cli = ConfigOptionDef::nocli;
+
     def = this->add("printer_technology", coEnum);
     def->label = L("Printer technology");
     def->tooltip = L("Printer technology");
