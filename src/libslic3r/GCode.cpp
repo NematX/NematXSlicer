@@ -6473,7 +6473,7 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
             is_convex = !is_convex;
         }
     } else {
-        // contour: shoudl eb counter-clockwise
+        // contour: shoulb be counter-clockwise
         if (!is_ccw) {
             is_convex = !is_convex;
         }
@@ -6870,13 +6870,16 @@ std::string GCodeGenerator::_extrude(const ExtrusionPath &path, const std::strin
             Point current_pos = polyline.front();
             for (size_t idx = 1; idx < polyline.size(); ++idx) {
                 if (config().stretch_corners.value &&
+                    // need to be a loop, not a thinwall/arachne
+                    m_current_loop && 
+                    // only for perimeters
                     (path.role().is_external_perimeter() ||
                      (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0))) {
                     if (idx + 1 < polyline.size()) {
                         if (!is_ccw) {
                             assert(m_current_loop_reversed);
-                            assert(m_current_loop);
-                            assert((*m_current_loop)->polygon().is_counter_clockwise() == (*m_current_loop)->is_counter_clockwise());
+                            assert((*m_current_loop)->polygon().is_counter_clockwise() ==
+                                   (*m_current_loop)->is_counter_clockwise());
                             is_ccw = (*m_current_loop)->is_counter_clockwise();
                         }
                         // it return a position between polyline.get_point(idx) (included) and polyline.get_point(idx + 1) (excluded)
