@@ -960,8 +960,9 @@ std::pair<VendorProfile, std::vector<PrstPtr>> load_sections(const std::string &
     // TODO: also for sla-only
     for (PrstPtr &prst : ordered_presets_print) {
         for (auto &kvp : *prst->node) {
-            if (kvp.first == "thick_bridge") {
+            if (kvp.first == "thick_bridge" || kvp.first == "overhang_speed_0" || kvp.first == "gcode_resolution") {
                 prusa_slicer_convertion = true;
+                std::cout << "PRUSASLICER config file detected, this file will use the prusa-specific convertions\n";
                 // mega break
                 goto end_find_prusa;
             }
