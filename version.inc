@@ -9,6 +9,8 @@ set(SLIC3R_APP_KEY "NematXSlicer")
 set(SLIC3R_APP_CMD "nematxslicer")
 # id for windows registry ([a-z] [A-Z] [0-9] '_' and '.' only)
 set(SLIC3R_APP_PROG_ID "Slic3r.1")
+# windows guid to identify the app, can begenerated via powershell running [guid]::NewGuid()
+set(SLIC3R_GUID "ee58a199-3c77-4865-bbe9-52b9cbb2bc32")
 # versions
 set(SLIC3R_VERSION "2.7+UNKNOWN")
 set(SLIC3R_VERSION_FULL "2.7.61.11")

@@ -4130,9 +4130,13 @@ std::string GCodeGenerator::change_layer(double print_z) {
 
 //TODO: rework: just change the core path extrusion to change z, and add extra loops in the middle.
 //like extrude_loop but with varying z and two full round
+// ie scarf seam
 std::string GCodeGenerator::extrude_loop_vase(const ExtrusionPaths &normal_loop_paths, const ExtrusionLoop &original_loop, const std::string_view description, double speed)
 {
     double saved_z_mm = writer().get_unlifted_position().z();
+    if (m_new_z_target) {
+        saved_z_mm = *m_new_z_target;
+    }
 
     // will use first half of normal_loop_paths, then use a loop of original_loop and then the last half of normal_loop_paths
     // will start at external_perimeters_vase_min_height z, and reach layer->printz - external_perimeters_vase_min_height
@@ -5907,25 +5911,47 @@ std::string GCodeGenerator::extrude_path_3D(const ExtrusionPath3D &path, const s
 
     // calculate extrusion length per distance unit
     double e_per_mm = _compute_e_per_mm(simplifed_path);
-    double path_length = 0.;
     {
         std::string_view comment = m_config.gcode_comments ? description : ""sv;
         //for (const Line &line : simplifed_path.polyline.lines()) {
+        //assert(!simplifed_path.polyline.has_arc()); //FIXME extrude_to_arc_xyz ?
         for (size_t i = 0; i < simplifed_path.polyline.size()-1;i++) {
-            assert(!simplifed_path.polyline.has_arc()); //FIXME extrude_to_arc_xyz ?
-            Line line(simplifed_path.polyline.get_point(i), simplifed_path.polyline.get_point(i + 1));
-            const double line_length = line.length() * SCALING_FACTOR;
-            path_length += line_length;
-            gcode += m_writer.extrude_to_xyz(
-                this->point_to_gcode(line.b, i+1 < simplifed_path.z_offsets.size() ? simplifed_path.z_offsets[i+1] : 0),
-                e_per_mm * line_length,
-                comment);
+            if (simplifed_path.polyline.get_arc(i + 1).orientation == Geometry::ArcWelder::Orientation::Unknown) {
+                Line line(simplifed_path.polyline.get_point(i), simplifed_path.polyline.get_point(i + 1));
+                // gcode += m_writer.extrude_to_xyz(
+                //     this->point_to_gcode(line.b, simplifed_path.z_offsets.size()>i ? simplifed_path.z_offsets[i] :
+                //     0), e_per_mm * line_length, comment);
+                _extrude_line(gcode, line, e_per_mm, comment, path.role(),
+                              simplifed_path.z_offsets.size() > i ? simplifed_path.z_offsets[i] : 0);
+            } else {
+                const Geometry::ArcWelder::Segment &segment = simplifed_path.polyline.get_arc(i + 1);
+                double radius = segment.radius;
+                if (radius != 0) {
+                    assert(simplifed_path.polyline.is_valid());
+                    // Calculate quantized IJ circle center offset.
+                    Point current_pos = simplifed_path.polyline.get_point(i);
+                    Point center = Geometry::ArcWelder::arc_center_scalar<coord_t, coordf_t>(current_pos, segment.point, segment.radius, segment.ccw());
+                    // Don't extrude a degenerated circle.
+                    if (!center.coincides_with_epsilon(simplifed_path.polyline.get_point(i))) {
+                        distf_t line_length = Geometry::ArcWelder::segment_length<distf_t>(simplifed_path.polyline.get_arc(i), segment);
+                        const Vec2d  center_offset = this->point_to_gcode(center) - this->point_to_gcode(current_pos);
+                        double       angle         = Geometry::ArcWelder::arc_angle(current_pos, segment.point, radius);
+                        gcode += m_writer.extrude_arc_to_xyz(this->point_to_gcode(segment.point,
+                                                                                  simplifed_path.z_offsets.size() > i ?
+                                                                                      simplifed_path.z_offsets[i] :
+                                                                                      0),
+                                                             center_offset, e_per_mm * unscaled(line_length),
+                                                             segment.ccw(), comment);
+                    }
+                }
+            }
         }
     }
     gcode += this->_after_extrude(simplifed_path);
     // ensure z is reset via lift if possible
-    if (!is_approx(m_writer.get_position().z(), m_layer->print_z, EPSILON) && m_writer.get_position().z() > m_layer->print_z) {
-        //assert(m_writer.get_position().z() > m_layer->print_z);
+    if (!is_approx(m_writer.get_position().z(), m_layer->print_z, EPSILON) &&
+        m_writer.get_position().z() > m_layer->print_z) {
+        // assert(m_writer.get_position().z() > m_layer->print_z);
         m_writer.set_lift(m_writer.get_position().z() - m_layer->print_z);
     }
 
@@ -6322,7 +6348,7 @@ std::vector<double> cut_corner_cache = {
     0.252510726678311,0.262777267777188,0.27352986689699,0.284799648665007,0.296620441746888,0.309029079319231,0.322065740515038,0.335774339512048,0.350202970204428,0.365404415947691,
     0.381436735764648,0.398363940736199,0.416256777189962,0.435193636891737,0.455261618934834 };
 
-void GCodeGenerator::_extrude_line(std::string& gcode_str, const Line& line, const double e_per_mm, const std::string_view comment, ExtrusionRole role) {
+void GCodeGenerator::_extrude_line(std::string& gcode_str, const Line& line, const double e_per_mm, const std::string_view comment, ExtrusionRole role, coord_t delta_z) {
     if (line.a.coincides_with_epsilon(line.b)) {
         assert(false); // todo: investigate if it happens (it happens in perimeters)
         return;
@@ -6351,10 +6377,11 @@ void GCodeGenerator::_extrude_line(std::string& gcode_str, const Line& line, con
         }
     }
     // end small_area_infill_flow_compensation
-    gcode_str += m_writer.extrude_to_xy(
-        this->point_to_gcode(line.b),
-        extrusion_value,
-        comment_copy);
+    if (delta_z == 0) {
+        gcode_str += m_writer.extrude_to_xy(this->point_to_gcode(line.b), extrusion_value, comment_copy);
+    } else {
+        gcode_str += m_writer.extrude_to_xyz(this->point_to_gcode(line.b, delta_z), extrusion_value, comment_copy);
+    }
 }
 
 void GCodeGenerator::_extrude_line_cut_corner(std::string& gcode_str, const Line& line, const double e_per_mm, const std::string_view comment, Point& last_pos, const double path_width) {
@@ -6864,7 +6891,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionPath &path, const std::strin
         //BBS: use G1 if not enable arc fitting or has no arc fitting result or in spiral_mode mode
         //Attention: G2 and G3 is not supported in spiral_mode mode
         assert(m_config.arc_fitting != ArcFittingType::Disabled  || !polyline.has_arc());
-        if (m_config.arc_fitting == ArcFittingType::Disabled || !polyline.has_arc() || m_spiral_vase_layer > 0) {
+        if (/*m_config.arc_fitting == ArcFittingType::Disabled || */!polyline.has_arc() || m_spiral_vase_layer > 0) {
             assert(!polyline.has_arc());
             Point last_pos    = polyline.front();
             Point current_pos = polyline.front();

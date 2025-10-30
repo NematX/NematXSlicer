@@ -823,7 +823,7 @@ int ArcPolyline::find_point(const Point &point, coordf_t epsilon) const
     }
 }
 
-bool ArcPolyline::at_least_length(coordf_t length) const
+bool ArcPolyline::at_least_length(distf_t length) const
 {
     for (size_t i = 1; length > 0 && i < m_path.size(); ++ i)
         length -= Geometry::ArcWelder::segment_length<double>(m_path[i - 1], m_path[i]);
@@ -904,7 +904,7 @@ void ArcPolyline::pop_back()
     assert(is_valid());
 }
 
-void ArcPolyline::clip_start(coordf_t dist)
+void ArcPolyline::clip_start(distf_t dist)
 {
     Geometry::ArcWelder::clip_start(m_path, dist);
     if (!m_only_strait)
@@ -912,7 +912,7 @@ void ArcPolyline::clip_start(coordf_t dist)
     assert(is_valid());
 }
 
-void ArcPolyline::clip_end(coordf_t dist)
+void ArcPolyline::clip_end(distf_t dist)
 {
     Geometry::ArcWelder::clip_end(m_path, dist);
     if (!m_only_strait)
@@ -920,7 +920,7 @@ void ArcPolyline::clip_end(coordf_t dist)
     assert(is_valid());
 }
 
-void ArcPolyline::split_at(coordf_t distance, ArcPolyline &p1, ArcPolyline &p2) const
+void ArcPolyline::split_at(distf_t distance, ArcPolyline &p1, ArcPolyline &p2) const
 {
     assert(p1.empty());
     assert(p2.empty());
@@ -1241,7 +1241,7 @@ bool ArcPolyline::split_at_index(const size_t index, ArcPolyline &p1, ArcPolylin
 }
 
 //TODO: find a way to avoid duplication of get_point_from_end / get_point_from_begin
-Point ArcPolyline::get_point_from_begin(coord_t distance) const {
+Point ArcPolyline::get_point_from_begin(distf_t distance) const {
     size_t idx = 1;
     while (distance > 0 && idx < m_path.size()) {
         const Geometry::ArcWelder::Segment last = m_path[idx - 1];
@@ -1276,7 +1276,7 @@ Point ArcPolyline::get_point_from_begin(coord_t distance) const {
     return m_path[idx - 1].point;
 }
 
-Point ArcPolyline::get_point_from_end(coord_t distance) const {
+Point ArcPolyline::get_point_from_end(distf_t distance) const {
     size_t idx = m_path.size() - 1;
     while (distance > 0 && idx > 0) {
         const Geometry::ArcWelder::Segment last = m_path[idx];
@@ -1313,19 +1313,25 @@ Point ArcPolyline::get_point_from_end(coord_t distance) const {
 
 void ArcPolyline::set_front(const Point &p) {
     assert(!m_path.empty());
-    m_path.front().point = p;
-    if (m_path.size() > 1) {
+    if (m_path.size() > 1 && m_path.front().point != p) {
         m_path[1].radius = 0.f;
         m_path[1].orientation = Geometry::ArcWelder::Orientation::Unknown;
+        // should have been discretized before
+        assert(false);
     }
+    m_path.front().point = p;
     assert(is_valid());
 }
 
 void ArcPolyline::set_back(const Point &p) {
     assert(!m_path.empty());
+    if (m_path.size() > 1 && m_path.front().point != p) {
+        m_path.back().radius = 0.f;
+        m_path.back().orientation = Geometry::ArcWelder::Orientation::Unknown;
+        // should have been discretized before
+        assert(false);
+    }
     m_path.back().point = p;
-    m_path.back().radius = 0.f;
-    m_path.back().orientation = Geometry::ArcWelder::Orientation::Unknown;
     assert(is_valid());
 }
 
@@ -1863,7 +1869,11 @@ void ArcPolyline::make_arc(ArcFittingType with_fitting_arc, coordf_t tolerance, 
 }
 
 bool ArcPolyline::is_valid() const {
-#ifdef _DEBEUG
+#ifdef _DEBUG
+    assert(m_path[0].radius == 0 && m_path[0].orientation == Geometry::ArcWelder::Orientation::Unknown);
+    for (size_t i = 1; i < m_path.size(); ++i) {
+        assert(m_path[i].radius != 0 || m_path[i].orientation == Geometry::ArcWelder::Orientation::Unknown);
+    }
     assert(m_path.empty() || m_path.front().radius == 0);
     double min_radius = 0;
     double max_radius = 0;
