@@ -1077,7 +1077,7 @@ void PrintObject::estimate_curled_extrusions()
         }
         if (this->print()->config().avoid_crossing_curled_overhangs ||
             std::any_of(this->print()->m_print_regions.begin(), this->print()->m_print_regions.end(),
-                        [](const PrintRegion *region) { return region->config().overhangs_dynamic_speed.is_enabled(); })) {
+                        [](const PrintRegion *region) { return region->config().overhangs_dynamic_flow.is_enabled() || region->config().overhangs_dynamic_speed.is_enabled(); })) {
             BOOST_LOG_TRIVIAL(debug) << "Estimating areas with curled extrusions - start";
             m_print->set_status(objectstep_2_percent[PrintObjectStep::posEstimateCurledExtrusions], _u8L("Estimating curled extrusions"));
 
@@ -1150,6 +1150,7 @@ void _calculate_overhanging_perimeters(
         // note: to simplify, overhang attribute are always computed.
         if (true/*regions_without_dynamic_speeds.empty()*/) {
             // simple case
+            assert(!regions.empty()); //note: regions should have the same bridge flow (because of layer::config_compatible_for_perimeter)
             const LayerRegion &one_layer_region = **regions.begin();
             const PrintRegionConfig &region_config = one_layer_region.region().config();
             size_t prev_layer_id = layer.lower_layer ? layer.lower_layer->id() : size_t(-1);
@@ -1176,6 +1177,28 @@ void _calculate_overhanging_perimeters(
         } else {
             //TODO: split extrusions per on/off, then reassemble them again
         }
+
+        // bridge flow
+        struct PathDynamicFlowVisitor : public ExtrusionVisitorRecursive
+        {
+            const PrintConfig *print_config;
+            const LayerRegion *layer_region;
+            const Layer* layer;
+            using ExtrusionVisitorRecursive::use;
+            void use(ExtrusionPath &path) override {
+                size_t extruder_id = layer_region->region().extruder(path.role().is_external() ?
+                                                                        FlowRole::frExternalPerimeter :
+                                                                        FlowRole::frPerimeter,
+                                                                    *layer->object()) -
+                    1;
+                ExtrusionProcessor::apply_overhang_flow(path, *print_config, *layer_region, extruder_id);
+            }
+        } overhangs_flow_visitor;
+        overhangs_flow_visitor.layer_region = *regions.begin();
+        overhangs_flow_visitor.print_config = &layer.object()->print()->config();
+        overhangs_flow_visitor.layer = &layer;
+        lri.mutable_extrusion(LayerRegionIsland::PERIMETERS).visit(overhangs_flow_visitor);
+
     }
 
 }
@@ -1216,6 +1239,8 @@ void PrintObject::calculate_overhanging_perimeters()
                             virtual void use(const ExtrusionPath &path) override {
                                 if (path.role().is_overhang())
                                     assert(path.overhang_attributes());
+                                assert(path.overhang_attributes() == nullptr || path.overhang_attributes()->has_full_overhangs_speed ||
+                                       path.overhang_attributes()->has_dynamic_overhangs_speed);
                             }
                         };
                         OverhangAssertVisitor ov_visitor;
@@ -1394,17 +1419,22 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "external_perimeter_extrusion_spacing"
             || opt_key == "external_perimeter_extrusion_width"
             || opt_key == "external_perimeters_vase"
+            || opt_key == "external_perimeters_vase_min_height"
             || opt_key == "gap_fill_extension"
             || opt_key == "gap_fill_last"
             || opt_key == "gap_fill_max_width"
             || opt_key == "gap_fill_min_area"
             || opt_key == "gap_fill_min_length"
             || opt_key == "gap_fill_min_width"
+            || opt_key == "gap_fill_no_overhang"
             || opt_key == "min_width_top_surface"
             || opt_key == "only_one_perimeter_first_layer"
             || opt_key == "only_one_perimeter_top"
             || opt_key == "only_one_perimeter_top_other_algo"
+            || opt_key == "overhangs"
+            || opt_key == "overhangs_dynamic_flow"
             || opt_key == "overhangs_dynamic_speed"
+            || opt_key == "overhangs_extrusion_spacing"
             || opt_key == "overhangs_reverse"
             || opt_key == "overhangs_reverse_threshold"
             || opt_key == "overhangs_speed_enforce"

@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <fstream>
+#include <regex>
 #include <stdexcept>
 #include <unordered_map>
 #include <boost/format.hpp>
@@ -89,13 +90,91 @@ ConfigFileType guess_config_file_type(const ptree &tree)
            (bundle > config) ? CONFIG_FILE_TYPE_CONFIG_BUNDLE : CONFIG_FILE_TYPE_CONFIG;
 }
 
+/*static*/ std::string VendorProfile::get_http_url_rest(const std::string &config_update_rest) {
+    if (config_update_rest.empty()) {
+        return "";
+    }
+    size_t pos_http = config_update_rest.find("://");
+    std::string http_part;
+    std::string domain_part;
+    std::string rest_api_root;
+    //extract http part
+    if (pos_http != std::string::npos) {
+        http_part = config_update_rest.substr(0, pos_http + 3);
+        domain_part = config_update_rest.substr(pos_http + 3);
+    } else {
+        http_part = "";
+        domain_part = config_update_rest;
+    }
+    //extract domain
+    size_t pos_slash = domain_part.find("/");
+    size_t pos_dot = domain_part.find(".");
+    if (pos_dot == std::string::npos) {
+        if (http_part.empty()) {
+            //no http nor domain, use github
+            http_part = "https://";
+            rest_api_root = domain_part;
+            domain_part = "api.github.com/repos";
+            if (!rest_api_root.empty() && rest_api_root[0] == '/') {
+                rest_api_root = rest_api_root.substr(1);
+            }
+            if (!rest_api_root.empty() && rest_api_root[rest_api_root.size() - 1] == '/') {
+                rest_api_root.pop_back();
+            }
+        } else {
+            assert(false);
+            // i don't understand what is it.
+            // use it as-is.
+        }
+    } else {
+        // extract domain
+        if (pos_slash != std::string::npos) {
+            assert(pos_slash <= pos_dot + 4);
+            assert(pos_slash > pos_dot);
+            rest_api_root = domain_part.substr(pos_slash + 1);
+            domain_part = domain_part.substr(0, pos_slash);
+        } else {
+            //no rest api... weird .. but okay...
+            if (!domain_part.empty() && domain_part[rest_api_root.size() - 1] == '/') {
+                domain_part.pop_back();
+            }
+        }
+    }
+    if (domain_part == "github.com") {
+        //we need the api
+        domain_part = "api.github.com/repos";
+    }
+    http_part += domain_part;
+    assert(domain_part.empty() || domain_part.front() != '/');
+    assert(domain_part.empty() || domain_part.back() != '/');
+    assert(domain_part.empty() || domain_part.front() != '.');
+    assert(domain_part.empty() || domain_part.back() != '.');
+    if (!rest_api_root.empty()) {
+        assert(rest_api_root.front() != '/');
+        assert(rest_api_root.back() != '/');
+        http_part += "/";
+        http_part += rest_api_root;
+    }
+    return http_part;
+}
+
+const std::regex VP_FOR_FILENAME("[^0-9a-zA-Z_\\-. ]");
+std::string VendorProfile::usable_id() const {
+    return std::regex_replace(id, VP_FOR_FILENAME, "-");
+}
 
 VendorProfile VendorProfile::from_ini(const boost::filesystem::path &path, bool load_all)
 {
+    const std::string id = path.stem().string();
+
+    if (! boost::filesystem::exists(path)) {
+        throw Slic3r::RuntimeError((boost::format("Cannot load Vendor Config Bundle `%1%`: File not found: `%2%`.") % id % path).str());
+    }
+
     ptree tree;
     boost::nowide::ifstream ifs(path.string());
     boost::property_tree::read_ini(ifs, tree);
-    return VendorProfile::from_ini(tree, path, load_all);
+    return VendorProfile::from_ini(tree, id, load_all);
 }
 
 static const std::unordered_map<std::string, std::string> pre_family_model_map {{
@@ -108,17 +187,13 @@ static const std::unordered_map<std::string, std::string> pre_family_model_map {
     { "SL1",        "SL1" },
 }};
 
-VendorProfile VendorProfile::from_ini(const ptree &tree, const boost::filesystem::path &path, bool load_all)
+VendorProfile VendorProfile::from_ini(const ptree &tree, const std::string &base_id, bool load_all)
 {
     static const std::string printer_model_key = "printer_model:";
     static const std::string filaments_section = "default_filaments";
     static const std::string materials_section = "default_sla_materials";
 
-    const std::string id = path.stem().string();
-
-    if (! boost::filesystem::exists(path)) {
-        throw Slic3r::RuntimeError((boost::format("Cannot load Vendor Config Bundle `%1%`: File not found: `%2%`.") % id % path).str());
-    }
+    std::string id = base_id;
 
     VendorProfile res(id);
 
@@ -134,6 +209,15 @@ VendorProfile VendorProfile::from_ini(const ptree &tree, const boost::filesystem
 
     // Load the header
     const auto &vendor_section = get_or_throw(tree, "vendor")->second;
+
+    // fix id if set (can be useful when when getting from internet or loading from a stream)
+    const auto id_node = vendor_section.find("id");
+    if (id_node != vendor_section.not_found()) {
+        std::string id_from_vendor = id_node->second.data();
+        res.id = id = id_from_vendor;
+    }
+
+    // name, full_name and technologies
     res.name = get_or_throw(vendor_section, "name")->second.data();
     auto full_name_node = vendor_section.find("full_name");
     res.full_name = (full_name_node == vendor_section.not_found()) ? res.name : full_name_node->second.data();
@@ -155,12 +239,23 @@ VendorProfile VendorProfile::from_ini(const ptree &tree, const boost::filesystem
         res.technologies.push_back(PrinterTechnology::ptFFF);
     }
 
-    auto config_version_str = get_or_throw(vendor_section, "config_version")->second.data();
-    auto config_version = Semver::parse(config_version_str);
-    if (! config_version) {
-        throw Slic3r::RuntimeError((boost::format("Vendor Config Bundle `%1%` is not valid: Cannot parse config_version: `%2%`.") % id % config_version_str).str());
-    } else {
-        res.config_version = std::move(*config_version);
+    // description
+    const auto description_node = vendor_section.find("description");
+    if (description_node != vendor_section.not_found()) {
+        res.description = description_node->second.data();
+    }
+
+    //it's now possible to have no version (only the vendor header)
+    const auto config_version_node = vendor_section.find("config_version");
+    if (config_version_node != vendor_section.not_found()) {
+        auto config_version = Semver::parse(config_version_node->second.data());
+        if (! config_version) {
+            throw Slic3r::RuntimeError((boost::format("Vendor Config Bundle `%1%` is not valid: Cannot parse config_version: `%2%`.") % id % config_version_node->second.data()).str());
+        } else {
+            res.config_version = std::move(*config_version);
+        }
+    } else if(load_all) {
+        throw Slic3r::RuntimeError((boost::format("Vendor Config Bundle `%1%` is not valid: Missing secion or key: `%2%`.") % id % "config_version").str());
     }
 
     // Load URLs
@@ -168,10 +263,35 @@ VendorProfile VendorProfile::from_ini(const ptree &tree, const boost::filesystem
     if (config_update_url != vendor_section.not_found()) {
         res.config_update_url = config_update_url->second.data();
     }
+    
+    const auto config_update_rest = vendor_section.find("config_update_rest");
+    const auto config_update_github = vendor_section.find("config_update_github");
+    if (config_update_rest != vendor_section.not_found()) {
+        res.config_update_rest = config_update_rest->second.data();
+    } else if (config_update_github != vendor_section.not_found()) {
+        res.config_update_rest = config_update_github->second.data();
+    }
 
     const auto changelog_url = vendor_section.find("changelog_url");
     if (changelog_url != vendor_section.not_found()) {
         res.changelog_url = changelog_url->second.data();
+    }
+
+    //slicer
+
+    const auto slicer_name_node = vendor_section.find("slicer");
+    if (slicer_name_node != vendor_section.not_found()) {
+        res.slicer = slicer_name_node->second.data();
+    }
+
+    const auto slicer_version_node = vendor_section.find("slicer_version");
+    if (slicer_version_node != vendor_section.not_found()) {
+        auto slicer_version = Semver::parse(slicer_version_node->second.data());
+        if (! slicer_version) {
+            res.slicer_version = Semver::zero();
+        } else {
+            res.slicer_version = std::move(*slicer_version);
+        }
     }
 
     //get family column size
@@ -507,9 +627,13 @@ static std::vector<std::string> s_Preset_print_options {
         "avoid_travel_island",
         "avoid_travel_island_weight",
         "thin_perimeters", "thin_perimeters_all",
+        "overhangs",
+        "overhangs_extrusion_spacing",
+        "overhangs_type",
         "overhangs_speed",
         "overhangs_speed_enforce",
         "overhangs_max_slope",
+        "overhangs_flow_ratio",
         "overhangs_bridge_threshold",
         "overhangs_bridge_upper_layers",
         "overhangs_width",
@@ -531,6 +655,7 @@ static std::vector<std::string> s_Preset_print_options {
         "external_perimeters_first",
         "external_perimeters_first_force",
         "external_perimeters_vase",
+        "external_perimeters_vase_min_height",
         "external_perimeters_nothole",
         "external_perimeters_hole",
         "external_perimeters_staggered",
@@ -586,6 +711,7 @@ static std::vector<std::string> s_Preset_print_options {
         "first_layer_min_speed",
         "first_layer_speed_over_raft",
         "infill_speed",
+        "overhangs_dynamic_flow",
         "overhangs_dynamic_speed",
         "perimeter_speed",
         "small_perimeter_speed",
@@ -609,6 +735,7 @@ static std::vector<std::string> s_Preset_print_options {
         "gap_fill_min_area",
         "gap_fill_min_length",
         "gap_fill_min_width",
+        "gap_fill_no_overhang",
         "gap_fill_overlap",
         "gap_fill_perimeter",
         "gap_fill_speed",
@@ -959,6 +1086,7 @@ static std::vector<std::string> s_Preset_machine_limits_options {
 
 static std::vector<std::string> s_Preset_printer_options {
     "arc_fitting",
+    "arc_fitting_ignore_holes",
     "arc_fitting_resolution",
     "arc_fitting_tolerance", //TODO: keep?
     "autoemit_temperature_commands",
@@ -997,6 +1125,7 @@ static std::vector<std::string> s_Preset_printer_options {
     "toolchange_gcode",
     "color_change_gcode", "pause_print_gcode", "template_custom_gcode","feature_gcode",
     "between_objects_gcode",
+    "between_objects_gcode_before_move",
     //printer fields
     "printer_custom_variables",
     "printer_vendor",

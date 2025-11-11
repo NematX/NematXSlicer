@@ -61,10 +61,13 @@ Flow LayerRegion::bridging_flow(FlowRole role, BridgeType force_type) const
     const PrintRegion       &region         = this->region();
     const PrintRegionConfig &region_config  = region.config();
     const PrintObject       &print_object   = *this->layer()->object();
+    const bool is_perimeter = role == frExternalPerimeter || role == frPerimeter;
     // Here this->extruder(role) - 1 may underflow to MAX_INT, but then the get_at() will follback to zero'th element, so everything is all right.
-    float nozzle_diameter = float(print_object.print()->config().nozzle_diameter.get_at(region.extruder(role, *this->layer()->object()) - 1));
+    const float nozzle_diameter = float(print_object.print()->config().nozzle_diameter.get_at(region.extruder(role, *this->layer()->object()) - 1));
     double diameter = 0;
-    BridgeType bridge_type = force_type == BridgeType::btNone ? region_config.bridge_type : force_type;
+    BridgeType bridge_type = force_type == BridgeType::btNone ?
+        (is_perimeter ? region_config.overhangs_type : region_config.bridge_type) :
+        force_type;
     if (bridge_type == BridgeType::btFromFlow ) {
         Flow reference_flow = flow(role);
         diameter = sqrt(4 * reference_flow.mm3_per_mm() / PI);
@@ -76,7 +79,13 @@ Flow LayerRegion::bridging_flow(FlowRole role, BridgeType force_type) const
         // Applies default bridge spacing.
         diameter =  nozzle_diameter;
     }
-    return Flow::bridging_flow(float(sqrt(force_type == BridgeType::btNone ? region_config.bridge_flow_ratio.get_abs_value(1.) : 0.95f) * diameter) , nozzle_diameter);
+    assert(!is_perimeter || (region_config.overhangs.get_bool() && region_config.overhangs_flow_ratio.is_enabled()));
+    return Flow::bridging_flow(float(sqrt(force_type == BridgeType::btNone ?
+                                              (is_perimeter ? region_config.overhangs_flow_ratio.get_abs_value(1.) :
+                                                              region_config.bridge_flow_ratio.get_abs_value(1.)) :
+                                              0.95f) *
+                                     diameter),
+                               nozzle_diameter);
     /* else {
         // The same way as other slicers: Use normal extrusions. Apply bridge_flow_ratio while maintaining the original spacing.
         return this->flow(role).with_flow_ratio(region_config.bridge_flow_ratio, overlap_percent);

@@ -230,6 +230,10 @@ public:
     float start_distance_from_prev_layer = -1; // mm
     float end_distance_from_prev_layer = -1; // mm
     float proximity_to_curled_lines = 0; // value between 0 and 1
+    bool has_full_overhangs_flow = false;
+    bool has_full_overhangs_speed = false;
+    bool has_dynamic_overhangs_flow = false;
+    bool has_dynamic_overhangs_speed = false;
     ExtrusionPropertyOverhang() {}
     ExtrusionPropertyOverhang(float start_dist, float end_dist)
         : start_distance_from_prev_layer(start_dist), end_distance_from_prev_layer(end_dist) {}
@@ -237,6 +241,14 @@ public:
         : start_distance_from_prev_layer(start_dist)
         , end_distance_from_prev_layer(end_dist)
         , proximity_to_curled_lines(curled_ratio) {}
+    ExtrusionPropertyOverhang(float start_dist, float end_dist, float curled_ratio, bool full_flow, bool full_speed, bool dynamic_flow, bool dynamic_speed)
+        : start_distance_from_prev_layer(start_dist)
+        , end_distance_from_prev_layer(end_dist)
+        , proximity_to_curled_lines(curled_ratio)
+        , has_full_overhangs_flow(full_flow)
+        , has_full_overhangs_speed(full_speed)
+        , has_dynamic_overhangs_flow(dynamic_flow)
+        , has_dynamic_overhangs_speed(dynamic_speed) {}
     std::unique_ptr<ExtrusionProperty> clone() const override { return std::make_unique<ExtrusionPropertyOverhang>(*this); }
     void visit(ExtrusionPropertyVisitor &visitor) override { visitor.use(*this); }
     void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this);}
@@ -1034,18 +1046,19 @@ struct HasThisRoleVisitor : public HasRoleVisitor{
 class ConfigOptionFloatOrPercent;
 class SimplifyVisitor : public ExtrusionVisitor{
     ArcFittingType                    m_use_arc_fitting;
-    coordf_t m_scaled_resolution;
+    bool                              m_ignore_holes;
+    coordf_t                          m_scaled_resolution;
     const ConfigOptionFloatOrPercent* m_arc_fitting_tolearance;
     // when an entity is too small, this is set to true do the collection that is higher in the stack can merge & delete.
     coord_t                           m_min_path_size = 0;
     bool                              m_last_deleted = false;
 public:
     using ExtrusionVisitor::use;
-    SimplifyVisitor(coordf_t scaled_resolution, ArcFittingType use_arc_fitting, const ConfigOptionFloatOrPercent *arc_fitting_tolearance)
-        : m_scaled_resolution(scaled_resolution), m_use_arc_fitting(use_arc_fitting), m_arc_fitting_tolearance(arc_fitting_tolearance)
+    SimplifyVisitor(coordf_t scaled_resolution, ArcFittingType use_arc_fitting, bool ignore_holes, const ConfigOptionFloatOrPercent *arc_fitting_tolearance)
+        : m_scaled_resolution(scaled_resolution), m_ignore_holes(ignore_holes), m_use_arc_fitting(use_arc_fitting), m_arc_fitting_tolearance(arc_fitting_tolearance)
     {}
-    SimplifyVisitor(coordf_t scaled_resolution, ArcFittingType use_arc_fitting, const ConfigOptionFloatOrPercent *arc_fitting_tolearance, coord_t min_path_size)
-        : m_scaled_resolution(scaled_resolution), m_use_arc_fitting(use_arc_fitting), m_arc_fitting_tolearance(arc_fitting_tolearance), m_min_path_size(min_path_size)
+    SimplifyVisitor(coordf_t scaled_resolution, ArcFittingType use_arc_fitting, bool ignore_holes, const ConfigOptionFloatOrPercent *arc_fitting_tolearance, coord_t min_path_size)
+        : m_scaled_resolution(scaled_resolution), m_ignore_holes(ignore_holes), m_use_arc_fitting(use_arc_fitting), m_arc_fitting_tolearance(arc_fitting_tolearance), m_min_path_size(min_path_size)
     {}
     
     virtual void use(ExtrusionPath& path) override;

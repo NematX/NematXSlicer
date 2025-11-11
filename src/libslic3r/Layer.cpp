@@ -114,9 +114,11 @@ void LayerRegionIsland::simplify_extrusion_entity(const Layer& layer)
     if (scaled_resolution == 0) scaled_resolution = enable_arc_fitting != ArcFittingType::Disabled ? SCALED_EPSILON * 2 : SCALED_EPSILON;
     scaled_resolution = std::max(double(SCALED_EPSILON), scaled_resolution);
 
-	//Ligne 652:     SimplifyVisitor(coordf_t scaled_resolution, ArcFittingType use_arc_fitting, const ConfigOptionFloatOrPercent *arc_fitting_tolearance)
     //call simplify for all paths
-    Slic3r::SimplifyVisitor visitor{ scaled_resolution , enable_arc_fitting, &print_config.arc_fitting_tolerance, enable_arc_fitting != ArcFittingType::Disabled ? SCALED_EPSILON * 2 : SCALED_EPSILON };
+    Slic3r::SimplifyVisitor visitor{scaled_resolution, enable_arc_fitting, print_config.arc_fitting_ignore_holes,
+                                    &print_config.arc_fitting_tolerance,
+                                    enable_arc_fitting != ArcFittingType::Disabled ? SCALED_EPSILON * 2 :
+                                                                                     SCALED_EPSILON};
     if (this->has_extrusion(LayerRegionIsland::PERIMETERS)) {
         this->mutable_extrusion(LayerRegionIsland::PERIMETERS).visit(visitor);
     }
@@ -810,17 +812,22 @@ ExPolygons Layer::merged(coordf_t offset_scaled) const
         offset_scaled  = float(  SCALED_EPSILON);
         offset_scaled2 = float(- SCALED_EPSILON);
     }
-    Polygons polygons;
+    ExPolygons expolygons;
 	for (LayerRegion *layerm : m_regions) {
 		const PrintRegionConfig &config = layerm->region().config();
 		// Our users learned to bend Slic3r to produce empty volumes to act as subtracters. Only add the region if it is non-empty.
-		if (config.bottom_solid_layers > 0 || config.top_solid_layers > 0 || config.fill_density > 0. || config.perimeters > 0 || (config.solid_infill_every_layers.value > 0 && config.fill_density.value > 0))
-			append(polygons, offset(layerm->slices().surfaces, offset_scaled));
+        if (config.bottom_solid_layers > 0 || config.top_solid_layers > 0 || config.fill_density > 0. ||
+            config.perimeters > 0 || (config.solid_infill_every_layers.value > 0 && config.fill_density.value > 0)) {
+            append(expolygons, offset_ex(layerm->slices().surfaces, offset_scaled));
 	}
-    ExPolygons out = union_ex(polygons);
+    }
+    expolygons = union_ex(expolygons);
 	if (offset_scaled2 != 0.f)
-		out = offset_ex(out, offset_scaled2);
-    return out;
+        expolygons = offset_ex(expolygons, offset_scaled2);
+
+    // with +- offset, you can have dupicated points. ensure_valid will remove them.
+    ensure_valid(expolygons);
+    return expolygons;
 }
 
 bool config_compatible_for_perimeter(const PrintRegionConfig &config, const PrintRegionConfig &other_config, bool is_first_layer) {
@@ -835,11 +842,16 @@ bool config_compatible_for_perimeter(const PrintRegionConfig &config, const Prin
         && config.external_perimeters_hole  == other_config.external_perimeters_hole
         && config.external_perimeters_nothole == other_config.external_perimeters_nothole
         && config.external_perimeters_vase == other_config.external_perimeters_vase
+        && config.external_perimeters_vase_min_height == other_config.external_perimeters_vase_min_height
+        && config.seam_notch_all            == other_config.seam_notch_all
+        && config.seam_notch_angle          == other_config.seam_notch_angle
+        && config.seam_notch_inner          == other_config.seam_notch_inner
+        && config.seam_notch_outer          == other_config.seam_notch_outer
         //&& config.extra_perimeters_below_area == other_config.extra_perimeters_below_area // can be used in modifiers
         //&& config.extra_perimeters_odd_layers == other_config.extra_perimeters_odd_layers // can be used in modifiers
         //&& config.extra_perimeters_on_overhangs == other_config.extra_perimeters_on_overhangs // can be used in modifiers
-        && config.gap_fill_enabled          == other_config.gap_fill_enabled
-        && ((config.gap_fill_speed          == other_config.gap_fill_speed) || !config.gap_fill_enabled)
+        //&& config.gap_fill_enabled          == other_config.gap_fill_enabled
+        && ((config.gap_fill_speed          == other_config.gap_fill_speed) || (!config.gap_fill_enabled && !other_config.gap_fill_enabled))
         && config.gap_fill_acceleration     == other_config.gap_fill_acceleration
         && config.gap_fill_last             == other_config.gap_fill_last
         && config.gap_fill_flow_match_perimeter == other_config.gap_fill_flow_match_perimeter
@@ -848,6 +860,7 @@ bool config_compatible_for_perimeter(const PrintRegionConfig &config, const Prin
         && config.gap_fill_min_area         == other_config.gap_fill_min_area
         && config.gap_fill_min_length         == other_config.gap_fill_min_length
         && config.gap_fill_min_width         == other_config.gap_fill_min_width
+        // && config.gap_fill_no_overhang         == other_config.gap_fill_no_overhang
         && config.gap_fill_overlap          == other_config.gap_fill_overlap
         && config.gap_fill_perimeter          == other_config.gap_fill_perimeter
         && config.infill_dense              == other_config.infill_dense
@@ -859,9 +872,14 @@ bool config_compatible_for_perimeter(const PrintRegionConfig &config, const Prin
         //&& config.only_one_perimeter_top    == other_config.only_one_perimeter_top // can be used in modifiers
         //&& config.only_one_perimeter_top_other_algo == other_config.only_one_perimeter_top_other_algo // can be used in modifiers with only_one_perimeter_top
         && config.overhangs_acceleration    == other_config.overhangs_acceleration
-        && config.overhangs_dynamic_speed   == other_config.overhangs_dynamic_speed
+        // && config.overhang   == other_config.overhangs
+        && config.overhangs_dynamic_speed   == other_config.overhangs_dynamic_speed // need regionSettings in gcode
+        && config.overhangs_extrusion_spacing == other_config.overhangs_extrusion_spacing
         && config.overhangs_width_speed     == other_config.overhangs_width_speed
-        && config.overhangs_width           == other_config.overhangs_width
+        // && config.overhangs_speed     == other_config.overhangs_speed
+        && config.overhangs_dynamic_flow   == other_config.overhangs_dynamic_flow // need regionSettings in printobject::calculateoverhangs
+        // && config.overhangs_width           == other_config.overhangs_width
+        && config.overhangs_flow_ratio           == other_config.overhangs_flow_ratio // need regionSettings in printobject::calculateoverhangs
      // && config.overhangs_speed_enforce   == other_config.overhangs_speed_enforce
         && config.overhangs_reverse         == other_config.overhangs_reverse
         && config.overhangs_reverse_threshold == other_config.overhangs_reverse_threshold
@@ -1002,12 +1020,16 @@ void LayerSliceIsland::make_perimeters(LayerRegionIsland &region_island) {
         (m_layer->id() >= size_t(region_config.bottom_solid_layers.value) &&
          m_layer->scaled_print_z() >= Layer::scale_to_layer_coord(region_config.bottom_solid_min_thickness.value));
 
+    Flow bridging_flow = (region_config.overhangs.get_bool() && region_config.overhangs_flow_ratio.is_enabled()) ?
+        default_layerm.bridging_flow(frExternalPerimeter) :
+        default_layerm.flow(frPerimeter);
+
     //this is a factory, the content will be copied into the PerimeterGenerator
     PerimeterGenerator::Parameters params(
         m_layer,
         default_layerm.flow(frPerimeter),
         default_layerm.flow(frExternalPerimeter),
-        default_layerm.bridging_flow(frPerimeter),
+        bridging_flow,
         default_layerm.flow(frSolidInfill),
         region_config,
         m_layer->object()->config(),
@@ -1103,10 +1125,10 @@ void LayerSliceIsland::make_perimeters(LayerRegionIsland &region_island) {
             assert(gap_fills.empty());
         }
         region_island.remove_empty_extrusions();
-        append(perimeters_slices, g.perimeter_boundary);
 
+        append(m_perimeter_slices, g.perimeter_boundary);
     }
-    perimeters_slices = union_ex(perimeters_slices);
+    m_perimeter_slices = union_ex(m_perimeter_slices);
 }
 
 bool config_compatible_for_milling(const PrintConfig &print_config, coord_t bottom_z, const PrintRegionConfig &config, const PrintRegionConfig &other_config) {
@@ -1242,7 +1264,11 @@ void SupportLayer::simplify_support_extrusion_path() {
         scaled_resolution = scale_d(print_config.arc_fitting_resolution.get_abs_value(unscaled(scaled_resolution)));
     }
     if (scaled_resolution == 0) scaled_resolution = enable_arc_fitting ? SCALED_EPSILON * 2 : SCALED_EPSILON;
-    SimplifyVisitor visitor{ scaled_resolution , enable_arc_fitting ? print_config.arc_fitting : ArcFittingType::Disabled, &print_config.arc_fitting_tolerance, enable_arc_fitting ? SCALED_EPSILON * 2 : SCALED_EPSILON};
+    SimplifyVisitor visitor{scaled_resolution,
+                            enable_arc_fitting ? print_config.arc_fitting : ArcFittingType::Disabled,
+                            false,
+                            &print_config.arc_fitting_tolerance,
+                            enable_arc_fitting ? SCALED_EPSILON * 2 : SCALED_EPSILON};
     this->support_fills.visit(visitor);
 }
 

@@ -73,7 +73,7 @@ public:
     bool no_sort() const override { return true; }
 };
 
-class FillMonotonicLines : public FillRectilinear
+class FillMonotonicLines : public FillMonotonic
 {
 public:
     Fill* clone() const override { return new FillMonotonicLines(*this); }

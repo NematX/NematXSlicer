@@ -865,7 +865,7 @@ void Tab::update_changed_ui()
     if (type() == Preset::TYPE_FFF_FILAMENT) {
         // compatible_print[er]s isn't added with "#0" by the presetcollection;
         for (const std::string special_key : {"compatible_print", "compatible_prints_condition", "compatible_printers",
-                                    "compatible_printers_condition", "inherits"}) {
+                                    "compatible_printers_condition", "inherits", "filament_vendor"}) {
             auto found = dirty_options.find(OptionKeyIdx::scalar(special_key));
             if (found != dirty_options.end()) {
                 dirty_options.emplace(OptionKeyIdx{special_key, 0}, found->second);
@@ -2044,7 +2044,7 @@ std::vector<Slic3r::GUI::PageShp> Tab::create_pages(std::string setting_type_nam
                 if ("no_search" == params[i])
                     no_search = true;
             }
-            
+
             current_group = current_page->new_optgroup(_(params.back()), no_title, !no_search, type_override);
             for (int i = 1; i < params.size() - 1; i++) {
                 if (boost::starts_with(params[i], "title_width$")) {

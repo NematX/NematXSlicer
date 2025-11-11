@@ -215,6 +215,7 @@ public:
     void simplify_extrusion_entity(const Layer& layer);
 
     uint16_t extruder_id() const { return m_extruder_id; };
+
 };
 
 using LayerRegionIslandPtr = std::unique_ptr<LayerRegionIsland>;
@@ -232,9 +233,8 @@ public:
     };
     std::vector<Link> overlaps_above;
     std::vector<Link> overlaps_below;
-    
-    // for avoid corssing perimeters
-    ExPolygons        perimeters_slices;
+
+    const ExPolygons &get_perimeter_slices() { return m_perimeter_slices; }
 
 protected:
     ExPolygon m_slice;
@@ -251,6 +251,8 @@ protected:
     ExPolygons                  m_fill_no_overlap_expolygons;
     ExPolygons                  m_fill_expolygons;
     BoundingBoxes               m_fill_expolygons_bboxes;
+    // to get the boundary in avoid_crossing_perimeters. Filled by make_perimeters()
+    ExPolygons                  m_perimeter_slices;
 
 public:
 

@@ -751,6 +751,26 @@ static float get_external_perimeter_width(const Layer &layer)
         perimeter_width = get_default_perimeter_spacing(*layer.object());
     return perimeter_width;
 }
+
+static float get_external_perimeter_overlap(const Layer &layer)
+{
+    size_t regions_count     = 0;
+    float  ext_perimeter_overlap   = 0.f;
+    for (const LayerRegion *layer_region : layer.regions())
+        if (layer_region != nullptr && ! layer_region->slices().empty()) {
+            ext_perimeter_overlap += layer_region->region().config().external_perimeter_overlap.value;
+            ++regions_count;
+        }
+
+    assert(ext_perimeter_overlap >= 0.f);
+    if (regions_count != 0) {
+        ext_perimeter_overlap /= float(regions_count);
+    } else {
+        ext_perimeter_overlap = layer.object()->print()->default_region_config().external_perimeter_overlap.value;
+    }
+    return ext_perimeter_overlap;
+}
+
 std::vector<std::pair<int,int>> datapoints;
 void print_debug_cross( int id,
                         const AvoidCrossingPerimeters::Boundary &boundary,
@@ -790,23 +810,259 @@ void print_debug_cross( int id,
 #endif
 }
 
-static float get_external_perimeter_overlap(const Layer &layer)
-{
-    size_t regions_count     = 0;
-    float  ext_perimeter_overlap   = 0.f;
-    for (const LayerRegion *layer_region : layer.regions())
-        if (layer_region != nullptr && ! layer_region->slices().empty()) {
-            ext_perimeter_overlap += layer_region->region().config().external_perimeter_overlap.value;
-            ++regions_count;
-        }
+char brute_force_jump(Intersection &intersection_start,
+                      Intersection &intersection_end,
+                      Line start_end_line,
+                      const Polygon &contour_start,
+                      const Polygon &contour_end,
+                      const double weight_island_travel = 0.4) {
+    // brute-force version,
+    distf_t shortest_dist = start_end_line.length() * (1 + weight_island_travel);
+    distsqrf_t shortest_dist_sqr = sqr(shortest_dist);
+    char type_dbg = 'N';
 
-    assert(ext_perimeter_overlap >= 0.f);
-    if (regions_count != 0) {
-        ext_perimeter_overlap /= float(regions_count);
-    } else {
-        ext_perimeter_overlap = layer.object()->print()->default_region_config().external_perimeter_overlap.value;
+    // line-line
+    Point res_end_saved;
+    Point start = start_end_line.a;
+    Point end = start_end_line.b;
+    {
+        for (size_t i = 0; i < contour_start.points.size(); ++i) {
+            Line l(contour_start.points[i], contour_start.points[(i + 1) % contour_start.points.size()]);
+            if (l.intersection(start_end_line, &intersection_start.point)) {
+                if (intersection_start.point == l.b) {
+                    intersection_start.line_idx = (i + 1) % contour_start.points.size();
+                    intersection_start.distance = 0;
+                } else {
+                    intersection_start.line_idx = i;
+                    intersection_start.distance = l.a.distance_to(intersection_start.point);
+                }
+                break;
+            }
+        }
+        // intersection fail, mayeb the point is just out of it. search for nearest instead.
+        if (intersection_start.line_idx == size_t(-1)) {
+            distsqrf_t dist_best = shortest_dist_sqr;
+            Point test_pt;
+            for (size_t i = 0; i < contour_start.points.size(); ++i) {
+                Line l(contour_start.points[i], contour_start.points[(i + 1) % contour_start.points.size()]);
+                distsqrf_t dist_test = l.distance_to_squared(start, &test_pt);
+                if (dist_test < dist_best) {
+                    dist_best = dist_test;
+                    intersection_start.point = test_pt;
+                    if (intersection_start.point == l.b) {
+                        intersection_start.line_idx = (i + 1) % contour_start.points.size();
+                        intersection_start.distance = 0;
+                    } else {
+                        intersection_start.line_idx = i;
+                        intersection_start.distance = l.a.distance_to(intersection_start.point);
+                    }
+                }
+            }
+        }
     }
-    return ext_perimeter_overlap;
+    {
+        for (size_t i = 0; i < contour_end.points.size(); ++i) {
+            Line l(contour_end.points[i], contour_end.points[(i + 1) % contour_end.points.size()]);
+            if (l.intersection(start_end_line, &intersection_end.point)) {
+                if (intersection_end.point == l.b) {
+                    intersection_end.line_idx = (i + 1) % contour_end.points.size();
+                    intersection_end.distance = 0;
+                } else {
+                    intersection_end.line_idx = i;
+                    intersection_end.distance = l.a.distance_to(intersection_end.point);
+                }
+                break;
+            }
+        }
+        // intersection fail, mayeb the point is just out of it. search for nearest instead.
+        if (intersection_end.line_idx == size_t(-1)) {
+            distsqrf_t dist_best = shortest_dist_sqr;
+            Point test_pt;
+            for (size_t i = 0; i < contour_end.points.size(); ++i) {
+                Line l(contour_end.points[i], contour_end.points[(i + 1) % contour_end.points.size()]);
+                distsqrf_t dist_test = l.distance_to_squared(start, &test_pt);
+                if (dist_test < dist_best) {
+                    dist_best = dist_test;
+                    intersection_end.point = test_pt;
+                    if (intersection_end.point == l.b) {
+                        intersection_end.line_idx = (i + 1) % contour_end.points.size();
+                        intersection_end.distance = 0;
+                    } else {
+                        intersection_end.line_idx = i;
+                        intersection_end.distance = l.a.distance_to(intersection_end.point);
+                    }
+                }
+            }
+        }
+    }
+    assert(intersection_start.line_idx != size_t(-1));
+    assert(intersection_end.line_idx != size_t(-1));
+    Intersection best_intersection_end_saved = intersection_end;
+    // for (size_t i_end = 0; i_end < contour_end.size(); i_end++)
+    {
+        // point-line
+        Point res;
+        distsqrf_t new_dist_sqr =
+            Line(contour_end.points[intersection_end.line_idx],
+                    contour_end.points[(intersection_end.line_idx + 1) % contour_end.points.size()])
+                .distance_to_squared(intersection_start.point, &res);
+        if (new_dist_sqr < shortest_dist_sqr) {
+            distf_t new_dist = std::sqrt(new_dist_sqr);
+            // TODO: here it's fly-distance, it's better to store & use the contour distance from
+            // start/end to the contour point.
+            new_dist += start.distance_to(intersection_start.point) * weight_island_travel +
+                res.distance_to(end) * weight_island_travel;
+            if (new_dist < shortest_dist) {
+                type_dbg = 'A';
+                assert(new_dist > 0);
+                shortest_dist = new_dist;
+                shortest_dist_sqr = sqr(shortest_dist);
+                if (res == contour_end.points[intersection_end.line_idx]) {
+                    type_dbg = 'a';
+                    intersection_end.point = contour_end.points[intersection_end.line_idx];
+                    intersection_end.distance = 0;
+                } else if (res ==
+                            contour_end
+                                .points[(intersection_end.line_idx + 1) % contour_end.points.size()]) {
+                    type_dbg = 'o';
+                    intersection_end.line_idx = (intersection_end.line_idx + 1) %
+                        contour_end.points.size();
+                    intersection_end.point = contour_end.points[intersection_end.line_idx];
+                    intersection_end.distance = 0;
+                } else {
+                    type_dbg = 'i';
+                    intersection_end.point = res;
+                    intersection_end.distance = contour_end.points[intersection_end.line_idx]
+                                                                .distance_to(res);
+                }
+                //print_debug_cross(i_id_run, boundary, intersection_start, intersection_end,
+                //                    start, end, std::string("dbg_startpt_") + std::to_string(new_dist));
+            }
+        }
+    }
+    // std::cout<<" -"<<type_dbg<<" : "<<shortest_dist<<"\n";
+    // for (size_t i_start = 0; i_start < contour_start.size(); i_start++)
+    {
+        // line-point
+        Point res;
+        distsqrf_t new_dist_sqr =
+            Line(contour_start.points[intersection_start.line_idx],
+                    contour_start.points[(intersection_start.line_idx + 1) % contour_start.points.size()])
+                .distance_to_squared(best_intersection_end_saved.point, &res);
+        res_end_saved = res;
+        if (new_dist_sqr < shortest_dist_sqr) {
+            distf_t new_dist = std::sqrt(new_dist_sqr);
+            new_dist += start.distance_to(res) * weight_island_travel +
+                best_intersection_end_saved.point.distance_to(end) * weight_island_travel;
+            if (new_dist < shortest_dist) {
+                intersection_end = best_intersection_end_saved;
+                type_dbg = 'B';
+                assert(new_dist > 0);
+                shortest_dist = new_dist;
+                shortest_dist_sqr = sqr(shortest_dist);
+                if (res == contour_start.points[intersection_start.line_idx]) {
+                    type_dbg = 'b';
+                    intersection_start.point = contour_start.points[intersection_start.line_idx];
+                    intersection_start.distance = 0;
+                } else if (res ==
+                            contour_start
+                                .points[(intersection_start.line_idx + 1) % contour_start.points.size()]) {
+                    type_dbg = 'c';
+                    intersection_start.line_idx = (intersection_start.line_idx + 1) %
+                        contour_start.points.size();
+                    intersection_start.point = contour_start.points[intersection_start.line_idx];
+                    intersection_start.distance = 0;
+                } else {
+                    type_dbg = 'g';
+                    intersection_start.point = res;
+                    intersection_start.distance =
+                        contour_start.points[intersection_start.line_idx].distance_to(res);
+                }
+                //print_debug_cross(i_id_run, boundary, intersection_start, intersection_end,
+                //                    start, end, std::string("dbg_endpt_") + std::to_string(new_dist));
+            }
+        }
+    }
+    
+    for (size_t i_start = 0; i_start < contour_start.size(); i_start++) {
+        // TODO: count boundary dist, not fly dist
+        for (size_t i_end = 0; i_end < contour_end.size(); i_end++) {
+            // point-line
+            Point res;
+            distf_t new_dist = Line(contour_end.points[i_end],
+                                    contour_end.points[(i_end + 1) % contour_end.points.size()])
+                                   .distance_to_squared(contour_start.points[i_start], &res);
+            if (new_dist < shortest_dist_sqr) {
+                new_dist = std::sqrt(new_dist);
+                // TODO: here it's fly-distance, it's better to store & use the contour distance from
+                // start/end to the contour point.
+                new_dist += start.distance_to(contour_start.points[i_start]) * weight_island_travel +
+                    res.distance_to(end) * weight_island_travel;
+                if (new_dist < shortest_dist) {
+                    type_dbg = 'P';
+                    assert(new_dist > 0);
+                    shortest_dist = new_dist;
+                    shortest_dist_sqr = sqr(shortest_dist);
+                    intersection_start.line_idx = i_start;
+                    intersection_start.point = contour_start.points[i_start];
+                    intersection_start.distance = 0;
+                    if (res == contour_end.points[i_end]) {
+                        type_dbg = 'Q';
+                        intersection_end.line_idx = i_end;
+                        intersection_end.point = contour_end.points[i_end];
+                        intersection_end.distance = 0;
+                    } else if (res == contour_end.points[(i_end + 1) % contour_end.points.size()]) {
+                        type_dbg = 'R';
+                        intersection_end.line_idx = (i_end + 1) % contour_end.points.size();
+                        intersection_end.point = contour_end.points[(i_end + 1) % contour_end.points.size()];
+                        intersection_end.distance = 0;
+                    } else {
+                        intersection_end.line_idx = i_end;
+                        intersection_end.point = res;
+                        intersection_end.distance = contour_end.points[i_end].distance_to(res);
+                    }
+                    //print_debug_cross(i_id_run, boundary, intersection_start, intersection_end,
+                    //                  start, end, std::string("dbg_startpt_") + std::to_string(new_dist));
+                }
+            }
+            // line-point
+            new_dist = Line(contour_start.points[i_start],
+                            contour_start.points[(i_start + 1) % contour_start.points.size()])
+                           .distance_to_squared(contour_end.points[i_end], &res);
+            if (new_dist < shortest_dist_sqr) {
+                new_dist = std::sqrt(new_dist);
+                new_dist += start.distance_to(res) * weight_island_travel +
+                    contour_end.points[i_end].distance_to(end) * weight_island_travel;
+                if (new_dist < shortest_dist) {
+                    type_dbg = 'L';
+                    assert(new_dist > 0);
+                    shortest_dist = new_dist;
+                    shortest_dist_sqr = sqr(shortest_dist);
+                    if (res == contour_start.points[i_start]) {
+                        intersection_start.line_idx = i_start;
+                        intersection_start.point = contour_start.points[i_start];
+                        intersection_start.distance = 0;
+                    } else if (res == contour_start.points[(i_start + 1) % contour_start.points.size()]) {
+                        intersection_start.line_idx = (i_start + 1) % contour_start.points.size();
+                        intersection_start.point = contour_start
+                                                                .points[(i_start + 1) % contour_start.points.size()];
+                        intersection_start.distance = 0;
+                    } else {
+                        intersection_start.line_idx = i_start;
+                        intersection_start.point = res;
+                        intersection_start.distance = contour_start.points[i_start].distance_to(res);
+                    }
+                    intersection_end.line_idx = i_end;
+                    intersection_end.point = contour_end.points[i_end];
+                    intersection_end.distance = 0;
+                    //print_debug_cross(i_id_run, boundary, intersection_start, intersection_end,
+                    //                  start, end, std::string("dbg_endpt_") + std::to_string(new_dist));
+                }
+            }
+        }
+    }
+
+    return type_dbg;
 }
 
 // TODO: avoid other islands in-between
@@ -843,6 +1099,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 }
             }
             // if in a hole (and not next to the contour in the bbox)
+            // bboxes overlap, but maybe the polygon not
             if (hole_contour != size_t(-1)) {
                 start_island = hole_contour;
             }
@@ -858,6 +1115,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 }
             }
             // if in a hole (and not next to the contour in the bbox)
+            // bboxes overlap, but maybe the polygon not
             if (hole_contour != size_t(-1)) {
                 end_island = hole_contour;
             }
@@ -881,7 +1139,6 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
         best_intersection_end.do_not_remove = true;
         distf_t shortest_dist = strait_dist * (1 + weight_island_travel);
         distsqrf_t shortest_dist_sqr = sqr(shortest_dist);
-        char type = 'N';
 
         // create edgegrid if not present already
         // note: create & use the grid allow to increase the speed if the number of point is high enough
@@ -968,18 +1225,6 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 assert(start != start_end_line.a);
                 start = start_end_line.a;
             }
-#ifdef _DEBUG
-            if (!visitor.intersect) {
-                assert(false);
-                SVG svg(debug_out_path("cannot_find_boundary.svg"));
-                svg.draw(to_polylines(start_grid.bbox().polygon()), "black", scale_t(0.04));
-                svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
-                svg.draw(contour_start.split_at_first_point(), "red", scale_t(0.025));
-                svg.draw(contour_end.split_at_first_point(), "green", scale_t(0.025));
-                svg.draw(Polyline({start, end}), "blue", scale_t(0.02));
-                svg.Close();
-            }
-#endif _DEBUG
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
                 assert(visitor.intersection_line_idx >= 0);
@@ -989,9 +1234,10 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                     Line(contour_start.points[best_intersection_start.line_idx],
                             contour_start.points[(best_intersection_start.line_idx + 1) % contour_start.points.size()]),
                     &best_intersection_start.point);
-                assert(found);
-                best_intersection_start.distance = contour_start.points[best_intersection_start.line_idx]
+                if (found) {
+                    best_intersection_start.distance = contour_start.points[best_intersection_start.line_idx]
                                                         .distance_to(best_intersection_start.point);
+                }
             }
         }
         // initialize best_intersection_end with intersection against contour_end
@@ -1012,19 +1258,6 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 assert(start != start_end_line.a);
                 start = start_end_line.a;
             }
-#ifdef _DEBUG
-            if (!visitor.intersect) {
-                assert(false);
-                SVG svg(debug_out_path("cannot_find_boundary.svg"));
-                svg.draw(to_polylines(end_grid.bbox().polygon()), "black", scale_t(0.04));
-                svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
-                svg.draw(contour_start.split_at_first_point(), "red", scale_t(0.025));
-                svg.draw(best_intersection_start.point, "orange", scale_t(0.03));
-                svg.draw(contour_end.split_at_first_point(), "green", scale_t(0.025));
-                svg.draw(Polyline({start, end}), "blue", scale_t(0.02));
-                svg.Close();
-            }
-#endif _DEBUG
             if (visitor.intersect) {
                 assert(visitor.intersection_contour_idx == 0);
                 assert(visitor.intersection_line_idx >= 0);
@@ -1034,57 +1267,64 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                     Line(contour_end.points[best_intersection_end.line_idx],
                             contour_end.points[(best_intersection_end.line_idx + 1) % contour_end.points.size()]),
                     &best_intersection_end.point);
-                assert(found);
-                best_intersection_end.distance = contour_end.points[best_intersection_end.line_idx]
+                if (found) {
+                    best_intersection_end.distance = contour_end.points[best_intersection_end.line_idx]
                                                         .distance_to(best_intersection_end.point);
+                }
             }
         }
-        //line-line
-        distf_t s1,s2,s3;
-        distf_t e1,e2,e3;
-        Point res_end;
-        {
-            Point res_start;
-            distf_t new_dist_from_start =
-                Line(contour_end.points[best_intersection_end.line_idx],
-                     contour_end.points[(best_intersection_end.line_idx + 1) % contour_end.points.size()])
-                    .distance_to_squared(best_intersection_start.point, &res_start);
-            s1 = start.distance_to(best_intersection_start.point) * weight_island_travel;
-            s2 = std::sqrt(new_dist_from_start);
-            new_dist_from_start = start.distance_to(best_intersection_start.point) * weight_island_travel +
-                std::sqrt(new_dist_from_start) + res_start.distance_to(end) * weight_island_travel;
-            s3 = res_start.distance_to(end) * weight_island_travel;
-            assert(is_approx(s2,best_intersection_start.point.distance_to(res_start),2.));
-            assert(is_approx(s1+s2+s3,new_dist_from_start,2.));
-            //Point res_end;
-            distf_t new_dist_from_end =
-                Line(contour_start.points[best_intersection_start.line_idx],
-                     contour_start.points[(best_intersection_start.line_idx + 1) % contour_start.points.size()])
-                    .distance_to_squared(best_intersection_end.point, &res_end);
-            e1 = start.distance_to(res_end) * weight_island_travel;
-            e2 = std::sqrt(new_dist_from_end);
+        if (best_intersection_start.line_idx >= contour_start.size() ||
+            best_intersection_end.line_idx >= contour_end.size()) {
+            // a grid search has failed.
+            // brute-force
+            brute_force_jump(best_intersection_start, best_intersection_end, Line(start,end), contour_start, contour_end, weight_island_travel);
+        } else {
+            // continue with grids
+
+            assert(best_intersection_start.line_idx < contour_start.size());
+            assert(best_intersection_end.line_idx < contour_end.size());
+            // line-line
+            distf_t s1, s2, s3;
+            distf_t e1, e2, e3;
+            Point res_end;
+            {
+                Point res_start;
+                distf_t new_dist_from_start =
+                    Line(contour_end.points[best_intersection_end.line_idx],
+                         contour_end.points[(best_intersection_end.line_idx + 1) % contour_end.points.size()])
+                        .distance_to_squared(best_intersection_start.point, &res_start);
+                s1 = start.distance_to(best_intersection_start.point) * weight_island_travel;
+                s2 = std::sqrt(new_dist_from_start);
+                new_dist_from_start = start.distance_to(best_intersection_start.point) * weight_island_travel +
+                    std::sqrt(new_dist_from_start) + res_start.distance_to(end) * weight_island_travel;
+                s3 = res_start.distance_to(end) * weight_island_travel;
+                assert(is_approx(s2, best_intersection_start.point.distance_to(res_start), 2.));
+                assert(is_approx(s1 + s2 + s3, new_dist_from_start, 2.));
+                // Point res_end;
+                distf_t new_dist_from_end =
+                    Line(contour_start.points[best_intersection_start.line_idx],
+                         contour_start.points[(best_intersection_start.line_idx + 1) % contour_start.points.size()])
+                        .distance_to_squared(best_intersection_end.point, &res_end);
+                e1 = start.distance_to(res_end) * weight_island_travel;
+                e2 = std::sqrt(new_dist_from_end);
             new_dist_from_end = start.distance_to(res_end) * weight_island_travel + std::sqrt(new_dist_from_end) +
                 best_intersection_end.point.distance_to(end) * weight_island_travel;
             e3 = best_intersection_end.point.distance_to(end) * weight_island_travel;
             if (new_dist_from_start <= new_dist_from_end) {
-                type = 'A';
                 assert(new_dist_from_start > 0);
                 shortest_dist = new_dist_from_start;
                 shortest_dist_sqr = sqr(shortest_dist);
                 best_intersection_end = best_intersection_end;
                 if (res_start == contour_end.points[best_intersection_end.line_idx]) {
-                    type = 'a';
                     best_intersection_end.point = contour_end.points[best_intersection_end.line_idx];
                     best_intersection_end.distance = 0;
                 } else if (res_start ==
                            contour_end.points[(best_intersection_end.line_idx + 1) % contour_end.points.size()]) {
-                    type = 'o';
                     best_intersection_end.line_idx = (best_intersection_end.line_idx + 1) %
                         contour_end.points.size();
                     best_intersection_end.point = contour_end.points[best_intersection_end.line_idx];
                     best_intersection_end.distance = 0;
                 } else {
-                    type = 'i';
                     best_intersection_end.point = res_start;
                     best_intersection_end.distance = contour_end.points[best_intersection_end.line_idx]
                                                              .distance_to(res_start);
@@ -1092,148 +1332,152 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 print_debug_cross(i_id_run, boundary, best_intersection_start, best_intersection_end, start, end,
                                   std::string("dbg_startpt_") + std::to_string(new_dist_from_start));
             } else {
-                type = 'B';
                 assert(new_dist_from_end > 0);
                 shortest_dist = new_dist_from_end;
                 shortest_dist_sqr = sqr(shortest_dist);
                 if (res_end == contour_start.points[best_intersection_start.line_idx]) {
-                    type = 'b';
                     best_intersection_start.point = contour_start.points[best_intersection_start.line_idx];
-                    best_intersection_start.distance = 0;
-                } else if (res_end ==
-                           contour_start.points[(best_intersection_start.line_idx + 1) % contour_start.points.size()]) {
-                    type = 'c';
-                    best_intersection_start.line_idx = (best_intersection_start.line_idx + 1) %
-                        contour_start.points.size();
-                    best_intersection_start.point = contour_start.points[best_intersection_start.line_idx];
-                    best_intersection_start.distance = 0;
-                } else {
-                    type = 'g';
-                    best_intersection_start.point = res_end;
-                    best_intersection_start.distance = contour_start.points[best_intersection_start.line_idx]
-                                                           .distance_to(res_end);
+                        best_intersection_start.distance = 0;
+                    } else if (res_end == contour_start.points[
+                            (best_intersection_start.line_idx + 1) % contour_start.points.size()]) {
+                        best_intersection_start.line_idx = (best_intersection_start.line_idx + 1) %
+                            contour_start.points.size();
+                        best_intersection_start.point = contour_start.points[best_intersection_start.line_idx];
+                        best_intersection_start.distance = 0;
+                    } else {
+                        best_intersection_start.point = res_end;
+                        best_intersection_start.distance = contour_start.points[best_intersection_start.line_idx]
+                                                               .distance_to(res_end);
+                    }
+                    print_debug_cross(i_id_run, boundary, best_intersection_start, best_intersection_end, start, end,
+                                      std::string("dbg_endpt_") + std::to_string(new_dist_from_end));
                 }
-                print_debug_cross(i_id_run, boundary, best_intersection_start, best_intersection_end, start, end,
-                                  std::string("dbg_endpt_") + std::to_string(new_dist_from_end));
             }
-        }
 
-        // for each grid cell, if they are near enough
-        //BoundingBox start_cells = start_grid.get_cells_intersecting_box(bb_start);
-        //BoundingBox end_cells = end_grid.get_cells_intersecting_box(bb_end);
-        for (size_t start_iy = 0; start_iy < start_grid.rows(); ++start_iy) {
-            const size_t min_end_y = start_iy > shortest_cell_dist ? start_iy - shortest_cell_dist : size_t(0);
-            const size_t max_end_y = std::min(1 + start_iy + shortest_cell_dist, end_grid.rows());
-            for (size_t start_ix = 0; start_ix < start_grid.cols(); ++start_ix) {
-                const size_t min_end_x = start_ix > shortest_cell_dist ? start_ix - shortest_cell_dist : size_t(0);
-                const size_t max_end_x = std::min(1 + start_ix + shortest_cell_dist, end_grid.cols());
-                // check if the cell has any data
-                if (!start_grid.cell_has_data(start_iy, start_ix)) {
-                    continue;
-                }
-                //TODO: use signed_distance_bilinear with the center of this cell to check if there is something near.
-                auto start_cell_data_range = start_grid.cell_data_range(start_iy, start_ix);
-                for (size_t end_iy = min_end_y; end_iy < max_end_y; ++end_iy) {
-                    assert(end_iy >= 0 && end_iy < end_grid.rows());
-                    for (size_t end_ix = min_end_x; end_ix < max_end_x; ++end_ix) {
-                        assert(end_ix >= 0 && end_ix < end_grid.cols());
-                        // check if the cell has any data
-                        if (!end_grid.cell_has_data(end_iy, end_ix)) {
-                            continue;
-                        }
-                        auto end_cell_data_range = end_grid.cell_data_range(end_iy, end_ix);
-                        // both cell are near enough and have data inside, compare them.
-                        for (auto it_start_contour_and_segment = start_cell_data_range.first;
-                             it_start_contour_and_segment != start_cell_data_range.second;
-                             ++it_start_contour_and_segment) {
-                            Line start_line = start_grid.line(*it_start_contour_and_segment);
-                            assert(it_start_contour_and_segment->first == 0); // only one contour
-                            for (auto it_end_contour_and_segment = end_cell_data_range.first;
-                                 it_end_contour_and_segment != end_cell_data_range.second;
-                                 ++it_end_contour_and_segment) {
-                                Line end_line = end_grid.line(*it_end_contour_and_segment);
-                                assert(it_end_contour_and_segment->first == 0); // only one contour
-                                // point-line
-                                Point res;
-                                distf_t new_dist = end_line.distance_to_squared(start_line.a, &res);
-                                if (new_dist < shortest_dist_sqr) {
-                                    new_dist = std::sqrt(new_dist);
-                                    new_dist += start.distance_to(start_line.a) * weight_island_travel +
-                                        res.distance_to(end) * weight_island_travel;
-                                    // this dist can be far too pessimistic, doing the whole loop instead of just travelling in strait line.
-                                    //assert(dist_from_start[it_start_contour_and_segment->second] > start.distance_to(start_line.a));
-                                    //new_dist += dist_from_start[it_start_contour_and_segment->second] * weight_island_travel +
-                                    //    res.distance_to(end) * weight_island_travel;
-                                    if (new_dist < shortest_dist) {
-                                        type='P';
-                                        assert(new_dist > 0);
-                                        shortest_dist = new_dist;
-                                        shortest_dist_sqr = sqr(shortest_dist);
-                                        shortest_cell_dist = 1 + shortest_dist / start_grid.resolution();
-                                        best_intersection_start.line_idx = it_start_contour_and_segment->second;
-                                        best_intersection_start.point = start_line.a;
-                                        best_intersection_start.distance = 0;
-                                        if (res == end_line.a) {
-                                        type='Q';
-                                            best_intersection_end.line_idx = it_end_contour_and_segment->second;
-                                            best_intersection_end.point = end_line.a;
-                                            best_intersection_end.distance = 0;
-                                        } else if (res == end_line.b) {
-                                        type='R';
-                                            best_intersection_end.line_idx = (it_end_contour_and_segment->second + 1) % contour_end.size();
-                                            best_intersection_end.point = end_line.b;
-                                            best_intersection_end.distance = 0;
-                                        } else {
-                                            best_intersection_end.line_idx = it_end_contour_and_segment->second;
-                                            best_intersection_end.point = res;
-                                            best_intersection_end.distance = end_line.a.distance_to(res);
-                                        }
-                                        assert(best_intersection_start.line_idx < contour_start.points.size() &&
-                                               contour_start.points[best_intersection_start.line_idx] == best_intersection_start.point);
-                                        print_debug_cross(i_id_run, boundary, best_intersection_start,
-                                                          best_intersection_end, start, end,
-                                                          std::string("startpt_") + std::to_string(new_dist));
-                                    }
-                                }
-                                // line-point
-                                new_dist = start_line.distance_to_squared(end_line.a, &res);
-                                if (new_dist < shortest_dist_sqr) {
-                                    new_dist = std::sqrt(new_dist);
-                                    assert(start_line.a == contour_start.points[it_start_contour_and_segment->second]);
-                                    new_dist += start.distance_to(res) * weight_island_travel +
-                                        end_line.a.distance_to(end) * weight_island_travel;
-                                    // this dist can be far too pessimistic, doing the whole loop instead of just travelling in strait line.
-                                    //new_dist += (std::min(dist_from_start[it_start_contour_and_segment->second] +
-                                    //                          start_line.a.distance_to(res),
-                                    //                      dist_from_start[(it_start_contour_and_segment->second + 1) % dist_from_start.size()] + start_line.b.distance_to(res))) *
-                                    //        weight_island_travel + end_line.a.distance_to(end) * weight_island_travel;
-                                    if (new_dist < shortest_dist) {
-                                        type='L';
-                                        assert(new_dist > 0);
-                                        shortest_dist = new_dist;
-                                        shortest_dist_sqr = sqr(shortest_dist);
-                                        shortest_cell_dist =  1 + shortest_dist / start_grid.resolution();
-                                        if (res == start_line.a) {
+            // for each grid cell, if they are near enough
+            // BoundingBox start_cells = start_grid.get_cells_intersecting_box(bb_start);
+            // BoundingBox end_cells = end_grid.get_cells_intersecting_box(bb_end);
+            for (size_t start_iy = 0; start_iy < start_grid.rows(); ++start_iy) {
+                const size_t min_end_y = start_iy > shortest_cell_dist ? start_iy - shortest_cell_dist : size_t(0);
+                const size_t max_end_y = std::min(1 + start_iy + shortest_cell_dist, end_grid.rows());
+                for (size_t start_ix = 0; start_ix < start_grid.cols(); ++start_ix) {
+                    const size_t min_end_x = start_ix > shortest_cell_dist ? start_ix - shortest_cell_dist :
+                                                                             size_t(0);
+                    const size_t max_end_x = std::min(1 + start_ix + shortest_cell_dist, end_grid.cols());
+                    // check if the cell has any data
+                    if (!start_grid.cell_has_data(start_iy, start_ix)) {
+                        continue;
+                    }
+                    // TODO: use signed_distance_bilinear with the center of this cell to check if there is something near.
+                    auto start_cell_data_range = start_grid.cell_data_range(start_iy, start_ix);
+                    for (size_t end_iy = min_end_y; end_iy < max_end_y; ++end_iy) {
+                        assert(end_iy >= 0 && end_iy < end_grid.rows());
+                        for (size_t end_ix = min_end_x; end_ix < max_end_x; ++end_ix) {
+                            assert(end_ix >= 0 && end_ix < end_grid.cols());
+                            // check if the cell has any data
+                            if (!end_grid.cell_has_data(end_iy, end_ix)) {
+                                continue;
+                            }
+                            auto end_cell_data_range = end_grid.cell_data_range(end_iy, end_ix);
+                            // both cell are near enough and have data inside, compare them.
+                            for (auto it_start_contour_and_segment = start_cell_data_range.first;
+                                 it_start_contour_and_segment != start_cell_data_range.second;
+                                 ++it_start_contour_and_segment) {
+                                Line start_line = start_grid.line(*it_start_contour_and_segment);
+                                assert(it_start_contour_and_segment->first == 0); // only one contour
+                                for (auto it_end_contour_and_segment = end_cell_data_range.first;
+                                     it_end_contour_and_segment != end_cell_data_range.second;
+                                     ++it_end_contour_and_segment) {
+                                    Line end_line = end_grid.line(*it_end_contour_and_segment);
+                                    assert(it_end_contour_and_segment->first == 0); // only one contour
+                                    // point-line
+                                    Point res;
+                                    distf_t new_dist = end_line.distance_to_squared(start_line.a, &res);
+                                    if (new_dist < shortest_dist_sqr) {
+                                        new_dist = std::sqrt(new_dist);
+                                        new_dist += start.distance_to(start_line.a) * weight_island_travel +
+                                            res.distance_to(end) * weight_island_travel;
+                                        // this dist can be far too pessimistic, doing the whole loop instead of just
+                                        // travelling in strait line.
+                                        // assert(dist_from_start[it_start_contour_and_segment->second] >
+                                        // start.distance_to(start_line.a)); new_dist +=
+                                        // dist_from_start[it_start_contour_and_segment->second] * weight_island_travel +
+                                        //    res.distance_to(end) * weight_island_travel;
+                                        if (new_dist < shortest_dist) {
+                                            assert(new_dist > 0);
+                                            shortest_dist = new_dist;
+                                            shortest_dist_sqr = sqr(shortest_dist);
+                                            shortest_cell_dist = 1 + shortest_dist / start_grid.resolution();
                                             best_intersection_start.line_idx = it_start_contour_and_segment->second;
                                             best_intersection_start.point = start_line.a;
                                             best_intersection_start.distance = 0;
-                                        } else if (res == start_line.b) {
-                                            best_intersection_start.line_idx = (it_start_contour_and_segment->second + 1) % contour_start.size();
-                                            best_intersection_start.point = start_line.b;
-                                            best_intersection_start.distance = 0;
-                                        } else {
-                                            best_intersection_start.line_idx = it_start_contour_and_segment->second;
-                                            best_intersection_start.point = res;
-                                            best_intersection_start.distance = start_line.a.distance_to(res);
+                                            if (res == end_line.a) {
+                                                best_intersection_end.line_idx = it_end_contour_and_segment->second;
+                                                best_intersection_end.point = end_line.a;
+                                                best_intersection_end.distance = 0;
+                                            } else if (res == end_line.b) {
+                                                best_intersection_end.line_idx =
+                                                    (it_end_contour_and_segment->second + 1) % contour_end.size();
+                                                best_intersection_end.point = end_line.b;
+                                                best_intersection_end.distance = 0;
+                                            } else {
+                                                best_intersection_end.line_idx = it_end_contour_and_segment->second;
+                                                best_intersection_end.point = res;
+                                                best_intersection_end.distance = end_line.a.distance_to(res);
+                                            }
+                                            assert(best_intersection_start.line_idx < contour_start.points.size() &&
+                                                   contour_start.points[best_intersection_start.line_idx] ==
+                                                       best_intersection_start.point);
+                                            print_debug_cross(i_id_run, boundary, best_intersection_start,
+                                                              best_intersection_end, start, end,
+                                                              std::string("startpt_") + std::to_string(new_dist));
                                         }
-                                        best_intersection_end.line_idx = it_end_contour_and_segment->second;
-                                        best_intersection_end.point = end_line.a;
-                                        best_intersection_end.distance = 0;
-                                        assert(best_intersection_end.line_idx < contour_end.points.size() &&
-                                               contour_end.points[best_intersection_end.line_idx] == best_intersection_end.point);
-                                        print_debug_cross(i_id_run, boundary, best_intersection_start,
-                                                          best_intersection_end, start, end,
-                                                          std::string("endpt_") + std::to_string(new_dist));
+                                    }
+                                    // line-point
+                                    new_dist = start_line.distance_to_squared(end_line.a, &res);
+                                    if (new_dist < shortest_dist_sqr) {
+                                        new_dist = std::sqrt(new_dist);
+                                        assert(start_line.a ==
+                                               contour_start.points[it_start_contour_and_segment->second]);
+                                        new_dist += start.distance_to(res) * weight_island_travel +
+                                            end_line.a.distance_to(end) * weight_island_travel;
+                                        // this dist can be far too pessimistic, doing the whole loop instead of just
+                                        // travelling in strait line.
+                                        // new_dist += (std::min(dist_from_start[it_start_contour_and_segment->second] +
+                                        //                          start_line.a.distance_to(res),
+                                        //                      dist_from_start[(it_start_contour_and_segment->second
+                                        //                      + 1) % dist_from_start.size()] +
+                                        //                      start_line.b.distance_to(res))) *
+                                        //        weight_island_travel + end_line.a.distance_to(end) * weight_island_travel;
+                                        if (new_dist < shortest_dist) {
+                                            assert(new_dist > 0);
+                                            shortest_dist = new_dist;
+                                            shortest_dist_sqr = sqr(shortest_dist);
+                                            shortest_cell_dist = 1 + shortest_dist / start_grid.resolution();
+                                            if (res == start_line.a) {
+                                                best_intersection_start.line_idx = it_start_contour_and_segment->second;
+                                                best_intersection_start.point = start_line.a;
+                                                best_intersection_start.distance = 0;
+                                            } else if (res == start_line.b) {
+                                                best_intersection_start.line_idx =
+                                                    (it_start_contour_and_segment->second + 1) % contour_start.size();
+                                                best_intersection_start.point = start_line.b;
+                                                best_intersection_start.distance = 0;
+                                            } else {
+                                                best_intersection_start.line_idx = it_start_contour_and_segment->second;
+                                                best_intersection_start.point = res;
+                                                best_intersection_start.distance = start_line.a.distance_to(res);
+                                            }
+                                            best_intersection_end.line_idx = it_end_contour_and_segment->second;
+                                            best_intersection_end.point = end_line.a;
+                                            best_intersection_end.distance = 0;
+                                            assert(best_intersection_end.line_idx < contour_end.points.size() &&
+                                                   contour_end.points[best_intersection_end.line_idx] ==
+                                                       best_intersection_end.point);
+                                            print_debug_cross(i_id_run, boundary, best_intersection_start,
+                                                              best_intersection_end, start, end,
+                                                              std::string("endpt_") + std::to_string(new_dist));
+                                        }
                                     }
                                 }
                             }
@@ -1261,229 +1505,12 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             best_intersection_end_dbg.point = contour_end.points.front();
             best_intersection_end_dbg.distance = 0;
             best_intersection_end_dbg.do_not_remove = true;
-            distf_t shortest_dist_dbg = strait_dist * (1 + weight_island_travel);
-            distsqrf_t shortest_dist_sqr_dbg = sqr(shortest_dist_dbg);
+            char type_dbg = brute_force_jump(best_intersection_start_dbg, best_intersection_end_dbg, Line(start,end), contour_start, contour_end, weight_island_travel);
             char type_dbg = 'N';
 
-            //line-line
-            Point real_start_inter;
-            size_t iter = 0;
-            distf_t s1_dbg,s2_dbg,s3_dbg;
-            distf_t e1_dbg,e2_dbg,e3_dbg;
-            Intersection best_intersection_start_dbg_saved;
-            Intersection best_intersection_start_dbg_saved2;
-            Intersection best_intersection_end_dbg_saved;
-            Point res_end_saved;
-            if(true){
-                Line start_end_line(start, end);
-                {
-                    for (size_t i = 0; i < contour_start.points.size(); ++ i) {
-                        Line l(contour_start.points[i], contour_start.points[(i + 1) % contour_start.points.size()]);
-                        if (l.intersection(start_end_line, &best_intersection_start_dbg.point)) {
-                            real_start_inter = best_intersection_start_dbg.point;
-                            iter = i;
-                            if (best_intersection_start_dbg.point == l.b) {
-                                best_intersection_start_dbg.line_idx = (i + 1) % contour_start.points.size();
-                                best_intersection_start_dbg.distance = 0;
-                            } else {
-                                best_intersection_start_dbg.line_idx = i;
-                                best_intersection_start_dbg.distance = l.a.distance_to(
-                                    best_intersection_start_dbg.point);
-                            }
-                            break;
-                        }
-                    }
-                }
-                {
-                    for (size_t i = 0; i < contour_end.points.size(); ++ i) {
-                        Line l(contour_end.points[i], contour_end.points[(i + 1) % contour_end.points.size()]);
-                        if (l.intersection(start_end_line, &best_intersection_end_dbg.point)) {
-                            if (best_intersection_end_dbg.point == l.b) {
-                                best_intersection_end_dbg.line_idx = (i + 1) % contour_end.points.size();
-                                best_intersection_end_dbg.distance = 0;
-                            } else {
-                                best_intersection_end_dbg.line_idx = i;
-                                best_intersection_end_dbg.distance = l.a.distance_to(best_intersection_end_dbg.point);
-                            }
-                            break;
-                        }
-                    }
-                }
-                assert(best_intersection_start_dbg.line_idx != size_t(-1));
-                assert(best_intersection_end_dbg.line_idx != size_t(-1));
-                //for (size_t i_end = 0; i_end < contour_end.size(); i_end++) 
-                Intersection best_intersection_saved = best_intersection_end_dbg;
-                best_intersection_start_dbg_saved = best_intersection_start_dbg;
-                best_intersection_end_dbg_saved = best_intersection_end_dbg;
-                {
-                    // point-line
-                    Point res;
-                    distf_t new_dist = Line(contour_end.points[best_intersection_end_dbg.line_idx],
-                                            contour_end.points[(best_intersection_end_dbg.line_idx + 1) % contour_end.points.size()])
-                                           .distance_to_squared(best_intersection_start_dbg.point, &res);
-                    if (new_dist < shortest_dist_sqr_dbg) {
-                        new_dist = std::sqrt(new_dist);
-                        s1_dbg = start.distance_to(best_intersection_start_dbg.point) * weight_island_travel;
-                        s2_dbg = new_dist;
-                        s3_dbg = res.distance_to(end) * weight_island_travel;
-                        // TODO: here it's fly-distance, it's better to store & use the contour distance from
-                        // start/end to the contour point.
-                        new_dist += start.distance_to(best_intersection_start_dbg.point) * weight_island_travel +
-                            res.distance_to(end) * weight_island_travel;
-                        if (new_dist < shortest_dist_dbg) {
-                            type_dbg = 'A';
-                            assert(new_dist > 0);
-                            shortest_dist_dbg = new_dist;
-                            shortest_dist_sqr_dbg = sqr(shortest_dist_dbg);
-                            if (res == contour_end.points[best_intersection_end_dbg.line_idx]) {
-                            type_dbg = 'a';
-                                best_intersection_end_dbg.point = contour_end.points[best_intersection_end_dbg.line_idx];
-                                best_intersection_end_dbg.distance = 0;
-                            } else if (res == contour_end.points[(best_intersection_end_dbg.line_idx + 1) % contour_end.points.size()]) {
-                            type_dbg = 'o';
-                                best_intersection_end_dbg.line_idx = (best_intersection_end_dbg.line_idx + 1) % contour_end.points.size();
-                                best_intersection_end_dbg.point = contour_end.points[best_intersection_end_dbg.line_idx];
-                                best_intersection_end_dbg.distance = 0;
-                            } else {
-                            type_dbg = 'i';
-                                best_intersection_end_dbg.point = res;
-                                best_intersection_end_dbg.distance = contour_end.points[best_intersection_end_dbg.line_idx].distance_to(res);
-                            }
-                            print_debug_cross(i_id_run, boundary, best_intersection_start_dbg, best_intersection_end_dbg,
-                                              start, end, std::string("dbg_startpt_") + std::to_string(new_dist));
-                        }
-                    }
-                }
-                //std::cout<<" -"<<type_dbg<<" : "<<shortest_dist_dbg<<"\n";
-                //for (size_t i_start = 0; i_start < contour_start.size(); i_start++)
-                best_intersection_start_dbg_saved2 = best_intersection_start_dbg;
-                {
-                    // line-point
-                    Point res;
-                    distf_t new_dist = 
-                        Line(contour_start.points[best_intersection_start_dbg.line_idx],
-                                contour_start.points[(best_intersection_start_dbg.line_idx + 1) % contour_start.points.size()])
-                            .distance_to_squared(best_intersection_saved.point, &res);
-                    res_end_saved = res;
-                    if (new_dist < shortest_dist_sqr_dbg) {
-                        new_dist = std::sqrt(new_dist);
-                        e1_dbg=start.distance_to(res) * weight_island_travel;
-                        e2_dbg=new_dist;
-                        e3_dbg=best_intersection_saved.point.distance_to(end) * weight_island_travel;
-                        new_dist += start.distance_to(res) * weight_island_travel +
-                            best_intersection_saved.point.distance_to(end) * weight_island_travel;
-                        if (new_dist < shortest_dist_dbg) {
-                            best_intersection_end_dbg = best_intersection_saved;
-                            type_dbg = 'B';
-                            assert(new_dist > 0);
-                            shortest_dist_dbg = new_dist;
-                            shortest_dist_sqr_dbg = sqr(shortest_dist_dbg);
-                            if (res == contour_start.points[best_intersection_start_dbg.line_idx]) {
-                            type_dbg = 'b';
-                                best_intersection_start_dbg.point = contour_start.points[best_intersection_start_dbg.line_idx];
-                                best_intersection_start_dbg.distance = 0;
-                            } else if (res == contour_start.points[(best_intersection_start_dbg.line_idx + 1) % contour_start.points.size()]) {
-                            type_dbg = 'c';
-                                best_intersection_start_dbg.line_idx = (best_intersection_start_dbg.line_idx + 1) % contour_start.points.size();
-                                best_intersection_start_dbg.point = contour_start.points[best_intersection_start_dbg.line_idx];
-                                best_intersection_start_dbg.distance = 0;
-                            } else {
-                            type_dbg = 'g';
-                                best_intersection_start_dbg.point = res;
-                                best_intersection_start_dbg.distance = contour_start.points[best_intersection_start_dbg.line_idx].distance_to(res);
-                            }
-                            print_debug_cross(i_id_run, boundary, best_intersection_start_dbg, best_intersection_end_dbg,
-                                                start, end, std::string("dbg_endpt_") + std::to_string(new_dist));
-                        }
-                    }
-                }
-            }
-            for (size_t i_start = 0; i_start < contour_start.size(); i_start++) {
-                // TODO: count boundary dist, not fly dist
-                for (size_t i_end = 0; i_end < contour_end.size(); i_end++) {
-                    // point-line
-                    Point res;
-                    distf_t new_dist = 
-                        Line(contour_end.points[i_end],
-                             contour_end.points[(i_end + 1) % contour_end.points.size()])
-                            .distance_to_squared(contour_start.points[i_start], &res);
-                    if (new_dist < shortest_dist_sqr_dbg) {
-                        new_dist = std::sqrt(new_dist);
-                        // TODO: here it's fly-distance, it's better to store & use the contour distance from
-                        // start/end to the contour point.
-                        new_dist += start.distance_to(contour_start.points[i_start]) * weight_island_travel +
-                            res.distance_to(end) * weight_island_travel;
-                        if (new_dist < shortest_dist_dbg) {
-                            type_dbg = 'P';
-                            assert(new_dist > 0);
-                            shortest_dist_dbg = new_dist;
-                            shortest_dist_sqr_dbg = sqr(shortest_dist_dbg);
-                            best_intersection_start_dbg.line_idx = i_start;
-                            best_intersection_start_dbg.point = contour_start.points[i_start];
-                            best_intersection_start_dbg.distance = 0;
-                            if (res == contour_end.points[i_end]) {
-                            type_dbg = 'Q';
-                                best_intersection_end_dbg.line_idx = i_end;
-                                best_intersection_end_dbg.point = contour_end.points[i_end];
-                                best_intersection_end_dbg.distance = 0;
-                            } else if (res == contour_end.points[(i_end + 1) % contour_end.points.size()]) {
-                            type_dbg = 'R';
-                                best_intersection_end_dbg.line_idx = (i_end + 1) % contour_end.points.size();
-                                best_intersection_end_dbg.point = contour_end.points[(i_end + 1) % contour_end.points.size()];
-                                best_intersection_end_dbg.distance = 0;
-                            } else {
-                                best_intersection_end_dbg.line_idx = i_end;
-                                best_intersection_end_dbg.point = res;
-                                best_intersection_end_dbg.distance = contour_end.points[i_end].distance_to(res);
-                            }
-                            print_debug_cross(i_id_run, boundary, best_intersection_start_dbg, best_intersection_end_dbg,
-                                              start, end, std::string("dbg_startpt_") + std::to_string(new_dist));
-                        }
-                    }
-                    // line-point
-                    new_dist = 
-                        Line(contour_start.points[i_start],
-                             contour_start.points[(i_start + 1) % contour_start.points.size()])
-                            .distance_to_squared(contour_end.points[i_end], &res);
-                    if (new_dist < shortest_dist_sqr_dbg) {
-                        new_dist = std::sqrt(new_dist);
-                        new_dist += start.distance_to(res) * weight_island_travel +
-                            contour_end.points[i_end].distance_to(end) * weight_island_travel;
-                        if (new_dist < shortest_dist_dbg) {
-                            type_dbg = 'L';
-                            assert(new_dist > 0);
-                            shortest_dist_dbg = new_dist;
-                            shortest_dist_sqr_dbg = sqr(shortest_dist_dbg);
-                            if (res == contour_start.points[i_start]) {
-                                best_intersection_start_dbg.line_idx = i_start;
-                                best_intersection_start_dbg.point = contour_start.points[i_start];
-                                best_intersection_start_dbg.distance = 0;
-                            } else if (res == contour_start.points[(i_start + 1) % contour_start.points.size()]) {
-                                best_intersection_start_dbg.line_idx = (i_start + 1) % contour_start.points.size();
-                                best_intersection_start_dbg.point = contour_start.points[(i_start + 1) % contour_start.points.size()];
-                                best_intersection_start_dbg.distance = 0;
-                            } else {
-                                best_intersection_start_dbg.line_idx = i_start;
-                                best_intersection_start_dbg.point = res;
-                                best_intersection_start_dbg.distance = contour_start.points[i_start].distance_to(res);
-                            }
-                            best_intersection_end_dbg.line_idx = i_end;
-                            best_intersection_end_dbg.point = contour_end.points[i_end];
-                            best_intersection_end_dbg.distance = 0;
-                            print_debug_cross(i_id_run, boundary, best_intersection_start_dbg, best_intersection_end_dbg,
-                                              start, end, std::string("dbg_endpt_") + std::to_string(new_dist));
-                        }
-                    }
-                }
-            }
+
 
             time_end = std::chrono::high_resolution_clock::now();
-            if (!(
-            (best_intersection_start.border_idx == best_intersection_start_dbg.border_idx)&&
-            (best_intersection_start.line_idx == best_intersection_start_dbg.line_idx)&&
-            (best_intersection_start.point.distance_to(best_intersection_start_dbg.point) < 10)&&
-            (is_approx(best_intersection_start.distance, best_intersection_start_dbg.distance, 10.f))&&
-
             (best_intersection_end.border_idx == best_intersection_end_dbg.border_idx)&&
             (best_intersection_end.line_idx == best_intersection_end_dbg.line_idx)&&
             (best_intersection_end.point.distance_to(best_intersection_end_dbg.point) < 10)&&
@@ -1509,8 +1536,6 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
             long long step1 = std::chrono::duration_cast<std::chrono::microseconds>(time_mid - time_start).count();
             long long stepcreate = std::chrono::duration_cast<std::chrono::microseconds>(time_cell - time_start).count();
             long long step2 = std::chrono::duration_cast<std::chrono::microseconds>(time_end - time_mid).count();
-            //std::cout << "step1=" << step1 << " ("<<stepcreate<<")\n";
-            //std::cout << "step2=" << step2 << "\n";
             datapoints.emplace_back(int(step1), int(step2));
             double speedup = 0;
             size_t nb = 0;
@@ -1524,16 +1549,7 @@ static void jump_between_island(AvoidCrossingPerimeters::Boundary &boundary, // 
                 return;
             }
         }
-        if (best_intersection_start.line_idx == size_t(-1) || best_intersection_end.line_idx == size_t(-1)) {
-            SVG svg(debug_out_path("cannot_find_boundary.svg"));
-            svg.draw(to_polylines(boundary.boundaries), "gray", scale_t(0.03));
-            svg.draw(contour_start.split_at_first_point(), "red", scale_t(0.025));
-            svg.draw(contour_end.split_at_first_point(), "green", scale_t(0.025));
-            svg.draw(Polyline({start, end}), "blue", scale_t(0.02));
-            svg.Close();
-        }
 #endif
-
         assert(best_intersection_start.line_idx != size_t(-1) && best_intersection_end.line_idx != size_t(-1));
 
         // create intersections between start & best_intersection_start
@@ -2260,22 +2276,25 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
 //#define INCLUDE_SUPPORTS_IN_BOUNDARY
 
 // called by AvoidCrossingPerimeters::travel_to()
-static ExPolygons get_boundary(const Layer &layer, std::vector<std::pair<ExPolygon, ExPolygon>> &slice_2_boundary, ExPolygons &to_avoid)
+static ExPolygons get_boundary(const Layer &layer, uint16_t extruder_id, std::vector<std::pair<ExPolygon, ExPolygon>> &slice_2_boundary, ExPolygons &to_avoid)
 {
     const coord_t perimeter_spacing = get_perimeter_spacing(layer);
     auto const *support_layer     = dynamic_cast<const SupportLayer *>(&layer);
     ExPolygons  perimeter_boundary;
     ExPolygons  boundary;
 
-    //get perimeter_boundary from layerregion
-    for (const LayerSliceIslandPtr &island : layer.islands()) {
-        append(perimeter_boundary, island->perimeters_slices);
+    //get perimeter_boundary from islands
+    for (const LayerSliceIslandPtr &layer_island : layer.islands()) {
+        append(perimeter_boundary, layer_island->get_perimeter_slices());
     }
     perimeter_boundary = union_ex(perimeter_boundary);
 
     auto old_2_new_expolygons = inner_offset(perimeter_boundary, coordf_t(1.5 * perimeter_spacing));
     for (const std::pair<ExPolygon, ExPolygon> &old_2_new_expoly : old_2_new_expolygons) {
-        assert(old_2_new_expoly.first.contains(old_2_new_expoly.second.contour.split_at_index(0)) || old_2_new_expoly.first == old_2_new_expoly.second);
+        // note: sometimes, old_2_new_expoly.first.contains(old_2_new_expoly.second.contour.split_at_index(0)) can fail when a new point is created on a circle, but diff_ex doesn't.
+        assert(old_2_new_expoly.first.contains(old_2_new_expoly.second.contour.split_at_index(0)) ||
+               old_2_new_expoly.first == old_2_new_expoly.second ||
+               diff_ex(old_2_new_expoly.second, old_2_new_expoly.first).empty());
         boundary.push_back(old_2_new_expoly.second);
         slice_2_boundary.push_back(std::move(old_2_new_expoly));
     }
@@ -2288,9 +2307,9 @@ static ExPolygons get_boundary(const Layer &layer, std::vector<std::pair<ExPolyg
         auto *layer_below = layer.object()->get_first_layer_below_printz(layer.scaled_print_z() + SCALED_EPSILON);
         if (layer_below) { // why?
             perimeter_boundary.clear();
-            //get perimeter_boundary from layerregion
-            for (const LayerSliceIslandPtr &island : layer_below->islands()) {
-                append(perimeter_boundary, island->perimeters_slices);
+            //get perimeter_boundary from islands
+            for (const LayerSliceIslandPtr &layer_island : layer_below->islands()) {
+                append(perimeter_boundary, layer_island->get_perimeter_slices());
             }
             perimeter_boundary = union_ex(perimeter_boundary);
             auto old_2_new_expolygons_supp = inner_offset(perimeter_boundary, coordf_t(1.5 * perimeter_spacing));
@@ -2331,7 +2350,58 @@ static ExPolygons get_boundary(const Layer &layer, std::vector<std::pair<ExPolyg
         top_layer_polygons = union_ex(top_layer_polygons);
         boundary = union_ex(boundary);
         append(to_avoid, top_layer_polygons);
-        return diff_ex(boundary, top_layer_polygons);
+        boundary = diff_ex(boundary, top_layer_polygons);
+    }
+
+    // multiple extruders?
+    // clip by region
+    const LayerRegionPtrs &all_regions = layer.regions();
+    bool multiple_extruders = false;
+    for (const LayerRegion *lregion : all_regions) {
+            multiple_extruders = multiple_extruders ||
+                lregion->region().config().perimeter_extruder.value !=
+                    extruder_id + 1;
+            multiple_extruders = multiple_extruders ||
+                lregion->region().config().infill_extruder.value !=
+                    extruder_id + 1;
+            multiple_extruders = multiple_extruders ||
+                lregion->region().config().solid_infill_extruder.value !=
+                    extruder_id + 1;
+            if (multiple_extruders) {
+                break;
+            }
+    }
+    if (multiple_extruders) {
+        ExPolygons clip;
+        for (const LayerRegion *lregion : all_regions) {
+            bool same_extruders = lregion->region().config().perimeter_extruder.value ==
+                    lregion->region().config().infill_extruder.value &&
+                lregion->region().config().infill_extruder.value ==
+                    lregion->region().config().solid_infill_extruder.value;
+
+            if (same_extruders) {
+                if (lregion->region().config().perimeter_extruder.value ==
+                    extruder_id + 1) {
+                    clip = union_ex(clip, lregion->get_raw_slices());
+                }
+            } else {
+                if (lregion->region().config().infill_extruder.value !=
+                    lregion->region().config().solid_infill_extruder.value) {
+                    BOOST_LOG_TRIVIAL(warning) << "";
+                }
+                if (lregion->region().config().perimeter_extruder.value ==
+                    extruder_id + 1) {
+                    assert(lregion->region().config().infill_extruder.value !=
+                            extruder_id + 1);
+                    clip = union_ex(clip, diff_ex(lregion->get_raw_slices(), lregion->fill_expolygons()));
+                } else {
+                    assert(lregion->region().config().infill_extruder.value ==
+                            extruder_id + 1);
+                    clip = union_ex(clip, lregion->fill_expolygons());
+                }
+            }
+        }
+        boundary = intersection_ex(boundary, offset_ex(clip, SCALED_EPSILON * 10 /*safety offset*/));
     }
 
     return boundary;
@@ -2474,15 +2544,16 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, cons
     Vec2d startf = start.cast<double>();
     Vec2d endf   = end  .cast<double>();
 
-    const ExPolygons &lslices           = gcodegen.layer()->lslices();
+    //const ExPolygons &lslices           = gcodegen.layer()->lslices();
     const coord_t     perimeter_spacing = get_perimeter_spacing(*gcodegen.layer());
     bool              is_support_layer  = dynamic_cast<const SupportLayer *>(gcodegen.layer()) != nullptr;
+
     if (!use_external && (is_support_layer || (!m_lslices_offset.empty() 
          /* already done by the caller && !any_expolygon_contains(m_lslices_offset, m_lslices_offset_bboxes, m_grid_lslices_offset, travel)*/))) {
         // Initialize m_internal only when it is necessary.
         if (m_internal.boundaries.empty()) {
             std::vector<std::pair<ExPolygon, ExPolygon>> boundary_growth;
-            init_boundary(&m_internal, get_boundary(*gcodegen.layer(), boundary_growth, m_internal.to_avoid), perimeter_spacing * 2);
+            init_boundary(&m_internal, get_boundary(*gcodegen.layer(), gcodegen.last_extruder(), boundary_growth, m_internal.to_avoid), perimeter_spacing * 2);
             m_internal.boundary_growth = std::move(boundary_growth);
         }
 
@@ -2586,9 +2657,9 @@ void AvoidCrossingPerimeters::init_layer(const Layer &layer)
     m_init_to = &layer;
 
     float ext_perimeter_width = get_external_perimeter_width(layer);
-    //get perimeter_boundary from layerregion instead of layer.lslices()
-    for (const LayerSliceIslandPtr &island : layer.islands()) {
-        append(m_lslices_offset, island->perimeters_slices);
+    //get perimeter_boundary from island instead of layer.lslices()
+    for (const LayerSliceIslandPtr &layer_island : layer.islands()) {
+        append(m_lslices_offset, layer_island->get_perimeter_slices());
     }
     m_lslices_offset = offset_ex(m_lslices_offset, -ext_perimeter_width / 2);
 

@@ -1028,6 +1028,8 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
     std::string name = is_external ? boost::filesystem::path(name_or_path).filename().string() : name_or_path;
 
     // 2) If the loading succeeded, split and load the config into print / filament / printer settings.
+    // compute phony fields
+    config.update_phony({});
     // First load the print and printer presets.
 
     std::set<std::string>& tmp_installed_presets_ref = tmp_installed_presets;
@@ -1344,7 +1346,7 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
 
     const VendorProfile *vendor_profile = nullptr;
     if (flags.has(LoadConfigBundleAttribute::LoadSystem) || flags.has(LoadConfigBundleAttribute::LoadVendorOnly)) {
-        VendorProfile vp = VendorProfile::from_ini(tree, path);
+        VendorProfile vp = VendorProfile::from_ini(tree, boost::filesystem::path(path).stem().string());
         if (vp.models.size() == 0 && !vp.templates_profile) {
             BOOST_LOG_TRIVIAL(error) << boost::format("Vendor bundle: `%1%`: No printer model defined.") % path;
             return std::make_pair(PresetsConfigSubstitutions{}, 0);

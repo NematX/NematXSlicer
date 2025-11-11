@@ -185,7 +185,7 @@ double Fill::compute_unscaled_volume_to_fill(const Surface &surface, const FillP
     if (this->no_overlap_expolygons.empty()) {
         polyline_volume = unscaled(unscaled(surface.area())) * params.flow.height();
     } else {
-        for (const ExPolygon &poly : intersection_ex(ExPolygons{surface.expolygon}, this->no_overlap_expolygons)) {
+        for (const ExPolygon& poly : intersection_ex(ExPolygons{surface.expolygon}, this->no_overlap_expolygons)) {
             polyline_volume += params.flow.height() * unscaled(unscaled(poly.area()));
             // note: the no_overlap_expolygons is already at spacing from the centerline of the perimeter.
         }
@@ -3914,7 +3914,7 @@ void FillWithPerimeter::fill_surface_extrusion(const Surface *surface,
                                                                 ExtrusionFlow{params.flow.mm3_per_mm(),
                                                                               params.flow.width(),
                                                                               params.flow.height()}},
-                                            true);
+                                            !params.monotonic);
 
             // === extrude infill ===
             // 50% overlap with the new perimeter
@@ -3941,7 +3941,7 @@ void FillWithPerimeter::fill_surface_extrusion(const Surface *surface,
                                                                         ExtrusionFlow{params.flow.mm3_per_mm(),
                                                                                       params.flow.width(),
                                                                                       params.flow.height()}},
-                                                    true);
+                                                    !params.monotonic);
 #ifdef _DEBUGINFO
                     eec_infill->visit(LoopAssertVisitor());
 #endif

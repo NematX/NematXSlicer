@@ -72,7 +72,7 @@ public:
         double get_abs_value(double ratio, const ConfigOption *opt = nullptr) const {
             const ConfigOption *val_opt = get_value_opt(opt);
             if (val_opt->is_percent()) {
-                return val_opt->get_float() * ratio / 100.;
+                return val_opt->get_float() * ratio;
             } else {
                 return val_opt->get_float();
             }

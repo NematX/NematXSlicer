@@ -231,6 +231,7 @@ void ExPolygon::douglas_peucker(coord_t tolerance) {
     assert_valid();
 }
 
+//FIXME: dangerous, please not use it (polygons may be not ordered correctly).
 void
 ExPolygon::simplify_p(coord_t tolerance, Polygons &polygons) const
 {
@@ -279,6 +280,7 @@ ExPolygon::simplify_p(coord_t tolerance) const
         Polygon oldp = polygon;
         assert(oldp.is_clockwise());
         polygon.douglas_peucker(tolerance);
+#ifdef _DEBUG
         if (polygon.size() > 2 && polygon.is_counter_clockwise()) {
             static int aodfjiaqsdz = 0;
             std::stringstream stri;
@@ -297,6 +299,7 @@ ExPolygon::simplify_p(coord_t tolerance) const
             svg.Close();
             assert(false);
         }
+#endif
         // if polygon began to be counnter-clockwise, then it means that the fucked up part of the
         //   hourglass is the only part / dominant part left
         if (polygon.size() > 2 && polygon.is_clockwise()) {

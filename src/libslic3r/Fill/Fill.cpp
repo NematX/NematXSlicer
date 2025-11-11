@@ -195,7 +195,7 @@ struct SurfaceFillParams : FillParams
             RETURN_COMPARE_NON_EQUAL(config->small_area_infill_flow_compensation_model.value);
             RETURN_COMPARE_NON_EQUAL(config->solid_infill_extruder);
             RETURN_COMPARE_NON_EQUAL(config->wipe_into_infill);
-            // print -modifier, because region are fused in gode wiew if not.
+            // print modifier, because region are fused in gode wiew if not.
             RETURN_COMPARE_NON_EQUAL(config->print_extrusion_multiplier.value);
             RETURN_COMPARE_NON_EQUAL(config->print_fan_speed.value);
             RETURN_COMPARE_NON_EQUAL(config->print_solid_infill_fan_speed.value);
@@ -248,7 +248,7 @@ struct SurfaceFillParams : FillParams
             || config->small_area_infill_flow_compensation_model != rhs.config->small_area_infill_flow_compensation_model
             || config->solid_infill_extruder != rhs.config->solid_infill_extruder
             || config->wipe_into_infill != rhs.config->wipe_into_infill
-            // print -modifier, because region are fused in gode wiew if not.
+            // print modifier, because region are fused in gode wiew if not.
             || config->print_extrusion_multiplier        != rhs.config->print_extrusion_multiplier
             || config->print_fan_speed                   != rhs.config->print_fan_speed
             || config->print_solid_infill_fan_speed      != rhs.config->print_solid_infill_fan_speed
@@ -1553,7 +1553,7 @@ void Layer::_make_ironing(LayerSliceIsland &island)
                     *eec, std::move(polylines),
                     ExtrusionAttributes{ExtrusionRole::Ironing,
                                         // TODO check FLOW, decide if it's good for an ironing?
-                                        ExtrusionFlow{flow_mm3_per_mm, extrusion_width, float(extrusion_height)}});
+                                        ExtrusionFlow{flow_mm3_per_mm, extrusion_width, float(extrusion_height)}}, false);
             }
         }
         // Regions up to j were processed.

@@ -18,6 +18,8 @@
 #include "RegionSettings.hpp"
 #include "SurfaceCollection.hpp"
 
+//#define _DEBUG_OVERHANGS
+
 namespace Slic3r::Arachne {
 struct ExtrusionLine;
 }
@@ -55,6 +57,8 @@ struct Parameters
     coord_t       get_ext_perimeter_spacing() const { return ext_perimeter_spacing; }
     coord_t       ext_perimeter_spacing2;
     coord_t       get_ext_perimeter_spacing2() const { return ext_perimeter_spacing2; }
+    const coord_t overhang_spacing;
+    coord_t       get_overhang_spacing() const { return overhang_spacing; }
     //const coord_t gap_fill_spacing;
     //coord_t       get_gap_fill_spacing() const { return gap_fill_spacing; }
     //const coord_t gap_fill_spacing_external;
@@ -69,7 +73,8 @@ struct Parameters
     coord_t       get_min_round_spacing() const { return min_round_spacing; }
 
     // cached parameters
-    Polygons lower_slices_bridge;
+    ExPolygons overhang_areas;
+    Polygons lower_slices_bridge_for_extra_overhangs;
     Polygons lower_slices_bridge_dynamic;
     Polygons lower_slices_bridge_speed_small;
     Polygons lower_slices_bridge_speed_big;
@@ -112,6 +117,7 @@ struct Parameters
         // external perimeters
         m_ext_mm3_per_mm(ext_perimeter_flow.mm3_per_mm()),
         ext_perimeter_width(ext_perimeter_flow.scaled_width()),
+        overhang_spacing(scale_t(config.overhangs_extrusion_spacing.get_abs_value(perimeter_flow.nozzle_diameter()))),
         //spacing between two external perimeter (where you don't have the space to add other loops)
         ext_perimeter_spacing(this->ext_perimeter_flow.scaled_spacing()),
         //spacing between external perimeter and the second
@@ -249,16 +255,34 @@ private:
     // the bbox is here to accelerate the diffs, loop_polygons is inside it.
     ExtrusionPaths create_overhangs_arachne(const Parameters &params,
         const ClipperLib_Z::Path& loop_polygons, const BoundingBox& bbox, ExtrusionRole role, bool is_external) const;
+
+    enum OverhangType : int{
+        NOT_OVERHANG = 0,
+        DYNAMIC_OVERHANG,
+        SMALL_SPEED_OVERHANG,
+        BIG_SPEED_OVERHANG,
+        SMALL_FLOW_OVERHANG,
+        BIG_FLOW_OVERHANG,
+    };
     struct Params_sort_overhangs
     {
         bool is_external;
         bool is_loop;
-        size_t layer_height_count;
+        bool has_dynamic;
+        //size_t layer_height_count;
         Point first_point;
         Point last_point;
+        std::vector<int> overhang_type_2_lh;
+#ifdef _DEBUG_OVERHANGS
+        std::vector<std::string> debug_colors;
+        int debug_i = 0;
+#endif
     };
+
     void _sort_overhangs(const Parameters &params,
-        ExtrusionPaths &paths, const ExtrusionRole role, const Params_sort_overhangs is_external) const;
+                         ExtrusionPaths &paths,
+                         const ExtrusionRole role,
+                         const Params_sort_overhangs &overhangs_params) const;
 
     // transform loops into ExtrusionEntityCollection, adding also thin walls into it.
     ExtrusionEntityCollection _traverse_loops_classic(const Parameters &params,

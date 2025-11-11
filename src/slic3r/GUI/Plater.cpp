@@ -137,8 +137,8 @@
 #include "Gizmos/GLGizmoSVG.hpp" // Drop SVG file
 #include "Gizmos/GLGizmoCut.hpp"
 #include "Widgets/CheckBox.hpp"
-#include "libslic3r/Format/HFP.hpp"
 #include "LoadStepDialog.hpp"
+#include "libslic3r/Format/HFP.hpp"
 
 #ifdef __APPLE__
 #include "Gizmos/GLGizmosManager.hpp"
@@ -2522,7 +2522,13 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
     if (wxGetApp().is_editor()) {
         this->q->Bind(EVT_EJECT_DRIVE_NOTIFICAION_CLICKED, [this](EjectDriveNotificationClickedEvent&) { this->q->eject_drive(); });
         this->q->Bind(EVT_EXPORT_GCODE_NOTIFICAION_CLICKED, [this](ExportGcodeNotificationClickedEvent&) { this->q->export_gcode(true); });
-        this->q->Bind(EVT_PRESET_UPDATE_AVAILABLE_CLICKED, [](PresetUpdateAvailableClickedEvent&) {  wxGetApp().get_preset_updater()->on_update_notification_confirm(); });
+        this->q->Bind(EVT_PRESET_UPDATE_AVAILABLE_CLICKED, [this](PresetUpdateAvailableClickedEvent &) {
+#ifdef USE_GTHUB_PRESET_UPDATE
+            wxGetApp().get_preset_updater()->show_synch_window(this->q, _L("Managing vendor bundles:"), [](bool){});
+#else
+            wxGetApp().get_preset_updater()->on_update_notification_confirm();
+#endif
+        });
         this->q->Bind(EVT_REMOVABLE_DRIVE_EJECTED, [this, q](RemovableDriveEjectEvent &evt) {
 		    if (evt.data.second) {
 			    q->show_action_buttons();
@@ -2842,8 +2848,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             } else
                 continue;
         }
-        
-        
+
         Slic3r::Model loaded_model;
         bool is_project_file = type_prusa;
         try {

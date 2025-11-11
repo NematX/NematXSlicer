@@ -97,6 +97,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         "bed_temperature",
         "before_layer_gcode",
         "between_objects_gcode",
+        "between_objects_gcode_before_move",
         "binary_gcode",
         "bridge_fan_speed",
         "chamber_temperature",
@@ -376,6 +377,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
             osteps.emplace_back(posSupportMaterial);
         } else if (
             opt_key == "arc_fitting"
+            || opt_key == "arc_fitting_ignore_holes"
             || opt_key == "arc_fitting_resolution"
             || opt_key == "arc_fitting_tolerance"
             || opt_key == "min_layer_height"

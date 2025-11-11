@@ -785,6 +785,11 @@ void SimplifyVisitor::use(ExtrusionMultiPath3D &multipath3D)
 }
 void SimplifyVisitor::use(ExtrusionLoop &loop)
 {
+    // ignore holes?
+    if (m_ignore_holes && (loop.loop_role() & elrHole) != 0) {
+        return;
+    }
+    // simplify
     for (size_t i = 0;i<loop.paths.size() ;++i) {
         ExtrusionPath *path = &loop.paths[i];
         //if (min_path_size > 0 && path.length() < min_path_size) {

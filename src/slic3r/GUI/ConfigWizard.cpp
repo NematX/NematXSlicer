@@ -131,14 +131,17 @@ BundleMap BundleMap::load()
     BundleMap res;
 
     const auto vendor_dir = (boost::filesystem::path(Slic3r::data_dir()) / "vendor").make_preferred();
+#ifndef USE_GTHUB_PRESET_UPDATE
     const auto archive_dir = (boost::filesystem::path(Slic3r::data_dir()) / "cache" / "vendor").make_preferred();
     const auto rsrc_vendor_dir = (boost::filesystem::path(resources_dir()) / "profiles").make_preferred();
     const auto cache_dir = boost::filesystem::path(Slic3r::data_dir()) / "cache"; // for Index
+#endif
     // Load Prusa bundle from the datadir/vendor directory or from datadir/cache/vendor (archive) or from resources/profiles.
 #ifdef ALLOW_PRUSA_FIRST
     // prusa bundle mandatory check at startup
     auto prusa_bundle_path = (vendor_dir / ALLOW_PRUSA_FIRST).replace_extension(".ini");
     BundleLocation prusa_bundle_loc = BundleLocation::IN_VENDOR;
+#ifndef USE_GTHUB_PRESET_UPDATE
     if (! boost::filesystem::exists(prusa_bundle_path)) {
         prusa_bundle_path = (archive_dir / ALLOW_PRUSA_FIRST).replace_extension(".ini");
         prusa_bundle_loc = BundleLocation::IN_ARCHIVE;
@@ -147,6 +150,13 @@ BundleMap BundleMap::load()
         prusa_bundle_path = (rsrc_vendor_dir / PresetBundle::PRUSA_BUNDLE).replace_extension(".ini");
         prusa_bundle_loc = BundleLocation::IN_RESOURCES;
     }
+#else
+    if (!boost::filesystem::exists(prusa_bundle_path)) {
+        // auto-install
+        boost::filesystem::copy(boost::filesystem::path(resources_dir()) / "profiles" / ALLOW_PRUSA_FIRST,
+                                prusa_bundle_path);
+    }
+#endif
     {
         Bundle prusa_bundle;
         if (prusa_bundle.load(std::move(prusa_bundle_path), prusa_bundle_loc, true))
@@ -158,10 +168,15 @@ BundleMap BundleMap::load()
     // and then additionally from datadir/cache/vendor (archive) and resources/profiles.
     // Should we concider case where archive has older profiles than resources (shouldnt happen)? -> YES, it happens during re-configuration when running older PS after newer version
     typedef std::pair<const fs::path&, BundleLocation> DirData;
+#ifndef USE_GTHUB_PRESET_UPDATE
     std::vector<DirData> dir_list { {vendor_dir, BundleLocation::IN_VENDOR},  {archive_dir, BundleLocation::IN_ARCHIVE},  {rsrc_vendor_dir, BundleLocation::IN_RESOURCES} };
     for ( auto dir : dir_list) {
         if (!fs::exists(dir.first))
             continue;
+#else
+    DirData dir = {vendor_dir, BundleLocation::IN_VENDOR};
+    if (fs::exists(dir.first)) {
+#endif
       try {
         for (const auto &dir_entry : boost::filesystem::directory_iterator(dir.first)) {
             if (Slic3r::is_ini_file(dir_entry)) {
@@ -169,11 +184,12 @@ BundleMap BundleMap::load()
 
                 // Don't load this bundle if we've already loaded it.
                 if (res.find(id) != res.end()) { continue; }
-
+                
+#ifndef USE_GTHUB_PRESET_UPDATE
                 // Fresh index should be in archive_dir, otherwise look for it in cache 
                 // Then if not in archive or cache - it could be 3rd party profile that user just copied to vendor folder (both ini and cache)
                 
-                fs::path idx_path (cache_dir / (id + ".idx"));
+                fs::path idx_path (rsrc_vendor_dir / (id + ".idx"));
                 if (!boost::filesystem::exists(idx_path)) {
                     BOOST_LOG_TRIVIAL(error) << format("Missing index %1% when loading bundle %2%. Going to search for it in cache folder.", idx_path.string(), id);
                     idx_path = fs::path(cache_dir / (id + ".idx"));
@@ -201,6 +217,7 @@ BundleMap BundleMap::load()
                     continue;
                 }
                 const auto recommended = recommended_it->config_version;
+#endif
                 VendorProfile vp;
                 try {
                     vp = VendorProfile::from_ini(dir_entry, true);
@@ -209,9 +226,11 @@ BundleMap BundleMap::load()
                     BOOST_LOG_TRIVIAL(error) << format("Could not load bundle %1% due to corrupted profile file %2%. Message: %3%", id, dir_entry.path().string(), e.what());
                     continue;
                 }
+#ifndef USE_GTHUB_PRESET_UPDATE
                 // Don't load
                 if (vp.config_version > recommended)
                     continue;
+#endif
 
                 Bundle bundle;
                 if (bundle.load(dir_entry.path(), dir.second))
@@ -599,14 +618,26 @@ PageWelcome::PageWelcome(ConfigWizard *parent)
     , cbox_integrate(append(
         new wxCheckBox(this, wxID_ANY, _L("Perform desktop integration (Sets this binary to be searchable by the system)."))
     ))
+    , bt_new_vendor(append(
+        new wxButton(this, wxID_ANY, _L("Add more vendors"))))
+    , run_reason(ConfigWizard::RunReason::RR_USER)
 {
     welcome_text->Hide();
-    cbox_reset->Hide();
-    cbox_integrate->Hide();    
+    bt_new_vendor->Hide();
+    cbox_integrate->Hide();
+    bt_new_vendor->Bind(wxEVT_BUTTON, [this, parent](wxCommandEvent &) {
+        ConfigWizard::RunReason rr = this->run_reason;
+        parent->EndModal(wxID_CANCEL);
+        wxCommandEvent *evt = new wxCommandEvent(EVT_WIZARD_SHOW_DIALOG);
+        // set args for GUI_App::run_wizard
+        evt->SetInt(int(rr) + 8*(GUI_App::RunVendorBundleManage::RVBM_ALWAYS));
+        GUI::wxGetApp().QueueEvent(evt);
+    });
 }
 
 void PageWelcome::set_run_reason(ConfigWizard::RunReason run_reason)
 {
+    this->run_reason = run_reason;
     const bool data_empty = run_reason == ConfigWizard::RR_DATA_EMPTY;
     welcome_text->Show(data_empty);
     cbox_reset->Show(!data_empty);
@@ -1693,11 +1724,11 @@ PageMode::PageMode(ConfigWizard *parent)
     radio_advanced = new wxRadioButton(this, wxID_ANY, _L("Advanced mode"));
     radio_expert = new wxRadioButton(this, wxID_ANY, _L("Expert mode"));
 
-    std::string mode { "simple" };
+    std::string mode { "Simple" };
     wxGetApp().app_config->get("", "view_mode", mode);
 
-    if (mode == "advanced") { radio_advanced->SetValue(true); }
-    else if (mode == "expert") { radio_expert->SetValue(true); }
+    if (mode == "Advanced") { radio_advanced->SetValue(true); }
+    else if (mode == "Expert") { radio_expert->SetValue(true); }
     else { radio_simple->SetValue(true); }
 
     append(radio_simple);
@@ -1716,9 +1747,9 @@ void PageMode::serialize_mode(AppConfig *app_config) const
 {
     std::string mode = "";
 
-    if (radio_simple->GetValue()) { mode = "simple"; }
-    if (radio_advanced->GetValue()) { mode = "advanced"; }
-    if (radio_expert->GetValue()) { mode = "expert"; }
+    if (radio_simple->GetValue()) { mode = "Simple"; }
+    if (radio_advanced->GetValue()) { mode = "Advanced"; }
+    if (radio_expert->GetValue()) { mode = "Expert"; }
 
     app_config->set("view_mode", mode);
     app_config->set("use_inches", check_inch->GetValue() ? "1" : "0");
@@ -3124,6 +3155,9 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
     if (!check_unsaved_preset_changes)
         act_btns |= ActionButtons::SAVE;
 
+#ifndef USE_GTHUB_PRESET_UPDATE
+    ///////////////////////// -supermerill: old prusa code for the old way to update profiles /////////////////////////
+    ///////////////////////// not used anymore 
     // Install bundles from resources or cache / vendor if needed:
     std::vector<std::string> install_bundles;
     for (const auto &pair : bundles) {
@@ -3157,7 +3191,7 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
     if (!check_unsaved_preset_changes)
         if ((check_unsaved_preset_changes = install_bundles.size() > 0))
             header = _L_PLURAL("A new vendor was installed and one of its printers will be activated", "New vendors were installed and one of theirs printers will be activated", install_bundles.size());
-
+#endif
 #ifdef __linux__
     // Desktop integration on Linux
     BOOST_LOG_TRIVIAL(debug) << "ConfigWizard::priv::apply_config integrate_desktop" << page_welcome->integrate_desktop()  << " perform_registration_linux " << page_downloader->m_downloader->get_perform_registration_linux();
@@ -3195,17 +3229,21 @@ bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *prese
     if (check_unsaved_preset_changes &&
         !wxGetApp().check_and_keep_current_preset_changes(caption, header, act_btns, &apply_keeped_changes))
         return false;
-
+    
+#ifndef USE_GTHUB_PRESET_UPDATE
+    ///////////////////////// -supermerill: old prusa code for the old way to update profiles /////////////////////////
+    ///////////////////////// not used anymore 
     if (install_bundles.size() > 0) {
         // Install bundles from resources or cache / vendor.
         // Don't create snapshot - we've already done that above if applicable.
         
-        bool install_result = updater->install_bundles_rsrc_or_cache_vendor(std::move(install_bundles), false);
+        bool install_result = install_bundles_rsrc_or_cache_vendor(std::move(install_bundles), false);
         if (!install_result)
             return false;
     } else {
         BOOST_LOG_TRIVIAL(info) << "No bundles need to be installed from resources or cache / vendor";
     }
+#endif
 
     if (page_welcome->reset_user_profile()) {
         BOOST_LOG_TRIVIAL(info) << "Resetting user profiles...";
