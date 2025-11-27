@@ -2571,9 +2571,10 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                 assert(layer_new.scaled_height() > 0);
                 intermediate_layers.push_back(&layer_new);
                 dist = extr2z - layer_new.scaled_print_z();
-                if (dist <= 0)
+                assert(dist >= SCALED_EPSILON || dist == 0);
+                if (dist < SCALED_EPSILON) {
                     continue;
-                assert(dist >= SCALED_EPSILON);
+                }
                 // Continue printing the other layers up to extr2z.
                 n_layers_total--;
                 if (n_layers_bot > 0) {

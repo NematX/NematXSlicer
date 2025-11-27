@@ -38,7 +38,8 @@ public:
     std::string finalize(GCodeGenerator &gcodegen);
     std::vector<float> used_filament_length() const;
     int get_current_layer_idx() const { return m_layer_idx; }
-    double get_last_wipe_tower_print_z() const { return m_last_wipe_tower_print_z; }
+    // force travel because of delayed Z travel
+    void set_force_travel(bool force_travel) { m_has_force_travel = force_travel; }
 
 private:
     WipeTowerIntegration& operator=(const WipeTowerIntegration&);
@@ -70,9 +71,11 @@ private:
     int                                                          m_layer_idx;
     int                                                          m_tool_change_idx;
     double                                                       m_last_wipe_tower_print_z;
-    //for nametx G91 for relative e
+    //for nematx G91 for relative e
     //GCodeFlavor     m_gcode_flavor;
     //char m_extruder_letter;
+
+    bool                                                         m_has_force_travel = false;
 };
 
 } // namespace GCode

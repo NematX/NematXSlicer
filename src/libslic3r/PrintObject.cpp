@@ -1418,8 +1418,6 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "external_perimeter_extrusion_change_odd_layers"
             || opt_key == "external_perimeter_extrusion_spacing"
             || opt_key == "external_perimeter_extrusion_width"
-            || opt_key == "external_perimeters_vase"
-            || opt_key == "external_perimeters_vase_min_height"
             || opt_key == "gap_fill_extension"
             || opt_key == "gap_fill_last"
             || opt_key == "gap_fill_max_width"
@@ -1764,6 +1762,9 @@ bool PrintObject::invalidate_state_by_config_options(
                 || opt_key == "seam_notch_angle"
                 || opt_key == "seam_notch_inner"
                 || opt_key == "seam_notch_outer"
+                || opt_key == "seam_slope_type"
+                || opt_key == "seam_slope_min_height"
+                || opt_key == "seam_slope_max_length"
                 || opt_key == "seam_travel_cost"
                 || opt_key == "seam_visibility"
                 || opt_key == "small_area_infill_flow_compensation_model"
@@ -2490,8 +2491,9 @@ void PrintObject::detect_surfaces_type()
 
                     // find internal surfaces (difference between top/bottom surfaces and others)
                     {
-                        Polygons topbottom = to_polygons(top);
-                        polygons_append(topbottom, to_polygons(bottom));
+                        ExPolygons topbottom;
+                        append(topbottom, to_expolygons(top));
+                        append(topbottom, to_expolygons(bottom));
                         assert_valid(topbottom);
                         assert_valid(surfaces_prev_expolys);
                         ExPolygons diff = diff_ex(union_ex(surfaces_prev_expolys), union_ex(topbottom));
@@ -3344,23 +3346,23 @@ void PrintObject::replaceSurfaceType(SurfaceType st_to_replace, SurfaceType st_r
             Layer*       layer       = *layer_it;
             LayerRegion* layerm      = layer->regions()[region_id];
 
-            Polygons poly_to_check;
+            ExPolygons poly_to_check;
             // extract the surfaces that might be transformed
-            layerm->fill_surfaces().filter_by_type(st_to_replace, &poly_to_check);
-            Polygons poly_to_replace = poly_to_check;
+            layerm->fill_surfaces().filter_by_type(st_to_replace, poly_to_check);
+            ExPolygons poly_to_replace = poly_to_check;
 
             // check the lower layer
             if (int(layer_it - this->layers().begin()) - 1 >= 0) {
                 const Layer* lower_layer = this->layers()[int(layer_it - this->layers().begin()) - 1];
 
                 // iterate through regions and collect internal surfaces
-                Polygons lower_internal;
+                ExPolygons lower_internal;
                 for (LayerRegion* lower_layerm : lower_layer->m_regions) {
-                    lower_layerm->fill_surfaces().filter_by_type(st_under_it, &lower_internal);
+                    lower_layerm->fill_surfaces().filter_by_type(st_under_it, lower_internal);
                 }
 
                 // intersect such lower internal surfaces with the candidate solid surfaces
-                poly_to_replace = intersection(poly_to_replace, lower_internal);
+                poly_to_replace = intersection_ex(poly_to_replace, lower_internal);
             }
 
             if (poly_to_replace.empty()) continue;
@@ -3401,7 +3403,7 @@ void PrintObject::bridge_over_infill()
     {
         CandidateSurface(const Surface     *original_surface,
                          int                layer_index,
-                         Polygons           new_polys,
+                         ExPolygons           new_polys,
                          const LayerRegion *region,
                          double             bridge_angle)
             : original_surface(original_surface)
@@ -3412,7 +3414,7 @@ void PrintObject::bridge_over_infill()
         {}
         const Surface     *original_surface;
         int                layer_index;
-        Polygons           new_polys;
+        ExPolygons         new_polys;
         const LayerRegion *region;
         double             bridge_angle;
     };
@@ -3431,19 +3433,17 @@ void PrintObject::bridge_over_infill()
                 bool has_same_internal_bridge_min_width = true;
                 coord_t common_internal_bridge_min_width = scale_t(layer->regions().front()->region().config().internal_bridge_min_width.get_abs_value(unscaled(spacing)));
                 // unsupported area will serve as a filter for polygons worth bridging.
-                Polygons   unsupported_area;
-                Polygons   lower_layer_solids;
+                ExPolygons   unsupported_area;
+                ExPolygons   lower_layer_solids;
                 for (const LayerRegion *region : layer->lower_layer->regions()) {
-                    Polygons fill_polys = to_polygons(region->fill_expolygons());
                     // initially consider the whole layer unsupported, but also gather solid layers to later cut off supported parts
-                    unsupported_area.insert(unsupported_area.end(), fill_polys.begin(), fill_polys.end());
+                    append(unsupported_area, region->fill_expolygons());
                     for (const Surface &surface : region->fill_surfaces()) {
                         // collect below solid surface where you don't need to have brdige on top.
                         if (    surface.has(stDensSolid) ||
                                 // > 80 instead of == 100, because at 80% it's like solid for bridge, it doesn't have space.
                                 (surface.has(stDensSparse) && region->region().config().fill_density.value > 80)) {
-                            Polygons p = to_polygons(surface.expolygon);
-                            lower_layer_solids.insert(lower_layer_solids.end(), p.begin(), p.end());
+                            lower_layer_solids.push_back(surface.expolygon);
                         }
                     }
                     // check if internal_bridge_min_width is the same in all regions, it simplifies things
@@ -3454,73 +3454,75 @@ void PrintObject::bridge_over_infill()
                         has_same_internal_bridge_min_width = false;
                     }
                 }
+                unsupported_area = union_ex(unsupported_area);
+                lower_layer_solids = union_ex(lower_layer_solids);
                 if (has_same_internal_bridge_min_width) {
-                    unsupported_area = closing(unsupported_area, float(SCALED_EPSILON));
+                    unsupported_area = closing_ex(unsupported_area, float(SCALED_EPSILON));
                     // By expanding the lower layer solids, we avoid making bridges from the tiny internal overhangs that are (very likely) supported by previous layer solids
                     // NOTE that we cannot filter out polygons worth bridging by their area, because sometimes there is a very small internal island that will grow into large hole
-                    lower_layer_solids = shrink(lower_layer_solids, spacing); // first remove thin regions that will not support anything
-                    lower_layer_solids = expand(lower_layer_solids, spacing + common_internal_bridge_min_width); // then expand back (opening), and further for parts supported by internal solids
+                    lower_layer_solids = shrink_ex(lower_layer_solids, spacing); // first remove thin regions that will not support anything
+                    lower_layer_solids = /*expand*/offset_ex(lower_layer_solids, spacing + common_internal_bridge_min_width); // then expand back (opening), and further for parts supported by internal solids
                     // By shrinking the unsupported area, we avoid making bridges from narrow ensuring region along perimeters.
                     if (common_internal_bridge_min_width > 0) {
-                        unsupported_area = shrink(unsupported_area, common_internal_bridge_min_width);
+                        unsupported_area = shrink_ex(unsupported_area, common_internal_bridge_min_width);
                     }
-                    unsupported_area   = diff(unsupported_area, lower_layer_solids);
+                    unsupported_area   = diff_ex(unsupported_area, lower_layer_solids);
                 } else {
                     // get the regions ordered per internal_bridge_min_width value
-                    std::map<coord_t, Polygons> min_width_to_fills;
+                    std::map<coord_t, ExPolygons> min_width_to_fills;
                     for (const LayerRegion *region : layer->regions()) {
                         coord_t region_internal_bridge_min_width = scale_t(region->region().config().internal_bridge_min_width.get_abs_value(unscaled(spacing)));
-                        append(min_width_to_fills[region_internal_bridge_min_width], to_polygons(region->fill_expolygons()));
+                        append(min_width_to_fills[region_internal_bridge_min_width], region->fill_expolygons());
                     }
                     for (auto &entry : min_width_to_fills) {
-                        entry.second = union_safety_offset(entry.second);
+                        entry.second = union_safety_offset_ex(entry.second);
                     }
 
-                    unsupported_area = closing(unsupported_area, float(SCALED_EPSILON));
+                    unsupported_area = closing_ex(unsupported_area, float(SCALED_EPSILON));
                     // By expanding the lower layer solids, we avoid making bridges from the tiny internal overhangs
                     // that are (very likely) supported by previous layer solids NOTE that we cannot filter out
                     // polygons worth bridging by their area, because sometimes there is a very small internal island
                     // that will grow into large hole
-                    Polygons shrinked_lower_layer_solids = shrink(lower_layer_solids, spacing); // first remove thin regions that will not support anything
+                    ExPolygons shrinked_lower_layer_solids = shrink_ex(lower_layer_solids, spacing); // first remove thin regions that will not support anything
                    // then expand back (opening), and further for parts supported by internal solids
                     lower_layer_solids.clear();
                     // we iterate from big to low internal_bridge_min_width, as the high one can accept all expansions.
-                    Polygons allowed_clip;
+                    ExPolygons allowed_clip;
                     for (auto it = min_width_to_fills.rbegin(); it != min_width_to_fills.rend(); ++it) {
                         append(allowed_clip, it->second);
-                        allowed_clip = union_safety_offset(allowed_clip);
+                        allowed_clip = union_safety_offset_ex(allowed_clip);
                         append(lower_layer_solids,
-                               intersection(expand(shrinked_lower_layer_solids, spacing + it->first), allowed_clip));
+                               intersection_ex(/*expand_ex*/offset_ex(shrinked_lower_layer_solids, spacing + it->first), allowed_clip));
                     }
-                    lower_layer_solids = union_safety_offset(lower_layer_solids);
+                    lower_layer_solids = union_safety_offset_ex(lower_layer_solids);
                     // By shrinking the unsupported area, we avoid making bridges from narrow ensuring region along perimeters.
                     // this time, as it's shrinking, the iteration directino doesn't matter.
-                    Polygons shrinked_unsupported_area; 
+                    ExPolygons shrinked_unsupported_area; 
                     for (auto it = min_width_to_fills.rbegin(); it != min_width_to_fills.rend(); ++it) {
-                        append(shrinked_unsupported_area, intersection(shrink(unsupported_area, it->first), it->second));
+                        append(shrinked_unsupported_area, intersection_ex(shrink_ex(unsupported_area, it->first), it->second));
                     }
-                    shrinked_unsupported_area = union_safety_offset(shrinked_unsupported_area);
-                    unsupported_area = diff(shrinked_unsupported_area, lower_layer_solids);
+                    shrinked_unsupported_area = union_safety_offset_ex(shrinked_unsupported_area);
+                    unsupported_area = diff_ex(shrinked_unsupported_area, lower_layer_solids);
                 }
 
                 for (const LayerRegion *region : layer->regions()) {
                     coord_t region_internal_bridge_min_width = scale_t(region->region().config().internal_bridge_min_width.get_abs_value(unscaled(spacing)));
                     SurfacesPtr region_internal_solids = region->fill_surfaces().filter_by_type(stPosInternal | stDensSolid);
                     for (const Surface *srf : region_internal_solids) {
-                        Polygons unsupported         = intersection(to_polygons(srf->expolygon), unsupported_area);
+                        ExPolygons unsupported         = intersection_ex(unsupported_area, srf->expolygon);
                         // The following flag marks those surfaces, which overlap with unuspported area, but at least part of them is supported. 
                         // These regions can be filtered by area, because they for sure are touching solids on lower layers, and it does not make sense to bridge their tiny overhangs 
                         bool     partially_supported = area(unsupported) < area(to_polygons(srf->expolygon)) - EPSILON;
                         if (!unsupported.empty() && (!partially_supported || area(unsupported) > 3 * 3 * spacing * spacing)) {
-                            Polygons worth_bridging = intersection(to_polygons(srf->expolygon), expand(unsupported, region_internal_bridge_min_width + spacing));
+                            ExPolygons worth_bridging = intersection_ex(/*expand_ex*/offset_ex(unsupported, region_internal_bridge_min_width + spacing), srf->expolygon);
                             // after we extracted the part worth briding, we go over the leftovers and merge the tiny ones back, to not brake the surface too much
-                            for (const Polygon& p : diff(to_polygons(srf->expolygon), expand(worth_bridging, spacing))) {
-                                double area = p.area();
+                            for (const ExPolygon& ex_p : diff_ex(srf->expolygon, /*expand_ex*/offset_ex(worth_bridging, spacing))) {
+                                double area = ex_p.area();
                                 if (area < spacing * scale_(12.0) && area > spacing * spacing) {
-                                    worth_bridging.push_back(p);
+                                    worth_bridging.push_back(ex_p);
                                 }
                             }
-                            worth_bridging = intersection(closing(worth_bridging, float(SCALED_EPSILON)), srf->expolygon);
+                            worth_bridging = intersection_ex(closing_ex(worth_bridging, float(SCALED_EPSILON)), srf->expolygon);
                             candidate_surfaces.push_back(CandidateSurface(srf, lidx, worth_bridging, region, 0));
 
 #ifdef DEBUG_BRIDGE_OVER_INFILL
@@ -3605,7 +3607,7 @@ void PrintObject::bridge_over_infill()
                     for (const auto &surface : surfaces_by_layer[lidx]) {
                         if (surface.region != region)
                             continue;
-                        ExPolygons expansion = intersection_ex(sparse_infill, expand(surface.new_polys, scaled<float>(3.0)));
+                        ExPolygons expansion = intersection_ex(sparse_infill, /*expand_ex*/offset_ex(surface.new_polys, scaled<float>(3.0)));
                         solid_infill.insert(solid_infill.end(), expansion.begin(), expansion.end());
                     }
 
@@ -4074,14 +4076,14 @@ void PrintObject::bridge_over_infill()
                 {
                     // Now also remove area that has been already filled on lower layers by bridging expansion - For this
                     // reason we did the clustering of layers per thread.
-                    Polygons filled_polyons_on_lower_layers;
+                    ExPolygons filled_polyons_on_lower_layers;
                     coord_t   bottom_z = layer->scaled_print_z() - (bridge_height);
                     if (job_idx > 0) {
                         for (int lower_job_idx = job_idx - 1; lower_job_idx >= 0; lower_job_idx--) {
                             size_t       lower_layer_idx = clustered_layers_for_threads[cluster_idx][lower_job_idx];
                             const Layer *lower_layer     = po->get_layer(lower_layer_idx);
                             if (lower_layer->scaled_print_z() >= bottom_z) {
-                                for (const auto &c : surfaces_by_layer[lower_layer_idx]) {
+                                for (const CandidateSurface &c : surfaces_by_layer[lower_layer_idx]) {
                                     filled_polyons_on_lower_layers.insert(filled_polyons_on_lower_layers.end(), c.new_polys.begin(),
                                                                           c.new_polys.end());
                                 }
@@ -4144,16 +4146,15 @@ void PrintObject::bridge_over_infill()
                 expanded_surfaces.reserve(surfaces_by_layer[lidx].size());
                 for (const CandidateSurface &candidate : surfaces_by_layer[lidx]) {
                     const Flow &flow              = candidate.region->bridging_flow(frSolidInfill, candidate.region->region().config().bridge_type);
-                    Polygons    area_to_be_bridge = candidate.new_polys; //expand(candidate.new_polys, flow.scaled_spacing()); //why?
                     // note: using polygons instead of expolygons really create weird issues.... is it really that more efficient?
-                    ExPolygons ex_area_to_be_bridge = intersection_ex(area_to_be_bridge, deep_infill_area);
+                    ExPolygons ex_area_to_be_bridge = intersection_ex(candidate.new_polys, deep_infill_area);
                     ex_area_to_be_bridge.erase(std::remove_if(ex_area_to_be_bridge.begin(), ex_area_to_be_bridge.end(),
                                                             [internal_unsupported_area](const ExPolygon &exp) {
                                                                 return intersection_ex(exp, internal_unsupported_area)
                                                                     .empty();
                                                             }),
                                             ex_area_to_be_bridge.end());
-                    area_to_be_bridge = to_polygons(ex_area_to_be_bridge);
+                    Polygons area_to_be_bridge = to_polygons(ex_area_to_be_bridge);
                     if (area_to_be_bridge.empty())
                         continue;
 
@@ -4224,8 +4225,8 @@ void PrintObject::bridge_over_infill()
                     bridging_area          = opening(bridging_area, flow.scaled_spacing());
                     bridging_area          = closing(bridging_area, flow.scaled_spacing());
                     bridging_area          = intersection(bridging_area, limiting_area);
-                    bridging_area          = intersection(bridging_area, total_fill_area);
-                    expansion_area         = diff(expansion_area, bridging_area);
+                    ExPolygons bridging_area_final = intersection_ex(bridging_area, total_fill_area);
+                    expansion_area         = diff(expansion_area, bridging_area_final);
 
 #ifdef DEBUG_BRIDGE_OVER_INFILL
                     {
@@ -4233,11 +4234,11 @@ void PrintObject::bridge_over_infill()
                         debug_draw(std::to_string(lidx) + "_" + std::to_string(cluster_idx) + "_" +
                                        std::to_string(job_idx) + "_" + "_expanded_bridging" + std::to_string(r++) + ".svg",
                                    to_polylines(layer->lslices()), (boundary_plines),
-                                   to_polylines(candidate.new_polys), to_polylines(bridging_area));
+                                   to_polylines(candidate.new_polys), to_polylines(bridging_area_final));
                     }
 #endif
 
-                    expanded_surfaces.push_back(CandidateSurface(candidate.original_surface, candidate.layer_index, bridging_area,
+                    expanded_surfaces.push_back(CandidateSurface(candidate.original_surface, candidate.layer_index, bridging_area_final,
                                                                  candidate.region, bridging_angle));
                 }
                 surfaces_by_layer[lidx].swap(expanded_surfaces);
@@ -4256,7 +4257,7 @@ void PrintObject::bridge_over_infill()
         if (!(surfaces_by_layer.find(lidx) == surfaces_by_layer.end() && surfaces_by_layer.find(lidx + 1) == surfaces_by_layer.end())) {
             Layer *layer = po->get_layer(lidx);
 
-            Polygons cut_from_infill{};
+            ExPolygons cut_from_infill{};
             if (surfaces_by_layer.find(lidx) != surfaces_by_layer.end()) {
                 for (const auto &surface : surfaces_by_layer.at(lidx)) {
                     cut_from_infill.insert(cut_from_infill.end(), surface.new_polys.begin(), surface.new_polys.end());

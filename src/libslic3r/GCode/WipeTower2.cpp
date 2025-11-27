@@ -52,14 +52,13 @@ void WipeTower2::set_config(const PrintConfig *config, const PrintObjectConfig *
     m_object_config = object_config;
     m_region_config = region_config;
 
-    //get position
+    // get position
     m_position = Point::new_scale(m_object_config->wipe_tower_x.value, m_object_config->wipe_tower_y.value);
 }
 
 coord_t WipeTower2::width() const { return m_object_config ? scale_t(m_object_config->wipe_tower_width.value) : 0; }
 Vec2d WipeTower2::position() const {
-    return Vec2d(m_object_config ? (m_object_config->wipe_tower_x.value) : 0,
-                 m_object_config ? (m_object_config->wipe_tower_y.value) : 0);
+    return m_object_config ? Vec2d(m_object_config->wipe_tower_x.value, m_object_config->wipe_tower_y.value) : unscale(m_position);
 }
 coord_t WipeTower2::extra_spacing() const { return m_object_config ? scale_t(m_object_config->wipe_tower_extra_spacing.value) : 0; }
 double WipeTower2::rotation_angle() const { return m_object_config ? m_object_config->wipe_tower_rotation_angle.value : 0; }
@@ -300,6 +299,7 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
     assert(m_printz_to_WTLayer_data.size() <= ordering.layer_tools().size());
 
     // compute estimated tower length for each layer
+    uint16_t previous_tool_id = uint16_t(-1);
     for (auto &entry : m_printz_to_WTLayer_data) {
         WipeTowerLayerData &wp_layer = *entry.second;
         const size_t nb_toolchange = 0;
@@ -308,20 +308,11 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
             ZLayerData &extruder_data = entry.second;
             extruder_data.estimated_wipe_tower_length = 0;
             for (uint16_t tool_id : extruder_data.extruders) {
-                const FilamentToolchangeInfo &fil_info = m_filament_change_data[tool_id];
-                assert(fil_info.tool_id == tool_id);
                 // how many lines we need to reserve?
-                if (tool_id != extruder_data.extruders.front()) {
-                    // loading
-                    distf_t filament_dist = scale_d(
-                        fil_info.wipe_volume_min /
-                        (unscaled(fil_info.wipe_width) * unscaled(wp_layer.extrusion_height)));
-                    // count the lines
-                    int nb_lines = 1 + filament_dist / (width() - EPSILON);
-                    extruder_data.estimated_wipe_tower_length += nb_lines * fil_info.wipe_spacing;
-                }
-                if (tool_id != extruder_data.extruders.back()) {
+                if (tool_id != previous_tool_id && previous_tool_id < m_filament_change_data.size()) {
                     // unloading
+                    const FilamentToolchangeInfo &fil_info = m_filament_change_data[previous_tool_id];
+                    assert(fil_info.tool_id == previous_tool_id);
                     // also purge the nozzle before retracting.
                     distf_t filament_dist = scale_d(
                         fil_info.purge_volume /
@@ -329,7 +320,21 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                     // count the lines
                     int nb_lines = 1 + filament_dist / (width() - EPSILON);
                     extruder_data.estimated_wipe_tower_length += nb_lines * fil_info.purge_spacing;
+                    std::cout<<"layer "<<entry.first<<" : clean "<<previous_tool_id<<" : "<<nb_lines<<" -> "<<nb_lines * fil_info.purge_spacing<<" => total:"<<extruder_data.estimated_wipe_tower_length<<"\n";
                 }
+                if (tool_id != previous_tool_id) {
+                    // loading
+                    const FilamentToolchangeInfo &fil_info = m_filament_change_data[tool_id];
+                    assert(fil_info.tool_id == tool_id);
+                    distf_t filament_dist = scale_d(
+                        fil_info.wipe_volume_min /
+                        (unscaled(fil_info.wipe_width) * unscaled(wp_layer.extrusion_height)));
+                    // count the lines
+                    int nb_lines = 1 + filament_dist / (width() - EPSILON);
+                    extruder_data.estimated_wipe_tower_length += nb_lines * fil_info.wipe_spacing;
+                    std::cout<<"layer "<<entry.first<<" : amorce "<<tool_id<<" : "<<nb_lines<<" -> "<<nb_lines * fil_info.purge_spacing<<" => total:"<<extruder_data.estimated_wipe_tower_length<<"\n";
+                }
+                previous_tool_id = tool_id;
             }
             total_wipe_tower_length += extruder_data.estimated_wipe_tower_length;
         }
@@ -631,6 +636,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
     this->uninitialized_z.erase(this->uninitialized_z.begin()); // pop_front()
 
     if (data.estimated_wipe_tower_length <= 0) {
+        assert(ordered_extruders.size() < 2);
         //wipe tower ended
         brim_done = true;
         perimeter_done = true;
@@ -650,10 +656,14 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
 
     const coord_t wipe_tower_width = m_wipe_tower_info->width();
     const Point wipe_tower_pos(0,0);// = Point::new_scale(m_wipe_tower_info->position());
-    const Point wipe_tower_left_pos(wipe_tower_pos.x() - wipe_tower_width/2, wipe_tower_pos.y());
-    const Point wipe_tower_right_pos(wipe_tower_pos.x() + wipe_tower_width/2, wipe_tower_pos.y());
-    const Point wipe_tower_left_bot_pos(wipe_tower_pos.x() - wipe_tower_width/2, wipe_tower_pos.y() + data.estimated_wipe_tower_length);
-    const Point wipe_tower_right_bot_pos(wipe_tower_pos.x() + wipe_tower_width/2, wipe_tower_pos.y() + data.estimated_wipe_tower_length);
+    const Point wipe_tower_left_pos(wipe_tower_pos.x() - wipe_tower_width /* - wipe_tower_width / 2*/,
+                                    wipe_tower_pos.y());
+    const Point wipe_tower_right_pos(wipe_tower_pos.x() /* + wipe_tower_width / 2*/,
+                                     wipe_tower_pos.y());
+    const Point wipe_tower_left_bot_pos(wipe_tower_pos.x() - wipe_tower_width /* - wipe_tower_width / 2*/,
+                                        wipe_tower_pos.y() - data.estimated_wipe_tower_length);
+    const Point wipe_tower_right_bot_pos(wipe_tower_pos.x() /* + wipe_tower_width / 2*/,
+                                         wipe_tower_pos.y() - data.estimated_wipe_tower_length);
 
     // create toolchanges
     for (size_t i = 1; i < ordered_extruders.size(); i++) {
@@ -664,8 +674,8 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
         toolchange.from_tool_id = ordered_extruders[i-1];
         toolchange.to_tool_id = ordered_extruders[i];
         assert(layers.size() == 1);
-        const WipeTower2::FilamentToolchangeInfo &fil_info_prev = m_wipe_tower_info->m_filament_change_data[ordered_extruders[i-1]];
-        const WipeTower2::FilamentToolchangeInfo &fil_info_next = m_wipe_tower_info->m_filament_change_data[ordered_extruders[i]];
+        const WipeTower2::FilamentToolchangeInfo &fil_info_prev = m_wipe_tower_info->m_filament_change_data[toolchange.from_tool_id];
+        const WipeTower2::FilamentToolchangeInfo &fil_info_next = m_wipe_tower_info->m_filament_change_data[toolchange.to_tool_id];
         //create polylines
         //purge
         if (fil_info_prev.purge_volume > 0) {
@@ -674,8 +684,9 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                                                          unscaled(extrusion_height), 1.f, false);
             distf_t dist_purge = scale_d(fil_info_prev.purge_volume / (unscaled(fil_info_prev.purge_width) * unscaled(extrusion_height)));
             int nblines_purge = ((dist_purge - 1) / wipe_tower_width) + 1;
+            std::cout<<"Write layer "<<extrusion_z<<" : purge "<<toolchange.from_tool_id<<" : "<<nblines_purge<<" -> "<<nblines_purge * fil_info_next.purge_spacing<<"\n";
             for (size_t iline = 0; iline < nblines_purge; iline++) {
-                m_current_y_pos += fil_info_prev.purge_spacing / 2;
+                m_current_y_pos -= fil_info_prev.purge_spacing / 2;
                 if (iline % 2 == 0) {
                     toolchange.purge_lines.points.push_back(
                         Point(wipe_tower_left_pos.x(), wipe_tower_pos.y() + m_current_y_pos));
@@ -687,7 +698,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                     toolchange.purge_lines.points.push_back(
                         Point(wipe_tower_left_pos.x(), wipe_tower_pos.y() + m_current_y_pos));
                 }
-                m_current_y_pos += fil_info_prev.purge_spacing / 2;
+                m_current_y_pos -= fil_info_prev.purge_spacing / 2;
             }
         }
         //wipe
@@ -698,8 +709,9 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
             Polyline polyline_wipe;
             distf_t dist_wipe = scale_d(fil_info_next.wipe_volume_min / (unscaled(fil_info_next.wipe_width) * unscaled(extrusion_height)));
             int nblines_wipe = ((dist_wipe - 1) / wipe_tower_width) + 1;
+            std::cout<<"Write layer "<<extrusion_z<<" : wipe "<<toolchange.to_tool_id<<" : "<<nblines_wipe<<" -> "<<nblines_wipe * fil_info_next.wipe_spacing<<"\n";
             for (size_t iline = 0; iline < nblines_wipe; iline++) {
-                m_current_y_pos += fil_info_next.wipe_spacing / 2;
+                m_current_y_pos -= fil_info_next.wipe_spacing / 2;
                 if (iline % 2 == 0) {
                     toolchange.wipe_lines.points.push_back(
                         Point(wipe_tower_left_pos.x(), wipe_tower_pos.y() + m_current_y_pos));
@@ -711,7 +723,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                     toolchange.wipe_lines.points.push_back(
                         Point(wipe_tower_left_pos.x(), wipe_tower_pos.y() + m_current_y_pos));
                 }
-                m_current_y_pos += fil_info_next.wipe_spacing / 2;
+                m_current_y_pos -= fil_info_next.wipe_spacing / 2;
             }
         }
     }
@@ -753,8 +765,11 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
             perimeter.points.emplace_back(perimeter.points[i].x(), data.estimated_wipe_tower_length - perimeter.points[i].y());
         }
         perimeter.points.push_back(wipe_tower_left_bot_pos);
-
-        perimeter = offset(perimeter, (tower_perimeter_flow.scaled_width())/2).front();
+        perimeter.reverse(); // built as CW, nede to fix it to CCW.
+        assert(perimeter.is_counter_clockwise());
+        Polygons big_rectangle = offset(perimeter, (tower_perimeter_flow.scaled_width())/2);
+        assert(!big_rectangle.empty());
+        perimeter = big_rectangle.front();
         tower_perimeters.push_back(perimeter.split_at_first_point());
 
         // brim (first layer only)
@@ -1352,21 +1367,23 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
     }
 
     //if nothing to fill
-    if (m_current_y_pos + infill_flow.scaled_width() >= m_max_y_pos) {
+    if (-m_current_y_pos + infill_flow.scaled_width() >= m_max_y_pos) {
         return smthg_printed;
     }
     
     const coord_t wipe_tower_width = m_wipe_tower_info->width();
-    const Point wipe_tower_left_pos(-wipe_tower_width / 2, m_current_y_pos);
-    const Point wipe_tower_right_pos(wipe_tower_width / 2, m_current_y_pos);
-    const Point wipe_tower_left_bot_pos(-wipe_tower_width / 2, m_max_y_pos);
-    const Point wipe_tower_right_bot_pos(wipe_tower_width / 2, m_max_y_pos);
+    const Point wipe_tower_left_pos(-wipe_tower_width , m_current_y_pos);
+    const Point wipe_tower_right_pos(0, m_current_y_pos);
+    const Point wipe_tower_left_bot_pos(-wipe_tower_width, -m_max_y_pos);
+    const Point wipe_tower_right_bot_pos(0, -m_max_y_pos);
     std::unique_ptr<Fill> filler;
     FillParams params;
     params.role = ExtrusionRole::WipeTower;
     params.flow = infill_flow;
-    Polygon wt_rectangle(Points{wipe_tower_right_pos, wipe_tower_right_bot_pos, wipe_tower_left_bot_pos, wipe_tower_left_pos});
+    Polygon wt_rectangle(Points{wipe_tower_right_pos, wipe_tower_left_pos, wipe_tower_left_bot_pos, wipe_tower_right_bot_pos});
+    assert(wt_rectangle.is_counter_clockwise());
     wt_rectangle = offset(wt_rectangle, infill_flow.scaled_spacing()/4).front();
+    assert(wt_rectangle.is_counter_clockwise());
     Surface surface(stPosBottom | stDensSolid, ExPolygon(wt_rectangle));
     if (extrusion_z == extrusion_height) {
         // infill

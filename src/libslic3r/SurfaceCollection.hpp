@@ -36,7 +36,10 @@ public:
     void remove_type(const SurfaceType type);
     void remove_type(const SurfaceType type, ExPolygons *polygons);
     void remove_types(std::initializer_list<SurfaceType> types);
+    //Deprecated, use ExPolygons
     void filter_by_type(const SurfaceType type, Polygons* polygons) const;
+    void filter_by_type(const SurfaceType type, ExPolygons &polygons) const;
+    //Deprecated
     void filter_by_type_flag(Polygons* polygons, const SurfaceType flags_needed, const SurfaceType flags_not_allowed = stNone) const;
     void set_type(SurfaceType type) {
         for (Surface &surface : this->surfaces)

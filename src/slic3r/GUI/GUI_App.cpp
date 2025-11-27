@@ -1978,6 +1978,7 @@ std::map<ConfigOptionMode, std::string> GUI_App::get_mode_default_palette()
     tag_color_map[ConfigOptionMode::comAdvanced] = "#FFDC00";
     tag_color_map[ConfigOptionMode::comExpert] = "#E70000";
     //get from color.ini
+    std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
     for (Tag app_config->tags()) {
         tag_color_map[tag] = color_hash
     }
@@ -2404,7 +2405,7 @@ const std::string GUI_App::get_html_bg_color(wxWindow* html_parent)
 std::string GUI_App::get_first_mode_btn_color(ConfigOptionMode mode_id) const
 {
     assert(0 <= size_t(mode_id));
-                           
+    std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
     for (const AppConfig::Tag& tag : get_app_config()->tags()) {
         // get the first good tag.
         if ((tag.tag & mode_id) == tag.tag) {
@@ -2417,9 +2418,11 @@ std::string GUI_App::get_first_mode_btn_color(ConfigOptionMode mode_id) const
 std::string GUI_App::get_last_mode_btn_color(ConfigOptionMode mode_id) const
 {
     assert(0 <= size_t(mode_id));
-    assert(size_t(mode_id)< get_app_config()->tags().size());
-    for (size_t idx_p1 = get_app_config()->tags().size(); idx_p1 > 0; --idx_p1) {
-        const AppConfig::Tag& tag = get_app_config()->tags()[idx_p1-1];
+    std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
+    const std::vector<AppConfig::Tag> &tags = get_app_config()->tags();
+    assert(size_t(mode_id) < tags.size());
+    for (size_t idx_p1 = tags.size() - 1; idx_p1 < tags.size(); --idx_p1) {
+        const AppConfig::Tag& tag = tags[idx_p1];
         // get the first good tag.
         if ((tag.tag & mode_id) == tag.tag) {
             // store the pointer so we can return a valid reference.
@@ -2434,6 +2437,7 @@ std::map<ConfigOptionMode, wxColour> GUI_App::get_mode_palette() const
 {
     std::map<ConfigOptionMode, wxColour> ret_map;
     //if(size_t(mode_id) < m_mode_palette.size()
+    std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
     for (const AppConfig::Tag& tag : get_app_config()->tags()) {
         ret_map[tag.tag] = wxColor(tag.color_hash);
     }
@@ -3273,7 +3277,7 @@ void GUI_App::update_mode()
 void GUI_App::add_config_menu(wxMenuBar *menu)
 {
     auto local_menu = new wxMenu();
-    wxWindowID config_id_base = wxWindow::NewControlId(int(ConfigMenuCnt + Slic3r::GUI::get_app_config()->tags().size()*2));
+    wxWindowID config_id_base = wxWindow::NewControlId(int(ConfigMenuCnt + Slic3r::GUI::get_app_config()->tags().size() * 2));
 
     const wxString config_wizard_name = _(ConfigWizard::name(true));
     const wxString config_wizard_tooltip = from_u8((boost::format(_u8L("Run %s")) % config_wizard_name).str());
@@ -3305,6 +3309,7 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
         local_menu->AppendSeparator();
         mode_menu = new wxMenu();
         int config_menu_idx = 0;
+        std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
         for (const AppConfig::Tag& tag : Slic3r::GUI::get_app_config()->tags()) {
             mode_menu->AppendCheckItem(config_id_base + ConfigMenuCnt + config_menu_idx, _(tag.name), _(tag.description));
             Bind(wxEVT_UPDATE_UI, [this, tag](wxUpdateUIEvent& evt) { evt.Check((get_mode() & tag.tag) == tag.tag); }, config_id_base + ConfigMenuCnt + config_menu_idx);
@@ -3494,6 +3499,7 @@ void GUI_App::add_config_menu(wxMenuBar *menu)
     using std::placeholders::_1;
 
     if (mode_menu != nullptr) {
+        std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
         auto modefn = [this](ConfigOptionMode mode, wxCommandEvent&) { if (get_mode() != mode) save_mode(mode); };
         int config_menu_idx = 0;
         for (const AppConfig::Tag& tag : Slic3r::GUI::get_app_config()->tags()) {

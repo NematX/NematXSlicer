@@ -1288,6 +1288,7 @@ void Sidebar::jump_to_option(size_t selected)
     else {
     ConfigOptionMode mode = wxGetApp().get_mode();
     if ((opt.tags & mode) != mode) {
+        std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
         wxString your_modes = _L("Your current tags:");
         wxString option_modes = _L("Option tags:");
         for (AppConfig::Tag& t : get_app_config()->tags()) {
@@ -2950,28 +2951,28 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                         wxGetApp().app_config->update_config_dir(path.parent_path().string());
                 }
             } else {
-               
                if (load_model) {
-                  if (type_step) {
-                  // Do not load config with STEP type
+                    if (type_step) {
+                        // Do not load config with STEP type
                         load_config = false;
-                        double linear_precision = string_to_double_decimal_point(wxGetApp().app_config->get("linear_precision"));
-                        double angle_precision = string_to_double_decimal_point(wxGetApp().app_config->get("angle_precision"));
-                        loaded_model = Slic3r::Model::read_from_file(path.string(),
-                                                                 nullptr,
-                                                                 nullptr,
-                                                                 only_if(load_config, Model::LoadAttribute::CheckVersion) |
-                                                                 only_if(unbake_trsf, Model::LoadAttribute::UnbakeTransformation),
-                                                                 std::make_pair(linear_precision, angle_precision));
-                  } else {
-                        loaded_model = Slic3r::Model::read_from_file(path.string(),
-                                          nullptr,
-                                          nullptr,
-                                          only_if(load_config, Model::LoadAttribute::CheckVersion) |
-                                          only_if(unbake_trsf, Model::LoadAttribute::UnbakeTransformation));
-                  }
-               }
-               
+                        double linear_precision = string_to_double_decimal_point(
+                            wxGetApp().app_config->get("linear_precision"));
+                        double angle_precision = string_to_double_decimal_point(
+                            wxGetApp().app_config->get("angle_precision"));
+                        loaded_model =
+                            Slic3r::Model::read_from_file(path.string(), nullptr, nullptr,
+                                                          only_if(load_config, Model::LoadAttribute::CheckVersion) |
+                                                              only_if(unbake_trsf,
+                                                                      Model::LoadAttribute::UnbakeTransformation),
+                                                          std::make_pair(linear_precision, angle_precision));
+                    } else {
+                        loaded_model =
+                            Slic3r::Model::read_from_file(path.string(), nullptr, nullptr,
+                                                          only_if(load_config, Model::LoadAttribute::CheckVersion) |
+                                                              only_if(unbake_trsf,
+                                                                      Model::LoadAttribute::UnbakeTransformation));
+                    }
+                }
                 for (auto obj : loaded_model.objects) {
                     if (obj->name.empty()) {
                         obj->name = fs::path(obj->input_file).filename().string();
@@ -3100,8 +3101,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
             }
 
             if (one_by_one) {
-                if ((type_3mf && !is_project_file) || (type_any_amf && !type_zip_amf))
-                    loaded_model.center_instances_around_point(this->bed.build_volume().bed_center());
+                if ((type_3mf && !is_project_file) || (type_any_amf && !type_zip_amf)) {
+                  loaded_model.center_instances_around_point(this->bed.build_volume().bed_center());
+                }
                 auto loaded_idxs = load_model_objects(loaded_model.objects, is_project_file);
                 obj_idxs.insert(obj_idxs.end(), loaded_idxs.begin(), loaded_idxs.end());
             } else {
@@ -3114,8 +3116,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 }
             }
 
-            if (is_project_file)
+            if (is_project_file) {
                 plater_after_load_auto_arrange.disable();
+            }
         }
     }
 

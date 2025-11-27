@@ -201,6 +201,13 @@ enum SeamPosition {
     spCost,
 };
 
+// Orca
+enum class SeamScarfType {
+    None,
+    External,
+    All,
+};
+
 enum SLAMaterial {
     slamTough,
     slamFlex,
@@ -332,6 +339,7 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialPattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialStyle)
 //CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SupportMaterialInterfacePattern)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamPosition)
+CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SeamScarfType)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(SLAMaterial)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(DenseInfillAlgo)
 CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(NoPerimeterUnsupportedAlgo)
@@ -1040,6 +1048,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloat,                seam_notch_angle))
     ((ConfigOptionFloatOrPercent,       seam_notch_inner))
     ((ConfigOptionFloatOrPercent,       seam_notch_outer))
+    ((ConfigOptionEnum<SeamScarfType>,  seam_slope_type))
+    ((ConfigOptionFloatOrPercent,       seam_slope_min_height))
+    ((ConfigOptionFloatOrPercent,       seam_slope_max_length))
     ((ConfigOptionGraph,                small_area_infill_flow_compensation_model))
     ((ConfigOptionFloatOrPercent,       small_perimeter_speed))
     ((ConfigOptionFloatOrPercent,       small_perimeter_min_length))

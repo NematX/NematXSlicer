@@ -469,6 +469,8 @@ inline ExPolygons to_expolygons(const Polygons &polys)
     return ex_polys;
 }
 
+// trasform a list of contour (ccw) into expolygons
+// polys.size() == return.size()
 inline ExPolygons to_expolygons(Polygons &&polys)
 {
     ExPolygons ex_polys;
@@ -480,6 +482,8 @@ inline ExPolygons to_expolygons(Polygons &&polys)
     return ex_polys;
 }
 
+// trasform a list of contour (ccw) into expolygons
+// polys.size() == return.size()
 inline Points to_points(const ExPolygon &expoly)
 {
     Points out;

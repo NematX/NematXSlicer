@@ -824,7 +824,7 @@ private:
 
     void                _make_skirt_brim();
     void                _make_skirt(const PrintObjectPtrs &objects, ExtrusionEntityCollection &out, std::optional<ExtrusionEntityCollection> &out_first_layer);
-    void                _make_wipe_tower();
+    //void                _make_wipe_tower();
     void                finalize_first_layer_convex_hull();
     void                alert_when_supports_needed();
 
@@ -859,6 +859,7 @@ private:
 
     // Following section will be consumed by the GCodeGenerator.
     std::vector<ToolOrdering>               m_tool_orderings;
+    mutable std::mutex                      m_wipe_tower_data_mutex;
     WipeTowerData                           m_wipe_tower_data {this};
     std::unique_ptr<WipeTower2>             m_wipe_tower2;
 

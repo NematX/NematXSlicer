@@ -8181,7 +8181,8 @@ void GLCanvas3D::_set_warning_notification(EWarning warning, bool state)
     const ConflictResultOpt& conflict_result = m_gcode_viewer.get_conflict_result();
     if (warning == EWarning::GCodeConflict) {
         if (conflict_result.has_value()) {
-            const PrintObject* obj2 = reinterpret_cast<const PrintObject*>(conflict_result->_obj2);
+            const void* obj2_void = conflict_result->_obj2;
+            const PrintObject* obj2 = reinterpret_cast<const PrintObject*>(obj2_void);
             auto     mo = obj2->model_object();
             ObjectID id = mo->id();
             int layer_id = conflict_result->layer;

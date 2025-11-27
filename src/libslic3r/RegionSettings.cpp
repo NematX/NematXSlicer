@@ -81,9 +81,9 @@ void RegionSettings::segregate_regions(const ExPolygon &my_srf, const LayerRegio
                 }
             }
             // delete empty ones
-            //std::erase_if(opt_2_areas, [](auto &kv) { return kv.second.expolys.empty(); });
+            //std::erase_if(opt_2_areas, [](auto &kv) { return kv.second.is_accept_all(); });
             for (auto it = opt_2_areas.begin(); it != opt_2_areas.end();) {
-                if (it->second.expolys.empty()) {
+                if (it->second.is_accept_all()) {
                     it = opt_2_areas.erase(it);
                 } else {
                     ++it;
@@ -115,7 +115,7 @@ void RegionSettings::ClipExpoly::compute_bb() {
 }
 
 ExPolygons RegionSettings::ClipExpoly::intersections(const ExPolygons &to_clip) const {
-    if (this->expolys.empty()) {
+    if (this->is_accept_all()) {
         return to_clip;
     }
     ExPolygons intersections;
@@ -131,7 +131,7 @@ ExPolygons RegionSettings::ClipExpoly::intersections(const ExPolygons &to_clip) 
 }
 
 ExPolygons RegionSettings::ClipExpoly::intersections(coord_t offset, const ExPolygons &to_clip) const {
-    if (this->expolys.empty()) {
+    if (this->is_accept_all()) {
         return to_clip;
     }
     ExPolygons intersections;

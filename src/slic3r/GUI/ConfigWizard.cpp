@@ -1787,8 +1787,12 @@ PageVendors::PageVendors(ConfigWizard *parent)
             wizard_p()->on_3rdparty_install(vendor, cbox->IsChecked());
         });
 
-        const auto &acvendors = appconfig.vendors();
-        const bool enabled = acvendors.find(vendor->id) != acvendors.end();
+        /*const*/ bool enabled;
+        {
+            std::lock_guard<std::recursive_mutex> lk(appconfig.config_lock);
+            const VendorMap &acvendors = appconfig.vendors();
+            enabled = acvendors.find(vendor->id) != acvendors.end();
+        }
         if (enabled) {
             cbox->SetValue(true);
 
@@ -3091,8 +3095,16 @@ static std::string get_first_added_preset(const std::map<std::string, std::strin
 bool ConfigWizard::priv::apply_config(AppConfig *app_config, PresetBundle *preset_bundle, const PresetUpdater *updater, bool& apply_keeped_changes)
 {
     wxString header, caption = _L("Configuration is edited in ConfigWizard");
-    const auto enabled_vendors = appconfig_new.vendors();
-    const auto enabled_vendors_old = app_config->vendors();
+    /*const*/ AppConfig::VendorMap enabled_vendors;
+    /*const*/ AppConfig::VendorMap enabled_vendors_old;
+    {
+        std::lock_guard<std::recursive_mutex> lk(appconfig_new.config_lock);
+        enabled_vendors = appconfig_new.vendors();
+    }
+    {
+        std::lock_guard<std::recursive_mutex> lk(app_config->config_lock);
+        enabled_vendors_old = app_config->vendors();
+    }
 
     bool suppress_sla_printer = model_has_multi_part_objects(wxGetApp().model());
     PrinterTechnology preferred_pt = ptAny;

@@ -181,7 +181,7 @@ public:
     const std::vector<const PrintObject *>& objects() const { return m_objects; };
 
 private:
-    void				initialize_layers(std::vector<coord_t> &zs);
+    void initialize_layers(std::vector<coord_t> &zs);
     void collect_extruders(const PrintObject &object,
                            const GCode::ObjectsLayerToPrint &layers,
                            const std::vector<std::pair<coord_t, uint16_t>> &per_layer_extruder_switches,

@@ -85,6 +85,16 @@ void SurfaceCollection::filter_by_type(const SurfaceType type, Polygons *polygon
         }
     }
 }
+
+void SurfaceCollection::filter_by_type(const SurfaceType type, ExPolygons &expolygons) const
+{
+    for (const Surface & surface : this->surfaces) {
+        if (surface.surface_type == type) {
+            expolygons.push_back(surface.expolygon);
+        }
+    }
+}
+
 void
 SurfaceCollection::filter_by_type_flag(Polygons* polygons, const SurfaceType flags_needed, const SurfaceType flags_not_allowed) const
 {

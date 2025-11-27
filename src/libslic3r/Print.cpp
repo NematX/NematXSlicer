@@ -1364,6 +1364,18 @@ void Print::process()
         this->m_wipe_tower2->init(this, this->objects(), this->m_tool_orderings.back());
 
         this->set_done(psWipeTower);
+        //fill wtdata
+        {
+            std::scoped_lock<std::mutex> lock(m_wipe_tower_data_mutex);
+            m_wipe_tower_data.height = -1;
+            m_wipe_tower_data.z_and_depth_pairs.clear();
+            for (auto &wt_layer : this->m_wipe_tower2->m_WTLayer_data) {
+                m_wipe_tower_data.height = std::max(m_wipe_tower_data.height, (float)unscaled(wt_layer->extrusion_z));
+                m_wipe_tower_data.z_and_depth_pairs.emplace_back((float)unscaled(wt_layer->extrusion_z), (float)unscaled(wt_layer->estimated_wipe_tower_length));
+            }
+            std::sort(m_wipe_tower_data.z_and_depth_pairs.begin(), m_wipe_tower_data.z_and_depth_pairs.end(),
+                [](std::pair<float,float> &e1, std::pair<float,float> &e2){ return e1.first < e2.first; });
+        }
     }
     
     secondary_status_counter_reset();
@@ -2261,6 +2273,7 @@ bool Print::has_wipe_tower() const {
 
 const WipeTowerData& Print::wipe_tower_data(const ConfigBase* config, double nozzle_diameter) const
 {
+    std::scoped_lock<std::mutex> lock(m_wipe_tower_data_mutex);
     // If the wipe tower wasn't created yet, make sure the depth and brim_width members are set to default.
     if (! is_step_done(psWipeTower) && config != &this->m_config) {
         size_t extruders_cnt = config->option("nozzle_diameter")->size();
@@ -2305,166 +2318,166 @@ const WipeTowerData& Print::wipe_tower_data(const ConfigBase* config, double noz
 
     return this->m_wipe_tower_data;
 }
-
-void Print::_make_wipe_tower()
-{
-    m_wipe_tower_data.clear();
-    if (! this->has_wipe_tower())
-        return;
-
-    std::vector<std::vector<float>> wipe_volumes = WipeTower::extract_wipe_volumes(m_config);
-
-    if (! m_wipe_tower_data.print->tool_orderings().front().has_wipe_tower())
-        // Don't generate any wipe tower.
-        return;
-
-    assert(m_tool_orderings.size() == 1);
-
-    // Check whether there are any layers in m_tool_orderings, which are marked with has_wipe_tower,
-    // they print neither object, nor support. These layers are above the raft and below the object, and they
-    // shall be added to the support layers to be printed.
-    // see https://github.com/prusa3d/PrusaSlicer/issues/607
-    {
-        size_t idx_begin = size_t(-1);
-        size_t idx_end   = m_tool_orderings.front().layer_tools().size();
-        // Find the first wipe tower layer, which does not have a counterpart in an object or a support layer.
-        for (size_t i = 0; i < idx_end; ++ i) {
-            const LayerTools &lt = m_tool_orderings.front().layer_tools()[i];
-            if (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support) {
-                idx_begin = i;
-                break;
-            }
-        }
-        if (idx_begin != size_t(-1)) {
-            // Find the position in m_objects.first()->support_layers to insert these new support layers.
-            coord_t wipe_tower_new_layer_print_z_first = m_tool_orderings.front().layer_tools()[idx_begin]._print_z;
-            SupportLayerPtrs::const_iterator it_layer = m_objects.front()->edit_support_layers().begin();
-            for (; it_layer != m_objects.front()->edit_support_layers().end() && (*it_layer)->scaled_print_z() <= wipe_tower_new_layer_print_z_first; ++ it_layer);
-            // Find the stopper of the sequence of wipe tower layers, which do not have a counterpart in an object or a support layer.
-            for (size_t i = idx_begin; i < idx_end; ++ i) {
-                LayerTools &lt = const_cast<LayerTools&>(m_tool_orderings.front().layer_tools()[i]);
-                if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support))
-                    break;
-                lt.has_support = true;
-                // Insert the new support layer.
-                coord_t height = lt._print_z - (i == 0 ? 0. : m_tool_orderings.front().layer_tools()[i-1]._print_z);
-                //FIXME the support layer ID is set to -1, as Vojtech hopes it is not being used anyway.
-                it_layer = m_objects.front()->insert_support_layer(it_layer, -1, 0, height, lt._print_z, unscaled(lt._print_z - height / 2));
-                ++ it_layer;
-            }
-        }
-    }
-    this->throw_if_canceled();
-
-    // Initialize the wipe tower.
-    WipeTower wipe_tower(m_config, m_default_object_config, m_default_region_config, wipe_volumes, m_tool_orderings.front().first_extruder());
-
-    // Set the extruder & material properties at the wipe tower object.
-    for (size_t i = 0; i < m_config.nozzle_diameter.size(); ++ i)
-        wipe_tower.set_extruder(i);
-
-    m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
-        wipe_tower.prime((float)unscaled(get_min_first_layer_height()), m_tool_orderings.front().all_extruders(), false));
-
-    // Lets go through the wipe tower layers and determine pairs of extruder changes for each
-    // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
-    {
-        unsigned int current_extruder_id = m_tool_orderings.front().all_extruders().back();
-        for (LayerTools &layer_tools : m_tool_orderings.front().layer_tools()) { // for all layers
-            if (!layer_tools.has_wipe_tower) continue;
-            bool first_layer = &layer_tools == &m_tool_orderings.front().front();
-            wipe_tower.plan_toolchange((float)unscaled(layer_tools._print_z), (float)unscaled(layer_tools.wipe_tower_layer_height), current_extruder_id, current_extruder_id, false);
-            for (const auto extruder_id : layer_tools.extruders) {
-                if ((first_layer && extruder_id == m_tool_orderings.front().all_extruders().back()) || extruder_id != current_extruder_id) {
-                    double volume_to_wipe = wipe_volumes[current_extruder_id][extruder_id];             // total volume to wipe after this toolchange
-                    
-                    // START filament_wipe_advanced_pigment
-                    if (m_config.wipe_advanced) {
-                        volume_to_wipe = m_config.wipe_advanced_nozzle_melted_volume;
-                        float pigmentBef = m_config.filament_wipe_advanced_pigment.get_at(current_extruder_id);
-                        float pigmentAft = m_config.filament_wipe_advanced_pigment.get_at(extruder_id);
-                        if (m_config.wipe_advanced_algo.value == waLinear) {
-                            volume_to_wipe += m_config.wipe_advanced_multiplier.value * (pigmentBef - pigmentAft);
-                            BOOST_LOG_TRIVIAL(info) << "advanced wiping (lin) ";
-                            BOOST_LOG_TRIVIAL(info) << current_extruder_id << " -> " << extruder_id << " will use " << volume_to_wipe << " mm3\n";
-                            BOOST_LOG_TRIVIAL(info) << " calculus : " << m_config.wipe_advanced_nozzle_melted_volume << " + " << m_config.wipe_advanced_multiplier.value
-                                << " * ( " << pigmentBef << " - " << pigmentAft << " )\n";
-                            BOOST_LOG_TRIVIAL(info) << "    = " << m_config.wipe_advanced_nozzle_melted_volume << " + " << (m_config.wipe_advanced_multiplier.value* (pigmentBef - pigmentAft)) << "\n";
-                        } else if (m_config.wipe_advanced_algo.value == waQuadra) {
-                            volume_to_wipe += m_config.wipe_advanced_multiplier.value * (pigmentBef - pigmentAft)
-                                + m_config.wipe_advanced_multiplier.value * (pigmentBef - pigmentAft) * (pigmentBef - pigmentAft) * (pigmentBef - pigmentAft);
-                            BOOST_LOG_TRIVIAL(info) << "advanced wiping (quadra) ";
-                            BOOST_LOG_TRIVIAL(info) << current_extruder_id << " -> " << extruder_id << " will use " << volume_to_wipe << " mm3\n";
-                            BOOST_LOG_TRIVIAL(info) << " calculus : " << m_config.wipe_advanced_nozzle_melted_volume << " + " << m_config.wipe_advanced_multiplier.value
-                                << " * ( " << pigmentBef << " - " << pigmentAft << " ) + " << m_config.wipe_advanced_multiplier.value
-                                << " * ( " << pigmentBef << " - " << pigmentAft << " ) ^3 \n";
-                            BOOST_LOG_TRIVIAL(info) << "    = " << m_config.wipe_advanced_nozzle_melted_volume << " + " << (m_config.wipe_advanced_multiplier.value* (pigmentBef - pigmentAft))
-                                << " + " << (m_config.wipe_advanced_multiplier.value*(pigmentBef - pigmentAft)*(pigmentBef - pigmentAft)*(pigmentBef - pigmentAft))<<"\n";
-                        } else if (m_config.wipe_advanced_algo.value == waHyper) {
-                            volume_to_wipe += m_config.wipe_advanced_multiplier.value * (0.5 + pigmentBef) / (0.5 + pigmentAft);
-                            BOOST_LOG_TRIVIAL(info) << "advanced wiping (hyper) ";
-                            BOOST_LOG_TRIVIAL(info) << current_extruder_id << " -> " << extruder_id << " will use " << volume_to_wipe << " mm3\n";
-                            BOOST_LOG_TRIVIAL(info) << " calculus : " << m_config.wipe_advanced_nozzle_melted_volume << " + " << m_config.wipe_advanced_multiplier.value
-                                << " * ( 0.5 + " << pigmentBef << " ) / ( 0.5 + " << pigmentAft << " )\n";
-                            BOOST_LOG_TRIVIAL(info) << "    = " << m_config.wipe_advanced_nozzle_melted_volume << " + " << (m_config.wipe_advanced_multiplier.value * (0.5 + pigmentBef) / (0.5 + pigmentAft)) << "\n";
-                        }
-                    }
-                    // END filament_wipe_advanced_pigment
-                    
-                    // Not all of that can be used for infill purging:
-                    volume_to_wipe -= (float)m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
-
-                    // try to assign some infills/objects for the wiping:
-                    volume_to_wipe = layer_tools.wiping_extrusions_nonconst().mark_wiping_extrusions(*this, layer_tools, current_extruder_id, extruder_id, volume_to_wipe);
-
-                    // add back the minimal amount toforce on the wipe tower:
-                    volume_to_wipe += (float)m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
-
-                    // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
-                    wipe_tower.plan_toolchange((float)unscaled(layer_tools._print_z), (float)unscaled(layer_tools.wipe_tower_layer_height),
-                                               current_extruder_id, extruder_id, volume_to_wipe);
-                    current_extruder_id = extruder_id;
-                }
-            }
-            layer_tools.wiping_extrusions_nonconst().ensure_perimeters_infills_order(*this, layer_tools);
-            if (&layer_tools == &m_tool_orderings.front().back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
-                break;
-        }
-    }
-
-    // Generate the wipe tower layers.
-    m_wipe_tower_data.tool_changes.reserve(m_tool_orderings.front().layer_tools().size());
-    wipe_tower.generate(m_wipe_tower_data.tool_changes);
-    m_wipe_tower_data.depth = wipe_tower.get_depth();
-    m_wipe_tower_data.z_and_depth_pairs = wipe_tower.get_z_and_depth_pairs();
-    m_wipe_tower_data.brim_width = wipe_tower.get_brim_width();
-    m_wipe_tower_data.height = wipe_tower.get_wipe_tower_height();
-
-    // Unload the current filament over the purge tower.
-    double layer_height = m_objects.front()->config().layer_height.value;
-    if (m_tool_orderings.front().back().wipe_tower_partitions > 0) {
-        // The wipe tower goes up to the last layer of the print.
-        if (wipe_tower.layer_finished()) {
-            // The wipe tower is printed to the top of the print and it has no space left for the final extruder purge.
-            // Lift Z to the next layer.
-            wipe_tower.set_layer(float(unscaled(m_tool_orderings.front().back()._print_z) + layer_height), float(layer_height), 0, false, true);
-        } else {
-            // There is yet enough space at this layer of the wipe tower for the final purge.
-        }
-    } else {
-        // The wipe tower does not reach the last print layer, perform the pruge at the last print layer.
-        assert(m_tool_orderings.front().back().wipe_tower_partitions == 0);
-        wipe_tower.set_layer(float(unscaled(m_tool_orderings.front().back()._print_z)), float(layer_height), 0, false, true);
-    }
-    m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(
-        wipe_tower.tool_change((unsigned int)(-1)));
-
-    m_wipe_tower_data.used_filament_until_layer = wipe_tower.get_used_filament_until_layer();
-    m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
-    m_wipe_tower_data.width = wipe_tower.width();
-    m_wipe_tower_data.first_layer_height = unscaled(get_min_first_layer_height());
-    m_wipe_tower_data.cone_angle = m_default_object_config.wipe_tower_cone_angle;
-}
+//
+//void Print::_make_wipe_tower()
+//{
+//    m_wipe_tower_data.clear();
+//    if (! this->has_wipe_tower())
+//        return;
+//
+//    std::vector<std::vector<float>> wipe_volumes = WipeTower::extract_wipe_volumes(m_config);
+//
+//    if (! m_wipe_tower_data.print->tool_orderings().front().has_wipe_tower())
+//        // Don't generate any wipe tower.
+//        return;
+//
+//    assert(m_tool_orderings.size() == 1);
+//
+//    // Check whether there are any layers in m_tool_orderings, which are marked with has_wipe_tower,
+//    // they print neither object, nor support. These layers are above the raft and below the object, and they
+//    // shall be added to the support layers to be printed.
+//    // see https://github.com/prusa3d/PrusaSlicer/issues/607
+//    {
+//        size_t idx_begin = size_t(-1);
+//        size_t idx_end   = m_tool_orderings.front().layer_tools().size();
+//        // Find the first wipe tower layer, which does not have a counterpart in an object or a support layer.
+//        for (size_t i = 0; i < idx_end; ++ i) {
+//            const LayerTools &lt = m_tool_orderings.front().layer_tools()[i];
+//            if (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support) {
+//                idx_begin = i;
+//                break;
+//            }
+//        }
+//        if (idx_begin != size_t(-1)) {
+//            // Find the position in m_objects.first()->support_layers to insert these new support layers.
+//            coord_t wipe_tower_new_layer_print_z_first = m_tool_orderings.front().layer_tools()[idx_begin]._print_z;
+//            SupportLayerPtrs::const_iterator it_layer = m_objects.front()->edit_support_layers().begin();
+//            for (; it_layer != m_objects.front()->edit_support_layers().end() && (*it_layer)->scaled_print_z() <= wipe_tower_new_layer_print_z_first; ++ it_layer);
+//            // Find the stopper of the sequence of wipe tower layers, which do not have a counterpart in an object or a support layer.
+//            for (size_t i = idx_begin; i < idx_end; ++ i) {
+//                LayerTools &lt = const_cast<LayerTools&>(m_tool_orderings.front().layer_tools()[i]);
+//                if (! (lt.has_wipe_tower && ! lt.has_object && ! lt.has_support))
+//                    break;
+//                lt.has_support = true;
+//                // Insert the new support layer.
+//                coord_t height = lt._print_z - (i == 0 ? 0. : m_tool_orderings.front().layer_tools()[i-1]._print_z);
+//                //FIXME the support layer ID is set to -1, as Vojtech hopes it is not being used anyway.
+//                it_layer = m_objects.front()->insert_support_layer(it_layer, -1, 0, height, lt._print_z, unscaled(lt._print_z - height / 2));
+//                ++ it_layer;
+//            }
+//        }
+//    }
+//    this->throw_if_canceled();
+//
+//    // Initialize the wipe tower.
+//    WipeTower wipe_tower(m_config, m_default_object_config, m_default_region_config, wipe_volumes, m_tool_orderings.front().first_extruder());
+//
+//    // Set the extruder & material properties at the wipe tower object.
+//    for (size_t i = 0; i < m_config.nozzle_diameter.size(); ++ i)
+//        wipe_tower.set_extruder(i);
+//
+//    m_wipe_tower_data.priming = Slic3r::make_unique<std::vector<WipeTower::ToolChangeResult>>(
+//        wipe_tower.prime((float)unscaled(get_min_first_layer_height()), m_tool_orderings.front().all_extruders(), false));
+//
+//    // Lets go through the wipe tower layers and determine pairs of extruder changes for each
+//    // to pass to wipe_tower (so that it can use it for planning the layout of the tower)
+//    {
+//        unsigned int current_extruder_id = m_tool_orderings.front().all_extruders().back();
+//        for (LayerTools &layer_tools : m_tool_orderings.front().layer_tools()) { // for all layers
+//            if (!layer_tools.has_wipe_tower) continue;
+//            bool first_layer = &layer_tools == &m_tool_orderings.front().front();
+//            wipe_tower.plan_toolchange((float)unscaled(layer_tools._print_z), (float)unscaled(layer_tools.wipe_tower_layer_height), current_extruder_id, current_extruder_id, false);
+//            for (const auto extruder_id : layer_tools.extruders) {
+//                if ((first_layer && extruder_id == m_tool_orderings.front().all_extruders().back()) || extruder_id != current_extruder_id) {
+//                    double volume_to_wipe = wipe_volumes[current_extruder_id][extruder_id];             // total volume to wipe after this toolchange
+//                    
+//                    // START filament_wipe_advanced_pigment
+//                    if (m_config.wipe_advanced) {
+//                        volume_to_wipe = m_config.wipe_advanced_nozzle_melted_volume;
+//                        float pigmentBef = m_config.filament_wipe_advanced_pigment.get_at(current_extruder_id);
+//                        float pigmentAft = m_config.filament_wipe_advanced_pigment.get_at(extruder_id);
+//                        if (m_config.wipe_advanced_algo.value == waLinear) {
+//                            volume_to_wipe += m_config.wipe_advanced_multiplier.value * (pigmentBef - pigmentAft);
+//                            BOOST_LOG_TRIVIAL(info) << "advanced wiping (lin) ";
+//                            BOOST_LOG_TRIVIAL(info) << current_extruder_id << " -> " << extruder_id << " will use " << volume_to_wipe << " mm3\n";
+//                            BOOST_LOG_TRIVIAL(info) << " calculus : " << m_config.wipe_advanced_nozzle_melted_volume << " + " << m_config.wipe_advanced_multiplier.value
+//                                << " * ( " << pigmentBef << " - " << pigmentAft << " )\n";
+//                            BOOST_LOG_TRIVIAL(info) << "    = " << m_config.wipe_advanced_nozzle_melted_volume << " + " << (m_config.wipe_advanced_multiplier.value* (pigmentBef - pigmentAft)) << "\n";
+//                        } else if (m_config.wipe_advanced_algo.value == waQuadra) {
+//                            volume_to_wipe += m_config.wipe_advanced_multiplier.value * (pigmentBef - pigmentAft)
+//                                + m_config.wipe_advanced_multiplier.value * (pigmentBef - pigmentAft) * (pigmentBef - pigmentAft) * (pigmentBef - pigmentAft);
+//                            BOOST_LOG_TRIVIAL(info) << "advanced wiping (quadra) ";
+//                            BOOST_LOG_TRIVIAL(info) << current_extruder_id << " -> " << extruder_id << " will use " << volume_to_wipe << " mm3\n";
+//                            BOOST_LOG_TRIVIAL(info) << " calculus : " << m_config.wipe_advanced_nozzle_melted_volume << " + " << m_config.wipe_advanced_multiplier.value
+//                                << " * ( " << pigmentBef << " - " << pigmentAft << " ) + " << m_config.wipe_advanced_multiplier.value
+//                                << " * ( " << pigmentBef << " - " << pigmentAft << " ) ^3 \n";
+//                            BOOST_LOG_TRIVIAL(info) << "    = " << m_config.wipe_advanced_nozzle_melted_volume << " + " << (m_config.wipe_advanced_multiplier.value* (pigmentBef - pigmentAft))
+//                                << " + " << (m_config.wipe_advanced_multiplier.value*(pigmentBef - pigmentAft)*(pigmentBef - pigmentAft)*(pigmentBef - pigmentAft))<<"\n";
+//                        } else if (m_config.wipe_advanced_algo.value == waHyper) {
+//                            volume_to_wipe += m_config.wipe_advanced_multiplier.value * (0.5 + pigmentBef) / (0.5 + pigmentAft);
+//                            BOOST_LOG_TRIVIAL(info) << "advanced wiping (hyper) ";
+//                            BOOST_LOG_TRIVIAL(info) << current_extruder_id << " -> " << extruder_id << " will use " << volume_to_wipe << " mm3\n";
+//                            BOOST_LOG_TRIVIAL(info) << " calculus : " << m_config.wipe_advanced_nozzle_melted_volume << " + " << m_config.wipe_advanced_multiplier.value
+//                                << " * ( 0.5 + " << pigmentBef << " ) / ( 0.5 + " << pigmentAft << " )\n";
+//                            BOOST_LOG_TRIVIAL(info) << "    = " << m_config.wipe_advanced_nozzle_melted_volume << " + " << (m_config.wipe_advanced_multiplier.value * (0.5 + pigmentBef) / (0.5 + pigmentAft)) << "\n";
+//                        }
+//                    }
+//                    // END filament_wipe_advanced_pigment
+//                    
+//                    // Not all of that can be used for infill purging:
+//                    volume_to_wipe -= (float)m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
+//
+//                    // try to assign some infills/objects for the wiping:
+//                    volume_to_wipe = layer_tools.wiping_extrusions_nonconst().mark_wiping_extrusions(*this, layer_tools, current_extruder_id, extruder_id, volume_to_wipe);
+//
+//                    // add back the minimal amount toforce on the wipe tower:
+//                    volume_to_wipe += (float)m_config.filament_minimal_purge_on_wipe_tower.get_at(extruder_id);
+//
+//                    // request a toolchange at the wipe tower with at least volume_to_wipe purging amount
+//                    wipe_tower.plan_toolchange((float)unscaled(layer_tools._print_z), (float)unscaled(layer_tools.wipe_tower_layer_height),
+//                                               current_extruder_id, extruder_id, volume_to_wipe);
+//                    current_extruder_id = extruder_id;
+//                }
+//            }
+//            layer_tools.wiping_extrusions_nonconst().ensure_perimeters_infills_order(*this, layer_tools);
+//            if (&layer_tools == &m_tool_orderings.front().back() || (&layer_tools + 1)->wipe_tower_partitions == 0)
+//                break;
+//        }
+//    }
+//
+//    // Generate the wipe tower layers.
+//    m_wipe_tower_data.tool_changes.reserve(m_tool_orderings.front().layer_tools().size());
+//    wipe_tower.generate(m_wipe_tower_data.tool_changes);
+//    m_wipe_tower_data.depth = wipe_tower.get_depth();
+//    m_wipe_tower_data.z_and_depth_pairs = wipe_tower.get_z_and_depth_pairs();
+//    m_wipe_tower_data.brim_width = wipe_tower.get_brim_width();
+//    m_wipe_tower_data.height = wipe_tower.get_wipe_tower_height();
+//
+//    // Unload the current filament over the purge tower.
+//    double layer_height = m_objects.front()->config().layer_height.value;
+//    if (m_tool_orderings.front().back().wipe_tower_partitions > 0) {
+//        // The wipe tower goes up to the last layer of the print.
+//        if (wipe_tower.layer_finished()) {
+//            // The wipe tower is printed to the top of the print and it has no space left for the final extruder purge.
+//            // Lift Z to the next layer.
+//            wipe_tower.set_layer(float(unscaled(m_tool_orderings.front().back()._print_z) + layer_height), float(layer_height), 0, false, true);
+//        } else {
+//            // There is yet enough space at this layer of the wipe tower for the final purge.
+//        }
+//    } else {
+//        // The wipe tower does not reach the last print layer, perform the pruge at the last print layer.
+//        assert(m_tool_orderings.front().back().wipe_tower_partitions == 0);
+//        wipe_tower.set_layer(float(unscaled(m_tool_orderings.front().back()._print_z)), float(layer_height), 0, false, true);
+//    }
+//    m_wipe_tower_data.final_purge = Slic3r::make_unique<WipeTower::ToolChangeResult>(
+//        wipe_tower.tool_change((unsigned int)(-1)));
+//
+//    m_wipe_tower_data.used_filament_until_layer = wipe_tower.get_used_filament_until_layer();
+//    m_wipe_tower_data.number_of_toolchanges = wipe_tower.get_number_of_toolchanges();
+//    m_wipe_tower_data.width = wipe_tower.width();
+//    m_wipe_tower_data.first_layer_height = unscaled(get_min_first_layer_height());
+//    m_wipe_tower_data.cone_angle = m_default_object_config.wipe_tower_cone_angle;
+//}
 
 // Generate a recommended G-code output file name based on the format template, default extension, and template parameters
 // (timestamps, object placeholders derived from the model, current placeholder prameters and print statistics.

@@ -841,8 +841,6 @@ bool config_compatible_for_perimeter(const PrintRegionConfig &config, const Prin
         && config.external_perimeters_first_force == other_config.external_perimeters_first_force
         && config.external_perimeters_hole  == other_config.external_perimeters_hole
         && config.external_perimeters_nothole == other_config.external_perimeters_nothole
-        && config.external_perimeters_vase == other_config.external_perimeters_vase
-        && config.external_perimeters_vase_min_height == other_config.external_perimeters_vase_min_height
         && config.seam_notch_all            == other_config.seam_notch_all
         && config.seam_notch_angle          == other_config.seam_notch_angle
         && config.seam_notch_inner          == other_config.seam_notch_inner

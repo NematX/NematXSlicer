@@ -654,8 +654,9 @@ static std::vector<std::string> s_Preset_print_options {
         // external_perimeters
         "external_perimeters_first",
         "external_perimeters_first_force",
-        "external_perimeters_vase",
-        "external_perimeters_vase_min_height",
+        "seam_slope_type",
+        "seam_slope_min_height",
+        "seam_slope_max_length",
         "external_perimeters_nothole",
         "external_perimeters_hole",
         "external_perimeters_staggered",
