@@ -5620,7 +5620,6 @@ std::string GCodeGenerator::extrude_loop(const ExtrusionLoop &original_loop, con
                 gcode += extrude_path(path, description, speed);
             }
         }
-        }
     }
     //extrusion notch end if any
     for (const ExtrusionPath& path : notch_extrusion_end) {
@@ -8419,10 +8418,10 @@ std::string GCodeGenerator::_travel_before_extrude(const ExtrusionPath &path, co
     assert(moved_to_point);
 
     // ensure ramping travel even if no call to write_travel_to
-    if (m_new_z_target) {
-        assert(this->writer().get_unlifted_position().z() - EPSILON < *m_new_z_target);
-        this->writer().travel_to_z(*m_new_z_target);
-        m_new_z_target.reset();
+    if (_m_force_move_z_from) {
+        // enforce current z
+        gcode += m_writer.ensure_z(m_layer->unscaled_print_z(), "enforce z");
+        _m_force_move_z_from.reset();
     }
 
     return gcode;

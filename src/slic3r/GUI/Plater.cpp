@@ -1291,7 +1291,7 @@ void Sidebar::jump_to_option(size_t selected)
         std::lock_guard<std::recursive_mutex> lk(get_app_config()->config_lock);
         wxString your_modes = _L("Your current tags:");
         wxString option_modes = _L("Option tags:");
-        for (AppConfig::Tag& t : get_app_config()->tags()) {
+        for (const AppConfig::Tag& t : get_app_config()->tags()) {
             if ((t.tag & mode) == t.tag) {
                 your_modes += " " + _(t.name);
             }

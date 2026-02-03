@@ -3718,7 +3718,7 @@ ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &param
     for (Arachne::VariableWidthLines &perimeter : perimeters) {
         this->throw_if_canceled();
         for (auto it_extrusion = perimeter.begin(); it_extrusion != perimeter.end();) {
-            assert(!srf_bb.it_extrusion->junctions.empty());
+            assert(!it_extrusion->junctions.empty());
             Point last_point = it_extrusion->junctions.front().p;
             for (auto it_junction = it_extrusion->junctions.begin()+1; it_junction != it_extrusion->junctions.end();) {
                 distsqrf_t dist_sqr = it_junction->p.distance_to_square(last_point);
@@ -3758,6 +3758,7 @@ ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &param
             }
         }
     }
+#endif
 
     //build perimeter_boundary
     bool has_tw = false;
