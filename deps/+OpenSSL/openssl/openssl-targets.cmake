@@ -79,7 +79,10 @@ set(_IMPORT_PREFIX)
 
 # Loop over all imported files and verify that they actually exist
 foreach(target ${_IMPORT_CHECK_TARGETS} )
+  message("Loop over all imported files, for ttarget: ${target}")
+  message("all files: ${_IMPORT_CHECK_FILES_FOR_${target}}")
   foreach(file ${_IMPORT_CHECK_FILES_FOR_${target}} )
+	message("test file ${file}")
     if(NOT EXISTS "${file}" )
       message(FATAL_ERROR "The imported target \"${target}\" references the file
    \"${file}\"

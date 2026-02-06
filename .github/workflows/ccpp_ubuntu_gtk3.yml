@@ -6,6 +6,8 @@ on:
       - Nigthly
       - nightly_dev
       - nightly_master
+      - nightly_ubuntu
+      - nightly_2.7.63
       - debug_ubuntu
       - beta
       - stable

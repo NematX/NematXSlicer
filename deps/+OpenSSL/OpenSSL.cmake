@@ -8,7 +8,18 @@ else()
     if(WIN32)
         set(_cross_arch "VC-WIN64A")
     elseif(APPLE)
-        set(_cross_arch "darwin64-arm64-cc")
+		set(_cross_arch "darwin64-arm64-cc")
+		if(NOT IS_CROSS_COMPILE AND ${CMAKE_SYSTEM_PROCESSOR} STREQUAL "x86_64")
+			set(_cross_arch "darwin64-x86_64-cc")
+		endif()
+	else()
+		#set(_cross_arch "x86_64")
+        if (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "aarch64" OR ${CMAKE_SYSTEM_PROCESSOR} STREQUAL "arm64")
+            set(_cross_arch "linux-aarch64")
+        elseif (${CMAKE_SYSTEM_PROCESSOR} STREQUAL "armhf") # For raspbian
+            # TODO: verify
+            set(_cross_arch "linux-armv4")
+        endif ()
 	endif()
 endif()
 
@@ -38,13 +49,14 @@ else()
     endif ()
 endif()
 
+message(STATUS "add external openssl project with args: ${_conf_cmd} ; ${_cross_arch} ; -openssldir=${${PROJECT_NAME}_DEP_INSTALL_PREFIX} and --prefix=${${PROJECT_NAME}_DEP_INSTALL_PREFIX} ${_cross_comp_prefix_line} ${_make_cmd} ${_install_cmd}")
+
 ExternalProject_Add(dep_OpenSSL
     #EXCLUDE_FROM_ALL ON
     URL "https://github.com/openssl/openssl/archive/OpenSSL_1_1_1w.tar.gz"
     URL_HASH SHA256=2130E8C2FB3B79D1086186F78E59E8BC8D1A6AEDF17AB3907F4CB9AE20918C41
     # URL "https://github.com/openssl/openssl/archive/refs/tags/openssl-3.1.2.tar.gz"
     # URL_HASH SHA256=8c776993154652d0bb393f506d850b811517c8bd8d24b1008aef57fbe55d3f31
-    DOWNLOAD_DIR ${DEP_DOWNLOAD_DIR}/OpenSSL
 	CONFIGURE_COMMAND ${_conf_cmd} ${_cross_arch}
         "--openssldir=${${PROJECT_NAME}_DEP_INSTALL_PREFIX}"
         "--prefix=${${PROJECT_NAME}_DEP_INSTALL_PREFIX}"
@@ -61,6 +73,6 @@ ExternalProject_Add(dep_OpenSSL
 ExternalProject_Add_Step(dep_OpenSSL install_cmake_files
     DEPENDEES install
 
-    COMMAND ${CMAKE_COMMAND} -E copy_directory openssl "${DESTDIR}/usr/local/${CMAKE_INSTALL_LIBDIR}/cmake/openssl"
+    COMMAND ${CMAKE_COMMAND} -E copy_directory openssl "${${PROJECT_NAME}_DEP_INSTALL_PREFIX}/${CMAKE_INSTALL_LIBDIR}/cmake/openssl"
     WORKING_DIRECTORY "${CMAKE_CURRENT_LIST_DIR}"
 )

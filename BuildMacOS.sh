@@ -247,7 +247,8 @@ then
         mkdir deps/build
     fi
     echo -e " \n[3/8] Configuring dependencies ... \n"
-    BUILD_ARGS="-DOPENSSL_ARCH"
+    BUILD_ARGS=""
+    #BUILD_ARGS="-DOPENSSL_ARCH=\"darwin64-arm64-cc\""
     if [[ -n "$BUILD_ARCH" ]]
     then
         BUILD_ARGS="${BUILD_ARGS}  -DCMAKE_OSX_ARCHITECTURES:STRING=${BUILD_ARCH}"
@@ -323,6 +324,8 @@ then
         make dep_MPFR -j$NCORES
         echo -e "[4/8] Building dep_Catch2 ...\n"
         make dep_Catch2 -j$NCORES
+        echo -e "[4/8] Building dep_OpenSSL ...\n"
+        make dep_OpenSSL -j$NCORES
 #    fi
 
     # make deps
@@ -347,6 +350,18 @@ then
     popd > /dev/null
     echo -e "\n ... done\n"
 fi
+
+
+echo "> ls deps/build/destdir/usr/local"
+ls -al deps/build/destdir/usr/local
+echo "> ls deps/build/destdir/usr/local/lib"
+ls -al deps/build/destdir/usr/local/lib
+echo "> ls deps/build/destdir/usr/local/lib/cmake/openssl"
+ls -al deps/build/destdir/usr/local/lib/cmake/openssl
+echo "> cat deps/build/destdir/usr/local/lib/cmake/openssl/openssl-targets.cmake"
+cat deps/build/destdir/usr/local/lib/cmake/openssl/openssl-targets.cmake
+echo "> cat deps/build/destdir/usr/local/lib/cmake/openssl/openssl-targets.cmake"
+cat deps/build/destdir/usr/local/lib/cmake/openssl/openssl-targets-release.cmake
 
 if [[ -n "$BUILD_SLIC3R" ]]
 then
@@ -385,7 +400,7 @@ then
     else
         BUILD_ARGS="${BUILD_ARGS} -DCMAKE_BUILD_TESTS=0"
     fi
-
+    
     # cmake
     pushd build > /dev/null
     if [[ "$BUILD_ARCH" == "$BUILD_ARCH_x86" ]]
