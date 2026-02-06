@@ -956,7 +956,7 @@ std::vector<GCodeExtrusionRole> etype_can_increase_fan = {
      GCodeExtrusionRole::InternalInfill,
      GCodeExtrusionRole::OverhangPerimeter,
      GCodeExtrusionRole::GapFill };
-// list of fan that won't be reduced in the first layers by full_fan_speed_layer (after disable_fan_first_layers)
+// list of fan that won't be reduced in the first layers by fan_speed_layer_gradient (after disable_fan_first_layers)
 std::vector<GCodeExtrusionRole> etype_can_ramp_up_fan = {
      GCodeExtrusionRole::None,
     // GCodeExtrusionRole::BridgeInfill,
@@ -1066,10 +1066,11 @@ std::string CoolingBuffer::apply_layer_cooldown(
             &fan_control, &fan_speeds, &default_fan_speed, initial_default_fan_speed, min_fan_speed]()
     {
         std::pair<int, int> custom_fan_speed_limits{fan_speeds[0], 100 }; // TODO REVIEW 2.7: min-max. min is min_fan_speed if always on.
-        int disable_fan_first_layers = EXTRUDER_CONFIG(disable_fan_first_layers);
+        int enable_fan_first_layers = EXTRUDER_CONFIG(enable_fan_first_layers);
+        int disable_fan_first_layers = EXTRUDER_CONFIG(disable_fan_first_layers) + enable_fan_first_layers;
+        int fan_speed_layer_gradient = EXTRUDER_CONFIG(fan_speed_layer_gradient);
         // Is the fan speed ramp enabled?
-        int full_fan_speed_layer = EXTRUDER_CONFIG(full_fan_speed_layer);
-        if (int(layer_id) >= disable_fan_first_layers) {
+        if (int(layer_id) < enable_fan_first_layers + fan_speed_layer_gradient || int(layer_id) >= disable_fan_first_layers) {
             int   max_fan_speed             = EXTRUDER_CONFIG(max_fan_speed);
             float slowdown_below_layer_time = float(EXTRUDER_CONFIG(slowdown_below_layer_time));
             float fan_below_layer_time      = float(EXTRUDER_CONFIG(fan_below_layer_time));
@@ -1101,12 +1102,32 @@ std::string CoolingBuffer::apply_layer_cooldown(
             }
 
             // Is the fan speed ramp enabled?
-            int full_fan_speed_layer = EXTRUDER_CONFIG(full_fan_speed_layer);
-            // When ramping up fan speed from disable_fan_first_layers to full_fan_speed_layer, if disable_fan_first_layers is zero,
+            if (int(layer_id) >= enable_fan_first_layers &&
+                int(layer_id) < enable_fan_first_layers + fan_speed_layer_gradient &&
+                int(layer_id) < disable_fan_first_layers) {
+                // Ramp down the fan speed
+                int max_layer_gradient = std::min(fan_speed_layer_gradient, disable_fan_first_layers - enable_fan_first_layers - 1);
+                assert(max_layer_gradient >= 0);
+                float factor = 1.f -
+                    float(int(layer_id + 1) - enable_fan_first_layers) / float(max_layer_gradient + 1);
+                if (int(layer_id) == disable_fan_first_layers) {
+                    factor = 0;
+                }
+                assert(factor >= 0 && factor <= 1);
+                for (size_t etype_idx = 0; etype_idx < etype_can_ramp_up_fan.size(); etype_idx++) {
+                    uint16_t idx = uint8_t(etype_can_ramp_up_fan[etype_idx]);
+                    if (fan_speeds[idx] > 0) {
+                        fan_speeds[idx] = std::clamp(int(float(fan_speeds[idx] < 0 ? 0 : fan_speeds[idx]) * factor + 0.01f), 0, 100);
+                    }
+                }
+                custom_fan_speed_limits.second = fan_speeds[0];
+            } else 
+            // When ramping up fan speed from disable_fan_first_layers for fan_speed_layer_gradient, if disable_fan_first_layers is zero,
             // the not-fan layer is a hypothetical -1 layer.
-            if (int(layer_id) >= disable_fan_first_layers && int(layer_id) + 1 < full_fan_speed_layer) {
-                // Ramp up the fan speed from disable_fan_first_layers to full_fan_speed_layer.
-                float factor = float(int(layer_id + 1) - disable_fan_first_layers) / float(full_fan_speed_layer - disable_fan_first_layers);
+            if (int(layer_id) >= disable_fan_first_layers && int(layer_id) < disable_fan_first_layers + fan_speed_layer_gradient) {
+                // Ramp up the fan speed from disable_fan_first_layers to fan_speed_layer_gradient.
+                float factor = float(int(layer_id + 1) - disable_fan_first_layers) / float(fan_speed_layer_gradient + 1);
+                assert(factor >= 0 && factor <= 1);
                 for (size_t etype_idx = 0; etype_idx < etype_can_ramp_up_fan.size(); etype_idx++) {
                     uint16_t idx = uint8_t(etype_can_ramp_up_fan[etype_idx]);
                     if (fan_speeds[idx] > 0) {

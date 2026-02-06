@@ -1423,7 +1423,8 @@ void PrintConfigDef::init_fff_params()
     def->label = L("Disable fan for the first");
     def->category = OptionCategory::cooling;
     def->tooltip = L("You can set this to a positive value to disable fan at all "
-                   "during the first layers, so that it does not make adhesion worse.");
+                   "during the first layers, so that it does not make adhesion worse."
+                   "\nIf 'enable_fan_first_layers' is active, the fan will be enabled, then disabled, then going to normal.");
     def->sidetext = L("layers");
     def->min = 0;
     def->max = 1000;
@@ -1463,6 +1464,21 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comPrusa | comSuSi;
     def->set_default_value(new ConfigOptionFloat(6));
+
+    def = this->add("enable_fan_first_layers", coInts);
+    def->label = L("Enable fan for the first");
+    def->category = OptionCategory::cooling;
+    def->tooltip = L("You can set this to a positive value to force enable the fan "
+                   "during the first layers, if needed for ashesion tuning."
+                    "\n This setting is applied before 'disable_fan_first_layers':"
+                    " if you want to enable the fan on the first layer then disable for the next 2 layers"
+                    ", you need to set this setting to 1 and 'disable_fan_first_layers' to 2.");
+    def->sidetext = L("layers");
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comExpert | comPrusa;
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionInts { 0 });
 
     def = this->add("end_gcode", coString);
     def->label = L("End G-code");
@@ -3254,14 +3270,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimpleAE | comPrusa;
     def->set_default_value(new ConfigOptionInts { 200 });
 
-    def = this->add("full_fan_speed_layer", coInts);
-    def->label = L("Full fan speed at layer");
+    def = this->add("fan_speed_layer_gradient", coInts);
+    def->label = L("Change fan speed over ");
     def->category = OptionCategory::filament;
-    def->tooltip = L("Fan speed will be ramped up linearly from zero at layer \"disable_fan_first_layers\" "
-                   "to maximum at layer \"full_fan_speed_layer\". "
-                   "\"full_fan_speed_layer\" will be ignored if equal or lower than \"disable_fan_first_layers\", in which case "
-                   "the fan will be running at maximum allowed speed at layer \"disable_fan_first_layers\" + 1."
-                   "\nset 0 to disable");
+    def->tooltip = L("Fan speed will be ramped up linearly from the previous value to the next value over this amount of layers."
+                    " It's only used to go from 'enable_fan_first_layers' to 'disable_fan_first_layers' to the normal speed algorithm."
+                   "\nset 0 to disable and have instatn change.");
+    def->sidetext = L("layers");
     def->min = 0;
     def->max = 1000;
     def->mode = comExpert | comPrusa;
@@ -9805,6 +9820,16 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
         } else {
             value() = "none";
         }
+    }
+
+    if (has(dict, "full_fan_speed_layer")) {
+        int val = boost::lexical_cast<int>(value());
+        if (auto it_disa = dict.find("disable_fan_first_layers") ; it_disa != dict.end()) {
+            val -= boost::lexical_cast<int>(it_disa->second.second);
+        }
+        val = std::max(0, val);
+        opt_key() = "fan_speed_layer_gradient"s;
+        value() = to_string_nozero(val, 5);
     }
 
     // it's not needed to check aliases, because they are taken care of in deserialize().

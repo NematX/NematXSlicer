@@ -89,9 +89,10 @@ group:Fan speed - default
         setting:id$0:overhangs_dynamic_fan_speed
 	line:Gap fill fan speed
 		setting:id$0:label_width$12:label$Gap fill:gap_fill_fan_speed
-	line:Disable fan for the first
-		setting:id$0:width$5:label$_:sidetext_width$7:disable_fan_first_layers
-		setting:id$0:width$5:label_width$18:full_fan_speed_layer
+	line:First layers
+		setting:id$0:enable_fan_first_layers
+		setting:id$0:disable_fan_first_layers
+		setting:id$0:fan_speed_layer_gradient
 	end_line
 group:Short layer time - began to increase base fan speed
 	setting:id$0:fan_below_layer_time

@@ -126,7 +126,8 @@ std::string PresetHints::cooling_description(const Preset &preset_fil, const Pre
     const int    overhangs_fan_speed       = get_fan_speed(preset_fil, "overhangs_fan_speed");
     const int    gap_fill_fan_speed        = get_fan_speed(preset_fil, "gap_fill_fan_speed");
     const int    disable_fan_first_layers  = preset_fil.config.opt_int("disable_fan_first_layers", 0);
-    const int    full_fan_speed_layer      = preset_fil.config.opt_int("full_fan_speed_layer", 0);
+    const int    enable_fan_first_layers  = preset_fil.config.opt_int("enable_fan_first_layers", 0);
+    const int    fan_speed_layer_gradient      = preset_fil.config.opt_int("fan_speed_layer_gradient", 0);
     const float  slowdown_below_layer_time = preset_fil.config.opt_float("slowdown_below_layer_time", 0);
     const int    min_print_speed           = int(preset_fil.config.opt_float("min_print_speed", 0) + 0.5);
     const int    max_speed_reduc           = int(preset_fil.config.opt_float("max_speed_reduction", 0));
@@ -151,23 +152,39 @@ std::string PresetHints::cooling_description(const Preset &preset_fil, const Pre
     format_simple_fan_min_speed(out, min_fan_speed, default_fan_speed, _L("Perimeter overhangs"), overhangs_fan_speed);
     format_simple_fan_min_speed(out, min_fan_speed, default_fan_speed, _L("Gap fills"), gap_fill_fan_speed);
     
+    bool has_enable = false;
     bool has_disable = false;
-    if (disable_fan_first_layers > 1) {
+    if (enable_fan_first_layers > 0) {
         out += "\n";
-        out += format_wxstr(_L("Except for the first %1% layers where the fan is disabled"), disable_fan_first_layers);
+        if (disable_fan_first_layers <= 0) {
+            out += format_wxstr(_L("The fan is enforced for the %1% first layer(s)"), enable_fan_first_layers);
+        } else {
+            out += format_wxstr(_L("The fan is enforced for the %1% first layer(s) and then disabled for the next "
+                                   "%2% layer, so up to the layer %3%."),
+                                enable_fan_first_layers, disable_fan_first_layers,
+                                disable_fan_first_layers + enable_fan_first_layers);
+        }
         has_disable = true;
+        has_enable = true;
+    } else {
+        if (disable_fan_first_layers > 1) {
+            out += "\n";
+            out += format_wxstr(_L("Except for the first %1% layers where the fan is disabled"),
+                                disable_fan_first_layers);
+            has_disable = true;
+        } else if (disable_fan_first_layers == 1) {
+            out += "\n";
+            out += _L("Except for the first layer where the fan is disabled");
+            has_disable = true;
+        }
     }
-    else if (disable_fan_first_layers == 1) {
-        out += "\n";
-        out += _L("Except for the first layer where the fan is disabled");
-        has_disable = true;
-    }
-    if (full_fan_speed_layer > disable_fan_first_layers + 1 && disable_fan_first_layers > 0) {
+    if (fan_speed_layer_gradient > 0 && (disable_fan_first_layers > 0 || enable_fan_first_layers > 0)) {
         out += " ";
-        out += format_wxstr(_L("and will gradually speed-up to the above speeds over %1% layers"), full_fan_speed_layer - disable_fan_first_layers);
+        out += format_wxstr(_L("and will gradually change speed over %1% layers"),
+                            fan_speed_layer_gradient);
         has_disable = true;
     }
-    if (full_fan_speed_layer > disable_fan_first_layers + 1 && disable_fan_first_layers > 0) {
+    if (fan_speed_layer_gradient > 0) {
         out += " ";
         wxString surface_list;
         if (bridge_fan_speed > 0) {
@@ -187,7 +204,7 @@ std::string PresetHints::cooling_description(const Preset &preset_fil, const Pre
             surface_list += _L("Perimeter overhangs");
         }
         if (surface_list.size() > 2) {
-            out += format_wxstr(_L("but for %1% where the speed-up phase is skipped."), surface_list.substr(1));
+            out += format_wxstr(_L("but for %1% where the speed gradient phase is skipped."), surface_list.substr(1));
             has_disable = true;
         }
     }
@@ -223,8 +240,8 @@ std::string PresetHints::cooling_description(const Preset &preset_fil, const Pre
                 out += " (";
                 out += _L("except for the first layer where the fan is disabled");
             }
-            if (full_fan_speed_layer > disable_fan_first_layers + 1 && disable_fan_first_layers > 0)
-                out += format_wxstr(_L(" and will gradually speed-up to the above speeds over %1% layers"), full_fan_speed_layer);
+            if (fan_speed_layer_gradient > 0)
+                out += format_wxstr(_L(" and will gradually speed-up to the above speeds over %1% layers"), fan_speed_layer_gradient);
             if(disable_fan_first_layers > 0)
                 out += ")";
             out += " and";
