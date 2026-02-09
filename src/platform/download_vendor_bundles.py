@@ -6,6 +6,7 @@ import sys
 
 # list of repositories to download for each release.
 all_repositories= [
+	"https://github.com/NematX/NematX-Profile",
 ]
 
 if len(sys.argv) < 2:
