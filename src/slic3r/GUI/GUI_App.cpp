@@ -4253,13 +4253,20 @@ void GUI_App::associate_bgcode_files()
 
 void GUI_App::on_version_read(wxCommandEvent& evt)
 {
-    app_config->set("version_online", into_u8(evt.GetString()));
     std::string opt = app_config->get("notify_release");
-    if (this->plater_ == nullptr || (!m_app_updater->get_triggered_by_user() && opt != "all" && opt != "release")) {
+    std::optional<Semver> version_online = Semver::parse(into_u8(evt.GetString()));
+    if (!version_online || this->plater_ == nullptr) {
+        return;
+    } else if (!m_app_updater->get_triggered_by_user() &&
+               (opt == "none" || (opt == "release" && version_online->prerelease()))) {
         BOOST_LOG_TRIVIAL(info) << "Version online: " << evt.GetString() << ". User does not wish to be notified.";
         return;
     }
-    if (*Semver::parse(SLIC3R_VERSION_FULL) >= *Semver::parse(into_u8(evt.GetString()))) {
+    std::optional<Semver> lastest_download = Semver::parse(app_config->get("version_online_seen"));
+    std::optional<Semver> current_version = Semver::parse(SLIC3R_VERSION_FULL);
+    assert(current_version);
+    if (!version_online || *version_online <= *current_version ||
+        (lastest_download && *version_online <= *lastest_download)) {
         if (m_app_updater->get_triggered_by_user())
         {
             std::string text = (*Semver::parse(into_u8(evt.GetString())) == Semver()) 
@@ -4296,7 +4303,7 @@ void GUI_App::app_updater(bool from_user)
 {
     DownloadAppData app_data = m_app_updater->get_app_data();
 
-    if (from_user && (!app_data.version || *app_data.version <= *Semver::parse(SLIC3R_VERSION)))
+    if (from_user && app_data.version <= *Semver::parse(SLIC3R_VERSION))
     {
         BOOST_LOG_TRIVIAL(info) << "There is no newer version online.";
         MsgNoAppUpdates no_update_dialog;
@@ -4309,18 +4316,22 @@ void GUI_App::app_updater(bool from_user)
     assert(!app_data.target_path.empty());
 
     // dialog with new version info
-    AppUpdateAvailableDialog dialog(*Semver::parse(SLIC3R_VERSION), *app_data.version, from_user);
+    AppUpdateAvailableDialog dialog(*Semver::parse(SLIC3R_VERSION), app_data.version, from_user);
     auto dialog_result = dialog.ShowModal();
     // checkbox "do not show again"
     if (dialog.disable_version_check()) {
         app_config->set("notify_release", "none");
+        app_config->set("version_online_seen", "");
     }
     // Doesn't wish to update
     if (dialog_result != wxID_OK) {
+        if (dialog_result == wxID_NO) {
+            app_config->set("version_online_seen", app_data.version.to_string());
+        }
         return;
     }
     // dialog with new version download (installer or app dependent on system) including path selection
-    AppUpdateDownloadDialog dwnld_dlg(*app_data.version, app_data.target_path);
+    AppUpdateDownloadDialog dwnld_dlg(app_data.version, app_data.target_path);
     dialog_result = dwnld_dlg.ShowModal();
     //  Doesn't wish to download
     if (dialog_result != wxID_OK) {

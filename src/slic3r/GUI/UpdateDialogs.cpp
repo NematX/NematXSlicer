@@ -118,12 +118,12 @@ AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver& ver_current, co
 	
 	AUAD_size = content_sizer->GetSize();
 	
-
+    
+	add_button(wxID_NO);
 	add_button(wxID_CANCEL);
-
-	if (auto* btn_ok = get_button(wxID_OK); btn_ok != NULL) {
-		btn_ok->SetLabel(_L("Next"));
-	}
+    
+	SetButtonLabel(wxID_OK, _L("Next"));
+	SetButtonLabel(wxID_NO, _L("Skip"));
 
 	finalize();
 }
