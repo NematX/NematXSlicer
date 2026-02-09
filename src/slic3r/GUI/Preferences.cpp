@@ -291,6 +291,9 @@ std::shared_ptr<ConfigOptionsGroup> PreferencesDialog::create_options_group(cons
         assert(opt_key_idx.idx < 0);
         Field *field = optgroup->get_field(opt_key_idx);
         // very special cases
+        if (opt_key_idx.key == "notify_release") {
+            get_app_config()->set("version_online_seen", "");
+        }
         if (opt_key_idx.key == "use_custom_toolbar_size") {
             m_icon_size_sizer->ShowItems(boost::any_cast<bool>(value));
             refresh_og(m_optkey_to_optgroup["use_custom_toolbar_size"]);

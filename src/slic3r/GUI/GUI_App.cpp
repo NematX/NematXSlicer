@@ -1062,7 +1062,7 @@ void choose_app_dir(GUI_App &app) {
             same_version.push_back(&installed);
         } else {
             old_versions.push_back(&installed);
-            if (boost::filesystem::exists(installed.exe_path) && boost::filesystem::equivalent(binary_file().parent_path(), installed.exe_path)) {
+            if (boost::filesystem::exists(installed.exe_path) && boost::filesystem::equivalent(install_path(), installed.exe_path)) {
                 same_exe_path.push_back(&installed);
             }
         }
@@ -1133,7 +1133,7 @@ void choose_app_dir(GUI_App &app) {
     for (int i = 1; already_used_name.find(my_default_installation.installed_name) != already_used_name.end(); ++i) {
         my_default_installation.installed_name = format("%1%_(%2%)", SLIC3R_BUILD_ID, i);
     }
-    my_default_installation.exe_path = binary_file().parent_path();
+    my_default_installation.exe_path = install_path();
     my_default_installation.other_keys["exe_path_relative"] = "0";
     my_default_installation.config_path = my_default_installation.installed_name;
     my_default_installation.other_keys["config_path_relative"] = "1";
@@ -1165,30 +1165,28 @@ void choose_app_dir(GUI_App &app) {
             if (it_is_legacy != old_versions[choice]->other_keys.end() && it_is_legacy->second == "1") {
                 boost::filesystem::path dir(app.app_config->get_root_data_dir());
                 assert(dir == old_versions[choice]->get_config_path(app.app_config->get_root_data_dir()));
+                auto copy_or_create =
+                    [&dir, &path](std::string_view dir_name) {
+                    if (boost::filesystem::exists(dir / dir_name))
+                        boost::filesystem::copy(dir / dir_name, path / dir_name,
+                                                boost::filesystem::copy_options::update_existing |
+                                                    boost::filesystem::copy_options::recursive);
+                    else
+                        boost::filesystem::create_directory(path / dir_name);
+                    };
                 boost::filesystem::copy(dir / (SLIC3R_APP_KEY ".ini"), path / (SLIC3R_APP_KEY ".ini"),
                                       boost::filesystem::copy_options::update_existing);
-                boost::filesystem::copy(dir / "cache", path / "cache",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "filament", path / "filament",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "physical_printer", path / "physical_printer",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "print", path / "print",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "printer", path / "printer",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "shapes", path / "shapes",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "sla_material", path / "sla_material",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "sla_print", path / "sla_print",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "snapshots", path / "snapshots",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "ui_layout", path / "ui_layout",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
-                boost::filesystem::copy(dir / "vendor", path / "vendor",
-                                      boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
+                copy_or_create("cache");
+                copy_or_create("filament");
+                copy_or_create("physical_printer");
+                copy_or_create("print");
+                copy_or_create("printer");
+                copy_or_create("shapes");
+                copy_or_create("sla_material");
+                copy_or_create("sla_print");
+                copy_or_create("snapshots");
+                copy_or_create("ui_layout");
+                copy_or_create("vendor");
             } else {
                 boost::filesystem::copy(old_versions[choice]->get_config_path(app.app_config->get_root_data_dir()), path,
                                       boost::filesystem::copy_options::update_existing | boost::filesystem::copy_options::recursive);
@@ -4398,16 +4396,19 @@ void GUI_App::associate_bgcode_files()
 
 void GUI_App::on_version_read(wxCommandEvent& evt)
 {
-    app_config->set("version_online", into_u8(evt.GetString()));
-    std::optional<Slic3r::Semver> version_online = Semver::parse(into_u8(evt.GetString()));
     std::string opt = app_config->get("notify_release");
+    std::optional<Semver> version_online = Semver::parse(into_u8(evt.GetString()));
     if (!version_online || this->plater_ == nullptr) {
         return;
-    } else if (!m_app_updater->get_triggered_by_user() && opt != "all" && (opt != "release" || version_online->prerelease() == nullptr)) {
+    } else if (!m_app_updater->get_triggered_by_user() &&
+               (opt == "none" || (opt == "release" && version_online->prerelease()))) {
         BOOST_LOG_TRIVIAL(info) << "Version online: " << evt.GetString() << ". User does not wish to be notified.";
         return;
     }
-    if (*Semver::parse(SLIC3R_VERSION_FULL) >= *version_online) {
+    std::optional<Semver> lastest_download = Semver::parse(app_config->get("version_online_seen"));
+    std::optional<Semver> current_version = Semver::parse(SLIC3R_VERSION_FULL);
+    assert(current_version);
+    if (*version_online <= *current_version || (lastest_download && *version_online <= *lastest_download)) {
         if (m_app_updater->get_triggered_by_user())
         {
             std::string text = (*version_online == Semver()) 
@@ -4444,7 +4445,7 @@ void GUI_App::app_updater(bool from_user)
 {
     DownloadAppData app_data = m_app_updater->get_app_data();
 
-    if (from_user && (!app_data.version || *app_data.version <= *Semver::parse(SLIC3R_VERSION)))
+    if (from_user && app_data.version <= *Semver::parse(SLIC3R_VERSION))
     {
         BOOST_LOG_TRIVIAL(info) << "There is no newer version online.";
         MsgNoAppUpdates no_update_dialog;
@@ -4457,18 +4458,22 @@ void GUI_App::app_updater(bool from_user)
     assert(!app_data.target_path.empty());
 
     // dialog with new version info
-    AppUpdateAvailableDialog dialog(*Semver::parse(SLIC3R_VERSION), *app_data.version, from_user);
+    AppUpdateAvailableDialog dialog(*Semver::parse(SLIC3R_VERSION), app_data.version, from_user);
     auto dialog_result = dialog.ShowModal();
     // checkbox "do not show again"
     if (dialog.disable_version_check()) {
         app_config->set("notify_release", "none");
+        app_config->set("version_online_seen", "");
     }
     // Doesn't wish to update
     if (dialog_result != wxID_OK) {
+        if (dialog_result == wxID_NO) {
+            app_config->set("version_online_seen", app_data.version.to_string());
+        }
         return;
     }
     // dialog with new version download (installer or app dependent on system) including path selection
-    AppUpdateDownloadDialog dwnld_dlg(*app_data.version, app_data.target_path);
+    AppUpdateDownloadDialog dwnld_dlg(app_data.version, app_data.target_path);
     dialog_result = dwnld_dlg.ShowModal();
     //  Doesn't wish to download
     if (dialog_result != wxID_OK) {

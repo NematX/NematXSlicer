@@ -332,7 +332,6 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                     // count the lines
                     int nb_lines = 1 + filament_dist / (width() - EPSILON);
                     extruder_data.estimated_wipe_tower_length += nb_lines * fil_info.wipe_spacing;
-                    std::cout<<"layer "<<entry.first<<" : amorce "<<tool_id<<" : "<<nb_lines<<" -> "<<nb_lines * fil_info.purge_spacing<<" => total:"<<extruder_data.estimated_wipe_tower_length<<"\n";
                 }
                 previous_tool_id = tool_id;
             }

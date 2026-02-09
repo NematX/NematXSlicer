@@ -1736,8 +1736,8 @@ ClipperLib_Z::Paths clip_extrusion(const ClipperLib_Z::Paths& subjects, const Cl
                 // Interpolate extrusion line width.
                 assert(start.z() > 0 && end.z() > 0);
 
-                double length = (end - start).cast<double>().norm();
-                double dist   = (pt - start).cast<double>().norm();
+                double length = (end - start).head<2>().cast<double>().norm();
+                double dist   = (pt - start).head<2>().cast<double>().norm();
                 assert(length >= dist && dist > 0);
                 double t          = std::sqrt(dist / length);
 

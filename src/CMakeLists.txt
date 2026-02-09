@@ -22,6 +22,7 @@ add_subdirectory(libigl)
 add_subdirectory(hints)
 add_subdirectory(qoi)
 add_subdirectory(libnest2d)
+add_subdirectory(quickdigest5)
 
 find_package(Qhull 7.2 REQUIRED)
 add_library(qhull INTERFACE)

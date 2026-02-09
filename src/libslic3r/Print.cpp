@@ -1388,14 +1388,13 @@ void Print::process()
         m_wipe_tower_data.position = { m_default_object_config.wipe_tower_x, m_default_object_config.wipe_tower_y };
         m_wipe_tower_data.rotation_angle = m_default_object_config.wipe_tower_rotation_angle;
     }
-    /*
-    * // too slow with detailed projects
+    this->set_status(printstep_2_percent[PrintStep::psCheckConflict], _u8L("Checking line conflicts"));
     auto conflictRes = ConflictChecker::find_inter_of_lines_in_diff_objs(objects(), m_wipe_tower_data);
 
     m_conflict_result = conflictRes;
     if (conflictRes.has_value())
         BOOST_LOG_TRIVIAL(error) << boost::format("gcode path conflicts found between %1% and %2%") % conflictRes->_objName1 % conflictRes->_objName2;
-        */
+
 #ifdef _DEBUG
     for (const PrintObject* obj : m_objects)
         for (const Layer* lay : obj->layers())

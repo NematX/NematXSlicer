@@ -632,6 +632,7 @@ target_link_libraries(libslic3r
     JPEG::JPEG
     qoi
     LibBGCode::bgcode_convert
+	quickdigest5
     )
 
 if (APPLE)

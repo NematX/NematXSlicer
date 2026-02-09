@@ -84,6 +84,7 @@ enum PrintStep : uint8_t {
     psToolOrdering = psWipeTower,
     psAlertWhenSupportsNeeded,
     psSkirtBrim,
+    psCheckConflict,
     // Last step before G-code export, after this step is finished, the initial extrusion path preview
     // should be refreshed.
     psSlicingFinished = psSkirtBrim,
@@ -143,6 +144,7 @@ inline std::map<PrintStep, int> printstep_2_percent = {
     {PrintStep::psAlertWhenSupportsNeeded, 45},
     {PrintStep::psSkirtBrim, 70},
     {PrintStep::psWipeTower, 75},
+    {PrintStep::psCheckConflict, 80},
     {PrintStep::psGCodeExport, 85},
     {PrintStep::psCount, 100},
 };

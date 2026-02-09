@@ -26,7 +26,7 @@ struct DownloadAppData
     std::string             asset_name;
     bool                    start_after;
     bool                    replace_current;
-    std::optional<Semver>   version;
+    Semver                  version;
     size_t                  size;
 	boost::filesystem::path target_path;
 };

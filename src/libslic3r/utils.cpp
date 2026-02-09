@@ -189,6 +189,19 @@ const boost::filesystem::path& binary_file()
     return g_binary_file;
 }
 
+
+static boost::filesystem::path g_install_path;
+
+void set_install_path(const boost::filesystem::path &file)
+{
+    g_install_path = file;
+}
+
+const boost::filesystem::path& install_path()
+{
+    return g_install_path;
+}
+
 static std::string g_resources_dir;
 
 void set_resources_dir(const std::string &dir)

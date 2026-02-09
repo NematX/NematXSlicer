@@ -316,7 +316,7 @@ ConflictComputeOpt ConflictChecker::find_inter_of_lines(const LineWithIDs &lines
 ConflictResultOpt ConflictChecker::find_inter_of_lines_in_diff_objs(SpanOfConstPtrs<PrintObject> objs,
                                                                     const WipeTowerData& wipe_tower_data) // find the first intersection point of lines in different objects
 {
-    if (objs.empty() || (objs.size() == 1 && objs.front()->instances().size() == 1 && wipe_tower_data.number_of_toolchanges == 0)) { return {}; }
+    if (objs.empty() || (objs.size() == 1 && objs.front()->instances().size() == 1 && wipe_tower_data.number_of_toolchanges <= 0)) { return {}; }
 
     // The code ported from BS uses void* to identify objects...
     // Let's use the address of this variable to represent the wipe tower.

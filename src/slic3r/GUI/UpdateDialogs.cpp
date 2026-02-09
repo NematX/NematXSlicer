@@ -124,12 +124,12 @@ AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver& ver_current, co
 	
 	AUAD_size = content_sizer->GetSize();
 	
-
+    
+	add_button(wxID_NO);
 	add_button(wxID_CANCEL);
-
-	if (auto* btn_ok = get_button(wxID_OK); btn_ok != NULL) {
-		btn_ok->SetLabel(_L("Next"));
-	}
+    
+	SetButtonLabel(wxID_OK, _L("Next"));
+	SetButtonLabel(wxID_NO, _L("Skip"));
 
 	finalize();
 }
@@ -682,11 +682,29 @@ void UpdateConfigDialog::add_vendor_in_list(wxWindow *parent, VendorSync &vendor
     } else if (vendor.synch_in_progress) {
         msg_synch = new wxStaticText(parent, wxID_ANY, _L("Synch with github ..."));
     } else if (vendor.synch_failed) {
-        if (vendor.available_profiles.size() > 1) {
-        
+        if (vendor.available_profiles.size() > 0 && !vendor.is_installed) {
+            wxString config_version_str = vendor.best->config_version.to_string();
+            wxString msg = format(_L("Install %1% from cache"), config_version_str);
+            wxButton *bt_upgrade = new wxButton(parent, wxID_ANY, msg);
+            bt_upgrade->SetToolTip(_L("Download failed") + ": "+_L("The slicer failed to access the GitHub repository."));
+            if (vendor.is_installed) {
+                bts_green_color.push_back(bt_upgrade);
+            }
+            bt_upgrade->SetToolTip(_L("Click this button to create a snapshot and install this vendor bundle available in the local repository."));
+            versions_sizer->Add(bt_upgrade, wxGBPosition(line_num, 3), wxGBSpan(1, 1), wxEXPAND, 2);
+            bt_upgrade->Bind(wxEVT_BUTTON, ([this, vendor_id, best_version](wxCommandEvent &e) {
+                this->wait_dialog.reset(new wxBusyInfo(_L("Installing the preset, please wait")));
+                this->m_data.install_vendor(vendor_id, best_version, [this](const std::string &error_msg) {
+                    // end of waiting dialog (yes, it has to be called without any exception)
+                    this->wait_dialog.reset();
+                    this->request_show_error_msg(error_msg);
+                    this->request_rebuild_ui();
+                });
+            }));
+        } else{
+            msg_synch = new wxStaticText(parent, wxID_ANY, _L("Download failed"));
+            msg_synch->SetToolTip(_L("Download failed") + ": "+_L("The slicer failed to access the GitHub repository."));
         }
-        msg_synch = new wxStaticText(parent, wxID_ANY, _L("Download failed"));
-        msg_synch->SetToolTip(_L("The slicer failed to access the GitHub repository."));
     } else {
         msg_synch = new wxStaticText(parent, wxID_ANY, _L("Unchecked"));
         msg_synch->SetToolTip(_L("This printer vendor bundle may have a new preset available online. Click the "

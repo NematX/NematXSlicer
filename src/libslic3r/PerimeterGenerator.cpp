@@ -3710,7 +3710,7 @@ ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &param
         }
     }
 #endif
-    
+
     // hack to fix points that go to the moon. https://github.com/supermerill/SuperSlicer/issues/4032
     // get max dist possible
     const distsqrf_t max_dist_sqr = srf_bb.min.distance_to_square(srf_bb.max);
@@ -3748,8 +3748,6 @@ ProcessSurfaceResult PerimeterGenerator::process_arachne(const Parameters &param
 
 #if _DEBUG
     // All closed ExtrusionLine should have the same the first and the last point.
-    // But in rare cases, Arachne produce ExtrusionLine marked as closed but without
-    // equal the first and the last point.
     for (Arachne::VariableWidthLines &perimeter : perimeters) {
         for (Arachne::ExtrusionLine &el : perimeter) {
             if (el.is_closed && el.junctions.front().p != el.junctions.back().p) {
@@ -6010,29 +6008,25 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
             //first, find loops and try to extract a perimeter from them.
             size_t looked_gap = gaps.size();
             for (size_t gap_idx = 0; gap_idx < looked_gap; gap_idx++) {
-                ExPolygon& expoly = gaps[gap_idx];
+                const ExPolygon& expoly = gaps[gap_idx];
                 if (expoly.holes.size() >= 1) {
                     //this is a a sort of a loop
                     //try to see if it's possible to add a "perimeter"
-                    //ExPolygons contour_expolygon = offset_ex(expoly, -(float)(params.get_perimeter_spacing() / 2), ClipperLib::jtMiter, 3);
-                    ExPolygons new_gaps =
-                        intersection_ex(expoly,
-                            offset_ex(expoly.contour, -(float) (params.get_perimeter_spacing())));
-                    if (new_gaps.size() == 1 && new_gaps.front().holes.size() >= 1) {
+                    ExPolygons new_contour = offset_ex(expoly, -(float)(params.get_perimeter_spacing() / 2), ClipperLib::jtMiter, 3);
+                    // note: don't unoffset only the contour, or you'll have issues with holes validating impossible perimeter (supermerill/SuperSlicer/issues/4696).
+                    if (new_contour.size() == 1 && new_contour.front().holes.size() >= 1) {
+                        //create our perimeter area
+                        ExPolygons contour_gap_area = offset_ex(new_contour.front(), (float)(params.get_perimeter_spacing() / 2));
                         // create centerline
-                        Polygons new_contour = offset(new_gaps.front().contour,
-                                                      (float) (params.get_perimeter_spacing() / 2));
+                        new_contour.front().holes.clear();
+                        contour_gap_area = diff_ex(contour_gap_area, offset_ex(new_contour, - (float)(params.get_perimeter_spacing() / 2)));
                         // there was an offset, simplify to avoid too small sections
                         new_contour = new_contour.front().simplify(SCALED_EPSILON);
-                        ExPolygons extents_new_perimeter = offset_ex(new_gaps.front().contour, (float) (params.get_perimeter_spacing()));
-                        if (new_contour.size() == 1 && extents_new_perimeter.size() == 1) {
+                        if (new_contour.size() == 1 && contour_gap_area.size() == 1) {
                             // OK
-                            //create our periemter area (can also use offset over the polyline from new_contour)
-                            perimeter_gaps_ex = union_ex(perimeter_gaps_ex, diff(extents_new_perimeter.front().contour, new_gaps.front().contour));
+                            perimeter_gaps_ex = union_ex(perimeter_gaps_ex, contour_gap_area);
                             // gap fill outside of the new contour
-                            append(gaps, ensure_valid(diff_ex(expoly, extents_new_perimeter), resolution));
-                            // gapfill after the perimeter
-                            append(gaps, ensure_valid(std::move(new_gaps), resolution));
+                            append(gaps, ensure_valid(diff_ex(expoly, contour_gap_area), resolution));
                             // remove our old gapfill
                             gaps.erase(gaps.begin() + gap_idx);
                             looked_gap--;
@@ -6045,7 +6039,7 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
                             }
                             assert(contours.size() == contour_count);
                             // Add the new perimeter
-                            contours[contours_size].emplace_back(new_contour.front(), contours_size,
+                            contours[contours_size].emplace_back(new_contour.front().contour, contours_size,
                                                                  true, has_steep_overhang, fuzzify_gapfill);
                         }
                     }
