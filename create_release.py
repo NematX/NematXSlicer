@@ -1,4 +1,5 @@
 import os
+import sys
 from shutil import rmtree
 from urllib.request import Request, urlopen, urlretrieve
 import json
@@ -16,6 +17,8 @@ import subprocess
 
 repo = "NematX/NematXSlicer"
 program_name = "NematXSlicer"
+branch_name = sys.argv[1] if len(sys.argv) > 1 else "rc"
+prefix = sys.argv[2] if len(sys.argv) > 2 else "rc"
 path_7zip = r"C:\Program Files\7-Zip\7z.exe"
 # github classic personal access token, works with [gist, repo, workflow] permissions, should be something like "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"
 github_auth_token = ""
@@ -23,11 +26,21 @@ github_auth_token = ""
 def get_version():
 	settings_stream = open("./version.inc", mode="r", encoding="utf-8");
 	lines = settings_stream.read().splitlines();
+	version = "0.0.0.0";
+	tag="";
 	for line in lines:
-		if("SLIC3R_VERSION_FULL" in line):
+		if("set(SLIC3R_RC_VERSION_DOTS" in line):
+			print("found1: " +line)
 			elems = line.split("\"");
-			return elems[1];
-	return "";
+			version = elems[1];
+		if("set(SLIC3R_VERSION_TAG" in line):
+			print("found2: " +line)
+			elems = line.split("\"");
+			tag = elems[1];
+	if("+" in tag):
+		elems = tag.split("+");
+		tag = elems[0];
+	return version+tag;
 
 found_win = False; 
 found_linux = False; 
@@ -47,17 +60,17 @@ def handle_artifact(json_artifact):
 	global found_macos_arm
 	global first_day
 	
-	if json_artifact["workflow_run"]["head_branch"] == "rc":
+	if json_artifact["workflow_run"]["head_branch"] == branch_name:
 		if first_day == "":
-			print("encounter the first rc at " + json_artifact["created_at"][:10]);
+			print("encounter the first " + branch_name + " at " + json_artifact["created_at"][:10]);
 			first_day = json_artifact["created_at"][:10];
 		if json_artifact["created_at"][:10] == first_day:
 			print("Next artifact: " + json_artifact["name"]);
 		else:
-			print("End of rc artifacts. Closing");
+			print(f"End of {branch_name} artifacts. Closing");
 			print("("+json_artifact["name"] + "  @ "+json_artifact["created_at"][:10]+")");
 			return False;
-		if json_artifact["name"] == "rc_win64" and not found_win:
+		if json_artifact["name"] == prefix + "_win64" and not found_win:
 			found_win = True;
 			print("Found win64 artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -70,7 +83,16 @@ def handle_artifact(json_artifact):
 				ret = subprocess.check_output([path_7zip, "a", "-tzip", base_name+".zip", base_name]);
 			except:
 				print("Failed to zip the win directory, do it yourself");
-		if json_artifact["name"] == "rc_"+program_name+"-macOS.dmg" and not found_macos:
+		if json_artifact["name"] ==  prefix + "_"+program_name+"-win64.msi" and not found_win:
+			found_win = True;
+			print("Found win64 msi artifact");
+			print("ask for: "+json_artifact["archive_download_url"]);
+			resp = requests.get(json_artifact["archive_download_url"], headers={'Authorization': 'token ' + github_auth_token,}, allow_redirects=True);
+			print("win: " +str(resp));
+			z = zipfile.ZipFile(io.BytesIO(resp.content))
+			z.extractall(release_path);
+			os.rename(release_path+"/"+program_name+"-win64.msi", release_path+"/"+program_name+"_"+version+"_win64_"+date_str+".msi");
+		if json_artifact["name"] == prefix + "_"+program_name+"-macOS.dmg" and not found_macos:
 			found_macos = True;
 			print("Found macos-intel artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -79,7 +101,7 @@ def handle_artifact(json_artifact):
 			z = zipfile.ZipFile(io.BytesIO(resp.content));
 			z.extractall(release_path);
 			os.rename(release_path+"/"+program_name+"-macOS-intel.dmg", release_path+"/"+program_name+"_"+version+"_macos_"+date_str+".dmg");
-		if json_artifact["name"] == "rc_"+program_name+"-macOS-arm.dmg" and not found_macos_arm:
+		if json_artifact["name"] == prefix + "_"+program_name+"-macOS-arm.dmg" and not found_macos_arm:
 			found_macos_arm = True;
 			print("Found macos-arm artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -88,7 +110,7 @@ def handle_artifact(json_artifact):
 			z = zipfile.ZipFile(io.BytesIO(resp.content));
 			z.extractall(release_path);
 			os.rename(release_path+"/"+program_name+"-macOS-arm.dmg", release_path+"/"+program_name+"_"+version+"_macos_arm_"+date_str+".dmg");
-		if json_artifact["name"] == "rc_"+program_name+"-linux-x64-GTK2.AppImage" and not found_linux_appimage_gtk2:
+		if json_artifact["name"] == prefix + "_"+program_name+"-linux-x64-GTK2.AppImage" and not found_linux_appimage_gtk2:
 			found_linux_appimage_gtk2 = True;
 			print("Found ubuntu GTK2 artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -97,7 +119,7 @@ def handle_artifact(json_artifact):
 			z = zipfile.ZipFile(io.BytesIO(resp.content));
 			z.extractall(release_path);
 			os.rename(release_path+"/"+program_name+"-linux-x64-GTK2.AppImage", release_path+"/"+program_name+"-ubuntu_22.04-gtk2-" + version + ".AppImage");
-		if json_artifact["name"] == "rc_"+program_name+"-linux-x64-GTK3.AppImage" and not found_linux_appimage_gtk3:
+		if json_artifact["name"] == prefix + "_"+program_name+"-linux-x64-GTK3.AppImage" and not found_linux_appimage_gtk3:
 			found_linux_appimage_gtk3 = True;
 			print("Found ubuntu GTK3 artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -106,7 +128,7 @@ def handle_artifact(json_artifact):
 			z = zipfile.ZipFile(io.BytesIO(resp.content));
 			z.extractall(release_path);
 			os.rename(release_path+"/"+program_name+"-linux-x64-GTK3.AppImage", release_path+"/"+program_name+"-ubuntu_22.04-" + version + ".AppImage");
-		if json_artifact["name"] == "rc_"+program_name+"-linux-x64-GTK3.tgz" and not found_linux:
+		if json_artifact["name"] == prefix + "_"+program_name+"-linux-x64-GTK3.tgz" and not found_linux:
 			found_linux = True;
 			print("Found ubuntu GTK3 archive artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -127,7 +149,9 @@ def handle_artifact(json_artifact):
 date_str = date.today().strftime('%y%m%d');
 version = get_version();
 print("create release for: " + str(version));
-release_path = "./build/release_"+str(version);
+if(not os.path.isdir("./releases")):
+	os.mkdir("./releases");
+release_path = "./releases/"+branch_name+"_release_"+str(version);
 if(os.path.isdir(release_path)):
 	rmtree(release_path);
 	print("deleting old directory");

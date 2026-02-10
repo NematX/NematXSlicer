@@ -23,4 +23,4 @@ deps/build-linux/*
 .pkg_cache
 CMakeUserPresets.json
 **/bad_*
-
+releases/

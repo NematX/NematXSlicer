@@ -135,7 +135,7 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: rc_win64
+        name: rc_${{ github.event.repository.name }}-win64
         path: build/package/
 
 # MSI CREATION (need files from the slic3r build, can't be its own step)

@@ -131,7 +131,7 @@ jobs:
     - name: Upload artifact
       uses: actions/upload-artifact@v4
       with:
-        name: nightly_win64
+        name: nightly_${{ github.event.repository.name }}-win64
         path: build/package/
 
 # MSI CREATION
@@ -189,5 +189,5 @@ jobs:
     - name: Upload MSI artifact
       uses: actions/upload-artifact@v4
       with:
-        name: nightly_${{ github.event.repository.name }}-win64-${{ env.InstallerVersion }}.msi
+        name: nightly_${{ github.event.repository.name }}-win64.msi
         path: build/${{ github.event.repository.name }}_${{ env.InstallerVersion }}.msi

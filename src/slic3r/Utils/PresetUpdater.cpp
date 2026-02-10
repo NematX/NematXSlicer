@@ -184,7 +184,10 @@ void PresetUpdater::reload_all_vendors() {
     }
 
     // get our vendors from resources;
-    assert(boost::filesystem::exists(resources_path / "profiles"));
+    assert(boost::filesystem::exists(resources_path));
+    if (!boost::filesystem::exists(resources_path / "profiles")) {
+        boost::filesystem::create_directories(resources_path / "profiles");
+    }
     load_unused_vendors(vendors_id, resources_path / "profiles", /*is_installed=*/ false);
 
 }
