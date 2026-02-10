@@ -211,14 +211,14 @@ brew --prefix zstd
 export $BUILD_ARCH
 export LIBRARY_PATH=$LIBRARY_PATH:$(brew --prefix zstd)/lib/
 
-echo -n "[1/8] Updating submodules..."
-{
-    # update submodule profiles
-    pushd resources/profiles
-    git submodule update --init
-    popd
-} #> $ROOT/build/Build.log # Capture all command output
-echo "done"
+# echo -n "[1/8] Updating submodules..."
+# {
+    # # update submodule profiles
+    # pushd resources/profiles
+    # git submodule update --init
+    # popd
+# } #> $ROOT/build/Build.log # Capture all command output
+# echo "done"
 
 
 if [[ -n "$VERSION_DATE" ]]

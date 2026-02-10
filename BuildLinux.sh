@@ -254,14 +254,14 @@ then
        echo " done"
     fi
 
-	echo -n "Updating submodules ..."
-	{
-		# update submodule profiles
-		pushd resources/profiles
-		git submodule update --init
-		popd
-	} #> $ROOT/build/Build.log # Capture all command output
-	echo " done"
+	# echo -n "Updating submodules ..."
+	# {
+		# # update submodule profiles
+		# pushd resources/profiles
+		# git submodule update --init
+		# popd
+	# } #> $ROOT/build/Build.log # Capture all command output
+	# echo " done"
 
 	if [[ -n $VERSION_DATE ]]
     then
