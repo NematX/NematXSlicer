@@ -896,6 +896,45 @@ static inline void simplify_polygon_impl(const Points &points, double tolerance,
     }
 }
 
+void polygons_append(Polygons &dst, const Polygons &src) {
+#ifdef _DEBUG
+    Polygons uni = dst;
+    append(uni, src);
+    uni= union_(uni);
+    Polygons exuni = union_(union_ex(dst), union_ex(src));
+    Polygons test_result = diff(exuni, uni);
+    assert(test_result.empty());
+    // I'm not confident on how we can add holes in the ordered list that is Polygons can only work if each polygons_append is for different islands.
+    // currently used by support, but please use ExPolygons instead of Polygons if you have holes and pushing randmly inot it instead of using clipper::union
+    //for (const Polygon &poly : src) {
+    //    assert(poly.is_counter_clockwise());
+    //}
+#endif
+    dst.insert(dst.end(), src.begin(), src.end());
+}
+
+void polygons_append(Polygons &dst, Polygons &&src) {
+#ifdef _DEBUG
+    Polygons uni = dst;
+    append(uni, src);
+    uni= union_(uni);
+    Polygons exuni = union_(union_ex(dst), union_ex(src));
+    Polygons test_result = diff(exuni, uni);
+    assert(test_result.empty());
+    // I'm not confident on how we can add holes in the ordered list that is Polygons can only work if each polygons_append is for different islands.
+    // currently used by support, but please use ExPolygons instead of Polygons if you have holes and pushing randmly inot it instead of using clipper::union
+    //for (const Polygon &poly : src) {
+    //    assert(poly.is_counter_clockwise());
+    //}
+#endif
+    if (dst.empty()) {
+        dst = std::move(src);
+    } else {
+        std::move(std::begin(src), std::end(src), std::back_inserter(dst));
+        src.clear();
+    }
+}
+
 Polygons polygons_simplify(Polygons &&source_polygons, double tolerance, bool strictly_simple /* = true */)
 {
     Polygons out;

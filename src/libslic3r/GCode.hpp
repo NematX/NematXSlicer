@@ -103,6 +103,8 @@ struct ObjectLayerToPrint
     ObjectLayerToPrint() : object_layer(nullptr), support_layer(nullptr) {}
     const Layer        *object_layer;
     const SupportLayer *support_layer;
+    //if filled, it restrict the islands needed to be printed (can be in support or/and object)
+    std::set<const LayerSliceIsland*> islands;
     const Layer        *layer() const { return (object_layer != nullptr) ? object_layer : support_layer; }
     const PrintObject  *object() const { return (this->layer() != nullptr) ? this->layer()->object() : nullptr; }
     coord_t _print_z() const {
@@ -246,10 +248,14 @@ private:
     };
     void            _do_export(Print &print, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb);
     void            _move_to_print_object(std::string& gcode_out, const Print& print, size_t finished_objects, uint16_t initial_extruder_id);
-    void            _init_multiextruders(const Print& print, std::string& gcode_out, GCodeWriter& writer, const ToolOrdering& tool_ordering, const std::string& custom_gcode);
+    void            _init_multiextruders(const Print& print, std::string& gcode_out, GCodeWriter& writer, const std::vector<ToolOrdering>& tool_ordering, const std::string& custom_gcode);
 
     static ObjectsLayerToPrint                                  collect_layers_to_print(const PrintObject &object, Print::StatusMonitor &status_monitor);
     static std::vector<std::pair<coord_t, ObjectsLayerToPrint>> collect_layers_to_print(const Print &print, Print::StatusMonitor &status_monitor);
+    static std::vector<ObjectsLayerToPrint> separate_islands(const ObjectsLayerToPrint object_layers,
+                                                             const coord_t start_e,
+                                                             const coord_t max_height,
+                                                             const coord_t min_dist);
 
 
     LayerResult process_layer(

@@ -489,7 +489,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     check(base_interface_layers);
 #endif
     // Generate the actual toolpaths and save them into each layer.
-    generate_support_toolpaths(object.edit_support_layers(), *m_object_config, m_support_params, *m_slicing_params,
+    generate_support_toolpaths(object, object.edit_support_layers(), *m_object_config, m_support_params, *m_slicing_params,
                                raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers,
                                base_interface_layers);
 
@@ -1457,7 +1457,7 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
                 diff_polygons = ensure_valid(diff_ex(diff_polygons, slices_margin.polygons), resolution);
 #endif
             }
-            polygons_append(contact_polygons, to_polygons(diff_polygons));
+            contact_polygons = union_(contact_polygons, diff_polygons);
 
             assert_valid(contact_polygons);
             assert_valid(overhang_polygons);

@@ -815,6 +815,8 @@ static std::vector<std::string> s_Preset_print_options {
         "notes", 
         "print_custom_variables",
         "complete_objects",
+        "parallel_islands",
+        "parallel_islands_min_distance",
         "parallel_objects_step",
         "parallel_objects_step_max_z",
         "complete_objects_one_skirt",

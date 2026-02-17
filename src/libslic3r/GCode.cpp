@@ -596,6 +596,277 @@ std::vector<std::pair<coord_t, GCodeGenerator::ObjectsLayerToPrint>> GCodeGenera
     return layers_to_print;
 }
 
+            std::set<const LayerSliceIsland*> printed;
+std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_islands(
+                const GCodeGenerator::ObjectsLayerToPrint object_layers,
+                const coord_t start_z,
+                const coord_t max_height,
+                const coord_t min_dist) {
+    std::vector<ObjectsLayerToPrint> ordered_layers_islands_to_print;
+    if (object_layers.empty())
+        return ordered_layers_islands_to_print;
+    struct GroupedIslands
+    {
+        BoundingBox bb;
+        ExPolygons slices;
+        std::vector<const LayerSliceIsland *> islands;
+        std::vector<bool> is_support;
+    };
+
+    std::set<const LayerSliceIsland *> all_islands;
+    std::vector<bool> finished(ordered_layers_islands_to_print.size());
+    // we use the object layer graph to print each island separatly
+    //const PrintObject* obj = object_layers.front().object_layer->object();
+    // we explore the graph layer per layer.
+    size_t good_layer = 0;
+    for (const ObjectLayerToPrint &layer : object_layers) {
+        if (start_z > layer.layer()->scaled_print_z() /*|| layer.layer()->scaled_print_z() >= start_z + max_height*/) {
+            continue;
+        }
+        if (layer.layer()->id() == 0) {
+            //first layer printed in a special first-layer iteration
+            continue;
+        }
+        good_layer++;
+        std::vector<GroupedIslands> grouped_islands;
+        auto fn_group_islands = [&grouped_islands, &all_islands, min_dist](const Layer &layer, bool is_support) {
+            for (const LayerSliceIslandPtr &island : layer.islands()) {
+                if (!island->has_extrusions()) {
+                    //shouldn't happen... i guess. but anyway, there is no extrusions inside, ignore it
+                    continue;
+                }
+                all_islands.insert(island.get());
+                size_t added = size_t(-1);
+                for (size_t i = 0; i < grouped_islands.size(); i++) {
+                    GroupedIslands &group = grouped_islands[i];
+                    BoundingBox inflated = group.bb;
+                    inflated.offset(coordf_t(min_dist));
+                    if (inflated.overlap(island->get_bounding_box())) {
+                        if (!intersection_ex(offset_ex(island->get_slice(), double(min_dist)), group.slices).empty()) {
+                            if (added == size_t(-1)) {
+                                // collide -> add it
+                                group.bb.merge(island->get_bounding_box().polygon().points);
+                                group.slices.push_back(
+                                    island->get_slice()); // note: as they are islands, they shouldn't touch each other.
+                                group.islands.push_back(island.get());
+                                group.is_support.push_back(is_support);
+                                added = i;
+                            } else {
+                                // merge the groups, sorry
+                                GroupedIslands &main_group = grouped_islands[added];
+                                main_group.bb.merge(group.bb);
+                                for (size_t gr_i = 0; gr_i < group.islands.size(); gr_i++) {
+                                    main_group.slices.push_back(std::move(group.slices[gr_i]));
+                                    main_group.islands.push_back(std::move(group.islands[gr_i]));
+                                    main_group.is_support.push_back(std::move(group.is_support[gr_i]));
+                                }
+                                grouped_islands.erase(grouped_islands.begin() + i);
+                                i--;
+                            }
+                        }
+                    }
+                }
+                if (added == size_t(-1)) {
+                    // create your group
+                    grouped_islands.emplace_back();
+                    grouped_islands.back().bb = island->get_bounding_box();
+                    grouped_islands.back().slices.push_back(island->get_slice());
+                    grouped_islands.back().islands.push_back(island.get());
+                    grouped_islands.back().is_support.push_back(is_support);
+                }
+            }
+        };
+        // first, we group islands that are too close toguether
+        if (layer.object_layer) {
+            assert(!layer.object_layer->islands().empty());
+            fn_group_islands(*layer.object_layer, false);
+        }
+        if (layer.support_layer) {
+            assert(!layer.support_layer->islands().empty());
+            fn_group_islands(*layer.support_layer, true);
+        }
+        // - when all of our below islands are in the same ObjectsLayerToPrint, we put ourself into it (or adding our
+        // island into the current one)
+        // - when our below islands are in different ObjectsLayerToPrint, we create a new one and put ourself into when
+        auto fn_add_group_into = [&layer](ObjectLayerToPrint& container_to_fill, GroupedIslands& group) {
+            bool has_obj = false;
+            bool has_supp = false;
+            assert(group.islands.size() == group.is_support.size());
+            for (size_t i=0;i<group.islands.size(); i++) {
+                if (group.is_support[i]) {
+                    has_supp = true;
+                } else {
+                    has_obj = true;
+                }
+                container_to_fill.islands.insert(group.islands[i]);
+            }
+            if (has_obj) {
+                container_to_fill.object_layer = layer.object_layer;
+            }
+            if (has_supp) {
+                container_to_fill.support_layer = layer.support_layer;
+            }
+        };
+        std::vector<std::optional<ObjectLayerToPrint>> to_add(ordered_layers_islands_to_print.size());
+        std::sort(grouped_islands.begin(), grouped_islands.end(), [](GroupedIslands &g1, GroupedIslands &g2) {
+            if (g1.islands.size() == g2.islands.size()) {
+                return g1.bb.area() > g2.bb.area();
+            }
+            return g1.islands.size() > g2.islands.size();
+        });
+        // we need a function to get the min z of an ObjectLayerToPrint (both layer have same printz, though)
+        auto min_bottom_z = [](const ObjectLayerToPrint& objlay) -> coord_t{
+            coord_t bottom = std::numeric_limits<coord_t>::max();
+            if (objlay.object_layer) {
+                bottom = objlay.object_layer->scaled_bottom_z();
+            }
+            if (objlay.support_layer) {
+                bottom = std::min(bottom, objlay.support_layer->scaled_bottom_z());
+            }
+            assert(bottom >= 0 && bottom < std::numeric_limits<coord_t>::max());
+            return bottom;
+        };
+        for (GroupedIslands &group : grouped_islands) {
+            std::set<const LayerSliceIsland*> still_needed;
+            // create list of parent peer group
+            for (const LayerSliceIsland *island : group.islands) {
+                for (auto &link : island->overlaps_below) {
+                    //don't use layer from other calls.
+                    if (all_islands.find(link.to) != all_islands.end()) {
+                        still_needed.insert(link.to);
+                    }
+                }
+            }
+            bool was_added = false;
+            // remove from still_needed until it's empty, then add it.
+            if (still_needed.empty()) {
+                //put at the end
+                ordered_layers_islands_to_print.emplace_back();
+                to_add.emplace_back(ObjectLayerToPrint());
+                finished.push_back(false);
+                fn_add_group_into(to_add.back().value(), group);
+                was_added = true;
+            } else {
+                bool already_in_another = false;
+                for (size_t i=0;i<ordered_layers_islands_to_print.size(); i++) {
+                    assert(i < finished.size());
+                    if (finished[i]) {
+                        continue;
+                    }
+                    assert(!still_needed.empty());
+                    bool removed_at_least_one = false;
+                    {
+                        ObjectsLayerToPrint &previous_layers = ordered_layers_islands_to_print[i];
+                        if (previous_layers.empty()) {
+                            continue;
+                        }
+                        for (size_t layer_idx = 0; layer_idx < previous_layers.size(); layer_idx++) {
+                            if (previous_layers[layer_idx].layer()->scaled_print_z() <
+                                min_bottom_z(layer)) {
+                                // too far back to be possible to contains a 'still needed' layer-island
+                                continue;
+                            }
+                            for (const LayerSliceIsland *check_island : previous_layers[layer_idx].islands) {
+                                if (auto it = still_needed.find(check_island); it != still_needed.end()) {
+                                    still_needed.erase(it);
+                                    removed_at_least_one = true;
+                                }
+                            }
+                        }
+                    }
+                    //found! add it after!
+                    if (still_needed.empty()) {
+                        if (!already_in_another && !to_add[i].has_value()) {
+                            // put inside the current one
+                            to_add[i] = ObjectLayerToPrint();
+                            fn_add_group_into(to_add[i].value(), group);
+                            was_added = true;
+                        } else {
+                            //add it just after
+                            ordered_layers_islands_to_print.emplace(ordered_layers_islands_to_print.begin() + i + 1);
+                            to_add.emplace(to_add.begin() + i + 1, ObjectLayerToPrint());
+                            finished.emplace(finished.begin() + i + 1, false);
+                            fn_add_group_into(to_add[i+1].value(), group);
+                            was_added = true;
+                        }
+                        //end research
+                        break;
+                    } else {
+                        already_in_another = already_in_another || removed_at_least_one;
+                    }
+                }
+                assert(still_needed.empty());
+            }
+            assert(was_added);
+        }
+
+        // add new layer groups from to_add
+        assert(ordered_layers_islands_to_print.size() == to_add.size());
+        assert(finished.size() == to_add.size());
+        for (size_t i = 0; i < to_add.size(); i++) {
+            if (to_add[i].has_value()) {
+                ordered_layers_islands_to_print[i].push_back(std::move(to_add[i].value()));
+            } else {
+                assert(!ordered_layers_islands_to_print[i].empty());
+                //test if this layer can't have new ones
+                if (min_bottom_z(layer) > ordered_layers_islands_to_print[i].back().layer()->scaled_print_z()) {
+                    finished[i] = true;
+                    // now tht this group of layers is finished, all next groups are after these layer-islands, so we
+                    // can safely remove them from 'all_islands' collection
+                    for (const ObjectLayerToPrint &objectlayer : ordered_layers_islands_to_print[i]) {
+                        for (const LayerSliceIsland *island : objectlayer.islands) {
+                            all_islands.erase(island);
+                        }
+                    }
+                }
+            }
+        }
+
+        // need to check if the added layer need a collection as the current one is too high vs the others.
+        // for each unfinished collection
+        for (size_t coll_idx = 0; coll_idx < ordered_layers_islands_to_print.size(); coll_idx++) {
+            if (finished[coll_idx]) {
+                continue;
+            }
+            // if a collection after it start more than max_height before
+            for (size_t coll_check_idx = coll_idx + 1; coll_check_idx < ordered_layers_islands_to_print.size();
+                 coll_check_idx++) {
+                assert(!ordered_layers_islands_to_print[coll_check_idx].empty());
+                assert(ordered_layers_islands_to_print[coll_check_idx].front().layer());
+                if (ordered_layers_islands_to_print[coll_idx].back().layer()->scaled_print_z() -
+                        ordered_layers_islands_to_print[coll_check_idx].front().layer()->scaled_print_z() >
+                    max_height) {
+                    // remove last layer and put it at the end in a new collection
+                    ordered_layers_islands_to_print.emplace_back();
+                    finished.push_back(false);
+                    ordered_layers_islands_to_print.back().push_back(std::move(ordered_layers_islands_to_print[coll_idx].back()));
+                    ordered_layers_islands_to_print[coll_idx].pop_back();
+                    finished[coll_idx] = true;
+                    // now tht this group of layers is finished, all next groups are after these layer-islands, so we can
+                    // safely remove them from 'all_islands' collection
+                    for (const ObjectLayerToPrint &objectlayer : ordered_layers_islands_to_print[coll_idx]) {
+                        for (const LayerSliceIsland *island : objectlayer.islands) {
+                            all_islands.erase(island);
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+        //assert(good_layer == ordered_layers_islands_to_print.size());
+    }
+    for (const ObjectsLayerToPrint &previous_layers : ordered_layers_islands_to_print) {
+        for (const ObjectLayerToPrint &previous_layer : previous_layers) {
+            for (const LayerSliceIsland *check_island : previous_layer.islands) {
+                assert(printed.find(check_island) == printed.end());
+                printed.insert(check_island);
+            }
+        }
+    }
+
+    return ordered_layers_islands_to_print;
+}
+
 // free functions called by GCodeGenerator::do_export()
 namespace DoExport {
 //    static void update_print_estimated_times_stats(const GCodeProcessor& processor, PrintStatistics& print_statistics)
@@ -1073,12 +1344,22 @@ namespace DoExport {
                         uint16_t interface_extruder = object->config().support_material_extruder;
                         interface_extruder = interface_extruder == 0 ? soluble ? -1 : layer_tools->extruders.front() :
                                                                    (interface_extruder - 1);
-                        if (support_extruder == extruder_id &&
-                            compute_min_mm3_per_mm.is_compatible({ExtrusionRole::SupportMaterial}))
-                            mm3_per_mm.insert(compute_min_mm3_per_mm.reset_use_get(layer->support_fills));
-                        if (interface_extruder == extruder_id &&
-                            compute_min_mm3_per_mm.is_compatible({ExtrusionRole::SupportMaterialInterface}))
-                            mm3_per_mm.insert(compute_min_mm3_per_mm.reset_use_get(layer->support_fills));
+                        for (const LayerSliceIslandPtr &layer_island_ptr : layer->islands()) {
+                            for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
+                                if (support_extruder == extruder_id &&
+                                    region_island_ptr->has_extrusion(LayerRegionIsland::SUPPORT) &&
+                                    compute_min_mm3_per_mm.is_compatible({ExtrusionRole::SupportMaterial})) {
+                                    mm3_per_mm.insert(compute_min_mm3_per_mm.reset_use_get(
+                                        region_island_ptr->extrusion(LayerRegionIsland::SUPPORT)));
+                                }
+                                if (interface_extruder == extruder_id &&
+                                    region_island_ptr->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE) &&
+                                    compute_min_mm3_per_mm.is_compatible({ExtrusionRole::SupportMaterialInterface})) {
+                                    mm3_per_mm.insert(compute_min_mm3_per_mm.reset_use_get(
+                                        region_island_ptr->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)));
+                                }
+                            }
+                        }
                     }
                 }
                 // skirt: for all extruders
@@ -1209,12 +1490,21 @@ namespace DoExport {
 
 // set standby temp for extruders
 // Parse the custom G-code, try to find T, and add it if not present
-void GCodeGenerator::_init_multiextruders(const Print& print, std::string& out, GCodeWriter & writer, const ToolOrdering &tool_ordering, const std::string &custom_gcode )
-{
+void GCodeGenerator::_init_multiextruders(const Print &print,
+                                          std::string &out,
+                                          GCodeWriter &writer,
+                                          const std::vector<ToolOrdering> &tool_orderings,
+                                          const std::string &custom_gcode) {
 
     //set standby temp for reprap
     if (std::set<uint8_t>{gcfRepRap}.count(print.config().gcode_flavor.value) > 0) {
-        for (uint16_t tool_id : tool_ordering.all_extruders()) {
+        std::set<uint16_t> extruders;
+        for (const ToolOrdering &tool_ordering : tool_orderings) {
+            for (uint16_t tool_id : tool_ordering.all_extruders()) {
+                extruders.insert(tool_id);
+            }
+        }
+        for (uint16_t tool_id : extruders) {
             int printing_temp = int(print.config().temperature.get_at(tool_id));
             if (printing_temp > 0) {
                 int standby_temp = printing_temp;
@@ -1781,8 +2071,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
 
     //init extruders
     if (!this->config().start_gcode_manual) {
-        assert(print.tool_orderings().size() == 1);
-        this->_init_multiextruders(print, preamble_to_put_start_layer, m_writer, print.tool_orderings().front(),
+        this->_init_multiextruders(print, preamble_to_put_start_layer, m_writer, print.tool_orderings(),
                                    start_gcode);
     }
 
@@ -1792,7 +2081,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
 
     // adds tag for processor
     preamble_to_put_start_layer.append(";").append(GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Role)).append(gcode_extrusion_role_to_string(GCodeExtrusionRole::Custom)).append("\n");
-    
+
     unset_last_pos();
 
     // Write the custom start G-code
@@ -1994,50 +2283,86 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                 bool first_layers = true;
                 //final_extruder_id = initial_extruder_id;
                 coord_t z_start = 0, z_end = height_step_range;
+                std::set<const PrintObject*> separate_islands_done;
                 bool is_layers = true;
                 while (is_layers && (print.config().parallel_objects_step_max_z.value == 0 || z_start + EPSILON < print.config().parallel_objects_step_max_z.value)) {
                     if (print.config().parallel_objects_step_max_z.value > 0) {
                         z_end = std::min(z_end, Layer::scale_to_layer_coord(print.config().parallel_objects_step_max_z.value));
                     }
+                    std::set<const LayerSliceIsland*> printed_island;
                     is_layers = false;
                     auto it_tool_ordering = print.tool_orderings().begin();
                     auto it_print_object_instance = print_object_instances_ordering.begin();
                     while (it_print_object_instance != print_object_instances_ordering.end()) {
                         assert(it_tool_ordering != print.tool_orderings().end());
-                        ObjectsLayerToPrint layers_to_print_range;
+                        std::vector<ObjectsLayerToPrint> layers_to_print_range;
                         const PrintObject &       object        = *(*it_print_object_instance)->print_object;
                         ObjectsLayerToPrint object_and_support_layers = collect_layers_to_print(object, status_monitor);
 
-                        for (const ObjectLayerToPrint &ltp : object_and_support_layers) {
-                            if (ltp._print_z() < z_start || ltp._print_z() >= z_end)
+                        if (!first_layers && print.config().parallel_islands.value) {
+                            if (separate_islands_done.find(&object) != separate_islands_done.end()) {
+                                //already printed, pass
+                                // relance
+                                 ++it_print_object_instance;
+                                 ++it_tool_ordering;
                                 continue;
+                            }
+                            double max_nzl_diam_mm = 0;
+                            for (const ToolOrdering &tool : print.tool_orderings()) {
+                                for (uint16_t extr_id : tool.all_extruders()) {
+                                    max_nzl_diam_mm = std::max(max_nzl_diam_mm, print.config().nozzle_diameter.get_at(extr_id));
+                                }
+                            }
+                            coord_t min_dist = Layer::scale_to_layer_coord(print.config().parallel_islands_min_distance.get_abs_value(max_nzl_diam_mm));
+                            layers_to_print_range = separate_islands(object_and_support_layers, z_start, height_step_range, min_dist);
+                            separate_islands_done.insert(&object);
+                        } else {
+                            // keep only layers that are i  our current printing range
+                            layers_to_print_range.emplace_back();
+                            for (const ObjectLayerToPrint &ltp : object_and_support_layers) {
+                                if (ltp._print_z() < z_start || ltp._print_z() >= z_end)
+                                    continue;
 
-                            // if first_layer then only id==0, else only id != 0
-                            if ( (first_layers) != (ltp.layer()->id() == 0))
-                                continue;
+                                // if first_layer then only id==0, else only id != 0
+                                if ((first_layers) != (ltp.layer()->id() == 0))
+                                    continue;
 
-                            layers_to_print_range.push_back(ltp);
+                                layers_to_print_range.front().push_back(ltp);
+                            }
+                            if (layers_to_print_range.front().empty()) {
+                                layers_to_print_range.pop_back();
+                            }
                         }
 
                         // complete the tool ordering for this sequence.
                         m_volumetric_speed_mm3_per_s = DoExport::autospeed_volumetric_limit(print, *it_tool_ordering);
 
                         if (!layers_to_print_range.empty() && it_tool_ordering->first_extruder() != uint16_t(-1)) {
-                            this->set_origin(unscale((*it_print_object_instance)->shift));
+                            for (ObjectsLayerToPrint &layer_group : layers_to_print_range) {
+                                assert(!layer_group.empty());
+                                this->set_origin(unscale((*it_print_object_instance)->shift));
 
-                            size_t finished_objects = 1 + (it_print_object_instance -
-                                                           print_object_instances_ordering.begin());
-                            if (finished_objects > 1)
-                                _move_to_print_object(preamble_to_put_start_layer, print, finished_objects, initial_extruder_id);
+                                size_t finished_objects = 1 +
+                                    (it_print_object_instance - print_object_instances_ordering.begin());
+                                if (finished_objects > 1)
+                                    _move_to_print_object(preamble_to_put_start_layer, print, finished_objects,
+                                                          initial_extruder_id);
 
-                            assert(!object.instances().empty());
-                            assert(*it_print_object_instance >= &*object.instances().begin() &&
-                                   *it_print_object_instance <= &*(object.instances().end()-1));
-                            this->process_layers(print, status_monitor, *it_tool_ordering, layers_to_print_range,
-                                                 *it_print_object_instance - object.instances().data(),
-                                                 preamble_to_put_start_layer, file);
-                            is_layers = true;
-                            //update "current exturder" for the next ToolOrdering
+                                assert(!object.instances().empty());
+                                assert(*it_print_object_instance >= &*object.instances().begin() &&
+                                       *it_print_object_instance <= &*(object.instances().end() - 1));
+                                for (ObjectLayerToPrint &layer: layer_group) {
+                                    for (const LayerSliceIsland *island : layer.islands) {
+                                        assert(printed_island.find(island) == printed_island.end());
+                                        printed_island.insert(island);
+                                    }
+                                }
+                                this->process_layers(print, status_monitor, *it_tool_ordering, layer_group,
+                                                     *it_print_object_instance - object.instances().data(),
+                                                     preamble_to_put_start_layer, file);
+                                is_layers = true;
+                                // update "current exturder" for the next ToolOrdering
+                            }
                         }
 
                         // relance
@@ -3582,6 +3907,7 @@ LayerResult GCodeGenerator::process_layer(
         (m_writer.tool()->retract_lift() > 0 && (m_config.retract_lift_above.get_at(m_writer.tool()->id()) == 0 || BOOL_EXTRUDER_CONFIG(retract_lift_first_layer)))
         ||   // or lift_min is higher than the first layer height.
          Layer::scale_to_layer_coord(m_config.lift_min.value) > layer.scaled_print_z()
+        || previous_layer_z > print_z
             )) {
         // still do the retraction
         gcode += this->retract_and_wipe();
@@ -3592,7 +3918,9 @@ LayerResult GCodeGenerator::process_layer(
         //extra lift on layer change if multiple objects
         if(single_object_instance_idx == size_t(-1) && (support_layer != nullptr || layers.size() > 1))
             set_extra_lift(m_last_layer_z_, layer.id(), print.config(), m_writer, first_extruder_id);
-        gcode += this->change_layer(previous_layer_z, print_z);  // this will increase m_layer_index
+        if (previous_layer_z != print_z) {
+            gcode += this->change_layer(previous_layer_z, print_z); // this will increase m_layer_index
+        }
         //forget wipe from previous layer
         //gcode += "; m_wipe.reset_path(); after change_layer\n";
         assert(_m_force_move_z_from || is_approx(unscaled(print_z), m_writer.get_unlifted_position().z(), EPSILON));
@@ -3761,7 +4089,7 @@ LayerResult GCodeGenerator::process_layer(
             this->set_origin(old_origin);
             gcode += this->visitor_gcode;
         } else {
-            gcode += this->set_extruder(extruder_id, print_z, true);
+            gcode += this->set_extruder(extruder_id, print_z);
         }
 
         assert(extruder_id == m_writer.tool()->id());
@@ -3939,6 +4267,7 @@ distsqrf_t dist_from_bb(const BoundingBox &bb, const Point &pt) {
     dist = std::min(dist, pt.distance_to_square(Point(bb.max.x(), bb.min.y())));
     return dist;
 }
+    std::set<const LayerSliceIsland *> aeff_all_islands;
 
 void GCodeGenerator::process_layer_single_object(
     // output
@@ -3995,8 +4324,8 @@ void GCodeGenerator::process_layer_single_object(
     const Print       &print        = *print_object.print();
 
     if (! print_args.print_wipe_extrusions && layer_to_print.support_layer != nullptr)
-        if (const SupportLayer &support_layer = *layer_to_print.support_layer; ! support_layer.support_fills.entities().empty()) {
-            ExtrusionRole   role               = support_layer.support_fills.role();
+        if (const SupportLayer &support_layer = *layer_to_print.support_layer; support_layer.has_extrusions()) {
+            ExtrusionRole   role               = support_layer.role();
             bool            has_support        = role.is_mixed() || role.is_support_base();
             bool            has_interface      = role.is_mixed() || role.is_support_interface();
             // Extruder ID of the support base. -1 if "don't care".
@@ -4026,24 +4355,73 @@ void GCodeGenerator::process_layer_single_object(
                 init_layer_delayed();
                 m_layer = layer_to_print.support_layer;
                 m_object_layer_over_raft = false;
-                ExtrusionEntitiesPtr        entities_cache;
-                const ExtrusionEntitiesPtr &entities = extrude_support && extrude_interface ? support_layer.support_fills.entities() : entities_cache;
-                if (! extrude_support || ! extrude_interface) {
-                    auto role = extrude_support ? ExtrusionRole::SupportMaterial : ExtrusionRole::SupportMaterialInterface;
-                    entities_cache.reserve(support_layer.support_fills.entities().size());
-                    for (ExtrusionEntity *ee : support_layer.support_fills.entities())
-                        if (ee->role() == role)
-                            entities_cache.emplace_back(ee);
+                std::vector<size_t> idxs_islands;
+                if (layer_to_print.islands.empty()) {
+                    idxs_islands = std::vector<size_t>(support_layer.islands().size());
+                } else {
+                    for (size_t i = 0; i < support_layer.islands().size(); i++) {
+                        if (layer_to_print.islands.find(support_layer.islands()[i].get()) != layer_to_print.islands.end()) {
+                            idxs_islands.push_back(i);
+                        }
+                    }
                 }
-                if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 && m_config.print_first_layer_temperature.is_enabled())
-                    gcode += m_writer.set_temperature(m_config.print_first_layer_temperature.value, false, m_writer.tool()->id());
-                else if (m_config.print_temperature.is_enabled())
-                    gcode += m_writer.set_temperature(m_config.print_temperature.value, false, m_writer.tool()->id());
-                else if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 && m_config.first_layer_temperature.get_at(m_writer.tool()->id()) > 0)
-                        gcode += m_writer.set_temperature(m_config.first_layer_temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
-                else if (m_config.temperature.get_at(m_writer.tool()->id()) > 0) // don't set it if disabled
-                    gcode += m_writer.set_temperature(m_config.temperature.get_at(m_writer.tool()->id()), false, m_writer.tool()->id());
-                gcode += this->extrude_support(chain_extrusion_references(entities, last_pos_defined()?&last_pos():nullptr));
+                while (!idxs_islands.empty()) {
+                    // get best (currently, only via bb)
+                    // TODO: use island slice polygon.
+                    size_t nearest_idx = 0;
+                    if (last_pos_defined()) {
+                        distsqrf_t nearest_dist_sqr =
+                            dist_from_bb(support_layer.islands()[idxs_islands[nearest_idx]]->get_bounding_box(),
+                                         last_pos());
+                        for (size_t i = 1; i < idxs_islands.size(); i++) {
+                            distsqrf_t other_dist_sqr =
+                                dist_from_bb(support_layer.islands()[idxs_islands[i]]->get_bounding_box(), last_pos());
+                            if (other_dist_sqr < nearest_dist_sqr) {
+                                nearest_idx = i;
+                                nearest_dist_sqr = other_dist_sqr;
+                            }
+                        }
+                    }
+                    // extrude island
+                    const LayerSliceIslandPtr &layer_island_ptr = support_layer.islands()[idxs_islands[nearest_idx]];
+
+                    ExtrusionEntitiesPtr entities;
+                    for (const LayerSliceIslandPtr &island : support_layer.islands()) {
+                        for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                                for (ExtrusionEntity *ee : region_island->extrusion(LayerRegionIsland::SUPPORT)) {
+                                    assert(ee->role() == ExtrusionRole::SupportMaterial);
+                                }
+                                append(entities, region_island->extrusion(LayerRegionIsland::SUPPORT).entities());
+                            }
+                            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                                for (ExtrusionEntity *ee : region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                                    assert(ee->role() == ExtrusionRole::SupportMaterialInterface);
+                                }
+                                append(entities, region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE).entities());
+                            }
+                        }
+                    }
+                    if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 &&
+                        m_config.print_first_layer_temperature.is_enabled())
+                        gcode += m_writer.set_temperature(m_config.print_first_layer_temperature.value, false,
+                                                          m_writer.tool()->id());
+                    else if (m_config.print_temperature.is_enabled())
+                        gcode += m_writer.set_temperature(m_config.print_temperature.value, false,
+                                                          m_writer.tool()->id());
+                    else if (m_layer != nullptr && m_layer->scaled_bottom_z() <= 0 &&
+                             m_config.first_layer_temperature.get_at(m_writer.tool()->id()) > 0)
+                        gcode += m_writer.set_temperature(m_config.first_layer_temperature.get_at(
+                                                              m_writer.tool()->id()),
+                                                          false, m_writer.tool()->id());
+                    else if (m_config.temperature.get_at(m_writer.tool()->id()) > 0) // don't set it if disabled
+                        gcode += m_writer.set_temperature(m_config.temperature.get_at(m_writer.tool()->id()), false,
+                                                          m_writer.tool()->id());
+                    gcode += this->extrude_support(
+                        chain_extrusion_references(entities, last_pos_defined() ? &last_pos() : nullptr));
+
+                    idxs_islands.erase(idxs_islands.begin() + nearest_idx);
+                }
             }
         }
     m_layer = layer_to_print.layer();
@@ -4088,8 +4466,19 @@ void GCodeGenerator::process_layer_single_object(
     if (const Layer *layer = layer_to_print.object_layer; layer) {
 
         // order islands (get next best)
-        std::vector<size_t> idxs_islands(layer->islands().size());
-        std::iota (std::begin(idxs_islands), std::end(idxs_islands), 0);
+        std::vector<size_t> idxs_islands;
+        if (layer_to_print.islands.empty()) {
+            idxs_islands = std::vector<size_t>(layer->islands().size());
+            std::iota (std::begin(idxs_islands), std::end(idxs_islands), 0);
+        } else {
+            for (size_t i = 0; i < layer->islands().size(); i++) {
+                if (layer_to_print.islands.find(layer->islands()[i].get()) != layer_to_print.islands.end()) {
+                    idxs_islands.push_back(i);
+                    std::cout<<"layer "<<layer->id()<<" : add island "<<i<<" @"<<uint64_t((void*)(layer->islands()[i].get()))<<"\n";
+                    //assert(aeff_all_islands.find(
+                }
+            }
+        }
         while (!idxs_islands.empty()) {
             // get best (currently, only via bb)
             //TODO: use island slice polygon.
@@ -4352,7 +4741,7 @@ std::string GCodeGenerator::preamble()
 
 // called by GCodeGenerator::process_layer()
 std::string GCodeGenerator::change_layer(coord_t from_z, coord_t to_z) {
-    assert(from_z < to_z);
+    assert(from_z != to_z);
     const double unscaled_to_print_z = unscaled(to_z);
     std::string gcode;
     if (layer_count() > 0)
@@ -8672,14 +9061,13 @@ bool GCodeGenerator::needs_retraction(const Polyline& travel, ExtrusionRole role
 
     if (role == ExtrusionRole::SupportMaterial && this->last_pos_defined()) {
         if (const SupportLayer *support_layer = dynamic_cast<const SupportLayer*>(m_layer);
-                support_layer != nullptr && ! support_layer->support_islands_bboxes.empty()) {
+                support_layer != nullptr && !support_layer->islands().empty()) {
             BoundingBox bbox_travel = get_extents(travel);
             Polylines   trimmed;
             bool        trimmed_initialized = false;
-            for (const BoundingBox &bbox : support_layer->support_islands_bboxes) {
-                if (bbox.overlap(bbox_travel)) {
-                    const auto &island = support_layer->support_islands[&bbox - support_layer->support_islands_bboxes.data()];
-                    trimmed = trimmed_initialized ? diff_pl(trimmed, island) : diff_pl(travel, island);
+            for (const LayerSliceIslandPtr &island : support_layer->islands()) {
+                if (island->get_bounding_box().overlap(bbox_travel)) {
+                    trimmed = trimmed_initialized ? diff_pl(trimmed, island->get_slice()) : diff_pl(travel, island->get_slice());
                     trimmed_initialized = true;
                     if (trimmed.empty())
                         // skip retraction if this is a travel move inside a support material island
@@ -9156,7 +9544,7 @@ std::string GCodeGenerator::set_extruder(uint16_t extruder_id, coord_t print_z, 
     ensure_end_object_change_labels(gcode);
 
     //just for testing
-    assert(m_layer == nullptr || is_approx(this->writer().get_position().z(), unscaled(print_z), EPSILON) ||
+    assert(m_layer == nullptr || is_approx(this->writer().get_unlifted_position().z(), unscaled(print_z), EPSILON) ||
            _m_force_move_z_from || (!m_z_override.empty() && (m_z_override.back().second == Layer::scale_to_layer_coord(this->writer().get_position().z()))));
 
     // if we are running a single-extruder setup, just set the extruder and return nothing (if no_toolchange)

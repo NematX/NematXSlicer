@@ -180,6 +180,8 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         "only_retract_when_crossing_perimeters",
         "output_filename_format",
         "overhangs_fan_speed",
+        "parallel_islands",
+        "parallel_islands_min_distance",
         "parallel_objects_step",
         "parallel_objects_step_max_z",
         "pause_print_gcode",
@@ -1319,7 +1321,7 @@ void Print::process()
         //    m_tool_orderings.back().assign_custom_gcodes(*this);
         //} else
         if (this->config().complete_objects.value || config().parallel_objects_step.value > 0) {
-            throw new std::exception();
+            //throw new std::exception();
             // FIXME: parallel_objects_step: end extruder on each pass isn't computed correctly.
             // TODO: add extruder-switch minimizing option.
             // Order object instances for sequential print.
@@ -1341,36 +1343,46 @@ void Print::process()
                     previous_final_extruder = m_tool_orderings.back().last_extruder();
                 }
             }
+            this->m_wipe_tower2.reset(new WipeTower2());
         } else {
             // Initialize the tool ordering, so it could be used by the G-code preview slider for planning tool
             // changes and filament switches.
-            m_tool_orderings.emplace_back(*this, -1, /*prime_mmu*/true/*false*/);
+            m_tool_orderings.emplace_back(*this, -1, /*prime_mmu*/ true /*false*/);
             if (m_tool_orderings.empty() || m_tool_orderings.back().last_extruder() == uint16_t(-1))
                 throw Slic3r::SlicingError(
                     "The print is empty. The model is not printable with current print settings.");
 
-            //add colorchange/pause/custom
+            // add colorchange/pause/custom
             m_tool_orderings.back().assign_custom_gcodes(*this);
-        }
-        //now create the wipe tower to move from extruder to the next one.
-        this->m_wipe_tower2.reset(new WipeTower2());
-        this->m_wipe_tower2->set_config(&this->config(), &this->default_object_config(), &this->default_region_config());
 
-        assert(m_tool_orderings.size() == 1);
-        this->m_wipe_tower2->init(this, this->objects(), this->m_tool_orderings.back());
+            // now create the wipe tower to move from extruder to the next one.
+            this->m_wipe_tower2.reset(new WipeTower2());
+            if (m_default_object_config.wipe_tower) {
+                this->m_wipe_tower2->set_config(&this->config(), &this->default_object_config(),
+                                                &this->default_region_config());
 
-        this->set_done(psWipeTower);
-        //fill wtdata
-        {
-            std::scoped_lock<std::mutex> lock(m_wipe_tower_data_mutex);
-            m_wipe_tower_data.height = -1;
-            m_wipe_tower_data.z_and_depth_pairs.clear();
-            for (auto &wt_layer : this->m_wipe_tower2->m_WTLayer_data) {
-                m_wipe_tower_data.height = std::max(m_wipe_tower_data.height, (float)unscaled(wt_layer->extrusion_z));
-                m_wipe_tower_data.z_and_depth_pairs.emplace_back((float)unscaled(wt_layer->extrusion_z), (float)unscaled(wt_layer->estimated_wipe_tower_length));
+                assert(m_tool_orderings.size() == 1);
+                this->m_wipe_tower2->init(this, this->objects(), this->m_tool_orderings.back());
+
+                this->set_done(psWipeTower);
+                // fill wtdata
+                {
+                    std::scoped_lock<std::mutex> lock(m_wipe_tower_data_mutex);
+                    m_wipe_tower_data.height = -1;
+                    m_wipe_tower_data.z_and_depth_pairs.clear();
+                    for (auto &wt_layer : this->m_wipe_tower2->m_WTLayer_data) {
+                        m_wipe_tower_data.height = std::max(m_wipe_tower_data.height,
+                                                            (float) unscaled(wt_layer->extrusion_z));
+                        m_wipe_tower_data.z_and_depth_pairs.emplace_back((float) unscaled(wt_layer->extrusion_z),
+                                                                         (float) unscaled(
+                                                                             wt_layer->estimated_wipe_tower_length));
+                    }
+                    std::sort(m_wipe_tower_data.z_and_depth_pairs.begin(), m_wipe_tower_data.z_and_depth_pairs.end(),
+                              [](std::pair<float, float> &e1, std::pair<float, float> &e2) {
+                                  return e1.first < e2.first;
+                              });
+                }
             }
-            std::sort(m_wipe_tower_data.z_and_depth_pairs.begin(), m_wipe_tower_data.z_and_depth_pairs.end(),
-                [](std::pair<float,float> &e1, std::pair<float,float> &e2){ return e1.first < e2.first; });
         }
     }
     
@@ -1799,8 +1811,9 @@ void Print::_make_skirt(const PrintObjectPtrs &objects, ExtrusionEntityCollectio
         for (const SupportLayer *layer : object->support_layers()) {
             if (layer->scaled_print_z() > skirt_height_z)
                 break;
-            for (const ExPolygon &expoly : layer->support_islands)
-                append(object_points, expoly.contour.points);
+            for (const LayerSliceIslandPtr &island : layer->islands()) {
+                append(object_points, island->get_slice().contour.points);
+            }
             // simplify
             object_points = Slic3r::Geometry::convex_hull(object_points).points;
         }
@@ -1810,8 +1823,9 @@ void Print::_make_skirt(const PrintObjectPtrs &objects, ExtrusionEntityCollectio
             if (!object->support_layers().empty() &&
                 object->support_layers().front()->scaled_print_z() == object->m_layers[0]->scaled_print_z()) {
                 Points support_points;
-                for (const ExPolygon &expoly : object->support_layers().front()->support_islands)
-                    append(support_points, expoly.contour.points);
+                for (const LayerSliceIslandPtr &island : object->support_layers().front()->islands()) {
+                    append(support_points, island->get_slice().contour.points);
+                }
                 const Polygon hull_support = Slic3r::Geometry::convex_hull(support_points);
                 for (const Polygon& poly : offset(hull_support, scale_(object->config().brim_width)))
                     append(object_points, poly.points);
@@ -1988,9 +2002,21 @@ Polygons Print::first_layer_islands() const
         Polygons object_islands;
         for (const ExPolygon &expoly : object->m_layers.front()->lslices())
             object_islands.push_back(expoly.contour);
-        if (! object->support_layers().empty())
-            //was polygons_covered_by_spacing, but is it really important?
-            object->support_layers().front()->support_fills.polygons_covered_by_width(object_islands, float(SCALED_EPSILON));
+        if (!object->support_layers().empty()) {
+            // was polygons_covered_by_spacing, but is it really important?
+            for (const LayerSliceIslandPtr &island : object->support_layers().front()->islands()) {
+                for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                               region_island->extrusion(LayerRegionIsland::SUPPORT)
+                                   .polygons_covered_by_width(object_islands, float(SCALED_EPSILON));
+                    }
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                               region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
+                                   .polygons_covered_by_width(object_islands, float(SCALED_EPSILON));
+                    }
+                }
+            }
+        }
         islands.reserve(islands.size() + object_islands.size() * object->instances().size());
         for (const PrintInstance &instance : object->instances())
             for (Polygon &poly : object_islands) {
@@ -2255,7 +2281,7 @@ bool Print::has_wipe_tower() const {
             for (const SupportLayer *slayer : obj->support_layers()) {
                 if (slayer->scaled_height() > max_z)
                     continue;
-                if (!slayer->support_fills.empty() &&
+                if (slayer->has_extrusions() &&
                     (check_extruder(obj->config().support_material_extruder.value) ||
                      check_extruder(obj->config().support_material_interface_extruder.value))) {
                     goto finish_search; // !can_wipe_tower

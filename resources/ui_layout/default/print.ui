@@ -600,6 +600,10 @@ group:Sequential printing
 		setting:label$Step:parallel_objects_step
 		setting:label$Max z:parallel_objects_step_max_z
 	end_line
+	line:Island Parallel printing step
+		setting:label$:parallel_islands
+		setting:label$Minimum island distance:parallel_islands_min_distance
+	end_line
 	setting:complete_objects_one_skirt
 	setting:complete_objects_sort
 	line:Extruder clearance (mm)

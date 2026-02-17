@@ -3706,7 +3706,7 @@ static void generate_support_areas(Print &print,
 #endif // SLIC3R_DEBUG
         generate_support_layers(print_object, raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
         // Don't fill in the tree supports, make them hollow with just a single sheath line.
-        generate_support_toolpaths(print_object.edit_support_layers(), print_object.config(), support_params, print_object.slicing_parameters(),
+        generate_support_toolpaths(print_object, print_object.edit_support_layers(), print_object.config(), support_params, print_object.slicing_parameters(),
             raft_layers, bottom_contacts, top_contacts, intermediate_layers, interface_layers, base_interface_layers);
         
  #if 0

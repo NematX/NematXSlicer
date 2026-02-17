@@ -106,6 +106,7 @@ public:
     void    export_region_fill_surfaces_to_svg_debug(const char *name) const;
 
     const ExPolygons &get_raw_slices() const { return m_raw_slices; }
+    const ExPolygons &get_raw_bounding_box() const { return m_raw_slices; }
     void set_raw_slices(ExPolygons&& raw_slices) { m_raw_slices = std::move(raw_slices); }
 
 protected:
@@ -190,6 +191,8 @@ public:
     static inline ExtrusionRole INFILLS = ERM_Infill;
     static inline ExtrusionRole IRONINGS = ExtrusionRole::Ironing;
     static inline ExtrusionRole MILLS = ExtrusionRole::Milling;
+    static inline ExtrusionRole SUPPORT = ExtrusionRole::SupportMaterial;
+    static inline ExtrusionRole SUPPORT_INTERFACE = ExtrusionRole::SupportMaterialInterface;
 
 
     bool has_extrusion(ExtrusionRole role) const {
@@ -277,6 +280,9 @@ public:
     // return true if this expolygon is (inside) this island.
     // TODO remove when the fill surfaces will be linked to their islands (maybe moved here)
     bool is_expolygons_from_region(const ExPolygon &expolygon) const;
+
+    // Is there any valid extrusion assigned to one LayerRegionIslandPtr?
+    bool has_extrusions() const;
 
     //// Unspecified fill polygons, used for intersecting when we don't want the infill/perimeter overlap
     //// note: if empty, that means there is no overlap, so you don't need to intersect with it.
@@ -392,8 +398,8 @@ public:
     void                    export_region_slices_to_svg_debug(const char *name) const;
     void                    export_region_fill_surfaces_to_svg_debug(const char *name) const;
 
-    // Is there any valid extrusion assigned to this LayerRegion?
-    virtual bool            has_extrusions() const;
+    // Is there any valid extrusion assigned to any island-region?
+    bool            has_extrusions() const;
 
     void simplify_extrusion_path() {
         for (LayerSliceIslandPtr &island_ptr : m_islands)
@@ -429,20 +435,11 @@ private:
 class SupportLayer : public Layer 
 {
 public:
-    // Polygons covered by the supports: base, interface and contact areas.
-    // Used to suppress retraction if moving for a support extrusion over these support_islands.
-    ExPolygons                  support_islands;
-    // Slightly inflated bounding boxes of the above, for faster intersection query.
-    BoundingBoxes               support_islands_bboxes;
-    // Extrusion paths for the support base and for the support interface and contacts.
-    ExtrusionEntityCollection   support_fills;
-
-
-    // Is there any valid extrusion assigned to this LayerRegion?
-    virtual bool                has_extrusions() const { return ! support_fills.empty(); }
 
     // Zero based index of an interface layer, used for alternating direction of interface / contact layers.
     size_t                      interface_id() const { return m_interface_id; }
+
+    ExtrusionRole role() const;
 
     void simplify_support_extrusion_path();
 protected:

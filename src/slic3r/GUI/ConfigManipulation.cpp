@@ -623,13 +623,20 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
     for (auto el : { /*"extruder_clearance_radius", "extruder_clearance_height",*/ "complete_objects_one_skirt",
         "complete_objects_sort"})
         toggle_field(el, have_sequential_printing);
-    toggle_field("parallel_objects_step", !config->opt_bool("complete_objects"));
-    toggle_field("parallel_objects_step_max_z", config->opt_float("parallel_objects_step") > 0);
+    bool temp_complete_step = !config->opt_bool("complete_objects");
+    toggle_field("parallel_objects_step", temp_complete_step);
+    temp_complete_step = temp_complete_step && config->opt_float("parallel_objects_step") > 0;
+    toggle_field("parallel_objects_step_max_z", temp_complete_step);
+    toggle_field("parallel_islands", temp_complete_step);
+    temp_complete_step = temp_complete_step && config->opt_bool("parallel_islands");
+    toggle_field("parallel_islands_min_distance", temp_complete_step);
 
     bool have_ooze_prevention = config->opt_bool("ooze_prevention");
     toggle_field("standby_temperature_delta", have_ooze_prevention);
 
-    bool have_wipe_tower = config->opt_bool("wipe_tower");
+    bool have_wipe_tower = config->opt_float("parallel_objects_step") <= 0;
+    toggle_field("wipe_tower", have_wipe_tower);
+    have_wipe_tower = have_wipe_tower && config->opt_bool("wipe_tower");
     for (auto el : { "wipe_tower_x", "wipe_tower_y", "wipe_tower_width", "wipe_tower_rotation_angle", "wipe_tower_brim_width",
                      "wipe_tower_cone_angle", "wipe_tower_extra_spacing",
                      "wipe_tower_bridging", "wipe_tower_brim", "wipe_tower_no_sparse_layers", "single_extruder_multi_material_priming",

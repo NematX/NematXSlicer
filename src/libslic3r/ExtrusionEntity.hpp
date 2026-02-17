@@ -1102,6 +1102,28 @@ public:
 };
 
 
+class CreateBoundingBoxVisitor : public ExtrusionVisitorRecursive {
+    BoundingBox bb;
+public:
+    using ExtrusionVisitorRecursive::use;
+    CreateBoundingBoxVisitor() {}
+    void use(ExtrusionPath &path) override {
+        for (const Geometry::ArcWelder::Segment & pt: path.polyline.get_arc()) {
+            bb.merge(pt.point);
+        }
+    }
+    void use(ExtrusionPath3D &path3D) override {
+        for (const Geometry::ArcWelder::Segment & pt: path3D.polyline.get_arc()) {
+            bb.merge(pt.point);
+        }
+    }
+    static inline BoundingBox create(ExtrusionEntity &ee) {
+        CreateBoundingBoxVisitor visitor;
+        ee.visit(visitor);
+        return visitor.bb;
+    }
+};
+
 #ifdef _DEBUGINFO
 struct LoopAssertVisitor : public ExtrusionVisitorRecursiveConst {
     using ExtrusionVisitorRecursiveConst::use;

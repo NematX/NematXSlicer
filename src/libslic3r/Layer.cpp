@@ -41,7 +41,8 @@ void LayerSliceIsland::fill_regions(Layer &layer) {
     for (const LayerRegion *lr : layer.regions()) {
         // intersection
         for (const ExPolygon &region_expoly : lr->get_raw_slices()) {
-            if (bb_bigger.contains(region_expoly.contour.front())) {
+            BoundingBox bb_region = get_extents(region_expoly);
+            if (bb_bigger.overlap(bb_region)) {
                 ExPolygons intersections = intersection_ex(m_slice, region_expoly);
                 if (!intersections.empty()) {
                     this->m_regions.insert(lr);
@@ -86,6 +87,15 @@ bool LayerSliceIsland::is_expolygons_from_region(const ExPolygon &expolygon) con
         area_diff += diff.area();
     }
     return area_inter > area_diff;
+}
+
+bool LayerSliceIsland::has_extrusions() const {
+    for (const LayerRegionIslandPtr &region_island_ptr : this->regions_islands()) {
+        if (region_island_ptr->has_extrusions()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void LayerRegionIsland::remove_empty_extrusions() {
@@ -136,6 +146,41 @@ void LayerRegionIsland::simplify_extrusion_entity(const Layer& layer)
     }
 }
 
+LayerRegionIsland &LayerSliceIsland::add_new_region_island(const LayerRegionSetConstPtrs &region_set,
+                                                            uint16_t extruder_id) {
+    // these region are all inside this islands
+    for (auto regionptr : region_set) {
+        assert(this->regions().find(regionptr) != this->regions().end());
+    }
+    // add it
+    m_extrusions.emplace_back(new LayerRegionIsland(region_set, extruder_id));
+    return *m_extrusions.back();
+}
+
+LayerRegionIsland &LayerSliceIsland::get_or_add_region_island(const LayerRegionSetConstPtrs &region_set,
+                                                            uint16_t extruder_id) {
+    LayerRegionIsland *region_island = nullptr;
+    for (LayerRegionIslandPtr &ri : this->regions_islands()) {
+        if (ri->regions() == region_set && ri->extruder_id() == extruder_id) {
+            region_island = ri.get();
+            break;
+        }
+    }
+    if (region_island == nullptr) {
+        region_island = &this->add_new_region_island(region_set, extruder_id);
+    }
+    return *region_island;
+}
+
+bool LayerRegionIsland::has_extrusions() const {
+    for (auto &entry : this->m_extrusion_regions) {
+        if (!entry.second.empty()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 Layer::~Layer()
 {
     this->lower_layer = this->upper_layer = nullptr;
@@ -184,41 +229,6 @@ void Layer::add_regions_to_islands() {
     this->m_islands_locked = true;
 }
 
-LayerRegionIsland &LayerSliceIsland::add_new_region_island(const LayerRegionSetConstPtrs &region_set,
-                                                            uint16_t extruder_id) {
-    // these region are all inside this islands
-    for (auto regionptr : region_set) {
-        assert(this->regions().find(regionptr) != this->regions().end());
-    }
-    // add it
-    m_extrusions.emplace_back(new LayerRegionIsland(region_set, extruder_id));
-    return *m_extrusions.back();
-}
-
-LayerRegionIsland &LayerSliceIsland::get_or_add_region_island(const LayerRegionSetConstPtrs &region_set,
-                                                            uint16_t extruder_id) {
-    LayerRegionIsland *region_island = nullptr;
-    for (LayerRegionIslandPtr &ri : this->regions_islands()) {
-        if (ri->regions() == region_set && ri->extruder_id() == extruder_id) {
-            region_island = ri.get();
-            break;
-        }
-    }
-    if (region_island == nullptr) {
-        region_island = &this->add_new_region_island(region_set, extruder_id);
-    }
-    return *region_island;
-}
-
-bool LayerRegionIsland::has_extrusions() const {
-    for (auto &entry : this->m_extrusion_regions) {
-        if (!entry.second.empty()) {
-            return true;
-        }
-    }
-    return false;
-}
-
 // Test whether whether there are any slices assigned to this layer.
 bool Layer::empty() const
 {
@@ -238,10 +248,8 @@ LayerRegion* Layer::add_region(const PrintRegion *print_region)
 
 bool Layer::has_extrusions() const {
     for (const LayerSliceIslandPtr &layer_island_ptr : this->islands()) {
-        for (const LayerRegionIslandPtr &region_island_ptr : layer_island_ptr->regions_islands()) {
-            if (region_island_ptr->has_extrusions()) {
-                return true;
-            }
+        if (layer_island_ptr->has_extrusions()) {
+            return true;
         }
     }
     return false;
@@ -780,7 +788,7 @@ void Layer::build_up_down_graph(Layer& below, Layer& above)
 
 void Layer::restore_untyped_slices() {
     for (LayerRegion *layerm : m_regions) {
-        layerm->m_slices.set(layerm->m_raw_slices, stPosInternal | stDensSparse);
+        layerm->m_slices.set(layerm->get_raw_slices(), stPosInternal | stDensSparse);
         for (auto &srf : layerm->m_slices)
             srf.expolygon.assert_valid();
     }
@@ -1251,7 +1259,31 @@ void SupportLayer::simplify_support_extrusion_path() {
                             false,
                             &print_config.arc_fitting_tolerance,
                             enable_arc_fitting ? SCALED_EPSILON * 2 : SCALED_EPSILON};
-    this->support_fills.visit(visitor);
+    for (LayerSliceIslandPtr &island : m_islands) {
+        for (LayerRegionIslandPtr &region_island : island->regions_islands()) {
+            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                region_island->mutable_extrusion(LayerRegionIsland::SUPPORT).visit(visitor);
+            }
+            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                region_island->mutable_extrusion(LayerRegionIsland::SUPPORT_INTERFACE).visit(visitor);
+            }
+        }
+    }
+}
+
+ExtrusionRole SupportLayer::role() const {
+    ExtrusionRole role = ExtrusionRole::None;
+    for (const LayerSliceIslandPtr &island : islands()) {
+        for (LayerRegionIslandPtr &region_island : island->regions_islands()) {
+            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                role |= ExtrusionRole::SupportMaterial;
+            }
+            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                role |= ExtrusionRole::SupportMaterialInterface;
+            }
+        }
+    }
+    return role;
 }
 
 BoundingBox get_extents(const LayerRegion &layer_region)

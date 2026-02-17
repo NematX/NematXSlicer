@@ -1039,7 +1039,22 @@ void make_brim(const Print& print, const Flow& flow, const PrintObjectPtrs& obje
             }
         }
         if (!object->support_layers().empty()) {
-            ExPolygons polys = union_ex(object->support_layers().front()->support_fills.polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+            ExPolygons polys;
+            for (const LayerSliceIslandPtr &island : object->support_layers().front()->islands()) {
+                for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                        expolygons_append(polys,
+                               region_island->extrusion(LayerRegionIsland::SUPPORT)
+                                   .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+                    }
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                        expolygons_append(polys,
+                               region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
+                                   .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+                    }
+                }
+            }
+            polys = union_ex(polys);
             for (ExPolygon& poly : polys) {
                 if (brim_offset == 0) {
                     object_islands.push_back(std::move(poly));
@@ -1213,7 +1228,22 @@ void make_brim_ears(const Print& print, const Flow& flow, const PrintObjectPtrs&
         }
 
         if (!object->support_layers().empty()) {
-            ExPolygons polys = union_ex(object->support_layers().front()->support_fills.polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+            ExPolygons polys;
+            for (const LayerSliceIslandPtr &island : object->support_layers().front()->islands()) {
+                for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                        expolygons_append(polys,
+                               region_island->extrusion(LayerRegionIsland::SUPPORT)
+                                   .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+                    }
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                        expolygons_append(polys,
+                               region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
+                                   .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+                    }
+                }
+            }
+            polys = union_ex(polys);
             //put ears over supports unless it's more than 30% fill
             if (object->config().raft_first_layer_density.get_abs_value(1.) > 0.3) {
                 for (ExPolygon& poly : polys) {
@@ -1437,9 +1467,22 @@ void make_brim_interior(const Print& print, const Flow& flow, const PrintObjectP
         }
         if (!object->support_layers().empty()) {
             spacing = scaled(object->config().support_material_interface_spacing.value) + support_material_flow(object, float(print.get_min_first_layer_height())).scaled_width() * 1.5;
-            ExPolygons polys = closing_ex(
-                union_ex(object->support_layers().front()->support_fills.polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)))
-                , spacing);
+            ExPolygons polys;
+            for (const LayerSliceIslandPtr &island : object->support_layers().front()->islands()) {
+                for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                        expolygons_append(polys,
+                               region_island->extrusion(LayerRegionIsland::SUPPORT)
+                                   .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+                    }
+                    if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                        expolygons_append(polys,
+                               region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
+                                   .polygons_covered_by_spacing(flow.spacing_ratio(), float(SCALED_EPSILON)));
+                    }
+                }
+            }
+            polys = closing_ex(union_ex(polys), spacing);
             for (ExPolygon& poly : polys) {
                 if (brim_offset == 0) {
                     object_islands.push_back(std::move(poly));
