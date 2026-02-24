@@ -76,7 +76,7 @@ public:
 
     std::vector<float> get_value_samples(float sampling) const; //returns sampled values
     std::vector<std::pair<float,float>> get_buttons() const; // returns buttons position
-    void                                set_buttons(std::vector<std::pair<float, float>>);
+    void                                set_buttons(std::vector<std::pair<float, float>>, bool freeze_front = false, bool freeze_back = false);
 
     void draw();
 
@@ -113,7 +113,7 @@ private:
         static inline const int pow10[] = {1, 10, 100, 1000, 10000, 100000, 1000000, 10000000, 100000000, 1000000000};
     public:
         bool operator<(const ButtonToDrag& a) const { return m_pos.m_x < a.m_pos.m_x; }
-        ButtonToDrag(wxPoint2DDouble pos, const Chart &chart) : m_pos{pos}, m_pos_following{pos}, m_chart(&chart) {};
+        ButtonToDrag(wxPoint2DDouble pos, const Chart &chart) : m_pos{pos}, m_pos_following{pos}, m_chart(&chart), freeze(false) {};
         wxPoint2DDouble get_pos() const { return m_pos; }
         void move(double x, double y) {
             m_pos_following.m_x += x;
@@ -135,6 +135,7 @@ private:
                 m_pos.m_y = int(m_pos.m_y * pow10[m_chart->m_y_precision]) / double(pow10[m_chart->m_y_precision]);
             }
         }
+        bool freeze = false;
     private:
         wxPoint2DDouble m_pos_following;    // position in math coordinates
         wxPoint2DDouble m_pos;              // position in math coordinates
