@@ -601,7 +601,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                 const GCodeGenerator::ObjectsLayerToPrint object_layers,
                 const coord_t start_z,
                 const coord_t max_height,
-                const coord_t min_dist) {
+                const std::vector<GraphData> &extruder_min_dist) {
     std::vector<ObjectsLayerToPrint> ordered_layers_islands_to_print;
     if (object_layers.empty())
         return ordered_layers_islands_to_print;
@@ -629,7 +629,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
         }
         good_layer++;
         std::vector<GroupedIslands> grouped_islands;
-        auto fn_group_islands = [&grouped_islands, &all_islands, min_dist](const Layer &layer, bool is_support) {
+        auto fn_group_islands = [&grouped_islands, &all_islands, max_height, &extruder_min_dist](const Layer &layer, bool is_support) {
             for (const LayerSliceIslandPtr &island : layer.islands()) {
                 if (!island->has_extrusions()) {
                     //shouldn't happen... i guess. but anyway, there is no extrusions inside, ignore it
@@ -640,9 +640,36 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                 for (size_t i = 0; i < grouped_islands.size(); i++) {
                     GroupedIslands &group = grouped_islands[i];
                     BoundingBox inflated = group.bb;
+                    //get compute min dist for the group height and the island extruder(s)
+                    coord_t min_dist = 0;
+                    bool no_clearance = false;
+                    for (const LayerRegionIslandPtr &region_island_ptr : island->regions_islands()) {
+                        assert(region_island_ptr->extruder_id() < extruder_min_dist.size() ||
+                               region_island_ptr->extruder_id() == uint16_t(-1));
+                        if (region_island_ptr->extruder_id() != uint16_t(-1)) {
+                            // check if in the usable part of the clearance
+                            if (extruder_min_dist[region_island_ptr->extruder_id()].data().back().y() <
+                                unscaled(max_height)) {
+                                no_clearance = true;
+                            } else {
+                                min_dist = std::max(min_dist,
+                                                    scale_t(extruder_min_dist[region_island_ptr->extruder_id()]
+                                                                .inverse_interpolate(unscaled(max_height))));
+                            }
+                        } else {
+                            for (const GraphData &extr_data : extruder_min_dist) {
+                                if (extr_data.data().back().y() < unscaled(max_height)) {
+                                    no_clearance = true;
+                                } else {
+                                    min_dist = std::max(min_dist,
+                                                        scale_t(extr_data.inverse_interpolate(unscaled(max_height))));
+                                }
+                            }
+                        }
+                    }
                     inflated.offset(coordf_t(min_dist));
-                    if (inflated.overlap(island->get_bounding_box())) {
-                        if (!intersection_ex(offset_ex(island->get_slice(), double(min_dist)), group.slices).empty()) {
+                    if (no_clearance || inflated.overlap(island->get_bounding_box())) {
+                        if (no_clearance || !intersection_ex(offset_ex(island->get_slice(), double(min_dist)), group.slices).empty()) {
                             if (added == size_t(-1)) {
                                 // collide -> add it
                                 group.bb.merge(island->get_bounding_box().polygon().points);
@@ -2313,8 +2340,8 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                                     max_nzl_diam_mm = std::max(max_nzl_diam_mm, print.config().nozzle_diameter.get_at(extr_id));
                                 }
                             }
-                            coord_t min_dist = Layer::scale_to_layer_coord(print.config().parallel_islands_min_distance.get_abs_value(max_nzl_diam_mm));
-                            layers_to_print_range = separate_islands(object_and_support_layers, z_start, height_step_range, min_dist);
+                            //TODO: "merge" these ranges between objects (ie don't wait to finish an object for switching, and try to minimize extruder swap)
+                            layers_to_print_range = separate_islands(object_and_support_layers, z_start, height_step_range, print.config().extruder_clearance.get_values());
                             separate_islands_done.insert(&object);
                         } else {
                             // keep only layers that are i  our current printing range

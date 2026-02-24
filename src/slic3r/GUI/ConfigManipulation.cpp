@@ -629,7 +629,6 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
     toggle_field("parallel_objects_step_max_z", temp_complete_step);
     toggle_field("parallel_islands", temp_complete_step);
     temp_complete_step = temp_complete_step && config->opt_bool("parallel_islands");
-    toggle_field("parallel_islands_min_distance", temp_complete_step);
 
     bool have_ooze_prevention = config->opt_bool("ooze_prevention");
     toggle_field("standby_temperature_delta", have_ooze_prevention);

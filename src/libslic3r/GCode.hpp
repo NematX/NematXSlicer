@@ -255,7 +255,7 @@ private:
     static std::vector<ObjectsLayerToPrint> separate_islands(const ObjectsLayerToPrint object_layers,
                                                              const coord_t start_e,
                                                              const coord_t max_height,
-                                                             const coord_t min_dist);
+                                                             const std::vector<GraphData> &extruder_min_dist);
 
 
     LayerResult process_layer(
