@@ -1704,7 +1704,7 @@ void PrintConfigDef::init_fff_params()
                     "\nIf disabled, the default fan speed will be used."
                     "\nExternal perimeters can benefit from higher fan speed to improve surface finish, "
                     "while internal perimeters, infill, etc. benefit from lower fan speed to improve layer adhesion."
-                    "\nCan be disabled by disable_fan_first_layers, slowed down by full_fan_speed_layer and increased by low layer time.");
+                    "\nCan be disabled by disable_fan_first_layers, slowed down by fan_speed_layer_gradient and increased by low layer time.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 100;
@@ -3362,7 +3362,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This fan speed is enforced during all gap fill Perimeter moves"
         "\nSet to 0 to stop the fan."
         "\nIf disabled, default fan speed will be used."
-        "\nCan be disabled by disable_fan_first_layers, slowed down by full_fan_speed_layer and increased by low layer time.");
+        "\nCan be disabled by disable_fan_first_layers, slowed down by fan_speed_layer_gradient and increased by low layer time.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 100;
@@ -3861,7 +3861,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This fan speed is enforced during all Internal Infill moves"
         "\nSet to 0 to stop the fan."
         "\nIf disabled, default fan speed will be used."
-        "\nCan be disabled by disable_fan_first_layers, slowed down by full_fan_speed_layer and increased by low layer time.");
+        "\nCan be disabled by disable_fan_first_layers, slowed down by fan_speed_layer_gradient and increased by low layer time.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 100;
@@ -5166,7 +5166,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This fan speed is enforced during all Perimeter moves"
         "\nSet to 0 to stop the fan."
         "\nIf disabled, default fan speed will be used."
-        "\nCan be disabled by disable_fan_first_layers, slowed down by full_fan_speed_layer and increased by low layer time.");
+        "\nCan be disabled by disable_fan_first_layers, slowed down by fan_speed_layer_gradient and increased by low layer time.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 100;
@@ -6344,7 +6344,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This fan speed is enforced during all Solid Infill moves"
         "\nSet to 0 to stop the fan."
         "\nIf disabled, default fan speed will be used."
-        "\nCan be disabled by disable_fan_first_layers, slowed down by full_fan_speed_layer and increased by low layer time.");
+        "\nCan be disabled by disable_fan_first_layers, slowed down by fan_speed_layer_gradient and increased by low layer time.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 100;
@@ -6873,7 +6873,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This fan speed is enforced during all support moves"
         "\nSet to 0 to stop the fan."
         "\nIf disabled, default fan speed will be used."
-        "\nCan be disabled by disable_fan_first_layers, slowed down by full_fan_speed_layer.");
+        "\nCan be disabled by disable_fan_first_layers, slowed down by fan_speed_layer_gradient.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 100;
@@ -7443,7 +7443,7 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("This fan speed is enforced during all top fills (including ironing)."
         "\nSet to 0 to stop the fan."
         "\nIf disabled, Solid Infill fan speed will be used."
-        "\nCan be disabled by disable_fan_first_layers, slowed down by full_fan_speed_layer.");
+        "\nCan be disabled by disable_fan_first_layers, slowed down by fan_speed_layer_gradient.");
     def->sidetext = L("%");
     def->min = 0;
     def->max = 100;
@@ -9823,13 +9823,27 @@ void _handle_legacy(std::unordered_map<t_config_option_key, std::pair<t_config_o
     }
 
     if (has(dict, "full_fan_speed_layer")) {
-        int val = boost::lexical_cast<int>(value());
-        if (auto it_disa = dict.find("disable_fan_first_layers") ; it_disa != dict.end()) {
-            val -= boost::lexical_cast<int>(it_disa->second.second);
-        }
-        val = std::max(0, val);
-        opt_key() = "fan_speed_layer_gradient"s;
-        value() = to_string_nozero(val, 5);
+        try {
+            std::vector<std::string> ffsl_array;
+            std::vector<std::string> dffl_array;
+            boost::split(ffsl_array, value(), boost::is_any_of(","), boost::token_compress_off);
+            if (auto it_disa = dict.find("disable_fan_first_layers"); it_disa != dict.end()) {
+                boost::split(dffl_array, it_disa->second.second, boost::is_any_of(","), boost::token_compress_off);
+            }
+            opt_key() = "fan_speed_layer_gradient"s;
+            value() = "";
+            for (size_t i = 0; i < ffsl_array.size(); i++) {
+                int val = boost::lexical_cast<int>(ffsl_array[i]);
+                if (i < dffl_array.size()) {
+                    val -= boost::lexical_cast<int>(dffl_array[i]);
+                }
+                val = std::max(0, val);
+                if (!value().empty()) {
+                    value() += ",";
+                }
+                value() += to_string_nozero(val, 5);
+            }
+        } catch (std::exception) {}
     }
 
     // it's not needed to check aliases, because they are taken care of in deserialize().
