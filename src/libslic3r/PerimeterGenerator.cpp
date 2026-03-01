@@ -5798,7 +5798,8 @@ ProcessSurfaceResult PerimeterGenerator::process_classic(const Parameters &     
                                                    resolution); // safety offset
                         }
                         // append gapfill where it's enabled
-                        if (params.region_setting.get_solo_config(&params.config.gap_fill_enabled).get_bool()) {
+                        if ((!params.region_setting.has_many_config(&params.config.gap_fill_enabled)) &&
+                            params.region_setting.get_solo_config(&params.config.gap_fill_enabled).get_bool()) {
                             append(gaps, gapfill);
                         } else {
                             for (auto const &[gap_fill_enabled, areas] :
