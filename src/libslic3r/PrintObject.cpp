@@ -2655,6 +2655,10 @@ void PrintObject::process_external_surfaces(bool old)
             [this, &surfaces_covered, region_id, old](const size_t layer_idx) {
                 PRINT_OBJECT_TIME_LIMIT_MILLIS(PRINT_OBJECT_TIME_LIMIT_DEFAULT);
                 m_print->throw_if_canceled();
+                if (m_layers[layer_idx]->get_region(int(region_id))->fill_surfaces().empty()) {
+                    // nothing to do.
+                    return;
+                }
                 // BOOST_LOG_TRIVIAL(trace) << "Processing external surface, layer" << m_layers[layer_idx]->unscaled_print_z();
                 if (old) {
                     m_layers[layer_idx]->get_region(int(region_id))->process_external_surfaces_old(

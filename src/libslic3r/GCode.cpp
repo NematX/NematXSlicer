@@ -6176,8 +6176,8 @@ std::string GCodeGenerator::extrude_loop(const ExtrusionLoop &original_loop, con
                                 polys.front().points.insert(polys.front().points.begin() + nearest_pt_idx, nearest_pt);
                             }
                             assert(polys.front().closest_point(pt_inside) != nullptr &&
-                                   std::abs(polys.front().closest_point(pt_inside)->distance_to_square(pt_inside) -
-                                            best_dist_sqr) < SCALED_EPSILON * SCALED_EPSILON);
+                                   std::abs(polys.front().closest_point(pt_inside)->distance_to(pt_inside) -
+                                            std::sqrt(best_dist_sqr)) < SCALED_EPSILON);
                         } else {
                             polys = { original_polygon };
                         }

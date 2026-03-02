@@ -900,9 +900,9 @@ void Layer::_make_fills(LayerSliceIsland& island,
     uint16_t current_extruder = -1;
     size_t first_object_layer_id = this->object()->get_layer(0)->id();
     for (SurfaceFill &surface_fill : surface_fills) {
-        // store the region fill when changing region. 
+        // store the region fill when changing region (if there is something to store in fills_by_priority).
         if (current_regions != surface_fill.regions || current_extruder != surface_fill.params.extruder) {
-            if (!current_regions.empty()) {
+            if (!current_regions.empty() && !fills_by_priority.empty()) {
                 store_fill(current_regions);
             }
             //current_regions.clear();
@@ -993,6 +993,7 @@ void Layer::_make_fills(LayerSliceIsland& island,
         //store default values, before modification.
         bool dont_adjust = surface_fill.params.dont_adjust;
         float density = surface_fill.params.density;
+        assert(!surface_fill.expolygons.empty());
         for (ExPolygon &expoly : surface_fill.expolygons) {
             //set overlap polygons
             f->no_overlap_expolygons.clear();
@@ -1042,8 +1043,9 @@ void Layer::_make_fills(LayerSliceIsland& island,
                             expolys = offset_ex(ExPolygon{surface_fill.surface.expolygon.contour}, -scale_t(surface_fill.params.spacing) / 2 - 10);
                         }
                         // if nothing after collapse, then go to next surface_fill.expolygon
-                        if (expolys.empty())
+                        if (expolys.empty()) {
                             continue;
+                        }
 
                         BoundingBox bb;
                         bool first = true;
@@ -1085,8 +1087,9 @@ void Layer::_make_fills(LayerSliceIsland& island,
                 }
 
                 //make fill
-                while ((size_t)surface_fill.params.priority >= fills_by_priority.size())
+                while ((size_t) surface_fill.params.priority >= fills_by_priority.size()) {
                     fills_by_priority.emplace_back();
+                }
                 // note: fills_by_priority[idx] is a vector that store all the entities of this priority, but that can be in multiple islands
                 //       the collection in fills_by_priority[idx][idx2) can be reordered, so put evrythgin in a new unorderable collection if it'ts needed
                 fills_by_priority[(size_t)surface_fill.params.priority].emplace_back(&surface_fill, new ExtrusionEntityCollection());
@@ -1139,8 +1142,10 @@ void Layer::_make_fills(LayerSliceIsland& island,
             }
         }
     }
-    if(!current_regions.empty())
+    // add last infill if a region is selected and any infill was created in it.
+    if (!current_regions.empty() && !fills_by_priority.empty()) {
         store_fill(current_regions);
+    }
 }
 
 //TODO: 
