@@ -1233,6 +1233,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloats,              retract_lift_before_travel))
     ((ConfigOptionFloats,              retract_restart_extra))
     ((ConfigOptionFloats,              retract_restart_extra_toolchange))
+    ((ConfigOptionBools,               retract_restart_wipe_toolchange))
     ((ConfigOptionFloats,              retract_speed))
     ((ConfigOptionStrings,             start_filament_gcode))
     ((ConfigOptionBool,                silent_mode))

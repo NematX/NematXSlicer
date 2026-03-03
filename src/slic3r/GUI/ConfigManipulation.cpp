@@ -849,6 +849,7 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
 
         bool toolchange_retraction = config->opt_float("retract_length_toolchange", i) > 0;
         toggle_field("retract_restart_extra_toolchange", extruder_count > 1 && toolchange_retraction, i);
+        toggle_field("retract_restart_wipe_toolchange", extruder_count > 1 && toolchange_retraction, i);
     }
 
     if (config->opt_bool("single_extruder_multi_material") && extruder_count > 1) {

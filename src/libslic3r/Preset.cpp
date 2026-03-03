@@ -1020,6 +1020,7 @@ static std::vector<std::string> s_Preset_filament_options {
         // Retract overrides
         "filament_retract_length", "filament_retract_lift", "filament_retract_lift_above", "filament_retract_lift_below", 
         "filament_retract_length_toolchange",
+        "retract_restart_wipe_toolchange",
         "filament_retract_speed", "filament_deretract_speed", "filament_retract_restart_extra", 
         "filament_retract_before_travel", "filament_retract_lift_before_travel",
         "filament_retract_layer_change", "filament_retract_before_wipe", 

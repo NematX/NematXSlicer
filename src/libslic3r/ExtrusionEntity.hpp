@@ -422,7 +422,11 @@ struct ExtrusionFlow
     ExtrusionFlow(const Flow &flow) :
         mm3_per_mm(flow.mm3_per_mm()), width(flow.width()), height(flow.height()) {}
 
+    void set_force_e_per_mm() { this->height = -2; }
+    bool force_e_per_mm() const { return this->height == -2; }
+
     // Volumetric velocity. mm^3 of plastic per mm of linear head motion. Used by the G-code generator.
+    // !!! if height == -2, then mm3_per_mm is changed into e_per_mm (used for exact unretraction) !!! (very unsafe, don't use it for normal extrusions)
     double          mm3_per_mm{ -1. };
     // Width of the extrusion, used for visualization purposes & for seam notch %. Unscaled
     float           width{ -1.f };

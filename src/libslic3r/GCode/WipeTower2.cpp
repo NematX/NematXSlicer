@@ -880,7 +880,7 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer, uint16
             }
             toolchange_Change(collection, new_tool);
             toolchange_load(collection, toolchange.wipe_lines, toolchange.to_tool_id);
-            toolchange_Wipe(collection, toolchange.wipe_lines, toolchange.wipe_flow);
+            toolchange_Wipe(collection, toolchange.wipe_lines, toolchange.wipe_flow, toolchange.to_tool_id);
         }
     }
     if (new_tool == perimeter_tool_idx) {
@@ -1223,9 +1223,55 @@ bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
 
 // Wipe the newly loaded filament until the end of the assigned wipe area.
 //TODO: if first layer, you may want to increase the flow a little bit (by 18% by default)
-void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection, Polyline wipe_lines, const Flow wipe_flow) {
+void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection,
+                                     Polyline wipe_lines,
+                                     const Flow wipe_flow,
+                                     const uint16_t tool_id) {
     if (wipe_lines.size() < 2)
         return;
+
+    // unretraction as wipe
+    if (m_config->retract_length_toolchange.get_at(tool_id) &&
+        m_config->retract_restart_wipe_toolchange.get_at(tool_id)) {
+        // get speed & length
+        const double wipe_e_length_mm = m_config->retract_length_toolchange.get_at(tool_id);
+        double unretract_speed_e_mm_per_s = m_config->deretract_speed.get_at(tool_id);
+        if (unretract_speed_e_mm_per_s == 0) {
+            unretract_speed_e_mm_per_s = m_config->retract_speed.get_at(tool_id);
+        }
+        assert(unretract_speed_e_mm_per_s > 0);
+        double time_s = wipe_e_length_mm / unretract_speed_e_mm_per_s;
+        double xy_speed = m_config->wipe_speed.get_at(tool_id);
+        if (xy_speed == 0) {
+            xy_speed = m_config->travel_speed.value;
+        }
+        assert(xy_speed > 0);
+        double dist_xy_mm = xy_speed * time_s;
+        const double max_length_mm = unscaled(wipe_lines.length());
+        Polyline unretract_lines = wipe_lines;
+        if (max_length_mm > dist_xy_mm) {
+            unretract_lines.clip_end(scale_d(max_length_mm - dist_xy_mm));
+        } else {
+            dist_xy_mm = max_length_mm;
+            xy_speed = max_length_mm / time_s;
+        }
+        unretract_lines.reverse();
+        //double e_per_mm3 = m_config->extrusion_multiplier.get_at(tool_id);
+        //double filament_diameter = m_config->filament_diameter.get_at(tool_id);
+        //if (!m_config->use_volumetric_e)
+        //    e_per_mm3 /= filament_diameter * filament_diameter * 0.25 * PI;
+        //double e_per_mm = e_per_mm3 * wipe_flow.mm3_per_mm();
+        // height = -1 to force the mm3_per_mm to e_per_mm3
+        ExtrusionFlow extrusion_flow(wipe_e_length_mm / dist_xy_mm, wipe_flow.width(), -2);
+        //extrusion_flow.force_e_per_mm = true;
+        ExtrusionAttributes extr_flow_attr(ExtrusionRole::WipeTowerWipe, std::move(extrusion_flow));
+        ExtrusionPath path_unretract(unretract_lines, extr_flow_attr, nullptr, false);
+        path_unretract.add_property(ExtrusionPropertySpeed(xy_speed));
+        collection.append(std::move(path_unretract));
+
+    }
+
+
     //.append("; CP TOOLCHANGE WIPE\n");
     float speed_factor = 1.f;
 

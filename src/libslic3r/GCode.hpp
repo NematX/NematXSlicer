@@ -301,6 +301,7 @@ private:
     std::string      visitor_gcode;
     bool             visitor_flipped; //TODO use instead of reverse() at extrude_entity
     bool             visitor_in_use = false;
+    std::string      visitor_root_state = ""; // to know what kind of thing we're doing.
     std::string_view visitor_comment;
     double           visitor_speed;
     virtual void use(const ExtrusionPath &path) override;

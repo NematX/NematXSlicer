@@ -291,7 +291,10 @@ protected:
                             const Polyline &ramming_lines,
                             const uint16_t tool_id,
                             const Flow &ramming_flow);
-    void toolchange_Wipe(ExtrusionEntityCollection &collection, Polyline wipe_lines, const Flow wipe_flow);
+    void toolchange_Wipe(ExtrusionEntityCollection &collection,
+                         Polyline wipe_lines,
+                         const Flow wipe_flow,
+                         const uint16_t tool_id);
     void toolchange_Change(ExtrusionEntityCollection &collection, const uint16_t new_tool);
 
     bool print_perimeter(ExtrusionEntityCollection &collection);

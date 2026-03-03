@@ -1250,12 +1250,12 @@ namespace DoExport {
                 excluded.insert(ExtrusionRole::Skirt);
         }
         virtual void use(const ExtrusionPath& path) override {
-            if (excluded.find(path.role()) == excluded.end()) {
+            if (excluded.find(path.role()) == excluded.end() && path.attributes().force_e_per_mm()) {
                 min = std::min(min, path.mm3_per_mm());
             }
         }
         virtual void use(const ExtrusionPath3D& path3D) override {
-            if (excluded.find(path3D.role()) == excluded.end()) {
+            if (excluded.find(path3D.role()) == excluded.end() && !path3D.attributes().force_e_per_mm()) {
                 min = std::min(min, path3D.mm3_per_mm());
             }
         }
@@ -4088,9 +4088,9 @@ LayerResult GCodeGenerator::process_layer(
     for (const uint16_t extruder_id : layer_tools.extruders)
     {
         // set extruder
-        if (m_wipe_tower_current_layer) {
+        uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
+        if (m_wipe_tower_current_layer && (old_extruder_id != extruder_id || layer_tools.extruders.size() < 2)) {
             assert(m_writer.tool());
-            uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
             ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id);
             if (extruder_id == layer_tools.extruders.back()) {
                 m_wipe_tower_current_layer->finish_layer(wt_extrusions, extruder_id, true);
@@ -4102,6 +4102,7 @@ LayerResult GCodeGenerator::process_layer(
             assert(m_current_entity.empty());
             assert(m_speed_override.empty());
             assert(!visitor_in_use);
+            this->visitor_root_state = "wp";
             this->visitor_in_use = true;
             this->visitor_gcode.clear();
             this->visitor_comment = "";
@@ -7385,6 +7386,9 @@ void GCodeGenerator::_extrude_line_cut_corner(std::string& gcode_str, const Line
 }
 
 double GCodeGenerator::_compute_e_per_mm(const ExtrusionPath &path) {
+    if (path.attributes().height == -2) {
+        return path.mm3_per_mm();
+    }
     const double path_mm3_per_mm = path.mm3_per_mm(); 
     // no e if no extrusion axis
     if (m_writer.extrusion_axis().empty() || path_mm3_per_mm <= 0)
@@ -8352,6 +8356,8 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
         //now that we move to the new layer, forget previous layer wipe (if any).
         //gcode += "; m_wipe.reset_path(); after m_delayed_layer_change\n";
     }
+
+    // unretraction (if needed)
     gcode += m_writer.unretract();
 
     //set pa after unretraction (do nothing if it isn't changed)
@@ -8414,9 +8420,10 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
 
     if (last_was_wipe_tower || m_last_height_ != Layer::scale_to_layer_coord(path.height())) {
         m_last_height_ = Layer::scale_to_layer_coord(path.height());
-
-        gcode += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
-            + float_to_string_decimal_point(unscaled(m_last_height_)) + "\n";
+        if (m_last_height_ >= 0) {
+            gcode += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) +
+                float_to_string_decimal_point(unscaled(m_last_height_)) + "\n";
+        }
     }
 
     std::string cooling_marker_setspeed_comments;
@@ -9678,6 +9685,16 @@ std::string GCodeGenerator::set_extruder(uint16_t extruder_id, coord_t print_z, 
 
     // The position is now known after the tool change.
     this->unset_last_pos();
+
+    // if the unretraction is done in the toolchange wipe, then erase the current unretraction
+    if (this->visitor_root_state == "wp" && m_config.retract_length_toolchange.get_at(extruder_id) > 0 &&
+        m_config.retract_restart_wipe_toolchange.get_at(extruder_id)) {
+        double max_retration = m_writer.tool()->retracted();
+        assert(max_retration >= m_config.retract_length_toolchange.get_at(extruder_id) || max_retration == 0);
+        if (max_retration >= m_config.retract_length_toolchange.get_at(extruder_id)) {
+            m_writer.tool()->set_retracted(0, m_writer.tool()->restart_extra());
+        }
+    }
 
     return gcode;
 }
