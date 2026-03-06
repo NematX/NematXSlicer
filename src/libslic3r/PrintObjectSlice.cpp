@@ -1031,7 +1031,7 @@ void PrintObject::_max_overhang_threshold() {
                 ExPolygons max_enlarged_support = offset_ex(enlarged_support, double(enlargement * 0.5));
                 ExPolygons min_enlarged_support = union_ex(supported_area,
                                                            offset_ex(enlarged_support, double(-enlargement * 0.5)));
-                
+
                 // put bridgeable into supported area (bridges are not enlarged)
                 max_enlarged_support = union_ex(max_enlarged_support, bridged_area);
                 min_enlarged_support = union_ex(min_enlarged_support, bridged_area);
@@ -1051,28 +1051,31 @@ void PrintObject::_max_overhang_threshold() {
                 enlarged_support = intersection_ex(enlarged_support, max_enlarged_support);
                 enlarged_support = union_ex(enlarged_support, min_enlarged_support);
                 // modify geometry
-                ExPolygons to_add;
-                ExPolygons my_raw_region_islands = lregion->get_raw_slices();
-                for (size_t expoly_idx = 0; expoly_idx < my_raw_region_islands.size(); expoly_idx++) {
-                    ExPolygons expolys = intersection_ex(enlarged_support, my_raw_region_islands[expoly_idx]);
+                Surfaces to_add;
+                Surfaces &my_surfaces = lregion->m_slices.surfaces;
+                ExPolygons expolys_final;
+                for (size_t surf_idx = 0; surf_idx < my_surfaces.size(); surf_idx++) {
+                    ExPolygons expolys = intersection_ex(enlarged_support, my_surfaces[surf_idx].expolygon);
                     // if bridge, smooth enlargment so there won't be spikes near bridges.
                     if (!bridged_other_layers_areas.empty()) {
                         expolys = offset2_ex(expolys, double(-enlargement / 2), double(enlargement / 2));
                     }
                     if (expolys.empty()) {
-                        my_raw_region_islands.erase(my_raw_region_islands.begin() + expoly_idx);
-                        expoly_idx--;
+                        my_surfaces.erase(my_surfaces.begin() + surf_idx);
+                        surf_idx--;
                     } else {
-                        my_raw_region_islands[expoly_idx] = expolys[0];
+                        my_surfaces[surf_idx].expolygon = expolys[0];
                         for (size_t i = 1; i < expolys.size(); i++) {
-                            to_add.push_back(std::move(expolys[i]));
+                            to_add.emplace_back(my_surfaces[surf_idx], expolys[i]);
                         }
+                        append(expolys_final, expolys);
                         append(all_region_modified, std::move(expolys));
                     }
                 }
-                append(my_raw_region_islands, std::move(to_add));
-                ensure_valid(my_raw_region_islands, resolution);
-                my_layer->m_regions[region_idx]->set_raw_slices(std::move(my_raw_region_islands));
+                my_layer->m_regions[region_idx]->set_raw_slices(std::move(expolys_final));
+                append(my_surfaces, std::move(to_add));
+                ensure_valid(my_surfaces, resolution);
+                for(auto &srf : my_surfaces) srf.expolygon.assert_valid();
             } else {
                 Surfaces &my_surfaces = lregion->m_slices.surfaces;
                 for (size_t surf_idx = 0; surf_idx < my_surfaces.size(); surf_idx++) {
