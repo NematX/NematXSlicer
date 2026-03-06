@@ -4091,7 +4091,8 @@ LayerResult GCodeGenerator::process_layer(
         uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
         if (m_wipe_tower_current_layer && (old_extruder_id != extruder_id || layer_tools.extruders.size() < 2)) {
             assert(m_writer.tool());
-            ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id);
+            assert(m_writer.get_tool(extruder_id));
+            ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id, m_writer.get_tool(extruder_id)->retracted());
             if (extruder_id == layer_tools.extruders.back()) {
                 m_wipe_tower_current_layer->finish_layer(wt_extrusions, extruder_id, true);
             }
@@ -4101,6 +4102,7 @@ LayerResult GCodeGenerator::process_layer(
             //setup
             assert(m_current_entity.empty());
             assert(m_speed_override.empty());
+            assert(m_modifier_override.empty());
             assert(!visitor_in_use);
             this->visitor_root_state = "wp";
             this->visitor_in_use = true;
@@ -4114,6 +4116,7 @@ LayerResult GCodeGenerator::process_layer(
             this->visitor_in_use = false;
             assert(m_current_entity.empty());
             assert(m_speed_override.empty());
+            assert(m_modifier_override.empty());
             this->set_origin(old_origin);
             gcode += this->visitor_gcode;
         } else {
@@ -6430,6 +6433,7 @@ std::string GCodeGenerator::extrude_entity(const ExtrusionEntityReference &entit
 {
     assert(m_current_entity.empty());
     assert(m_speed_override.empty());
+    assert(m_modifier_override.empty());
     assert(!visitor_in_use);
     this->visitor_in_use = true;
     this->visitor_gcode.clear();
@@ -6440,6 +6444,7 @@ std::string GCodeGenerator::extrude_entity(const ExtrusionEntityReference &entit
     this->visitor_in_use = false;
     assert(m_current_entity.empty());
     assert(m_speed_override.empty());
+    assert(m_modifier_override.empty());
     return this->visitor_gcode;
 }
 void GCodeGenerator::use(const ExtrusionPath &path) {
@@ -6541,6 +6546,9 @@ void GCodeGenerator::end_using_extrusion(const ExtrusionEntity &entity) {
         }
         m_speed_override.pop_back();
     }
+    if (!m_modifier_override.empty() && m_modifier_override.back().first == &entity) {
+        m_modifier_override.pop_back();
+    }
     if (!m_z_override.empty() && m_z_override.back().first == &entity) {
         // move up right away if possible
         if (m_layer && m_z_override.back().second < m_layer->scaled_print_z()) {
@@ -6568,6 +6576,12 @@ void GCodeGenerator::use(const ExtrusionPropertySpeed& speed_override) {
         m_saved_temp.push_back(m_writer.get_temperature());
         visitor_gcode += m_writer.set_temperature(m_speed_override.back().second->temperature_C, false);
     }
+}
+
+void GCodeGenerator::use(const ExtrusionPropertyModifier& modifier_override) {
+    assert(visitor_in_use);
+    assert(!m_current_entity.empty() && (m_modifier_override.empty() || m_modifier_override.back().first != m_current_entity.back()));
+    m_modifier_override.push_back(std::pair<const ExtrusionEntity*, const ExtrusionPropertyModifier*>(m_current_entity.back(), &modifier_override));
 }
 
 void GCodeGenerator::use(const ExtrusionPropertyCustomGcode& custom_gcode) {
@@ -8648,7 +8662,7 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
     } else {
         // retraction not needed
         // check if lift is enforced
-        if (m_writer.get_extra_lift() > 0) {
+        if (m_writer.get_extra_lift() > 0 && (m_modifier_override.empty() || !m_modifier_override.back().second->disable_lift)) {
             gcode += m_writer.lift(this->m_layer_index);
         }
         // Reset the wipe path when traveling, so one would not wipe along an old path.
@@ -9081,9 +9095,13 @@ std::string GCodeGenerator::travel_to(
 
 bool GCodeGenerator::needs_retraction(const Polyline& travel, ExtrusionRole role /*=ExtrusionRole::None*/, coordf_t max_min_dist /*=0*/)
 {
+    if (!m_modifier_override.empty() && m_modifier_override.back().second->disable_retraction) {
+        return false;
+    }
     // If extra lift set, please lift (and retract, as one is dependent on the other)
-    if (m_writer.get_extra_lift() > 0)
+    if (m_writer.get_extra_lift() > 0) {
         return true;
+    }
     coordf_t min_dist = scale_d(EXTRUDER_CONFIG_WITH_DEFAULT(retract_before_travel, 0));
     if (max_min_dist > 0)
         min_dist = std::min(max_min_dist, min_dist);
@@ -9460,6 +9478,10 @@ std::string GCodeGenerator::retract_and_wipe(bool toolchange, bool inhibit_lift)
 
     if (m_writer.tool() == nullptr)
         return gcode;
+
+    if (!m_modifier_override.empty() && m_modifier_override.back().second->disable_lift) {
+        inhibit_lift = true;
+    }
 
     // We need to reset e before any extrusion or wipe to allow the reset to happen at the real 
     // begining of an object gcode

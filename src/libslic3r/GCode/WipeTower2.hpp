@@ -238,6 +238,8 @@ public:
     uint16_t perimeter_tool_idx = uint16_t(-1);
     bool perimeter_done = false;
 
+    bool y_down = true;
+
     struct Toolchange
     {
         const Layer *layer;
@@ -280,7 +282,7 @@ public:
     //ExtrusionEntityCollection create_toolchange(uint16_t from, uint16_t to, Point current_pos);
     //ExtrusionEntityCollection create_purge(uint16_t toolid, Point current_pos);
 
-    ExtrusionEntityCollection tool_change(const Layer *layer, uint16_t old_tool, uint16_t new_tool);
+    ExtrusionEntityCollection tool_change(const Layer *layer, uint16_t old_tool, uint16_t new_tool, double de_retraction_new_tool = 0);
     bool finish_layer(ExtrusionEntityCollection &collection, uint16_t current_extruder, bool force = false);
 
 protected:
@@ -294,11 +296,13 @@ protected:
     void toolchange_Wipe(ExtrusionEntityCollection &collection,
                          Polyline wipe_lines,
                          const Flow wipe_flow,
-                         const uint16_t tool_id);
+                         const uint16_t tool_id,
+                         const double de_retraction_new_tool);
     void toolchange_Change(ExtrusionEntityCollection &collection, const uint16_t new_tool);
 
     bool print_perimeter(ExtrusionEntityCollection &collection);
 
+    coord_t compute_y(coord_t raw_y);
 
 };
 

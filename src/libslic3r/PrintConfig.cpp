@@ -7526,6 +7526,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("wipe_tower_rest_in_middle", coBool);
+    def->label = L("toolchange inside the wipetower");
+    def->category = OptionCategory::mmsetup;
+    def->tooltip = L("If enabled, there will be a travel inside the wipe tower before the toolchange.");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
     //TODO: combuine x&y into a coPoint
     def = this->add("wipe_tower_x", coFloat);
     def->label = L("X");
@@ -10708,6 +10715,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "filament_wipe_return", // filament override
 "filament_wipe_speed", // filament override
 "wipe_tower_extrusion_width",
+"wipe_tower_rest_in_middle",
 "wipe_tower_speed",
 "wipe_tower_wipe_starting_speed",
 "xy_size_compensation",

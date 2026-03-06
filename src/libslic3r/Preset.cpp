@@ -888,6 +888,7 @@ static std::vector<std::string> s_Preset_print_options {
         "wipe_tower_extra_spacing",
         "wipe_tower_extruder",
         "wipe_tower_extrusion_width",
+        "wipe_tower_rest_in_middle",
         "wipe_tower_no_sparse_layers",
         "wipe_tower_speed",
         "wipe_tower_wipe_starting_speed",

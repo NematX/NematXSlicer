@@ -64,6 +64,7 @@ class ExtrusionProperty;
 class ExtrusionPropertyNone;
 class ExtrusionMultiProperties;
 class ExtrusionPropertySpeed;
+class ExtrusionPropertyModifier;
 class ExtrusionPropertyCustomGcode;
 class ExtrusionPropertySpecialCommand;
 class ExtrusionPropertyOverhang;
@@ -73,6 +74,7 @@ public:
     virtual void default_use(ExtrusionProperty&);
     virtual void use(ExtrusionMultiProperties&);
     virtual void use(ExtrusionPropertySpeed&);
+    virtual void use(ExtrusionPropertyModifier&);
     virtual void use(ExtrusionPropertyCustomGcode&);
     virtual void use(ExtrusionPropertySpecialCommand&);
     virtual void use(ExtrusionPropertyOverhang&);
@@ -83,6 +85,7 @@ public:
     virtual void default_use(const ExtrusionProperty&);
     virtual void use(const ExtrusionMultiProperties&);
     virtual void use(const ExtrusionPropertySpeed&);
+    virtual void use(const ExtrusionPropertyModifier&);
     virtual void use(const ExtrusionPropertyCustomGcode&);
     virtual void use(const ExtrusionPropertySpecialCommand&);
     virtual void use(const ExtrusionPropertyOverhang&);
@@ -137,40 +140,76 @@ class ExtrusionPropertySpeed : public ExtrusionProperty
 {
 public:
     float speed_mm_per_s = -1.f;
-    float accel_mm_per_s2= -1.f;
+    float accel_mm_per_s2 = -1.f;
     float pressure_adv = -1.f;
-    float fan_speed_percent = -1.f; //between 0 and 100
+    float fan_speed_percent = -1.f; // between 0 and 100
     float temperature_C = -1.f;
-    //ROLE_OVERRIDE?
+    // ROLE_OVERRIDE?
 
     ExtrusionPropertySpeed(float speed = -1, float accel = -1, float pa = -1, float fan = -1, float temp = -1)
-        : speed_mm_per_s(speed), accel_mm_per_s2(accel), pressure_adv(pa), fan_speed_percent(fan), temperature_C(temp) {}
-    
-    ExtrusionPropertySpeed& speed(float speed) {
-        speed_mm_per_s=(speed);
+        : speed_mm_per_s(speed)
+        , accel_mm_per_s2(accel)
+        , pressure_adv(pa)
+        , fan_speed_percent(fan)
+        , temperature_C(temp) {}
+
+    ExtrusionPropertySpeed &speed(float speed) {
+        speed_mm_per_s = (speed);
         return *this;
     }
-    ExtrusionPropertySpeed& acceleration(float accel) {
-        accel_mm_per_s2=(accel);
+    ExtrusionPropertySpeed &acceleration(float accel) {
+        accel_mm_per_s2 = (accel);
         return *this;
     }
-    ExtrusionPropertySpeed& presure_advance(float pa) {
-        pressure_adv=(pa);
+    ExtrusionPropertySpeed &presure_advance(float pa) {
+        pressure_adv = (pa);
         return *this;
     }
-    ExtrusionPropertySpeed& fan_speed(float fspeed) {
-        assert(fspeed >=-1 && fspeed <= 100);
-        fan_speed_percent=(fspeed);
+    ExtrusionPropertySpeed &fan_speed(float fspeed) {
+        assert(fspeed >= -1 && fspeed <= 100);
+        fan_speed_percent = (fspeed);
         return *this;
     }
-    ExtrusionPropertySpeed& temperature(float temp) {
-        temperature_C=(temp);
+    ExtrusionPropertySpeed &temperature(float temp) {
+        temperature_C = (temp);
         return *this;
     }
 
-    std::unique_ptr<ExtrusionProperty> clone() const override { return std::make_unique<ExtrusionPropertySpeed>(*this); }
+    std::unique_ptr<ExtrusionProperty> clone() const override {
+        return std::make_unique<ExtrusionPropertySpeed>(*this);
+    }
     void visit(ExtrusionPropertyVisitor &visitor) override { visitor.use(*this); }
-    void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this);}
+    void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this); }
+};
+// this store switch to activate/deactivate/enforce certain gcode feature like retract, lift, etc.
+class ExtrusionPropertyModifier : public ExtrusionProperty
+{
+public:
+    // enforce a blind travel to the first point of the extrusion, even if the processor think it don't move
+    bool enforce_travel = false;
+    bool disable_retraction = false;
+    bool disable_lift = false;
+
+    ExtrusionPropertyModifier() {}
+
+    ExtrusionPropertyModifier &set_enforce_travel(bool enforce = true) {
+        enforce_travel = enforce;
+        return *this;
+    }
+    ExtrusionPropertyModifier &set_disable_retraction(bool disable = true) {
+        disable_retraction = disable;
+        return *this;
+    }
+    ExtrusionPropertyModifier &set_disable_lift(bool disable = true) {
+        disable_lift = disable;
+        return *this;
+    }
+
+    std::unique_ptr<ExtrusionProperty> clone() const override {
+        return std::make_unique<ExtrusionPropertyModifier>(*this);
+    }
+    void visit(ExtrusionPropertyVisitor &visitor) override { visitor.use(*this); }
+    void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this); }
 };
 class ExtrusionPropertyCustomGcode : public ExtrusionProperty
 {

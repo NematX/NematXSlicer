@@ -356,6 +356,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
             || opt_key == "wipe_tower_no_sparse_layers"
             || opt_key == "wipe_tower_extruder"
             || opt_key == "wipe_tower_per_color_wipe"
+            || opt_key == "wipe_tower_rest_in_middle"
             || opt_key == "wipe_tower_speed"
             || opt_key == "wipe_tower_wipe_starting_speed"
             || opt_key == "wiping_volumes_extruders"
