@@ -1323,35 +1323,54 @@ void estimate_supports_malformations(SupportLayerPtrs &layers, float flow_width,
     for (SupportLayer *l : layers) {
         l->curled_lines.clear();
         std::vector<ExtrusionLine> current_layer_lines;
-        ExtrusionEntityCollection coll = l->support_fills.flatten(false);
-        for (const ExtrusionEntity *extrusion : coll.entities()) {
-            Polyline pl = extrusion->as_polyline().to_polyline(scale_t(flow_width*4));
-            Polygon  pol(pl.points);
-            pol.make_counter_clockwise();
+        ExtrusionEntitiesPtr coll;
+        for (const LayerSliceIslandPtr &island : l->islands()) {
+            for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                    append(coll, region_island->extrusion(LayerRegionIsland::SUPPORT).entities());
+                }
+                if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                    append(coll, region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE).entities());
+                }
+            }
+        }
+        for (const ExtrusionEntity *extrusion : coll) {
+            for (ArcPolyline &arcpolyline : extrusion->as_polylines()) {
+                Polyline pl = arcpolyline.to_polyline(scale_t(flow_width * 4));
+                Polygon pol(pl.points);
+                pol.make_counter_clockwise();
 
-            auto annotated_points = ExtrusionProcessor::estimate_points_properties<true, true, false, false>(pol.points, prev_layer_lines,
-                                                                                                             flow_width);
+                auto annotated_points =
+                    ExtrusionProcessor::estimate_points_properties<true, true, false, false>(pol.points,
+                                                                                             prev_layer_lines,
+                                                                                             flow_width);
 
-            for (size_t i = 0; i < annotated_points.size(); ++i) {
-                const ExtrusionProcessor::ExtendedPoint &a = i > 0 ? annotated_points[i - 1] : annotated_points[i];
-                const ExtrusionProcessor::ExtendedPoint &b = annotated_points[i];
-                ExtrusionLine line_out{a.position.cast<float>(), b.position.cast<float>(), float((a.position - b.position).norm()),
-                                       extrusion};
+                for (size_t i = 0; i < annotated_points.size(); ++i) {
+                    const ExtrusionProcessor::ExtendedPoint &a = i > 0 ? annotated_points[i - 1] :
+                                                                         annotated_points[i];
+                    const ExtrusionProcessor::ExtendedPoint &b = annotated_points[i];
+                    ExtrusionLine line_out{a.position.cast<float>(), b.position.cast<float>(),
+                                           float((a.position - b.position).norm()), extrusion};
 
-                Vec2f middle                               = 0.5 * (line_out.a + line_out.b);
-                auto [middle_distance, bottom_line_idx, x] = prev_layer_lines.distance_from_lines_extra<false>(middle);
-                ExtrusionLine bottom_line                  = prev_layer_lines.get_lines().empty() ? ExtrusionLine{} :
-                                                                                                    prev_layer_lines.get_line(bottom_line_idx);
+                    Vec2f middle = 0.5 * (line_out.a + line_out.b);
+                    auto [middle_distance, bottom_line_idx,
+                          x] = prev_layer_lines.distance_from_lines_extra<false>(middle);
+                    ExtrusionLine bottom_line = prev_layer_lines.get_lines().empty() ?
+                        ExtrusionLine{} :
+                        prev_layer_lines.get_line(bottom_line_idx);
 
-                Vec2f v1   = (bottom_line.b - bottom_line.a);
-                Vec2f v2   = (a.position.cast<float>() - bottom_line.a);
-                auto  d    = (v1.x() * v2.y()) - (v1.y() * v2.x());
-                float sign = (d > 0) ? -1.0f : 1.0f;
+                    Vec2f v1 = (bottom_line.b - bottom_line.a);
+                    Vec2f v2 = (a.position.cast<float>() - bottom_line.a);
+                    auto d = (v1.x() * v2.y()) - (v1.y() * v2.x());
+                    float sign = (d > 0) ? -1.0f : 1.0f;
 
-                line_out.curled_up_height = estimate_curled_up_height(middle_distance * sign, 0.5 * (a.curvature + b.curvature), l->unscaled_height(),
-                                                                      flow_width, bottom_line.curled_up_height, params);
+                    line_out.curled_up_height = estimate_curled_up_height(middle_distance * sign,
+                                                                          0.5 * (a.curvature + b.curvature),
+                                                                          l->unscaled_height(), flow_width,
+                                                                          bottom_line.curled_up_height, params);
 
-                current_layer_lines.push_back(line_out);
+                    current_layer_lines.push_back(line_out);
+                }
             }
         }
 

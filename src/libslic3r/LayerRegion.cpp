@@ -982,12 +982,12 @@ void LayerRegion::process_external_surfaces_old(const Layer *lower_layer, const 
                         continue;
                     // Collect the initial ungrown regions and the grown polygons.
                     ExPolygons  initial;
-                    Polygons    grown;
+                    ExPolygons    grown;
                     for (size_t i = 0; i < bridges.size(); ++ i) {
                         if (bridge_group[i] != group_id)
                             continue;
                         initial.push_back(std::move(bridges[i].expolygon));
-                        polygons_append(grown, bridges_grown[i]);
+                        append(grown, union_ex(bridges_grown[i]));
                     }
                     // detect bridge direction before merging grown surfaces otherwise adjacent bridges
                     // would get merged into a single one while they need different directions

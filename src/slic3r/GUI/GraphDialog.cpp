@@ -137,7 +137,26 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
 
     // min & max
     Pointfs data_points = data.data();
+    bool freeze_front = false, freeze_back = false;
     if (!data_points.empty()) {
+        //ensure enforced valuea are here
+        if (!settings.enforced_values.empty()) {
+            if (!std::isnan(settings.enforced_values.front().x())) {
+                if (data_points.front() != settings.enforced_values.front()) {
+                    data_points.insert(data_points.begin(), settings.enforced_values.front());
+                }
+                freeze_front =true;
+            }
+            if (settings.enforced_values.size() > 1) {
+                if (!std::isnan(settings.enforced_values.back().x())) {
+                    if (data_points.back() != settings.enforced_values.back()) {
+                        data_points.push_back(settings.enforced_values.back());
+                    }
+                    freeze_back = true;
+                }
+            }
+        }
+
         for (Vec2d &point : data_points) {
             m_last_min_x = std::min(m_last_min_x, (point.x()));
             m_last_max_x = std::max(m_last_max_x, (point.x()));
@@ -178,9 +197,10 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
     }
 
     std::vector<std::pair<float, float>> buttons;
-    for (const Vec2d &point : data.graph_points) buttons.emplace_back(float(point.x()), float(point.y()));
+    for (const Vec2d &point : data_points) buttons.emplace_back(float(point.x()), float(point.y()));
 
     m_chart = new Chart(this, wxRect(scale(1), scale(1), scale(64), scale(36)), buttons, scale(1));
+    m_chart->set_buttons(buttons, freeze_front, freeze_back);
     m_chart->set_manual_points_manipulation(true);
     double precision = 0.000001f;
     while (precision < (m_last_max_x - m_last_min_x)) precision *= 10;
@@ -301,12 +321,31 @@ GraphPanel::GraphPanel(wxWindow *parent, GraphData data, const GraphSettings &se
     sizer_chart->SetSizeHints(this);
     SetSizer(sizer_chart);
 
-    bt_reset->Bind(wxEVT_BUTTON, ([this, reset_vals = settings.reset_vals](wxCommandEvent& e) {
+    bt_reset->Bind(wxEVT_BUTTON, ([this, reset_vals = settings.reset_vals, enforced_vals = settings.enforced_values](wxCommandEvent& e) {
         std::vector<std::pair<float,float>> buttons;// = m_chart->get_buttons();
         for (const auto &x2y: reset_vals.graph_points) {
             buttons.emplace_back(float(x2y.x()), float(x2y.y()));
         }
-        m_chart->set_buttons(buttons);
+        //ensure enforced valuea are here
+        bool freeze_front = false, freeze_back = false;
+        if (!enforced_vals.empty()) {
+            if (!std::isnan(enforced_vals.front().x())) {
+                if (buttons.front().first != enforced_vals.front().x() || buttons.front().second != enforced_vals.front().y()) {
+                    buttons.emplace(buttons.begin(), float(enforced_vals.front().x()), float(enforced_vals.front().y()));
+                }
+                freeze_front = true;
+            }
+            if (enforced_vals.size() > 1) {
+                if (!std::isnan(enforced_vals.back().x())) {
+                    if (buttons.back().first != enforced_vals.back().x() ||
+                        buttons.back().second != enforced_vals.back().y()) {
+                        buttons.emplace_back(float(enforced_vals.back().x()), float(enforced_vals.back().y()));
+                    }
+                    freeze_back = true;
+                }
+            }
+        }
+        m_chart->set_buttons(buttons, freeze_front, freeze_back);
         m_chart->set_xy_range(
             reset_vals.begin_idx >= 0 && reset_vals.begin_idx < reset_vals.graph_points.size() ? reset_vals.graph_points[reset_vals.begin_idx].x() : std::numeric_limits<float>::quiet_NaN(),
             std::numeric_limits<float>::quiet_NaN(), 

@@ -365,6 +365,9 @@ int Chart::which_button_is_clicked(const wxPoint& point) const {
     int dist = 99999;
     int idx = -1;
     for (size_t i = 0; i < m_buttons.size(); ++i) {
+        if (m_buttons[i].freeze) {
+            continue;
+        }
         wxRect rect(math_to_screen(m_buttons[i].get_pos())-wxPoint(side,side),wxSize(side*2,side*2)); // bounding rectangle of this button
         if (rect.Contains(point)) {
             int new_dist = std::abs(rect.x + rect.width/2 - point.x) + std::abs(rect.y + rect.height/2 - point.y);
@@ -522,10 +525,16 @@ std::vector<std::pair<float,float>> Chart::get_buttons() const {
 }
 
 
-void Chart::set_buttons(std::vector<std::pair<float, float>> new_buttons) {
+void Chart::set_buttons(std::vector<std::pair<float, float>> new_buttons, bool freeze_front, bool freeze_back) {
     m_buttons.clear();
     for (std::pair<float, float> &new_button : new_buttons) {
         m_buttons.emplace_back(wxPoint2DDouble(new_button.first, new_button.second), *this);
+    }
+    if (freeze_front) {
+        m_buttons.front().freeze = true;
+    }
+    if (freeze_back) {
+        m_buttons.back().freeze = true;
     }
     recalculate_line();
 }

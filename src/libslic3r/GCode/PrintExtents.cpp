@@ -125,12 +125,15 @@ BoundingBoxf get_print_object_extrusions_extents(const PrintObject &print_object
                 if (region_island_ptr->has_extrusion(LayerRegionIsland::INFILLS)) {
                     bbox_this.merge(extrusionentity_extents(region_island_ptr->extrusion(LayerRegionIsland::INFILLS)));
                 }
+                // 2 next take care of the case 'dynamic_cast<const SupportLayer*>(layer);'
+                if (region_island_ptr->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                    bbox_this.merge(extrusionentity_extents(region_island_ptr->extrusion(LayerRegionIsland::SUPPORT)));
+                }
+                if (region_island_ptr->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                    bbox_this.merge(extrusionentity_extents(region_island_ptr->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)));
+                }
             }
         }
-        const SupportLayer *support_layer = dynamic_cast<const SupportLayer*>(layer);
-        if (support_layer)
-            for (const ExtrusionEntity *extrusion_entity : support_layer->support_fills.entities())
-                bbox_this.merge(extrusionentity_extents(extrusion_entity));
         for (const PrintInstance &instance : print_object.instances()) {
             BoundingBoxf bbox_translated(bbox_this);
             bbox_translated.translate(unscale(instance.shift));

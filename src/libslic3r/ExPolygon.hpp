@@ -543,6 +543,22 @@ inline void polygons_append(Polygons &dst, ExPolygons &&src)
     }
 }
 
+inline void expolygons_append(ExPolygons &dst, const Polygons &src) 
+{ 
+    for (const Polygon& poly: src) {
+        assert(poly.is_counter_clockwise());
+        dst.emplace_back(poly);
+    }
+}
+
+inline void expolygons_append(ExPolygons &dst, Polygons &&src) 
+{ 
+    for (Polygon& poly: src) {
+        assert(poly.is_counter_clockwise());
+        dst.emplace_back(std::move(poly));
+    }
+}
+
 inline void expolygons_append(ExPolygons &dst, const ExPolygons &src) 
 { 
     dst.insert(dst.end(), src.begin(), src.end());

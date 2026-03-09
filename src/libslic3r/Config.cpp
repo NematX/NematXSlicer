@@ -485,6 +485,15 @@ double GraphData::interpolate(double x_value) const{
     return y_value;
 }
 
+double GraphData::inverse_interpolate(double y_value) const {
+    GraphData inverse = *this;
+    // inverse x & y
+    for (Vec2d &data_point : inverse.graph_points) {
+        std::swap(data_point.x(), data_point.y());
+    }
+    return inverse.interpolate(y_value);
+}
+
 bool GraphData::validate() const
 {
     if (this->begin_idx < 0 || this->end_idx < 0 || this->end_idx < this->begin_idx)

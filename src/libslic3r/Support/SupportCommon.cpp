@@ -1684,6 +1684,7 @@ public:
 #endif
 
 void generate_support_toolpaths(
+    PrintObject                         &object,
     SupportLayerPtrs                    &support_layers,
     const PrintObjectConfig             &config,
     const SupportParameters             &support_params,
@@ -1703,6 +1704,9 @@ void generate_support_toolpaths(
         }
     }
 
+    const int16_t support_extruder = int16_t(config.support_material_extruder.value - 1);
+    const int16_t support_interface_extruder = int16_t(config.support_material_interface_extruder.value - 1);
+
     // loop_interface_processor with a given circle radius.
     LoopInterfaceProcessor loop_interface_processor(1.5 * support_params.support_material_interface_flow.scaled_width());
     loop_interface_processor.n_contact_loops = config.support_material_interface_contact_loops ? 1 : 0;
@@ -1711,21 +1715,24 @@ void generate_support_toolpaths(
 
 //    const coordf_t link_max_length_factor = 3.;
     const coordf_t link_max_length_factor = 0.;
+    // layer -> support & support_interface
+    std::map<const Layer*, std::pair<ExtrusionEntityCollection, ExtrusionEntityCollection>> raft_cache;
 
     // Insert the raft base layers.
     auto n_raft_layers = std::min<size_t>(support_layers.size(), std::max(0, int(slicing_params.raft_layers()) - 1));
+    std::vector<BoundingBox> raft_layers_bb(n_raft_layers);
 
     tbb::parallel_for(tbb::blocked_range<size_t>(0, n_raft_layers),
         [&support_layers, &raft_layers, &intermediate_layers, &config, &support_params, &slicing_params,
-            &bbox_object, link_max_length_factor]
+            &bbox_object, &raft_cache, &raft_layers_bb, link_max_length_factor]
             (const tbb::blocked_range<size_t>& range) {
         for (size_t support_layer_id = range.begin(); support_layer_id < range.end(); ++ support_layer_id)
         {
             assert(support_layer_id < raft_layers.size());
             SupportLayer               &support_layer = *support_layers[support_layer_id];
-            assert(support_layer.support_fills.entities().empty());
+            assert(!support_layer.has_extrusions());
             SupportGeneratorLayer      &raft_layer    = *raft_layers[support_layer_id];
-            
+
             std::unique_ptr<Fill> filler_interface = std::unique_ptr<Fill>(Fill::new_from_type(support_params.raft_interface_fill_pattern)); // m_support_params.contact_top_fill_pattern)); FIXME choose
             std::unique_ptr<Fill> filler_support   = std::unique_ptr<Fill>(Fill::new_from_type(support_params.base_fill_pattern));
             std::unique_ptr<FillWithPerimeter> filler_support_with_sheath = std::make_unique<FillWithPerimeter>(
@@ -1757,6 +1764,13 @@ void generate_support_toolpaths(
                 Flow  flow   = Flow::new_from_width(float(support_params.raft_flow.width()), support_params.raft_flow.nozzle_diameter(),
                                                  float(raft_layer.unscaled_height()), support_params.raft_flow.spacing_ratio());
                 assert(!raft_layer.bridging);
+                assert(support_layer.islands().empty());
+                //assert(!support_layer.islands().front()->regions_islands().empty());
+                // create fake island, islands are created after the extrusions
+                //support_layer.set_islands(ExPolygons{ExPolygon()});
+                //support_layer.add_region(object.regions().front());
+                //support_layer.get_mutable_island(0)->
+                //ExtrusionEntityCollection &support_storage = support_layer.islands().front()->regions_islands().front()->mutable_extrusion(LayerRegionIsland::SUPPORT);
                 if (! to_infill_polygons.empty()) {
                     Fill *filler = support_params.with_sheath ? filler_support_with_sheath.get() : filler_support.get();
                     filler->angle = support_params.raft_angle_base;
@@ -1764,7 +1778,7 @@ void generate_support_toolpaths(
                                                       support_params.support_density);
                     fill_expolygons_generate_paths(
                         // Destination
-                        support_layer.support_fills.set_entities(),
+                        raft_cache[&support_layer].first.set_entities(),
                         // Regions to fill
                         closing_ex(tree_polygons.empty() ? to_infill_polygons : diff(to_infill_polygons, tree_polygons),
                                    float(SCALED_EPSILON), float(SCALED_EPSILON + 0.5 * flow.scaled_width())),
@@ -1773,11 +1787,11 @@ void generate_support_toolpaths(
                         // Extrusion parameters
                         ExtrusionRole::SupportMaterial, flow, support_params.raft_flow.spacing(), support_params.default_region_config);
 #ifndef NDEBUG
-                    support_layer.support_fills.visit(verifier);
+                    raft_cache[&support_layer].first.visit(verifier);
 #endif // NDEBUG
                 }
                 if (! tree_polygons.empty())
-                    tree_supports_generate_paths(support_layer.support_fills, tree_polygons, flow, support_params);
+                    tree_supports_generate_paths(raft_cache[&support_layer].first, tree_polygons, flow, support_params);
             }
 
             Fill *filler = filler_interface.get();
@@ -1808,9 +1822,12 @@ void generate_support_toolpaths(
                 continue;
             filler->link_max_length = scale_t(spacing * link_max_length_factor / density);
             //fill_expolygons_with_sheath_generate_paths( //TODO 2.7 test if the pattern contains the sheath
+            ExtrusionEntityCollection &support_storage =
+                    (support_layer_id < slicing_params.base_raft_layers) ? raft_cache[&support_layer].first :
+                                                                           raft_cache[&support_layer].second;
             fill_expolygons_generate_paths(
                 // Destination
-                support_layer.support_fills.set_entities(), 
+                support_storage.set_entities(), 
                 // Regions to fill
                 closing_ex(tree_polygons.empty() ? raft_layer.polygons : diff(raft_layer.polygons, tree_polygons), float(SCALED_EPSILON),
                            float(SCALED_EPSILON + 0.5 * flow.scaled_width())),
@@ -1821,10 +1838,81 @@ void generate_support_toolpaths(
                                                                        ExtrusionRole::SupportMaterialInterface,
                 flow, spacing, support_params.default_region_config);
 #ifndef NDEBUG
-            support_layer.support_fills.visit(verifier);
+            support_storage.visit(verifier);
 #endif // NDEBUG
+            raft_layers_bb[support_layer_id] = CreateBoundingBoxVisitor::create(raft_cache[&support_layer].first);
+            raft_layers_bb[support_layer_id].merge(CreateBoundingBoxVisitor::create(raft_cache[&support_layer].second));
         }
     });
+
+    BoundingBox raft_bb;
+    for (size_t i = 0; i < raft_layers_bb.size(); i++) {
+        raft_bb.merge(raft_layers_bb[i]);
+    }
+
+    tbb::parallel_for(tbb::blocked_range<size_t>(0, n_raft_layers),
+        [&support_layers, &raft_bb, &object, &raft_cache, support_extruder, support_interface_extruder]
+            (const tbb::blocked_range<size_t>& range) {
+        for (size_t support_layer_id = range.begin(); support_layer_id < range.end(); ++support_layer_id) {
+            SupportLayer &support_layer = *support_layers[support_layer_id];
+            if (!raft_bb.empty()) {
+                support_layer.set_islands(ExPolygons{ExPolygon(raft_bb.polygon())});
+                // add regions
+                // note: region slice is on the object, not the support, so we only get the first region, wich should
+                // be the default one.
+                // for (const std::reference_wrapper<const PrintRegion> &pregion : object.all_regions()) {
+                //    support_layer.add_region(&pregion.get());
+                //}
+                support_layer.add_region(&object.printing_region(0));
+                BoundingBox bb_region = raft_bb;
+                support_layer.get_region(0)->set_raw_slices(ExPolygons{ExPolygon(bb_region.polygon())});
+                // construct island region
+                support_layer.add_regions_to_islands();
+                for (const LayerSliceIslandPtr &island : support_layer.islands()) {
+                    assert(!island->regions().empty());
+                }
+                // push extrusions
+                assert(raft_cache.find(&support_layer) != raft_cache.end());
+                std::pair<ExtrusionEntityCollection, ExtrusionEntityCollection> &supp_and_interface =
+                    raft_cache[&support_layer];
+                // add raft that is already computed.
+                for (ExtrusionEntity *ee : supp_and_interface.first.entities()) {
+                    int added = 0;
+                    for (const LayerSliceIslandPtr &island : support_layer.islands()) {
+                        // if ee is in this island
+                        BoundingBox ee_bb = CreateBoundingBoxVisitor::create(*ee);
+                        if (ee_bb.overlap(island->get_bounding_box())) {
+                            if (!intersection_pl(to_polylines(ee->as_polylines()), island->get_slice()).empty()) {
+                                island->get_or_add_region_island({support_layer.get_region(0)}, support_extruder)
+                                    .mutable_extrusion(LayerRegionIsland::SUPPORT)
+                                    .append(std::move(*ee));
+                                added++;
+                                break;
+                            }
+                        }
+                    }
+                    assert(added == 1);
+                }
+                for (ExtrusionEntity *ee : supp_and_interface.second.entities()) {
+                    int added = 0;
+                    for (const LayerSliceIslandPtr &island : support_layer.islands()) {
+                        // if ee is in this island
+                        BoundingBox ee_bb = CreateBoundingBoxVisitor::create(*ee);
+                        if (ee_bb.overlap(island->get_bounding_box())) {
+                            if (!intersection_pl(to_polylines(ee->as_polylines()), island->get_slice()).empty()) {
+                                island->get_or_add_region_island({support_layer.get_region(0)}, support_interface_extruder)
+                                    .mutable_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
+                                    .append(std::move(*ee));
+                                added++;
+                                break;
+                            }
+                        }
+                    }
+                    assert(added == 1);
+                }
+            }
+        }
+        });
 
     struct LayerCacheItem {
         LayerCacheItem(SupportGeneratorLayerExtruded *layer_extruded = nullptr) : layer_extruded(layer_extruded) {}
@@ -1860,8 +1948,10 @@ void generate_support_toolpaths(
                                                                 (slicing_params.base_raft_layers + slicing_params.interface_raft_layers - 1);
 
     tbb::parallel_for(tbb::blocked_range<size_t>(n_raft_layers, support_layers.size()),
-        [&config, &slicing_params, &support_params, &support_layers, &bottom_contacts, &top_contacts, &intermediate_layers, &interface_layers, &base_interface_layers, &layer_caches, &loop_interface_processor,
-            &bbox_object, n_raft_layers, link_max_length_factor, &filler_first_layer, raft_top_interface_idx]
+        [&config, &slicing_params, &support_params, &support_layers, &bottom_contacts, &top_contacts,
+         &intermediate_layers, &interface_layers, &base_interface_layers, &layer_caches, &loop_interface_processor,
+         &bbox_object, n_raft_layers, link_max_length_factor, &filler_first_layer, &object, &raft_bb,
+         raft_top_interface_idx]
             (const tbb::blocked_range<size_t>& range) {
         // Indices of the 1st layer in their respective container at the support layer height.
         size_t idx_layer_bottom_contact   = size_t(-1);
@@ -2217,19 +2307,32 @@ void generate_support_toolpaths(
                 // Order the layers by lexicographically by an increasing print_z and a decreasing layer height.
                 std::stable_sort(layer_cache_item.overlapping.begin(), layer_cache_item.overlapping.end(), [](auto *l1, auto *l2) { return *l1 < *l2; });
             }
-            assert(support_layer.support_islands.empty());
+            assert(support_layer.islands().empty());
             if (!islands_expolys.empty()) {
-                support_layer.support_islands = std::move(islands_expolys);
-                support_layer.support_islands_bboxes.reserve(support_layer.support_islands.size());
-                for (const ExPolygon &expoly : support_layer.support_islands)
-                    support_layer.support_islands_bboxes.emplace_back(get_extents(expoly).inflated(SCALED_EPSILON));
+                BoundingBox bb_region = raft_bb;
+                bb_region.merge(get_extents(islands_expolys));
+                assert(!bb_region.empty());
+                support_layer.set_islands(std::move(islands_expolys));
+                // add regions
+                // note: region slice is on the object, not the support, so we only get the first region, wich should be the default one.
+                support_layer.add_region(&object.printing_region(0));
+                support_layer.get_region(0)->set_raw_slices(ExPolygons{ExPolygon(bb_region.polygon())});
+                // construct island region
+                support_layer.add_regions_to_islands();
+                for (const LayerSliceIslandPtr &island : support_layer.islands()) {
+                    assert(!island->regions().empty());
+                }
+
+            } else {
+                // is it possible???
+                assert(false);
             }
         } // for each support_layer_id
     });
 
     // Now modulate the support layer height in parallel.
     tbb::parallel_for(tbb::blocked_range<size_t>(n_raft_layers, support_layers.size()),
-        [&support_layers, &layer_caches]
+        [&support_layers, &layer_caches, support_extruder, support_interface_extruder]
             (const tbb::blocked_range<size_t>& range) {
         for (size_t support_layer_id = range.begin(); support_layer_id < range.end(); ++ support_layer_id) {
             SupportLayer &support_layer = *support_layers[support_layer_id];
@@ -2248,13 +2351,56 @@ void generate_support_toolpaths(
 #ifndef NDEBUG
                 layer_cache_item.layer_extruded->extrusions.visit(verifier);
 #endif // NDEBUG
-                support_layer.support_fills.append(std::move(layer_cache_item.layer_extruded->extrusions));
+                for (ExtrusionEntity *ee : layer_cache_item.layer_extruded->extrusions) {
+                    int added = 0;
+                    for (const LayerSliceIslandPtr &island : support_layer.islands()) {
+                        // if ee is in this island
+                        BoundingBox ee_bb = CreateBoundingBoxVisitor::create(*ee);
+                        if (ee_bb.overlap(island->get_bounding_box())) {
+                            if (!intersection_pl(to_polylines(ee->as_polylines()), island->get_slice()).empty()) {
+                                assert(!ee->role().is_mixed());
+                                assert(ee->role().is_support());
+                                if (ee->role().is_support_base()) {
+                                    island->get_or_add_region_island({support_layer.get_region(0)}, support_extruder)
+                                        .mutable_extrusion(LayerRegionIsland::SUPPORT)
+                                        .append(std::move(*ee));
+                                } else {
+                                    island->get_or_add_region_island({support_layer.get_region(0)}, support_interface_extruder)
+                                        .mutable_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)
+                                        .append(std::move(*ee));
+                                }
+                                added++;
+                                break;
+                            }
+                        }
+                    }
+                    assert(added == 1);
+                }
 #ifndef NDEBUG
-                support_layer.support_fills.visit(verifier);
+                for (const LayerSliceIslandPtr &island : support_layer.islands()) {
+                    for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                        if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                            region_island->extrusion(LayerRegionIsland::SUPPORT).visit(verifier);
+                        }
+                        if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                            region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE).visit(verifier);
+                        }
+                    }
+                }
 #endif // NDEBUG
             }
         }
     });
+
+    // link support islands beetween layers
+    tbb::parallel_for(
+        tbb::blocked_range<size_t>(1, support_layers.size()),
+        [&support_layers](const tbb::blocked_range<size_t> &range) {
+            for (size_t layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                Layer::build_up_down_graph(*support_layers[layer_idx - 1], *support_layers[layer_idx]);
+            }
+        }
+    );
 
 #ifndef NDEBUG
     const SupportLayer *support_layer_current = nullptr;
@@ -2262,8 +2408,16 @@ void generate_support_toolpaths(
     for (const SupportLayer *support_layer : support_layers) {
         support_layer_current = support_layer;
 
-        if (!support_layer->support_fills.empty())
-            support_layer->support_fills.visit(verifier);
+        for (const LayerSliceIslandPtr &island : support_layer->islands()) {
+            for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+                if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                    region_island->extrusion(LayerRegionIsland::SUPPORT).visit(verifier);
+                }
+                if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                    region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE).visit(verifier);
+                }
+            }
+        }
         idx++;
     }
 #endif // NDEBUG

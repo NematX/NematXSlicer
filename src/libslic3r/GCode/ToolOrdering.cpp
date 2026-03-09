@@ -317,7 +317,7 @@ void ToolOrdering::collect_extruders(
         if(!support_layer->has_extrusions())
             return;
         LayerTools   *layer_tools = this->tools_for_layer(support_layer->scaled_print_z());
-        ExtrusionRole role = support_layer->support_fills.role();
+        ExtrusionRole role = support_layer->role();
         bool         has_support        = role == ExtrusionRole::Mixed || role == ExtrusionRole::SupportMaterial;
         bool         has_interface      = role == ExtrusionRole::Mixed || role == ExtrusionRole::SupportMaterialInterface;
         uint16_t extruder_support   = object.config().support_material_extruder.value;
