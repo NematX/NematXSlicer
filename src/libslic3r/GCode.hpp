@@ -312,6 +312,7 @@ private:
     std::string      visitor_gcode;
     bool             visitor_flipped; //TODO use instead of reverse() at extrude_entity
     bool             visitor_in_use = false;
+    std::string      visitor_root_state = ""; // to know what kind of thing we're doing.
     std::string_view visitor_comment;
     double           visitor_speed;
     virtual void use(const ExtrusionPath &path) override;
@@ -328,6 +329,7 @@ private:
     virtual void use(const ExtrusionMultiProperties&) override;
     virtual void use(const ExtrusionPropertySpeed&) override;
     virtual void use(const ExtrusionPropertyCustomGcode&) override;
+    virtual void use(const ExtrusionPropertyModifier&) override;
     virtual void use(const ExtrusionPropertySpecialCommand&) override;
     //virtual void use(const ExtrusionPropertyOverhang&) override; // no need for this one
     virtual void use(const ExtrusionPropertyZOffset&) override;
@@ -565,6 +567,7 @@ private:
     // from extrusion properties.
     std::vector<const ExtrusionEntity*> m_current_entity;
     std::vector<std::pair<const ExtrusionEntity*, const ExtrusionPropertySpeed*>> m_speed_override;
+    std::vector<std::pair<const ExtrusionEntity*, const ExtrusionPropertyModifier*>> m_modifier_override;
     std::vector<std::pair<const ExtrusionEntity*, coord_t>> m_z_override;
     std::vector<int16_t>                m_saved_temp;
     bool                                m_force_unretract{false};

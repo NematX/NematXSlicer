@@ -5882,6 +5882,15 @@ void PrintConfigDef::init_fff_params()
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionFloats { 0. });
 
+    def = this->add("retract_restart_wipe_toolchange", coBools);
+    def->label = L("Wipe the unretraction");
+    def->full_label = L("Wipe the unretraction (Toolchange)");
+    def->tooltip = L("When unretraction is triggered after changing tool in a wipe tower, the unretraction is made into a wipe move"
+                     " instead of a static unretraction on top of the wipe tower.");
+    def->mode = comExpert | comSuSi;
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionBools { true });
+
     def = this->add("retract_speed", coFloats);
     def->label = L("Retraction Speed");
     def->full_label = L("Retraction Speed");
@@ -7901,6 +7910,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("wipe_tower_rest_in_middle", coBool);
+    def->label = L("toolchange inside the wipetower");
+    def->category = OptionCategory::mmsetup;
+    def->tooltip = L("If enabled, there will be a travel inside the wipe tower before the toolchange.");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
     //TODO: combuine x&y into a coPoint
     def = this->add("wipe_tower_x", coFloat);
     def->label = L("X");
@@ -8320,6 +8336,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "retract_lift_top",
         "retract_restart_extra",
         "retract_restart_extra_toolchange",
+        "retract_restart_wipe_toolchange",
         "retract_speed",
         "seam_gap",
         "seam_gap_external",
@@ -8358,6 +8375,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "retract_lift_top",
         "retract_restart_extra",
         "retract_restart_extra_toolchange",
+        "retract_restart_wipe_toolchange",
         "retract_speed",
         "seam_gap",
         "seam_gap_external",
@@ -8391,6 +8409,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "retract_lift_below",
         "retract_restart_extra",
         "retract_restart_extra_toolchange",
+        "retract_restart_wipe_toolchange",
         "retract_speed",
         "seam_gap",
         "travel_lift_before_obstacle",
@@ -11066,6 +11085,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "retract_lift_first_layer",
 "retract_lift_top",
 "retract_lift_before_travel",
+"retract_restart_wipe_toolchange",
 "seam_angle_cost",
 "seam_gap",
 "seam_gap_external",
@@ -11168,6 +11188,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "filament_wipe_return", // filament override
 "filament_wipe_speed", // filament override
 "wipe_tower_extrusion_width",
+"wipe_tower_rest_in_middle",
 "wipe_tower_speed",
 "wipe_tower_wipe_starting_speed",
 "xy_size_compensation",

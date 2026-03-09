@@ -217,6 +217,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         "retract_lift_before_travel",
         "retract_restart_extra",
         "retract_restart_extra_toolchange",
+        "retract_restart_wipe_toolchange",
         "retract_speed",
         "second_layer_flow_ratio",
         "silent_mode",
@@ -359,6 +360,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
             || opt_key == "wipe_tower_no_sparse_layers"
             || opt_key == "wipe_tower_extruder"
             || opt_key == "wipe_tower_per_color_wipe"
+            || opt_key == "wipe_tower_rest_in_middle"
             || opt_key == "wipe_tower_speed"
             || opt_key == "wipe_tower_wipe_starting_speed"
             || opt_key == "wiping_volumes_extruders"
@@ -2037,8 +2039,8 @@ Points Print::first_layer_wipe_tower_corners() const
     Points pts_scaled;
 
     if (has_wipe_tower() && ! m_wipe_tower_data.tool_changes.empty()) {
-        double width = m_default_object_config.wipe_tower_width + 2*m_wipe_tower_data.brim_width;
-        double depth = m_wipe_tower_data.depth + 2*m_wipe_tower_data.brim_width;
+        double width = m_default_object_config.wipe_tower_width + 2 * m_wipe_tower_data.brim_width;
+        double depth = m_wipe_tower_data.depth + 2 * m_wipe_tower_data.brim_width;
         Vec2d pt0(-m_wipe_tower_data.brim_width, -m_wipe_tower_data.brim_width);
         
         // First the corners.

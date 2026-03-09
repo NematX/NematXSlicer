@@ -898,6 +898,7 @@ static std::vector<std::string> s_Preset_print_options {
         "wipe_tower_extra_spacing",
         "wipe_tower_extruder",
         "wipe_tower_extrusion_width",
+        "wipe_tower_rest_in_middle",
         "wipe_tower_no_sparse_layers",
         "wipe_tower_speed",
         "wipe_tower_wipe_starting_speed",
@@ -1049,6 +1050,7 @@ static std::vector<std::string> s_Preset_filament_options {
         // Retract overrides
         "filament_retract_length", "filament_retract_lift", "filament_retract_lift_above", "filament_retract_lift_below", 
         "filament_retract_length_toolchange",
+        "retract_restart_wipe_toolchange",
         "filament_retract_speed", "filament_deretract_speed", "filament_retract_restart_extra", 
         "filament_retract_before_travel", "filament_retract_lift_before_travel",
         "filament_retract_layer_change", "filament_retract_before_wipe", 

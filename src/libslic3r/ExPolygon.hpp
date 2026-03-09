@@ -99,6 +99,7 @@ public:
     const Polygon& 	contour_or_hole(size_t idx) const 	{ return (idx == 0) ? this->contour : this->holes[idx - 1]; }
 
 #ifdef _DEBUGINFO
+#pragma UNOPTIMIZE
     void assert_valid() const {
         contour.assert_valid();
         assert(contour.is_counter_clockwise());

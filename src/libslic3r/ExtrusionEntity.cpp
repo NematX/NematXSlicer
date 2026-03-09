@@ -51,6 +51,7 @@ void ExtrusionPropertyVisitor::use(ExtrusionMultiProperties &thing) {
         prop->visit(*this);
 };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertySpeed &thing) { default_use(thing); };
+void ExtrusionPropertyVisitor::use(ExtrusionPropertyModifier &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertyCustomGcode &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertySpecialCommand &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertyOverhang &thing) { default_use(thing); };
@@ -64,6 +65,7 @@ void ExtrusionPropertyVisitorConst::use(const ExtrusionMultiProperties &thing) {
         prop->visit(*this);
 };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpeed &thing) { default_use(thing); };
+void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyModifier &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyCustomGcode &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpecialCommand &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyOverhang &thing) { default_use(thing); };
@@ -184,7 +186,8 @@ void ExtrusionPath::_inflate_collection(const Polylines &polylines, ExtrusionEnt
 
 void ExtrusionPath::polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const
 {
-    polygons_append(out, offset(this->polyline.to_polyline(), double(scale_(m_attributes.width / 2)) + scaled_epsilon));
+    //polygons_append(out, offset(this->polyline.to_polyline(), double(scale_(m_attributes.width / 2)) + scaled_epsilon));
+    out = union_(out, offset(this->polyline.to_polyline(), double(scale_(m_attributes.width / 2)) + scaled_epsilon));
 }
 
 void ExtrusionPath::polygons_covered_by_spacing(Polygons &out, const float spacing_ratio, const float scaled_epsilon) const

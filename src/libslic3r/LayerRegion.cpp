@@ -157,10 +157,12 @@ void LayerRegion::slices_to_fill_surfaces_clipped(coord_t opening_offset)
 // Extract surfaces of given type from surfaces, extract fill (layer) thickness of one of the surfaces.
 static ExPolygons fill_surfaces_extract_expolygons(Surfaces &surfaces, std::initializer_list<SurfaceType> surface_types, coord_t &thickness)
 {
+    assert(!surfaces.empty());
     size_t cnt = 0;
     for (const Surface &surface : surfaces)
         if (std::find(surface_types.begin(), surface_types.end(), surface.surface_type) != surface_types.end()) {
             ++cnt;
+            assert(surface.scaled_thickness() != 0);
             thickness = surface.scaled_thickness();
         }
     if (cnt == 0)
@@ -571,19 +573,27 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
     }
 #endif
     reserve_more(m_fill_surfaces.surfaces, shells.size() + sparse.size() + bridges.size() + bottoms.size() + tops.size());
-    {
+    if (!shells.empty()) {
         Surface solid_templ(stPosInternal | stDensSolid, {});
-        assert(layer_solid_thickness > 0);
-        solid_templ.set_scaled_thickness(layer_solid_thickness);
+        assert(layer_solid_thickness == -1); // should be >0 but it's set on infill, well after here, we do that for nothing.
+        if (layer_solid_thickness > 0) {
+            solid_templ.set_scaled_thickness(layer_solid_thickness);
+        }
         ensure_valid(shells/*, scaled_resolution*/);
         m_fill_surfaces.append(std::move(shells), solid_templ);
+    } else {
+        //assert(layer_solid_thickness == 0);
     }
-    {
+    if (!sparse.empty()) {
         Surface sparse_templ(stPosInternal | stDensSparse, {});
-        assert(layer_sparse_thickness > 0);
-        sparse_templ.set_scaled_thickness(layer_sparse_thickness);
+        assert(layer_sparse_thickness -1); // should be >0 but it's set on infill, well after here, we do that for nothing.
+        if (layer_sparse_thickness > 0) {
+            sparse_templ.set_scaled_thickness(layer_sparse_thickness);
+        }
         ensure_valid(sparse/*, scaled_resolution*/);
         m_fill_surfaces.append(std::move(sparse), sparse_templ);
+    } else {
+        // assert(layer_sparse_thickness == 0);
     }
     for(auto&srf : bridges.surfaces) srf.expolygon.assert_valid();
     for(auto&srf : bottoms) srf.expolygon.assert_valid();
