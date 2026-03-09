@@ -249,6 +249,7 @@ private:
         // If suppressed, the backoup holds m_find_replace.
         GCodeFindReplace *m_find_replace_backup { nullptr };
         GCodeProcessor   &m_processor;
+        size_t line_length = 0;
     };
     void            _do_export(Print &print, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb);
     void            _move_to_print_object(std::string& gcode_out, const Print& print, size_t finished_objects, uint16_t initial_extruder_id);

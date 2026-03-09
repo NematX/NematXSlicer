@@ -1600,7 +1600,13 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     m_label_objects.init(print);
     BoundingBoxf3 global_bounding_box;
     file.write(m_label_objects.all_objects_header(global_bounding_box, scale_d(print.config().resolution_internal.value)));
-    
+    std::string test("test:\"lol,mrd,ptdr\"");
+    for (int i = 0; test.size() < 4000; i++) {
+        test = test + test;
+    }
+    file.write("\n; ");
+    file.write(test);
+    file.write("\n\n");
     // Update output variables after the extruders were initialized.
     this->m_placeholder_parser_integration.init(print.config(), m_writer);
     
@@ -6286,9 +6292,24 @@ void GCodeGenerator::GCodeOutputStream::write(const char *what)
         if (m_only_ascii) {
             remove_not_ascii(gcode);
         }
-        //process the gcode for the gcode viewer
+        // process the gcode for the gcode viewer
         m_processor.process_buffer(gcode);
         // post-process that will mess with the gcode viewer
+
+        // ensure line size limit
+        for (size_t i = 0; i < gcode.size(); i++) {
+            if (gcode[i] != '\n') {
+                line_length++;
+                if (line_length > 4000) {
+                    // hard line return
+                    fwrite(gcode.c_str(), 1, i, this->f);
+                    gcode = "\n; " + gcode.substr(i);
+                    line_length = 2;
+                }
+            } else {
+                line_length = 0;
+            }
+        }
         // writes string to file
         fwrite(gcode.c_str(), 1, gcode.size(), this->f);
     }

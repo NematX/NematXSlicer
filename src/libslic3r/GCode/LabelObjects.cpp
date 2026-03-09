@@ -200,7 +200,7 @@ std::string LabelObjects::all_objects_header(BoundingBoxf3 &global_bounding_box,
             std::snprintf(buffer, sizeof(buffer) - 1, "[%.3f,%.3f],", unscale<float>(point[0]), unscale<float>(point[1]));
             platter_json += buffer;
             // prevent 2^12 overflow (4096) that can happen innematx firmware
-            if (platter_json.size() > 4000) {
+            if (platter_json.size() > 3000) {
                 platter_json += "\n";
                 out += platter_json;
                 platter_json = "; ";
