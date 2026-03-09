@@ -578,27 +578,34 @@ int GLVolumeCollection::load_wipe_tower_preview(
             m.translate(0.f, -z_and_depth_pairs[i-1].second/2.f + z_and_depth_pairs[0].second/2.f, z_and_depth_pairs[i-1].first);
             mesh.merge(m);
         }
+        if (z_and_depth_pairs.empty()) {
+            depth = 0;
+        } else {
+            depth = z_and_depth_pairs.front().second;
+        }
     }
 
-    // We'll make another mesh to show the brim (fixed layer height):
-    TriangleMesh brim_mesh = make_cube(width + 2.f * brim_width, depth + 2.f * brim_width, 0.2f);
-    brim_mesh.translate(-brim_width, -brim_width, 0.f);
-    mesh.merge(brim_mesh);
+    if (depth > 0) {
+        // We'll make another mesh to show the brim (fixed layer height):
+        TriangleMesh brim_mesh = make_cube(width + 2.f * brim_width, depth + 2.f * brim_width, 0.2f);
+        brim_mesh.translate(-brim_width, -brim_width, 0.f);
+        mesh.merge(brim_mesh);
 
-    // Now the stabilization cone and its base.
-    const auto [R, scale_x] = WipeTower::get_wipe_tower_cone_base(width, height, depth, cone_angle);
-    if (R > 0.) {
-        TriangleMesh cone_mesh(its_make_cone(R, height));
-        cone_mesh.scale(Vec3f(1.f/scale_x, 1.f, 1.f));
+        // Now the stabilization cone and its base.
+        const auto [R, scale_x] = WipeTower::get_wipe_tower_cone_base(width, height, depth, cone_angle);
+        if (R > 0.) {
+            TriangleMesh cone_mesh(its_make_cone(R, height));
+            cone_mesh.scale(Vec3f(1.f / scale_x, 1.f, 1.f));
 
-        TriangleMesh disk_mesh(its_make_cylinder(R, brim_height));
-        disk_mesh.scale(Vec3f(1. / scale_x, 1., 1.)); // Now it matches the base, which may be elliptic.
-        disk_mesh.scale(Vec3f(1.f + scale_x*brim_width/R, 1.f + brim_width/R, 1.f)); // Scale so the brim is not deformed.
-        cone_mesh.merge(disk_mesh);
-        cone_mesh.translate(width / 2., depth / 2., 0.);
-        mesh.merge(cone_mesh);
+            TriangleMesh disk_mesh(its_make_cylinder(R, brim_height));
+            disk_mesh.scale(Vec3f(1. / scale_x, 1., 1.)); // Now it matches the base, which may be elliptic.
+            disk_mesh.scale(Vec3f(1.f + scale_x * brim_width / R, 1.f + brim_width / R,
+                                  1.f)); // Scale so the brim is not deformed.
+            cone_mesh.merge(disk_mesh);
+            cone_mesh.translate(width / 2., depth / 2., 0.);
+            mesh.merge(cone_mesh);
+        }
     }
-
 
     volumes.emplace_back(new GLVolume(color));
     GLVolume& v = *volumes.back();

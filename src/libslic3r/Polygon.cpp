@@ -529,6 +529,7 @@ size_t Polygon::remove_collinear_angle(double angle_radian) {
 }
 
 #ifdef _DEBUGINFO
+#pragma UNOPTIMIZE
 void Polygon::assert_valid() const {
     assert(size() > 2);
     for (size_t i_pt = 1; i_pt < size(); ++i_pt)

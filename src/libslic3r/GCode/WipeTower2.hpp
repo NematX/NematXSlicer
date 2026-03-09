@@ -228,8 +228,9 @@ public:
 
     bool m_is_finished = false;
     coord_t m_current_y_pos = 0;
-    coord_t m_max_y_pos = 0;
-    
+    coord_t m_max_y_pos;
+    coord_t m_wipetower_max_y_pos;
+
     Flow brim_flow;
     Polylines brim;
     bool brim_done = false;

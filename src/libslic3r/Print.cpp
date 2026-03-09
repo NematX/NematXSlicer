@@ -2034,8 +2034,8 @@ Points Print::first_layer_wipe_tower_corners() const
     Points pts_scaled;
 
     if (has_wipe_tower() && ! m_wipe_tower_data.tool_changes.empty()) {
-        double width = m_default_object_config.wipe_tower_width + 2*m_wipe_tower_data.brim_width;
-        double depth = m_wipe_tower_data.depth + 2*m_wipe_tower_data.brim_width;
+        double width = m_default_object_config.wipe_tower_width + 2 * m_wipe_tower_data.brim_width;
+        double depth = m_wipe_tower_data.depth + 2 * m_wipe_tower_data.brim_width;
         Vec2d pt0(-m_wipe_tower_data.brim_width, -m_wipe_tower_data.brim_width);
         
         // First the corners.

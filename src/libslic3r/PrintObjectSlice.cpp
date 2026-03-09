@@ -1053,7 +1053,6 @@ void PrintObject::_max_overhang_threshold() {
                 // modify geometry
                 Surfaces to_add;
                 Surfaces &my_surfaces = lregion->m_slices.surfaces;
-                ExPolygons expolys_final;
                 for (size_t surf_idx = 0; surf_idx < my_surfaces.size(); surf_idx++) {
                     ExPolygons expolys = intersection_ex(enlarged_support, my_surfaces[surf_idx].expolygon);
                     // if bridge, smooth enlargment so there won't be spikes near bridges.
@@ -1068,13 +1067,17 @@ void PrintObject::_max_overhang_threshold() {
                         for (size_t i = 1; i < expolys.size(); i++) {
                             to_add.emplace_back(my_surfaces[surf_idx], expolys[i]);
                         }
-                        append(expolys_final, expolys);
                         append(all_region_modified, std::move(expolys));
                     }
                 }
-                my_layer->m_regions[region_idx]->set_raw_slices(std::move(expolys_final));
                 append(my_surfaces, std::move(to_add));
                 ensure_valid(my_surfaces, resolution);
+                // update raw_slices from m_slices to be in synch
+                ExPolygons expolys_final;
+                for (size_t surf_idx = 0; surf_idx < my_surfaces.size(); surf_idx++) {
+                    expolys_final.push_back(my_surfaces[surf_idx].expolygon);
+                }
+                my_layer->m_regions[region_idx]->set_raw_slices(std::move(expolys_final));
                 for(auto &srf : my_surfaces) srf.expolygon.assert_valid();
             } else {
                 Surfaces &my_surfaces = lregion->m_slices.surfaces;
