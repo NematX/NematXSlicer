@@ -14,6 +14,9 @@ import time
 from datetime import date
 import tarfile
 import subprocess
+from pathlib import Path
+
+token = None
 
 repo = "NematX/NematXSlicer"
 program_name = "NematXSlicer"
@@ -22,6 +25,19 @@ prefix = sys.argv[2] if len(sys.argv) > 2 else "rc"
 path_7zip = r"C:\Program Files\7-Zip\7z.exe"
 # github classic personal access token, works with [gist, repo, workflow] permissions, should be something like "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"
 github_auth_token = ""
+# try to fill github_auth_token via file
+githubtoken_file = Path("githubtoken.ini")
+if githubtoken_file.exists():
+	with open(githubtoken_file) as f:
+		for line in f:
+			if line.startswith("token="):
+				github_auth_token = line.strip().split("=", 1)[1];
+				print(f"file githubtoken.ini found, using token:'{github_auth_token}'");
+				break
+else:
+	print(f"file githubtoken.ini not found, using hardcoded token:'{github_auth_token}'");
+	if(not github_auth_token):
+		print("For this scipt to work, please create a 'githubtoken.ini' file, and make at least a line with 'token=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'");
 
 def get_version():
 	settings_stream = open("./version.inc", mode="r", encoding="utf-8");
@@ -70,7 +86,7 @@ def handle_artifact(json_artifact):
 			print(f"End of {branch_name} artifacts. Closing");
 			print("("+json_artifact["name"] + "  @ "+json_artifact["created_at"][:10]+")");
 			return False;
-		if json_artifact["name"] == prefix + "_win64" and not found_win:
+		if json_artifact["name"] == prefix + "_" +program_name + "-win64" and not found_win:
 			found_win = True;
 			print("Found win64 artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -83,7 +99,7 @@ def handle_artifact(json_artifact):
 				ret = subprocess.check_output([path_7zip, "a", "-tzip", base_name+".zip", base_name]);
 			except:
 				print("Failed to zip the win directory, do it yourself");
-		if json_artifact["name"] ==  prefix + "_"+program_name+"-win64.msi" and not found_win:
+		if json_artifact["name"] ==  prefix + "_" +program_name + "-win64.msi" and not found_win:
 			found_win = True;
 			print("Found win64 msi artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
@@ -92,7 +108,7 @@ def handle_artifact(json_artifact):
 			z = zipfile.ZipFile(io.BytesIO(resp.content))
 			z.extractall(release_path);
 			os.rename(release_path+"/"+program_name+"-win64.msi", release_path+"/"+program_name+"_"+version+"_win64_"+date_str+".msi");
-		if json_artifact["name"] == prefix + "_"+program_name+"-macOS.dmg" and not found_macos:
+		if json_artifact["name"] == prefix + "_"+program_name+"-macOS-intel.dmg" and not found_macos:
 			found_macos = True;
 			print("Found macos-intel artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);

@@ -186,8 +186,11 @@ jobs:
         set MSIFileName=${{ github.event.repository.name }}_%InstallerVersion%.msi
         candle.exe -dSourceDir="package" -dInstallerVersion="%InstallerVersion%" -dReleaseSuffix="%ReleaseSuffix%" src\winInstaller.wxs files.wxs
         light.exe -b package -ext WixUIExtension winInstaller.wixobj files.wixobj -o %MSIFileName% -sw1076
+    - name: rename msi
+      shell: cmd
+      run: rename build\${{ github.event.repository.name }}_${{ env.InstallerVersion }}.msi nightly_${{ github.event.repository.name }}-win64.msi
     - name: Upload MSI artifact
       uses: actions/upload-artifact@v4
       with:
         name: nightly_${{ github.event.repository.name }}-win64.msi
-        path: build/${{ github.event.repository.name }}_${{ env.InstallerVersion }}.msi
+        path: build/${{ github.event.repository.name }}-win64.msi
