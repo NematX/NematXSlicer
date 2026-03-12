@@ -193,4 +193,4 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: nightly_${{ github.event.repository.name }}-win64.msi
-        path: build/${{ github.event.repository.name }}-win64.msi
+        path: build/nightly_${{ github.event.repository.name }}-win64.msi
