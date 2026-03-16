@@ -64,6 +64,7 @@ class ExtrusionProperty;
 class ExtrusionPropertyNone;
 class ExtrusionMultiProperties;
 class ExtrusionPropertySpeed;
+class ExtrusionPropertyModifier;
 class ExtrusionPropertyCustomGcode;
 class ExtrusionPropertySpecialCommand;
 class ExtrusionPropertyOverhang;
@@ -73,6 +74,7 @@ public:
     virtual void default_use(ExtrusionProperty&);
     virtual void use(ExtrusionMultiProperties&);
     virtual void use(ExtrusionPropertySpeed&);
+    virtual void use(ExtrusionPropertyModifier&);
     virtual void use(ExtrusionPropertyCustomGcode&);
     virtual void use(ExtrusionPropertySpecialCommand&);
     virtual void use(ExtrusionPropertyOverhang&);
@@ -83,6 +85,7 @@ public:
     virtual void default_use(const ExtrusionProperty&);
     virtual void use(const ExtrusionMultiProperties&);
     virtual void use(const ExtrusionPropertySpeed&);
+    virtual void use(const ExtrusionPropertyModifier&);
     virtual void use(const ExtrusionPropertyCustomGcode&);
     virtual void use(const ExtrusionPropertySpecialCommand&);
     virtual void use(const ExtrusionPropertyOverhang&);
@@ -137,40 +140,91 @@ class ExtrusionPropertySpeed : public ExtrusionProperty
 {
 public:
     float speed_mm_per_s = -1.f;
-    float accel_mm_per_s2= -1.f;
+    float accel_mm_per_s2 = -1.f;
     float pressure_adv = -1.f;
-    float fan_speed_percent = -1.f; //between 0 and 100
+    float fan_speed_percent = -1.f; // between 0 and 100
     float temperature_C = -1.f;
-    //ROLE_OVERRIDE?
+    // ROLE_OVERRIDE?
 
     ExtrusionPropertySpeed(float speed = -1, float accel = -1, float pa = -1, float fan = -1, float temp = -1)
-        : speed_mm_per_s(speed), accel_mm_per_s2(accel), pressure_adv(pa), fan_speed_percent(fan), temperature_C(temp) {}
-    
-    ExtrusionPropertySpeed& speed(float speed) {
-        speed_mm_per_s=(speed);
+        : speed_mm_per_s(speed)
+        , accel_mm_per_s2(accel)
+        , pressure_adv(pa)
+        , fan_speed_percent(fan)
+        , temperature_C(temp) {}
+
+    ExtrusionPropertySpeed &speed(float speed) {
+        speed_mm_per_s = (speed);
         return *this;
     }
-    ExtrusionPropertySpeed& acceleration(float accel) {
-        accel_mm_per_s2=(accel);
+    ExtrusionPropertySpeed &acceleration(float accel) {
+        accel_mm_per_s2 = (accel);
         return *this;
     }
-    ExtrusionPropertySpeed& presure_advance(float pa) {
-        pressure_adv=(pa);
+    ExtrusionPropertySpeed &presure_advance(float pa) {
+        pressure_adv = (pa);
         return *this;
     }
-    ExtrusionPropertySpeed& fan_speed(float fspeed) {
-        assert(fspeed >=-1 && fspeed <= 100);
-        fan_speed_percent=(fspeed);
+    ExtrusionPropertySpeed &fan_speed(float fspeed) {
+        assert(fspeed >= -1 && fspeed <= 100);
+        fan_speed_percent = (fspeed);
         return *this;
     }
-    ExtrusionPropertySpeed& temperature(float temp) {
-        temperature_C=(temp);
+    ExtrusionPropertySpeed &temperature(float temp) {
+        temperature_C = (temp);
         return *this;
     }
 
-    std::unique_ptr<ExtrusionProperty> clone() const override { return std::make_unique<ExtrusionPropertySpeed>(*this); }
+    std::unique_ptr<ExtrusionProperty> clone() const override {
+        return std::make_unique<ExtrusionPropertySpeed>(*this);
+    }
     void visit(ExtrusionPropertyVisitor &visitor) override { visitor.use(*this); }
-    void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this);}
+    void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this); }
+};
+// this store switch to activate/deactivate/enforce certain gcode feature like retract, lift, etc.
+class ExtrusionPropertyModifier : public ExtrusionProperty
+{
+public:
+    // enforce a blind travel to the first point of the extrusion, even if the processor think it don't move
+    bool enforce_travel = false;
+    bool enforce_retraction = false;
+    bool enforce_unlift = false;
+    bool disable_retraction = false;
+    bool disable_lift = false;
+    bool toolchange_retraction = false;
+
+    ExtrusionPropertyModifier() {}
+
+    ExtrusionPropertyModifier &set_enforce_travel(bool enforce = true) {
+        enforce_travel = enforce;
+        return *this;
+    }
+    ExtrusionPropertyModifier &set_enforce_retraction(bool enforce = true) {
+        enforce_retraction = enforce;
+        return *this;
+    }
+    ExtrusionPropertyModifier &set_enforce_unlift(bool enforce = true) {
+        enforce_unlift = enforce;
+        return *this;
+    }
+    ExtrusionPropertyModifier &set_disable_retraction(bool disable = true) {
+        disable_retraction = disable;
+        return *this;
+    }
+    ExtrusionPropertyModifier &set_disable_lift(bool disable = true) {
+        disable_lift = disable;
+        return *this;
+    }
+    ExtrusionPropertyModifier &set_toolchange_retraction(bool is = true) {
+        toolchange_retraction = is;
+        return *this;
+    }
+
+    std::unique_ptr<ExtrusionProperty> clone() const override {
+        return std::make_unique<ExtrusionPropertyModifier>(*this);
+    }
+    void visit(ExtrusionPropertyVisitor &visitor) override { visitor.use(*this); }
+    void visit(ExtrusionPropertyVisitorConst &visitor) const override { visitor.use(*this); }
 };
 class ExtrusionPropertyCustomGcode : public ExtrusionProperty
 {
@@ -207,6 +261,8 @@ public:
         RESTORE_SPEED_RATIO,
         FLUSH_PLANNER_QUEUE,
         EXTRUSION, // only e move, by extra_data mm
+        RETRACT, // only e move, by extra_data mm, but taggued retract/unretract
+        //WIPE_RETRACT_LIFT, //trigger auto-wipe, retract & lift, like before a travel
         PAUSE, // pause (G4) for extra_data miliseconds (int)
         //SET_TEMP, // for extra_data °C should be done via ExtrusionPropertySpeed.temperature
         WAIT_FOR_TEMP, // wait for current temperature, given by ExtrusionPropertySpeed
@@ -353,25 +409,38 @@ public:
 // only cary an ExtrusionProperty
 class ExtrusionNop : public ExtrusionEntity
 {
+    ExtrusionRole m_role = ExtrusionRole::None;
 public:
     static Point NOT_A_POINT;
-    // role?
+    // this can have a position, to move the head.
+    Point position = NOT_A_POINT;
     ExtrusionNop() : ExtrusionEntity(true) {}
-    ExtrusionNop(const ExtrusionNop& other) : ExtrusionEntity(other) {}
-    ExtrusionNop(ExtrusionNop&& other) : ExtrusionEntity(std::move(other)) {}
+    ExtrusionNop(const ExtrusionNop& other) : ExtrusionEntity(other), m_role(other.m_role), position(other.position) {}
+    ExtrusionNop(ExtrusionNop&& other) : ExtrusionEntity(std::move(other)), m_role(other.m_role), position(std::move(other.position)) {}
     ExtrusionNop(const ExtrusionProperty &attr) : ExtrusionEntity(true) { this->add_property(attr); }
-    ExtrusionNop& operator=(const ExtrusionNop &rhs) { ExtrusionEntity::operator=(rhs); return *this; }
-    ExtrusionNop& operator=(ExtrusionNop &rhs) { ExtrusionEntity::operator=(rhs); return *this; }
+    ExtrusionNop &operator=(const ExtrusionNop &rhs) {
+        ExtrusionEntity::operator=(rhs);
+        this->m_role = rhs.m_role;
+        this->position = rhs.position;
+        return *this;
+    }
+    ExtrusionNop &operator=(ExtrusionNop &rhs) {
+        ExtrusionEntity::operator=(rhs);
+        this->m_role = rhs.m_role;
+        this->position = rhs.position;
+        return *this;
+    }
     //ExtrusionNop(std::unique_ptr<ExtrusionProperty> sptr_attr) : ExtrusionEntity(true) { this->add_property(std::move(sptr_attr)); }
-    ExtrusionRole role() const override {return ExtrusionRole::None; }
-    bool has_role(ExtrusionRole) const override { return false; }
+    ExtrusionRole role() const override { return m_role; }
+    void set_role(ExtrusionRole new_role) { m_role = new_role; }
+    bool has_role(ExtrusionRole test_role) const override { return (m_role & test_role) == test_role; }
     ExtrusionEntity *clone() const override { return new ExtrusionNop(*this); }
     // Create a new object, initialize it with this object using the move semantics.
     virtual ExtrusionEntity* clone_move() { return new ExtrusionNop(std::move(*this)); }
     void reverse() override {}
-    const Point &first_point() const override { return NOT_A_POINT; }
-    const Point& last_point() const override { return NOT_A_POINT; }
-    const Point& middle_point() const override { return NOT_A_POINT; }
+    const Point &first_point() const override { return position; }
+    const Point& last_point() const override { return position; }
+    const Point& middle_point() const override { return position; }
     void polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const override {}
     void polygons_covered_by_spacing(Polygons &out, const float spacing_ratio, const float scaled_epsilon) const override {}
     Polygons polygons_covered_by_width(const float scaled_epsilon = 0.f) const override { return {}; }
@@ -422,7 +491,11 @@ struct ExtrusionFlow
     ExtrusionFlow(const Flow &flow) :
         mm3_per_mm(flow.mm3_per_mm()), width(flow.width()), height(flow.height()) {}
 
+    void set_force_e_per_mm() { this->height = -2; }
+    bool force_e_per_mm() const { return this->height == -2; }
+
     // Volumetric velocity. mm^3 of plastic per mm of linear head motion. Used by the G-code generator.
+    // !!! if height == -2, then mm3_per_mm is changed into e_per_mm (used for exact unretraction) !!! (very unsafe, don't use it for normal extrusions)
     double          mm3_per_mm{ -1. };
     // Width of the extrusion, used for visualization purposes & for seam notch %. Unscaled
     float           width{ -1.f };

@@ -282,6 +282,9 @@ std::string debug_out_path(const char *name, ...)
     if (!debug_out_path_called.exchange(true)) {
         std::string path = boost::filesystem::system_complete(SLIC3R_DEBUG_OUT_PATH_PREFIX).string();
         printf("Debugging output files will be written to %s\n", path.c_str());
+        if (!boost::filesystem::exists(path)) {
+            boost::filesystem::create_directories(path);
+        }
     }
     char buffer[2048];
     va_list args;
@@ -306,6 +309,9 @@ std::string debug_out_path_uniqueid(std::string name, ...) {
     if (!debug_out_path_called.exchange(true)) {
         std::string path = boost::filesystem::system_complete(SLIC3R_DEBUG_OUT_PATH_PREFIX).string();
         printf("Debugging output files will be written to %s\n", path.c_str());
+        if (!boost::filesystem::exists(path)) {
+            boost::filesystem::create_directories(path);
+        }
     }
     char buffer[2048];
     va_list args;

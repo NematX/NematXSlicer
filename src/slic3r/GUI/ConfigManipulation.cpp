@@ -653,7 +653,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
                      "wipe_tower_cone_angle", "wipe_tower_extra_spacing",
                      "wipe_tower_bridging", "wipe_tower_brim", "wipe_tower_no_sparse_layers", "single_extruder_multi_material_priming",
                      "wipe_tower_speed", "wipe_tower_wipe_starting_speed",
-                     "wipe_tower_extrusion_width" })
+                     "wipe_tower_extrusion_width", "wipe_tower_rest_in_middle" })
         toggle_field(el, have_wipe_tower);
 
     bool have_non_zero_mmu_segmented_region_max_width = config->opt_float("mmu_segmented_region_max_width") > 0.;
@@ -863,6 +863,8 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
 
         bool toolchange_retraction = config->opt_float("retract_length_toolchange", i) > 0;
         toggle_field("retract_restart_extra_toolchange", extruder_count > 1 && toolchange_retraction, i);
+        toggle_field("retract_restart_toolchange_on_perimeter", extruder_count > 1 && toolchange_retraction, i);
+        toggle_field("retract_restart_wipe_toolchange", extruder_count > 1 && toolchange_retraction, i);
     }
 
     if (config->opt_bool("single_extruder_multi_material") && extruder_count > 1) {

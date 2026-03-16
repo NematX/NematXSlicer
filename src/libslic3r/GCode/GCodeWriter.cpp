@@ -964,13 +964,15 @@ void GCodeWriter::_extrude_e(GCodeFormatter &w, double dE)
         w.emit_e(m_extrusion_axis, e_to_write);    }
 }
 
-std::string GCodeWriter::extrude_to_e(const double dE, const std::string_view comment)
+std::string GCodeWriter::extrude_to_e(const double dE, const double speed_mm_s, const std::string_view comment)
 {
     assert(dE == dE);
 
     GCodeG1Formatter w(this->get_default_gcode_formatter());
     _extrude_e(w, dE);
-
+    if (speed_mm_s > 0) {
+        w.emit_f(speed_mm_s * 60.);
+    }
     w.emit_comment(this->config.gcode_comments, comment);
     return write_acceleration() + w.string();
 }
@@ -1297,7 +1299,7 @@ std::string GCodeWriter::unretract()
             gcode += w.string();
         }
     }
-    
+
     return gcode;
 }
 

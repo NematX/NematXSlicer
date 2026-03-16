@@ -1113,7 +1113,7 @@ void GCodeViewer::SequentialView::GCodeWindow::render(float top, float bottom, s
     ImGuiWrapper& imgui = *wxGetApp().imgui();
 
     auto add_item_to_line = [&imgui](const std::string& txt, const ImVec4& color, float spacing, size_t& current_length) {
-        static const size_t LENGTH_THRESHOLD = 60;
+        static const size_t LENGTH_THRESHOLD = 90;
 
         if (txt.empty())
             return false;

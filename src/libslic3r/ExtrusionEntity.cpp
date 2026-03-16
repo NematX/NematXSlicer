@@ -51,6 +51,7 @@ void ExtrusionPropertyVisitor::use(ExtrusionMultiProperties &thing) {
         prop->visit(*this);
 };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertySpeed &thing) { default_use(thing); };
+void ExtrusionPropertyVisitor::use(ExtrusionPropertyModifier &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertyCustomGcode &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertySpecialCommand &thing) { default_use(thing); };
 void ExtrusionPropertyVisitor::use(ExtrusionPropertyOverhang &thing) { default_use(thing); };
@@ -64,6 +65,7 @@ void ExtrusionPropertyVisitorConst::use(const ExtrusionMultiProperties &thing) {
         prop->visit(*this);
 };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpeed &thing) { default_use(thing); };
+void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyModifier &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyCustomGcode &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertySpecialCommand &thing) { default_use(thing); };
 void ExtrusionPropertyVisitorConst::use(const ExtrusionPropertyOverhang &thing) { default_use(thing); };

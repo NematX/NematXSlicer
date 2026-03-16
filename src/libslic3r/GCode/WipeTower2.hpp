@@ -221,6 +221,7 @@ public:
     std::vector<const Layer *> layers;
 
     // this layer extrusion information
+    size_t wipetower_layer_idx = 0;
     coord_t extrusion_z;
     coord_t extrusion_height;
     std::vector<coord_t> uninitialized_z;
@@ -228,8 +229,9 @@ public:
 
     bool m_is_finished = false;
     coord_t m_current_y_pos = 0;
-    coord_t m_max_y_pos = 0;
-    
+    coord_t m_max_y_pos;
+    coord_t m_wipetower_max_y_pos;
+
     Flow brim_flow;
     Polylines brim;
     bool brim_done = false;
@@ -237,6 +239,9 @@ public:
     Polylines tower_perimeters;
     uint16_t perimeter_tool_idx = uint16_t(-1);
     bool perimeter_done = false;
+
+    bool y_down = true;
+    Point last_point;
 
     struct Toolchange
     {
@@ -280,7 +285,7 @@ public:
     //ExtrusionEntityCollection create_toolchange(uint16_t from, uint16_t to, Point current_pos);
     //ExtrusionEntityCollection create_purge(uint16_t toolid, Point current_pos);
 
-    ExtrusionEntityCollection tool_change(const Layer *layer, uint16_t old_tool, uint16_t new_tool);
+    ExtrusionEntityCollection tool_change(const Layer *layer, uint16_t old_tool, uint16_t new_tool, double de_retraction_new_tool = 0);
     bool finish_layer(ExtrusionEntityCollection &collection, uint16_t current_extruder, bool force = false);
 
 protected:
@@ -291,11 +296,16 @@ protected:
                             const Polyline &ramming_lines,
                             const uint16_t tool_id,
                             const Flow &ramming_flow);
-    void toolchange_Wipe(ExtrusionEntityCollection &collection, Polyline wipe_lines, const Flow wipe_flow);
+    void toolchange_Wipe(ExtrusionEntityCollection &collection,
+                         Polyline wipe_lines,
+                         const Flow wipe_flow,
+                         const uint16_t tool_id,
+                         const double de_retraction_new_tool);
     void toolchange_Change(ExtrusionEntityCollection &collection, const uint16_t new_tool);
 
-    bool print_perimeter(ExtrusionEntityCollection &collection);
+    bool print_perimeter(ExtrusionEntityCollection &collection, bool for_toolchange = false);
 
+    coord_t compute_y(coord_t raw_y);
 
 };
 

@@ -360,7 +360,7 @@ void GCodeGenerator::PlaceholderParserIntegration::update_from_gcodewriter(const
                 if (it == wtuf.end())
                     it = wtuf.end() - 1;
                 wt_vol = it->second[e.id()] * e.filament_crossection();
-            }            
+            }
 
             double v = e.extruded_volume() + wt_vol;
             double w = v * e.filament_density() * 0.001;
@@ -1243,12 +1243,12 @@ namespace DoExport {
                 excluded.insert(ExtrusionRole::Skirt);
         }
         virtual void use(const ExtrusionPath& path) override {
-            if (excluded.find(path.role()) == excluded.end()) {
+            if (excluded.find(path.role()) == excluded.end() && path.attributes().force_e_per_mm()) {
                 min = std::min(min, path.mm3_per_mm());
             }
         }
         virtual void use(const ExtrusionPath3D& path3D) override {
-            if (excluded.find(path3D.role()) == excluded.end()) {
+            if (excluded.find(path3D.role()) == excluded.end() && !path3D.attributes().force_e_per_mm()) {
                 min = std::min(min, path3D.mm3_per_mm());
             }
         }
@@ -4122,10 +4122,11 @@ LayerResult GCodeGenerator::process_layer(
     for (const uint16_t extruder_id : layer_tools.extruders)
     {
         // set extruder
-        if (m_wipe_tower_current_layer) {
+        uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
+        if (m_wipe_tower_current_layer && (old_extruder_id != extruder_id || layer_tools.extruders.size() < 2)) {
             assert(m_writer.tool());
-            uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
-            ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id);
+            assert(m_writer.get_tool(extruder_id));
+            ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id, m_writer.get_tool(extruder_id)->retracted());
             if (extruder_id == layer_tools.extruders.back()) {
                 m_wipe_tower_current_layer->finish_layer(wt_extrusions, extruder_id, true);
             }
@@ -4153,7 +4154,9 @@ LayerResult GCodeGenerator::process_layer(
             //setup
             assert(m_current_entity.empty());
             assert(m_speed_override.empty());
+            assert(m_modifier_override.empty());
             assert(!visitor_in_use);
+            this->visitor_root_state = "wp";
             this->visitor_in_use = true;
             this->visitor_gcode.clear();
             this->visitor_comment = "";
@@ -4165,6 +4168,7 @@ LayerResult GCodeGenerator::process_layer(
             this->visitor_in_use = false;
             assert(m_current_entity.empty());
             assert(m_speed_override.empty());
+            assert(m_modifier_override.empty());
             this->set_origin(old_origin);
             gcode += this->visitor_gcode;
         } else {
@@ -4346,7 +4350,6 @@ distsqrf_t dist_from_bb(const BoundingBox &bb, const Point &pt) {
     dist = std::min(dist, pt.distance_to_square(Point(bb.max.x(), bb.min.y())));
     return dist;
 }
-    std::set<const LayerSliceIsland *> aeff_all_islands;
 
 void GCodeGenerator::process_layer_single_object(
     // output
@@ -4564,8 +4567,6 @@ void GCodeGenerator::process_layer_single_object(
             for (size_t i = 0; i < layer->islands().size(); i++) {
                 if (layer_to_print.islands.find(layer->islands()[i].get()) != layer_to_print.islands.end()) {
                     idxs_islands.push_back(i);
-                    std::cout<<"layer "<<layer->id()<<" : add island "<<i<<" @"<<uint64_t((void*)(layer->islands()[i].get()))<<"\n";
-                    //assert(aeff_all_islands.find(
                 }
             }
         }
@@ -6504,6 +6505,7 @@ std::string GCodeGenerator::extrude_entity(const ExtrusionEntityReference &entit
 {
     assert(m_current_entity.empty());
     assert(m_speed_override.empty());
+    assert(m_modifier_override.empty());
     assert(!visitor_in_use);
     this->visitor_in_use = true;
     this->visitor_gcode.clear();
@@ -6514,6 +6516,7 @@ std::string GCodeGenerator::extrude_entity(const ExtrusionEntityReference &entit
     this->visitor_in_use = false;
     assert(m_current_entity.empty());
     assert(m_speed_override.empty());
+    assert(m_modifier_override.empty());
     return this->visitor_gcode;
 }
 void GCodeGenerator::use(const ExtrusionPath &path) {
@@ -6562,6 +6565,15 @@ void GCodeGenerator::use(const ExtrusionEntityCollection &collection) {
     if (collection.has_properties()) {
         collection.get_root_property()->visit(*this);
     }
+    if (!visitor_comment.empty() && m_config.gcode_comments) {
+        // use the comment
+        visitor_gcode += "; ";
+        visitor_gcode += visitor_comment;
+        if (visitor_gcode.back() != '\n') {
+            visitor_gcode += "\n";
+        }
+        visitor_comment = ""sv;
+    }
     if (!collection.can_sort() /*|| collection.role() == ExtrusionRole::Mixed*/ || collection.entities().size() <= 1) {
         if (this->visitor_flipped && collection.can_reverse()) {
             for (size_t idx = collection.entities().size() - 1; idx <collection.entities().size(); --idx) {
@@ -6591,10 +6603,63 @@ void GCodeGenerator::use(const ExtrusionEntityCollection &collection) {
 void GCodeGenerator::use(const ExtrusionNop &command) {
     assert(visitor_in_use);
     start_using_extrusion(command);
+    std::string save_gcode = std::move(visitor_gcode);
+    visitor_gcode.clear();
     //create gcode from the command properties
     if (command.has_properties()) {
         command.get_root_property()->visit(*this);
     }
+    // need travel?
+    if (command.position != ExtrusionNop::NOT_A_POINT) {
+        // prepend retraction on the current extruder
+        std::string travel_gcode ;
+        if (m_modifier_override.empty() || !m_modifier_override.back().second->disable_retraction) {
+            travel_gcode += this->retract_and_wipe(
+                m_modifier_override.empty() ? false : m_modifier_override.back().second->toolchange_retraction);
+        }
+        Polyline polyline = this->travel_to(travel_gcode, command.first_point(), command.role());
+        std::string comment = "move to first ";
+        if (!visitor_comment.empty()) {
+            comment += visitor_comment;
+            comment += " point";
+            visitor_comment = ""sv;
+        } else {
+            comment += "point";
+        }
+        this->write_travel_to(travel_gcode, polyline, comment);
+        if (m_modifier_override.empty() || !m_modifier_override.back().second->enforce_unlift) {
+            //ensure we're at the right z
+            std::string z_gcode = m_writer.unlift();
+            if (z_gcode.empty()) {
+                travel_gcode += ensure_z();
+            }
+            travel_gcode += z_gcode;
+        }
+        visitor_gcode = travel_gcode + visitor_gcode;
+    }
+    // need comment?
+    if (!visitor_comment.empty() && m_config.gcode_comments) {
+        // use the comment
+        if (!visitor_gcode.empty() && visitor_gcode.back() != ' ') {
+            visitor_gcode += " ";
+        }
+        visitor_gcode += "; ";
+        visitor_gcode += visitor_comment;
+        if (visitor_gcode.back() != '\n') {
+            visitor_gcode += "\n";
+        }
+    }
+    // has a type?
+    if (command.role() != ExtrusionRole::None) {
+        GCodeExtrusionRole grole = extrusion_role_to_gcode_extrusion_role(command.role());
+        std::string temp_gcode = ";_EXTRUDETYPE_";
+        temp_gcode += char('A' + uint8_t(grole));
+        temp_gcode += "\n";
+        temp_gcode += std::move(visitor_gcode);
+        temp_gcode += ";_EXTRUDE_END\n";
+        visitor_gcode = std::move(temp_gcode);
+    }
+    visitor_gcode = save_gcode + visitor_gcode;
     end_using_extrusion(command);
 }
 
@@ -6615,6 +6680,9 @@ void GCodeGenerator::end_using_extrusion(const ExtrusionEntity &entity) {
         }
         m_speed_override.pop_back();
     }
+    if (!m_modifier_override.empty() && m_modifier_override.back().first == &entity) {
+        m_modifier_override.pop_back();
+    }
     if (!m_z_override.empty() && m_z_override.back().first == &entity) {
         // move up right away if possible
         if (m_layer && m_z_override.back().second < m_layer->scaled_print_z()) {
@@ -6625,6 +6693,7 @@ void GCodeGenerator::end_using_extrusion(const ExtrusionEntity &entity) {
     }
     assert(!m_current_entity.empty() && m_current_entity.back() == &entity);
     m_current_entity.pop_back();
+    visitor_comment = ""sv;
 }
 
 void GCodeGenerator::default_use(const ExtrusionProperty &ep) { assert(dynamic_cast<const ExtrusionPropertyOverhang*>(&ep)); }
@@ -6644,19 +6713,32 @@ void GCodeGenerator::use(const ExtrusionPropertySpeed& speed_override) {
     }
 }
 
+void GCodeGenerator::use(const ExtrusionPropertyModifier& modifier_override) {
+    assert(visitor_in_use);
+    assert(!m_current_entity.empty() && (m_modifier_override.empty() || m_modifier_override.back().first != m_current_entity.back()));
+    m_modifier_override.push_back(std::pair<const ExtrusionEntity*, const ExtrusionPropertyModifier*>(m_current_entity.back(), &modifier_override));
+}
+
 void GCodeGenerator::use(const ExtrusionPropertyCustomGcode& custom_gcode) {
     if (custom_gcode.gcode.empty()) {
         return;
     }
     assert(visitor_in_use);
     if (custom_gcode.code == ExtrusionPropertyCustomGcode::Code::COMMENT) {
-        visitor_gcode += "; ";
-        visitor_gcode += custom_gcode.gcode;
+        if (visitor_comment.empty()) {
+            visitor_comment = custom_gcode.gcode;
+        } else if (m_config.gcode_comments) {
+            visitor_gcode += "; ";
+            visitor_gcode += custom_gcode.gcode;
+            if (visitor_gcode.back() != '\n') {
+                visitor_gcode += "\n";
+            }
+        }
     } else {
         visitor_gcode += custom_gcode.gcode;
-    }
-    if (custom_gcode.gcode.back() != '\n') {
-        visitor_gcode += "\n";
+        if (visitor_gcode.back() != '\n') {
+            visitor_gcode += "\n";
+        }
     }
 }
 
@@ -6703,8 +6785,27 @@ void GCodeGenerator::use(const ExtrusionPropertySpecialCommand& command) {
         visitor_gcode += "G4 S0\n";
         break;
     case ExtrusionPropertySpecialCommand::Code::EXTRUSION: // only e move: by extra_data mm
-        visitor_gcode += m_writer.extrude_to_e(command.extra_data);
+    {
+        double speed_mm_per_s = 0.;
+        if (!m_speed_override.empty() && m_speed_override.back().second->speed_mm_per_s > 0) {
+            speed_mm_per_s = (double) m_speed_override.back().second->speed_mm_per_s;
+        }
+        visitor_gcode += m_writer.extrude_to_e(command.extra_data, speed_mm_per_s, visitor_comment);
+        if (!visitor_comment.empty()) {
+            visitor_comment = ""sv;
+        }
         break;
+    }
+    case ExtrusionPropertySpecialCommand::Code::RETRACT: // only e move: by extra_data mm
+    {
+        assert(m_writer.tool());
+        double speed_mm_per_s = command.extra_data >= 0 ? m_writer.tool()->retract_speed() : m_writer.tool()->deretract_speed();
+        visitor_gcode += m_writer.extrude_to_e(command.extra_data, speed_mm_per_s, visitor_comment);
+        if (!visitor_comment.empty()) {
+            visitor_comment = ""sv;
+        }
+        break;
+    }
     case ExtrusionPropertySpecialCommand::Code::PAUSE: // pause (G4) for extra_data miliseconds (int)
         visitor_gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Pause_Print) + "\n";
         if (config().gcode_flavor.value == gcfNematX) {
@@ -7162,6 +7263,7 @@ void GCodeGenerator::extrude_perimeters(const ExtrudeArgs &print_args, const Lay
     if (region_island.has_extrusion(LayerRegionIsland::GAP_FILLS)) {
         const ExtrusionEntityCollection &eec = region_island.extrusion(LayerRegionIsland::GAP_FILLS);
         if (shall_print_this_extrusion_collection(print_args, &eec, *m_region)) {
+            to_extrude.clear(); // don't forget to clear before reuse
             if (first) {
                 first = false;
                 // Apply region-specific settings
@@ -7875,6 +7977,9 @@ Point GCodeGenerator::_extrude_line_stretch_corner(std::string& gcode_str, const
 }
 
 double GCodeGenerator::_compute_e_per_mm(const ExtrusionPath &path) {
+    if (path.attributes().height == -2) {
+        return path.mm3_per_mm();
+    }
     const double path_mm3_per_mm = path.mm3_per_mm(); 
     // no e if no extrusion axis
     if (m_writer.extrusion_axis().empty() || path_mm3_per_mm <= 0)
@@ -8172,6 +8277,7 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
     if (!m_speed_override.empty() && m_speed_override.back().second->speed_mm_per_s > 0) {
         speed = (double)m_speed_override.back().second->speed_mm_per_s;
     }
+    const ExtrusionPropertyOverhang* overhang_attributes = GetEEAttribute<ExtrusionPropertyOverhang>().get(path);
     // set speed
     if (speed < 0) {
         //if speed == -1, then it's means "choose yourself, but if it's < SMALL_PERIMETER_SPEED_RATIO_OFFSET, then it's a scaling from small_perimeter.
@@ -8180,8 +8286,7 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
         }
         //it's a bit hacky, so if you want to rework it, help yourself.
         if ((path.role().is_overhang() && m_config.overhangs) ||
-                   (path.overhang_attributes() &&
-                    path.overhang_attributes()->has_full_overhangs_speed)) {
+                   (overhang_attributes && overhang_attributes->has_full_overhangs_speed)) {
             // OverhangPerimeter or OverhangExternalPerimeter
             speed = m_config.get_computed_value("overhangs_speed");
             if(comment) *comment = "overhangs_speed";
@@ -8317,10 +8422,10 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
     // compute overhangs dynamic if needed
     // OverhangPerimeter or OverhangExternalPerimeter
     // don't need to do anything on first layer, as there is no overhangs? (at least, the data to compute them is not generated)
-    assert(path.overhang_attributes() == nullptr || path.overhang_attributes()->has_full_overhangs_speed ||
-           path.overhang_attributes()->has_dynamic_overhangs_speed);
+    assert(overhang_attributes == nullptr || overhang_attributes->has_full_overhangs_speed ||
+           overhang_attributes->has_dynamic_overhangs_speed);
 
-    if (path.overhang_attributes() && path.overhang_attributes()->has_dynamic_overhangs_speed) {
+    if (overhang_attributes && overhang_attributes->has_dynamic_overhangs_speed) {
         assert(this->layer()->id() > 0);
         double my_speed = speed;
         if(comment) *comment = "overhangs_speed";
@@ -8646,7 +8751,7 @@ void GCodeGenerator::cooldown_marker_init() {
         _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::Skirt)]                = allow_speed_change;
         _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::SupportMaterial)]      = allow_speed_change;
         _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::SupportMaterialInterface)] = maybe_allow_speed_change;
-        _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::WipeTower)]                = allow_speed_change;
+        _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::WipeTower)]                = "";
         _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::Milling)]                  = "";
         _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::Custom)]                   = maybe_allow_speed_change;
         _cooldown_marker_speed[uint8_t(GCodeExtrusionRole::Travel)]                   = maybe_allow_speed_change;
@@ -8938,6 +9043,8 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
         //now that we move to the new layer, forget previous layer wipe (if any).
         //gcode += "; m_wipe.reset_path(); after m_delayed_layer_change\n";
     }
+
+    // unretraction (if needed)
     gcode += m_writer.unretract();
 
     //set pa after unretraction (do nothing if it isn't changed)
@@ -9000,9 +9107,10 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
 
     if (last_was_wipe_tower || m_last_height_ != Layer::scale_to_layer_coord(path.height())) {
         m_last_height_ = Layer::scale_to_layer_coord(path.height());
-
-        gcode += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height)
-            + float_to_string_decimal_point(unscaled(m_last_height_)) + "\n";
+        if (m_last_height_ >= 0) {
+            gcode += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) +
+                float_to_string_decimal_point(unscaled(m_last_height_)) + "\n";
+        }
     }
 
     std::string cooling_marker_setspeed_comments;
@@ -9255,7 +9363,7 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
     } else {
         // retraction not needed
         // check if lift is enforced
-        if (m_writer.get_extra_lift() > 0) {
+        if (m_writer.get_extra_lift() > 0 && (m_modifier_override.empty() || !m_modifier_override.back().second->disable_lift)) {
             gcode += m_writer.lift(this->m_layer_index);
         }
         // Reset the wipe path when traveling, so one would not wipe along an old path.
@@ -9698,9 +9806,16 @@ std::string GCodeGenerator::travel_to(
 
 bool GCodeGenerator::needs_retraction(const Polyline& travel, ExtrusionRole role /*=ExtrusionRole::None*/, coordf_t max_min_dist /*=0*/)
 {
-    // If extra lift set, please lift (and retract, as one is dependent on the other)
-    if (m_writer.get_extra_lift() > 0)
+    if (!m_modifier_override.empty() && m_modifier_override.back().second->disable_retraction) {
+        return false;
+    }
+    if (!m_modifier_override.empty() && m_modifier_override.back().second->enforce_retraction) {
         return true;
+    }
+    // If extra lift set, please lift (and retract, as one is dependent on the other)
+    if (m_writer.get_extra_lift() > 0) {
+        return true;
+    }
     coordf_t min_dist = scale_d(EXTRUDER_CONFIG_WITH_DEFAULT(retract_before_travel, 0));
     if (max_min_dist > 0)
         min_dist = std::min(max_min_dist, min_dist);
@@ -10080,6 +10195,10 @@ std::string GCodeGenerator::retract_and_wipe(bool toolchange, bool inhibit_lift)
     if (m_writer.tool() == nullptr)
         return gcode;
 
+    if (!m_modifier_override.empty() && m_modifier_override.back().second->disable_lift) {
+        inhibit_lift = true;
+    }
+
     // We need to reset e before any extrusion or wipe to allow the reset to happen at the real 
     // begining of an object gcode
     gcode += m_writer.reset_e();
@@ -10179,6 +10298,7 @@ std::string GCodeGenerator::toolchange(uint16_t extruder_id, coord_t print_z) {
     if (m_enable_cooling_markers) {
         gcode += ";_TOOLCHANGE " + std::to_string(extruder_id) + "\n";
     }
+    gcode+= m_writer.reset_e(true);
     // the toolchange may have messed the X, Y & Z, so at next move also move Z.
     _m_force_move_z_from = -1;
     return gcode;
@@ -10304,6 +10424,16 @@ std::string GCodeGenerator::set_extruder(uint16_t extruder_id, coord_t print_z, 
 
     // The position is now known after the tool change.
     this->unset_last_pos();
+
+    // if the unretraction is done in the toolchange wipe, then erase the current unretraction
+    if (this->visitor_root_state == "wp" && m_config.retract_length_toolchange.get_at(extruder_id) > 0 &&
+        m_config.retract_restart_wipe_toolchange.get_at(extruder_id) > 0) {
+        double max_retration = m_writer.tool()->retracted();
+        assert(max_retration >= m_config.retract_length_toolchange.get_at(extruder_id) || max_retration == 0);
+        if (max_retration >= m_config.retract_length_toolchange.get_at(extruder_id)) {
+            m_writer.tool()->set_retracted(0, m_writer.tool()->restart_extra());
+        }
+    }
 
     return gcode;
 }
