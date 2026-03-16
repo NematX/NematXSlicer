@@ -4444,11 +4444,11 @@ void GUI_App::on_version_read(wxCommandEvent& evt)
 void GUI_App::app_updater(bool from_user)
 {
     DownloadAppData app_data = m_app_updater->get_app_data();
-
-    if (from_user && app_data.version <= *Semver::parse(SLIC3R_VERSION))
+    Semver current_version = *Semver::parse(SLIC3R_VERSION_FULL);
+    if (from_user && app_data.version <= current_version)
     {
         BOOST_LOG_TRIVIAL(info) << "There is no newer version online.";
-        MsgNoAppUpdates no_update_dialog;
+        MsgNoAppUpdates no_update_dialog; 
         no_update_dialog.ShowModal();
         return;
 
@@ -4458,7 +4458,7 @@ void GUI_App::app_updater(bool from_user)
     assert(!app_data.target_path.empty());
 
     // dialog with new version info
-    AppUpdateAvailableDialog dialog(*Semver::parse(SLIC3R_VERSION), app_data.version, from_user);
+    AppUpdateAvailableDialog dialog(current_version, app_data.version, from_user);
     auto dialog_result = dialog.ShowModal();
     // checkbox "do not show again"
     if (dialog.disable_version_check()) {
