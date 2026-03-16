@@ -69,6 +69,7 @@ SupportGeneratorLayersPtr generate_support_layers(
 // Produce the support G-code.
 // Used by both classic and tree supports.
 void generate_support_toolpaths(
+	PrintObject							&object,
 	SupportLayerPtrs    				&support_layers,
 	const PrintObjectConfig 			&config,
 	const SupportParameters 			&support_params,

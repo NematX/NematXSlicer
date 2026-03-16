@@ -184,7 +184,8 @@ void ExtrusionPath::_inflate_collection(const Polylines &polylines, ExtrusionEnt
 
 void ExtrusionPath::polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const
 {
-    polygons_append(out, offset(this->polyline.to_polyline(), double(scale_(m_attributes.width / 2)) + scaled_epsilon));
+    //polygons_append(out, offset(this->polyline.to_polyline(), double(scale_(m_attributes.width / 2)) + scaled_epsilon));
+    out = union_(out, offset(this->polyline.to_polyline(), double(scale_(m_attributes.width / 2)) + scaled_epsilon));
 }
 
 void ExtrusionPath::polygons_covered_by_spacing(Polygons &out, const float spacing_ratio, const float scaled_epsilon) const

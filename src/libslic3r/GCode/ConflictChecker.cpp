@@ -277,8 +277,18 @@ ExtrusionPaths getExtrusionPathsFromLayer(const std::vector<LayerSliceIslandPtr>
 
 ExtrusionPaths getExtrusionPathsFromSupportLayer(const SupportLayer *supportLayer)
 {
+    assert(supportLayer);
     ExtrusionPaths paths;
-    getExtrusionPathsFromEntity(&supportLayer->support_fills, paths);
+    for (const LayerSliceIslandPtr &island : supportLayer->islands()) {
+        for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
+            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                getExtrusionPathsFromEntity(&region_island->extrusion(LayerRegionIsland::SUPPORT), paths);
+            }
+            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                getExtrusionPathsFromEntity(&region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE), paths);
+            }
+        }
+    }
     return paths;
 }
 
@@ -323,7 +333,7 @@ ConflictResultOpt ConflictChecker::find_inter_of_lines_in_diff_objs(SpanOfConstP
     int wtptr = 0;
 
     LinesBucketQueue conflictQueue;
-    if (! wipe_tower_data.z_and_depth_pairs.empty()) {
+    if (! wipe_tower_data.z_and_depth_pairs.empty() && wipe_tower_data.tool_changes.size() > 0) {
         // The wipe tower is being generated.
         const Vec2d plate_origin = Vec2d::Zero();
         std::vector<ExtrusionPaths> wtpaths = getFakeExtrusionPathsFromWipeTower(wipe_tower_data);

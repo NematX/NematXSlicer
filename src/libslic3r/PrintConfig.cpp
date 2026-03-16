@@ -1225,27 +1225,6 @@ void PrintConfigDef::init_fff_params()
     def->mode = comSimpleAE | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
 
-    def = this->add("parallel_objects_step", coFloat);
-    def->label = L("Parallel printing step");
-    def->category = OptionCategory::output;
-    def->tooltip = L("When multiple objects are present, instead of jumping form one to another at each layer"
-        " the printer will continue to print the current object layers up to this height before moving to the next object."
-        " (first layers will be still printed one by one)."
-        "\nThis feature also use the same extruder clearance radius field as 'complete individual objects' (complete_objects)"
-        ", but you can modify them to instead reflect the clerance of the nozzle, if this field reflect the z-clearance of it."
-        "\nThis field is exclusive with 'complete individual objects' (complete_objects). Set to 0 to deactivate.");
-    def->sidetext = L("mm");
-    def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = this->add("parallel_objects_step_max_z", coFloat);
-    def->label = L("Max height for parallel printing step");
-    def->category = OptionCategory::output;
-    def->tooltip = L("If the nozzle print higher than taht, the print is switched back to normal printing. Allow to quicly print the first layer per object if these need quick printing.");
-    def->sidetext = L("mm");
-    def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(new ConfigOptionFloat(0));
-
     def = this->add("complete_objects_one_skirt", coBool);
     def->label = L("Allow only one skirt loop");
     def->category = OptionCategory::output;
@@ -1913,6 +1892,37 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionFloat(20));
+
+    def             = this->add("extruder_clearance", coGraphs);
+    def->label      = L("Extruder clearance");
+    def->category   = OptionCategory::speed;
+    def->tooltip    = L("height of the extruder in function of the clearance radius (all in mm).");
+    def->is_vector_extruder = true;
+    def->mode       = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionGraphs({GraphData(0,3, GraphData::GraphType::LINEAR,
+        {{0, 0},{2.5, 0},{5,10}}
+    )}));
+    def->graph_settings = std::make_shared<GraphSettings>();
+    def->graph_settings->title       = L("Overhangs fan speed by % of overlap");
+    def->graph_settings->description = L("Choose the Overhangs maximum fan speed for each percentage of overlap with the layer below."
+        "If the current fan speed (from perimeter, external, of default) is higher, then this setting won't slow the fan."
+        "\n100% overlap is when the extrusion is fully on top of the previous layer's extrusion."
+        "\n0% overlap is when the extrusion centerline is at a distance of 'overhangs threshold for speed'(overhangs_bridge_threshold)"
+        "\nfrom the nearest extrusion of the previous layer.");
+    def->graph_settings->x_label     = L("radius clearance");
+    def->graph_settings->y_label     = L("Height from nozzle tip");
+    def->graph_settings->label_min_x = L("");
+    def->graph_settings->label_max_x = L("Highest available clearance");
+    def->graph_settings->label_min_y = L("");
+    def->graph_settings->label_max_y = L("Max height with clearance");
+    def->graph_settings->min_x       = 0;
+    def->graph_settings->max_x       = 10;
+    def->graph_settings->step_x      = .1;
+    def->graph_settings->min_y       = 0;
+    def->graph_settings->max_y       = 10;
+    def->graph_settings->step_y      = .1;
+    def->graph_settings->enforced_values = {{0.,0.}};
+    def->graph_settings->allowed_types = {GraphData::GraphType::LINEAR, GraphData::GraphType::SQUARE};
 
     def = this->add("extruder_clearance_radius", coFloat);
     def->label = L("Radius");
@@ -6482,6 +6492,36 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionString(""));
 
+    def = this->add("parallel_objects_step", coFloat);
+    def->label = L("Parallel printing step");
+    def->category = OptionCategory::output;
+    def->tooltip = L("When multiple objects are present, instead of jumping form one to another at each layer"
+        " the printer will continue to print the current object layers up to this height before moving to the next object."
+        " (first layers will be still printed one by one)."
+        "\nThis feature also use the same extruder clearance radius field as 'complete individual objects' (complete_objects)"
+        ", but you can modify them to instead reflect the clerance of the nozzle, if this field reflect the z-clearance of it."
+        "\nThis field is exclusive with 'complete individual objects' (complete_objects). Set to 0 to deactivate.");
+    def->sidetext = L("mm");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("parallel_objects_step_max_z", coFloat);
+    def->label = L("Max height for parallel printing step");
+    def->category = OptionCategory::output;
+    def->tooltip = L("If the nozzle print higher than taht, the print is switched back to normal printing. Allow to quicly print the first layer per object if these need quick printing.");
+    def->sidetext = L("mm");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    def = this->add("parallel_islands", coBool);
+    def->label = L("Island Parallel printing step");
+    def->category = OptionCategory::output;
+    def->tooltip = L("When using 'parallel_objects_step', consider each object island as a separate object, if far enough."
+                    "\nTwo islands are consider separate if there are farther than the extruder clearance.");
+    def->sidetext = L("mm");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("pause_print_gcode", coString);
     def->label = L("Pause Print G-code");
     def->tooltip = L("This G-code will be used as a code for the pause print."
@@ -8256,6 +8296,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "default_filament_profile",
         "deretract_speed",
         "extruder_axis",
+        "extruder_clearance",
         "extruder_colour",
         "extruder_extrusion_multiplier_speed",
         "extruder_fan_offset",
@@ -10825,6 +10866,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "extra_perimeters_below_area",
 "extra_perimeters_count",
 "extra_perimeters_odd_layers",
+"extruder_clearance",
 "extruder_extrusion_multiplier_speed",
 "extruder_fan_offset",
 "extruder_pressure_factor",
@@ -10984,6 +11026,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "overhangs_speed_enforce",
 "overhangs_type",
 "overhangs_width_speed",
+"parallel_islands",
 "parallel_objects_step",
 "parallel_objects_step_max_z",
 "perimeter_bonding",

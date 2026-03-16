@@ -206,29 +206,8 @@ void remove_collinear(Polygons &polys, coord_t max_offset = SCALED_EPSILON);
 // because if you append a big hole at the end of the list, you erase evrything.
 
 // Append a vector of polygons at the end of another vector of polygons.
-inline void polygons_append(Polygons &dst, const Polygons &src) {
-#ifdef _DEBUG
-    for (const Polygon &poly : src) {
-        assert(poly.is_counter_clockwise());
-    }
-#endif
-    dst.insert(dst.end(), src.begin(), src.end());
-}
-
-inline void polygons_append(Polygons &dst, Polygons &&src) 
-{
-#ifdef _DEBUG
-    for (const Polygon &poly : src) {
-        assert(poly.is_counter_clockwise());
-    }
-#endif
-    if (dst.empty()) {
-        dst = std::move(src);
-    } else {
-        std::move(std::begin(src), std::end(src), std::back_inserter(dst));
-        src.clear();
-    }
-}
+void polygons_append(Polygons &dst, const Polygons &src);
+void polygons_append(Polygons &dst, Polygons &&src);
 
 Polygons polygons_simplify(Polygons &&polys, distf_t tolerance, bool strictly_simple = true);
 Polygons polygons_simplify(const Polygons &polys, distf_t tolerance, bool strictly_simple = true);
