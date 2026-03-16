@@ -5,6 +5,8 @@ on:
     branches:
       - rc
       - debug_win
+      - beta-rc
+      - stable-rc
 
 jobs:
   build_dep:
