@@ -6631,7 +6631,7 @@ void GCodeGenerator::use(const ExtrusionNop &command) {
             //ensure we're at the right z
             std::string z_gcode = m_writer.unlift();
             if (z_gcode.empty()) {
-                travel_gcode += ensure_z();
+                travel_gcode += m_writer.ensure_z();
             }
             travel_gcode += z_gcode;
         }
