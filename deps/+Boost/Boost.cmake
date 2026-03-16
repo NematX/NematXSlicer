@@ -10,6 +10,11 @@ if (APPLE AND CMAKE_OSX_ARCHITECTURES)
     set(_context_arch_line "-DBOOST_CONTEXT_ARCHITECTURE:STRING=${CMAKE_OSX_ARCHITECTURES}")
 endif ()
 
+if (MSVC)
+    # windows don't have iconv while boost::locale want it by default.
+    #set(_context_arch_line "-DBOOST_LOCALE_ENABLE_ICONV:BOOL=OFF")
+endif ()
+
 add_cmake_project(Boost
     URL "https://github.com/boostorg/boost/releases/download/boost-1.83.0/boost-1.83.0.zip"
     URL_HASH SHA256=9effa3d7f9d92b8e33e2b41d82f4358f97ff7c588d5918720339f2b254d914c6
@@ -18,6 +23,7 @@ add_cmake_project(Boost
         -DBOOST_EXCLUDE_LIBRARIES:STRING=contract|fiber|numpy|stacktrace|wave|test
         -DBOOST_LOCALE_ENABLE_ICU:BOOL=OFF # do not link to libicu, breaks compatibility between distros
         -DBUILD_TESTING:BOOL=OFF
+		-DCMAKE_CXX_FLAGS:STRING=/MP
         "${_context_abi_line}"
         "${_context_arch_line}"
 )
