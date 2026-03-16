@@ -15,10 +15,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: ilammy/msvc-dev-cmd@v1
-    - uses: shogo82148/actions-setup-perl@v1
-      with:
-        perl-version: "5.42"
-        distribution: strawberry
     - name: mkdir in deps
       run: mkdir deps/build
     - name: dep cache
@@ -41,10 +37,6 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - uses: ilammy/msvc-dev-cmd@v1
-    - uses: shogo82148/actions-setup-perl@v1
-      with:
-        perl-version: "5.42"
-        distribution: strawberry
     - name: change date in version
       shell: powershell
       run: |
