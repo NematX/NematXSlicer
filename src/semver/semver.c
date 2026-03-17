@@ -505,15 +505,15 @@ semver_satisfies (semver_t x, semver_t y, const char *op) {
 
 void
 semver_free (semver_t *x) {
-  if (x->metadata) {
+  if (x->metadata != NULL) {
     free(x->metadata);
     x->metadata = NULL;
   }
-  if (x->prerelease) {
+  if (x->prerelease != NULL) {
     free(x->prerelease);
     x->prerelease = NULL;
   }
-  if (x->counters) {
+  if (x->counters != NULL) {
       x->counter_size = 0;
       free(x->counters);
       x->counters = NULL;
@@ -688,8 +688,10 @@ semver_copy(const semver_t *ver) {
   if (ver->prerelease != NULL) {
       res.prerelease = strdup(ver->prerelease);
   }
-  if (ver->counters) {
+  if (ver->counters != NULL) {
       res.counters = semver_intdup(ver->counters, ver->counter_size);
+      if (res.counters == NULL)
+          res.counter_size = 0;
   }
   return res;
 }

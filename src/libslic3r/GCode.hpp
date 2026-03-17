@@ -109,6 +109,8 @@ struct ObjectLayerToPrint
     // if filled, it restrict the islands needed to be printed (can be in support or/and object)
     // used as adress check, so you can store nullptr.
     std::set<const LayerSliceIsland*> islands;
+    // if mmu, extruder order override
+    std::vector<uint16_t> extruders_order;
     // wipetower managment, for parallel object/islands
     bool allow_wipe_tower = true; // allow to print wipetoer & finish wieptower layer
     coord_t finish_wipe_tower_until = 0; // before printing anything, finish all unfinish wp layer until this z (should be <= _print_z())
@@ -270,7 +272,8 @@ private:
     static std::vector<ObjectsLayerToPrint> separate_islands(const ObjectsLayerToPrint object_layers,
                                                              const coord_t start_e,
                                                              const coord_t max_height,
-                                                             const std::vector<GraphData> &extruder_min_dist);
+                                                             const std::vector<GraphData> &extruder_min_dist,
+                                                             const uint16_t current_extruder_id);
 
 
     LayerResult process_layer(

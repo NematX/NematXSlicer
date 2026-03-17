@@ -655,12 +655,17 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
 
     assert(!layers.empty());
     assert(!ordered_extruders.empty());
+    auto it = std::find(this->uninitialized_z.begin(), this->uninitialized_z.end(), layers.front()->scaled_print_z());
+    if (it == this->uninitialized_z.end()) {
+        assert(this->uninitialized_z.empty()); //weird thing with islands
+        return;
+    }
     // m_is_init = true;
     assert(!this->uninitialized_z.empty());
     assert(this->uninitialized_z.front() == layers.front()->scaled_print_z());
-    const coord_t objects_print_z = this->uninitialized_z.front();
+    const coord_t objects_print_z = *it;
     initialized_z.push_back(objects_print_z);
-    this->uninitialized_z.erase(this->uninitialized_z.begin()); // pop_front()
+    this->uninitialized_z.erase(it);
 
     if (data.estimated_wipe_tower_length <= 0) {
         assert(ordered_extruders.size() < 2);

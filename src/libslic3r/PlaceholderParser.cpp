@@ -1450,6 +1450,31 @@ namespace client
             }
             output.it_range = opt.it_range;
         }
+
+        // Return a boolean value, true if the scalar variable referenced by "opt" or "opt[index]" is enabled.
+        static void interpolate_graph(const MyContext *ctx, OptWithPos &opt, expr &valeur,  expr &output)
+        {
+            if (ctx->skipping()) {
+            } else if (opt.opt->is_vector()) {
+                if (! opt.has_index())
+                    ctx->throw_exception("Referencing a vector variable when scalar is expected", opt.it_range);
+                if (opt.opt->size() == 0)
+                    ctx->throw_exception("Indexing an empty vector variable", opt.it_range);
+                if (opt.opt->type() != ConfigOptionType::coGraphs)
+                    ctx->throw_exception("Interpolate on a variable that isn't a graph", opt.it_range);
+                expr::throw_if_not_numeric(valeur);
+                double val_x = valeur.type() == expr::Type::TYPE_DOUBLE ? (valeur.as_d()) : (valeur.as_i() * 1.);
+                output.set_d(((ConfigOptionGraphs*)opt.opt)->get_at(opt.index).interpolate(val_x));
+            } else {
+                assert(opt.opt->is_scalar());
+                if (opt.opt->type() != ConfigOptionType::coGraph)
+                    ctx->throw_exception("Interpolate on a variable that isn't a graph", opt.it_range);
+                expr::throw_if_not_numeric(valeur);
+                double val_x = valeur.type() == expr::Type::TYPE_DOUBLE ? (valeur.as_d()) : (valeur.as_i() * 1.);
+                output.set_d(((ConfigOptionGraph*)opt.opt)->value.interpolate(val_x));
+            }
+            output.it_range = opt.it_range;
+        }
         // Return a boolean value, true if an element of a variable referenced by "opt" or "opt[index]" is disabled.
         static void is_nil_test(const MyContext *ctx, OptWithPos &opt, expr &output)
         {
@@ -2459,6 +2484,8 @@ namespace client
                 |   (kw["ceil"] > '(' > conditional_expression(_r1) > ')') [ px::bind(&FactorActions::ceil,   _1, _val) ]
                 |   (kw["is_nil"] > '(' > variable_reference(_r1) > ')') [px::bind(&MyContext::is_nil_test, _r1, _1, _val)] // Deprecated same as !is_enabled
                 |   (kw["is_enabled"] > '(' > variable_reference(_r1) > ')') [px::bind(&MyContext::is_enabled_test, _r1, _1, _val)]
+                |   (kw["interpolate"] > '(' > variable_reference(_r1) > ',' > conditional_expression(_r1) > ')') 
+                                                        [ px::bind(&MyContext::interpolate_graph, _r1, _1, _2, _val) ]
                 |   (kw["one_of"] > '(' > one_of(_r1) > ')')        [ _val = _1 ]
                 |   (kw["empty"] > '(' > variable_reference(_r1) > ')') [px::bind(&MyContext::is_vector_empty, _r1, _1, _val)]
                 |   (kw["size"] > '(' > variable_reference(_r1) > ')') [px::bind(&MyContext::vector_size, _r1, _1, _val)]
@@ -2542,6 +2569,7 @@ namespace client
                 ("endif")
                 ("false")
                 ("global")
+                ("interpolate")
                 ("interpolate_table")
                 ("min")
                 ("max")
@@ -2567,6 +2595,7 @@ namespace client
                 debug(text_block);
                 debug(macros);
                 debug(if_else_output);
+                debug(interpolate_graph);
                 debug(interpolate_table);
 //                debug(switch_output);
                 debug(legacy_variable_expansion);
@@ -2639,6 +2668,7 @@ namespace client
         qi::rule<Iterator, expr(const MyContext*), qi::locals<expr>, skipper> one_of;
         qi::rule<Iterator, expr(const MyContext*, const expr &param), skipper> one_of_list;
         // Evaluating the "interpolate_table" expression.
+        qi::rule<Iterator, expr(const MyContext*), skipper> interpolate_graph;
         qi::rule<Iterator, expr(const MyContext*), qi::locals<expr>, skipper> interpolate_table;
         qi::rule<Iterator, InterpolateTableContext(const MyContext*, const expr &param), skipper> interpolate_table_list;
 

@@ -2740,7 +2740,8 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
         const bool wt = m_config->option("wipe_tower")->get_bool();
         const bool co = m_config->option("complete_objects")->get_bool() ||
             (m_config->option("parallel_objects_step")->get_float() > 0 &&
-             m_config->option("parallel_objects_step_max_z")->get_float() == 0);
+             m_config->option("parallel_objects_step_max_z")->get_float() == 0 &&
+              !m_config->option("parallel_islands")->get_bool());
 
         if (extruders_count > 1 && wt && !co) {
             // can't get these one from wipe_tower_data, as these use the platter's config, not the print one.
@@ -3844,7 +3845,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
                 c == GLGizmosManager::EType::Scale ||
                 c == GLGizmosManager::EType::Rotate) {
                 show_sinking_contours();
-                if (current_printer_technology() == ptFFF && (fff_print()->config().complete_objects || fff_print()->config().parallel_objects_step > 0))
+                if (current_printer_technology() == ptFFF &&
+                    (fff_print()->config().complete_objects ||
+                     (fff_print()->config().parallel_objects_step > 0 && !fff_print()->config().parallel_islands)))
                     update_sequential_clearance(true);
             }
         }
@@ -4095,7 +4098,9 @@ void GLCanvas3D::on_mouse(wxMouseEvent& evt)
             if (cur_scale != Vec3d(1, 1, 1)) {
                 m_selection.scale(cur_scale, trafo_type);
             }
-            if (current_printer_technology() == ptFFF && (fff_print()->config().complete_objects || fff_print()->config().parallel_objects_step > 0))
+            if (current_printer_technology() == ptFFF &&
+                (fff_print()->config().complete_objects ||
+                 (fff_print()->config().parallel_objects_step > 0 && !fff_print()->config().parallel_islands)))
                 update_sequential_clearance(false);
             wxGetApp().obj_manipul()->set_dirty();
             m_dirty = true;
@@ -4933,7 +4938,9 @@ void GLCanvas3D::mouse_up_cleanup()
 
 void GLCanvas3D::update_sequential_clearance(bool force_contours_generation)
 {
-    if (current_printer_technology() != ptFFF || (!fff_print()->config().complete_objects && fff_print()->config().parallel_objects_step == 0))
+    if (current_printer_technology() != ptFFF ||
+        (!fff_print()->config().complete_objects &&
+         (fff_print()->config().parallel_objects_step == 0 || fff_print()->config().parallel_islands)))
         return;
 
     if (m_layers_editing.is_enabled())
@@ -7435,7 +7442,13 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
                 if (!print_object->brim().empty())
                     for (const PrintInstance& inst : print_object->instances()) {
                         if (!print_object->brim().empty()) volume = ensure_volume_is_ready(volume, init_data);
-                        _3DScene::extrusionentity_to_verts(print_object->brim(), print_zs_mm[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
+                        _3DScene::extrusionentity_to_verts(print_object->brim(), print_zs_mm[i],
+                                                           (print->config().complete_objects ||
+                                                            (print->config().parallel_objects_step > 0 &&
+                                                             !print->config().parallel_islands)) ?
+                                                               inst.shift :
+                                                               Point(0, 0),
+                                                           init_data);
                     }
                 if (print_object->skirt_first_layer())
                     for (const PrintInstance& inst : print_object->instances()) {
@@ -7454,7 +7467,13 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
             if ( !print_object->skirt().empty() && (i != 0 || !print_object->skirt_first_layer()))
                 for (const PrintInstance& inst : print_object->instances()) {
                     if (!print_object->skirt().empty()) volume = ensure_volume_is_ready(volume, init_data);
-                    _3DScene::extrusionentity_to_verts(print_object->skirt(), print_zs_mm[i], (print->config().complete_objects || print->config().parallel_objects_step > 0)? inst.shift : Point(0, 0), init_data);
+                    _3DScene::extrusionentity_to_verts(print_object->skirt(), print_zs_mm[i],
+                                                       (print->config().complete_objects ||
+                                                        (print->config().parallel_objects_step > 0 &&
+                                                         !print->config().parallel_islands)) ?
+                                                           inst.shift :
+                                                           Point(0, 0),
+                                                       init_data);
                 }
         }
     }

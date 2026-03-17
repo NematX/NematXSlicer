@@ -2320,6 +2320,7 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
         "complete_objects",
         "parallel_objects_step",
         "parallel_objects_step_max_z",
+        "parallel_islands",
         "complete_objects_sort",
         "complete_objects_one_skirt",
         "brim_per_object",
