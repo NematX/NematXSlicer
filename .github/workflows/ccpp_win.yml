@@ -84,10 +84,10 @@ jobs:
       # run: msbuild /m /P:Configuration=RelWithDebInfo gettext_make_pot.vcxproj
     - name: create OCCT wrapper
       working-directory: ./build
-      run: msbuild /m /P:Configuration=RelWithDebInfo src\occt_wrapper\OCCTWrapper.vcxproj
+      run: msbuild /m /P:Configuration=Release src\occt_wrapper\OCCTWrapper.vcxproj
     - name: copy dll
       working-directory: ./build
-      run: msbuild /m /P:Configuration=RelWithDebInfo src\slic3rDllsCopy.vcxproj
+      run: msbuild /m /P:Configuration=Release src\slic3rDllsCopy.vcxproj
     - name: create package directory
       working-directory: ./build
       shell: powershell
