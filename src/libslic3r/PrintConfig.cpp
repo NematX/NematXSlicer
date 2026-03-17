@@ -1900,7 +1900,7 @@ void PrintConfigDef::init_fff_params()
     def->is_vector_extruder = true;
     def->mode       = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionGraphs({GraphData(0,3, GraphData::GraphType::LINEAR,
-        {{0, 0},{2.5, 0},{5,10}}
+        {{0, 0},{0.55, 0},{2,1.9}}
     )}));
     def->graph_settings = std::make_shared<GraphSettings>();
     def->graph_settings->title       = L("Overhangs fan speed by % of overlap");
