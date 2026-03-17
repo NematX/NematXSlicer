@@ -106,8 +106,12 @@ struct ObjectLayerToPrint
     ObjectLayerToPrint() : object_layer(nullptr), support_layer(nullptr) {}
     const Layer        *object_layer;
     const SupportLayer *support_layer;
-    //if filled, it restrict the islands needed to be printed (can be in support or/and object)
+    // if filled, it restrict the islands needed to be printed (can be in support or/and object)
+    // used as adress check, so you can store nullptr.
     std::set<const LayerSliceIsland*> islands;
+    // wipetower managment, for parallel object/islands
+    bool allow_wipe_tower = true; // allow to print wipetoer & finish wieptower layer
+    coord_t finish_wipe_tower_until = 0; // before printing anything, finish all unfinish wp layer until this z (should be <= _print_z())
     const Layer        *layer() const { return (object_layer != nullptr) ? object_layer : support_layer; }
     const PrintObject  *object() const { return (this->layer() != nullptr) ? this->layer()->object() : nullptr; }
     coord_t _print_z() const {
@@ -142,7 +146,7 @@ public:
     const Vec2d&    origin() const { return m_origin; }
     void            set_origin(const Vec2d &pointf);
     void            set_origin(const coordf_t x, const coordf_t y) { this->set_origin(Vec2d(x, y)); }
-    uint16_t        last_extruder() const { return m_writer.tool() ? m_writer.tool()->id() : size_t(0); }
+    uint16_t        last_extruder(uint16_t def = 0) const { return m_writer.tool() ? uint16_t(m_writer.tool()->id()) : def; }
     const Point&    last_pos() const { assert(m_last_pos); return *m_last_pos; }
     bool            last_pos_defined() const { return m_last_pos.has_value(); }
     void            set_last_pos(const Point &pos) { m_last_pos = pos; }
@@ -606,7 +610,6 @@ private:
     int32_t                             m_spiral_vase_layer = 0;
     std::unique_ptr<GCodeFindReplace>   m_find_replace;
     std::unique_ptr<PressureEqualizer>  m_pressure_equalizer;
-    std::unique_ptr<GCode::WipeTowerIntegration> m_wipe_tower;
     std::map<coord_t, std::shared_ptr<WipeTowerLayer>> m_wipe_tower_layers;
     std::shared_ptr<WipeTowerLayer>     m_wipe_tower_current_layer;
     // to get extruded volume, for stats

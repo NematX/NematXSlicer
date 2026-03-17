@@ -1328,7 +1328,11 @@ void Print::process()
         //    this->_make_wipe_tower();
         //    m_tool_orderings.back().assign_custom_gcodes(*this);
         //} else
-        if (this->config().complete_objects.value || config().parallel_objects_step.value > 0) {
+        bool is_separate_objects = this->config().complete_objects.value || config().parallel_objects_step.value > 0;
+        if (config().parallel_objects_step.value > 0 && config().parallel_islands.value && m_default_object_config.wipe_tower && m_objects.size() == 1) {
+            is_separate_objects = false;
+        }
+        if (is_separate_objects) {
             //throw new std::exception();
             // FIXME: parallel_objects_step: end extruder on each pass isn't computed correctly.
             // TODO: add extruder-switch minimizing option.
@@ -2239,7 +2243,7 @@ bool Print::has_wipe_tower() const {
         config().spiral_vase.value) {
         return false;
     }
-    bool has_parallel_objects_step = config().parallel_objects_step.value > 0;
+    bool has_parallel_objects_step = config().parallel_objects_step.value > 0 && !config().parallel_islands.value;
     if (has_parallel_objects_step && config().parallel_objects_step.value > 0) {
         // check if the print has multiple extruders below has_parallel_objects_step_max_z
         const coord_t max_z = Layer::scale_to_layer_coord(config().parallel_objects_step.value);

@@ -462,12 +462,12 @@ bool Control::ensure_correctly_filled() const
     bool ok = true;
     if (!m_layers_times.empty() && m_layers_times.size() != m_values.size() && m_layers_times.size() != m_values.size() - 1) {
         ok = false;
-        assert(false);
+        //assert(false);
         //m_layers_times.clear();
     }
     if (!m_layers_areas.empty() && m_layers_areas.size() != m_values.size() && m_layers_areas.size() != m_values.size() - 1) {
         ok = false;
-        assert(false);
+        //assert(false);
         //m_layers_areas.clear();
     }
     if (!m_layers_values.empty()) {

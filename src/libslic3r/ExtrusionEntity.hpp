@@ -1242,6 +1242,7 @@ class AddGetEEAttribute : public ExtrusionPropertyVisitor
 public:
     using ExtrusionPropertyVisitor::use;
     AttributeType *found = nullptr;
+    void default_use(ExtrusionProperty &thing) override {};
     void use(AttributeType &prop) override { found = &prop;}
     AttributeType &add_or_get(ExtrusionEntity &entity) {
         if (entity.get_root_property()) {
@@ -1264,6 +1265,7 @@ class GetEEAttribute : public ExtrusionPropertyVisitorConst
 public:
     using ExtrusionPropertyVisitorConst::use;
     const AttributeType *found = nullptr;
+    void default_use(const ExtrusionProperty &thing) override {};
     void use(const AttributeType &prop) override { found = &prop;}
     const AttributeType *get(const ExtrusionEntity &entity) {
         if (entity.get_root_property()) {

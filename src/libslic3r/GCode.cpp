@@ -610,10 +610,24 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
         ExPolygons slices;
         std::vector<const LayerSliceIsland *> islands;
         std::vector<bool> is_support;
+        // extruder of the group.(-1: any; -2: multiple)
+        uint16_t extruder_id = uint16_t(-1);
     };
 
     std::set<const LayerSliceIsland *> all_islands;
     std::vector<bool> finished(ordered_layers_islands_to_print.size());
+    std::vector<uint16_t> extruder(ordered_layers_islands_to_print.size());
+    uint16_t previous_extruder_id = uint16_t(-1);
+    auto set_finished = [&ordered_layers_islands_to_print, &finished, &all_islands](size_t idx) {
+        finished[idx] = true;
+        // now tht this group of layers is finished, all next groups are after these layer-islands, so we
+        // can safely remove them from 'all_islands' collection
+        for (const ObjectLayerToPrint &objectlayer : ordered_layers_islands_to_print[idx]) {
+            for (const LayerSliceIsland *island : objectlayer.islands) {
+                all_islands.erase(island);
+            }
+        }
+    };
     // we use the object layer graph to print each island separatly
     //const PrintObject* obj = object_layers.front().object_layer->object();
     // we explore the graph layer per layer.
@@ -634,9 +648,31 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                 }
                 all_islands.insert(island.get());
                 size_t added = size_t(-1);
-                for (size_t i = 0; i < grouped_islands.size(); i++) {
-                    GroupedIslands &group = grouped_islands[i];
+                size_t group_idx = 0;
+                // check if the island has multiple nozzle, if true don't merge it.
+                uint16_t my_extruder_id = uint16_t(-1);
+                for (const LayerRegionIslandPtr &lri : island->regions_islands()) {
+                    if (my_extruder_id == uint16_t(-1)) {
+                        my_extruder_id = lri->extruder_id();
+                    } else if (lri->extruder_id() != uint16_t(-1) && my_extruder_id != lri->extruder_id()) {
+                        // multiple extruder in same island -> can't be printed in parallel
+                        // skip the search loop, go to add it in a new group.
+                        group_idx = grouped_islands.size();
+                        my_extruder_id = uint16_t(-2);
+                        break;
+                    }
+                }
+                // try to merge into a group
+                for (; group_idx < grouped_islands.size(); group_idx++) {
+                    GroupedIslands &group = grouped_islands[group_idx];
                     BoundingBox inflated = group.bb;
+                    // check if extruder is compatible
+                    if (my_extruder_id != -1 && group.extruder_id != -1) {
+                        if (my_extruder_id != group.extruder_id) {
+                            // extruder is incompatible, don't add it inside.
+                            continue;
+                        }
+                    }
                     //get compute min dist for the group height and the island extruder(s)
                     coord_t min_dist = 0;
                     bool no_clearance = false;
@@ -674,18 +710,26 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                                     island->get_slice()); // note: as they are islands, they shouldn't touch each other.
                                 group.islands.push_back(island.get());
                                 group.is_support.push_back(is_support);
-                                added = i;
+                                if (group.extruder_id == uint16_t(-1)) {
+                                    group.extruder_id = my_extruder_id;
+                                }
+                                added = group_idx;
                             } else {
                                 // merge the groups, sorry
                                 GroupedIslands &main_group = grouped_islands[added];
+                                assert(main_group.extruder_id == group.extruder_id ||
+                                       main_group.extruder_id == uint16_t(-1) || group.extruder_id == uint16_t(-1));
                                 main_group.bb.merge(group.bb);
                                 for (size_t gr_i = 0; gr_i < group.islands.size(); gr_i++) {
                                     main_group.slices.push_back(std::move(group.slices[gr_i]));
                                     main_group.islands.push_back(std::move(group.islands[gr_i]));
                                     main_group.is_support.push_back(std::move(group.is_support[gr_i]));
                                 }
-                                grouped_islands.erase(grouped_islands.begin() + i);
-                                i--;
+                                if (main_group.extruder_id == uint16_t(-1)) {
+                                    main_group.extruder_id = group.extruder_id;
+                                }
+                                grouped_islands.erase(grouped_islands.begin() + group_idx);
+                                group_idx--;
                             }
                         }
                     }
@@ -697,6 +741,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                     grouped_islands.back().slices.push_back(island->get_slice());
                     grouped_islands.back().islands.push_back(island.get());
                     grouped_islands.back().is_support.push_back(is_support);
+                    grouped_islands.back().extruder_id = my_extruder_id;
                 }
             }
         };
@@ -709,6 +754,26 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
             assert(!layer.support_layer->islands().empty());
             fn_group_islands(*layer.support_layer, true);
         }
+
+        // check if extruder swap
+        bool has_extruder_swap = false;
+        ObjectsLayerToPrint mmu_layers;
+        uint16_t mmu_layers_extruder_id = uint16_t(-1);
+        uint16_t current_extruder_id = uint16_t(-1);
+        for (const GroupedIslands &group : grouped_islands) {
+            if (current_extruder_id == uint16_t(-1)) {
+                current_extruder_id = group.extruder_id;
+            } else if (group.extruder_id != uint16_t(-1) && current_extruder_id != group.extruder_id) {
+                has_extruder_swap = true;
+                current_extruder_id = uint16_t(-2);
+                break;
+            }
+        }
+        if (!has_extruder_swap && current_extruder_id >= 0 && previous_extruder_id >= 0 &&
+            current_extruder_id != previous_extruder_id) {
+            has_extruder_swap = true;
+        }
+
         // - when all of our below islands are in the same ObjectsLayerToPrint, we put ourself into it (or adding our
         // island into the current one)
         // - when our below islands are in different ObjectsLayerToPrint, we create a new one and put ourself into when
@@ -730,6 +795,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
             if (has_supp) {
                 container_to_fill.support_layer = layer.support_layer;
             }
+            container_to_fill.allow_wipe_tower = false;
         };
         std::vector<std::optional<ObjectLayerToPrint>> to_add(ordered_layers_islands_to_print.size());
         std::sort(grouped_islands.begin(), grouped_islands.end(), [](GroupedIslands &g1, GroupedIslands &g2) {
@@ -751,6 +817,25 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
             return bottom;
         };
         for (GroupedIslands &group : grouped_islands) {
+            //check if not mmu group anyway
+            bool need_mmu = false;
+            need_mmu = (group.extruder_id == uint16_t(-2));
+            if (!need_mmu && group.extruder_id >= 0 && previous_extruder_id >= 0) {
+                need_mmu = group.extruder_id != previous_extruder_id;
+            }
+            if (need_mmu) {
+                // put it into the mmu_layers
+                mmu_layers.emplace_back();
+                fn_add_group_into(mmu_layers.back(), group);
+                mmu_layers.back().allow_wipe_tower = true;
+                if (mmu_layers_extruder_id == uint16_t(-1)) {
+                    mmu_layers_extruder_id = group.extruder_id;
+                } else if (mmu_layers_extruder_id >= 0 && group.extruder_id != mmu_layers_extruder_id) {
+                    mmu_layers_extruder_id = uint16_t(-2);
+                }
+                continue;
+            }
+
             std::set<const LayerSliceIsland*> still_needed;
             // create list of parent peer group
             for (const LayerSliceIsland *island : group.islands) {
@@ -768,9 +853,11 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                 ordered_layers_islands_to_print.emplace_back();
                 to_add.emplace_back(ObjectLayerToPrint());
                 finished.push_back(false);
+                extruder.push_back(group.extruder_id);
                 fn_add_group_into(to_add.back().value(), group);
                 was_added = true;
             } else {
+                // true if at least 2 parent are in two different group, so i need to be in a new one after these two.
                 bool already_in_another = false;
                 for (size_t i=0;i<ordered_layers_islands_to_print.size(); i++) {
                     assert(i < finished.size());
@@ -778,6 +865,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                         continue;
                     }
                     assert(!still_needed.empty());
+                    // do we ahave remove a parent from this group?
                     bool removed_at_least_one = false;
                     {
                         ObjectsLayerToPrint &previous_layers = ordered_layers_islands_to_print[i];
@@ -800,9 +888,14 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                     }
                     //found! add it after!
                     if (still_needed.empty()) {
+                        assert(extruder[i] != uint16_t(-2) && group.extruder_id != uint16_t(-2));
                         if (!already_in_another && !to_add[i].has_value()) {
                             // put inside the current one
                             to_add[i] = ObjectLayerToPrint();
+                            assert(extruder[i] == uint16_t(-1) || group.extruder_id == uint16_t(-1) || extruder[i] == group.extruder_id);
+                            if (extruder[i] == uint16_t(-1)) {
+                                extruder[i] = group.extruder_id;
+                            }
                             fn_add_group_into(to_add[i].value(), group);
                             was_added = true;
                         } else {
@@ -810,6 +903,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                             ordered_layers_islands_to_print.emplace(ordered_layers_islands_to_print.begin() + i + 1);
                             to_add.emplace(to_add.begin() + i + 1, ObjectLayerToPrint());
                             finished.emplace(finished.begin() + i + 1, false);
+                            extruder.insert(extruder.begin() + i + 1, group.extruder_id);
                             fn_add_group_into(to_add[i+1].value(), group);
                             was_added = true;
                         }
@@ -827,6 +921,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
         // add new layer groups from to_add
         assert(ordered_layers_islands_to_print.size() == to_add.size());
         assert(finished.size() == to_add.size());
+        assert(extruder.size() == to_add.size());
         for (size_t i = 0; i < to_add.size(); i++) {
             if (to_add[i].has_value()) {
                 ordered_layers_islands_to_print[i].push_back(std::move(to_add[i].value()));
@@ -834,14 +929,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                 assert(!ordered_layers_islands_to_print[i].empty());
                 //test if this layer can't have new ones
                 if (min_bottom_z(layer) > ordered_layers_islands_to_print[i].back().layer()->scaled_print_z()) {
-                    finished[i] = true;
-                    // now tht this group of layers is finished, all next groups are after these layer-islands, so we
-                    // can safely remove them from 'all_islands' collection
-                    for (const ObjectLayerToPrint &objectlayer : ordered_layers_islands_to_print[i]) {
-                        for (const LayerSliceIsland *island : objectlayer.islands) {
-                            all_islands.erase(island);
-                        }
-                    }
+                    set_finished(i);
                 }
             }
         }
@@ -863,20 +951,32 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                     // remove last layer and put it at the end in a new collection
                     ordered_layers_islands_to_print.emplace_back();
                     finished.push_back(false);
+                    extruder.push_back(extruder[coll_idx]);
                     ordered_layers_islands_to_print.back().push_back(std::move(ordered_layers_islands_to_print[coll_idx].back()));
                     ordered_layers_islands_to_print[coll_idx].pop_back();
-                    finished[coll_idx] = true;
-                    // now tht this group of layers is finished, all next groups are after these layer-islands, so we can
-                    // safely remove them from 'all_islands' collection
-                    for (const ObjectLayerToPrint &objectlayer : ordered_layers_islands_to_print[coll_idx]) {
-                        for (const LayerSliceIsland *island : objectlayer.islands) {
-                            all_islands.erase(island);
-                        }
-                    }
+                    set_finished(coll_idx);
                     break;
                 }
             }
         }
+
+        //check if nozzle change. if true, finish all collections
+        if (!mmu_layers.empty()) {
+            for (size_t coll_idx = 0; coll_idx < ordered_layers_islands_to_print.size(); coll_idx++) {
+                if (!finished[coll_idx]) {
+                    set_finished(coll_idx);
+                }
+            }
+            assert(mmu_layers_extruder_id != uint16_t(-1));
+            extruder.push_back(mmu_layers_extruder_id);
+            finished.push_back(false);
+            ordered_layers_islands_to_print.push_back(std::move(mmu_layers));
+            uint16_t current_extruder_id = uint16_t(-1);
+            current_extruder_id = mmu_layers_extruder_id;
+            set_finished(ordered_layers_islands_to_print.size() - 1);
+        }
+
+        previous_extruder_id = current_extruder_id;
     }
 
     return ordered_layers_islands_to_print;
@@ -1881,7 +1981,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
         assert(!print.tool_orderings().empty());
         for(size_t i=0; i< print.tool_orderings().size() && initial_extruder_id == uint16_t(-1); ++i)
             initial_extruder_id = print.tool_orderings()[i].first_extruder();
-        has_wipe_tower = print.has_wipe_tower();
+        has_wipe_tower = print.has_wipe_tower() && print.wipe_tower2()->has_toolchange();
         if (initial_extruder_id == static_cast<unsigned int>(-1))
             // No object to print was found, cancel the G-code export.
             throw Slic3r::SlicingError(_u8L("No extrusions were generated for objects."));
@@ -2278,37 +2378,60 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                 ToolOrdering parallel_ordering;
                 std::vector<std::pair<coord_t, ObjectsLayerToPrint>> parallel_layers_to_print;
                 assert(!has_wipe_tower || (!print.tool_orderings().empty()));
-                if (has_wipe_tower && !print.tool_orderings().empty()) {
-                    parallel_layers_to_print = collect_layers_to_print(print, status_monitor);
-                    // if wipetower, it's in the last part, after the sequentail parts.
-                    //TODO better way to find it/them
-                    parallel_ordering = print.tool_orderings().back();
-                    assert(!parallel_layers_to_print.empty());
-                    assert(print.config().parallel_objects_step > 0);
-                     wipe_tower = std::make_unique<GCode::WipeTowerIntegration>(print.config(),
-                                                                         print.default_object_config(),
-                                                                        *print.wipe_tower_data().priming.get(),
-                                                                        print.wipe_tower_data().tool_changes,
-                                                                        *print.wipe_tower_data().final_purge.get());
-                    //can't prime both
-                    //preamble_to_put_start_layer.append(m_wipe_tower->prime(*this));
-                    //TODO prime if  1nozzlemmu
-                    // parallel tool ordering to prime correctly the wipe tower
-                    //tool_ordering = print.tool_ordering();
-                    // Print first wipe tower layer
-                    this->m_pos_layer = this->m_layer = parallel_layers_to_print[0].second.back().layer();
-                    wipe_tower->next_layer();
-                    file.write(wipe_tower->tool_change(*this, parallel_ordering.first_extruder(), true));
-                }
+
+                // Multi-Material wipe tower.
+                // //TODO
+                //if (has_wipe_tower && !print.tool_orderings().empty()) {
+                //    parallel_layers_to_print = collect_layers_to_print(print, status_monitor);
+                //    // if wipetower, it's in the last part, after the sequential parts.
+                //    // Set position for wipe tower generation.
+                //    preamble_to_put_start_layer.append(
+                //        this->writer().travel_to_z(unscaled(first_layer_height), "Move to first z, for wipe tower"));
+                //    m_last_layer_z_ = first_layer_height;
+                //    m_max_layer_z_ = std::max(m_max_layer_z_,
+                //                              Layer::scale_to_layer_coord(this->writer().get_unlifted_position().z()));
+                //}
+                
+                //OLDTOREMOVE
+                //if (has_wipe_tower && !print.tool_orderings().empty()) {
+                //    parallel_layers_to_print = collect_layers_to_print(print, status_monitor);
+                //    // if wipetower, it's in the last part, after the sequential parts.
+                //    //TODO better way to find it/them
+                //    parallel_ordering = print.tool_orderings().back();
+                //    assert(!parallel_layers_to_print.empty());
+                //    assert(print.config().parallel_objects_step > 0);
+                //     wipe_tower = std::make_unique<GCode::WipeTowerIntegration>(print.config(),
+                //                                                         print.default_object_config(),
+                //                                                        *print.wipe_tower_data().priming.get(),
+                //                                                        print.wipe_tower_data().tool_changes,
+                //                                                        *print.wipe_tower_data().final_purge.get());
+                //    //can't prime both
+                //    //preamble_to_put_start_layer.append(m_wipe_tower->prime(*this));
+                //    //TODO prime if  1nozzlemmu
+                //    // parallel tool ordering to prime correctly the wipe tower
+                //    //tool_ordering = print.tool_ordering();
+                //    // Print first wipe tower layer
+                //    this->m_pos_layer = this->m_layer = parallel_layers_to_print[0].second.back().layer();
+                //    wipe_tower->next_layer();
+                //    file.write(wipe_tower->tool_change(*this, parallel_ordering.first_extruder(), true));
+                //}
                 coord_t height_step_range = Layer::scale_to_layer_coord(
                     std::min(print.config().parallel_objects_step, print.config().extruder_clearance_height));
                 if (print.config().complete_objects_sort.value == cosNearest) {
                     print_object_instances_ordering = chain_print_object_instances(print);
                 }
                 bool first_layers = true;
+                //uint16_t extruder = uint16_t(-1);
                 //final_extruder_id = initial_extruder_id;
                 coord_t z_start = 0, z_end = height_step_range;
                 std::set<const PrintObject*> separate_islands_done;
+                coord_t previous_wipe_tower_z = 0;
+                coord_t end_wipe_tower_z = 0;
+                for (auto &z_to_wt_layer : m_wipe_tower_layers) {
+                    if (!z_to_wt_layer.second->m_toolchanges.empty()) {
+                        end_wipe_tower_z = std::max(end_wipe_tower_z, z_to_wt_layer.first);
+                    }
+                }
                 bool is_layers = true;
                 while (is_layers && (print.config().parallel_objects_step_max_z.value == 0 || z_start + EPSILON < print.config().parallel_objects_step_max_z.value)) {
                     if (print.config().parallel_objects_step_max_z.value > 0) {
@@ -2321,7 +2444,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                     while (it_print_object_instance != print_object_instances_ordering.end()) {
                         assert(it_tool_ordering != print.tool_orderings().end());
                         std::vector<ObjectsLayerToPrint> layers_to_print_range;
-                        const PrintObject &       object        = *(*it_print_object_instance)->print_object;
+                        const PrintObject &object = *(*it_print_object_instance)->print_object;
                         ObjectsLayerToPrint object_and_support_layers = collect_layers_to_print(object, status_monitor);
 
                         if (!first_layers && print.config().parallel_islands.value) {
@@ -2364,27 +2487,279 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
 
                         if (!layers_to_print_range.empty() && it_tool_ordering->first_extruder() != uint16_t(-1)) {
                             for (ObjectsLayerToPrint &layer_group : layers_to_print_range) {
+                                bool print_in_parallel_mode = false;
+                                //std::cout<<"\nprinting group with:\n";
+                                //for (ObjectLayerToPrint &obj_layer : layer_group) {
+                                //    std::cout << " - " << obj_layer.layer()->unscaled_print_z() << " ; "
+                                //              << (obj_layer.allow_wipe_tower ? "withWP" : "")<< " with islands";
+                                //    if (obj_layer.object_layer) {
+                                //        std::cout << " with obj islands";
+                                //        for (auto lsi_ptr : obj_layer.islands) {
+                                //            if (obj_layer.object_layer == lsi_ptr->layer()) {
+                                //                for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
+                                //                    if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
+                                //                        std::cout << " " << i;
+                                //                        break;
+                                //                    }
+                                //                }
+                                //            } else {
+                                //                assert(obj_layer.support_layer == lsi_ptr->layer());
+                                //            }
+                                //        }
+                                //        std::cout << " / " << obj_layer.object_layer->islands().size();
+                                //    }
+                                //    if(obj_layer.support_layer) {
+                                //        std::cout<< " with supp islands";
+                                //        for (auto lsi_ptr : obj_layer.islands) {
+                                //            if (obj_layer.support_layer == lsi_ptr->layer()) {
+                                //                for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
+                                //                    if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
+                                //                        std::cout << " " << i;
+                                //                        break;
+                                //                    }
+                                //                }
+                                //            } else {
+                                //                assert(obj_layer.object_layer == lsi_ptr->layer());
+                                //            }
+                                //        }
+                                //        std::cout << " / " << obj_layer.support_layer->islands().size();
+                                //    }
+                                //    std::cout << " obj:" << obj_layer.layer()->object()->id().id;
+                                //    std::cout << ":\n";
+                                //}
                                 assert(!layer_group.empty());
                                 this->set_origin(unscale((*it_print_object_instance)->shift));
 
-                                size_t finished_objects = 1 +
-                                    (it_print_object_instance - print_object_instances_ordering.begin());
-                                if (finished_objects > 1)
-                                    _move_to_print_object(preamble_to_put_start_layer, print, finished_objects,
-                                                          initial_extruder_id);
-
-                                assert(!object.instances().empty());
-                                assert(*it_print_object_instance >= &*object.instances().begin() &&
-                                       *it_print_object_instance <= &*(object.instances().end() - 1));
-                                for (ObjectLayerToPrint &layer: layer_group) {
-                                    for (const LayerSliceIsland *island : layer.islands) {
-                                        assert(printed_island.find(island) == printed_island.end());
-                                        printed_island.insert(island);
+                                if (has_wipe_tower && ((previous_wipe_tower_z + height_step_range <
+                                        layer_group.back().layer()->scaled_print_z() && end_wipe_tower_z > previous_wipe_tower_z) ||
+                                    layer_group.front().allow_wipe_tower)) {
+                                    //std::cout << "WT: " << (previous_wipe_tower_z + height_step_range) << " < "
+                                    //          << layer_group.back().layer()->scaled_print_z() << " && "
+                                    //          << end_wipe_tower_z << " > " << previous_wipe_tower_z
+                                    //          << ") || " << layer_group.front().allow_wipe_tower
+                                    //          << "\n";
+                                    if (layer_group.front().allow_wipe_tower) {
+                                        for (ObjectLayerToPrint &obj_layer : layer_group) {
+                                            assert(obj_layer.allow_wipe_tower);
+                                            assert(obj_layer.layer()->scaled_print_z() == layer_group.back().layer()->scaled_print_z());
+                                        }
                                     }
+                                    // print wipetower until max layer_group.front() + height_step_range
+                                    // ObjectsLayerToPrint wt_layers_to_print;
+                                    std::vector<std::pair<coord_t, ObjectsLayerToPrint>> wt_layers_to_print;
+                                    for (auto &z_to_wt_layer : m_wipe_tower_layers) {
+                                        const std::shared_ptr<WipeTowerLayer> &wt_layer = z_to_wt_layer.second;
+                                        assert(wt_layer->extrusion_z > previous_wipe_tower_z || wt_layer->perimeter_done);
+                                        if (wt_layer->extrusion_z >= layer_group.back().layer()->scaled_print_z()) {
+                                            break;
+                                        } else if (!wt_layer->perimeter_done && wt_layer->m_toolchanges.empty()) {
+                                            assert(!wt_layer->layers.empty());
+                                            // print it
+                                            wt_layers_to_print.emplace_back(wt_layer->extrusion_z,
+                                                                            ObjectsLayerToPrint());
+                                            wt_layers_to_print.back().second.emplace_back();
+                                            // go to the layer, but don't print anything.
+                                            wt_layers_to_print.back().second.front().islands.insert(nullptr);
+                                            wt_layers_to_print.back().second.front().object_layer = wt_layer->layers
+                                                                                                        .front();
+                                            for (const Layer *layer : wt_layer->layers) {
+                                                // use the best layer z
+                                                if (std::abs(layer->scaled_print_z() - wt_layer->extrusion_z) <
+                                                    std::abs(wt_layers_to_print.back()
+                                                                 .second.front()
+                                                                 .object_layer->scaled_print_z() -
+                                                             wt_layer->extrusion_z)) {
+                                                    wt_layers_to_print.back().second.front().object_layer = layer;
+                                                    if (std::abs(layer->scaled_print_z() - wt_layer->extrusion_z) ==
+                                                        0) {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        } else {
+                                            assert(wt_layer->perimeter_done ||
+                                                   wt_layer->extrusion_z >=
+                                                       layer_group.front().layer()->scaled_print_z());
+                                        }
+                                    }
+                                    if (layer_group.front().allow_wipe_tower) {
+                                        assert(wt_layers_to_print.empty() ||
+                                               wt_layers_to_print.back().first <
+                                                   layer_group.front().layer()->scaled_print_z());
+                                    } else {
+                                        assert(wt_layers_to_print.empty() ||
+                                               wt_layers_to_print.back().first <
+                                                   layer_group.back().layer()->scaled_print_z());
+                                    }
+                                    if (layer_group.front().allow_wipe_tower) {
+                                        //merge the group islands, as they are now printed at the same time.
+                                        for (size_t merge_id = layer_group.size() - 1; merge_id > 0 ; merge_id--) {
+                                            if (layer_group[merge_id].object_layer) {
+                                                for (size_t data_id = 0; data_id < merge_id; data_id++) {
+                                                    if (layer_group[merge_id].object_layer == layer_group[data_id].object_layer) {
+                                                        layer_group[data_id].islands.insert(layer_group[merge_id].islands.begin(),
+                                                                                      layer_group[merge_id].islands.end());
+                                                        if (layer_group[merge_id].support_layer) {
+                                                            assert(!layer_group[data_id].support_layer);
+                                                            layer_group[data_id].support_layer = layer_group[merge_id].support_layer;
+                                                        }
+                                                        layer_group.erase(layer_group.begin() + merge_id);
+                                                        break;
+                                                    } else if(!layer_group[data_id].object_layer && layer_group[data_id].support_layer->object() == layer_group[merge_id].object_layer->object()) {
+                                                        layer_group[data_id].islands.insert(layer_group[merge_id].islands.begin(),
+                                                                                      layer_group[merge_id].islands.end());
+                                                        layer_group[data_id].object_layer = layer_group[merge_id].object_layer;
+                                                        layer_group.erase(layer_group.begin() + merge_id);
+                                                        break;
+                                                    }
+                                                }
+                                            } else if (!layer_group[merge_id].object_layer) {
+                                                for (size_t data_id = 0; data_id < merge_id; data_id++) {
+                                                    if (layer_group[data_id].support_layer == layer_group[merge_id].support_layer) {
+                                                        layer_group[data_id].islands.insert(layer_group[merge_id].islands.begin(),
+                                                                                      layer_group[merge_id].islands.end());
+                                                        if (layer_group[merge_id].object_layer) {
+                                                            assert(!layer_group[data_id].object_layer);
+                                                            layer_group[data_id].object_layer = layer_group[merge_id].object_layer;
+                                                        }
+                                                        layer_group.erase(layer_group.begin() + merge_id);
+                                                        break;
+                                                    } else if(!layer_group[data_id].support_layer && layer_group[data_id].object_layer->object() == layer_group[merge_id].support_layer->object()) {
+                                                        layer_group[data_id].islands.insert(layer_group[merge_id].islands.begin(),
+                                                                                      layer_group[merge_id].islands.end());
+                                                        layer_group[data_id].support_layer = layer_group[merge_id].support_layer;
+                                                        layer_group.erase(layer_group.begin() + merge_id);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        //std::cout<<"print_in_parallel_mode\n";
+                                        wt_layers_to_print.emplace_back(layer_group.front().layer()->scaled_print_z(),
+                                                                        layer_group);
+                                        print_in_parallel_mode = true;
+                                    }
+                                    // if (!wt_layers_to_print.empty()) {
+                                    // ToolOrdering custom_tool_ordering(object, wt_layers_to_print,
+                                    // this->last_extruder(initial_extruder_id));
+                                    //std::cout<<"PROCESS IN // list with:\n";
+                                    //for (auto &pair : wt_layers_to_print) {
+                                    //    std::cout << "*GROUP"<< " :\n";
+                                    //    for (ObjectLayerToPrint &obj_layer : pair.second) {
+                                    //        std::cout << " - " << obj_layer.layer()->unscaled_print_z() << " ; "
+                                    //                  << (obj_layer.allow_wipe_tower ? "withWP" : "")
+                                    //                  << " with islands";
+                                    //        if(obj_layer.islands.size() == 1 && *obj_layer.islands.begin() == nullptr) {
+                                    //            std::cout << " WT island";
+                                    //        } else {
+                                    //            if (obj_layer.object_layer) {
+                                    //                std::cout << " with obj islands";
+                                    //                for (auto lsi_ptr : obj_layer.islands) {
+                                    //                    if (obj_layer.object_layer == lsi_ptr->layer()) {
+                                    //                        for (size_t i = 0; i < lsi_ptr->layer()->islands().size();
+                                    //                             i++) {
+                                    //                            if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
+                                    //                                std::cout << " " << i;
+                                    //                                break;
+                                    //                            }
+                                    //                        }
+                                    //                    } else {
+                                    //                        assert(obj_layer.support_layer == lsi_ptr->layer());
+                                    //                    }
+                                    //                }
+                                    //                std::cout << " / " << obj_layer.object_layer->islands().size();
+                                    //            }
+                                    //            if (obj_layer.support_layer) {
+                                    //                std::cout << " with supp islands";
+                                    //                for (auto lsi_ptr : obj_layer.islands) {
+                                    //                    if (obj_layer.support_layer == lsi_ptr->layer()) {
+                                    //                        for (size_t i = 0; i < lsi_ptr->layer()->islands().size();
+                                    //                             i++) {
+                                    //                            if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
+                                    //                                std::cout << " " << i;
+                                    //                                break;
+                                    //                            }
+                                    //                        }
+                                    //                    } else {
+                                    //                        assert(obj_layer.object_layer == lsi_ptr->layer());
+                                    //                    }
+                                    //                }
+                                    //                std::cout << " / " << obj_layer.support_layer->islands().size();
+                                    //            }
+                                    //        }
+                                    //        std::cout << " obj:" << obj_layer.layer()->object()->id().id;
+                                    //        std::cout << ":\n";
+                                    //    }
+                                    //}
+                                    this->process_layers(print, status_monitor, print.tool_orderings().back(),
+                                                         print_object_instances_ordering, wt_layers_to_print,
+                                                         preamble_to_put_start_layer, file);
+                                    previous_wipe_tower_z = wt_layers_to_print.back().first;
                                 }
-                                this->process_layers(print, status_monitor, *it_tool_ordering, layer_group,
-                                                     *it_print_object_instance - object.instances().data(),
-                                                     preamble_to_put_start_layer, file);
+                                if (!print_in_parallel_mode) {
+                                    // sequential
+
+                                    size_t finished_objects = 1 +
+                                        (it_print_object_instance - print_object_instances_ordering.begin());
+                                    if (finished_objects > 1)
+                                        _move_to_print_object(preamble_to_put_start_layer, print, finished_objects,
+                                                              this->last_extruder(initial_extruder_id));
+
+                                    assert(!object.instances().empty());
+                                    assert(*it_print_object_instance >= &*object.instances().begin() &&
+                                           *it_print_object_instance <= &*(object.instances().end() - 1));
+                                    ToolOrdering custom_tool_ordering(object, layer_group,
+                                                                      this->last_extruder(initial_extruder_id));
+                                    for (ObjectLayerToPrint &layer : layer_group) {
+                                        for (const LayerSliceIsland *island : layer.islands) {
+                                            assert(printed_island.find(island) == printed_island.end());
+                                            printed_island.insert(island);
+                                        }
+                                    }
+                                //std::cout<<"PROCESS IN ->-> group with:\n";
+                                //for (ObjectLayerToPrint &obj_layer : layer_group) {
+                                //    std::cout << " - " << obj_layer.layer()->unscaled_print_z() << " ; "
+                                //              << (obj_layer.allow_wipe_tower ? "withWP" : "") ;
+                                //    if (obj_layer.object_layer) {
+                                //        std::cout << " with obj islands";
+                                //        for (auto lsi_ptr : obj_layer.islands) {
+                                //            if (obj_layer.object_layer == lsi_ptr->layer()) {
+                                //                for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
+                                //                    if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
+                                //                        std::cout << " " << i;
+                                //                        break;
+                                //                    }
+                                //                }
+                                //            } else {
+                                //                assert(obj_layer.support_layer == lsi_ptr->layer());
+                                //            }
+                                //        }
+                                //        std::cout << " / " << obj_layer.object_layer->islands().size();
+                                //    }
+                                //    if(obj_layer.support_layer) {
+                                //        std::cout<< " with supp islands";
+                                //        for (auto lsi_ptr : obj_layer.islands) {
+                                //            if (obj_layer.support_layer == lsi_ptr->layer()) {
+                                //                for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
+                                //                    if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
+                                //                        std::cout << " " << i;
+                                //                        break;
+                                //                    }
+                                //                }
+                                //            } else {
+                                //                assert(obj_layer.object_layer == lsi_ptr->layer());
+                                //            }
+                                //        }
+                                //        std::cout << " / " << obj_layer.support_layer->islands().size();
+                                //    }
+                                //    std::cout << " obj:" << obj_layer.layer()->object()->id().id;
+                                //    std::cout << ":\n";
+                                //}
+                                    this->process_layers(print, status_monitor,
+                                                         custom_tool_ordering /**it_tool_ordering*/, layer_group,
+                                                         *it_print_object_instance - object.instances().data(),
+                                                         preamble_to_put_start_layer, file);
+                                }
                                 is_layers = true;
                                 // update "current exturder" for the next ToolOrdering
                             }
@@ -2403,44 +2778,41 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                     }
                 }
                 assert(!is_layers || !print.tool_orderings().empty());
-                if (is_layers && !print.tool_orderings().empty()) {
-                    assert(print.config().parallel_objects_step_max_z.value > 0);
-                    if (wipe_tower) {
-                        m_wipe_tower = std::move(wipe_tower);
-                    }
-                    // Return to normal printing
-                    // skip all layer below print.config().parallel_objects_step_max_z.value
-                    size_t idx;
-                    for (idx = 0; idx < parallel_layers_to_print.size() && parallel_layers_to_print[idx].first + EPSILON < print.config().parallel_objects_step_max_z.value; idx++) {
-                        //print wipe tower (if here) up to the z
-                        if (m_wipe_tower && idx > 0) {
-                            uint16_t extruder_id = print.tool_orderings().back().first_extruder();
+                //TODO
+                //if (is_layers && !print.tool_orderings().empty()) {
+                //    assert(print.config().parallel_objects_step_max_z.value > 0);
+                //    if (wipe_tower) {
+                //        m_wipe_tower = std::move(wipe_tower);
+                //    }
+                //    // Return to normal printing
+                //    // skip all layer below print.config().parallel_objects_step_max_z.value
+                //    size_t idx;
+                //    for (idx = 0; idx < parallel_layers_to_print.size() && parallel_layers_to_print[idx].first + EPSILON < print.config().parallel_objects_step_max_z.value; idx++) {
+                //        //print wipe tower (if here) up to the z
+                //        if (m_wipe_tower && idx > 0) {
+                //            uint16_t extruder_id = print.tool_orderings().back().first_extruder();
 
-                            assert (parallel_ordering
-                                       .layer_tools()[m_wipe_tower->get_current_layer_idx() + 1]
-                                       ._print_z < Layer::scale_to_layer_coord(print.config().parallel_objects_step_max_z.value));
-                                m_wipe_tower->next_layer();
-                                this->m_pos_layer = this->m_layer = parallel_layers_to_print[idx].second.back().layer();
-                                file.write(m_wipe_tower->tool_change(*this, extruder_id, true));
-                        }
-                    }
-                    parallel_layers_to_print = {parallel_layers_to_print.begin() + idx, parallel_layers_to_print.end()};
-                    // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
-                    // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
-                    // and export G-code into file.
-                    this->process_layers(print, status_monitor, parallel_ordering, print_object_instances_ordering, parallel_layers_to_print, preamble_to_put_start_layer, file);
-                    if (m_wipe_tower)
-                        // Purge the extruder, pull out the active filament.
-                        file.write(m_wipe_tower->finalize(*this));
-                }
+                //            assert (parallel_ordering
+                //                       .layer_tools()[m_wipe_tower->get_current_layer_idx() + 1]
+                //                       ._print_z < Layer::scale_to_layer_coord(print.config().parallel_objects_step_max_z.value));
+                //                m_wipe_tower->next_layer();
+                //                this->m_pos_layer = this->m_layer = parallel_layers_to_print[idx].second.back().layer();
+                //                file.write(m_wipe_tower->tool_change(*this, extruder_id, true));
+                //        }
+                //    }
+                //    parallel_layers_to_print = {parallel_layers_to_print.begin() + idx, parallel_layers_to_print.end()};
+                //    // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
+                //    // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
+                //    // and export G-code into file.
+                //    this->process_layers(print, status_monitor, parallel_ordering, print_object_instances_ordering, parallel_layers_to_print, preamble_to_put_start_layer, file);
+                //}
                 /////////////////////////////////////////////// end parallel_objects_step
             } else {
                 // Sort layers by Z.
                 // All extrusion moves with the same top layer height are extruded uninterrupted.
                 std::vector<std::pair<coord_t, ObjectsLayerToPrint>> layers_to_print = collect_layers_to_print(print, status_monitor);
-                // Prusa Multi-Material wipe tower.
+                // Multi-Material wipe tower.
                 if (has_wipe_tower && !layers_to_print.empty()) {
-                    //m_wipe_tower = std::make_unique<GCode::WipeTowerIntegration>(print.config(), print.default_object_config(), *print.wipe_tower_data().priming.get(), print.wipe_tower_data().tool_changes, *print.wipe_tower_data().final_purge.get());
 
                     // Set position for wipe tower generation.
                     preamble_to_put_start_layer.append(this->writer().travel_to_z(unscaled(first_layer_height), "Move to first z, for wipe tower"));
@@ -2491,9 +2863,6 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                 // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
                 // and export G-code into file.
                 this->process_layers(print, status_monitor, print.tool_orderings().front(), print_object_instances_ordering, layers_to_print, preamble_to_put_start_layer, file);
-                if (m_wipe_tower)
-                    // Purge the extruder, pull out the active filament.
-                    file.write(m_wipe_tower->finalize(*this));
             }
         }
     }
@@ -2743,8 +3112,6 @@ void GCodeGenerator::process_layers(
                 assert(layer_tools);
                 if (!layer_tools)
                     return LayerResult::make_nop_layer_result();
-                if (m_wipe_tower && layer_tools->has_wipe_tower)
-                    m_wipe_tower->next_layer();
                  this->m_throw_if_canceled();
                 LayerResult result = this->process_layer(print, status_monitor, layer.second, *layer_tools,
                                                          &layer == &layers_to_print.back(),
@@ -4081,41 +4448,52 @@ LayerResult GCodeGenerator::process_layer(
         }
     }
 
+    bool ignore_wipetower = true;
     if (print.wipe_tower2()->has_toolchange()) {
-        // find our WipeTowerLayer
-        //auto it_WTLD_search = print.wipe_tower2()->m_printz_to_WTLayer_data.find(layer.scaled_print_z());
-        //assert(it_search != print.wipe_tower2()->m_printz_to_WTLayer_data.end());
-        //int64_t layer_key = WipeTower2::ObjectLayerData::compute_layer_key(layer.scaled_print_z(), layer.scaled_height());
-        //auto it_OLD_search = print.wipe_tower2()->m_layer_data.find(layer_key);
-        //assert(it_OLD_search != print.wipe_tower2()->m_layer_data.end());
-        //wtl = it_OLD_search->second->create_wipe_tower_layer();
-        //for (WipeTower2::ObjectLayerData *z_to_OLD : it_search->second->fused_with) {
-            //if (z_to_OLD->real_z == print_z && z_to_OLD->real_height == layer.scaled_height()) {
-                //wtl = std::move(z_to_OLD->create_wipe_tower_layer());
-                //break;
-            //}
+        std::vector<const Layer *> current_layers;
+        coord_t finish_wipe_tower_until = 0;
+        for (const ObjectLayerToPrint &l : layers) {
+            if (l.allow_wipe_tower) {
+                if (l.object_layer) {
+                    current_layers.push_back(object_layer);
+                }
+                if (l.support_layer) {
+                    current_layers.push_back(support_layer);
+                }
+                ignore_wipetower = false;
+            }
+            finish_wipe_tower_until = std::max(finish_wipe_tower_until, l.finish_wipe_tower_until);
+        }
+        if (!ignore_wipetower) {
+            assert(single_object_instance_idx == size_t(-1));
+            // find our WipeTowerLayer
+            auto search_wtl = m_wipe_tower_layers.find(layer.scaled_print_z());
+            assert(search_wtl != m_wipe_tower_layers.end());
+            if (m_wipe_tower_current_layer != search_wtl->second) {
+                m_wipe_tower_current_layer = search_wtl->second;
+            }
+            assert(m_wipe_tower_current_layer);
+            assert(!layer_tools.extruders.empty());
+            if (m_writer.tool() && !layer_tools.extruders.empty() &&
+                m_writer.tool()->id() != layer_tools.extruders.front()) {
+                // last extruder don't print anything here, plan to change to another one right away.
+                // note: the extruders may not be used in this layer, and so not present in layer_tools
+                std::vector<uint16_t> extruder_with_empty_first;
+                extruder_with_empty_first.push_back(m_writer.tool()->id());
+                extruder_with_empty_first.insert(extruder_with_empty_first.end(), layer_tools.extruders.begin(),
+                                                 layer_tools.extruders.end());
+                m_wipe_tower_current_layer->init(current_layers, extruder_with_empty_first, std::vector<uint16_t>{});
+            } else {
+                m_wipe_tower_current_layer->init(current_layers, layer_tools.extruders, std::vector<uint16_t>{});
+            }
+        }
+        //if (finish_wipe_tower_until > 0) {
+        //    // finish wipetower at this layer
+        //    assert(!layer_tools.extruders.empty());
+        //    for (const uint16_t extruder_id : layer_tools.extruders) {
+        //        m_wipe_tower_current_layer->finish_layer(wt_extrusions, extruder_id, true);
+        //    }
         //}
-        auto search_wtl = m_wipe_tower_layers.find(layer.scaled_print_z());
-        assert(search_wtl != m_wipe_tower_layers.end());
-        if (m_wipe_tower_current_layer != search_wtl->second) {
-            m_wipe_tower_current_layer = search_wtl->second;
-        }
-        assert(m_wipe_tower_current_layer);
-        std::vector<const Layer *> layers;
-        layers.push_back(&layer);
-        assert(!layer_tools.extruders.empty());
-        if (m_writer.tool() && !layer_tools.extruders.empty() &&
-            m_writer.tool()->id() != layer_tools.extruders.front()) {
-            // last extruder don't print anything here, plan to change to another one right away.
-            // note: the extruders may not be used in this layer, and so not present in layer_tools
-            std::vector<uint16_t> extruder_with_empty_first;
-            extruder_with_empty_first.push_back(m_writer.tool()->id());
-            extruder_with_empty_first.insert(extruder_with_empty_first.end(), layer_tools.extruders.begin(),
-                                                layer_tools.extruders.end());
-            m_wipe_tower_current_layer->init(layers, extruder_with_empty_first, std::vector<uint16_t>{});
-        } else {
-            m_wipe_tower_current_layer->init(layers, layer_tools.extruders, std::vector<uint16_t>{});
-        }
     }
 
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
@@ -4123,7 +4501,7 @@ LayerResult GCodeGenerator::process_layer(
     {
         // set extruder
         uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
-        if (m_wipe_tower_current_layer && (old_extruder_id != extruder_id || layer_tools.extruders.size() < 2)) {
+        if (!ignore_wipetower && m_wipe_tower_current_layer && (old_extruder_id != extruder_id || layer_tools.extruders.size() < 2)) {
             assert(m_writer.tool());
             assert(m_writer.get_tool(extruder_id));
             ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id, m_writer.get_tool(extruder_id)->retracted());
@@ -4171,19 +4549,13 @@ LayerResult GCodeGenerator::process_layer(
             assert(m_modifier_override.empty());
             this->set_origin(old_origin);
             gcode += this->visitor_gcode;
+            // enforce/let analyzer tag generator aware of a role type change
+            m_last_processor_extrusion_role = GCodeExtrusionRole::WipeTower;
         } else {
             gcode += this->set_extruder(extruder_id, print_z);
         }
 
         assert(extruder_id == m_writer.tool()->id());
-
-        //gcode += (layer_tools.has_wipe_tower && m_wipe_tower) ?
-        //    m_wipe_tower->tool_change(*this, extruder_id, extruder_id == layer_tools.extruders.back()) :
-        //    this->set_extruder(extruder_id, print_z, true);
-
-        // let analyzer tag generator aware of a role type change
-        if (layer_tools.has_wipe_tower && m_wipe_tower)
-            m_last_processor_extrusion_role = GCodeExtrusionRole::WipeTower;
 
         if (has_custom_gcode_to_emit && extruder_id_for_custom_gcode == int(extruder_id)) {
             assert(m_writer.tool()->id() == extruder_id_for_custom_gcode);
@@ -4440,6 +4812,7 @@ void GCodeGenerator::process_layer_single_object(
                 std::vector<size_t> idxs_islands;
                 if (layer_to_print.islands.empty()) {
                     idxs_islands = std::vector<size_t>(support_layer.islands().size());
+                    std::iota (std::begin(idxs_islands), std::end(idxs_islands), 0);
                 } else {
                     for (size_t i = 0; i < support_layer.islands().size(); i++) {
                         if (layer_to_print.islands.find(support_layer.islands()[i].get()) != layer_to_print.islands.end()) {
@@ -4468,20 +4841,18 @@ void GCodeGenerator::process_layer_single_object(
                     const LayerSliceIslandPtr &layer_island_ptr = support_layer.islands()[idxs_islands[nearest_idx]];
 
                     ExtrusionEntitiesPtr entities;
-                    for (const LayerSliceIslandPtr &island : support_layer.islands()) {
-                        for (const LayerRegionIslandPtr &region_island : island->regions_islands()) {
-                            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
-                                for (ExtrusionEntity *ee : region_island->extrusion(LayerRegionIsland::SUPPORT)) {
-                                    assert(ee->role() == ExtrusionRole::SupportMaterial);
-                                }
-                                append(entities, region_island->extrusion(LayerRegionIsland::SUPPORT).entities());
+                    for (const LayerRegionIslandPtr &region_island : layer_island_ptr->regions_islands()) {
+                        if (region_island->has_extrusion(LayerRegionIsland::SUPPORT)) {
+                            for (ExtrusionEntity *ee : region_island->extrusion(LayerRegionIsland::SUPPORT)) {
+                                assert(ee->role() == ExtrusionRole::SupportMaterial);
                             }
-                            if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                                for (ExtrusionEntity *ee : region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                                    assert(ee->role() == ExtrusionRole::SupportMaterialInterface);
-                                }
-                                append(entities, region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE).entities());
+                            append(entities, region_island->extrusion(LayerRegionIsland::SUPPORT).entities());
+                        }
+                        if (region_island->has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                            for (ExtrusionEntity *ee : region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                                assert(ee->role() == ExtrusionRole::SupportMaterialInterface);
                             }
+                            append(entities, region_island->extrusion(LayerRegionIsland::SUPPORT_INTERFACE).entities());
                         }
                     }
                     int new_temperature = (-1);
@@ -9105,7 +9476,7 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
     }
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
 
-    if (last_was_wipe_tower || m_last_height_ != Layer::scale_to_layer_coord(path.height())) {
+    if (path.height() > 0 && (last_was_wipe_tower || m_last_height_ != Layer::scale_to_layer_coord(path.height()))) {
         m_last_height_ = Layer::scale_to_layer_coord(path.height());
         if (m_last_height_ >= 0) {
             gcode += std::string(";") + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height) +

@@ -268,6 +268,7 @@ public:
     const LayerRegionSetConstPtrs &regions() const { return m_regions; }
     const std::vector<LayerRegionIslandPtr> &regions_islands() const { return m_extrusions; }
     std::vector<LayerRegionIslandPtr> &regions_islands()  { return m_extrusions; }
+    const Layer *layer() const { return m_layer; }
 
     LayerRegionIsland& get_or_add_region_island(const LayerRegionSetConstPtrs &regions, uint16_t extruder_id = uint16_t(-1));
     LayerRegionIsland& add_new_region_island(const LayerRegionSetConstPtrs &regions, uint16_t extruder_id = uint16_t(-1));

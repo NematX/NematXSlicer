@@ -646,7 +646,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
     bool have_ooze_prevention = config->opt_bool("ooze_prevention");
     toggle_field("standby_temperature_delta", have_ooze_prevention);
 
-    bool have_wipe_tower = config->opt_float("parallel_objects_step") <= 0;
+    bool have_wipe_tower = config->opt_float("parallel_objects_step") <= 0 || config->opt_bool("parallel_islands");
     toggle_field("wipe_tower", have_wipe_tower);
     have_wipe_tower = have_wipe_tower && config->opt_bool("wipe_tower");
     for (auto el : { "wipe_tower_x", "wipe_tower_y", "wipe_tower_width", "wipe_tower_rotation_angle", "wipe_tower_brim_width",

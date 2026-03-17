@@ -2406,6 +2406,7 @@ void generate_support_toolpaths(
     const SupportLayer *support_layer_current = nullptr;
     int                 idx                   = 0;
     for (const SupportLayer *support_layer : support_layers) {
+        assert(support_layer->object() == &object);
         support_layer_current = support_layer;
 
         for (const LayerSliceIslandPtr &island : support_layer->islands()) {

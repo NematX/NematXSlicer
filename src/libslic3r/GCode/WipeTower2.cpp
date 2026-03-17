@@ -1424,10 +1424,13 @@ void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection,
                 for (size_t i = 0; i < tower_perimeters.size(); i++) {
                     if (dist >= coord_t(tower_perimeters[i].length())) {
                         dist -= coord_t(tower_perimeters[i].length());
-                    } else {
+                    } else if(dist > SCALED_EPSILON * 10) {
                         Polyline temp = tower_perimeters[i];
                         temp.split_at(distf_t(dist));
                         path_move.position = temp.back();
+                        break;
+                    } else {
+                        path_move.position = tower_perimeters[i].front();
                         break;
                     }
                 }
@@ -1442,6 +1445,7 @@ void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection,
             path_move.set_role(ExtrusionRole::Travel);
             path_move.add_property(ExtrusionPropertyModifier().set_disable_retraction());
             collection.append(std::move(path_move));
+            //assert(((ExtrusionNop*)collection.entities().back())->first_point() == unretract_lines.front());
             ExtrusionNop path_pre_unretract = ExtrusionNop();
             path_pre_unretract.set_role(ExtrusionRole::WipeTowerWipe);
             path_pre_unretract.add_property(ExtrusionPropertySpeed(speed));
@@ -1455,7 +1459,6 @@ void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection,
                 ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::RETRACT,pre_uwipe_unretract_e));
             collection.append(std::move(path_pre_unretract));
             assert(((ExtrusionNop*)collection.entities().back())->role() == ExtrusionRole::WipeTowerWipe);
-            assert(((ExtrusionNop*)collection.entities().back())->first_point() == unretract_lines.front());
         }
         collection.append(std::move(path_unretract));
     }
