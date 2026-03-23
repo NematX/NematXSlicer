@@ -15,13 +15,38 @@ from datetime import date
 import tarfile
 import subprocess
 from pathlib import Path
+import argparse
+import re
 
+# function to get a var from version.inc
+def get_cmake_var(filepath, var_name):
+	pattern = rf'set\(\s*{var_name}\s+"([^"]+)"\s*\)'
+
+	with open(filepath, "r") as f:
+		content = f.read()
+
+	match = re.search(pattern, content)
+	if match:
+		return match.group(1)
+	return None
+
+parser = argparse.ArgumentParser(
+	description="Create release folders without overwriting existing ones."
+)
+
+parser.add_argument("branch_name", nargs="?", default="rc", help="Branch name")
+parser.add_argument("prefix", nargs="?", default="rc", help="Prefix name")
+parser.add_argument("date", nargs="?", default="", help="Artifact compile date")
+
+args = parser.parse_args()
+
+branch_name = args.branch_name
+prefix = args.prefix
+first_day = args.date;
+repo = get_cmake_var("version.inc", "SLIC3R_GITHUB")
+program_name = get_cmake_var("version.inc", "SLIC3R_APP_KEY")
 token = None
 
-repo = "NematX/NematXSlicer"
-program_name = "NematXSlicer"
-branch_name = sys.argv[1] if len(sys.argv) > 1 else "rc"
-prefix = sys.argv[2] if len(sys.argv) > 2 else "rc"
 path_7zip = r"C:\Program Files\7-Zip\7z.exe"
 # github classic personal access token, works with [gist, repo, workflow] permissions, should be something like "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"
 github_auth_token = ""
@@ -59,16 +84,17 @@ def get_version():
 	return version+tag;
 
 found_win = False; 
+found_win_msi = False; 
 found_linux = False; 
 found_linux_appimage_gtk2 = False; 
 found_linux_appimage_gtk3 = False; 
 found_macos = False; 
 found_macos_arm = False;
-first_day = "";
 
 # return True if he want to cntue new artifacts
 def handle_artifact(json_artifact):
 	global found_win
+	global found_win_msi
 	global found_linux
 	global found_linux_appimage_gtk2
 	global found_linux_appimage_gtk3
@@ -82,8 +108,11 @@ def handle_artifact(json_artifact):
 			first_day = json_artifact["created_at"][:10];
 		if json_artifact["created_at"][:10] == first_day:
 			print("Next artifact: " + json_artifact["name"]);
+		elif json_artifact["created_at"][:10] > first_day:
+			print("Ignored artifact (bad day): ("+json_artifact["name"] + "  @ "+json_artifact["created_at"][:10]+")");
+			return True
 		else:
-			print(f"End of {branch_name} artifacts. Closing");
+			print(f"End of {branch_name} artifacts (date too far away). Closing");
 			print("("+json_artifact["name"] + "  @ "+json_artifact["created_at"][:10]+")");
 			return False;
 		if json_artifact["name"] == prefix + "_" +program_name + "-win64" and not found_win:
@@ -93,21 +122,21 @@ def handle_artifact(json_artifact):
 			resp = requests.get(json_artifact["archive_download_url"], headers={'Authorization': 'token ' + github_auth_token,}, allow_redirects=True);
 			print("win: " +str(resp));
 			z = zipfile.ZipFile(io.BytesIO(resp.content))
-			base_name = release_path+"/"+program_name+"_"+version+"_win64_"+date_str;
+			base_name = release_path+"/"+prefix+"_" +program_name+"_"+version+"_win64_"+date_str;
 			z.extractall(base_name);
 			try:
 				ret = subprocess.check_output([path_7zip, "a", "-tzip", base_name+".zip", base_name]);
 			except:
 				print("Failed to zip the win directory, do it yourself");
-		if json_artifact["name"] ==  prefix + "_" +program_name + "-win64.msi" and not found_win:
-			found_win = True;
+		if json_artifact["name"] ==  prefix + "_" +program_name + "-win64.msi" and not found_win_msi:
+			found_win_msi = True;
 			print("Found win64 msi artifact");
 			print("ask for: "+json_artifact["archive_download_url"]);
 			resp = requests.get(json_artifact["archive_download_url"], headers={'Authorization': 'token ' + github_auth_token,}, allow_redirects=True);
 			print("win: " +str(resp));
 			z = zipfile.ZipFile(io.BytesIO(resp.content))
 			z.extractall(release_path);
-			os.rename(release_path+"/"+program_name+"-win64.msi", release_path+"/"+program_name+"_"+version+"_win64_"+date_str+".msi");
+			os.rename(release_path+"/"+prefix + "_" +program_name+"-win64.msi", release_path+"/"+program_name+"_"+version+"_win64_"+date_str+".msi");
 		if json_artifact["name"] == prefix + "_"+program_name+"-macOS-intel.dmg" and not found_macos:
 			found_macos = True;
 			print("Found macos-intel artifact");
@@ -160,17 +189,22 @@ def handle_artifact(json_artifact):
 			# except:
 				# with zipfile.ZipFile(base_path+"_bof.tar.zip", 'w') as myzip:
 					# myzip.write(base_path+".tar");
-	return  not (found_win and found_linux and found_linux_appimage_gtk2 and found_linux_appimage_gtk3 and found_macos and found_macos_arm);
+	return  not (found_win and found_win_msi and found_linux and found_linux_appimage_gtk2 and found_linux_appimage_gtk3 and found_macos and found_macos_arm);
 
 date_str = date.today().strftime('%y%m%d');
 version = get_version();
 print("create release for: " + str(version));
 if(not os.path.isdir("./releases")):
 	os.mkdir("./releases");
-release_path = "./releases/"+branch_name+"_release_"+str(version);
-if(os.path.isdir(release_path)):
-	rmtree(release_path);
-	print("deleting old directory");
+base_path = "./releases/"+branch_name+"_release_"+str(version);
+release_path = base_path;
+
+# find a non-existing directory name
+counter = 2;
+while os.path.isdir(release_path):
+	release_path = f"{base_path}_{counter}";
+	counter += 1;
+
 os.mkdir(release_path);
 #urllib.urlretrieve ("https://api.github.com/repos/"+repo+"/actions/artifacts", release_path+"artifacts.json");
 need_more = True
