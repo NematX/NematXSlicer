@@ -233,6 +233,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         "start_gcode",
         "start_gcode_manual",
         "start_filament_gcode",
+        "temperature_heat_speed",
         "template_custom_gcode",
         "thumbnails",
         "thumbnails_color",

@@ -1283,6 +1283,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     // ((ConfigOptionFloats,              travel_max_lift))
     ((ConfigOptionFloats,              travel_slope))
     ((ConfigOptionBools,               travel_lift_before_obstacle))
+    ((ConfigOptionFloats,              temperature_heat_speed))
     ((ConfigOptionStrings,             tool_name))
     ((ConfigOptionString,              toolchange_gcode))
     ((ConfigOptionFloat,               travel_speed))

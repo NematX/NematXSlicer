@@ -21,7 +21,7 @@ const std::string& FanMover::process_gcode(const std::string& gcode, bool flush)
         m_buffer_time_size += data.time;
     }
 
-    if(!gcode.empty())
+    if (!gcode.empty())
         m_parser.parse_buffer(gcode,
             [this](GCodeReader& reader, const GCodeReader::GCodeLine& line) { /*m_process_output += line.raw() + "\n";*/ this->_process_gcode_line(reader, line); });
 
@@ -170,8 +170,7 @@ void FanMover::_put_in_middle_G1(std::list<BufferData>::iterator item_to_split, 
     }
 }
 
-int16_t FanMover::_get_fan_speed(const std::string &line, GCodeFlavor flavor)
-{
+int16_t FanMover::_get_fan_speed(const std::string &line, GCodeFlavor flavor) {
     if (flavor == (gcfNematX)) {
         if (line.compare(0, 4, "M106") == 0) {
             if (m_current_extruder == 0) {
@@ -183,7 +182,7 @@ int16_t FanMover::_get_fan_speed(const std::string &line, GCodeFlavor flavor)
             }
         }
         return -1;
-    }else if (line.compare(0, 4, "M106") == 0) {
+    } else if (line.compare(0, 4, "M106") == 0) {
         if (flavor == (gcfMach3) || flavor == (gcfMachinekit)) {
             return (int16_t) FanMover_func::get_axis_value(line, 'P');
         } else {
@@ -209,7 +208,7 @@ void FanMover::_print_in_middle_G1(BufferData& line_to_split, float nb_sec_from_
         //will also print before if line_to_split.time == 0
         m_process_output += line_to_write + (line_to_write.back() == '\n' ? "" : "\n");
         m_process_output += line_to_split.raw + "\n";
-    }else if(line_to_split.raw.size() > 2
+    } else if (line_to_split.raw.size() > 2
         && line_to_split.raw[0] == 'G' && line_to_split.raw[1] == '1' && line_to_split.raw[2] == ' ') {
         float percent = nb_sec_from_item_start / line_to_split.time;
         std::string before = line_to_split.raw;
@@ -264,7 +263,7 @@ std::string FanMover::_set_fan(int16_t speed, std::string_view comment) {
     std::string str = GCodeWriter::set_fan(m_writer.config.gcode_flavor.value, m_writer.config.gcode_comments.value,
                                            speed, tool ? tool->fan_offset() : 0, tool ? tool->id() : 0,
                                            m_writer.config.fan_percentage.value, comment);
-    if(!str.empty() && str.back() == '\n')
+    if (!str.empty() && str.back() == '\n')
         return str.substr(0,str.size()-1);
     return str;
 }
@@ -478,7 +477,7 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                                     //i'm printed by the m_current_kickstart
                                     time = -1;
                                 }
-                            } else if(m_back_buffer_fan_speed < fan_speed - 10){ //only kickstart if more than 10% change
+                            } else if (m_back_buffer_fan_speed < fan_speed - 10){ //only kickstart if more than 10% change
                                 //don't write this line, as it will need to be delayed
                                 time = -1;
                                 //get the duration of kickstart
@@ -508,7 +507,7 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
         }
         }
     } else {
-        if(!line.raw().empty() && line.raw().front() == ';')
+        if (!line.raw().empty() && line.raw().front() == ';')
         {
             if (line.raw().size() > 10 && line.raw().rfind(";TYPE:", 0) == 0) {
                 // get the type of the next extrusions

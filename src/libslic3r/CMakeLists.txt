@@ -204,6 +204,8 @@ set(SLIC3R_SOURCES
     GCode/SeamPlacer.hpp
     #GCode/SmoothPath.cpp
     #GCode/SmoothPath.hpp
+    GCode/TemperatureMover.cpp
+    GCode/TemperatureMover.hpp
     GCode/ToolOrdering.cpp
     GCode/ToolOrdering.hpp
     GCode/Wipe.cpp

@@ -1,5 +1,5 @@
-#ifndef slic3r_GCode_FanMover_hpp_
-#define slic3r_GCode_FanMover_hpp_
+#ifndef slic3r_GCode_TemperatureMover_hpp_
+#define slic3r_GCode_TemperatureMover_hpp_
 
 
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -14,7 +14,7 @@
 namespace Slic3r {
 
 
-class FanMover
+class TemperatureMover
 {
     class BufferData
     {
@@ -23,15 +23,15 @@ class FanMover
         std::string raw;
         // time to go from start to end
         float   time;
-        int16_t fan_speed;
-        bool    is_kickstart;
+        int16_t temperature = -1;
+        uint16_t temperature_extruder_idx = uint16_t(0);
         // start position
         float x = 0, y = 0, z = 0, e = 0;
         // delta to go to end position
         float dx = 0, dy = 0, dz = 0, de = 0;
         char e_axis_char = 'E';
-        BufferData(std::string line, char e_axis, float time = 0, int16_t fan_speed = 0, float is_kickstart = false)
-            : raw(line), time(time), fan_speed(fan_speed), is_kickstart(is_kickstart), e_axis_char(e_axis)
+        BufferData(std::string line, char e_axis, float time, int16_t temperature, uint16_t extruder_idx)
+            : raw(line), time(time), temperature(temperature), temperature_extruder_idx(extruder_idx), e_axis_char(e_axis)
         {
             // avoid double \n
             if (!line.empty() && line.back() == '\n')
@@ -40,11 +40,10 @@ class FanMover
     };
 
 private:
-    const float nb_seconds_delay; // in s
-    const bool with_D_option;
+    const std::regex regex_temperature_set;
+    const std::vector<double> heating_speed; // in °C/s
+    float m_max_seconds_delay;
     const bool relative_e;
-    const bool only_overhangs;
-    const float kickstart; // in s
 
     GCodeReader m_parser{};
     const GCodeWriter& m_writer;
@@ -57,10 +56,8 @@ private:
     uint16_t m_current_extruder = 0;
 
     // variable for when you add a line (front of the buffer)
-    int m_front_buffer_fan_speed = 1;
-    int m_back_buffer_fan_speed = 1;
-    BufferData m_current_kickstart{"",-1,0};
-    float m_current_kickstart_duration = 0;
+    int m_front_buffer_temperatures[256];
+    int m_back_buffer_temperatures[256];
 
     //buffer
     std::list<BufferData> m_buffer;
@@ -70,21 +67,25 @@ private:
     std::string m_process_output;
 
 public:
-    FanMover(const GCodeWriter &writer,
-             const FullPrintConfig &  config,
-             const float        nb_seconds_delay,
-             const bool         with_D_option,
-             const bool         relative_e,
-             const bool         only_overhangs,
-             const float        kickstart) :
-        nb_seconds_delay(nb_seconds_delay > 0 ? std::max(0.01f, nb_seconds_delay) : 0)
-        , with_D_option(with_D_option)
+    TemperatureMover(const GCodeWriter &writer,
+             const FullPrintConfig     &config,
+             const std::vector<double>  heating_speed,
+             const bool                 relative_e)
+        : regex_temperature_set("S[0-9]+")
+        , heating_speed(heating_speed)
         , relative_e(relative_e)
-        , only_overhangs(only_overhangs)
-        , kickstart(kickstart)
         , m_writer(writer)
     {
         m_parser.apply_config(config);
+        m_max_seconds_delay = 0;
+        for (double speed : heating_speed) {
+            float delay = 300.f / float(speed);
+            if (delay > m_max_seconds_delay) {
+                m_max_seconds_delay = delay;
+            }
+        }
+        std::fill(std::begin(m_front_buffer_temperatures),std::end(m_front_buffer_temperatures),int16_t(-1));
+        std::fill(std::begin(m_back_buffer_temperatures),std::end(m_back_buffer_temperatures),int16_t(-1));
     }
 
     // Adds the gcode contained in the given string to the analysis and returns it after removing the workcodes
@@ -94,7 +95,8 @@ private:
     BufferData& put_in_buffer(BufferData&& data) {
         assert(data.time >= 0 && data.time < 1000000 && !std::isnan(data.time));
          m_buffer_time_size += data.time;
-        if (data.fan_speed >= 0 && !m_buffer.empty() && m_buffer.back().fan_speed >= 0) {
+        if (!m_buffer.empty() && data.temperature_extruder_idx == m_buffer.back().temperature_extruder_idx &&
+            data.temperature >= 0 && m_buffer.back().temperature >= 0) {
             // erase last item
             m_buffer.back() = data;
         } else {
@@ -111,15 +113,14 @@ private:
     void _process_gcode_line(GCodeReader& reader, const GCodeReader::GCodeLine& line);
     void _process_ACTIVATE_EXTRUDER(const std::string_view command);
     void _process_T(const std::string_view command);
-    void _put_in_middle_G1(std::list<BufferData>::iterator item_to_split, float nb_sec, BufferData&& line_to_write, float max_time);
-    void _print_in_middle_G1(BufferData& line_to_split, float nb_sec, const std::string& line_to_write);
-    void _remove_slow_fan(int16_t min_speed, float past_sec);
-    int16_t _get_fan_speed(const std::string &line, GCodeFlavor flavor);
+    //void _print_in_middle_G1(BufferData& line_to_split, float nb_sec, const std::string& line_to_write);
+    void _put_in_middle_G1(std::list<BufferData>::reverse_iterator item_to_split, float nb_sec_since_itemtosplit_start, BufferData &&line_to_write, float max_time);
+    void _remove_low_heat(int16_t min_temp, uint16_t extr_idx, float past_sec);
+    std::tuple<int16_t, uint16_t> _get_temperature_with_extruder_idx(const std::string &line, GCodeFlavor flavor);
     void write_buffer_data();
-    std::string _set_fan(int16_t speed, std::string_view comment);
 };
 
 } // namespace Slic3r
 
 
-#endif /* slic3r_GCode_FanMover_hpp_ */
+#endif /* slic3r_GCode_TemperatureMover_hpp_ */

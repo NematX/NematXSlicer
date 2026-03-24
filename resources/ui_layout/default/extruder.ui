@@ -67,6 +67,7 @@ group:General wipe
 		setting:idx:label$for external perimeters:sidetext_width$5:seam_gap_external
 	end_line
 group:others
+    setting:idx:temperature_heat_speed
     setting:idx:extruder_pressure_factor
     setting:idx:split_extrusion_acceleration
 group:Retraction when tool is disabled (advanced settings for multi-extruder setups)

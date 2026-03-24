@@ -39,6 +39,7 @@
 #include "GCode/RetractWhenCrossingPerimeters.hpp"
 // #include "GCode/SmoothPath.hpp"
 #include "GCode/SpiralVase.hpp"
+#include "GCode/TemperatureMover.hpp"
 #include "GCode/ToolOrdering.hpp"
 #include "GCode/Wipe.hpp"
 #include "GCode/WipeTowerIntegration.hpp"
@@ -620,6 +621,7 @@ private:
     std::unique_ptr<AddLineNumber>        m_add_line_number;
     std::unique_ptr<RemoveComments>       m_remove_comments;
     std::unique_ptr<FanMover>             m_fan_mover;
+    std::unique_ptr<TemperatureMover>             m_temperature_mover;
     std::unique_ptr<PressureAdvance>      m_pressure_model;
 
     // Heights (print_z) at which the skirt has already been extruded.

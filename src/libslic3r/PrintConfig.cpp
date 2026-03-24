@@ -7308,17 +7308,30 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("temperature", coInts);
     def->label = L("Other layers");
-    def->full_label = L("Temperature");
+    def->full_label = L("Nozzle temperature");
     def->category = OptionCategory::filament;
     def->tooltip = L("Extruder nozzle temperature for layers after the first one. Set zero to disable "
                    "temperature control commands in the output G-code.");
     def->sidetext = L("°C");
-    def->full_label = L("Nozzle temperature");
     def->min = 0;
     def->max = max_temp;
     def->mode = comSimpleAE | comPrusa;
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionInts { 200 });
+
+    def = this->add("temperature_heat_speed", coFloats);
+    def->label = L("Other layers");
+    def->full_label = L("Temperature heating speed");
+    def->category = OptionCategory::extruders;
+    def->tooltip = L(
+        "As the extruder takes time to heat up, when a toolchange is approchaing, the next extruder that may be at "
+        "parking temp can heat up in advance to be ready for the higher temp more quickly."
+        "\nSet to 0 to deactivate.");
+    def->sidetext = L("°C/s");
+    def->min = 0;
+    def->mode = comExpert | comSuSi;
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloats { 0 });
 
     def = this->add("thin_perimeters", coPercent);
     def->label = L("Overlapping external perimeter");
@@ -8344,6 +8357,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "seam_gap",
         "seam_gap_external",
         "split_extrusion_acceleration",
+        "temperature_heat_speed",
         "tool_name",
         "travel_lift_before_obstacle",
         // "travel_max_lift",
@@ -8417,6 +8431,7 @@ void PrintConfigDef::init_extruder_option_keys()
         "retract_restart_wipe_toolchange",
         "retract_speed",
         "seam_gap",
+        "temperature_heat_speed",
         "travel_lift_before_obstacle",
         // "travel_max_lift",
         "travel_ramping_lift",
@@ -11146,6 +11161,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "support_material_interface_layer_height",
 "support_material_layer_expansion",
 "support_material_layer_height",
+"temperature_heat_speed",
 "thin_perimeters_all",
 "thin_perimeters",
 "thin_walls_acceleration",
@@ -11183,6 +11199,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "wipe_only_crossing",
 "wipe_return",
 "wipe_speed",
+"filament_temperature_heat_speed", // filament override
 "filament_wipe_extra_perimeter", // filament override
 "filament_wipe_inside_depth", // filament override
 "filament_wipe_inside_end", // filament override
