@@ -84,7 +84,7 @@ void PresetUpdater::set_installed_vendors(const PresetBundle *preset_bundle) {
                 is_synch = false;
             }
         } else {
-            bool has_cache = boost::filesystem::exists(GUI::into_path(data_dir()) / "cache" / "vendor" / installed_vendor.usable_id());
+            bool has_cache = boost::filesystem::exists(data_path() / "cache" / "vendor" / installed_vendor.usable_id());
             it->second.reset(installed_vendor, true, has_cache);
         }
     }
@@ -115,7 +115,7 @@ void PresetUpdater::load_unused_vendors(std::set<std::string> &vendors_id, const
             if (!vp.config_update_rest.empty()) {
                 is_synch = false;
             }
-            bool has_cache = boost::filesystem::exists(GUI::into_path(data_dir()) / "cache" / "vendor" / vp.usable_id());
+            bool has_cache = boost::filesystem::exists(data_path() / "cache" / "vendor" / vp.usable_id());
             this->all_vendors[vp.id] = VendorSync{vp, is_installed, has_cache};
             assert(this->all_vendors[vp.id].is_installed == is_installed);
             if (vp.config_version != Semver()) {
@@ -128,7 +128,7 @@ void PresetUpdater::load_unused_vendors(std::set<std::string> &vendors_id, const
             // now order by version
             this->all_vendors[vp.id].sort_available();
         } else {
-            bool has_cache = boost::filesystem::exists(GUI::into_path(data_dir()) / "cache" / "vendor" / vp.usable_id());
+            bool has_cache = boost::filesystem::exists(data_path() / "cache" / "vendor" / vp.usable_id());
             it->second.reset(vp, is_installed, has_cache);
         }
     }
@@ -138,8 +138,8 @@ void PresetUpdater::reload_all_vendors() {
     //this->unused_vendors.clear();
     std::set<std::string> vendors_id;
 
-    boost::filesystem::path configuration_path(Slic3r::data_dir());
-    boost::filesystem::path resources_path(Slic3r::resources_dir());
+    boost::filesystem::path configuration_path = Slic3r::data_path();
+    boost::filesystem::path resources_path = Slic3r::resources_path();
     all_vendors.clear();
 
     // read all vendor from configuration
@@ -208,7 +208,7 @@ void PresetUpdater::download_logs(const std::string &vendor_id, std::function<vo
         // note: all_vendors shoudln't change since vendor was stored somewhere elese.
         std::lock_guard<std::mutex> guard(this->callback_update_changelog_mutex);
         changelog_synch = vendor.available_profiles.size();
-        boost::filesystem::path cache_path = GUI::into_path(data_dir()) / "cache" / "vendor" / vendor.profile.usable_id() / "logs";
+        boost::filesystem::path cache_path = data_path() / "cache" / "vendor" / vendor.profile.usable_id() / "logs";
         boost::filesystem::create_directories(cache_path);
         // for each tag
         for (size_t available_idx = 0; available_idx < vendor.available_profiles.size(); available_idx++) {
@@ -418,7 +418,7 @@ void PresetUpdater::sync_async(std::function<void(int)> callback_for_after_updat
 
 void PresetUpdater::update_vendor(VendorSync &vendor, bool force) {
     // reuse
-    boost::filesystem::path cache_path = GUI::into_path(data_dir()) / "cache" / "vendor" / vendor.profile.usable_id() / (vendor.profile.usable_id() + "_tags.json");
+    boost::filesystem::path cache_path = data_path() / "cache" / "vendor" / vendor.profile.usable_id() / (vendor.profile.usable_id() + "_tags.json");
     if (boost::filesystem::exists(cache_path) && !force) {
         std::time_t last_mod  = boost::filesystem::last_write_time(cache_path);
         std::time_t now = std::time(nullptr);
@@ -442,7 +442,7 @@ void PresetUpdater::update_vendor(VendorSync &vendor, bool force) {
         end_updating();
         return;
     }
-    boost::filesystem::path cache_dir = GUI::into_path(data_dir()) / "cache" / "vendor" / vendor.profile.usable_id();
+    boost::filesystem::path cache_dir = data_path() / "cache" / "vendor" / vendor.profile.usable_id();
     boost::filesystem::create_directories(cache_dir);
     // create url to get tags from github
     std::string url(VendorProfile::get_http_url_rest(vendor.profile.config_update_rest) + "/tags?per_page=100;page=1");
@@ -714,7 +714,7 @@ void PresetUpdater::install_vendor(const std::string &vendor_id,
         // read it with models
         if (vendor.profile.models.empty()) {
             assert(vendor.is_installed);
-            vendor.profile = VendorProfile::from_ini(GUI::into_path(data_dir()) / "vendor" / (vendor.profile.id + ".ini"), true);
+            vendor.profile = VendorProfile::from_ini(data_path() / "vendor" / (vendor.profile.id + ".ini"), true);
             assert(!vendor.profile.models.empty());
         }
         // update appconfig : remove unfindable printers
@@ -823,14 +823,14 @@ bool copy_file_and_icons(boost::filesystem::path dir_in, boost::filesystem::path
 
 std::string VendorSync::install_vendor_config(const VendorAvailable &to_install, PresetUpdater& api_slot) {
     // rename current venddor file (if any)
-    boost::filesystem::path vendor_file = GUI::into_path(data_dir()) / "vendor" / (this->profile.id + ".ini");
+    boost::filesystem::path vendor_file = data_path() / "vendor" / (this->profile.id + ".ini");
     assert(!this->is_installed || boost::filesystem::exists(vendor_file));
     // get new file
     if (!to_install.local_file.empty() && boost::filesystem::exists(to_install.local_file)) {
         // file in resource directory
         boost::filesystem::path new_vendor_file(to_install.local_file);
         assert(new_vendor_file.stem() == profile.id);
-        bool copy_okay = copy_file_and_icons(new_vendor_file.parent_path(), GUI::into_path(data_dir()) / "vendor", new_vendor_file.stem().string(), true);
+        bool copy_okay = copy_file_and_icons(new_vendor_file.parent_path(), data_path() / "vendor", new_vendor_file.stem().string(), true);
         if (!copy_okay) {
             return _u8L(ERROR_MSG_UNABLE_COPY_CONFIG);
         }
@@ -840,11 +840,11 @@ std::string VendorSync::install_vendor_config(const VendorAvailable &to_install,
         std::string directory_name = profile.id+"-"+to_install.tag;
         directory_name = std::regex_replace(directory_name, std::regex("[^0-9a-zA-Z_\\-.]"), "-");
         // download zip
-        boost::filesystem::path temp_dir = GUI::into_path(data_dir()) / "cache" / "vendor" / this->profile.usable_id();
+        boost::filesystem::path temp_dir = data_path() / "cache" / "vendor" / this->profile.usable_id();
         boost::filesystem::path root_dir = temp_dir / directory_name;
         if (!boost::filesystem::exists(root_dir)) {
             boost::filesystem::create_directories(temp_dir);
-            boost::filesystem::path download_zip_file(data_dir());
+            boost::filesystem::path download_zip_file = data_path();
             download_zip_file = download_zip_file / "cache" / "vendor" / this->profile.usable_id() / (this->profile.usable_id() + ".zip");
             if (boost::filesystem::exists(download_zip_file)) {
                 boost::filesystem::remove(download_zip_file);
@@ -937,7 +937,7 @@ std::string VendorSync::install_vendor_config(const VendorAvailable &to_install,
                                     if (!p) {
                                         return _u8L("Unable to open the preset zip. Maybe the download is corrupted");
                                     }
-                                    FILE *file_to_write = fopen(out_path.string().c_str(), "wb");
+                                    FILE *file_to_write = boost::nowide::fopen(out_path.string().c_str(), "wb");
                                     if (file_to_write == nullptr) {
                                         BOOST_LOG_TRIVIAL(error) << "Fail to unzip downloaded config zip.";
                                         return _u8L("Unable to write into the hard disk drive.");
@@ -955,7 +955,7 @@ std::string VendorSync::install_vendor_config(const VendorAvailable &to_install,
                 }
                 // copy the file & icons
                 assert(boost::filesystem::exists(root_dir));
-                bool copy_okay = copy_file_and_icons(root_dir / "profiles", GUI::into_path(data_dir()) / "vendor",
+                bool copy_okay = copy_file_and_icons(root_dir / "profiles", data_path() / "vendor",
                                                      this->profile.id, true);
                 if (!copy_okay) {
                     return _u8L(ERROR_MSG_UNABLE_COPY_CONFIG);
@@ -965,7 +965,8 @@ std::string VendorSync::install_vendor_config(const VendorAvailable &to_install,
             //already downloaded
             // copy the file & icons
             assert(boost::filesystem::exists(root_dir));
-            bool copy_okay = copy_file_and_icons(root_dir / "profiles", GUI::into_path(data_dir()) / "vendor",
+            assert(boost::filesystem::exists(root_dir / "profiles"));
+            bool copy_okay = copy_file_and_icons(root_dir / "profiles", data_path() / "vendor",
                                                     this->profile.id, true);
             if (!copy_okay) {
                 return _u8L(ERROR_MSG_UNABLE_COPY_CONFIG);
@@ -973,7 +974,7 @@ std::string VendorSync::install_vendor_config(const VendorAvailable &to_install,
         }
     }
     // refresh this
-    VendorProfile vp = VendorProfile::from_ini(GUI::into_path(data_dir()) / "vendor" / (this->profile.id + ".ini"), true);
+    VendorProfile vp = VendorProfile::from_ini(data_path() / "vendor" / (this->profile.id + ".ini"), true);
     this->is_installed = true;
     this->profile = vp;
     this->can_upgrade = !available_profiles.empty() && available_profiles.front().config_version > profile.config_version;
@@ -982,7 +983,7 @@ std::string VendorSync::install_vendor_config(const VendorAvailable &to_install,
 
 bool VendorSync::uninstall_vendor_config() {
     // move from vendor to cache
-    bool move_okay = copy_file_and_icons(GUI::into_path(data_dir()) / "vendor", GUI::into_path(data_dir()) / "cache" / "vendor" / this->profile.usable_id(), this->profile.usable_id(), false);
+    bool move_okay = copy_file_and_icons(data_path() / "vendor", data_path() / "cache" / "vendor" / this->profile.usable_id(), this->profile.usable_id(), false);
     if (!move_okay) {
         return false;
     }
@@ -997,7 +998,7 @@ bool VendorSync::uninstall_vendor_config() {
 bool VendorSync::clear_cache() {
     assert(has_cache);
     // remove cache
-    size_t nbdel = boost::filesystem::remove_all(GUI::into_path(data_dir()) / "cache" / "vendor" / this->profile.usable_id());
+    size_t nbdel = boost::filesystem::remove_all(data_path() / "cache" / "vendor" / this->profile.usable_id());
     return nbdel > 0;
 }
 
@@ -1110,8 +1111,8 @@ void PresetUpdater::download_new_repo(const std::string &rest_url, std::function
                     boost::property_tree::read_ini(body_stream, root);
                     VendorProfile vp = VendorProfile::from_ini(root, id, false);
                     // save it
-                    boost::filesystem::create_directories(GUI::into_path(data_dir()) / "cache" / "vendor" / vp.usable_id());
-                    boost::filesystem::path file_path = GUI::into_path(data_dir()) / "cache" / "vendor" / vp.usable_id() / (vp.usable_id() + ".ini");
+                    boost::filesystem::create_directories(data_path() / "cache" / "vendor" / vp.usable_id());
+                    boost::filesystem::path file_path = data_path() / "cache" / "vendor" / vp.usable_id() / (vp.usable_id() + ".ini");
                     bool no_error = true;
                     try {
                         std::ofstream file_out;
@@ -1162,8 +1163,8 @@ void PresetUpdater::download_new_repo(const std::string &rest_url, std::function
                         vp = VendorProfile::from_ini(root, id, false);
                     }
                     // save it
-                    boost::filesystem::create_directories(GUI::into_path(data_dir()) / "cache" / "vendor" / vp.usable_id());
-                    boost::filesystem::path file_path = GUI::into_path(data_dir()) / "cache" / "vendor" / vp.usable_id() / (vp.usable_id() + ".ini");
+                    boost::filesystem::create_directories(data_path() / "cache" / "vendor" / vp.usable_id());
+                    boost::filesystem::path file_path = data_path() / "cache" / "vendor" / vp.usable_id() / (vp.usable_id() + ".ini");
                     try {
                         std::ofstream file_out;
                         file_out.open(file_path.string().c_str(), std::ofstream::out | std::ofstream::trunc);
@@ -1305,7 +1306,7 @@ void PresetUpdater::upgrade_all_installed_vendors(std::function<void(const std::
                 // read it with models
                 if (vendor.profile.models.empty()) {
                     assert(vendor.is_installed);
-                    vendor.profile = VendorProfile::from_ini(GUI::into_path(data_dir()) / "vendor" / (vendor.profile.id + ".ini"), true);
+                    vendor.profile = VendorProfile::from_ini(data_path() / "vendor" / (vendor.profile.id + ".ini"), true);
                     assert(!vendor.profile.models.empty());
                 }
                 // update appconfig : remove unfindable printers

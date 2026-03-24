@@ -37,11 +37,12 @@ extern void enforce_thread_count(std::size_t count);
 extern size_t total_physical_memory();
 
 // Set a path with GUI resource files.
-void set_var_dir(const std::string &path);
+void set_icons_dir(const std::string &path);
 // Return a full path to the GUI resource files.
-const std::string& var_dir();
+const std::string& icons_dir();
+const boost::filesystem::path& icons_path();
 // Return a full resource path for a file_name.
-std::string var(const std::string &file_name);
+std::string get_icon_file(const std::string &file_name);
 
 // Set the path of the binary that execute this code
 void set_binary_file(const boost::filesystem::path &path);
@@ -58,11 +59,13 @@ const boost::filesystem::path& install_path();
 void set_resources_dir(const std::string &path);
 // Return a full path to the resources directory.
 const std::string& resources_dir();
+const boost::filesystem::path& resources_path();
 
 // Set a path with GUI localization files.
 void set_local_dir(const std::string &path);
 // Return a full path to the localization directory.
 const std::string& localization_dir();
+const boost::filesystem::path& localization_path();
 
 // Set a path with shapes gallery files.
 void set_sys_shapes_dir(const std::string &path);
@@ -81,6 +84,7 @@ const std::string& custom_gcodes_dir();
 void set_data_dir(const std::string &path);
 // Return a full path to the GUI resource files.
 const std::string& data_dir();
+const boost::filesystem::path& data_path();
 bool has_data_dir();
 
 // Format an output path for debugging purposes.

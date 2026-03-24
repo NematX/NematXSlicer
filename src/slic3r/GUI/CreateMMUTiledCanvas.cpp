@@ -298,7 +298,7 @@ namespace GUI {
 
     void BasicDrawPane::loadImage(std::string path) {
         //wxImage image;
-        //if (!image.LoadFile(Slic3r::GUI::from_u8(Slic3r::var("C:/Users/VR-REMI/Downloads/1649109736.png")), wxBITMAP_TYPE_PNG) ||
+        //if (!image.LoadFile(Slic3r::GUI::from_u8(Slic3r::get_icon_file("C:/Users/VR-REMI/Downloads/1649109736.png")), wxBITMAP_TYPE_PNG) ||
         //    image.GetWidth() == 0 || image.GetHeight() == 0)
         //    return ;
         if (boost::filesystem::exists(path))

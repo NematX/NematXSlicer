@@ -332,7 +332,7 @@ bool GLTexture::load_from_svg_files_as_sprites_array(const std::vector<std::stri
         }
     }
 
-    std::string out_filename = resources_dir() + "/icons/test_" + std::to_string(pass) + ".png";
+    std::string out_filename = (icons_path() / (std::string("test_") + std::to_string(pass) + ".png")).string();
     output.SaveFile(out_filename, wxBITMAP_TYPE_PNG);
 #endif // 0
 

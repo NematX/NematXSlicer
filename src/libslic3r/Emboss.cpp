@@ -1100,7 +1100,7 @@ std::unique_ptr<FontFile> Emboss::create_font_file(
 std::unique_ptr<FontFile> Emboss::create_font_file(const char *file_path)
 {
     BOOST_LOG_TRIVIAL(debug) << "open font file: " << file_path;
-    FILE *file = std::fopen(file_path, "rb");
+    FILE *file = boost::nowide::fopen(file_path, "rb");
     if (file == nullptr) {
         assert(false);
         BOOST_LOG_TRIVIAL(error) << "Couldn't open " << file_path << " for reading.";

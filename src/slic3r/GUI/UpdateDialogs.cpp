@@ -848,9 +848,9 @@ void UpdateConfigDialog::build_ui() {
         boost::filesystem::path path(into_path(dlg.GetPath()));
         try {
             // copy into cache
-            boost::filesystem::copy(path, into_path(data_dir()) / "cache" / "vendor" / path.filename());
+            boost::filesystem::copy(path, data_path() / "cache" / "vendor" / path.filename());
             //copy icons if found nearby
-            boost::filesystem::path cache_icon_dir = into_path(data_dir()) / "cache" / "vendor" / path.stem();
+            boost::filesystem::path cache_icon_dir = data_path() / "cache" / "vendor" / path.stem();
             boost::filesystem::path local_icon_dir = path.parent_path() / path.stem();
             if (boost::filesystem::exists(local_icon_dir)) {
                 // remove all old

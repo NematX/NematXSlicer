@@ -823,10 +823,10 @@ bool CLI::setup(int argc, char **argv)
     set_install_path(install_path);
     set_binary_file(path_to_binary);
     set_resources_dir(path_resources.string());
-    set_var_dir((path_resources / "icons").string());
+    set_icons_dir((path_resources / "icons").string());
     set_local_dir((path_resources / "localization").string());
     set_sys_shapes_dir((path_resources / "shapes").string());
-    set_custom_gcodes_dir((path_resources / "custom_gcodes").string());
+    //set_custom_gcodes_dir((path_resources / "custom_gcodes").string());
 
     // Parse all command line options into a DynamicConfig.
     // If any option is unsupported, print usage and abort immediately.
@@ -865,8 +865,10 @@ bool CLI::setup(int argc, char **argv)
         for (const t_optiondef_map::value_type &optdef : *options)
             m_config.option(optdef.first, true);
 
-    set_data_dir(m_config.opt_string("datadir"));
-    
+    if (std::string datadir = m_config.opt_string("datadir"); !datadir.empty()) {
+        set_data_dir(boost::filesystem::absolute(datadir).string());
+    }
+
     //FIXME Validating at this stage most likely does not make sense, as the config is not fully initialized yet.
     if (!validity.empty()) {
         boost::nowide::cerr << "error: " << validity << std::endl;

@@ -417,7 +417,12 @@ std::string into_u8(const wxString &str)
 wxString from_path(const boost::filesystem::path &path)
 {
 #ifdef _WIN32
-	return wxString(path.string<std::wstring>());
+    std::wstring wdir = path.string<std::wstring>();
+    const std::wstring prefix = L"\\\\?\\";
+    if (wdir.rfind(prefix, 0) == 0) { // starts with prefix
+        wdir.erase(0, prefix.length());
+    }
+	return wxString(wdir);
 #else
 	return from_u8(path.string<std::string>());
 #endif
@@ -425,7 +430,27 @@ wxString from_path(const boost::filesystem::path &path)
 
 boost::filesystem::path into_path(const wxString &str)
 {
-	return boost::filesystem::path(str.wx_str());
+    boost::filesystem::path fixpath(str.wx_str());
+    // note: lexically_normal() already do make_preferred()
+    fixpath.lexically_normal();
+#ifdef _WIN32
+    // on windows, we need to force long path support when possible/needed, by appedning the R"(\\?\)" to force long path
+    if (!fixpath.empty() && fixpath.string().front() != '\\' && (fixpath.is_absolute() || fixpath.size() > 250)) {
+        if (boost::filesystem::exists(fixpath)) {
+            // if the path exists, we can canonicalize it and add the long path prefix, which will resolve any ".." or
+            // "." in the path and give us a proper absolute path.
+            fixpath = R"(\\?\)" + boost::filesystem::canonical(fixpath).string();
+        } else if (boost::filesystem::exists(fixpath.parent_path())) {
+            // if the path doesn't exist, but the parent path exists, we can canonicalize the parent path and then
+            // append the filename
+            fixpath = R"(\\?\)" + (boost::filesystem::canonical(fixpath.parent_path()) / fixpath.filename()).string();
+        } else if (fixpath.is_absolute()) {
+            // if the path doesn't exist, we can't canonicalize it, so we just add the long path prefix and hope for the best
+            fixpath = R"(\\?\)" + fixpath.string();
+        }
+    }
+#endif
+    return fixpath;
 }
 
 void about()

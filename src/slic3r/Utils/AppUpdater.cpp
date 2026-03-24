@@ -165,7 +165,7 @@ AppUpdater::priv::priv() :
 #ifdef __linux__
     , m_default_dest_folder (boost::filesystem::path("/tmp"))
 #else
-	, m_default_dest_folder (boost::filesystem::path(data_dir()) / "cache")
+	, m_default_dest_folder (Slic3r::data_path() / "cache")
 #endif //_WIN32
 {	
 	boost::filesystem::path downloads_path = boost::filesystem::path(get_downloads_path());
@@ -233,7 +233,7 @@ boost::filesystem::path AppUpdater::priv::download_file(const DownloadAppData& d
 	tmp_path += format(".%1%%2%", std::to_string(GUI::GLCanvas3D::timestamp_now()), ".download");
 	FILE* file;
 	wxString temp_path_wstring(tmp_path.wstring());
-	file = fopen(temp_path_wstring.c_str(), "wb");
+	file = boost::nowide::fopen(temp_path_wstring.c_str(), "wb");
 	assert(file != NULL);
 	if (file == NULL) {
 	    std::string line1 = GUI::format(_u8L("Download from %1% couldn't start:"), data.url);

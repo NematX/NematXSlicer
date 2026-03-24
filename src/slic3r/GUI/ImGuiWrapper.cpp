@@ -1714,7 +1714,7 @@ std::vector<unsigned char> ImGuiWrapper::load_svg(const std::string& bitmap_name
     replaces.add("#2172eb", color_int);
     // as the platter is quite dark, then this replacment is always active
     replaces.add("#808080", "#FFFFFF");
-    NSVGimage* image = BitmapCache::nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
+    NSVGimage* image = BitmapCache::nsvgParseFromFileWithReplace(Slic3r::get_icon_file(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
     if (image == nullptr)
         return empty_vector;
 

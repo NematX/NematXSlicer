@@ -400,7 +400,7 @@ wxBitmapBundle* BitmapCache::from_svg(const std::string& bitmap_name, unsigned t
     color_changes.add(std::string("#ButtonBG"), std::string(has_dark_mode ? "#4E4E4E" : "#828282"));
 
     std::string str;
-    nsvgGetDataFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), str, color_changes);
+    nsvgGetDataFromFileWithReplace(Slic3r::get_icon_file(bitmap_name + ".svg").c_str(), str, color_changes);
     if (str.empty())
         return nullptr;
 
@@ -427,7 +427,7 @@ wxBitmapBundle* BitmapCache::from_png(const std::string& bitmap_name, unsigned w
 
     wxImage image;
     BOOST_LOG_TRIVIAL(debug) << "Loading (load_png) image: '"<<bitmap_name<<"'.png";
-    if (!image.LoadFile(Slic3r::GUI::from_u8(Slic3r::var(bitmap_name + ".png")), wxBITMAP_TYPE_PNG) ||
+    if (!image.LoadFile(Slic3r::GUI::from_u8(Slic3r::get_icon_file(bitmap_name + ".png")), wxBITMAP_TYPE_PNG) ||
         image.GetWidth() == 0 || image.GetHeight() == 0)
         return nullptr;
 
@@ -501,7 +501,7 @@ wxBitmapBundle* BitmapCache::from_png(const std::string& bitmap_name, unsigned w
 //        }
 //    }*/
 //
-//    NSVGimage* image = nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
+//    NSVGimage* image = nsvgParseFromFileWithReplace(Slic3r::get_icon_file(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
 //    if (image == nullptr)
 //        return nullptr;
 //

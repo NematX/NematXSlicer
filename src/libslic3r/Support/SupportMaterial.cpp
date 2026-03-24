@@ -794,7 +794,7 @@ public:
 #if defined(SLIC3R_DEBUG) && ! defined(SUPPORT_USE_AGG_RASTERIZER)
     void serialize(const std::string &path)
     {
-        FILE *file = ::fopen(path.c_str(), "wb");
+        FILE *file = boost::nowide::fopen(path.c_str(), "wb");
         ::fwrite(&m_support_spacing_mm, 8, 1, file);
         ::fwrite(&m_support_angle, 8, 1, file);
         uint32_t n_polygons = m_support_polygons->size();
@@ -834,7 +834,7 @@ public:
     // Deserialization constructor
     bool deserialize_(const std::string &path, int which = -1)
     {
-        FILE *file = ::fopen(path.c_str(), "rb");
+        FILE *file = boost::nowide::fopen(path.c_str(), "rb");
         if (file == nullptr)
             return false;
 

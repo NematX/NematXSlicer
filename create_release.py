@@ -122,7 +122,7 @@ def handle_artifact(json_artifact):
 			resp = requests.get(json_artifact["archive_download_url"], headers={'Authorization': 'token ' + github_auth_token,}, allow_redirects=True);
 			print("win: " +str(resp));
 			z = zipfile.ZipFile(io.BytesIO(resp.content))
-			base_name = release_path+"/"+prefix+"_" +program_name+"_"+version+"_win64_"+date_str;
+			base_name = release_path+"/"+program_name+"_"+version+"_win64_"+date_str;
 			z.extractall(base_name);
 			try:
 				ret = subprocess.check_output([path_7zip, "a", "-tzip", base_name+".zip", base_name]);

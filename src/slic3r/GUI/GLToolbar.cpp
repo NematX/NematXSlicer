@@ -184,11 +184,10 @@ bool GLToolbar::init(const BackgroundTexture::Metadata& background_texture)
     if (m_background_texture.texture.get_id() != 0)
         return true;
 
-    std::string path = resources_dir() + "/icons/";
     bool res = false;
 
     if (!background_texture.filename.empty())
-        res = m_background_texture.texture.load_from_file(path + background_texture.filename, false, GLTexture::SingleThreaded, false);
+        res = m_background_texture.texture.load_from_file((icons_path() / background_texture.filename).string(), false, GLTexture::SingleThreaded, false);
 
     if (res)
         m_background_texture.metadata = background_texture;
@@ -201,8 +200,7 @@ bool GLToolbar::init_arrow(const std::string& filename)
     if (m_arrow_texture.get_id() != 0)
         return true;
 
-    const std::string path = resources_dir() + "/icons/";
-    return (!filename.empty()) ? m_arrow_texture.load_from_svg_file(path + filename, false, false, false, 512) : false;
+    return (!filename.empty()) ? m_arrow_texture.load_from_svg_file((icons_path() / filename).string(), false, false, false, 512) : false;
 }
 
 GLToolbar::Layout::EType GLToolbar::get_layout_type() const
@@ -1297,12 +1295,11 @@ void GLToolbar::render_vertical(const GLCanvas3D& parent)
 
 bool GLToolbar::generate_icons_texture()
 {
-    std::string path = resources_dir() + "/icons/";
     std::vector<std::string> filenames;
     for (GLToolbarItem* item : m_items) {
         const std::string& icon_filename = item->get_icon_filename();
         if (!icon_filename.empty())
-            filenames.push_back(path + icon_filename);
+            filenames.push_back((icons_path() / icon_filename).string());
     }
 
     std::vector<std::pair<int, bool>> states;

@@ -187,9 +187,9 @@ void FileGet::priv::get_perform()
 	FILE* file;
 	// open file for writting
 	if (m_written == 0)
-		file = fopen(temp_path_wstring.c_str(), "wb");
+		file = boost::nowide::fopen(temp_path_wstring.c_str(), "wb");
 	else 
-		file = fopen(temp_path_wstring.c_str(), "ab");
+		file = boost::nowide::fopen(temp_path_wstring.c_str(), "ab");
 
 	//assert(file != NULL);
 	if (file == NULL) {
