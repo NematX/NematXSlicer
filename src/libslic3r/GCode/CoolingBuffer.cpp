@@ -1292,6 +1292,8 @@ std::string CoolingBuffer::apply_layer_cooldown(
                 if (line->type & (CoolingLine::TYPE_ADJUSTABLE | CoolingLine::TYPE_ADJUSTABLE_EMPTY | CoolingLine::TYPE_ADJUSTABLE_MAYBE | CoolingLine::TYPE_WIPE)) {
                     // Process comments, remove ";_EXTRUDE_SET_SPEED", ";_EXTRUDE_SET_SPEED_MAYBE", ";_WIPE"
                     std::string comment(end, line_end);
+                    if (comment.back() == '\n')
+                        comment.pop_back();
                     if (line->type & (CoolingLine::TYPE_ADJUSTABLE_MAYBE)) {
                         boost::replace_all(comment, ";_EXTRUDE_SET_SPEED_MAYBE", "");
                     } else {
@@ -1299,9 +1301,9 @@ std::string CoolingBuffer::apply_layer_cooldown(
                     }
                     if (line->type & CoolingLine::TYPE_WIPE)
                         boost::replace_all(comment, ";_WIPE", "");
-                    assert((comment.empty() && new_gcode.back() == '\n') ||
-                           (!comment.empty() && comment.back() == '\n' && new_gcode.back() != '\n'));
                     new_gcode += comment;
+                    if (new_gcode.back() != '\n')
+                        new_gcode += '\n';
                 } else {
                     assert((new_gcode.back() == '\n' && line_end == end) ||
                            (new_gcode.back() != '\n' && (*(line_end-1)) == '\n'));
