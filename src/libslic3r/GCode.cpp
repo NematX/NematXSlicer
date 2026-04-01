@@ -1600,13 +1600,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     m_label_objects.init(print);
     BoundingBoxf3 global_bounding_box;
     file.write(m_label_objects.all_objects_header(global_bounding_box, scale_d(print.config().resolution_internal.value)));
-    std::string test("test:\"lol,mrd,ptdr\"");
-    for (int i = 0; test.size() < 4000; i++) {
-        test = test + test;
-    }
-    file.write("\n; ");
-    file.write(test);
-    file.write("\n\n");
+
     // Update output variables after the extruders were initialized.
     this->m_placeholder_parser_integration.init(print.config(), m_writer);
     
