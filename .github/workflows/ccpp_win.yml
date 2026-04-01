@@ -157,7 +157,7 @@ jobs:
     - name: Generate installer version
       shell: powershell
       run: |
-        $fullVersion = (Get-Content version.inc | Select-String -Pattern 'set\(SLIC3R_RC_VERSION_DOTS \"(.*?)\"\)' | ForEach-Object { $_.Matches.Groups[1].Value })
+        $fullVersion = (Get-Content version.inc | Select-String -Pattern 'set\(SLIC3R_VERSION_FULL \"(.*?)\"\)' | ForEach-Object { $_.Matches.Groups[1].Value })
         $dateSuffix = (Get-Date -Format 'yyMMdd')
         $env:InstallerVersion = "$fullVersion$dateSuffix" -replace '\.[0-9]([+-].+)?', '.0'
         echo "InstallerVersion=$env:InstallerVersion" >> $env:GITHUB_ENV
