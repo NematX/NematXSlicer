@@ -48,6 +48,8 @@ public:
 	void cancel();
 	bool cancel_callback();
 
+    static void clean();
+
 	std::string get_default_dest_folder();
 
 	static std::string get_filename_from_url(const std::string& url);
