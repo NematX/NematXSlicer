@@ -70,7 +70,7 @@ def get_version():
 	version = "0.0.0.0";
 	tag="";
 	for line in lines:
-		if("set(SLIC3R_RC_VERSION_DOTS" in line):
+		if("set(SLIC3R_VERSION_FULL" in line):
 			print("found1: " +line)
 			elems = line.split("\"");
 			version = elems[1];
@@ -103,6 +103,8 @@ def handle_artifact(json_artifact):
 	global first_day
 	
 	if json_artifact["workflow_run"]["head_branch"] == branch_name:
+		print("artifact: " , json_artifact["name"]);
+		print("target: ", prefix , "_" ,program_name , "-win64");
 		if first_day == "":
 			print("encounter the first " + branch_name + " at " + json_artifact["created_at"][:10]);
 			first_day = json_artifact["created_at"][:10];
@@ -214,6 +216,7 @@ while need_more and page < 10:
 		artifacts = json.loads(f.read().decode('utf-8'));
 		print("there is "+ str(artifacts["total_count"])+ " artifacts in the repo");
 		for entry in artifacts["artifacts"]:
+			print("target: ", entry["name"]);
 			need_more = handle_artifact(entry);
 			if not need_more:
 				break;
