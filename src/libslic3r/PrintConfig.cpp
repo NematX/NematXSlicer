@@ -7320,13 +7320,12 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInts { 200 });
 
     def = this->add("temperature_heat_speed", coFloats);
-    def->label = L("Other layers");
-    def->full_label = L("Temperature heating speed");
+    def->label = L("heating speed");
+    def->full_label = L("Extruder heating speed");
     def->category = OptionCategory::extruders;
-    def->tooltip = L(
-        "As the extruder takes time to heat up, when a toolchange is approchaing, the next extruder that may be at "
-        "parking temp can heat up in advance to be ready for the higher temp more quickly."
-        "\nSet to 0 to deactivate.");
+    def->tooltip = L("When a tool change is approaching, the next extruder that may be at parking temperature can "
+                     "heat up in advance to be ready for the higher temperature more quickly."
+                     "\nSet to 0 to deactivate.");
     def->sidetext = L("°C/s");
     def->min = 0;
     def->mode = comExpert | comSuSi;

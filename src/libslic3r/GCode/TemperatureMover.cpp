@@ -14,24 +14,31 @@ const std::string& TemperatureMover::process_gcode(const std::string& gcode, boo
 {
     m_process_output = "";
 
-    // recompute buffer time to recover from rounding
-    m_buffer_time_size = 0;
-    for (auto &data : m_buffer) {
-        assert(data.time >= 0 && data.time < 1000000 && !std::isnan(data.time));
-        m_buffer_time_size += data.time;
-    }
-
-    if(!gcode.empty())
-        m_parser.parse_buffer(gcode,
-            [this](GCodeReader& reader, const GCodeReader::GCodeLine& line) { /*m_process_output += line.raw() + "\n";*/ this->_process_gcode_line(reader, line); });
-
-    if (flush) {
-        while (!m_buffer.empty()) {
-            write_buffer_data();
+    if (m_max_seconds_delay > 0) {
+        // recompute buffer time to recover from rounding
+        m_buffer_time_size = 0;
+        for (auto &data : m_buffer) {
+            assert(data.time >= 0 && data.time < 1000000 && !std::isnan(data.time));
+            m_buffer_time_size += data.time;
         }
-    }
 
-    return m_process_output;
+        if (!gcode.empty())
+            m_parser.parse_buffer(gcode, [this](GCodeReader &reader, const GCodeReader::GCodeLine &line) {
+                /*m_process_output += line.raw() + "\n";*/
+                this->_process_gcode_line(reader, line);
+            });
+
+        if (flush) {
+            while (!m_buffer.empty()) {
+                write_buffer_data();
+            }
+        }
+
+        return m_process_output;
+    } else {
+        // not activated, skip processing and return the gcode as is.
+        return gcode;
+    }
 }
 
 namespace TemperatureMover_func {
