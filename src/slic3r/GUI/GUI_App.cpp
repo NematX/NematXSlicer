@@ -4265,25 +4265,28 @@ void GUI_App::on_version_read(wxCommandEvent& evt)
     std::optional<Semver> lastest_download = Semver::parse(app_config->get("version_online_seen"));
     std::optional<Semver> current_version = Semver::parse(SLIC3R_VERSION_FULL);
     assert(current_version);
-    if (!version_online || *version_online <= *current_version ||
-        (lastest_download && *version_online <= *lastest_download)) {
-        if (m_app_updater->get_triggered_by_user())
-        {
-            std::string text = (*Semver::parse(into_u8(evt.GetString())) == Semver()) 
-                ? _u8L("Check for application update has failed.")
-                : Slic3r::format(_u8L("You are currently running the latest released version %1%."), evt.GetString());
+    if (m_app_updater->get_triggered_by_user()) {
+        if (!version_online || *version_online <= *current_version) {
+            std::string text = (*Semver::parse(into_u8(evt.GetString())) == Semver()) ?
+                _u8L("Check for application update has failed.") :
+                Slic3r::format(_u8L("You are currently running the latest released version %1%."), current_version->to_string());
 
             if (*Semver::parse(SLIC3R_VERSION) > *Semver::parse(into_u8(evt.GetString())))
-                text = Slic3r::format(_u8L("There are no new released versions online. The latest release version is %1%."), evt.GetString());
+                text = Slic3r::format(
+                    _u8L("There are no new released versions online. The latest release version is %1%."),
+                    evt.GetString());
 
-            this->plater_->get_notification_manager()->push_version_notification(NotificationType::NoNewReleaseAvailable
-                , NotificationManager::NotificationLevel::RegularNotificationLevel
-                , text
-                , std::string()
-                , std::function<bool(wxEvtHandler*)>()
-            );
+            this->plater_->get_notification_manager()
+                ->push_version_notification(NotificationType::NoNewReleaseAvailable,
+                                            NotificationManager::NotificationLevel::RegularNotificationLevel, text,
+                                            std::string(), std::function<bool(wxEvtHandler *)>());
+            return;
         }
-        return;
+    } else {
+        if (!version_online || *version_online <= *current_version ||
+            (lastest_download && *version_online <= *lastest_download)) {
+            return;
+        }
     }
     // notification
     /*
@@ -4348,6 +4351,7 @@ void GUI_App::app_updater(bool from_user)
 
 void GUI_App::app_version_check(bool from_user)
 {
+    AppUpdater::clean();
     if (from_user) {
         if (m_app_updater->get_download_ongoing()) {
             MessageDialog msgdlg(nullptr, _L("Downloading of the new version is in progress. Do you want to continue?"), _L("Notice"), wxYES_NO);

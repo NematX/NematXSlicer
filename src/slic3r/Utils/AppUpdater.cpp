@@ -791,6 +791,7 @@ bool replace_me(DownloadAppData input_data, const boost::filesystem::path &archi
 }
 
 void fix_replace_me() {
+#ifdef _WIN32
     //get our directory
     boost::filesystem::path my_dir = binary_file().parent_path();
     boost::filesystem::path temp_dir = my_dir / SLIC3R_VERSION_FULL ".old";
@@ -805,8 +806,12 @@ void fix_replace_me() {
     if (boost::filesystem::exists(temp_dir / "resources")) {
         boost::filesystem::rename(temp_dir / "resources", my_dir / "resources");
     }
-
+#else
+    assert(false);
+#endif
 }
+
+
 
 AppUpdater::AppUpdater()
 	:p(new priv())
@@ -820,6 +825,21 @@ AppUpdater::~AppUpdater()
 		p->m_cancel = true;
 		p->m_thread.join();
 	}
+}
+
+//clean "old" after a in-place upgrade
+void AppUpdater::clean() {
+#ifdef _WIN32
+    //get our directory
+    boost::filesystem::path my_dir = binary_file().parent_path();
+    // rename back all dll & exe
+    for (const boost::filesystem::directory_entry& file_entry : boost::filesystem::directory_iterator(my_dir)) {
+        if (file_entry.status().type() == boost::filesystem::file_type::regular_file
+                && file_entry.path().extension() == ".old") {
+            boost::filesystem::remove(file_entry.path());
+        }
+    }
+#endif
 }
 
 void AppUpdater::sync_download()
@@ -868,7 +888,7 @@ void AppUpdater::sync_download()
 #ifdef _WIN32
                 //windows
                 if (name.find("win") != std::string::npos && 
-                    (!input_data.replace_current ? name.find("zip") != std::string::npos : name.find("msi") != std::string::npos))
+                    (input_data.replace_current ? name.find("zip") != std::string::npos : name.find("msi") != std::string::npos))
 #elif __APPLE__
                 //macos
 #if defined(__arm__) || defined(_M_ARM)
