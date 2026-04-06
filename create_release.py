@@ -199,13 +199,13 @@ if(not os.path.isdir("./releases")):
 base_path = "./releases/"+branch_name+"_release_"+str(version);
 release_path = base_path;
 
-# find a non-existing directory name
+# find a directory that either doesn't exist OR is empty
 counter = 2;
-while os.path.isdir(release_path):
+while os.path.isdir(release_path) and os.listdir(release_path):
 	release_path = f"{base_path}_{counter}";
 	counter += 1;
-
 os.mkdir(release_path);
+
 #urllib.urlretrieve ("https://api.github.com/repos/"+repo+"/actions/artifacts", release_path+"artifacts.json");
 need_more = True
 page = 1
@@ -219,4 +219,4 @@ while need_more and page < 10:
 				break;
 	page = page + 1;
 
-print("DONT FORGET TO PUSH YOUR MASTER");
+print("DONT FORGET TO PUSH YOUR MAIN/MASTER BRANCH");
