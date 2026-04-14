@@ -1918,6 +1918,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     m_temperature_mover.release();
     m_fan_mover.release();
     m_pressure_model.release();
+    m_z_to_obstacles.clear();
     file.set_only_ascii(print.config().gcode_ascii.value);
 
     // resets analyzer's tracking data
@@ -2674,73 +2675,13 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                         if (!layers_to_print_range.empty() && it_tool_ordering->first_extruder() != uint16_t(-1)) {
                             for (ObjectsLayerToPrint &layer_group : layers_to_print_range) {
                                 bool print_in_parallel_mode = false;
-                                std::cout<<"\nprinting group with:\n";
-                                for (ObjectLayerToPrint &obj_layer : layer_group) {
-                                    std::cout << " - " << obj_layer.layer()->unscaled_print_z() << " ; "
-                                              << (obj_layer.allow_wipe_tower ? "withWP" : "")<< " with islands";
-                                    std::set<uint16_t> extruders;
-                                    if (obj_layer.object_layer) {
-                                        std::cout << " with obj islands";
-                                        for (auto lsi_ptr : obj_layer.islands) {
-                                            if (obj_layer.object_layer == lsi_ptr->layer()) {
-                                                for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
-                                                    if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
-                                                        std::cout << " " << i;
-                                                        break;
-                                                    }
-                                                }
-                                            } else {
-                                                assert(obj_layer.support_layer == lsi_ptr->layer());
-                                            }
-                                            for (auto &lri_ptr : lsi_ptr->regions_islands()) {
-                                                extruders.insert(lri_ptr->extruder_id());
-                                            }
-                                        }
-                                        std::cout << " / " << obj_layer.object_layer->islands().size();
-                                    }
-                                    if(obj_layer.support_layer) {
-                                        std::cout<< " with supp islands";
-                                        for (auto lsi_ptr : obj_layer.islands) {
-                                            if (obj_layer.support_layer == lsi_ptr->layer()) {
-                                                for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
-                                                    if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
-                                                        std::cout << " " << i;
-                                                        break;
-                                                    }
-                                                }
-                                            } else {
-                                                assert(obj_layer.object_layer == lsi_ptr->layer());
-                                            }
-                                            for (auto &lri_ptr : lsi_ptr->regions_islands()) {
-                                                extruders.insert(lri_ptr->extruder_id());
-                                            }
-                                        }
-                                        std::cout << " / " << obj_layer.support_layer->islands().size();
-                                    }
-                                    std::cout << " obj:" << obj_layer.layer()->object()->id().id;
-                                    std::cout << " extruders:";
-                                    for (uint16_t extr : extruders) {
-                                        std::cout << " " << extr;
-                                    }
-                                    std::cout << ":\n";
-                                }
+                                // printing group";
                                 assert(!layer_group.empty());
                                 this->set_origin(unscale((*it_print_object_instance)->shift));
 
                                 if (has_wipe_tower && ((previous_wipe_tower_z + height_step_range <
                                         layer_group.back().layer()->scaled_print_z() && end_wipe_tower_z > previous_wipe_tower_z) ||
                                     layer_group.front().allow_wipe_tower)) {
-                                    //std::cout << "WT: " << (previous_wipe_tower_z + height_step_range) << " < "
-                                    //          << layer_group.back().layer()->scaled_print_z() << " && "
-                                    //          << end_wipe_tower_z << " > " << previous_wipe_tower_z
-                                    //          << ") || " << layer_group.front().allow_wipe_tower
-                                    //          << "\n";
-                                    //if (layer_group.front().allow_wipe_tower) {
-                                    //    for (ObjectLayerToPrint &obj_layer : layer_group) {
-                                    //        assert(obj_layer.allow_wipe_tower);
-                                    //        assert(obj_layer.layer()->scaled_print_z() == layer_group.back().layer()->scaled_print_z());
-                                    //    }
-                                    //}
                                     // print wipetower until max layer_group.front() + height_step_range
                                     // ObjectsLayerToPrint wt_layers_to_print;
                                     std::vector<std::pair<coord_t, ObjectsLayerToPrint>> wt_layers_to_print;
@@ -2839,80 +2780,19 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                                                 }
                                             }
                                         }
-                                        //std::cout<<"print_in_parallel_mode\n";
                                         wt_layers_to_print.emplace_back(layer_group.front().layer()->scaled_print_z(),
                                                                         layer_group);
                                         print_in_parallel_mode = true;
                                     }
-                                    // if (!wt_layers_to_print.empty()) {
-                                    // ToolOrdering custom_tool_ordering(object, wt_layers_to_print,
-                                    // this->last_extruder(initial_extruder_id));
-                                    std::cout<<"PROCESS IN // list with:\n";
-                                    for (auto &pair : wt_layers_to_print) {
-                                        std::cout << "*GROUP"<< " :\n";
-                                        for (ObjectLayerToPrint &obj_layer : pair.second) {
-                                            std::cout << " - " << obj_layer.layer()->unscaled_print_z() << " ; "
-                                                      << (obj_layer.allow_wipe_tower ? "withWP" : "")
-                                                      << " with islands";
-                                            std::set<uint16_t> extruders;
-                                            if (obj_layer.islands.size() == 1 &&
-                                                *obj_layer.islands.begin() == nullptr) {
-                                                std::cout << " WT island";
-                                            } else {
-                                                if (obj_layer.object_layer) {
-                                                    std::cout << " with obj islands";
-                                                    for (auto lsi_ptr : obj_layer.islands) {
-                                                        if (obj_layer.object_layer == lsi_ptr->layer()) {
-                                                            for (size_t i = 0; i < lsi_ptr->layer()->islands().size();
-                                                                 i++) {
-                                                                if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
-                                                                    std::cout << " " << i;
-                                                                    break;
-                                                                }
-                                                            }
-                                                        } else {
-                                                            assert(obj_layer.support_layer == lsi_ptr->layer());
-                                                        }
-                                                        for (auto &lri_ptr : lsi_ptr->regions_islands()) {
-                                                            extruders.insert(lri_ptr->extruder_id());
-                                                        }
-                                                    }
-                                                    std::cout << " / " << obj_layer.object_layer->islands().size();
-                                                }
-                                                if (obj_layer.support_layer) {
-                                                    std::cout << " with supp islands";
-                                                    for (auto lsi_ptr : obj_layer.islands) {
-                                                        if (obj_layer.support_layer == lsi_ptr->layer()) {
-                                                            for (size_t i = 0; i < lsi_ptr->layer()->islands().size();
-                                                                 i++) {
-                                                                if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
-                                                                    std::cout << " " << i;
-                                                                    break;
-                                                                }
-                                                            }
-                                                        } else {
-                                                            assert(obj_layer.object_layer == lsi_ptr->layer());
-                                                        }
-                                                        for (auto &lri_ptr : lsi_ptr->regions_islands()) {
-                                                            extruders.insert(lri_ptr->extruder_id());
-                                                        }
-                                                    }
-                                                    std::cout << " / " << obj_layer.support_layer->islands().size();
-                                                }
-                                            }
-                                            std::cout << " obj:" << obj_layer.layer()->object()->id().id;
-                                            std::cout << " extruders:";
-                                            for (uint16_t extr : extruders) {
-                                                std::cout << " " << extr;
-                                            }
-                                            std::cout << ":\n";
-                                        }
-                                    }
+                                    // PROCESS IN // list with
                                     if (!wt_layers_to_print.empty()) {
                                         this->process_layers(print, status_monitor, print.tool_orderings().back(),
                                                              print_object_instances_ordering, wt_layers_to_print,
                                                              preamble_to_put_start_layer, file);
                                         previous_wipe_tower_z = wt_layers_to_print.back().first;
+                                        for (auto &pair : wt_layers_to_print) {
+                                            add_travel_obstacle(pair.second);
+                                        }
                                     }
                                 }
                                 if (!print_in_parallel_mode) {
@@ -2935,60 +2815,12 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                                             printed_island.insert(island);
                                         }
                                     }
-                                    std::cout<<"PROCESS IN ->-> group with:\n";
-                                    for (ObjectLayerToPrint &obj_layer : layer_group) {
-                                        std::cout << " - " << obj_layer.layer()->unscaled_print_z() << " ; "
-                                                  << (obj_layer.allow_wipe_tower ? "withWP" : "") ;
-                                        std::set<uint16_t> extruders;
-                                        if (obj_layer.object_layer) {
-                                            std::cout << " with obj islands";
-                                            for (auto lsi_ptr : obj_layer.islands) {
-                                                if (obj_layer.object_layer == lsi_ptr->layer()) {
-                                                    for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
-                                                        if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
-                                                            std::cout << " " << i;
-                                                            break;
-                                                        }
-                                                    }
-                                                } else {
-                                                    assert(obj_layer.support_layer == lsi_ptr->layer());
-                                                }
-                                                for (auto &lri_ptr : lsi_ptr->regions_islands()) {
-                                                    extruders.insert(lri_ptr->extruder_id());
-                                                }
-                                            }
-                                            std::cout << " / " << obj_layer.object_layer->islands().size();
-                                        }
-                                        if(obj_layer.support_layer) {
-                                            std::cout<< " with supp islands";
-                                            for (auto lsi_ptr : obj_layer.islands) {
-                                                if (obj_layer.support_layer == lsi_ptr->layer()) {
-                                                    for (size_t i = 0; i < lsi_ptr->layer()->islands().size(); i++) {
-                                                        if (lsi_ptr->layer()->islands()[i].get() == lsi_ptr) {
-                                                            std::cout << " " << i;
-                                                            break;
-                                                        }
-                                                    }
-                                                } else {
-                                                    assert(obj_layer.object_layer == lsi_ptr->layer());
-                                                }
-                                                for (auto &lri_ptr : lsi_ptr->regions_islands()) {
-                                                    extruders.insert(lri_ptr->extruder_id());
-                                                }
-                                            }
-                                            std::cout << " / " << obj_layer.support_layer->islands().size();
-                                        }
-                                        std::cout << " obj:" << obj_layer.layer()->object()->id().id;
-                                        std::cout << " extruders:";
-                                        for (uint16_t extr : extruders) {
-                                            std::cout << " " << extr;
-                                        }
-                                        std::cout << ":\n";
-                                    }
+                                    // PROCESS IN ->-> group
                                     this->process_layers(print, status_monitor,
                                                          custom_tool_ordering /**it_tool_ordering*/, layer_group,
                                                          *it_print_object_instance - object.instances().data(),
                                                          preamble_to_put_start_layer, file);
+                                    add_travel_obstacle(layer_group);
                                     if (layer_group.front().allow_wipe_tower) {
                                         previous_wipe_tower_z = layer_group.front().layer()->scaled_print_z();
                                     }
@@ -4368,7 +4200,35 @@ void GCodeGenerator::init_layer_for_collision_check(const Layer *object_layer) {
             }
         }
     }
+}
 
+void GCodeGenerator::add_travel_obstacle(const ObjectsLayerToPrint &layer_group) {
+    // create ostacle where theis group was printed
+    // union all boundaries of the islands
+    for (const ObjectLayerToPrint &layergroup : layer_group) {
+        ExPolygons &travel_obstacles = m_z_to_obstacles[layergroup._print_z()].first;
+        ExPolygons layer_expolygons;
+        if (layergroup.islands.empty()) {
+            if (layergroup.object_layer) {
+                layer_expolygons = layergroup.object_layer->lslices();
+            }
+            if (layergroup.support_layer) {
+                layer_expolygons = layergroup.support_layer->lslices();
+            }
+        } else {
+            for (const LayerSliceIsland *island : layergroup.islands) {
+                layer_expolygons.push_back(island->get_slice());
+            }
+        }
+
+        // expand by 1mm to coompensate for simplification
+        layer_expolygons = offset_ex(layer_expolygons, scale_t(1));
+        // reduce complexity (by 1mm)
+        expolygons_simplify(layer_expolygons, scale_t(1));
+        // union simplified expolygons
+        travel_obstacles = union_ex(travel_obstacles, layer_expolygons);
+        m_z_to_obstacles[layergroup._print_z()].second = get_extents(travel_obstacles);
+    }
 }
 
 // Matches "G92 E0" with various forms of writing the zero and with an optional comment.
@@ -4578,15 +4438,18 @@ LayerResult GCodeGenerator::process_layer(
     // if it's going to the first layer, then we may want to delay the move in these condition:
     // there is no "after layer change gcode" and it's the first move from the unknown
     if (print.config().layer_gcode.value.empty() && !last_pos_defined() && m_config.start_gcode_manual && (
-            // there is a lift (on the first llyer, so the first move will bring us to the required height
+            // there is a lift (on the first layer, so the first move will bring us to the required height
         (m_writer.tool()->retract_lift() > 0 && (m_config.retract_lift_above.get_at(m_writer.tool()->id()) == 0 || BOOL_EXTRUDER_CONFIG(retract_lift_first_layer)))
         ||   // or lift_min is higher than the first layer height.
          Layer::scale_to_layer_coord(m_config.lift_min.value) > layer.scaled_print_z()
-        || previous_layer_z > print_z
-            )) {
+        || previous_layer_z > print_z) ||
+        // supermerill : too dangerous to not do it when you're going down.
+         Layer::scale_to_layer_coord(m_writer.get_position().z()) > print_z
+            ) {
         // still do the retraction
         gcode += this->retract_and_wipe();
         gcode += m_writer.reset_e();
+        m_delayed_layer_change_current_print_z = Layer::scale_to_layer_coord(m_writer.get_position().z());
         m_delayed_layer_change = this->change_layer(previous_layer_z, print_z); //HACK for superslicer#1775
         assert(!_m_force_move_z_from);
     } else {
@@ -8778,7 +8641,7 @@ std::string GCodeGenerator::_extrude(ExtrusionPath &path, const std::string_view
             Point last_pos    = polyline.front();
             Point current_pos = polyline.front();
             for (size_t idx = 1; idx < polyline.size(); ++idx) {
-                if (config().stretch_corners.value &&
+                if (config().stretch_corners.value && m_current_loop &&
                     (path.role().is_external_perimeter() ||
                      (path.role().is_perimeter() && config().stretch_corners_inner_perimeters.value > 0))) {
                     if (idx + 1 < polyline.size()) {
@@ -10119,6 +9982,186 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
         }
     }
 
+    //also avoid obstacles.
+    if (!m_z_to_obstacles.empty() && travel.size() > 1) {
+        coord_t current_z = Layer::scale_to_layer_coord(m_writer.get_position().z());
+        GraphData extruder_clearance = m_config.extruder_clearance.get_at(m_writer.tool()->id());
+        if (!m_delayed_layer_change.empty()) {
+            // note: it shouldn't be need to do that, too much spagetti!
+            current_z = m_delayed_layer_change_current_print_z;
+        }
+        coord_t lift_max_z = 0;
+        // get the obstacle that are on our z
+        ExPolygons all_obstacles;
+        {
+            // get all obstacle with z > current_z
+            for (auto it = m_z_to_obstacles.upper_bound(current_z); it != m_z_to_obstacles.end(); ++it) {
+                std::pair<ExPolygons, BoundingBox> &obstacle = it->second;
+                // check collision : keep obstacle that are intersecting our path
+                if (obstacle.second.cross(travel)) {
+                    if (!intersection_pl(travel, obstacle.first).empty()) {
+                        // exclude last obstacle if we are going out of it, we should be already at the right height
+                        // to avoid it
+                        bool start_inside = false;
+                        if (obstacle.second.contains(travel.front())) {
+                            for (const ExPolygon &expo : obstacle.first) {
+                                if (expo.contains(travel.front(), true)) {
+                                    //start_inside = true;
+                                    //has_start_inside = true;
+                                    // can't start inside something higher than our current z
+                                    assert(false);
+                                }
+                            }
+                        }
+                        lift_max_z = std::max(lift_max_z, it->first);
+                        if (!start_inside) {
+                            // intersecting! keep it
+                            // offset by the amount depending of the extruder_clearance
+                            append(all_obstacles,
+                                   offset_ex(obstacle.first,
+                                             scale_d(extruder_clearance.interpolate(
+                                                 unscaled(it->first - current_z)))));
+                        }
+                    }
+                }
+            }
+        }
+        if (!all_obstacles.empty()) {
+            // union in case offset make hem overlap
+            all_obstacles = union_ex(all_obstacles);
+            // simplify again to have a smoother run
+            expolygons_simplify(all_obstacles, scale_t(1));
+            bool need_lift = false;
+            // Transform our travl to a polygon so it can be union/diff
+            Polygon polygon_travel(travel.points);
+            // To do that, we create a box by extending it, adding 4 points far away (1km).
+            // It need to be CCW, so up->left->down->right
+            // first, we check the main direction of the travel
+            coord_t dx = travel.back().x() - travel.front().x();
+            coord_t dy = travel.back().y() - travel.front().y();
+            if (std::abs(dx) > std::abs(dy)) {
+                if (dx > 0) {
+                    // go right first
+                    polygon_travel.points.emplace_back(MAX_COORD_T, travel.back().y());
+                    polygon_travel.points.emplace_back(MAX_COORD_T, MAX_COORD_T);
+                    polygon_travel.points.emplace_back(-MAX_COORD_T, MAX_COORD_T);
+                    polygon_travel.points.emplace_back(-MAX_COORD_T, travel.front().y());
+                } else {
+                    // go left first
+                    polygon_travel.points.emplace_back(-MAX_COORD_T, travel.back().y());
+                    polygon_travel.points.emplace_back(-MAX_COORD_T, -MAX_COORD_T);
+                    polygon_travel.points.emplace_back(MAX_COORD_T, -MAX_COORD_T);
+                    polygon_travel.points.emplace_back(MAX_COORD_T, travel.front().y());
+                }
+            } else {
+                if (dy > 0) {
+                    // go up first
+                    polygon_travel.points.emplace_back(travel.back().x(), MAX_COORD_T);
+                    polygon_travel.points.emplace_back(-MAX_COORD_T, MAX_COORD_T);
+                    polygon_travel.points.emplace_back(-MAX_COORD_T, -MAX_COORD_T);
+                    polygon_travel.points.emplace_back(travel.front().y(), -MAX_COORD_T);
+                } else {
+                    // go down first
+                    polygon_travel.points.emplace_back(travel.back().x(), -MAX_COORD_T);
+                    polygon_travel.points.emplace_back(MAX_COORD_T, -MAX_COORD_T);
+                    polygon_travel.points.emplace_back(MAX_COORD_T, MAX_COORD_T);
+                    polygon_travel.points.emplace_back(travel.front().y(), MAX_COORD_T);
+                }
+            }
+
+            // check polygon_travel validity
+            if (!std::equal(travel.begin(), travel.end(), polygon_travel.points.begin())) {
+                need_lift = true;
+            }
+
+            assert(polygon_travel.is_counter_clockwise());
+
+            // try to union or diff, keep the shortest path
+            ExPolygons travel_diff;
+            Slic3r::Polygon::iterator it_front;
+            if (!need_lift) {
+                travel_diff = diff_ex(polygon_travel, all_obstacles);
+                for (auto it = travel_diff.begin(); it != travel_diff.end();) {
+                    it_front = std::find(it->contour.begin(), it->contour.end(), travel.front());
+                    if (it_front == it->contour.end()) {
+                        it = travel_diff.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (travel_diff.size() != 1) {
+                    need_lift = true;
+                }
+            }
+
+            // check if back() and front() ar still in the contour
+            Slic3r::Polygon::iterator it_back;
+            if (!need_lift) {
+                Polygon &contour = travel_diff.front().contour;
+                it_front = std::find(contour.begin(), contour.end(), travel.front());
+                it_back = std::find(contour.begin(), contour.end(), travel.back());
+                if (it_front == contour.end() || it_back == contour.end()) {
+                    need_lift = true;
+                }
+            }
+            if (need_lift) {
+                // enforce a big lift
+                if (current_z <= lift_max_z) {
+                    double saved_wanted_position = m_writer.get_unlifted_position().z();
+                    gcode += m_writer.travel_to_z(unscaled(lift_max_z + m_layer->scaled_height()),
+                                                  "extra z move to avoid collision while traveling");
+                    m_writer.set_lift(m_writer.get_position().z() - saved_wanted_position);
+                    assert(scale_t(m_writer.get_unlifted_position().z()) == scale_t(saved_wanted_position));
+                }
+            } else {
+                Point travel_front = travel.front();
+                Point travel_back = travel.back();
+                // change travel
+                travel.clear();
+                if (it_front <= it_back) {
+                    // normal case
+                    travel.points.insert(travel.end(), it_front, it_back + 1);
+                } else {
+                    // wrap-around case
+                    travel.points.insert(travel.end(), it_front, travel_diff.front().contour.end());
+                    travel.points.insert(travel.end(), travel_diff.front().contour.begin(), it_back + 1);
+                }
+                // check if union isn't shorter
+                travel_diff = union_ex(all_obstacles, ExPolygon(polygon_travel));
+                for (auto it = travel_diff.begin(); it != travel_diff.end();) {
+                    it_front = std::find(it->contour.begin(), it->contour.end(), travel_front);
+                    if (it_front == it->contour.end()) {
+                        it = travel_diff.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+                if (travel_diff.size() == 1) {
+                    Polygon &contour = travel_diff.front().contour;
+                    it_front = std::find(contour.begin(), contour.end(), travel_front);
+                    it_back = std::find(contour.begin(), contour.end(), travel_back);
+                    assert(it_front != contour.end() && it_back != contour.end());
+                    if (it_front != contour.end() && it_back != contour.end()) {
+                        Polyline travel_union;
+                        if (it_front <= it_back) {
+                            // normal case
+                            travel_union.points.insert(travel_union.end(), it_front, it_back + 1);
+                        } else {
+                            // wrap-around case
+                            travel_union.points.insert(travel_union.end(), it_front,
+                                                       travel_diff.front().contour.end());
+                            travel_union.points.insert(travel_union.end(), travel_diff.front().contour.begin(),
+                                                       it_back + 1);
+                        }
+                        if (travel_union.length() < travel.length()) {
+                            travel = std::move(travel_union);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     return travel;
 }
 
@@ -10230,7 +10273,9 @@ void GCodeGenerator::write_travel_to(std::string &gcode, Polyline& travel, std::
         }
     } else {
         if (_m_force_move_z_from) {
-            gcode += "; use enforce z\n";
+            gcode += "; use enforce z ";
+            gcode += std::to_string(unscaled(target_z));
+            gcode += "\n";
             assert(*_m_force_move_z_from <= 0);
             // enforce current z
             gcode += m_writer.ensure_z(unscaled(target_z), comment);

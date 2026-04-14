@@ -74,7 +74,8 @@ using lengthsqr_t = uint64_t;
 // int32_t fits an interval of (-2147.48mm, +2147.48mm)
 // with int64_t we don't have to worry anymore about the size of the int.
 static constexpr double SCALING_FACTOR   = 0.000001;
-static constexpr double UNSCALING_FACTOR = 1000000; // 1 / SCALING_FACTOR; <- linux has some problem compiling this constexpr
+static constexpr double UNSCALING_FACTOR = 1'000'000; // 1 / SCALING_FACTOR; <- linux has some problem compiling this constexpr
+static constexpr coord_t MAX_COORD_T = 100'000'000'000LL; // 100m (10e11 nm)
 
 //FIXME This epsilon value is used for many non-related purposes:
 // For a threshold of a squared Euclidean distance,
