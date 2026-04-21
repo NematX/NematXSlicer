@@ -600,6 +600,7 @@ std::vector<std::pair<coord_t, GCodeGenerator::ObjectsLayerToPrint>> GCodeGenera
 std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_islands(
                 const GCodeGenerator::ObjectsLayerToPrint object_layers,
                 const coord_t start_z,
+                const Point last_position_init,
                 const coord_t max_height,
                 const std::vector<GraphData> &extruder_min_dist,
                 const uint16_t initial_extruder_id) {
@@ -617,6 +618,7 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
         std::set<uint16_t> extruders_id;
     };
 
+    Point last_position = last_position_init;
     std::set<const LayerSliceIsland *> all_islands;
     std::vector<bool> finished(ordered_layers_islands_to_print.size());
     std::vector<uint16_t> extruder(ordered_layers_islands_to_print.size());
@@ -1137,6 +1139,51 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
             assert(was_added);
         }
 
+        // sort new ordered_layers_islands_to_print so it minimise distance.
+        size_t first_idx = size_t(-1);
+        for (size_t i = 0; i < ordered_layers_islands_to_print.size(); i++) {
+            if (ordered_layers_islands_to_print[i].empty()) {
+                first_idx = i;
+                break;
+            }
+        }
+        // is there something to sort?
+        if (first_idx != size_t(-1) && first_idx < ordered_layers_islands_to_print.size() - 1) {
+            std::vector<Point> centroids(ordered_layers_islands_to_print.size());
+            for (size_t i = first_idx; i < ordered_layers_islands_to_print.size(); i++) {
+                assert(ordered_layers_islands_to_print[i].empty());
+                assert(to_add[i]);
+                Point &centroid = centroids[i];
+                for (const LayerSliceIsland *lsi : to_add[i]->islands) {
+                    centroid += lsi->get_slice().contour.centroid();
+                }
+                centroid /= to_add[i]->islands.size();
+            }
+            // sort from first_idx to ordered_layers_islands_to_print.size()
+            for (size_t sort_idx = first_idx; sort_idx < ordered_layers_islands_to_print.size(); sort_idx++) {
+                // find nearest group
+                double best_distance = std::numeric_limits<double>::max();
+                size_t best_idx = 0;
+                for (size_t search_idx = sort_idx; search_idx < ordered_layers_islands_to_print.size();
+                     search_idx++) {
+                    if (centroids[search_idx].distance_to(last_position) < best_distance) {
+                        best_distance = centroids[search_idx].distance_to(last_position);
+                        best_idx = search_idx;
+                    }
+                }
+                if (best_distance < std::numeric_limits<double>::max()) {
+                    if (sort_idx != best_idx) {
+                        //swap
+                        std::swap(to_add[sort_idx], to_add[best_idx]);
+                        std::swap(centroids[sort_idx], centroids[best_idx]);
+                    }
+                    last_position = centroids[sort_idx];
+                } else {
+                    assert(false);
+                }
+            }
+        }
+
         // add new layer groups from to_add
         assert(ordered_layers_islands_to_print.size() == to_add.size());
         assert(finished.size() == to_add.size());
@@ -1152,6 +1199,16 @@ std::vector<GCodeGenerator::ObjectsLayerToPrint> GCodeGenerator::separate_island
                 //    set_finished(i);
                 //}
             }
+        }
+        if (!ordered_layers_islands_to_print.empty()) {
+            assert(!ordered_layers_islands_to_print.back().empty());
+            assert(!ordered_layers_islands_to_print.back().back().islands.empty());
+            Point pt;
+            for (const LayerSliceIsland *lsi : ordered_layers_islands_to_print.back().back().islands) {
+                pt += lsi->get_slice().contour.centroid();
+            }
+            pt /= ordered_layers_islands_to_print.back().back().islands.size();
+            last_position = pt;
         }
 
         previous_extruder_id = current_extruder_id;
@@ -2643,6 +2700,8 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                             }
                             //TODO: "merge" these ranges between objects (ie don't wait to finish an object for switching, and try to minimize extruder swap)
                             layers_to_print_range = separate_islands(object_and_support_layers, z_start,
+                                                                     this->last_pos_defined() ? this->last_pos() :
+                                                                                                Point(0, 0),
                                                                      height_step_range,
                                                                      print.config().extruder_clearance.get_values(),
                                                                      uint16_t(m_writer.tool() != nullptr ?

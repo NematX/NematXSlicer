@@ -272,6 +272,7 @@ private:
     static std::vector<std::pair<coord_t, ObjectsLayerToPrint>> collect_layers_to_print(const Print &print, Print::StatusMonitor &status_monitor);
     static std::vector<ObjectsLayerToPrint> separate_islands(const ObjectsLayerToPrint object_layers,
                                                              const coord_t start_e,
+                                                             const Point last_position,
                                                              const coord_t max_height,
                                                              const std::vector<GraphData> &extruder_min_dist,
                                                              const uint16_t current_extruder_id);
