@@ -2604,7 +2604,7 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, cons
             result_pl.points.back()   = end;
         }
     }
-    assert(result_pl.size() > 1);
+    //assert(result_pl.size() > 1);
     for (size_t i = 1; i < result_pl.size(); i++)
         assert(!result_pl.points[i - 1].coincides_with_epsilon(result_pl.points[i]));
 

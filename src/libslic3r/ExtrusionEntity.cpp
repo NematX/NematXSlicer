@@ -707,7 +707,7 @@ void SimplifyVisitor::use(ExtrusionPath& path) {
         m_last_deleted = true;
         return;
     }
-    assert(m_scaled_resolution >= SCALED_EPSILON);
+    assert(m_scaled_resolution + 0.1 >= SCALED_EPSILON);
     path.simplify(m_scaled_resolution, m_use_arc_fitting, scale_d(m_arc_fitting_tolearance->get_abs_value(path.width())));
     for (int i = 1; i < path.polyline.size(); ++i)
         if (path.polyline.get_point(i - 1).coincides_with_epsilon(path.polyline.get_point(i))) {

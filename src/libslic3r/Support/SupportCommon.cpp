@@ -2209,7 +2209,7 @@ void generate_support_toolpaths(
                     base_interface_layer.extrusions.set_entities(), 
                     //base_layer_interface.extrusions,
                     // Regions to fill
-                    union_safety_offset_ex(base_interface_layer.polygons_to_extrude()),
+                    ensure_valid(union_safety_offset_ex(base_interface_layer.polygons_to_extrude())),
                     // Filler and its parameters
                     filler, float(support_params.interface_density),
                     // Extrusion parameters

@@ -575,6 +575,7 @@ struct SupportGridParams {
 class SupportGridPattern
 {
 public:
+    bool no_expansion = false;
     SupportGridPattern(
         // Support islands, to be stretched into a grid. Already trimmed with min(lower_layer_offset, m_gap_xy)
         const Polygons          *support_polygons, 
@@ -766,6 +767,10 @@ public:
 
             if (m_support_angle != 0.)
                 polygons_rotate(out, m_support_angle);
+            // if no extension, clip the contact_polygons
+            if (no_expansion) {
+                out = intersection(out, *m_support_polygons);
+            }
             return out;
         }
         case smsTree:
@@ -1273,6 +1278,7 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
         0.;
     float        no_interface_offset = 0.f;
 
+    coord_t max_flow_width  = 0;
     if (layer_id == 0) 
     {
         // This is the first object layer, so the object is being printed on a raft and
@@ -1286,6 +1292,10 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
 #endif
         // Expand for better stability.
         contact_polygons = object_config.raft_expansion.value > 0 ? expand(overhang_polygons, scaled<float>(object_config.raft_expansion.value)) : overhang_polygons;
+
+        for (LayerRegion *layerm : layer.regions()) {
+            max_flow_width = std::max(max_flow_width, (layerm->flow(frExternalPerimeter).scaled_width()));
+        }
     }
     else if (! layer.regions().empty())
     {
@@ -1321,6 +1331,7 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
             // Extrusion width accounts for the roundings of the extrudates.
             // It is the maximum widh of the extrudate.
             coord_t flow_width = (layerm->flow(frExternalPerimeter).scaled_width());
+            max_flow_width = std::max(max_flow_width, flow_width);
             lower_layer_offset  = 
                 (layer_id < (size_t)object_config.support_material_enforce_layers.value) ? 
                     // Enforce a full possible support, ignore the overhang angle.
@@ -1488,6 +1499,9 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
                 }
             }
         }
+    overhang_polygons = closing(overhang_polygons, double(max_flow_width) * 0.1);
+    contact_polygons = closing(contact_polygons, double(max_flow_width) * 0.1);
+    enforcer_polygons = closing(enforcer_polygons, double(max_flow_width) * 0.1);
 
     return std::make_tuple(std::move(overhang_polygons), std::move(contact_polygons), std::move(enforcer_polygons), no_interface_offset);
 }
@@ -1599,7 +1613,8 @@ static inline void fill_contact_layer(
     const Polygons          &contact_polygons, 
     const Polygons          &enforcer_polygons, 
     const Polygons          &lower_layer_polygons,
-    float                    no_interface_offset
+    float                    no_interface_offset,
+    coord_t                  expansion
 #ifdef SLIC3R_DEBUG
     , size_t                 iRun,
     const Layer             &layer
@@ -1619,6 +1634,10 @@ static inline void fill_contact_layer(
 
     // Stretch support islands into a grid, trim them. 
     SupportGridPattern support_grid_pattern(&contact_polygons, &slices_margin.polygons, grid_params);
+    // if no extension, clip the contact_polygons
+    if (expansion <= 0) {
+        support_grid_pattern.no_expansion = true;
+    }
     // 1) Contact polygons will be projected down. To keep the interface and base layers from growing, return a contour a tiny bit smaller than the grid cells.
     new_layer.contact_polygons = std::make_unique<Polygons>(support_grid_pattern.extract_support(grid_params.expansion_to_propagate, true
 #ifdef SLIC3R_DEBUG
@@ -1681,8 +1700,12 @@ static inline void fill_contact_layer(
 
     if (! enforcer_polygons.empty() && ! slices_margin.all_polygons.empty() && layer_id > 0) {
         // Support enforcers used together with support enforcers. The support enforcers need to be handled separately from the rest of the support.
-        
+
         SupportGridPattern support_grid_pattern(&enforcer_polygons, &slices_margin.all_polygons, grid_params);
+        // if no extension, clip the contact_polygons
+        if (expansion <= 0) {
+            support_grid_pattern.no_expansion = true;
+        }
         // 1) Contact polygons will be projected down. To keep the interface and base layers from growing, return a contour a tiny bit smaller than the grid cells.
         new_layer.enforcer_polygons = std::make_unique<Polygons>(support_grid_pattern.extract_support(grid_params.expansion_to_propagate, true
 #ifdef SLIC3R_DEBUG
@@ -1708,6 +1731,10 @@ static inline void fill_contact_layer(
                 // See for example GH #4874.
                 Polygons dense_interface_polygons_trimmed = intersection(dense_interface_polygons, *new_layer.enforcer_polygons);
                 SupportGridPattern support_grid_pattern(&dense_interface_polygons_trimmed, &slices_margin.all_polygons, grid_params);
+                // if no extension, clip the contact_polygons
+                if (expansion <= 0) {
+                    support_grid_pattern.no_expansion = true;
+                }
                 // Extend the polygons to extrude with the contact polygons of support enforcers.
                 new_polygons = support_grid_pattern.extract_support(grid_params.expansion_to_slice, false
     #ifdef SLIC3R_DEBUG
@@ -1890,7 +1917,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::top_contact_layers(
                         // Fill the non-bridging layer with polygons.
                         fill_contact_layer(*new_layer, layer_id, *m_slicing_params, m_support_params,
                             *m_object_config, slices_margin, overhang_polygons, contact_polygons, enforcer_polygons, lower_layer_polygons,
-                            no_interface_offset
+                            no_interface_offset, scale_t(m_object_config->support_material_layer_expansion.value)
                     #ifdef SLIC3R_DEBUG
                             , iRun, layer
                     #endif // SLIC3R_DEBUG
@@ -2002,9 +2029,10 @@ static inline SupportGeneratorLayer* detect_bottom_contacts(
     layer_new.idx_object_layer_below = layer_id;
     layer_new.bridging = !slicing_params.soluble_interface;
     //FIXME how much to inflate the bottom surface, as it is being extruded with a bridging flow? The following line uses a normal flow.
-    layer_new.polygons = expand(touching, double(support_params.support_material_flow.scaled_width()), SUPPORT_SURFACES_OFFSET_PARAMETERS);
+    // fixed in 2.7.63
+    //layer_new.polygons = expand(touching, double(support_params.support_material_flow.scaled_width()), SUPPORT_SURFACES_OFFSET_PARAMETERS);
+    layer_new.polygons = touching;
     ensure_valid(layer_new.polygons, support_params.resolution);
-    for (Polygon &poly : layer_new.polygons);
 
     if (! slicing_params.soluble_interface) {
         // Walk the top surfaces, snap the top of the new bottom surface to the closest top of the top surface,
@@ -2097,6 +2125,10 @@ static inline std::pair<Polygons, Polygons> project_support_to_grid(const Layer 
 #endif /* SLIC3R_DEBUG */
 
     SupportGridPattern support_grid_pattern(&overhangs_projection, &trimming, grid_params);
+    // if no extension, clip the contact_polygons
+    if (layer.object()->config().support_material_layer_expansion.value <= 0) {
+        support_grid_pattern.no_expansion = true;
+    }
     tbb::task_group task_group_inner;
 
     std::pair<Polygons, Polygons> out;
