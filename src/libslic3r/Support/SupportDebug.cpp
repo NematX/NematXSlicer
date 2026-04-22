@@ -82,7 +82,7 @@ void export_print_z_polygons_and_extrusions_to_svg(
     const char                        *path, 
     SupportGeneratorLayer ** const     layers, 
     int                                n_layers,
-    SupportLayer                      &support_layer)
+    const SupportLayer                &support_layer)
 {
     BoundingBox bbox;
     for (int i = 0; i < n_layers; ++ i)
