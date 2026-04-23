@@ -74,9 +74,9 @@ REM new minimum version and setting PS_VERSION_EXCEEDED to the maximum supported
 REM version plus one.
 REM The officially supported toolchain versions are:
 REM   Minimum: 16 (Visual Studio 2019)
-REM   Maximum: 17 (Visual Studio 2022)
+REM   Maximum: 18 (Visual Studio 2026)
 SET PS_VERSION_SUPPORTED=16
-SET PS_VERSION_EXCEEDED=18
+SET PS_VERSION_EXCEEDED=19
 SET VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe
 IF NOT EXIST "%VSWHERE%" SET VSWHERE=%ProgramFiles%\Microsoft Visual Studio\Installer\vswhere.exe
 FOR /F "tokens=4 USEBACKQ delims=." %%I IN (`"%VSWHERE%" -nologo -property productId`) DO SET PS_PRODUCT_DEFAULT=%%I
