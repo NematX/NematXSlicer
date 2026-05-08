@@ -64,6 +64,11 @@ endif ()
 
 include(${PROJECT_SOURCE_DIR}/../cmake/modules/AddCMakeProject.cmake)
 
+# Some bundled third-party projects still declare very old minimum CMake
+# versions. Pass this policy floor to external project configure steps so
+# they remain configurable with newer CMake (including VS2026 bundled CMake).
+list(APPEND DEP_CMAKE_OPTS "-DCMAKE_POLICY_VERSION_MINIMUM=3.5")
+
 macro(list_projects result curdir)
   file(GLOB children RELATIVE ${curdir} ${curdir}/*)
   set(dirlist "")

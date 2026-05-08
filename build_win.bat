@@ -176,6 +176,16 @@ IF NOT EXIST "%MSVC_DIR%" (
 )
 REM Cmake always defaults to latest supported MSVC generator. Let's make sure it uses what we select.
 FOR /F "tokens=* USEBACKQ" %%I IN (`^""%VSWHERE%" %MSVC_FILTER% -nologo -property catalog_productLineVersion^"`) DO SET PS_PRODUCT_VERSION=%%I
+REM vswhere may return the major line number (e.g. 18) instead of the year token
+REM expected by CMake generators (e.g. 2026).
+IF "%PS_PRODUCT_VERSION%" EQU "16" SET PS_PRODUCT_VERSION=2019
+IF "%PS_PRODUCT_VERSION%" EQU "17" SET PS_PRODUCT_VERSION=2022
+IF "%PS_PRODUCT_VERSION%" EQU "18" SET PS_PRODUCT_VERSION=2026
+IF "%PS_PRODUCT_VERSION%" EQU "" (
+    IF "%PS_VERSION%" EQU "16" SET PS_PRODUCT_VERSION=2019
+    IF "%PS_VERSION%" EQU "17" SET PS_PRODUCT_VERSION=2022
+    IF "%PS_VERSION%" EQU "18" SET PS_PRODUCT_VERSION=2026
+)
 
 REM Give the user a chance to cancel if we found something odd.
 IF "%PS_ASK_TO_CONTINUE%" EQU "" GOTO :BUILD_ENV
