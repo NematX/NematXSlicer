@@ -2256,14 +2256,13 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::bottom_contact_layers_and_
         }
         if (overhangs_projection.empty() && enforcers_projection.empty())
             continue;
-
         // Overhangs_projection will be filled in asynchronously, move it away.
-        Polygons overhangs_projection_raw = union_(std::move(overhangs_projection));
-        Polygons enforcers_projection_raw = union_(std::move(enforcers_projection));
+        // closing == union_extremely_safe_offset
+        coordf_t safety_offfset = std::max(coordf_t(this->m_support_params.resolution), SCALED_EPSILON * 10.);
+        Polygons overhangs_projection_raw = closing((overhangs_projection), safety_offfset, safety_offfset);
+        Polygons enforcers_projection_raw = closing((enforcers_projection), safety_offfset, safety_offfset);
         ensure_valid(overhangs_projection_raw, this->m_support_params.resolution);
         ensure_valid(enforcers_projection_raw, this->m_support_params.resolution);
-        for (Polygon &poly : overhangs_projection_raw);
-        for (Polygon &poly : enforcers_projection_raw);
 
         tbb::task_group task_group;
         const Polygons &overhangs_for_bottom_contacts = buildplate_only ? enforcers_projection_raw : overhangs_projection_raw;
