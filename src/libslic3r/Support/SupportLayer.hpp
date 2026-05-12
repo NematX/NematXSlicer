@@ -108,6 +108,7 @@ protected:
     coord_t m_height_block { 0 };
 
 public:
+    bool is_raft = false;
     coord_t scaled_print_z() const { return m_print_z; }
     double  unscaled_print_z() const { return unscaled(m_print_z); }
     void set_scaled_print_z(coord_t print_z) { m_print_z = print_z;

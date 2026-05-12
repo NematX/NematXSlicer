@@ -1501,9 +1501,9 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
                 }
             }
         }
-    overhang_polygons = closing(overhang_polygons, double(max_flow_width) * 0.1);
-    contact_polygons = closing(contact_polygons, double(max_flow_width) * 0.1);
-    enforcer_polygons = closing(enforcer_polygons, double(max_flow_width) * 0.1);
+    overhang_polygons = ensure_valid(closing(overhang_polygons, double(max_flow_width) * 0.1), resolution);
+    contact_polygons = ensure_valid(closing(contact_polygons, double(max_flow_width) * 0.1), resolution);
+    enforcer_polygons = ensure_valid(closing(enforcer_polygons, double(max_flow_width) * 0.1), resolution);
 
     return std::make_tuple(std::move(overhang_polygons), std::move(contact_polygons), std::move(enforcer_polygons), no_interface_offset);
 }
@@ -1522,6 +1522,7 @@ static inline std::pair<SupportGeneratorLayer*, SupportGeneratorLayer*> new_cont
     SupportGeneratorLayer* bridging_layer = nullptr;
     assert(layer.id() >= slicing_params.raft_layers());
     size_t layer_id = layer.id() - slicing_params.raft_layers();
+    bool is_raft = false;
 
     if (layer_id == 0) {
         // This is a raft contact layer sitting directly on the print bed.
@@ -1529,6 +1530,7 @@ static inline std::pair<SupportGeneratorLayer*, SupportGeneratorLayer*> new_cont
         print_z  = Layer::scale_to_layer_coord(slicing_params.raft_contact_top_z);
         bottom_z = Layer::scale_to_layer_coord(slicing_params.raft_interface_top_z);
         height   = Layer::scale_to_layer_coord(slicing_params.contact_raft_layer_height);
+        is_raft = true;
     } else if (slicing_params.soluble_interface) {
         // Align the contact surface height with a layer immediately below the supported layer.
         // Interface layer will be synchronized with the object.
@@ -1601,6 +1603,7 @@ static inline std::pair<SupportGeneratorLayer*, SupportGeneratorLayer*> new_cont
     new_layer.set_scaled_print_z(print_z);
     new_layer.set_scaled_bottom_z(bottom_z);
     new_layer.set_scaled_height(height);
+    new_layer.is_raft = is_raft;
     return std::make_pair(&new_layer, bridging_layer);
 }
 
@@ -2425,7 +2428,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
     // Generate intermediate layers.
     // The first intermediate layer is the same as the 1st layer if there is no raft,
     // or the bottom of the first intermediate layer is aligned with the bottom of the raft contact layer.
-    // Intermediate layers are always printed with a normal etrusion flow (non-bridging).
+    // Intermediate layers are always printed with a normal extrusion flow (non-bridging).
     size_t idx_layer_object = 0;
     size_t idx_extreme_first = 0;
     coord_t support_layer_height = Layer::scale_to_layer_coord(m_object_config->support_material_layer_height.value == 0 ?
@@ -2437,7 +2440,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
         std::min(m_slicing_params->max_suport_layer_height, std::max(0.,// m_slicing_params->min_suport_layer_height,
             m_object_config->support_material_interface_layer_height.get_abs_value(m_support_params.support_material_interface_flow.nozzle_diameter()))));
     if (!extremes.empty() &&
-         (extremes.front()->scaled_height() > 0 ||
+         (extremes.front()->is_raft ||
           (m_slicing_params->raft_interface_top_z > 0 &&
            extremes.front()->scaled_extreme_z() ==
                Layer::scale_to_layer_coord(m_slicing_params->raft_interface_top_z)))) {
