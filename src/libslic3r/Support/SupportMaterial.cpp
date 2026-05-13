@@ -341,7 +341,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
 
     assert_check(intermediate_layers);
     assert_z(intermediate_layers);
-
+//
     this->trim_support_layers_by_object(object, top_contacts,
                                         Layer::scale_to_layer_coord(m_slicing_params->gap_support_object),
                                         Layer::scale_to_layer_coord(m_slicing_params->gap_object_support),
@@ -356,7 +356,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
 #endif
 
     BOOST_LOG_TRIVIAL(info) << "Support generator - Creating base layers";
-
+//
     // Fill in intermediate layers between the top / bottom support contact layers, trim them by the object.
     this->generate_base_layers(object, bottom_contacts, top_contacts, intermediate_layers, layer_support_areas);
 
@@ -1452,7 +1452,10 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
                 //FIXME one should trim with the layer span colliding with the support layer, this layer
                 // may be lower than lower_layer, so the support area needed may need to be actually bigger!
                 // For the same reason, the non-bridging support area may be smaller than the bridging support area!
-                slices_margin_update((float)std::min(lower_layer_offset, gap_xy), no_interface_offset);
+                // slices_margin_update((float)std::min(lower_layer_offset, gap_xy), no_interface_offset);
+                // The overhang detection uses lower_layer_offset to decide what is unsupported,
+                // but the final support/object XY clearance must still honor gap_xy.
+                slices_margin_update((float)gap_xy, no_interface_offset);
                 // Offset the contact polygons outside.
 #if 0
                 for (size_t i = 0; i < NUM_MARGIN_STEPS; ++ i) {
@@ -1493,7 +1496,9 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
                 if (! enforcer_polygons.empty()) {
                     ensure_valid(enforcer_polygons, resolution);
                     polygons_append(overhang_polygons, enforcer_polygons);
-                    slices_margin_update((float)std::min(lower_layer_offset, gap_xy), no_interface_offset);
+                    // Keep the enforced support/object XY clearance consistent with normal supports.
+                    // slices_margin_update((float)std::min(lower_layer_offset, gap_xy), no_interface_offset);
+                    slices_margin_update((float)gap_xy, no_interface_offset);
                     polygons_append(contact_polygons, diff(enforcer_polygons, slices_margin.all_polygons.empty() ? slices_margin.polygons : slices_margin.all_polygons));
                     //ensure_valid(overhang_polygons, resolution);
                     assert_valid(overhang_polygons);
