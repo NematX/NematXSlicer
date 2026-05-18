@@ -62,7 +62,7 @@
 #endif
 
 #include <cassert>
-#pragma UNOPTIMIZE
+
 using namespace Slic3r::FFFSupport;
 
 namespace Slic3r {
