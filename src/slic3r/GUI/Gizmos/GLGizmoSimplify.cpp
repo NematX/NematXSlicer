@@ -766,10 +766,9 @@ void GLGizmoSimplify::on_render()
             contour_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
             const ColorRGBA color = glmodel.get_color();
             glmodel.set_color(ColorRGBA::WHITE());
-#if ENABLE_GL_CORE_PROFILE
-            if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
+            if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
                 glsafe(::glLineWidth(1.0f));
+            }
 #if !ENABLE_OPENGL_ES
             glsafe(::glPolygonMode(GL_FRONT_AND_BACK, GL_LINE));
 #endif // !ENABLE_OPENGL_ES

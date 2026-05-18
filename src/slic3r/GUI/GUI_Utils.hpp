@@ -100,7 +100,7 @@ public:
             dpi = DPI_DEFAULT * custom_gui_size / 10.f;
         }
         m_prev_scale_factor = m_scale_factor;
-		m_normal_font = get_default_font_for_dpi(this, dpi);
+        m_normal_font = get_default_font_for_dpi(this, dpi);
 
         if (font_point_size > 0)
             m_normal_font.SetPointSize(font_point_size);

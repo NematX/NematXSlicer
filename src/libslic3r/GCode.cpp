@@ -1972,8 +1972,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     m_add_line_number = make_unique<AddLineNumber>(print.config());
     m_remove_comments = make_unique<RemoveComments>(print.config());
     file.set_find_replace(m_find_replace.get(), m_add_line_number.get(), m_remove_comments.get(), false);
-    m_temperature_mover.release();
-    m_fan_mover.release();
+
     m_pressure_model.release();
     m_z_to_obstacles.clear();
     file.set_only_ascii(print.config().gcode_ascii.value);
@@ -1987,6 +1986,8 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
     m_last_mm3_per_mm = 0.;
 #endif // ENABLE_GCODE_VIEWER_DATA_CHECKING
+    m_fan_mover.release();
+    m_temperature_mover.release();
 
     status_monitor.stats().color_extruderid_to_used_filament.clear();
     status_monitor.stats().color_extruderid_to_used_weight.clear();
@@ -8890,10 +8891,22 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
 
     float factor = 1;
     double speed = set_speed;
+
     if (!m_speed_override.empty() && m_speed_override.back().second->speed_mm_per_s > 0) {
         speed = (double)m_speed_override.back().second->speed_mm_per_s;
     }
+
+    ExtrusionRole role = path.role();
     const ExtrusionPropertyOverhang* overhang_attributes = GetEEAttribute<ExtrusionPropertyOverhang>().get(path);
+    // remove overhang role for speed if it's out of has_full_overhangs_speed.
+    if (role.is_overhang()) {
+        assert(overhang_attributes);
+        if (overhang_attributes != nullptr &&
+                !overhang_attributes->has_full_overhangs_speed){
+            role = role & ExtrusionRoleModifier(~ExtrusionRoleModifier::ERM_Bridge);
+            }
+    }
+
     // set speed
     if (speed < 0) {
         //if speed == -1, then it's means "choose yourself, but if it's < SMALL_PERIMETER_SPEED_RATIO_OFFSET, then it's a scaling from small_perimeter.
@@ -8901,36 +8914,35 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
             factor = float(-speed + SMALL_PERIMETER_SPEED_RATIO_OFFSET);
         }
         //it's a bit hacky, so if you want to rework it, help yourself.
-        if ((path.role().is_overhang() && m_config.overhangs) ||
-                   (overhang_attributes && overhang_attributes->has_full_overhangs_speed)) {
+        if (role.is_overhang()) {
             // OverhangPerimeter or OverhangExternalPerimeter
             speed = m_config.get_computed_value("overhangs_speed");
             if(comment) *comment = "overhangs_speed";
-        } else if (path.role() == ExtrusionRole::Perimeter) {
+        } else if (role == ExtrusionRole::Perimeter) {
             speed = m_config.get_computed_value("perimeter_speed");
             if(comment) *comment = "perimeter_speed";
-        } else if (path.role() == ExtrusionRole::ExternalPerimeter) {
+        } else if (role == ExtrusionRole::ExternalPerimeter) {
             speed = m_config.get_computed_value("external_perimeter_speed");
             if(comment) *comment = "external_perimeter_speed";
-        } else if (path.role() == ExtrusionRole::BridgeInfill) {
+        } else if (role == ExtrusionRole::BridgeInfill) {
             speed = m_config.get_computed_value("bridge_speed");
             if(comment) *comment = "bridge_speed";
-        } else if (path.role() == ExtrusionRole::InternalBridgeInfill) {
+        } else if (role == ExtrusionRole::InternalBridgeInfill) {
             speed = m_config.get_computed_value("internal_bridge_speed");
             if(comment) *comment = "internal_bridge_speed";
-        } else if (path.role() == ExtrusionRole::InternalInfill) {
+        } else if (role == ExtrusionRole::InternalInfill) {
             speed = m_config.get_computed_value("infill_speed");
             if(comment) *comment = "infill_speed";
-        } else if (path.role() == ExtrusionRole::SolidInfill) {
+        } else if (role == ExtrusionRole::SolidInfill) {
             speed = m_config.get_computed_value("solid_infill_speed");
             if(comment) *comment = "solid_infill_speed";
-        } else if (path.role() == ExtrusionRole::TopSolidInfill) {
+        } else if (role == ExtrusionRole::TopSolidInfill) {
             speed = m_config.get_computed_value("top_solid_infill_speed");
             if(comment) *comment = "top_solid_infill_speed";
-        } else if (path.role() == ExtrusionRole::ThinWall) {
+        } else if (role == ExtrusionRole::ThinWall) {
             speed = m_config.get_computed_value("thin_walls_speed");
             if(comment) *comment = "thin_walls_speed";
-        } else if (path.role() == ExtrusionRole::GapFill) {
+        } else if (role == ExtrusionRole::GapFill) {
             speed = m_config.get_computed_value("gap_fill_speed");
             if(comment) *comment = "gap_fill_speed";
             double max_ratio = m_config.gap_fill_flow_match_perimeter.get_abs_value(1.);
@@ -8944,25 +8956,25 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
                     if(comment) *comment = "max_vol_speed (from " + (*comment) + ")";
                 }
             }
-        } else if (path.role() == ExtrusionRole::Ironing) {
+        } else if (role == ExtrusionRole::Ironing) {
             speed = m_config.get_computed_value("ironing_speed");
             if(comment) *comment = "ironing_speed";
-        } else if (path.role() == ExtrusionRole::None || path.role() == ExtrusionRole::Travel) {
-            assert(path.role() != ExtrusionRole::None);
+        } else if (role == ExtrusionRole::None || role == ExtrusionRole::Travel) {
+            assert(role != ExtrusionRole::None);
             speed = m_config.get_computed_value("travel_speed");
             if(comment) *comment = "travel_speed";
-        } else if (path.role() == ExtrusionRole::RectilinearAroundHoleInfillTravel) {
+        } else if (role == ExtrusionRole::RectilinearAroundHoleInfillTravel) {
             speed = m_config.get_computed_value("fill_rectilinearholes_travel_speed");
-        } else if (path.role() == ExtrusionRole::Milling) {
+        } else if (role == ExtrusionRole::Milling) {
             speed = m_config.get_computed_value("milling_speed");
             if(comment) *comment = "milling_speed";
-        } else if (path.role() == ExtrusionRole::SupportMaterial) {
+        } else if (role == ExtrusionRole::SupportMaterial) {
             speed = m_config.get_computed_value("support_material_speed");
             if(comment) *comment = "support_material_speed";
-        } else if (path.role() == ExtrusionRole::SupportMaterialInterface) {
+        } else if (role == ExtrusionRole::SupportMaterialInterface) {
             speed = m_config.get_computed_value("support_material_interface_speed");
             if(comment) *comment = "support_material_interface_speed";
-        } else if (path.role() == ExtrusionRole::Skirt) {
+        } else if (role == ExtrusionRole::Skirt) {
             speed = m_config.get_computed_value("brim_speed");
             if(comment) *comment = "brim_speed";
         } else if (path.role() == ExtrusionRole::WipeTowerWipe) {
@@ -8992,38 +9004,38 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
         }
         // if using a % of an auto speed, use the % over the volumetric speed.
         // respect the % hierarchy
-        if ((path.role().is_overhang() && m_config.overhangs) ||
+        if (role.is_overhang() && 
             (path.overhang_attributes() && path.overhang_attributes()->has_full_overhangs_speed)) {
             speed = m_config.overhangs_speed.get_abs_value(m_config.bridge_speed.get_abs_value(vol_speed));
             if(comment) *comment = std::string("overhangs_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::Perimeter) {
+        } else if (role == ExtrusionRole::Perimeter) {
             speed = m_config.perimeter_speed.get_abs_value(vol_speed);
             if(comment) *comment = std::string("perimeter_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::ExternalPerimeter) {
+        } else if (role == ExtrusionRole::ExternalPerimeter) {
             speed = m_config.external_perimeter_speed.get_abs_value(m_config.perimeter_speed.get_abs_value(vol_speed));
             if(comment) *comment = std::string("external_perimeter_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::BridgeInfill) {
+        } else if (role == ExtrusionRole::BridgeInfill) {
             speed = m_config.bridge_speed.get_abs_value(vol_speed);
             if(comment) *comment = std::string("bridge_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::InternalBridgeInfill) {
+        } else if (role == ExtrusionRole::InternalBridgeInfill) {
             speed = m_config.internal_bridge_speed.get_abs_value(m_config.bridge_speed.get_abs_value(vol_speed));
             if(comment) *comment = std::string("internal_bridge_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::InternalInfill) {
+        } else if (role == ExtrusionRole::InternalInfill) {
             speed = m_config.infill_speed.get_abs_value(m_config.solid_infill_speed.get_abs_value(vol_speed));
             if(comment) *comment = std::string("infill_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::SolidInfill) {
+        } else if (role == ExtrusionRole::SolidInfill) {
             speed = m_config.solid_infill_speed.get_abs_value(vol_speed);
             if(comment) *comment = std::string("solid_infill_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::TopSolidInfill) {
+        } else if (role == ExtrusionRole::TopSolidInfill) {
             speed = m_config.top_solid_infill_speed.get_abs_value(m_config.solid_infill_speed.get_abs_value(vol_speed));
             if(comment) *comment = std::string("top_solid_infill_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::ThinWall) {
+        } else if (role == ExtrusionRole::ThinWall) {
             speed = m_config.thin_walls_speed.get_abs_value(m_config.external_perimeter_speed.get_abs_value(m_config.perimeter_speed.get_abs_value(vol_speed)));
             if(comment) *comment = std::string("thin_walls_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::GapFill) {
+        } else if (role == ExtrusionRole::GapFill) {
             speed = m_config.gap_fill_speed.get_abs_value(m_config.perimeter_speed.get_abs_value(vol_speed));
             if(comment) *comment = std::string("gap_fill_speed ") + *comment;
-        } else if (path.role() == ExtrusionRole::Ironing) {
+        } else if (role == ExtrusionRole::Ironing) {
             speed = m_config.ironing_speed.get_abs_value(m_config.top_solid_infill_speed.get_abs_value(m_config.solid_infill_speed.get_abs_value(vol_speed)));
             if(comment) *comment = std::string("ironing_speed ") + *comment;
         }
@@ -9044,15 +9056,16 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
     if (overhang_attributes && overhang_attributes->has_dynamic_overhangs_speed) {
         assert(this->layer()->id() > 0);
         double my_speed = speed;
-        if(comment) *comment = "overhangs_speed";
-        auto [speed_ratio, over_fan_speed] = ExtrusionProcessor::calculate_overhang_speed(path, this->m_config, m_writer.tool()->id());
+        if (comment)
+            *comment = "overhangs_speed";
+        float speed_ratio = ExtrusionProcessor::calculate_overhang_speed(path, this->m_config,
+                                                                   m_writer.tool()->id());
         assert(speed_ratio == -1 || (speed_ratio >= 0 && speed_ratio <= 1));
-        assert(over_fan_speed == -1 || (over_fan_speed >= 0 && over_fan_speed <= 100));
         if (speed_ratio >= 0) {
             double other_speed = set_speed;
-            if (path.role().is_overhang()) {
+            if (role.is_overhang()) {
                 // external or normal perimeter?
-                if (path.role() == ExtrusionRole::OverhangExternalPerimeter) {
+                if (role == ExtrusionRole::OverhangExternalPerimeter) {
                     other_speed = m_config.get_computed_value("external_perimeter_speed");
                 } else {
                     other_speed = m_config.get_computed_value("perimeter_speed");
@@ -9060,7 +9073,8 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
             } else {
                 other_speed = m_config.get_computed_value("overhangs_speed");
             }
-            if (m_writer.tool()->id() >= 0 && m_volumetric_speed_mm3_per_s[m_writer.tool()->id()] != 0. && other_speed == 0) {
+            if (m_writer.tool()->id() >= 0 && m_volumetric_speed_mm3_per_s[m_writer.tool()->id()] != 0. &&
+                other_speed == 0) {
                 // copy/paste
                 // if m_volumetric_speed_mm3_per_s, use the max size for thinwall & gapfill, to avoid variations
                 double vol_speed = m_volumetric_speed_mm3_per_s[m_writer.tool()->id()] / path.mm3_per_mm();
@@ -9068,7 +9082,7 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
                 if (vol_speed > max_print_speed) {
                     vol_speed = max_print_speed;
                 }
-                if (path.role() == ExtrusionRole::OverhangExternalPerimeter) {
+                if (role == ExtrusionRole::OverhangExternalPerimeter) {
                     other_speed = m_config.external_perimeter_speed.get_abs_value(vol_speed);
                 } else {
                     other_speed = m_config.perimeter_speed.get_abs_value(vol_speed);
@@ -9079,7 +9093,7 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
             }
             double overhangs_speed;
             double perimeter_speed;
-            if (path.role().is_overhang()) {
+            if (role.is_overhang()) {
                 overhangs_speed = my_speed;
                 perimeter_speed = other_speed;
             } else {
@@ -9088,6 +9102,13 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
             }
             speed = overhangs_speed * (1 - speed_ratio) + perimeter_speed * speed_ratio;
         }
+    }
+    
+    if (overhang_attributes &&
+        m_config.overhangs_dynamic_fan_speed.is_enabled(m_writer.tool()->id())) {
+        float over_fan_speed = ExtrusionProcessor::calculate_overhang_fan_speed(path, this->m_config,
+                                                                               m_writer.tool()->id());
+        assert(over_fan_speed == -1 || (over_fan_speed >= 0 && over_fan_speed <= 100));
         if (over_fan_speed >= 0) {
             fan_speed = over_fan_speed;
         }
@@ -9784,6 +9805,7 @@ std::string GCodeGenerator::_before_extrude(const ExtrusionPath &path, const std
             m_check_markers++;
         }
         if (m_overhang_fan_override >= 0) {
+            gcode += "; overhang speed : SET_MIN_FAN_SPEED" + std::to_string(int(m_overhang_fan_override)) + "\n";
             gcode += ";_SET_MIN_FAN_SPEED" + std::to_string(int(m_overhang_fan_override)) + "\n";
         }
         // comment to be on the same line as the speed command.
@@ -9800,6 +9822,7 @@ std::string GCodeGenerator::_after_extrude(const ExtrusionPath &path) {
     std::string gcode;
     if (m_enable_cooling_markers) {
         if (m_overhang_fan_override >= 0) {
+            gcode += "; end of overhang speed\n";
             gcode += ";_RESET_MIN_FAN_SPEED\n";
             m_overhang_fan_override = -1.;
         }

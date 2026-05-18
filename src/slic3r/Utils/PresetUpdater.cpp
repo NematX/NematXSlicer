@@ -55,6 +55,9 @@ wxDEFINE_EVENT(EVT_CONFIG_UPDATER_SHOW_DIALOG, wxCommandEvent);
 #define ERROR_MSG_UNABLE_SNAPSHOT "Error: fail to take a snapshot"
 #define ERROR_MSG_UNABLE_COPY_CONFIG "Unable to copy the vendor bundle into the configuration directory."
 
+
+bool copy_file_and_icons(boost::filesystem::path dir_in, boost::filesystem::path dir_out, std::string vendor_id, bool copy = true);
+
 PresetUpdater::PresetUpdater(wxEvtHandler* event_handler) : evt_handler(event_handler){
 
     evt_handler->Bind(EVT_CONFIG_UPDATER_SHOW_DIALOG, [this](const wxCommandEvent& evt) {
@@ -100,9 +103,9 @@ void PresetUpdater::load_unused_vendors(std::set<std::string> &vendors_id, const
                 if (file_path.extension() != ".ini") {
                     continue;
                 }
-                if (vendors_id.find(file_path.stem().string()) == vendors_id.end()) {
+                //if (vendors_id.find(file_path.stem().string()) == vendors_id.end()) {
                     vendors.push_back(file_path);
-                }
+                //}
             }
         }
     }
@@ -115,6 +118,7 @@ void PresetUpdater::load_unused_vendors(std::set<std::string> &vendors_id, const
             if (!vp.config_update_rest.empty()) {
                 is_synch = false;
             }
+            // ensure it's copied into the cache
             bool has_cache = boost::filesystem::exists(data_path() / "cache" / "vendor" / vp.usable_id());
             this->all_vendors[vp.id] = VendorSync{vp, is_installed, has_cache};
             assert(this->all_vendors[vp.id].is_installed == is_installed);
@@ -128,8 +132,21 @@ void PresetUpdater::load_unused_vendors(std::set<std::string> &vendors_id, const
             // now order by version
             this->all_vendors[vp.id].sort_available();
         } else {
-            bool has_cache = boost::filesystem::exists(data_path() / "cache" / "vendor" / vp.usable_id());
-            it->second.reset(vp, is_installed, has_cache);
+            // add new available version if not present
+            bool new_version = true;
+            for (const VendorAvailable &version : it->second.available_profiles) {
+                if (version.config_version == vp.config_version) {
+                    new_version = false;
+                    break;
+                }
+            }
+            if (new_version) {
+                it->second.available_profiles.emplace_back(
+                    VendorAvailable{vp.config_version, vp.slicer_version, path.string(), "", "", "",
+                                    /*tag = */vp.config_version.to_string() + "=" + vp.slicer_version.to_string(), ""});
+                it->second.sort_available();
+                it->second.can_upgrade = !it->second.available_profiles.empty() && it->second.available_profiles.front().config_version > it->second.profile.config_version;
+            }
         }
     }
 }
@@ -177,7 +194,8 @@ void PresetUpdater::reload_all_vendors() {
         }
     }
     // read all vendor from cache (added but not installed)
-    for (const boost::filesystem::directory_entry &vendor_entry : boost::filesystem::directory_iterator(configuration_path / "cache" / "vendor")) {
+    for (const boost::filesystem::directory_entry &vendor_entry :
+         boost::filesystem::directory_iterator(configuration_path / "cache" / "vendor")) {
         if (vendor_entry.status().type() == boost::filesystem::file_type::directory_file) {
             load_unused_vendors(vendors_id, vendor_entry.path(), /*is_installed=*/false);
         }
@@ -188,7 +206,44 @@ void PresetUpdater::reload_all_vendors() {
     if (!boost::filesystem::exists(resources_path / "profiles")) {
         boost::filesystem::create_directories(resources_path / "profiles");
     }
-    load_unused_vendors(vendors_id, resources_path / "profiles", /*is_installed=*/ false);
+    //load_unused_vendors(vendors_id, resources_path / "profiles", /*is_installed=*/ false);
+    for (const boost::filesystem::directory_entry &vendor_entry :
+         boost::filesystem::directory_iterator(resources_path / "profiles")) {
+        if (vendor_entry.path().extension() != ".ini") {
+            continue;
+        }
+        try {
+            VendorProfile vp = VendorProfile::from_ini(vendor_entry.path(), false);
+            //if (vp.config_update_rest.empty()) 
+            {
+                // copy to cache if not already in
+                boost::filesystem::path vendor_cache = GUI::into_path(data_dir()) / "cache" / "vendor" /
+                    vp.usable_id();
+                std::string vendor_file_id = vendor_entry.path().stem().string();
+                std::string dir_cache_name = vendor_entry.path().stem().string() + "_" + vp.config_version.to_string();
+                if (!boost::filesystem::exists(vendor_cache / dir_cache_name)) {
+                    boost::filesystem::create_directories(vendor_cache / dir_cache_name / "profiles");
+                    copy_file_and_icons(resources_path / "profiles", vendor_cache / dir_cache_name / "profiles", vendor_file_id, true);
+                }
+            }
+        } catch (std::exception) {
+        }
+    }
+
+    // load all available profile copied into cache.
+    for (const boost::filesystem::directory_entry &vendor_entry :
+         boost::filesystem::directory_iterator(configuration_path / "cache" / "vendor")) {
+        if (vendor_entry.is_directory()) {
+            for (const boost::filesystem::directory_entry &config_entry :
+                 boost::filesystem::directory_iterator(vendor_entry.path())) {
+                if (config_entry.is_directory() && boost::filesystem::exists(config_entry.path() / "profiles")) {
+                    load_unused_vendors(vendors_id, config_entry.path() / "profiles", /*is_installed=*/false);
+                }
+            }
+        }
+    }
+
+
 
 }
 
@@ -767,7 +822,7 @@ void PresetUpdater::install_vendor(const std::string &vendor_id,
     callback_result(result); 
 }
 
-bool copy_file_and_icons(boost::filesystem::path dir_in, boost::filesystem::path dir_out, std::string vendor_id, bool copy = true) {
+bool copy_file_and_icons(boost::filesystem::path dir_in, boost::filesystem::path dir_out, std::string vendor_id, bool copy) {
 
     // copy the file & icons
     assert(boost::filesystem::exists(dir_in));

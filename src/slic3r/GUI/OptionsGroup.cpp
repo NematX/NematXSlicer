@@ -150,6 +150,9 @@ OptionsGroup::OptionsGroup(	wxWindow* _parent, const wxString& title,
                 staticbox(title!=""), extra_column(extra_clmn)
 {
     assert(Tab::fake_build || m_parent);
+
+    sidetext_font = wxFont(wxGetApp().normal_font());
+    label_font = wxFont(wxGetApp().normal_font());
 }
 
 Option::Option(const ConfigOptionDef &_opt, int32_t idx /*= -1*/)

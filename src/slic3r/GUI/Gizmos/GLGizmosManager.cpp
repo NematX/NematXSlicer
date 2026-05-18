@@ -98,7 +98,7 @@ bool GLGizmosManager::init()
 
     if (!m_background_texture.metadata.filename.empty())
     {
-        if (!m_background_texture.texture.load_from_file(resources_dir() + "/icons/" + m_background_texture.metadata.filename, false, GLTexture::SingleThreaded, false))
+        if (!m_background_texture.texture.load_from_file((resources_path() / "icons" / m_background_texture.metadata.filename).string(), false, GLTexture::SingleThreaded, false))
             return false;
     }
 
@@ -140,8 +140,8 @@ bool GLGizmosManager::init_arrow(const std::string& filename)
     if (m_arrow_texture.get_id() != 0)
         return true;
 
-    const std::string path = resources_dir() + "/icons/";
-    return (!filename.empty()) ? m_arrow_texture.load_from_svg_file(path + filename, false, false, false, 512) : false;
+    const boost::filesystem::path file_path = resources_path() / "icons" / filename;
+    return (!filename.empty()) ? m_arrow_texture.load_from_svg_file(file_path.string(), false, false, false, 512) : false;
 }
 
 void GLGizmosManager::set_overlay_icon_size(float size)
@@ -896,7 +896,7 @@ GLGizmosManager::EType GLGizmosManager::get_gizmo_from_name(const std::string& g
 
 bool GLGizmosManager::generate_icons_texture()
 {
-    std::string path = resources_dir() + "/icons/";
+    boost::filesystem::path path = resources_path() / "icons";
     std::vector<std::string> filenames;
     for (size_t idx=0; idx<m_gizmos.size(); ++idx)
     {
@@ -905,7 +905,7 @@ bool GLGizmosManager::generate_icons_texture()
         {
             const std::string& icon_filename = gizmo->get_icon_filename();
             if (!icon_filename.empty())
-                filenames.push_back(path + icon_filename);
+                filenames.push_back((path / icon_filename).string());
         }
     }
 

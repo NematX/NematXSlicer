@@ -816,13 +816,15 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Direction of the support pattern (in XY plane).
     ((ConfigOptionFloat,                support_material_angle))
     ((ConfigOptionFloat,                support_material_angle_height))
+    ((ConfigOptionFloatOrPercent,       support_material_bottom_interface_expansion))
+    ((ConfigOptionInt,                  support_material_bottom_interface_layers))
+    ((ConfigOptionEnum<InfillPattern>,  support_material_bottom_interface_pattern))
     ((ConfigOptionBool,                 support_material_buildplate_only))
     ((ConfigOptionEnum<SupportZDistanceType>,   support_material_contact_distance_type))
     // support_material_contact_distance (PS) == support_material_contact_distance_top (SuSi 2.3 &-)
     ((ConfigOptionFloatOrPercent,       support_material_contact_distance))
     // support_material_bottom_contact_distance (PS 2.4) == support_material_contact_distance_bottom (SuSi 2.3 &-)
     ((ConfigOptionFloatOrPercent,       support_material_bottom_contact_distance))
-    ((ConfigOptionEnum<InfillPattern>,  support_material_bottom_interface_pattern))
     // Morphological closing of support areas. Only used for "sung" supports.
     ((ConfigOptionFloat,                support_material_closing_radius))
     ((ConfigOptionInt,                  support_material_enforce_layers))
@@ -834,7 +836,6 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  support_material_interface_extruder))
     ((ConfigOptionInt,                  support_material_interface_layers))
     ((ConfigOptionFloatOrPercent,       support_material_interface_layer_height))
-    ((ConfigOptionInt,                  support_material_bottom_interface_layers))
     // Spacing between interface lines (the hatching distance). Set zero to get a solid interface.
     ((ConfigOptionFloat,                support_material_interface_spacing))
     ((ConfigOptionFloatOrPercent,       support_material_interface_speed))

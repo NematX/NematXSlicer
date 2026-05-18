@@ -188,14 +188,15 @@ wxBitmapBundle* BitmapCache::insert_bndl(const std::string& name, const std::vec
 wxBitmapBundle* BitmapCache::insert_bndl(const std::string &bitmap_key, const char* data, size_t width, size_t height)
 {
     wxBitmapBundle* bndl = nullptr;
+    wxSize sizeDef(width, height);
     auto it = m_bndl_map.find(bitmap_key);
     if (it == m_bndl_map.end()) {
-        bndl = new wxBitmapBundle(wxBitmapBundle::FromSVG(data, wxSize(width, height)));
+        bndl = new wxBitmapBundle(wxBitmapBundle::FromSVG(data, sizeDef));
         m_bndl_map[bitmap_key] = bndl;
     }
     else {
         bndl = it->second;
-        *bndl = wxBitmapBundle::FromSVG(data, wxSize(width, height));
+        *bndl = wxBitmapBundle::FromSVG(data, sizeDef);
     }
     return bndl;
 }
@@ -375,13 +376,12 @@ wxBitmapBundle* BitmapCache::from_svg(const std::string& bitmap_name, unsigned t
     //reduce hash to 16b
     color_change_hash = ((color_change_hash >> 16) & 0x0000FFFF) ^ (color_change_hash & 0x0000FFFF);
 
-    if (target_width == 0)
-        target_width = target_height;
-    std::string bitmap_key = bitmap_name + (target_height != 0 ?
-        "-h" + std::to_string(target_height) :
-        "-w" + std::to_string(target_width))
+    std::string bitmap_key = bitmap_name +
+        (target_height > 0    ? "-h" + std::to_string(target_height) :
+             target_width > 0 ? "-w" + std::to_string(target_width) :
+                                "")
         //+ (dark_mode ? "-dm" : "")
-        + (color_change_hash>0 ? std::string("-") + std::to_string(color_change_hash): "");
+        + (color_change_hash > 0 ? std::string("-") + std::to_string(color_change_hash) : "");
 
     auto it = m_bndl_map.find(bitmap_key);
     if (it != m_bndl_map.end())
@@ -403,6 +403,28 @@ wxBitmapBundle* BitmapCache::from_svg(const std::string& bitmap_name, unsigned t
     nsvgGetDataFromFileWithReplace(Slic3r::get_icon_file(bitmap_name + ".svg").c_str(), str, color_changes);
     if (str.empty())
         return nullptr;
+    
+    // pre-load the svg to get he width & height to resize correctly
+    if (target_width == 0 || target_height == 0) {
+        wxCharBuffer copy(str.data());
+        NSVGimage *const svgImage = nsvgParse(copy.data(), "px", 96);
+        if (svgImage) {
+            // Somewhat unexpectedly, a non-null but empty image is returned even if
+            // the data is not SVG at all, e.g. without this check creating a bundle
+            // from any random file with FromSVGFile() would "work".
+            if (svgImage->width > 0 && svgImage->height > 0) {
+                if (target_width == 0 && target_height > 0) {
+                    target_width = svgImage->width * target_height / svgImage->height;
+                } else if (target_width > 0 && target_height == 0) {
+                    target_height = svgImage->height * target_width / svgImage->width;
+                } else if (target_width == 0 && target_height == 0) {
+                    target_height = svgImage->height;
+                    target_width = svgImage->width;
+                }
+            }
+            nsvgDelete(svgImage);
+        }
+    }
 
     return insert_bndl(bitmap_key, str.data(), target_width, target_height);
 }
@@ -416,10 +438,11 @@ wxBitmapBundle* BitmapCache::from_png(const std::string& bitmap_name, unsigned w
     }
     color_change_hash = ((color_change_hash >> 16) & 0x0000FFFF) | (color_change_hash & 0x0000FFFF);
 
-    std::string bitmap_key = bitmap_name + (height != 0 ?
-        "-h" + std::to_string(height) :
-        "-w" + std::to_string(width))
-        + (color_change_hash>0 ? std::string("-") + std::to_string(color_change_hash): "");
+    std::string bitmap_key = bitmap_name +
+        (height > 0    ? "-h" + std::to_string(height) :
+             width > 0 ? "-w" + std::to_string(width) :
+                         "") +
+        (color_change_hash > 0 ? std::string("-") + std::to_string(color_change_hash) : "");
 
     auto it = m_bndl_map.find(bitmap_key);
     if (it != m_bndl_map.end())
@@ -431,14 +454,16 @@ wxBitmapBundle* BitmapCache::from_png(const std::string& bitmap_name, unsigned w
         image.GetWidth() == 0 || image.GetHeight() == 0)
         return nullptr;
 
-    if (height != 0 && unsigned(image.GetHeight()) != height)
+    if (width <= 0 && height > 0) {
         width = unsigned(0.5f + float(image.GetWidth()) * height / image.GetHeight());
-    else if (width != 0 && unsigned(image.GetWidth()) != width)
+    } else if (height <= 0 && width > 0) {
         height = unsigned(0.5f + float(image.GetHeight()) * width / image.GetWidth());
+    }
 
-    if (height != 0 && width != 0)
+    if (height > 0 && width > 0 && image.GetWidth() != width && image.GetHeight() != height) {
         image.Rescale(width, height, wxIMAGE_QUALITY_BILINEAR);
-    
+    }
+
     if (color_changes.has_value(int2rgb(9079434))) {
         image = image.ConvertToGreyscale(m_gs, m_gs, m_gs);
     } else {

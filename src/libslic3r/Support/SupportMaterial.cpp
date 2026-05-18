@@ -1422,7 +1422,7 @@ static inline std::tuple<Polygons, Polygons, Polygons, float> detect_overhangs(
             if (object_config.dont_support_bridges) {
                 // FIXME Expensive, potentially not precise enough.
                 assert_valid(diff_polygons);
-                remove_bridges_from_contacts(print_config, lower_layer, *layerm, flow_width, diff_polygons);
+                remove_bridges_from_contacts(print_config, lower_layer, *layerm, double(flow_width), diff_polygons);
                 ensure_valid(diff_polygons, resolution);
             }
 
@@ -2034,15 +2034,21 @@ static inline SupportGeneratorLayer* detect_bottom_contacts(
                                           layer_new.scaled_height());
     layer_new.set_scaled_print_z(slicing_params.soluble_interface ? layer.upper_layer->scaled_print_z() :
         layer.scaled_print_z() + layer_new.scaled_height_block() + Layer::scale_to_layer_coord(slicing_params.gap_object_support));
-    layer_new.set_scaled_bottom_z(layer.scaled_print_z());
+    layer_new.set_scaled_bottom_z(slicing_params.soluble_interface ? layer.scaled_print_z() :
+        layer.scaled_print_z() + Layer::scale_to_layer_coord(slicing_params.gap_object_support));
     //recompute layer height to be in synch with print & bottom
     layer_new.set_scaled_height(layer_new.scaled_print_z() - layer_new.scaled_bottom_z());
     layer_new.idx_object_layer_below = layer_id;
     layer_new.bridging = !slicing_params.soluble_interface;
-    //FIXME how much to inflate the bottom surface, as it is being extruded with a bridging flow? The following line uses a normal flow.
-    // fixed in 2.7.63
-    //layer_new.polygons = expand(touching, double(support_params.support_material_flow.scaled_width()), SUPPORT_SURFACES_OFFSET_PARAMETERS);
-    layer_new.polygons = touching;
+    // how much to inflate the bottom surface, for better stability
+    if (support_params.bottom_interface_expansion.value > 0) {
+        coordf_t expansion = scale_d(support_params.bottom_interface_expansion.get_abs_value(
+            support_params.support_material_bottom_interface_flow.width()));
+        layer_new.polygons = expand(touching, expansion, SUPPORT_SURFACES_OFFSET_PARAMETERS);
+        layer_new.polygons = intersection(top, layer_new.polygons);
+    } else {
+        layer_new.polygons = touching;
+    }
     ensure_valid(layer_new.polygons, support_params.resolution);
 
     if (! slicing_params.soluble_interface) {

@@ -968,7 +968,7 @@ void PrintObject::_max_overhang_threshold() {
                             for (size_t other_region_idx = 0; other_region_idx < my_layer->m_regions.size(); ++other_region_idx) {
                                 const LayerRegion *other_lregion = my_layer->get_region(other_region_idx);
                                 if ( (other_lregion->region().config().overhangs_bridge_threshold.value != 0 ||
-                                        !lregion->region().config().overhangs_bridge_threshold.is_enabled())
+                                        !other_lregion->region().config().overhangs_bridge_threshold.is_enabled())
                                     && other_lregion->region().config().overhangs_max_slope > 0) {
                                     coord_t enlargement = scale_t(lregion->region().config().overhangs_max_slope.get_abs_value(unscaled(max_nz_diam))); // me or other?
                                     enlargement = std::max(enlargement, max_nz_diam);
@@ -980,7 +980,7 @@ void PrintObject::_max_overhang_threshold() {
                                                      scale_t(this->print()->config().bridge_precision.get_abs_value(bridge_flow.spacing())),
                                                      other_layer_bridge_idx);
                                         detector.layer_id = other_layer_bridge_idx;
-                                        if (lregion->region().config().overhangs_bridge_threshold.is_enabled()) {
+                                        if (other_lregion->region().config().overhangs_bridge_threshold.is_enabled()) {
                                             detector.max_bridge_length = scale_d(std::max(0., other_lregion->region().config().overhangs_bridge_threshold.value));
                                         } else {
                                             detector.max_bridge_length = -1;
@@ -1044,7 +1044,7 @@ void PrintObject::_max_overhang_threshold() {
                     // same with holes (concave as they are in reverse order, this is taken care inside only_convex_or_90deg)
                     for (Polygon &hole : expoly.holes) {
                         assert(hole.is_clockwise());
-                        smoothen(expoly.contour, std::max(double(enlargement) * 2, double(max_nz_diam * 2)),
+                        smoothen(hole, std::max(double(enlargement) * 2, double(max_nz_diam * 2)),
                                  PI * 5. / 6.);
                     }
                 }

@@ -94,6 +94,20 @@ int OpenGLManager::GLInfo::get_max_tex_size() const
 #endif // __APPLE__
 }
 
+float OpenGLManager::GLInfo::get_max_line_width() const
+{
+    if (!m_detected)
+        detect();
+    return m_max_line_width;
+}
+
+float OpenGLManager::GLInfo::get_min_line_width() const
+{
+    if (!m_detected)
+        detect();
+    return m_min_line_width;
+}
+
 float OpenGLManager::GLInfo::get_max_anisotropy() const
 {
     if (!m_detected)
@@ -114,24 +128,27 @@ void OpenGLManager::GLInfo::detect() const
     *const_cast<Semver*>(&m_version)       = parse_version_string(m_version_string);
     *const_cast<bool*>(&m_version_is_mesa) = boost::icontains(m_version_string, "mesa");
     *const_cast<Semver*>(&m_glsl_version)  = parse_version_string(m_glsl_version_string);
-    
-    int* max_tex_size = const_cast<int*>(&m_max_tex_size);
-    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, max_tex_size));
 
-    *max_tex_size /= 2;
+    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, &m_max_tex_size));
+
+    m_max_tex_size /= 2;
 
     if (Slic3r::total_physical_memory() / (1024 * 1024 * 1024) < 6)
-        *max_tex_size /= 2;
+        m_max_tex_size /= 2;
 
     if (GLEW_EXT_texture_filter_anisotropic) {
-        float* max_anisotropy = const_cast<float*>(&m_max_anisotropy);
-        glsafe(::glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, max_anisotropy));
+        glsafe(::glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, &m_max_anisotropy));
     }
 
     if (!GLEW_ARB_compatibility)
-        *const_cast<bool*>(&m_core_profile) = true;
+        m_core_profile = true;
 
-    *const_cast<bool*>(&m_detected) = true;
+    float range[2];
+    glGetFloatv(GL_ALIASED_LINE_WIDTH_RANGE, range);
+    m_min_line_width = range[0];
+    m_max_line_width = range[1];
+
+    m_detected = true;
 }
 
 static Semver parse_version_string(const std::string& version)

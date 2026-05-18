@@ -132,7 +132,9 @@ static wxIcon main_frame_icon(GUI_App::EAppMode app_mode)
     }
     return wxIcon(path, wxBITMAP_TYPE_ICO);
 #else // _WIN32
-    return wxIcon(Slic3r::get_icon_file(app_mode == GUI_App::EAppMode::Editor ? SLIC3R_APP_KEY "_128px.png" : GCODEVIEWER_APP_KEY "_128px.png"), wxBITMAP_TYPE_PNG);
+    wxIcon icon;
+    icon.CopyFromBitmap(get_bmp_bundle(GUI_App::dark_mode() ? wxGetApp().light_icon_name() : wxGetApp().dark_icon_name(), 128)->GetBitmap(wxSize(128, 128)));
+    return icon;
 #endif // _WIN32
 }
 
@@ -145,6 +147,7 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
 {
     // Fonts were created by the DPIFrame constructor for the monitor, on which the window opened.
     wxGetApp().update_fonts(this);
+    this->SetFont(wxGetApp().normal_font());
 /*
 #ifndef __WXOSX__ // Don't call SetFont under OSX to avoid name cutting in ObjectList 
     this->SetFont(this->normal_font());
@@ -1677,7 +1680,7 @@ static wxMenu* generate_help_menu()
     append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s Releases"), SLIC3R_APP_NAME), wxString::Format(_L("Open the %s releases page in your browser"), SLIC3R_APP_NAME),
         [](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog(SLIC3R_DOWNLOAD); });
     append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s wiki"), SLIC3R_APP_NAME), wxString::Format(_L("Open the %s wiki in your browser"), SLIC3R_APP_NAME),
-        [](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog("http://github.com/" SLIC3R_GITHUB "/wiki"); });
+        [](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog(get_app_config()->github_url() + "/wiki"); });
     append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s website"), SLIC3R_APP_NAME), wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
         [](wxCommandEvent&) { wxGetApp().open_browser_with_warning_dialog("http://github.com/" SLIC3R_GITHUB); });
     // append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("Slic3r Manual")),

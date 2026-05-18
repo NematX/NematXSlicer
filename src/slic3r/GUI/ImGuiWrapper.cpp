@@ -1773,9 +1773,23 @@ void ImGuiWrapper::init_font(bool compress)
 #endif
 	builder.BuildRanges(&ranges); // Build the final result (ordered ranges with all the unique characters submitted)
 
+        auto copy_and_get_font = [](std::string_view str) -> std::string {
+            assert(boost::filesystem::exists(Slic3r::resources_path() / "fonts"));
+            assert(boost::filesystem::exists(Slic3r::data_path()));
+            // copy fonts into configuration, to avoid blocking them
+            if (!boost::filesystem::exists(Slic3r::data_path() / "cache" / "fonts" / str) &&
+                boost::filesystem::exists(Slic3r::resources_path() / "fonts" / str)) {
+                if (!boost::filesystem::exists(Slic3r::data_path() / "cache" / "fonts")) {
+                    boost::filesystem::create_directories(Slic3r::data_path() / "cache" / "fonts");
+                }
+                boost::filesystem::copy(Slic3r::resources_path() / "fonts" / str, Slic3r::data_path() / "cache" / "fonts" / str);
+            }
+            return (Slic3r::data_path() / "cache" / "fonts" / str).string();
+        };
+
     //FIXME replace with io.Fonts->AddFontFromMemoryTTF(buf_decompressed_data, (int)buf_decompressed_size, m_font_size, nullptr, ranges.Data);
     //https://github.com/ocornut/imgui/issues/220
-	ImFont* font = io.Fonts->AddFontFromFileTTF((boost::filesystem::path(Slic3r::resources_dir()) / "fonts" / (m_font_cjk ? "NotoSansCJK-Regular.ttc" : "NotoSans-Regular.ttf")).string().c_str(), m_font_size, nullptr, ranges.Data);
+	ImFont* font = io.Fonts->AddFontFromFileTTF(copy_and_get_font(m_font_cjk ? "NotoSansCJK-Regular.ttc" : "NotoSans-Regular.ttf").c_str(), m_font_size, nullptr, ranges.Data);
     if (font == nullptr) {
         font = io.Fonts->AddFontDefault();
         if (font == nullptr) {
@@ -1788,7 +1802,7 @@ void ImGuiWrapper::init_font(bool compress)
     config.MergeMode = true;
     if (! m_font_cjk) {
 		// Apple keyboard shortcuts are only contained in the CJK fonts.
-        [[maybe_unused]]ImFont *font_cjk = io.Fonts->AddFontFromFileTTF((boost::filesystem::path(Slic3r::resources_dir()) / "fonts" / "NotoSansCJK-Regular.ttc").string().c_str(), m_font_size, &config, ranges_keyboard_shortcuts);
+        [[maybe_unused]]ImFont *font_cjk = io.Fonts->AddFontFromFileTTF(copy_and_get_font("NotoSansCJK-Regular.ttc").c_str(), m_font_size, &config, ranges_keyboard_shortcuts);
         assert(font_cjk != nullptr);
     }
 #endif

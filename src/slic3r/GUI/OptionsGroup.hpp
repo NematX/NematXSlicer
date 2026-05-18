@@ -147,12 +147,12 @@ public:
     std::function<void(wxWindow* win)> rescale_near_label_widget { nullptr };
 
     std::function<void(const OptionKeyIdx& opt_key_idx)> edit_custom_gcode { nullptr };
-    
-    wxFont			sidetext_font {wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT) };
-    wxFont			label_font {wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT) };
-    int             sidetext_width{ -1 };
-    int             label_width{ -1 };
-	//int				sublabel_width{ -1 }; //never set
+
+    wxFont sidetext_font;
+    wxFont label_font;
+    int    sidetext_width{ -1 };
+    int    label_width{ -1 };
+    //int    sublabel_width{ -1 }; //never set
 
     /// Returns a copy of the pointer of the parent wxWindow.
     /// Accessor function is because users are not allowed to change the parent

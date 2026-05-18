@@ -78,9 +78,12 @@ namespace GUI {
 
 #if ENABLE_GL_CORE_PROFILE
         const bool core_profile = OpenGLManager::get_gl_info().is_core_profile();
-        if (!core_profile)
+
 #endif // ENABLE_GL_CORE_PROFILE
-            glsafe(::glLineWidth(1.5f));
+        if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
+            float min = std::min(.5f, OpenGLManager::get_gl_info().get_min_line_width());
+            glsafe(::glLineWidth(min + 1.f));
+        }
 
         glsafe(::glDisable(GL_DEPTH_TEST));
 

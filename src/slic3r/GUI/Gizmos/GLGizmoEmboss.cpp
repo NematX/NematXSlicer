@@ -1236,7 +1236,7 @@ void GLGizmoEmboss::set_volume_by_selection()
 
         // Have to use some wxFont
         if (!wx_font.IsOk())
-            wx_font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+            wx_font = wxGetApp().normal_font();
     }
     assert(wx_font.IsOk());
 

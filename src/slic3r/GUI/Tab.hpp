@@ -476,6 +476,7 @@ public:
     virtual void	sys_color_changed();
 	size_t          get_page_count() { return m_pages.size(); }
 	PageShp         get_page(size_t idx) { return m_pages[idx]; }
+    size_t          get_page_idx(Page* page) const;
 	Field*			get_field(const t_config_option_key& opt_key, int32_t opt_index = -1) const;
 	Line*			get_line(const t_config_option_key& opt_key);
 	std::pair<OG_CustomCtrl*, bool*> get_custom_ctrl_with_blinking_ptr(const t_config_option_key& opt_key, int32_t opt_index = -1);
@@ -652,7 +653,8 @@ class TabPrinter : public Tab
 	}
 
 	ogStaticText* m_machine_limits_description_line {nullptr};
-	void 		update_machine_limits_description(const MachineLimitsUsage usage);
+	void        update_machine_limits_description(const MachineLimitsUsage usage);
+    uint16_t    compute_extruder_idx() const;
 
 
     std::vector<PageShp>			m_pages_fff;
@@ -672,6 +674,7 @@ public:
     bool        m_rebuild_kinematics_page = false;
     
 	int16_t		m_unregular_page_pos = -1;
+	int16_t		m_extruder_page_pos = -1;
 	size_t		m_extruders_count = 0;
 	size_t		m_extruders_count_old = 0;
 	size_t		m_initial_extruders_count = 0;

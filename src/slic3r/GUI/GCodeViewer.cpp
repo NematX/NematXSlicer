@@ -3955,12 +3955,17 @@ void GCodeViewer::render_toolpaths()
                 switch (buffer.render_primitive_type)
                 {
                 case TBuffer::ERenderPrimitiveType::Line: {
+                    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
+                        float lwidth  = 1.f;
 #if ENABLE_GL_CORE_PROFILE
-                    if (!OpenGLManager::get_gl_info().is_core_profile())
-                        glsafe(::glLineWidth(static_cast<GLfloat>(line_width(camera.get_zoom()))));
+                        lwidth = line_width(camera.get_zoom());
 #else
-                    glsafe(::glLineWidth(static_cast<GLfloat>(line_width(zoom))));
+                        lwidth = line_width(zoom);
 #endif // ENABLE_GL_CORE_PROFILE
+                        lwidth = std::min(OpenGLManager::get_gl_info().get_max_line_width(), lwidth);
+                        lwidth = std::max(OpenGLManager::get_gl_info().get_min_line_width(), lwidth);
+                        glsafe(::glLineWidth(lwidth));
+                    }
                     render_as_lines(it_path, buffer.render_paths.end(), *shader, uniform_color);
                     break;
                 }

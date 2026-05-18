@@ -887,9 +887,11 @@ void CLI::print_help(bool include_print_options, PrinterTechnology printer_techn
 #else /* SLIC3R_GUI */
         << " (without GUI support)"
 #endif /* SLIC3R_GUI */
-        << std::endl
-        << "https://github.com/" << SLIC3R_GITHUB << std::endl << std::endl
-        << "Usage: superslicer [ ACTIONS ] [ TRANSFORM ] [ OPTIONS ] [ file.stl ... ]" << std::endl
+        << std::endl;
+        if (SLIC3R_GITHUB[0] !='h' && SLIC3R_GITHUB[1] != 't' && SLIC3R_GITHUB[2] != 't' && SLIC3R_GITHUB[3] != 'p') {
+            boost::nowide::cout << "https://github.com/" << SLIC3R_GITHUB << std::endl << std::endl;
+        }
+    boost::nowide::cout << "Usage: " SLIC3R_APP_CMD " [ ACTIONS ] [ TRANSFORM ] [ OPTIONS ] [ file.stl ... ]" << std::endl
         << std::endl
         << "Actions:" << std::endl;
     cli_actions_config_def.print_cli_help(boost::nowide::cout, false);

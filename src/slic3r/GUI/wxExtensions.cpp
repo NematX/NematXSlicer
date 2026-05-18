@@ -480,20 +480,25 @@ wxBitmapBundle* get_bmp_bundle(const std::string& bmp_name_in, int width/* = 16*
 
 wxBitmapBundle *get_bmp_bundle(const std::string &bmp_name_in, int width, int height, Slic3r::ColorReplaces &new_colors_rgb)
 {
-    
 #ifdef __WXGTK2__
-    width *= scale();
+    if (width > 0)
+        width *= scale();
     if (height > 0)
         height *= scale();
 #endif // __WXGTK2__
+    assert(width >= 0);
+    if (width < 0) {
+        width = std::max(0, height);
+    }
+    if (height < 0) {
+        height = width;
+    }
+    assert(height >= 0);
 
     static Slic3r::GUI::BitmapCache cache;
 
     std::string bmp_name = bmp_name_in;
     boost::replace_last(bmp_name, ".png", "");
-
-    if (height < 0)
-        height = width;
 
     if (Slic3r::GUI::wxGetApp().dark_mode()) {
         new_colors_rgb.add("#808080", "#FFFFFF");
@@ -501,9 +506,9 @@ wxBitmapBundle *get_bmp_bundle(const std::string &bmp_name_in, int width, int he
     }
 
     //wxBitmap *bmp = cache.load_svg(bmp_name, width, height, grayscale, dark_mode, color);
-    wxBitmapBundle* bmp = cache.from_svg(bmp_name, width, height, new_colors_rgb);
+    wxBitmapBundle* bmp = cache.from_svg(bmp_name, unsigned(width), unsigned(height), new_colors_rgb);
     if (bmp == nullptr) {
-        bmp = cache.from_png(bmp_name, width, height, new_colors_rgb);
+        bmp = cache.from_png(bmp_name, unsigned(width), unsigned(height), new_colors_rgb);
         if (!bmp)
         // Neither SVG nor PNG has been found, raise error
         throw Slic3r::RuntimeError("Could not load bitmap: " + bmp_name);

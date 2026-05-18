@@ -4747,11 +4747,12 @@ void PrintConfigDef::init_fff_params()
     def             = this->add("overhangs_dynamic_fan_speed", coGraphs);
     def->label      = L("Dynamic overhang speeds");
     def->category   = OptionCategory::speed;
-    def->tooltip    = L("This setting can only works correctly if dynamic speed is also enabled (overhangs_dynamic_fan_speed)."
-        "\nOverhang size is expressed as a percentage of overlap of the extrusion with the previous layer: "
-        "100% would be full overlap (no overhang), while 0% represents full overhang (floating extrusion, bridge)."
-        "\nFan speeds for overhang sizes in between are calculated via linear interpolation."
-        "\nIf enabled, overhangs_fan_speed is disabled, as the fan speed for full overhang is used.");
+    def->tooltip    = L("Adjusts the fan speed based on the severity of overhangs."
+        "\nOverhang size is defined as the percentage of overlap with the previous layer: "
+        "100% means full overlap (no overhang), while 0% indicates a full overhang (unsupported extrusion, i.e., a bridge)."
+        "\nFan speeds for intermediate overhang values are calculated using linear interpolation."
+        "\nWhen this option is enabled, 'overhangs_fan_speed' is ignored, as this setting now control the overhang fan speed."
+        " For extrusion that not supported at all, the fan spedd for 0% is used.");
     def->sidetext   = L("%");
     def->is_vector_extruder = true;
     def->can_be_disabled = true;
@@ -6880,6 +6881,16 @@ void PrintConfigDef::init_fff_params()
     def->aliases = { "support_material_contact_distance_bottom" }; //since PS 2.4
     def->set_default_value(new ConfigOptionFloatOrPercent(0.2,false));
 
+    def = this->add("support_material_bottom_interface_expansion", coFloatOrPercent);
+    def->label = L("Bottom interface expansion");
+    def->category = OptionCategory::support;
+    def->tooltip = L("Expanion of the bottom interface for better stability."
+        "\nCan be percentage of the interface line width.");
+    def->sidetext = L("mm or %");
+    def->min = 0;
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(100, true));
+
     def = this->add("support_material_enforce_layers", coInt);
     def->label = L("Enforce support for the first");
     def->category = OptionCategory::support;
@@ -7333,7 +7344,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionInts { 200 });
 
     def = this->add("temperature_heat_speed", coFloats);
-    def->label = L("heating speed");
+    def->label = L("Heating speed");
     def->full_label = L("Extruder heating speed");
     def->category = OptionCategory::extruders;
     def->tooltip = L("When a tool change is approaching, the next extruder that may be at parking temperature can "
@@ -11171,6 +11182,8 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "support_material_interface_angle_increment",
 "support_material_interface_fan_speed",
 "support_material_interface_layer_height",
+"support_material_bottom_interface_expansion",
+"support_material_bottom_interface_pattern",
 "support_material_layer_expansion",
 "support_material_layer_height",
 "temperature_heat_speed",

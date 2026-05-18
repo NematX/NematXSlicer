@@ -144,6 +144,7 @@ SupportParameters::SupportParameters(const PrintObject &object)
     this->raft_interface_fill_pattern = this->raft_interface_density > 0.95 ? ipRectilinear : ipSupportBase;
     this->contact_top_fill_pattern    = object_config.support_material_top_interface_pattern;
     this->contact_bottom_fill_pattern = object_config.support_material_bottom_interface_pattern;
+    this->bottom_interface_expansion = boost::any_cast<FloatOrPercent>(object_config.support_material_bottom_interface_expansion.get_any());
     if (this->contact_top_fill_pattern == ipAuto) {
         if (slicing_params.soluble_interface)
             this->contact_top_fill_pattern = ipConcentric;

@@ -3981,7 +3981,7 @@ void TabPrinter::build_unregular_pages(bool from_initial_build/* = false*/)
     }
     if(m_has_single_extruder_MM_page)
         n_before_extruders++;
-
+    m_extruder_page_pos = n_before_extruders;
     // Build missed extruder pages
     for (size_t extruder_idx = m_extruders_count_old; extruder_idx < m_extruders_count; ++extruder_idx) {
         std::vector<PageShp> pages = this->create_pages("extruder.ui", extruder_idx);
@@ -4114,24 +4114,47 @@ void TabPrinter::clear_pages()
     m_fff_print_host_upload_description_line    = nullptr;
     m_sla_print_host_upload_description_line    = nullptr;
 }
+uint16_t TabPrinter::compute_extruder_idx() const {
+    uint16_t active_extruder = uint16_t(-1);
+    int extruder_idx = int(get_page_idx(m_active_page)) - int(m_extruder_page_pos);
+    if (extruder_idx >= 0 && extruder_idx < m_extruders_count) {
+        active_extruder = uint16_t(extruder_idx);
+    }
+    return active_extruder;
+}
 
 void TabPrinter::toggle_options()
 {
     if (!m_active_page || m_presets->get_edited_preset().printer_technology() != ptFFF)
         return;
 
-    const DynamicPrintConfig& print_config = m_preset_bundle->fff_prints.get_edited_preset().config;
-    const DynamicPrintConfig& filament_config = m_preset_bundle->filaments.get_edited_preset().config;
-    const DynamicPrintConfig& printer_config = m_preset_bundle->printers.get_edited_preset().config;
+    //const DynamicPrintConfig& print_config = m_preset_bundle->fff_prints.get_edited_preset().config;
+    //const DynamicPrintConfig& edited_filament_config = m_preset_bundle->filaments.get_edited_preset().config;
+    //const DynamicPrintConfig& printer_config = m_preset_bundle->printers.get_edited_preset().config;
 
-    // Print config values
-    DynamicPrintConfig full_print_config;
-    full_print_config.apply(print_config);
-    full_print_config.apply(filament_config);
-    full_print_config.apply(printer_config);
+    //// Print config values
+    //DynamicPrintConfig full_print_config;
+    //full_print_config.apply(print_config);
+    //full_print_config.apply(printer_config);
 
-    m_config_manipulation.toggle_printer_fff_options(m_config, full_print_config);
-    
+    //// find curent extruder filament config.
+    //uint16_t filament_idx = compute_extruder_idx();
+    //if (filament_idx >= m_extruders_count) {
+    //    full_print_config.apply(edited_filament_config);
+    //}else{
+    //    //TODO: find the extruder that should be at index filament_idx
+    //    if (filament_idx < m_preset_bundle->extruders_filaments.size()) {
+    //        const std::string &filament_name = m_preset_bundle->extruders_filaments[filament_idx]
+    //                                               .get_selected_preset_name();
+
+    //        if (const Preset *filament_preset = m_preset_bundle->filaments.find_preset(filament_name, true, true)) {
+    //            filament_cfg = &filament_preset->config;
+    //        }
+    //    }
+    //}
+    DynamicPrintConfig full_print_config = m_preset_bundle->full_config();
+    m_config_manipulation.toggle_printer_fff_options(m_config, full_print_config, compute_extruder_idx());
+
     if (m_last_gcode_flavor != uint8_t(m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value)) {
         m_last_gcode_flavor = uint8_t(m_config->option<ConfigOptionEnum<GCodeFlavor>>("gcode_flavor")->value);
         m_rebuild_kinematics_page = true;
@@ -4196,7 +4219,7 @@ void TabPrinter::update()
     m_update_cnt--;
 
     if (get_printer_technology() == ptFFF) {
-        m_config_manipulation.update_printer_fff_config(m_config, true);
+        m_config_manipulation.update_printer_fff_config(m_config, compute_extruder_idx(), true);
     } else if (get_printer_technology() == ptSLA) {
         // nothing to do
     }
@@ -6229,6 +6252,14 @@ void Page::refresh()
 {
     for (auto group : m_optgroups)
         group->refresh();
+}
+
+size_t Tab::get_page_idx(Page *page) const {
+    for (size_t i = 0; i < m_pages.size(); i++) {
+        if (m_pages[i].get() == page)
+            return i;
+    }
+    return uint16_t(-1);
 }
 
 Field* Page::get_field(const t_config_option_key& opt_key, int32_t opt_index /*= -1*/) const

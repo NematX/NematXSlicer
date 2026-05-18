@@ -166,10 +166,9 @@ void GLGizmoPainterBase::render_cursor_circle()
     const float radius = m_cursor_radius * float(wxGetApp().plater()->get_camera().get_zoom());
 #endif // ENABLE_GL_CORE_PROFILE || ENABLE_OPENGL_ES
 
-#if ENABLE_GL_CORE_PROFILE
-    if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
+    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
         glsafe(::glLineWidth(1.5f));
+    }
     glsafe(::glDisable(GL_DEPTH_TEST));
 
 #if !ENABLE_GL_CORE_PROFILE && !ENABLE_OPENGL_ES

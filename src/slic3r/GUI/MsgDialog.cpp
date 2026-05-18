@@ -111,7 +111,8 @@ void MsgDialog::apply_style(long style)
 
     std::string icon_name = style & wxICON_WARNING        ? "exclamation" :
                             style & wxICON_INFORMATION    ? "info"        :
-                            style & wxICON_QUESTION       ? "question"    : SLIC3R_APP_KEY;
+                            style & wxICON_QUESTION       ? "question"    :
+        GUI_App::dark_mode() ? wxGetApp().light_icon_name() : wxGetApp().dark_icon_name();
     logo->SetBitmap(*get_bmp_bundle(icon_name, 64));
 }
 
@@ -228,7 +229,7 @@ void ErrorDialog::create(const HtmlContent& content, int icon_width)
     add_msg_content(this, content_sizer, content);
 
     // Use a small bitmap with monospaced font, as the error text will not be wrapped.
-    logo->SetBitmap(*get_bmp_bundle(SLIC3R_APP_KEY "_192px.png", icon_width, -1 , "#606060"/*grayscale*/));
+    logo->SetBitmap(*get_bmp_bundle(GUI_App::dark_mode() ? wxGetApp().light_icon_name() : wxGetApp().dark_icon_name(), icon_width, -1 , "#606060"/*grayscale*/));
 
     SetMaxSize(wxSize(-1, CONTENT_MAX_HEIGHT*wxGetApp().em_unit()));
 

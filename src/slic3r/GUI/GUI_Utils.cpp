@@ -143,18 +143,21 @@ wxFont get_default_font_for_dpi(const wxWindow *window, int dpi)
         NONCLIENTMETRICS nm;
         memset(&nm, 0, sizeof(NONCLIENTMETRICS));
         nm.cbSize = sizeof(NONCLIENTMETRICS);
-        if (SystemParametersInfoForDpi_fn(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &nm, 0, dpi))
-            return wxFont(wxNativeFontInfo(nm.lfMessageFont, window));
+        if (SystemParametersInfoForDpi_fn(SPI_GETNONCLIENTMETRICS, sizeof(NONCLIENTMETRICS), &nm, 0, dpi)) {
+            wxNativeFontInfo fontinfo(nm.lfMessageFont, window);
+            fontinfo.SetFaceName(wxGetApp().normal_font().GetFaceName());
+             return wxFont(fontinfo);
+        }
     }
     // Then try to guesstimate the font DPI scaling on Windows 8.
     // Let's hope that the font returned by the SystemParametersInfo(), which is used by wxWidgets internally, makes sense.
     int dpi_primary = get_dpi_for_window(nullptr);
     if (dpi_primary != dpi) {
         // Rescale the font.
-        return wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).Scaled(float(dpi) / float(dpi_primary));
+        return wxGetApp().normal_font().Scaled(float(dpi) / float(dpi_primary));
     }
 #endif
-    return wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+    return wxGetApp().normal_font();
 }
 
 bool check_dark_mode() {

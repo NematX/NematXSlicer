@@ -16,8 +16,8 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
                                                           const AABBTreeLines::LinesDistancer<Linef>      &unscaled_prev_layer,
                                                           const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
                                                           const double &nozzle_diameter) {
-    assert(path.overhang_attributes() == nullptr || path.overhang_attributes()->has_full_overhangs_speed ||
-           path.overhang_attributes()->has_dynamic_overhangs_speed);
+    //assert(path.overhang_attributes() == nullptr || path.overhang_attributes()->has_full_overhangs_speed ||
+    //       path.overhang_attributes()->has_dynamic_overhangs_speed);
     if (path.overhang_attributes() == nullptr) {
         return { path };
     } else {
@@ -140,7 +140,7 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(const ExtrusionPath   
     //remove overhang role, as it prevents placing seams on it.
     for (ExtrusionPath &res_path : result) {
         assert(res_path.overhang_attributes());
-        res_path.attributes_mutable().role = (res_path.role() & ExtrusionRoleModifier(~ExtrusionRoleModifier::ERM_Bridge));
+        //res_path.attributes_mutable().role = (res_path.role() & ExtrusionRoleModifier(~ExtrusionRoleModifier::ERM_Bridge));
         //assert(res_path.role() == ExtrusionRole::Perimeter || res_path.role() == ExtrusionRole::ExternalPerimeter);
     }
 #ifdef _DEBUG
@@ -246,17 +246,17 @@ ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(const Extru
 };
 
 
-std::pair<float,float> calculate_overhang_speed(const ExtrusionPath &path,
+float calculate_overhang_speed(const ExtrusionPath &path,
                               const FullPrintConfig     &config,
                               size_t                     extruder_id)
 {
     const ExtrusionPropertyOverhang *overhang_attributes = path.overhang_attributes();
     assert(overhang_attributes);
     if(!overhang_attributes)
-        return {-1, -1};
+        return -1;
     float speed_ratio = 0; // 0: overhangs speed, 1= perimeter/externalperimeter speed.
-    float fan_speed = -1;
-    if (config.overhangs_dynamic_speed.is_enabled()) {
+    // enforce config.overhangs_width_speed.is_enabled() to be able to compute overhangs_dynamic_speed, for simplicity sake.
+    if (config.overhangs_width_speed.is_enabled() && config.overhangs_dynamic_speed.is_enabled()) {
         if (overhang_attributes->start_distance_from_prev_layer == 0 &&
             overhang_attributes->end_distance_from_prev_layer == 0) {
             speed_ratio = 1;
@@ -291,8 +291,17 @@ std::pair<float,float> calculate_overhang_speed(const ExtrusionPath &path,
             assert(speed_ratio >= 0 && speed_ratio <= 1);
         }
     }
+    return speed_ratio;
+}
 
-
+float calculate_overhang_fan_speed(const ExtrusionPath &path,
+                               const FullPrintConfig &config,
+                               size_t extruder_id) {
+    const ExtrusionPropertyOverhang *overhang_attributes = path.overhang_attributes();
+    assert(overhang_attributes);
+    if (overhang_attributes == nullptr)
+        return -1;
+    float fan_speed = -1;
     std::vector<std::pair<int, ConfigOptionInts>> overhang_with_fan_speeds = {{100, ConfigOptionInts{0}}};
     if (config.overhangs_dynamic_fan_speed.is_enabled(extruder_id) &&
         overhang_attributes->start_distance_from_prev_layer > 0 &&
@@ -310,7 +319,7 @@ std::pair<float,float> calculate_overhang_speed(const ExtrusionPath &path,
                      graph.interpolate(100 - 100 * std::min(1.f, overhang_attributes->end_distance_from_prev_layer)));
         assert(fan_speed >= 0 && fan_speed <= 100);
     }
-    return {speed_ratio, fan_speed};
+    return fan_speed;
 }
 
 

@@ -1008,19 +1008,22 @@ void Sidebar::init_filament_combo(PlaterPresetComboBox** combo, const int extr_i
         auto opt = wxGetApp().preset_bundle->printers.get_edited_preset().config.option<ConfigOptionStrings>("tool_name");
         //assert(opt); // sla don't have tool_name
         std::string tool_name = opt ? opt->get_at(extr_idx) : "";
-        int size_panel = get_app_config()->get_int("side_panel_width");
-        size_t max_letters  = size_t(std::max(4, size_panel/4));
-        if (tool_name.size() > max_letters) {
-            if (max_letters > 6) {
-                tool_name = tool_name.substr(0, max_letters-3) + std::string("... ");
-            } else {
-                tool_name = tool_name.substr(0, max_letters);
+        if (!tool_name.empty()) {
+            int size_panel = get_app_config()->get_int("side_panel_width");
+            size_t max_letters = size_t(std::max(4, size_panel / 4));
+            if (tool_name.size() > max_letters) {
+                if (max_letters > 6) {
+                    tool_name = tool_name.substr(0, max_letters - 3) + std::string("... ");
+                } else {
+                    tool_name = tool_name.substr(0, max_letters);
+                }
             }
+            (*combo)->label = new wxStaticText(p->presets_panel, wxID_ANY,
+                                               tool_name.empty() ? "" : (tool_name + std::string(": ")));
+            (*combo)->label->SetFont(wxGetApp().small_font());
+            (*combo)->label->SetToolTip(tool_name); // doesn't work in msw because static text doesn't get mouse event
+            combo_and_btn_sizer->Add((*combo)->label, 0, wxALIGN_LEFT | wxEXPAND | wxRIGHT, 4);
         }
-        (*combo)->label = new wxStaticText(p->presets_panel, wxID_ANY, tool_name.empty() ? "" : ( tool_name + std::string(": ")));
-        (*combo)->label->SetFont(wxGetApp().small_font());
-        (*combo)->label->SetToolTip(tool_name); //doesn't work in msw because static text doesn't get mouse event
-        combo_and_btn_sizer->Add((*combo)->label, 0, wxALIGN_LEFT | wxEXPAND | wxRIGHT, 4);
     }
     combo_and_btn_sizer->Add(*combo, 1, wxEXPAND);
     assert((*combo)->edit_btn);

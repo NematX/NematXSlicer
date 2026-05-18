@@ -153,10 +153,11 @@ void GLGizmoRotate::on_render()
 
     m_grabbers.front().matrix = local_transform(selection);
 
-#if ENABLE_GL_CORE_PROFILE
-    if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
-        glsafe(::glLineWidth((m_hover_id != -1) ? 2.0f : 1.5f));
+    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
+        float min = std::min(1.5f, OpenGLManager::get_gl_info().get_min_line_width());
+        float bigger = min <= 1.5f ? 2.f : min + 1.f;
+        glsafe(::glLineWidth((m_hover_id != -1) ? bigger : min));
+    }
 
 #if ENABLE_GL_CORE_PROFILE
     GLShaderProgram* shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");

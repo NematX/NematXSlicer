@@ -112,20 +112,21 @@ SysInfoDialog::SysInfoDialog()
     //m_logo = new wxStaticBitmap(this, wxID_ANY, m_logo_bmp.bmp());
     m_logo = new wxStaticBitmap(this, wxID_ANY, *get_bmp_bundle(wxGetApp().logo_name(), 192));
 
-	hsizer->Add(m_logo, 0, wxALIGN_CENTER_VERTICAL);
-    
+    hsizer->Add(m_logo, 0, wxALIGN_CENTER_VERTICAL);
+
     wxBoxSizer* vsizer = new wxBoxSizer(wxVERTICAL);
     hsizer->Add(vsizer, 1, wxEXPAND|wxLEFT, 20);
 
+    // title is in the logo
     // title
-    {
-        wxStaticText* title = new wxStaticText(this, wxID_ANY, wxGetApp().is_editor() ? SLIC3R_APP_NAME : GCODEVIEWER_APP_NAME, wxDefaultPosition, wxDefaultSize);
-        wxFont title_font = wxGetApp().bold_font();
-        title_font.SetFamily(wxFONTFAMILY_ROMAN);
-        title_font.SetPointSize(int(2.5 * title_font.GetPointSize()));//title_font.SetPointSize(22);
-        title->SetFont(title_font);
-        vsizer->Add(title, 0, wxEXPAND | wxALIGN_LEFT | wxTOP, wxGetApp().em_unit()/*50*/);
-    }
+    //{
+    //    wxStaticText* title = new wxStaticText(this, wxID_ANY, wxGetApp().is_editor() ? SLIC3R_APP_NAME : GCODEVIEWER_APP_NAME, wxDefaultPosition, wxDefaultSize);
+    //    wxFont title_font = wxGetApp().bold_font();
+    //    title_font.SetFamily(wxFONTFAMILY_ROMAN);
+    //    title_font.SetPointSize(int(2.5 * title_font.GetPointSize()));//title_font.SetPointSize(22);
+    //    title->SetFont(title_font);
+    //    vsizer->Add(title, 0, wxEXPAND | wxALIGN_LEFT | wxTOP, wxGetApp().em_unit()/*50*/);
+    //}
 
     // main_info_text
     wxFont font = GetFont();// get_default_font(this);

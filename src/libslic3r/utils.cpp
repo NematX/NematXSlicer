@@ -165,7 +165,7 @@ boost::filesystem::path clean_absolute_path(const boost::filesystem::path &path)
     // make sure the path is well formed for the os.
     boost::filesystem::path fixpath(path);
     // note: lexically_normal() already do make_preferred()
-    fixpath.lexically_normal();
+    fixpath = fixpath.lexically_normal();
 #ifndef _WIN32
     fixpath = boost::filesystem::canonical(fixpath);
 #else
@@ -194,7 +194,7 @@ std::string clean_dir(const std::string &dir_name)
     // make sure the path is well formed for the os.
     boost::filesystem::path fixpath(dir_name);
     // note: lexically_normal() already do make_preferred()
-    fixpath.lexically_normal();
+    fixpath = fixpath.lexically_normal();
     assert(fixpath.string().find("..") == std::string::npos);
     return fixpath.string();
 }
@@ -332,7 +332,8 @@ void set_data_dir(const std::string &dir)
 
 const std::string& data_dir()
 {
-    assert(!g_data_dir.empty());
+    // this function can be used to check for emptyness
+    //assert(!g_data_dir.empty());
     return g_data_dir;
 }
 

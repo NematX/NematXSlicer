@@ -55,6 +55,7 @@ struct SupportParameters {
 	Flow 					support_material_interface_flow;
 	// Flow at the bottom interfaces and contacts.
 	Flow 					support_material_bottom_interface_flow;
+	FloatOrPercent			bottom_interface_expansion;
 	// Flow at raft layers.
 	Flow    				raft_flow;
 	// Flow at raft inteface & contact layers.

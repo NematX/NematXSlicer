@@ -258,9 +258,14 @@ ExtrusionEntityCollection calculate_and_split_overhanging_extrusions(
     const AABBTreeLines::LinesDistancer<CurledLine> &prev_layer_curled_lines,
     const double &nzl_diam);
 
-std::pair<float, float> calculate_overhang_speed(const ExtrusionPath &path,
-                                                 const FullPrintConfig &config,
-                                                 size_t extruder_id);
+float calculate_overhang_speed(const ExtrusionPath &path,
+                               const FullPrintConfig &config,
+                               size_t extruder_id);
+
+float calculate_overhang_fan_speed(const ExtrusionPath &path,
+                                   const FullPrintConfig &config,
+                                   size_t extruder_id);
+
 void apply_overhang_flow(ExtrusionPath &path,
                          const PrintConfig &print_config,
                          const LayerRegion &region,

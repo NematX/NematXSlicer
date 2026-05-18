@@ -298,8 +298,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         // Copy icon PrusaSlicer.png from resources_dir()/icons to target_dir_icons/icons/
         if (contains_path_dir(target_candidates[i], "icons")) {
             target_dir_icons = target_candidates[i];
-            std::string icon_path = GUI::format("%1%/icons/" SLIC3R_APP_KEY ".png",resources_dir());
-            std::string dest_path = GUI::format("%1%/icons/%2%" SLIC3R_APP_KEY "%3%.png", target_dir_icons, icon_theme_path, version_suffix);
+            std::string icon_path = GUI::format("%1%/icons/%2%.png",resources_dir(), GUI_App::dark_mode() ? wxGetApp().light_icon_name() : wxGetApp().dark_icon_name());
+            std::string dest_path = GUI::format("%1%/icons/%2%" SLIC3R_APP_KEY "%3%.png", target_dir_icons, icon_theme_path, version_suffix, GUI_App::dark_mode() ? wxGetApp().light_icon_name() : wxGetApp().dark_icon_name());
             if (copy_icon(icon_path, dest_path))
                 break; // success
             else
@@ -311,7 +311,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
               create_path(boost::nowide::narrow(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
               // copy icon
              target_dir_icons = GUI::format("%1%/.local/share",wxFileName::GetHomeDir());
-              std::string icon_path = GUI::format("%1%/icons/" SLIC3R_APP_KEY ".png",resources_dir());
+              std::string icon_path = GUI::format("%1%/icons/%2%.png",resources_dir(), GUI_App::dark_mode() ? wxGetApp().light_icon_name() : wxGetApp().dark_icon_name());
               std::string dest_path = GUI::format("%1%/icons/%2%" SLIC3R_APP_KEY "%3%.png", target_dir_icons, icon_theme_path, version_suffix);
              if (!contains_path_dir(target_dir_icons, "icons") 
                 || !copy_icon(icon_path, dest_path)) {

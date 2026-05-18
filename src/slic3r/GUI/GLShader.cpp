@@ -30,9 +30,10 @@ GLShaderProgram::~GLShaderProgram()
 bool GLShaderProgram::init_from_files(const std::string& name, const ShaderFilenames& filenames, const std::initializer_list<std::string_view> &defines)
 {
     // Load a shader program from file, prepend defs block.
-    auto load_from_file = [](const std::string& filename, const std::string &defs) {
-        std::string path = resources_dir() + "/shaders/" + filename;
-        boost::nowide::ifstream s(path, boost::nowide::ifstream::binary);
+    auto load_from_file = [](const boost::filesystem::path &filename, const std::string &defs) {
+        boost::filesystem::path path = resources_path() / "shaders" / filename;
+        assert(boost::filesystem::exists(path));
+        boost::nowide::ifstream s(path.generic_string(), boost::nowide::ifstream::binary);
         if (!s.good()) {
             BOOST_LOG_TRIVIAL(error) << "Couldn't open file: '" << path << "'";
             return std::string();

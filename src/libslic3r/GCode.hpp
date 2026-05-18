@@ -628,8 +628,6 @@ private:
     const WipeTowerData                *m_wipe_tower_data;
     std::unique_ptr<AddLineNumber>        m_add_line_number;
     std::unique_ptr<RemoveComments>       m_remove_comments;
-    std::unique_ptr<FanMover>             m_fan_mover;
-    std::unique_ptr<TemperatureMover>     m_temperature_mover;
     std::unique_ptr<PressureAdvance>      m_pressure_model;
 
     // Heights (print_z) at which the skirt has already been extruded.
@@ -659,6 +657,10 @@ private:
 
     // Processor
     GCodeProcessor m_processor;
+
+    //some post-processing on the file, with their data class
+    std::unique_ptr<FanMover> m_fan_mover;
+    std::unique_ptr<TemperatureMover> m_temperature_mover;
 
     std::function<void()> m_throw_if_canceled = [](){};
 

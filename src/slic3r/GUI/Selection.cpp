@@ -2273,13 +2273,13 @@ void Selection::render_bounding_box(const BoundingBoxf3& box, const Transform3d&
 
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-#if ENABLE_GL_CORE_PROFILE
-    if (!OpenGLManager::get_gl_info().is_core_profile())
+    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
         glsafe(::glLineWidth(2.0f * m_scale_factor));
+    }
+#if ENABLE_GL_CORE_PROFILE
 
     GLShaderProgram* shader = OpenGLManager::get_gl_info().is_core_profile() ? wxGetApp().get_shader("dashed_thick_lines") : wxGetApp().get_shader("flat");
 #else
-    glsafe(::glLineWidth(2.0f * m_scale_factor));
     GLShaderProgram* shader = wxGetApp().get_shader("flat");
 #endif // ENABLE_GL_CORE_PROFILE
     if (shader == nullptr)

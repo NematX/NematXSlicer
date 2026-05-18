@@ -431,7 +431,7 @@ void FanMover::_process_gcode_line(GCodeReader& reader, const GCodeReader::GCode
                                         time_count -= it->time;
                                         if (time_count< 0) {
                                             //found something that is lower than us
-                                            _put_in_middle_G1(it, it->time + time_count, BufferData(std::string(line.raw()), line.e_char() ,0, fan_speed, true), nb_seconds_delay);
+                                            _put_in_middle_G1(it, it->time + time_count, BufferData(std::string(line.raw()), line.e_char(), 0, fan_speed, true), nb_seconds_delay);
                                             //found, stop
                                             break;
                                         }

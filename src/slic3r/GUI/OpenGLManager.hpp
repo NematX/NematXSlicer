@@ -30,10 +30,13 @@ public:
 
     class GLInfo
     {
-        bool m_detected{ false };
-        bool m_core_profile{ false };
-        int m_max_tex_size{ 0 };
-        float m_max_anisotropy{ 0.0f };
+        // mutable as filled by detect(), which is const
+        mutable bool m_detected{ false };
+        mutable bool m_core_profile{ false };
+        mutable float m_min_line_width{ .1f };
+        mutable float m_max_line_width{ 1.f };
+        mutable int m_max_tex_size{ 0 };
+        mutable float m_max_anisotropy{ 0.0f };
 
         std::string m_version_string;
         Semver m_version = Semver::invalid();
@@ -64,6 +67,8 @@ public:
 #endif // ENABLE_OPENGL_ES
         }
 
+        float get_max_line_width() const;
+        float get_min_line_width() const;
         int get_max_tex_size() const;
         float get_max_anisotropy() const;
 

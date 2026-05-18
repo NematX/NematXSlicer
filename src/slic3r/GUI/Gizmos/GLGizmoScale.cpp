@@ -164,10 +164,11 @@ void GLGizmoScale3D::on_render()
 
     update_render_data();
 
-#if ENABLE_GL_CORE_PROFILE
-    if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
-        glsafe(::glLineWidth((m_hover_id != -1) ? 2.0f : 1.5f));
+    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
+        float min = std::min(1.5f, OpenGLManager::get_gl_info().get_min_line_width());
+        float bigger = min <= 1.5f ? 2.f : min + 1.f;
+        glsafe(::glLineWidth((m_hover_id != -1) ? bigger : min));
+    }
 
     const float grabber_mean_size = (float)((m_bounding_box.size().x() + m_bounding_box.size().y() + m_bounding_box.size().z()) / 3.0);
 

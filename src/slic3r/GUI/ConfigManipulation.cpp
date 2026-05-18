@@ -17,6 +17,36 @@
 namespace Slic3r {
 namespace GUI {
 
+namespace {
+
+// utility methods to get the real value of an extruder option, as they can be overriden by filament_overrides.
+bool uses_filament_override(const DynamicPrintConfig &full_config, const std::string &key, size_t extruder_idx) {
+    if (print_config_def.filament_override_option_keys().find(key) ==
+        print_config_def.filament_override_option_keys().end())
+        return false;
+
+    const ConfigOption *filament_opt = full_config.option(std::string("filament_") + key);
+    return filament_opt != nullptr && filament_opt->is_enabled(extruder_idx);
+}
+
+bool get_effective_extruder_bool(const DynamicPrintConfig &full_config, const std::string &key, size_t extruder_idx) {
+    const std::string effective_key = uses_filament_override(full_config, key, extruder_idx) ?
+        std::string("filament_") + key :
+        key;
+    return full_config.opt_bool(effective_key, extruder_idx);
+}
+
+double get_effective_extruder_float(const DynamicPrintConfig &full_config,
+                                    const std::string &key,
+                                    size_t extruder_idx) {
+    const std::string effective_key = uses_filament_override(full_config, key, extruder_idx) ?
+        std::string("filament_") + key :
+        key;
+    return full_config.opt_float(effective_key, extruder_idx);
+}
+
+} // namespace
+
 void ConfigManipulation::apply(DynamicPrintConfig* config, DynamicPrintConfig* new_config)
 {
     bool modified = false;
@@ -404,10 +434,13 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
     toggle_field("overhangs_reverse", can_have_overhangs_reverse);
     toggle_field("overhangs_reverse_threshold", can_have_overhangs_reverse && config->opt_bool("overhangs_reverse"));
     toggle_field("overhangs_speed_enforce", have_overhangs && !have_perimeter_loop && have_overhangs);
-    for (auto el : { "overhangs_speed", "overhangs_width_speed", "overhangs_dynamic_speed", "overhangs_flow_ratio" })
+    for (auto el : { "overhangs_width_speed", "overhangs_flow_ratio" })
         toggle_field(el, have_overhangs);
+    bool have_overhangs_speed = have_overhangs && config->option("overhangs_width_speed")->is_enabled();
+    for (auto el : { "overhangs_speed", "overhangs_dynamic_speed", "overhangs_flow_ratio" })
+        toggle_field(el, have_overhangs_speed);
     bool have_overhangs_flow = have_overhangs && config->option("overhangs_flow_ratio")->is_enabled();
-    for (auto el : { "overhangs_width", "overhangs_dynamic_flow" })
+    for (auto el : { "overhangs_width", "overhangs_dynamic_flow", "overhangs_type" })
         toggle_field(el, have_overhangs_flow);
 
 
@@ -564,7 +597,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
 
     for (auto el : { "support_material_bottom_interface_pattern", "support_material_top_interface_pattern", "support_material_interface_spacing", "support_material_interface_extruder",
                     "support_material_interface_speed", "support_material_interface_contact_loops", "support_material_interface_layer_height"
-                    "support_material_interface_angle", "support_material_interface_angle_increment"})
+                    "support_material_interface_angle", "support_material_interface_angle_increment", "support_material_bottom_interface_expansion"})
         toggle_field(el, have_support_material && have_support_interface);
     toggle_field("support_material_synchronize_layers", have_support_soluble);
 
@@ -708,8 +741,8 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig* config)
 
 
 void ConfigManipulation::update_printer_fff_config(DynamicPrintConfig *config,
-                                                   const bool          is_global_config)
-{
+                                                   uint16_t active_extruder,
+                                                   const bool is_global_config) {
     const std::vector<double> &nozzle_sizes = config->option<ConfigOptionFloats>("nozzle_diameter")->get_values();
     double min_step_size = config->option("z_step")->get_float();
     //for each extruder
@@ -763,7 +796,7 @@ void ConfigManipulation::update_printer_fff_config(DynamicPrintConfig *config,
         }
     }
 }
-void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, DynamicPrintConfig &full_config)
+void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, const DynamicPrintConfig &full_config, uint16_t active_extruder)
 {
 
     size_t extruder_count = config->option("nozzle_diameter")->size();
@@ -774,7 +807,7 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
     bool custom_color = config->opt_bool("thumbnails_custom_color");
     toggle_field("thumbnails_color", custom_color);
     const ConfigOptionEnum<GCodeThumbnailsFormat>* thumbnails_format = config->option<ConfigOptionEnum<GCodeThumbnailsFormat>>("thumbnails_format");
-    
+
     if (thumbnails_format) {
         toggle_field("thumbnails_end_file", thumbnails_format->value != (GCodeThumbnailsFormat::BIQU));
         toggle_field("thumbnails_tag_format", thumbnails_format->value != (GCodeThumbnailsFormat::BIQU));
@@ -800,10 +833,9 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
     toggle_field("silent_mode", is_marlin_flavor);
 
     for (size_t i = 0; i < extruder_count; ++i) {
-        
-        bool have_retract_length = config->opt_float("retract_length", i) > 0;
-        
-        const bool ramping_lift = config->get_bool("travel_ramping_lift", i);
+        bool have_retract_length = get_effective_extruder_float(full_config, "retract_length", i) > 0;
+
+        const bool ramping_lift = get_effective_extruder_bool(full_config, "travel_ramping_lift", i);
         //const bool lifts_z = (ramping_lift && config->get_float("travel_max_lift", i) > 0)
         //                  || (! ramping_lift && config->get_float("retract_lift", i) > 0);
 
@@ -828,7 +860,7 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
         // for (auto el : vec) {
             // toggle_field(el, retraction, i);
         // }
-                bool has_lift = /*retraction &&  now possible outside retraction */ config->get_float("retract_lift", i) > 0;
+        bool has_lift = /*retraction &&  now possible outside retraction */ get_effective_extruder_float(full_config, "retract_lift", i) > 0;
         // retract lift above / below only applies if using retract lift
         // vec.resize(0);
         std::vector<std::string> vec = { "retract_lift_above", "retract_lift_below", "retract_lift_top", "retract_lift_first_layer", "retract_lift_before_travel"};
@@ -845,7 +877,7 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
             toggle_field(el, retraction && !use_firmware_retraction, i);
         }
 
-        bool wipe = config->opt_bool("wipe", i) && have_retract_length;
+        bool wipe = get_effective_extruder_bool(full_config, "wipe", i) && have_retract_length;
         vec.resize(0);
         vec = { "retract_before_wipe", "wipe_only_crossing", "wipe_return", "wipe_speed" };
         for (auto el : vec) {
@@ -861,10 +893,18 @@ void ConfigManipulation::toggle_printer_fff_options(DynamicPrintConfig *config, 
 
         toggle_field("retract_length_toolchange", extruder_count > 1, i);
 
-        bool toolchange_retraction = config->opt_float("retract_length_toolchange", i) > 0;
+        bool toolchange_retraction = get_effective_extruder_float(full_config, "retract_length_toolchange", i) > 0;
         toggle_field("retract_restart_extra_toolchange", extruder_count > 1 && toolchange_retraction, i);
         toggle_field("retract_restart_toolchange_on_perimeter", extruder_count > 1 && toolchange_retraction, i);
         toggle_field("retract_restart_wipe_toolchange", extruder_count > 1 && toolchange_retraction, i);
+
+        if (i < extruder_count) {
+            for (std::string option_name : print_config_def.filament_override_option_keys()) {
+                if (uses_filament_override(full_config, option_name, i)) {
+                    toggle_field(option_name, false, i);
+                }
+            }
+        }
     }
 
     if (config->opt_bool("single_extruder_multi_material") && extruder_count > 1) {

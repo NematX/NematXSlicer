@@ -362,7 +362,7 @@ group:Options for support material interface
 		setting:label$Bottom:support_material_bottom_interface_layers
 	end_line
 	setting:support_material_interface_contact_loops
-	
+	setting:support_material_bottom_interface_expansion
 group:Organic supports
 	line:Tree Branch angle
 		setting:label$Maximum:support_tree_angle

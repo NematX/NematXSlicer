@@ -397,8 +397,8 @@ void AppUpdater::priv::parse_version_string(const std::string &constbody) {
     std::regex matcher("[0-9]+\\.[0-9]+(\\.[0-9]+)*(-[A-Za-z0-9]+)?(\\+[A-Za-z0-9]+)?");
 
     Semver current_version(SLIC3R_VERSION_FULL);
-    Semver best_pre(1, 0, 0, 0);
-    Semver best_release(1, 0, 0, 0);
+    Semver best_pre(0, 0, 0, 0);
+    Semver best_release(0, 0, 0, 0);
     std::string best_pre_url;
     std::string best_pre_assets_url;
     std::string best_release_url;
@@ -743,14 +743,14 @@ bool replace_me(DownloadAppData input_data, const boost::filesystem::path &archi
 
         mz_zip_archive_file_stat file_stat;
 
-        std::string archive_name = archive_path.stem().string();
+        boost::filesystem::path archive_name = archive_path.stem();
 
         // we first loop the entries to read from the archive the .model file only, in order to extract the version from it
         bool found_model = false;
         for (mz_uint i = 0; i < num_entries; ++i) {
             if (mz_zip_reader_file_stat(&zip.archive, i, &file_stat)) {
                 boost::filesystem::path name(file_stat.m_filename);
-                boost::filesystem::path out = name.lexically_relative(archive_path.stem());
+                boost::filesystem::path out = name.lexically_relative(archive_name);
                 if (file_stat.m_is_directory) {
                     boost::filesystem::create_directories(out);
                 } else {
@@ -804,6 +804,9 @@ void fix_replace_me() {
         }
     }
     if (boost::filesystem::exists(temp_dir / "resources")) {
+        if (boost::filesystem::exists(my_dir / "resources")) {
+            boost::filesystem::remove_all(my_dir / "resources");
+        }
         boost::filesystem::rename(temp_dir / "resources", my_dir / "resources");
     }
 #else

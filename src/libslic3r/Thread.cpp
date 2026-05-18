@@ -251,11 +251,11 @@ void parallel_for(size_t begin, size_t size, std::function<void(size_t)> process
     //For now, this is just use in debug mode, to be able toswitch from // to sequential withotu recompiling evrything.
 
     // normal step
-    tbb::parallel_for(begin, size, [&process_one_item](size_t item_idx) { process_one_item(item_idx); });
+    //tbb::parallel_for(begin, size, [&process_one_item](size_t item_idx) { process_one_item(item_idx); });
     // if you need to debug without // stuff
-    //for (size_t idx = begin; idx < size; ++idx) {
-    //    process_one_item(idx);
-    //}
+    for (size_t idx = begin; idx < size; ++idx) {
+        process_one_item(idx);
+    }
 }
 void not_parallel_for(size_t begin, size_t size, std::function<void(size_t)> process_one_item) {
     for (size_t idx = begin; idx < size; ++idx) {

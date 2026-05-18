@@ -556,8 +556,8 @@ ExtrusionEntityCollection PerimeterGenerator::_traverse_loops_classic(const Para
         // detect overhanging/bridging perimeters
         ExtrusionPaths paths;
 
-        bool can_overhang = (params.config.overhangs_width_speed.is_enabled() ||
-                             params.config.overhangs_width.is_enabled()) &&
+        bool can_overhang = params.config.overhangs.value &&
+            (params.config.overhangs_width_speed.is_enabled() || params.config.overhangs_width.is_enabled()) &&
             params.layer->id() > 0 && params.layer->id() >= params.object_config.raft_layers;
         if (params.object_config.support_material &&
             params.object_config.support_material_contact_distance_type.value == zdNone) {
@@ -1238,7 +1238,7 @@ void PerimeterGenerator::_sort_overhangs(const Parameters &params,
 ) const
 {
     const bool dynamic_enabled = params.config.overhangs &&
-        (params.config.overhangs_dynamic_speed.is_enabled() ||
+        (params.config.overhangs_width_speed.is_enabled() && params.config.overhangs_dynamic_speed.is_enabled() ||
          (params.config.overhangs_flow_ratio.is_enabled() && params.config.overhangs_dynamic_flow.is_enabled()));
     // reapply the nearest point search for starting point
     // We allow polyline reversal because Clipper may have randomly reversed polylines during clipping.
@@ -1828,7 +1828,8 @@ ExtrusionEntityCollection PerimeterGenerator::_traverse_extrusions(const Paramet
 
         ExtrusionPaths paths;
         // detect overhanging/bridging perimeters
-        if ( (params.config.overhangs_width_speed.is_enabled() || params.config.overhangs_width.is_enabled())
+        if (params.config.overhangs.value &&
+            (params.config.overhangs_width_speed.is_enabled() || params.config.overhangs_width.is_enabled())
             && params.layer->id() > 0 && params.layer->id() >= params.object_config.raft_layers
             && !((params.object_config.support_material || params.object_config.support_material_enforce_layers > 0) &&
                 params.object_config.support_material_contact_distance.value == 0)) {
@@ -4239,19 +4240,21 @@ void PerimeterGenerator::process(// Input:
             full_overhangs = union_ex(full_overhangs);
             full_overhangs = diff_ex(full_overhangs, *simplified);
             full_overhangs = offset2_ex(full_overhangs, SCALED_EPSILON * 10, SCALED_EPSILON * 10);
-            // offset2 the params.overhang_areas to remove overhangs that overlap too much (it overlpa inside the not-overhang area so it cna be removed withotu creating holes)
+            // offset2 the params.overhang_areas to remove overhangs that overlap too much (it overlap inside the
+            // not-overhang area so it can be removed withotu creating holes)
             params.overhang_areas = offset_ex(full_overhangs, double(max_offset));
             // intersection to remove the part over the surface
             params.overhang_areas = intersection_ex(params.overhang_areas, island_polygon);
-            //now shrink where needed
+            // now shrink where needed
             ExPolygons all_shrinks;
             for (auto const &[opt_values, areas] : params.region_setting.get_areas(&params.config.overhangs)) {
                 const bool overhang_flow_enabled = opt_values.is_enabled(&params.config.overhangs_flow_ratio);
                 if (overhang_flow_enabled && opt_values.get_bool(&params.config.overhangs)) {
-                coord_t overhangs_width_flow = scale_t(
+                    coord_t overhangs_width_flow = scale_t(
                         opt_values.get_abs_value(this->params.overhang_flow.nozzle_diameter(),
                                                  &params.config.overhangs_width));
-                    append(all_shrinks, offset_ex(areas.intersections(params.overhang_areas), double(overhangs_width_flow)));
+                    append(all_shrinks,
+                           offset_ex(areas.intersections(params.overhang_areas), double(overhangs_width_flow)));
                 }
             }
             // intersect with full_overhangs, to remove the part that are still inside the not-overhang area
@@ -4294,11 +4297,27 @@ void PerimeterGenerator::process(// Input:
                         overhangs_width_speed = scale_t(
                             opt_values.get_abs_value(this->params.overhang_flow.nozzle_diameter(),
                                                      &params.config.overhangs_width_speed));
-                    } else {
+                    } else if(overhang_flow_enabled) {
                         overhangs_width_speed = scale_t(
                             opt_values.get_abs_value(this->params.overhang_flow.nozzle_diameter(),
                                                      &params.config.overhangs_width));
-                    }
+                    } else {
+                        // no flow, no speed, we only compute the "dynamic" part for possible fan_speed
+                        // no flow: use the biggest and simpliest bb so all the extrusion will be inside.
+                        Polygons offseted;
+                        if (areas.is_accept_all()) {
+                            // only one region, go big.
+                            offseted = {get_extents(island_polygon.contour).polygon()};
+                        } else {
+                            //multiple region, ensure it's inside bounds.
+                            offseted = union_(areas.expolys);
+                        }
+                        params.lower_slices_bridge_speed_small = offseted;
+                        params.lower_slices_bridge_speed_big = offseted;
+                        params.lower_slices_bridge_flow_small = offseted;
+                        params.lower_slices_bridge_flow_big = offseted;
+                            continue;
+                        }
                 } else {
                     overhangs_width_speed = overhangs_width_flow;
                 }

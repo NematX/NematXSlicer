@@ -108,8 +108,8 @@ public:
 	void 							update_slic3r_versions(std::vector<Index> &index_db);
 
 	// Create a snapshot directory, copy the vendor config bundles, user print / sla_print / filament / sla_material / printer / physical_printer profiles,
-	// create an index.
-	const Snapshot&					take_snapshot(const AppConfig &app_config, Snapshot::Reason reason, const std::string &comment = "");
+	// create an index. Can modify AppConfig if it contains vendor entries without the files.
+	const Snapshot&					take_snapshot(AppConfig &app_config, Snapshot::Reason reason, const std::string &comment = "");
 	const Snapshot&					restore_snapshot(const std::string &id, AppConfig &app_config);
 	void 							restore_snapshot(const Snapshot &snapshot, AppConfig &app_config);
 	// Test whether the AppConfig's on_snapshot variable points to an existing snapshot, and the existing snapshot
@@ -132,11 +132,11 @@ private:
 };
 
 // Take snapshot on SnapshotDB::singleton(). If taking snapshot fails, report an error and return nullptr.
-const Snapshot* take_config_snapshot_report_error(const AppConfig &app_config, Snapshot::Reason reason, const std::string &comment);
+const Snapshot* take_config_snapshot_report_error(AppConfig &app_config, Snapshot::Reason reason, const std::string &comment);
 
 // Take snapshot on SnapshotDB::singleton(). If taking snapshot fails, report "message", and present a "Continue" or "Abort" buttons to respond.
 // Return true on success and on "Continue" to continue with the process (for example installation of presets).
-bool take_config_snapshot_cancel_on_error(const AppConfig &app_config, Snapshot::Reason reason, const std::string &comment, const std::string &message, Snapshot const **psnapshot = nullptr);
+bool take_config_snapshot_cancel_on_error(AppConfig &app_config, Snapshot::Reason reason, const std::string &comment, const std::string &message, Snapshot const **psnapshot = nullptr);
 
 } // namespace Config
 } // namespace GUI

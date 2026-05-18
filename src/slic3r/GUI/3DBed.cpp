@@ -19,6 +19,7 @@
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "GLCanvas3D.hpp"
+#include "OpenGLManager.hpp"
 #include "Plater.hpp"
 #include "Camera.hpp"
 
@@ -414,22 +415,22 @@ void Bed3D::render_grid(bool bottom, bool has_model)
         grid_color = DEFAULT_SOLID_GRID_COLOR;
     else if (bottom)
         grid_color = DEFAULT_TRANSPARENT_GRID_COLOR;
-#if ENABLE_GL_CORE_PROFILE
-    if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
-        glsafe(::glLineWidth(0.5f * m_scale_factor));
-    m_gridlines_small.set_color(grid_color);
-    m_gridlines_small.render();
-#if ENABLE_GL_CORE_PROFILE
-    if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
-         glsafe(::glLineWidth(1.5f * m_scale_factor));
+    float line_width = OpenGLManager::get_gl_info().get_min_line_width();
+    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
+        glsafe(::glLineWidth(line_width * m_scale_factor));
+        m_gridlines_small.set_color(grid_color);
+        m_gridlines_small.render();
+        line_width += 1;
+    }
+    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
+        glsafe(::glLineWidth(line_width * m_scale_factor));
+        line_width *= 2;
+    }
     m_gridlines.set_color(grid_color);
     m_gridlines.render();
-#if ENABLE_GL_CORE_PROFILE
-    if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
-        glsafe(::glLineWidth(3.0f * m_scale_factor));
+    if (OpenGLManager::get_gl_info().get_max_line_width() > 1) {
+        glsafe(::glLineWidth(line_width * m_scale_factor));
+    }
     m_gridlines_big.set_color(grid_color);
     m_gridlines_big.render();
 }
@@ -479,10 +480,8 @@ void Bed3D::render_camera_grid(const Transform3d &view_matrix,
             grid_color = DEFAULT_SOLID_GRID_COLOR;
         else
             grid_color = DEFAULT_TRANSPARENT_GRID_COLOR;
-#if ENABLE_GL_CORE_PROFILE
-        if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
-            glsafe(::glLineWidth(0.5f * m_scale_factor));
+        if (OpenGLManager::get_gl_info().get_max_line_width() > 1)
+            glsafe(::glLineWidth(std::max(OpenGLManager::get_gl_info().get_min_line_width(), 0.5f) * m_scale_factor));
         m_gridlines_camera.set_color(grid_color);
         m_gridlines_camera.render();
 
@@ -729,10 +728,9 @@ void Bed3D::render_contour(const Transform3d& view_matrix, const Transform3d& pr
         glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
         // draw contour
-#if ENABLE_GL_CORE_PROFILE
-        if (!OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
-            glsafe(::glLineWidth(1.5f * m_scale_factor));
+        if (OpenGLManager::get_gl_info().get_max_line_width() > 1)
+            glsafe(::glLineWidth(std::max(OpenGLManager::get_gl_info().get_min_line_width() + 1.f, 1.5f) *
+                                 m_scale_factor));
         m_contourlines.render();
 
         glsafe(::glDisable(GL_BLEND));

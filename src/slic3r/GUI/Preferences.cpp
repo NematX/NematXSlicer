@@ -1014,7 +1014,7 @@ void PreferencesDialog::build()
 		
 		append_bool_option(m_tabid_2_optgroups.back().back(), "show_layer_time_doubleslider",
 			L("Show layer time on the scroll bar"),
-			L("Add the layer height (after the layer height, or if it's hidden after the layer z position) next to a widget of the layer double-scrollbar."),
+			L("Add the layer time (after the layer height, or if it's hidden after the layer z position) next to a widget of the layer double-scrollbar."),
 			app_config->get_bool("show_layer_time_doubleslider"));
 		
 		append_bool_option(m_tabid_2_optgroups.back().back(), "show_layer_area_doubleslider",
@@ -1857,13 +1857,13 @@ void PreferencesDialog::create_settings_font_widget(wxWindow* tab, std::shared_p
 	auto revert_btn = new ScalableButton(parent, wxID_ANY, "undo");
 	revert_btn->SetToolTip(_L("Revert font to default"));
 	revert_btn->Bind(wxEVT_BUTTON, [size_sc, apply_font](wxEvent& event) {
-		wxFont font = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
+		wxFont font = wxGetApp().normal_font();
 		const int val = font.GetPointSize();
 	    size_sc->SetValue(val);
 		apply_font(val, font);
 		});
 	parent->Bind(wxEVT_UPDATE_UI, [size_sc](wxUpdateUIEvent& evt) {
-		const int def_size = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT).GetPointSize();
+		const int def_size = wxGetApp().normal_font().GetPointSize();
 		evt.Enable(def_size != size_sc->GetValue());
 	}, revert_btn->GetId());
 	

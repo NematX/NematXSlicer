@@ -42,18 +42,20 @@
 
 namespace Slic3r {
 
+constexpr bool starts_with_http(const char* str) {
+    return str[0] == 'h' && str[1] == 't' && str[2] == 't' && str[3] == 'p';
+}
+
 static const std::string VENDOR_PREFIX = "vendor:";
 static const std::string MODEL_PREFIX = "model:";
-static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/" SLIC3R_GITHUB "/releases";
-// Url to index archive zip that contains latest indicies
-static const std::string INDEX_ARCHIVE_URL= "https://api.github.com/repos/" SLIC3R_GITHUB "-profiles/releases";
-//to get the slic3r idx: look at the json from INDEX_ARCHIVE_URL, and request the assets_url
-// then, in t8he json look for an entry with name == "vendor_indices.zip"
+static const std::string SLIC3R_GITHUB_ABSOLUTE = starts_with_http(SLIC3R_GITHUB) ?
+    std::string(SLIC3R_GITHUB) :
+    "https://github.com/" SLIC3R_GITHUB;
+static const std::string VERSION_CHECK_URL = starts_with_http(SLIC3R_GITHUB) ?
+    std::string(SLIC3R_GITHUB) + "/releases" :
+    "https://api.github.com/repos/" SLIC3R_GITHUB "/releases";
 
-// Url to folder with vendor profile files. Used when downloading new profiles that are not in resources folder.
-static const std::string PROFILE_FOLDER_URL = "https://raw.githubusercontent.com/" SLIC3R_GITHUB "-profiles/main/";
-
-const std::string AppConfig::SECTION_FILAMENTS = "filaments";
+const std::string AppConfig::SECTION_FILAMENTS = "materials";
 const std::string AppConfig::SECTION_MATERIALS = "sla_materials";
 const std::string AppConfig::SECTION_EMBOSS_STYLE = "font";
 
@@ -175,7 +177,7 @@ void AppConfig::set_defaults()
         if (get("tab_icon_size").empty())
             set("tab_icon_size", "32");
 
-        if (get("font_size").empty())
+        if (get("font_size").empty() || get_int("font_size") <= 0)
             set("font_size", "0");
 
         if (get("side_panel_width").empty())
@@ -1374,30 +1376,16 @@ std::string AppConfig::splashscreen(bool is_editor) {
     return file_name;
 }
 
+std::string AppConfig::github_url() const
+{
+    auto from_settings = get("github_url");
+    return from_settings.empty() ? SLIC3R_GITHUB_ABSOLUTE : from_settings;
+}
+
 std::string AppConfig::version_check_url() const
 {
     auto from_settings = get("version_check_url");
     return from_settings.empty() ? VERSION_CHECK_URL : from_settings;
-}
-
-std::string AppConfig::index_archive_url() const
-{
-#if 0  
-    // this code is for debug & testing purposes only - changed url wont get trough inner checks anyway. 
-    auto from_settings = get("index_archive_url");
-    return from_settings.empty() ? INDEX_ARCHIVE_URL : from_settings;
-#endif
-    return INDEX_ARCHIVE_URL;
-}
-
-std::string AppConfig::profile_folder_url() const
-{
-#if 0   
-    // this code is for debug & testing purposes only - changed url wont get trough inner checks anyway. 
-    auto from_settings = get("profile_folder_url");
-    return from_settings.empty() ? PROFILE_FOLDER_URL : from_settings;
-#endif
-    return PROFILE_FOLDER_URL;
 }
 
 bool AppConfig::exists() const

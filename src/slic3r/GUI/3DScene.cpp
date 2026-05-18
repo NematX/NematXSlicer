@@ -12,11 +12,12 @@
 #include <GL/glew.h>
 
 #include "3DScene.hpp"
-#include "GLShader.hpp"
-#include "GUI_App.hpp"
-#include "Plater.hpp"
 #include "BitmapCache.hpp"
 #include "Camera.hpp"
+#include "GLShader.hpp"
+#include "GUI_App.hpp"
+#include "OpenGLManager.hpp"
+#include "Plater.hpp"
 
 #include "libslic3r/BuildVolume.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -147,10 +148,9 @@ void GLVolume::NonManifoldEdges::render()
 {
     update();
 
-#if ENABLE_GL_CORE_PROFILE
-    if (!GUI::OpenGLManager::get_gl_info().is_core_profile())
-#endif // ENABLE_GL_CORE_PROFILE
+    if (GUI::OpenGLManager::get_gl_info().get_max_line_width() > 1) {
         glsafe(::glLineWidth(2.0f));
+    }
 
     GLShaderProgram* shader = GUI::wxGetApp().get_current_shader();
     if (shader == nullptr)

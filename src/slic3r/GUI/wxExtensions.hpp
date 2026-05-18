@@ -69,8 +69,11 @@ void    update_Slic3r_string(wxString& tooltip);
 void    msw_buttons_rescale(wxDialog* dlg, const int em_unit, const std::vector<int>& btn_ids, double height_koef = 1.);
 int     em_unit(wxWindow* win);
 
-wxBitmapBundle* get_bmp_bundle(const std::string& bmp_name, int width = 16, int height = -1, const std::string& new_color_rgb = std::string());
+// if width or height  == 0, then their value will be computed from the "bmp" ratio (from the file).
+// if height == -1, then it will us ehte same value as width.
 wxBitmapBundle* get_bmp_bundle(const std::string& bmp_name, int width, int height, Slic3r::ColorReplaces& color_changes);
+// shortcut for get_bmp_bundle when you only want to add one ColorReplace from the accent color (ed6b21/2172eb)
+wxBitmapBundle* get_bmp_bundle(const std::string& bmp_name, int width = 16, int height = -1, const std::string& new_color_rgb = std::string());
 wxBitmapBundle* get_empty_bmp_bundle(int width, int height);
 wxBitmapBundle* get_solid_bmp_bundle(int width, int height, const std::string& color);
 

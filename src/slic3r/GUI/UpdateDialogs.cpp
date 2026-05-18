@@ -39,9 +39,17 @@ namespace Slic3r {
 namespace GUI {
 
 
-static const char* URL_CHANGELOG = "https://github.com/" SLIC3R_GITHUB "/releases";
-static const char* URL_DOWNLOAD = "https://github.com/" SLIC3R_GITHUB "/releases";
-static const char* URL_DEV = "https://github.com/" SLIC3R_GITHUB "/releases/tag/%1%";
+constexpr bool starts_with_http(const char* str) {
+    return str[0] == 'h' && str[1] == 't' && str[2] == 't' && str[3] == 'p';
+}
+
+static const char *URL_CHANGELOG = starts_with_http(SLIC3R_GITHUB) ? SLIC3R_GITHUB "/releases" :
+                                                                     "https://github.com/" SLIC3R_GITHUB "/releases";
+static const char *URL_DOWNLOAD = starts_with_http(SLIC3R_GITHUB) ? SLIC3R_GITHUB "/releases" :
+                                                                    "https://github.com/" SLIC3R_GITHUB "/releases";
+static const char *URL_DEV = starts_with_http(SLIC3R_GITHUB) ? SLIC3R_GITHUB "/releases/tag/%1%" :
+                                                               "https://github.com/" SLIC3R_GITHUB
+                                                               "/releases/tag/%1%";
 
 static const std::string CONFIG_UPDATE_WIKI_URL("https://github.com/prusa3d/PrusaSlicer/wiki/Slic3r-PE-1.40-configuration-update");
 
@@ -607,7 +615,7 @@ void UpdateConfigDialog::add_vendor_in_list(wxWindow *parent, VendorSync &vendor
         bt_version_msg = _L("Not installed");
     }
     wxButton *bt_version = new wxButton(parent, wxID_ANY, bt_version_msg);
-    if ((!vendor.is_installed && vendor.available_profiles.size() <= 1)  || vendor.available_profiles.size() < 1 || vendor.profile.config_update_rest.empty()) {
+    if ((!vendor.is_installed && vendor.available_profiles.size() <= 1)  || vendor.available_profiles.size() < 1) {
         bt_version->Enable(false);
     } else {
         bt_version->Bind(wxEVT_BUTTON, ([this, vendor_id](wxCommandEvent &e) {
@@ -644,6 +652,29 @@ void UpdateConfigDialog::add_vendor_in_list(wxWindow *parent, VendorSync &vendor
                     this->request_rebuild_ui();
                 });
             }));
+        } else if (vendor.can_upgrade) {
+            assert(vendor.best->config_version > vendor.profile.config_version);
+            wxString config_version_str = vendor.best->config_version.to_string();
+            wxString msg = vendor.is_installed ? format(_L("Upgrade to %1%"), config_version_str) :
+                                                 format(_L("Install %1%"), config_version_str);
+            wxButton *bt_upgrade = new wxButton(parent, wxID_ANY, msg);
+            if (vendor.is_installed) {
+                bts_green_color.push_back(bt_upgrade);
+            }
+            bt_upgrade->SetToolTip(_L("Click this button to create a snapshot and upgrade this vendor bundle to the "
+                                      "latest compatible version."));
+            versions_sizer->Add(bt_upgrade, wxGBPosition(line_num, 3), wxGBSpan(1, 1), wxEXPAND, 2);
+            bt_upgrade->Bind(wxEVT_BUTTON, ([this, vendor_id, best_version](wxCommandEvent &e) {
+                                 this->wait_dialog.reset(new wxBusyInfo(_L("Upgrading the preset, please wait")));
+                                 this->m_data.install_vendor(vendor_id, best_version,
+                                                             [this](const std::string &error_msg) {
+                                                                 // end of waiting dialog (yes, it has to be called
+                                                                 // without any exception)
+                                                                 this->wait_dialog.reset();
+                                                                 this->request_show_error_msg(error_msg);
+                                                                 this->request_rebuild_ui();
+                                                             });
+                             }));
         } else {
             msg_synch = new wxStaticText(parent, wxID_ANY, _L("Local bundle"));
             msg_synch->SetToolTip(
