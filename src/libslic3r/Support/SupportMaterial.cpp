@@ -62,7 +62,7 @@
 #endif
 
 #include <cassert>
-
+#pragma UNOPTIMIZE
 using namespace Slic3r::FFFSupport;
 
 namespace Slic3r {
@@ -1666,7 +1666,8 @@ static inline void fill_contact_layer(
             dense_interface_polygons =
                 diff(
                     // Regularize the contour.
-                    expand(dense_interface_polygons, no_interface_offset * 0.1f),
+                    //expand(dense_interface_polygons, no_interface_offset * 0.1f),
+                    dense_interface_polygons,
                     slices_margin.polygons);
             // Support islands, to be stretched into a grid.
             //FIXME The regularization of dense_interface_polygons above may stretch dense_interface_polygons outside of the contact polygons,
@@ -2909,6 +2910,48 @@ void PrintObjectSupportMaterial::generate_base_layers(
                                         Layer::scale_to_layer_coord(m_slicing_params->gap_support_object),
                                         Layer::scale_to_layer_coord(m_slicing_params->gap_object_support),
                                         m_support_params._gap_xy);
+
+    // Cap the lateral growth of the sparse support columns: a lower base layer may only
+    // extend by support_max_slope from the previous higher base layer, except where a bottom contact
+    // explicitly needs material.
+    if (m_support_params.support_max_slope > 0 && ! intermediate_layers.empty()) {
+        int      idx_bottom_contact_overlapping = -2;
+        for (int idx_intermediate = 1; idx_intermediate < intermediate_layers.size(); ++idx_intermediate) {
+            SupportGeneratorLayer &layer_previous = *intermediate_layers[idx_intermediate -1];
+            SupportGeneratorLayer &layer_intermediate = *intermediate_layers[idx_intermediate];
+
+            // Areas directly below a bottom interface may grow immediately, regardless of the
+            // previous base layer footprint.
+
+            Polygons allowed_polygons = layer_previous.polygons;
+            //find bottom contacts
+            for (size_t idx_bottom = 0; idx_bottom < bottom_contacts.size() &&
+                 bottom_contacts[idx_bottom]->scaled_print_z() <= layer_previous.scaled_print_z();
+                 ++idx_bottom) {
+                if (bottom_contacts[idx_bottom]->scaled_print_z() == layer_previous.scaled_print_z()) {
+                    // add bottom interface
+                    allowed_polygons = union_(allowed_polygons, bottom_contacts[idx_bottom]->polygons);
+                }
+            }
+            allowed_polygons = offset(allowed_polygons, double(m_support_params.support_max_slope), SUPPORT_SURFACES_OFFSET_PARAMETERS);
+
+            if (allowed_polygons.empty()) {
+                layer_intermediate.polygons.clear();
+            } else {
+                layer_intermediate.polygons = intersection(layer_intermediate.polygons, allowed_polygons);
+                ensure_valid(layer_intermediate.polygons, this->m_support_params.resolution);
+            }
+            for (size_t idx_bottom = 0; idx_bottom < top_contacts.size() &&
+                 top_contacts[idx_bottom]->scaled_print_z() <= layer_intermediate.scaled_print_z();
+                 ++idx_bottom) {
+                if (top_contacts[idx_bottom]->scaled_print_z() == layer_intermediate.scaled_print_z()) {
+                    // clip top
+                    top_contacts[idx_bottom]->polygons = intersection(allowed_polygons, top_contacts[idx_bottom]->polygons);
+                }
+            }
+        
+        }
+    }
 }
 
 void PrintObjectSupportMaterial::trim_support_layers_by_object(

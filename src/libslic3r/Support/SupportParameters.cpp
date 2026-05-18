@@ -59,6 +59,10 @@ SupportParameters::SupportParameters(const PrintObject &object)
     this->_support_layer_height_min                      = std::numeric_limits<coord_t>::max();
     const ConfigOptionFloatsOrPercents &min_layer_height = print_config.min_layer_height;
     const ConfigOptionFloats           &nozzle_diameter  = print_config.nozzle_diameter;
+    double max_nzl_diameter_mm = 0;
+    for (int extr_id = 0; extr_id < nozzle_diameter.size(); ++extr_id) {
+        max_nzl_diameter_mm = std::max(max_nzl_diameter_mm, nozzle_diameter.get_at(extr_id));
+    }
     for (int extr_id = 0; extr_id < min_layer_height.size(); ++extr_id) {
         coord_t min_from_extr = Layer::scale_to_layer_coord(min_layer_height.get_abs_value(extr_id, nozzle_diameter.get_at(extr_id)));
         if (min_from_extr > 0)
@@ -104,6 +108,7 @@ SupportParameters::SupportParameters(const PrintObject &object)
     }
     this->_gap_xy = Layer::scale_to_layer_coord(object_config.support_material_xy_spacing.get_abs_value(external_perimeter_width));
     bridge_flow_ratio /= object.num_printing_regions();
+    this->support_max_slope = scale_t(object_config.support_max_slope.get_abs_value(max_nzl_diameter_mm));
 
     this->support_material_bottom_interface_flow = slicing_params.soluble_interface ?
         this->support_material_interface_flow.with_flow_ratio(bridge_flow_ratio) :

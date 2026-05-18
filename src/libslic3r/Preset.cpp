@@ -811,6 +811,7 @@ static std::vector<std::string> s_Preset_print_options {
         "support_material_contact_distance_top",
         "support_material_contact_distance_bottom",
         "support_material_buildplate_only", "dont_support_bridges", 
+        "support_max_slope",
         "support_tree_angle",
         "support_tree_angle_slow",
         "support_tree_branch_diameter",

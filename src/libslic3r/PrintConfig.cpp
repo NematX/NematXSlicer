@@ -7205,6 +7205,19 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("support_max_slope", coFloatOrPercent);
+    def->label = L("Maximum slope");
+    def->full_label = L("Maximum slope for supports");
+    def->category = OptionCategory::support;
+    def->tooltip = L("Maximum slope for support x-y growth, in mm of overhangs allowed."
+                    "\nCan be a % of the widest nozzle diameter."
+                    "\nSet to 0 to disable.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "nozzle_diameter";
+    def->min = 0;
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
+
     def = this->add("support_tree_angle", coFloat);
     def->label = L("Maximum Branch Angle");
     def->category = OptionCategory::support;

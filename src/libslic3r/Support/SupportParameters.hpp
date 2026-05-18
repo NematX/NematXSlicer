@@ -68,6 +68,8 @@ struct SupportParameters {
     // double                  support_layer_height_max;
 
     coord_t                 _gap_xy;
+    
+    coord_t                 support_max_slope;
 
     //scaled, resolution for supports
     coord_t                 resolution = SCALED_EPSILON;

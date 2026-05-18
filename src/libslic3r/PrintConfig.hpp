@@ -851,6 +851,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionEnum<InfillPattern>,  support_material_top_interface_pattern))
     ((ConfigOptionBool,                 support_material_with_sheath))
     ((ConfigOptionFloatOrPercent,       support_material_xy_spacing))
+    ((ConfigOptionFloatOrPercent,       support_max_slope))
     ((ConfigOptionBool,                 thin_walls_merge))
     // Tree supports
     ((ConfigOptionFloat,                support_tree_angle))
