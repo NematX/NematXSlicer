@@ -1645,7 +1645,7 @@ static inline void fill_contact_layer(
     // Stretch support islands into a grid, trim them. 
     SupportGridPattern support_grid_pattern(&contact_polygons, &slices_margin.polygons, grid_params);
     // if no extension, clip the contact_polygons
-    if (expansion <= 0) {
+    if (object_config.support_material_layer_expansion_snug) {
         support_grid_pattern.no_expansion = true;
     }
     // 1) Contact polygons will be projected down. To keep the interface and base layers from growing, return a contour a tiny bit smaller than the grid cells.
@@ -1714,7 +1714,7 @@ static inline void fill_contact_layer(
 
         SupportGridPattern support_grid_pattern(&enforcer_polygons, &slices_margin.all_polygons, grid_params);
         // if no extension, clip the contact_polygons
-        if (expansion <= 0) {
+        if (object_config.support_material_layer_expansion_snug) {
             support_grid_pattern.no_expansion = true;
         }
         // 1) Contact polygons will be projected down. To keep the interface and base layers from growing, return a contour a tiny bit smaller than the grid cells.
@@ -1743,7 +1743,7 @@ static inline void fill_contact_layer(
                 Polygons dense_interface_polygons_trimmed = intersection(dense_interface_polygons, *new_layer.enforcer_polygons);
                 SupportGridPattern support_grid_pattern(&dense_interface_polygons_trimmed, &slices_margin.all_polygons, grid_params);
                 // if no extension, clip the contact_polygons
-                if (expansion <= 0) {
+                if (object_config.support_material_layer_expansion_snug) {
                     support_grid_pattern.no_expansion = true;
                 }
                 // Extend the polygons to extrude with the contact polygons of support enforcers.
@@ -2143,7 +2143,7 @@ static inline std::pair<Polygons, Polygons> project_support_to_grid(const Layer 
 
     SupportGridPattern support_grid_pattern(&overhangs_projection, &trimming, grid_params);
     // if no extension, clip the contact_polygons
-    if (layer.object()->config().support_material_layer_expansion.value <= 0) {
+    if (layer.object()->config().support_material_layer_expansion_snug) {
         support_grid_pattern.no_expansion = true;
     }
     tbb::task_group task_group_inner;

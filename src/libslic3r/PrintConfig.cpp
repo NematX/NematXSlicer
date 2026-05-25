@@ -7134,6 +7134,13 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionFloat(0));
 
+    def = this->add("support_material_layer_expansion_snug", coBool);
+    def->label = L("Support don't do an extra expand");
+    def->category = OptionCategory::support;
+    def->tooltip = L("Support grid expand by itself. With this setting, it doesn't do that, reducing the expansion.");
+    def->mode = comAdvancedE | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("support_material_layer_height", coFloatOrPercent);
     def->label = L("Support layer height");
     def->category = OptionCategory::support;
@@ -11185,6 +11192,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "support_material_bottom_interface_expansion",
 "support_material_bottom_interface_pattern",
 "support_material_layer_expansion",
+"support_material_layer_expansion_snug",
 "support_material_layer_height",
 "temperature_heat_speed",
 "thin_perimeters_all",

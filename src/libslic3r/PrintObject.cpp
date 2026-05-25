@@ -1518,6 +1518,7 @@ bool PrintObject::invalidate_state_by_config_options(
                 || opt_key == "support_material_interface_layer_height"
                 || opt_key == "support_material_layer_height"
                 || opt_key == "support_material_layer_expansion"
+                || opt_key == "support_material_layer_expansion_snug"
                 || opt_key == "wall_transition_length"
                 || opt_key == "wall_transition_filter_deviation"
                 || opt_key == "wall_transition_angle"

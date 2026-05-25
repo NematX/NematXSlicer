@@ -342,7 +342,10 @@ group:Options for support material and raft
 	setting:support_material_closing_radius
 	setting:tags$Advanced$Expert$Prusa:support_material_buildplate_only
 	setting:sidetext_width$7:support_material_xy_spacing
-	setting:support_material_layer_expansion
+	line:Support expansion
+		setting:label$_:support_material_layer_expansion
+		setting:support_material_layer_expansion_snug
+	end_line
 	setting:dont_support_bridges
 	setting:support_material_synchronize_layers
 	setting:support_max_slope
