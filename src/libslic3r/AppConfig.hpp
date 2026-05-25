@@ -20,6 +20,8 @@
 
 namespace Slic3r {
 
+class ColorRGB;
+
 class AppConfig
 {
 public:
@@ -141,6 +143,7 @@ public:
 		{ return this->get(key) == "1"; }
 	int  				get_int(const std::string &key) const
 		{ return atoi(this->get(key).c_str()); }
+	ColorRGB            get_color(const std::string &key) const;
 	bool			    set(const std::string &section, const std::string &key, const std::string &value)
 	{
 #ifndef NDEBUG

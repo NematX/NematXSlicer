@@ -86,8 +86,9 @@
 
 static constexpr const float TRACKBALLSIZE = 0.8f;
 
-static const Slic3r::ColorRGBA DEFAULT_BG_DARK_COLOR  = { 0.478f, 0.478f, 0.478f, 1.0f };
-static const Slic3r::ColorRGBA DEFAULT_BG_LIGHT_COLOR = { 0.753f, 0.753f, 0.753f, 1.0f };
+// now in AppConfig::get_color("Gui_skybox_dark/light")
+//static const Slic3r::ColorRGBA DEFAULT_BG_DARK_COLOR  = { 0.478f, 0.478f, 0.478f, 1.0f };
+//static const Slic3r::ColorRGBA DEFAULT_BG_LIGHT_COLOR = { 0.753f, 0.753f, 0.753f, 1.0f };
 static const Slic3r::ColorRGBA ERROR_BG_DARK_COLOR    = { 0.478f, 0.192f, 0.039f, 1.0f };
 static const Slic3r::ColorRGBA ERROR_BG_LIGHT_COLOR   = { 0.753f, 0.192f, 0.039f, 1.0f };
 
@@ -1533,6 +1534,9 @@ GLCanvas3D::GLCanvas3D(wxGLCanvas *canvas, Bed3D &bed)
     m_arrange_settings_dialog.on_arrange_btn([]{
         wxGetApp().plater()->arrange();
     });
+
+    this->m_skybox_dark =  Slic3r::ColorRGBA(get_app_config()->get_color("color_skybox_dark"));
+    this->m_skybox_light = Slic3r::ColorRGBA(get_app_config()->get_color("color_skybox_light"));
 }
 
 GLCanvas3D::~GLCanvas3D()
@@ -6546,7 +6550,7 @@ void GLCanvas3D::_render_background()
     // Draws a bottom to top gradient over the complete screen.
     glsafe(::glDisable(GL_DEPTH_TEST));
 
-    const ColorRGBA bottom_color = use_error_color ? ERROR_BG_DARK_COLOR : DEFAULT_BG_DARK_COLOR;
+    const ColorRGBA bottom_color = use_error_color ? ERROR_BG_DARK_COLOR : m_skybox_dark /*DEFAULT_BG_DARK_COLOR*/;
 
     if (!m_background.is_initialized()) {
         m_background.reset();
@@ -6572,7 +6576,7 @@ void GLCanvas3D::_render_background()
     GLShaderProgram* shader = wxGetApp().get_shader("background");
     if (shader != nullptr) {
         shader->start_using();
-        shader->set_uniform("top_color", use_error_color ? ERROR_BG_LIGHT_COLOR : DEFAULT_BG_LIGHT_COLOR);
+        shader->set_uniform("top_color", use_error_color ? ERROR_BG_LIGHT_COLOR : m_skybox_light /*DEFAULT_BG_LIGHT_COLOR*/);
         shader->set_uniform("bottom_color", bottom_color);
         m_background.render();
         shader->stop_using();

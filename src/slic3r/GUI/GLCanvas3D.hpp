@@ -569,6 +569,8 @@ private:
     ECursorType m_cursor_type;
     GLSelectionRectangle m_rectangle_selection;
     std::vector<int> m_hover_volume_idxs;
+    ColorRGBA m_skybox_dark;
+    ColorRGBA m_skybox_light;
 
     // Following variable is obsolete and it should be safe to remove it.
     // I just don't want to do it now before a release (Lukas Matena 24.3.2019)

@@ -104,6 +104,12 @@ uint32_t AppConfig::create_color(float saturation, float value, EAppColorType co
     return rgb2int(rgb_color);
 }
 
+ColorRGB AppConfig::get_color(const std::string &key) const {
+    std::string hex_str = get(key);
+    uint32_t int_color = hex2int(hex_str);
+    return int2rgb(int_color);
+}
+
 // Override missing or keys with their defaults.
 void AppConfig::set_defaults()
 {
@@ -719,7 +725,8 @@ void AppConfig::init_ui_layout() {
     //get default color from the ini file
 
     //try to load colors from ui file
-    std::map<std::string, std::string> key2color = { {"Gui_color_dark", "cabe39"}, {"Gui_color", "eddc21"}, {"Gui_color_light", "ffee38"} };
+    std::map<std::string, std::string> key2color = { {"Gui_color_dark", "cabe39"}, {"Gui_color", "eddc21"}, {"Gui_color_light", "ffee38"},
+    {"Gui_skybox_dark", "7A7A7A"}, {"Gui_skybox_light", "C0C0C0"}, {"Gui_plater", "3C3C3C"}, {"Gui_plater_grid", "D0D0D0"}};
     boost::property_tree::ptree tree_colors;
     boost::filesystem::path path_colors = boost::filesystem::path(layout_config_path()) / "colors.ini";
     try {
@@ -781,6 +788,18 @@ void AppConfig::init_ui_layout() {
 
     if (get("color_light").empty())
         set("color_light", key2color["Gui_color_light"]);
+
+    if (get("color_skybox_dark").empty())
+        set("color_skybox_dark", key2color["Gui_skybox_dark"]);
+
+    if (get("color_skybox_light").empty())
+        set("color_skybox_light", key2color["Gui_skybox_light"]);
+
+    if (get("color_plater").empty())
+        set("color_plater", key2color["Gui_plater"]);
+
+    if (get("color_plater_grid").empty())
+        set("color_plater_grid", key2color["Gui_plater_grid"]);
 
     {
         // try to load splashscreen from ui file

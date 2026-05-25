@@ -7677,7 +7677,9 @@ std::string GCodeGenerator::extrude_path_3D(const ExtrusionPath3D &path, const s
     // ensure the first position is at the right z
     //FIXME: go to the first z offset of simplifed_path
     if (!is_approx(m_writer.get_position().z(), start_gcode_pos.z(), EPSILON)) {
-        gcode += m_writer.travel_to_xyz(start_gcode_pos, false);
+        //gcode += m_writer.travel_to_xyz(start_gcode_pos, false);
+        //currently, Cooling buffer doesn't support a travel inside an extrusion, as it mess with speed ovveride.
+        gcode += m_writer.extrude_to_xyz(start_gcode_pos, 0);
     }
 
     // calculate extrusion length per distance unit

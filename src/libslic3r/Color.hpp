@@ -82,6 +82,7 @@ public:
 	ColorRGBA(float r, float g, float b, float a);
 	ColorRGBA(unsigned char r, unsigned char g, unsigned char b, unsigned char a);
 	ColorRGBA(const ColorRGBA& other) = default;
+    ColorRGBA(const ColorRGB &rgb) : m_data{rgb.r(), rgb.g(), rgb.b(), 1.0f} {}
 
 	ColorRGBA& operator = (const ColorRGBA& other) { m_data = other.m_data; return *this; }
 

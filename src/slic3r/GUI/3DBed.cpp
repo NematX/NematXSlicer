@@ -44,9 +44,13 @@ namespace GUI {
 
 Bed3D::Bed3D()
 {
+    AppConfig* app_config = get_app_config();
     this->m_model_color = DEFAULT_MODEL_COLOR;
     this->m_grid_color = DEFAULT_TRANSPARENT_GRID_COLOR;
-    {
+    if (app_config && app_config->has("color_plater")) {
+        this->m_model_color =  Slic3r::ColorRGBA(app_config->get_color("color_plater"));
+        this->m_grid_color = Slic3r::ColorRGBA(app_config->get_color("color_plater_grid"));
+    } else {
         //try to load color from ui file
         boost::property_tree::ptree tree_colors;
         boost::filesystem::path path_colors = Slic3r::GUI::get_app_config()->layout_config_path() / "colors.ini";
@@ -562,6 +566,7 @@ void Bed3D::render_texture(bool bottom, GLCanvas3D& canvas, const Transform3d& v
         shader->set_uniform("view_model_matrix", view_matrix);
         shader->set_uniform("projection_matrix", projection_matrix);
         shader->set_uniform("transparent_background", bottom);
+        shader->set_uniform("solid_color", false);
         shader->set_uniform("svg_source", boost::algorithm::iends_with(m_texture.get_source(), ".svg"));
 
         glsafe(::glEnable(GL_DEPTH_TEST));
