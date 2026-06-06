@@ -10712,6 +10712,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "support_material_bottom_interface_expansion",
 "support_material_bottom_interface_pattern",
 "support_material_layer_height",
+"support_max_slope",
 "temperature_heat_speed",
 "thin_perimeters_all",
 "thin_perimeters",
