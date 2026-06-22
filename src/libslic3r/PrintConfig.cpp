@@ -7223,6 +7223,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionBool(true));
 
+    def = this->add("support_material_collapse_too_thin", coFloatOrPercent);
+    def->label = L("Collapse too-thin support areas");
+    def->category = OptionCategory::support;
+    def->tooltip = L("Remove support regions that become thinner than a printable support line after trimming or slope clipping."
+                   "\nSet to 0 to disable."
+                   "\nPercent values are applied to half of the support line width for the relevant support flow.");
+    def->sidetext = L("mm or %");
+    def->min = 0;
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
+
     def = this->add("support_max_slope", coFloatOrPercent);
     def->label = L("Maximum slope");
     def->full_label = L("Maximum slope for supports");
@@ -11194,6 +11205,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "support_material_layer_expansion",
 "support_material_layer_expansion_snug",
 "support_material_layer_height",
+"support_material_collapse_too_thin",
 "support_max_slope",
 "temperature_heat_speed",
 "thin_perimeters_all",

@@ -349,6 +349,7 @@ group:Options for support material and raft
 	setting:dont_support_bridges
 	setting:support_material_synchronize_layers
 	setting:support_max_slope
+	setting:support_material_collapse_too_thin
 group:Options for support material interface
 	setting:support_material_interface_layer_height
 	line:Pattern

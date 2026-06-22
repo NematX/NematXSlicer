@@ -71,6 +71,7 @@ struct SupportParameters {
     coord_t                 _gap_xy;
     
     coord_t                 support_max_slope;
+    FloatOrPercent          support_material_collapse_too_thin;
 
     //scaled, resolution for supports
     coord_t                 resolution = SCALED_EPSILON;

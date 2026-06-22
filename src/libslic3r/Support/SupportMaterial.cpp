@@ -82,6 +82,44 @@ namespace Slic3r {
 //#define SUPPORT_SURFACES_OFFSET_PARAMETERS ClipperLib::jtMiter, 1.5
 #define SUPPORT_SURFACES_OFFSET_PARAMETERS ClipperLib::jtSquare, 0.
 
+static coord_t support_collapse_radius(const Slic3r::FFFSupport::SupportParameters &support_params, const Slic3r::FFFSupport::SupporLayerType layer_type)
+{
+    if (support_params.support_material_collapse_too_thin.value <= 0)
+        return 0;
+
+    double base_radius = 0.;
+    switch (layer_type) {
+    case Slic3r::FFFSupport::SupporLayerType::Base:
+    case Slic3r::FFFSupport::SupporLayerType::Intermediate:
+        base_radius = 0.5 * support_params.support_material_flow.width();
+        break;
+    case Slic3r::FFFSupport::SupporLayerType::TopContact:
+    case Slic3r::FFFSupport::SupporLayerType::TopInterface:
+        base_radius = 0.5 * support_params.support_material_interface_flow.width();
+        break;
+    case Slic3r::FFFSupport::SupporLayerType::BottomContact:
+    case Slic3r::FFFSupport::SupporLayerType::BottomInterface:
+        base_radius = 0.5 * support_params.support_material_bottom_interface_flow.width();
+        break;
+    case Slic3r::FFFSupport::SupporLayerType::RaftBase:
+    case Slic3r::FFFSupport::SupporLayerType::RaftInterface:
+    case Slic3r::FFFSupport::SupporLayerType::Unknown:
+        return 0;
+    }
+
+    const coord_t collapse_radius = scale_t(support_params.support_material_collapse_too_thin.get_abs_value(base_radius));
+    return std::max<coord_t>(0, collapse_radius);
+}
+
+static void collapse_too_thin_support_regions(const Slic3r::FFFSupport::SupportParameters &support_params, Slic3r::FFFSupport::SupportGeneratorLayer &layer)
+{
+    const coord_t collapse_radius = support_collapse_radius(support_params, layer.layer_type);
+    if (collapse_radius <= 0 || layer.polygons.empty())
+        return;
+
+    layer.polygons = opening(layer.polygons, double(collapse_radius), SUPPORT_SURFACES_OFFSET_PARAMETERS);
+}
+
 #ifdef SUPPORT_USE_AGG_RASTERIZER
 static std::vector<unsigned char> rasterize_polygons(const Vec2i32 &grid_size, const coordf_t pixel_size, const Point &left_bottom, const Polygons &polygons)
 {
@@ -2945,6 +2983,7 @@ void PrintObjectSupportMaterial::generate_base_layers(
                 layer_intermediate.polygons.clear();
             } else {
                 layer_intermediate.polygons = intersection(layer_intermediate.polygons, allowed_polygons);
+                collapse_too_thin_support_regions(this->m_support_params, layer_intermediate);
                 ensure_valid(layer_intermediate.polygons, this->m_support_params.resolution);
             }
             for (size_t idx_bottom = 0; idx_bottom < top_contacts.size() &&
@@ -2953,9 +2992,10 @@ void PrintObjectSupportMaterial::generate_base_layers(
                 if (top_contacts[idx_bottom]->scaled_print_z() == layer_intermediate.scaled_print_z()) {
                     // clip top
                     top_contacts[idx_bottom]->polygons = intersection(allowed_polygons, top_contacts[idx_bottom]->polygons);
+                    collapse_too_thin_support_regions(this->m_support_params, *top_contacts[idx_bottom]);
+                    ensure_valid(top_contacts[idx_bottom]->polygons, this->m_support_params.resolution);
                 }
             }
-        
         }
     }
 }
@@ -3059,6 +3099,7 @@ void PrintObjectSupportMaterial::trim_support_layers_by_object(
                 // We leave a gap equal to a full extrusion width.
                 ensure_valid(expolygons_trimming, this->m_support_params.resolution);
                 support_layer.polygons = diff(support_layer.polygons, union_ex(expolygons_trimming));
+                collapse_too_thin_support_regions(this->m_support_params, support_layer);
                 ensure_valid(support_layer.polygons, this->m_support_params.resolution);
             }
         });

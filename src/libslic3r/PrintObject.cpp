@@ -1562,6 +1562,7 @@ bool PrintObject::invalidate_state_by_config_options(
             || opt_key == "support_material_style"
             || opt_key == "support_material_top_interface_pattern"
             || opt_key == "support_material_xy_spacing"
+            || opt_key == "support_material_collapse_too_thin"
             || opt_key == "support_max_slope"
             || opt_key == "support_material_spacing"
             || opt_key == "support_material_closing_radius"

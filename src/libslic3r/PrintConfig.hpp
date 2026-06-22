@@ -852,6 +852,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  support_material_threshold))
     ((ConfigOptionEnum<InfillPattern>,  support_material_top_interface_pattern))
     ((ConfigOptionBool,                 support_material_with_sheath))
+    ((ConfigOptionFloatOrPercent,       support_material_collapse_too_thin))
     ((ConfigOptionFloatOrPercent,       support_material_xy_spacing))
     ((ConfigOptionFloatOrPercent,       support_max_slope))
     ((ConfigOptionBool,                 thin_walls_merge))

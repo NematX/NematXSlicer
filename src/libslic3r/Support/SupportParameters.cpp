@@ -109,6 +109,7 @@ SupportParameters::SupportParameters(const PrintObject &object)
     this->_gap_xy = Layer::scale_to_layer_coord(object_config.support_material_xy_spacing.get_abs_value(external_perimeter_width));
     bridge_flow_ratio /= object.num_printing_regions();
     this->support_max_slope = scale_t(object_config.support_max_slope.get_abs_value(max_nzl_diameter_mm));
+    this->support_material_collapse_too_thin = boost::any_cast<FloatOrPercent>(object_config.support_material_collapse_too_thin.get_any());
 
     this->support_material_bottom_interface_flow = slicing_params.soluble_interface ?
         this->support_material_interface_flow.with_flow_ratio(bridge_flow_ratio) :
