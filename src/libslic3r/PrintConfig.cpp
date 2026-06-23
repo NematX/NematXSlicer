@@ -1477,11 +1477,9 @@ void PrintConfigDef::init_fff_params()
     def->set_enum<InfillPattern>({
         { "rectilinear",        L("Rectilinear") },
         { "monotonic",          L("Monotonic") },
-        { "monotonicgapfill",   L("Monotonic (filled)") },
         { "monotoniclines",     L("Monotonic Lines") },
         { "alignedrectilinear", L("Aligned Rectilinear") },
         { "concentric",         L("Concentric") },
-        { "concentricgapfill",  L("Concentric (filled)") },
         { "hilbertcurve",       L("Hilbert Curve") },
         { "archimedeanchords",  L("Archimedean Chords") },
         { "octagramspiral",     L("Octagram Spiral") },
@@ -1502,11 +1500,9 @@ void PrintConfigDef::init_fff_params()
     def->set_enum<InfillPattern>({
         { "rectilinear",        L("Rectilinear") },
         { "monotonic",          L("Monotonic") },
-        { "monotonicgapfill",   L("Monotonic (filled)") },
         { "monotoniclines",     L("Monotonic Lines") },
         { "alignedrectilinear", L("Aligned Rectilinear") },
         { "concentric",         L("Concentric") },
-        { "concentricgapfill",  L("Concentric (filled)") },
         { "hilbertcurve",       L("Hilbert Curve") },
         { "archimedeanchords",  L("Archimedean Chords") },
         { "octagramspiral",     L("Octagram Spiral") },
@@ -1525,13 +1521,10 @@ void PrintConfigDef::init_fff_params()
     def->set_enum<InfillPattern>({
         { "ensuring",           L("Ensuring") },
         { "rectilinear",        L("Rectilinear") },
-        { "rectilineargapfill", L("Rectilinear (filled)") },
         { "monotonic",          L("Monotonic") },
-        { "monotonicgapfill",   L("Monotonic (filled)") },
         { "monotoniclines",     L("Monotonic Lines") },
         { "alignedrectilinear", L("Aligned Rectilinear") },
         { "concentric",         L("Concentric") },
-        { "concentricgapfill",  L("Concentric (filled)") },
         { "hilbertcurve",       L("Hilbert Curve") },
         { "archimedeanchords",  L("Archimedean Chords") },
         { "octagramspiral",     L("Octagram Spiral") },
@@ -6743,7 +6736,6 @@ void PrintConfigDef::init_fff_params()
         { "concentric",        L("Concentric") },
         { "sawtooth",          L("Sawtooth") },
         { "hilbertcurve",      L("Hilbert Curve") },
-        { "concentricgapfill", L("Concentric (filled)") },
         { "smooth",            L("Ironing") },
     });
     def->mode = comAdvancedE | comPrusa;
