@@ -3535,7 +3535,9 @@ void FillRectilinear::change_flow_intersection(const Polylines &polylines_first_
                     // between points is always higher than half_spacing
                     Line line(path.polyline.get_point(path.polyline.size()-2), path.polyline.back());
                     line.extend_end(half_spacing);
-                    path.polyline.set_back(line.b);
+                    if (line.b.distance_to_square(path.polyline.back()) > SCALED_EPSILON) {
+                        path.polyline.set_back(line.b);
+                    }
                     collisions.front() = path.polyline.back();
                     // check if we can reuse previous path
                     if (!multi_path.empty() &&
