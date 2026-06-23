@@ -351,6 +351,10 @@ public:
     // return value shows visibility : false => all options are hidden
     void        Hide();
     void        Show(const bool show);
+    // Returns whether this option is displayed by at least one line of this group in the current mode.
+    // If the option was registered/defined but is not attached to a Line, it is considered visible
+    // to avoid hiding reset affordances for custom controls or late-created fields.
+    bool        option_is_visible(const OptionKeyIdx &opt_key_idx, ConfigOptionMode mode) const;
     bool        is_visible(ConfigOptionMode mode);
     bool        update_visibility(ConfigOptionMode mode);
     void        msw_rescale();
