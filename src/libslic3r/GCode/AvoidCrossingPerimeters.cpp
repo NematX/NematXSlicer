@@ -2276,7 +2276,11 @@ static std::vector<std::pair<ExPolygon, ExPolygon>> inner_offset(const ExPolygon
 //#define INCLUDE_SUPPORTS_IN_BOUNDARY
 
 // called by AvoidCrossingPerimeters::travel_to()
-static ExPolygons get_boundary(const Layer &layer, uint16_t extruder_id, std::vector<std::pair<ExPolygon, ExPolygon>> &slice_2_boundary, ExPolygons &to_avoid)
+static ExPolygons get_boundary(const Layer                                      &layer,
+                               uint16_t                                         extruder_id,
+                               std::vector<std::pair<ExPolygon, ExPolygon>>    &slice_2_boundary,
+                               ExPolygons                                      &to_avoid,
+                               const ExPolygons                                &no_travel)
 {
     const coord_t perimeter_spacing = get_perimeter_spacing(layer);
     auto const *support_layer     = dynamic_cast<const SupportLayer *>(&layer);
@@ -2404,11 +2408,14 @@ static ExPolygons get_boundary(const Layer &layer, uint16_t extruder_id, std::ve
         boundary = intersection_ex(boundary, offset_ex(clip, SCALED_EPSILON * 10 /*safety offset*/));
     }
 
+    if (!no_travel.empty())
+        boundary = diff_ex(boundary, no_travel);
+
     return boundary;
 }
 
 // called by AvoidCrossingPerimeters::travel_to()
-static Polygons get_boundary_external(const Layer &layer)
+static Polygons get_boundary_external(const Layer &layer, const ExPolygons &no_travel_external)
 {
     const coord_t perimeter_spacing = get_perimeter_spacing_external(layer);
     const coord_t perimeter_offset  = perimeter_spacing / 2;
@@ -2461,6 +2468,10 @@ static Polygons get_boundary_external(const Layer &layer)
     // Reverse all polygons for making normals point from the polygon out.
     for (Polygon &poly : boundary)
         poly.reverse();
+    for (const ExPolygon &expoly : no_travel_external) {
+        boundary.emplace_back(expoly.contour);
+        boundary.back().reverse();
+    }
 #ifdef INCLUDE_SUPPORTS_IN_BOUNDARY
     append(boundary, to_polygons(inner_offset(supports_boundary, coordf_t(perimeter_offset))));
 #endif
@@ -2528,6 +2539,112 @@ static void init_boundary(AvoidCrossingPerimeters::Boundary *boundary, ExPolygon
     assert(boundary->islands.size() == boundary->boundaries.size());
 }
 
+static std::vector<float> no_travel_slab_slice_zs(const Layer &layer)
+{
+    const coord_t bottom_z = layer.scaled_bottom_z();
+    const coord_t print_z  = layer.scaled_print_z();
+    const coord_t mid_z    = bottom_z + (print_z - bottom_z) / 2;
+
+    std::vector<coord_t> scaled_zs;
+    auto add_z = [&scaled_zs, bottom_z, print_z](coord_t z) {
+        z = std::clamp(z, bottom_z, print_z);
+        if (std::find(scaled_zs.begin(), scaled_zs.end(), z) == scaled_zs.end())
+            scaled_zs.emplace_back(z);
+    };
+
+    if (print_z > bottom_z + 2 * SCALED_EPSILON) {
+        add_z(bottom_z + SCALED_EPSILON);
+        add_z(print_z - SCALED_EPSILON);
+    } else {
+        add_z(mid_z);
+    }
+
+    if (layer.slice_z >= 0.) {
+        const coord_t slice_z = scale_t(layer.slice_z);
+        if (slice_z >= bottom_z && slice_z <= print_z)
+            add_z(slice_z);
+    } else {
+        add_z(mid_z);
+    }
+
+    std::sort(scaled_zs.begin(), scaled_zs.end());
+
+    std::vector<float> zs;
+    zs.reserve(scaled_zs.size());
+    for (coord_t z : scaled_zs)
+        zs.emplace_back(float(unscaled(z)));
+    return zs;
+}
+
+const ExPolygons& AvoidCrossingPerimeters::no_travel_expolygons_for_object_slab(const PrintObject &object, coord_t print_z)
+{
+    static const ExPolygons empty;
+
+    NoTravelCache &cache = m_no_travel_cache[&object];
+    if (!cache.initialized) {
+        cache.initialized = true;
+
+        std::map<coord_t, std::vector<float>> zs_by_print_z;
+        auto append_layer_zs = [&zs_by_print_z](const Layer &layer) {
+            std::vector<float> &dst = zs_by_print_z[layer.scaled_print_z()];
+            for (float z : no_travel_slab_slice_zs(layer))
+                if (std::find(dst.begin(), dst.end(), z) == dst.end())
+                    dst.emplace_back(z);
+        };
+        for (const Layer *layer : object.layers())
+            append_layer_zs(*layer);
+        for (const SupportLayer *layer : object.support_layers())
+            append_layer_zs(*layer);
+
+        std::vector<coord_t> print_zs;
+        std::vector<float>   zs;
+        for (const auto &[layer_print_z, layer_zs] : zs_by_print_z) {
+            for (float slice_z : layer_zs) {
+                print_zs.emplace_back(layer_print_z);
+                zs.emplace_back(slice_z);
+            }
+        }
+
+        std::vector<ExPolygons> slices = object.slice_model_volumes(ModelVolumeType::NO_TRAVEL, zs);
+        if (!slices.empty()) {
+            assert(slices.size() == print_zs.size());
+            const size_t count = std::min(slices.size(), print_zs.size());
+            for (size_t i = 0; i < count; ++i) {
+                if (!slices[i].empty())
+                    append(cache.by_print_z[print_zs[i]], std::move(slices[i]));
+            }
+            for (auto &[layer_print_z, expolygons] : cache.by_print_z)
+                expolygons = union_ex(expolygons);
+        }
+    }
+
+    auto it = cache.by_print_z.find(print_z);
+    return it == cache.by_print_z.end() ? empty : it->second;
+}
+
+ExPolygons AvoidCrossingPerimeters::no_travel_expolygons_for_layer_slab(const Layer &layer)
+{
+    return this->no_travel_expolygons_for_object_slab(*layer.object(), layer.scaled_print_z());
+}
+
+ExPolygons AvoidCrossingPerimeters::no_travel_expolygons_for_external_layer_slab(const Layer &layer)
+{
+    ExPolygons out;
+    const coord_t print_z = layer.scaled_print_z();
+    for (const PrintObject *object : layer.object()->print()->objects()) {
+        const ExPolygons &object_no_travel = this->no_travel_expolygons_for_object_slab(*object, print_z);
+        if (object_no_travel.empty())
+            continue;
+        for (const PrintInstance &instance : object->instances()) {
+            const size_t first = out.size();
+            append(out, object_no_travel);
+            for (size_t i = first; i < out.size(); ++i)
+                out[i].translate(instance.shift);
+        }
+    }
+    return out.empty() ? ExPolygons{} : union_ex(out);
+}
+
 // Plan travel, which avoids perimeter crossings by following the boundaries of the layer.
 Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, const Point &point, bool *could_be_wipe_disabled)
 {
@@ -2553,7 +2670,13 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, cons
         // Initialize m_internal only when it is necessary.
         if (m_internal.boundaries.empty()) {
             std::vector<std::pair<ExPolygon, ExPolygon>> boundary_growth;
-            init_boundary(&m_internal, get_boundary(*gcodegen.layer(), gcodegen.last_extruder(), boundary_growth, m_internal.to_avoid), perimeter_spacing * 2);
+            init_boundary(&m_internal,
+                          get_boundary(*gcodegen.layer(),
+                                       gcodegen.last_extruder(),
+                                       boundary_growth,
+                                       m_internal.to_avoid,
+                                       this->no_travel_expolygons_for_layer_slab(*gcodegen.layer())),
+                          perimeter_spacing * 2);
             m_internal.boundary_growth = std::move(boundary_growth);
         }
 
@@ -2581,7 +2704,9 @@ Polyline AvoidCrossingPerimeters::travel_to(const GCodeGenerator &gcodegen, cons
     } else if(use_external) {
         // Initialize m_external only when exist any external travel for the current layer.
         if (m_external.boundaries.empty())
-            init_boundary(&m_external, get_boundary_external(*gcodegen.layer()), perimeter_spacing * 2);
+            init_boundary(&m_external,
+                          get_boundary_external(*gcodegen.layer(), this->no_travel_expolygons_for_external_layer_slab(*gcodegen.layer())),
+                          perimeter_spacing * 2);
 
         // Trim the travel line by the bounding box.
         if (!m_external.boundaries.empty() && Geometry::liang_barsky_line_clipping(startf, endf, m_external.bbox)) {

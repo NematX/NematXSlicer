@@ -406,6 +406,7 @@ public:
     void slice();
 
     // Helpers to slice support enforcer / blocker meshes by the support generator.
+    std::vector<ExPolygons>     slice_model_volumes(const ModelVolumeType model_volume_type, const std::vector<float> &zs) const;
     std::vector<ExPolygons>     slice_support_volumes(const ModelVolumeType model_volume_type) const;
     std::vector<ExPolygons>     slice_support_blockers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_BLOCKER); }
     std::vector<ExPolygons>     slice_support_enforcers() const { return this->slice_support_volumes(ModelVolumeType::SUPPORT_ENFORCER); }

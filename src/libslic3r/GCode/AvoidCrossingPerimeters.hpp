@@ -9,12 +9,15 @@
 #include "../ExPolygon.hpp"
 #include "../EdgeGrid.hpp"
 
+#include <map>
+
 namespace Slic3r {
 
 // Forward declarations.
 class GCodeGenerator;
 class Layer;
 class Point;
+class PrintObject;
 
 class AvoidCrossingPerimeters
 {
@@ -23,6 +26,7 @@ public:
     void        use_external_mp(bool use = true) { m_use_external_mp = use; };
     void        use_external_mp_once()  { m_use_external_mp_once = true; }
     bool        used_external_mp_once() { return m_use_external_mp_once; }
+    bool        uses_external_mp() const { return m_use_external_mp || m_use_external_mp_once; }
     void        disable_once()          { m_disabled_once = true; }
     bool        disabled_once() const   { return m_disabled_once; }
     void        reset_once_modifiers()  { m_use_external_mp_once = false; m_disabled_once = false; }
@@ -37,6 +41,9 @@ public:
     }
 
     Polyline    travel_to(const GCodeGenerator &gcodegen, const Point& point, bool* could_be_wipe_disabled);
+
+    ExPolygons  no_travel_expolygons_for_layer_slab(const Layer &layer);
+    ExPolygons  no_travel_expolygons_for_external_layer_slab(const Layer &layer);
 
     struct Boundary {
         // Collection of boundaries used for detection of crossing perimeters for travels
@@ -76,6 +83,13 @@ public:
     };
 
 private:
+    struct NoTravelCache {
+        bool initialized { false };
+        std::map<coord_t, ExPolygons> by_print_z;
+    };
+
+    const ExPolygons& no_travel_expolygons_for_object_slab(const PrintObject &object, coord_t print_z);
+
     bool           m_use_external_mp { false };
     // just for the next travel move
     bool           m_use_external_mp_once { false };
@@ -96,6 +110,7 @@ private:
     Boundary m_internal;
     // Store all needed data for travels outside object
     Boundary m_external;
+    std::map<const PrintObject*, NoTravelCache> m_no_travel_cache;
 };
 
 } // namespace Slic3r

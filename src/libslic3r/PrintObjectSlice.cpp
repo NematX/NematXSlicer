@@ -1991,15 +1991,14 @@ void PrintObject::slice_volumes()
     BOOST_LOG_TRIVIAL(debug) << "Slicing volumes - make_slices in parallel - end";
 }
 
-std::vector<ExPolygons> PrintObject::slice_support_volumes(const ModelVolumeType model_volume_type) const
+std::vector<ExPolygons> PrintObject::slice_model_volumes(const ModelVolumeType model_volume_type, const std::vector<float> &zs) const
 {
     auto it_volume     = this->model_object()->volumes.begin();
     auto it_volume_end = this->model_object()->volumes.end();
     for (; it_volume != it_volume_end && (*it_volume)->type() != model_volume_type; ++ it_volume) ;
     std::vector<ExPolygons> slices;
-    if (it_volume != it_volume_end) {
-        // Found at least a single support volume of model_volume_type.
-        std::vector<float> zs = slice_z_from_layers(this->layers());
+    if (it_volume != it_volume_end && !zs.empty()) {
+        // Found at least a single volume of model_volume_type.
         std::vector<char>  merge_layers;
         bool               merge = false;
         const Print       *print = this->print();
@@ -2040,6 +2039,11 @@ std::vector<ExPolygons> PrintObject::slice_support_volumes(const ModelVolumeType
         }
     }
     return slices;
+}
+
+std::vector<ExPolygons> PrintObject::slice_support_volumes(const ModelVolumeType model_volume_type) const
+{
+    return this->slice_model_volumes(model_volume_type, slice_z_from_layers(this->layers()));
 }
 
 } // namespace Slic3r

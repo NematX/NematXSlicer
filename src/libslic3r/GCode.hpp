@@ -438,6 +438,19 @@ private:
     std::string     set_extruder(uint16_t extruder_id, coord_t print_z, bool no_toolchange = false);
     std::string     toolchange(uint16_t extruder_id, coord_t print_z);
     bool line_distancer_is_required(const std::vector<uint16_t>& extruder_ids);
+    void            use_external_mp_for_travel(bool use = true);
+    void            use_external_mp_once_for_travel();
+    bool            uses_external_mp_for_travel() const { return m_use_external_mp_for_travel || m_use_external_mp_once_for_travel; }
+    void            reset_avoid_crossing_once_modifiers();
+
+    struct NoTravelCache {
+        bool initialized { false };
+        std::map<coord_t, ExPolygons> by_print_z;
+    };
+
+    const ExPolygons& no_travel_expolygons_for_object_slab(const PrintObject &object, coord_t print_z) const;
+    ExPolygons        no_travel_expolygons_for_layer_slab(const Layer &layer) const;
+    ExPolygons        no_travel_expolygons_for_external_layer_slab(const Layer &layer) const;
 
     // Cache for custom seam enforcers/blockers for each layer.
     SeamPlacer                          m_seam_placer;
@@ -447,6 +460,9 @@ private:
     std::vector<std::pair<ArcPolylines, coord_t>>  m_layer_collision_already_printed_2_width;
     void init_layer_for_collision_check(const Layer *object_layer);
     void add_travel_obstacle(const ObjectsLayerToPrint &layer_group);
+    bool                                m_use_external_mp_for_travel { false };
+    bool                                m_use_external_mp_once_for_travel { false };
+    mutable std::map<const PrintObject*, NoTravelCache> m_no_travel_cache;
     public:
     /* Origin of print coordinates expressed in unscaled G-code coordinates.
        This affects the input arguments supplied to the extrude*() and travel_to()

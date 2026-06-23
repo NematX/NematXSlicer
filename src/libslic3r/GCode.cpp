@@ -56,6 +56,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <chrono>
+#include <limits>
 #include <map>
 #include <unordered_set>
 #include <optional>
@@ -1975,6 +1976,9 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
 
     m_pressure_model.release();
     m_z_to_obstacles.clear();
+    m_no_travel_cache.clear();
+    m_use_external_mp_for_travel = false;
+    m_use_external_mp_once_for_travel = false;
     file.set_only_ascii(print.config().gcode_ascii.value);
 
     // resets analyzer's tracking data
@@ -3138,7 +3142,7 @@ void GCodeGenerator::_move_to_print_object(std::string& gcode_out, const Print& 
     // Move to the origin position for the copy we're going to print.
     // This happens before Z goes down to layer 0 again, so that no collision happens hopefully.
     m_enable_cooling_markers = false; // we're not filtering these moves through CoolingBuffer
-    m_avoid_crossing_perimeters.use_external_mp_once();
+    this->use_external_mp_once_for_travel();
     set_extra_lift(m_last_layer_z_, 0, print.config(), m_writer, initial_extruder_id);
     gcode_out.append(this->retract_and_wipe());
     //go to origin of the next object (it's 0,0 because we shifted the origin to it)
@@ -4822,7 +4826,7 @@ LayerResult GCodeGenerator::process_layer(
             set_extra_lift(m_last_layer_z_, layer.id(), print.config(), m_writer, extruder_id);
             const std::pair<size_t, size_t> loops = loops_it->second;
             this->set_origin(0., 0.);
-            m_avoid_crossing_perimeters.use_external_mp();
+            this->use_external_mp_for_travel();
             Flow layer_skirt_flow = print.skirt_flow(extruder_id)
                                         .with_height(float(unscaled(
                                             m_skirt_done.back() -
@@ -4838,7 +4842,7 @@ LayerResult GCodeGenerator::process_layer(
                     ExtrusionFlow{ mm3_per_mm, 0., layer_skirt_flow.height() }, gcode, "skirt"sv);
             }
             m_last_too_small.polyline.clear();
-            m_avoid_crossing_perimeters.use_external_mp(false);
+            this->use_external_mp_for_travel(false);
             // Allow a straight travel move to the first object point if this is the first layer (but don't in next layers).
             if (first_layer && loops.first == 0)
                 m_avoid_crossing_perimeters.disable_once();
@@ -4851,7 +4855,7 @@ LayerResult GCodeGenerator::process_layer(
             //global skirt & brim use the global settings.
             m_config.apply(print.default_object_config(), true);
             this->set_origin(0., 0.);
-            m_avoid_crossing_perimeters.use_external_mp();
+            this->use_external_mp_for_travel();
             m_region = nullptr;
             set_region_for_extrude(print, nullptr, nullptr, gcode);
             for (const ExtrusionEntity* brim_entity : print.brim().entities()) {
@@ -4861,7 +4865,7 @@ LayerResult GCodeGenerator::process_layer(
             }
             m_last_too_small.polyline.clear();
             m_brim_done[{nullptr, 0}] = true;
-            m_avoid_crossing_perimeters.use_external_mp(false);
+            this->use_external_mp_for_travel(false);
             // Allow a straight travel move to the first object point.
             m_avoid_crossing_perimeters.disable_once();
             //to go to the object-only skirt or brim, or to the object  (May be overriden here but I don't care)
@@ -4899,10 +4903,10 @@ LayerResult GCodeGenerator::process_layer(
             set_region_for_extrude(print, print_object, nullptr, gcode);
             this->set_origin(unscale(print_object->instances()[single_object_instance_idx].shift));
             if (this->m_layer != nullptr && this->m_layer->id() == 0) {
-                m_avoid_crossing_perimeters.use_external_mp(true);
+                this->use_external_mp_for_travel(true);
                 for (const ExtrusionEntity* ee : print_object->brim().entities())
                     gcode += this->extrude_entity({*ee, false}, "Brim"sv);
-                m_avoid_crossing_perimeters.use_external_mp(false);
+                this->use_external_mp_for_travel(false);
                 m_avoid_crossing_perimeters.disable_once();
                 m_last_too_small.polyline.clear();
             }
@@ -5003,7 +5007,7 @@ void GCodeGenerator::process_layer_single_object(
             const Point &offset = instance.shift;
             GCode::PrintObjectInstance next_instance = {&print_object, int(print_args.print_instance.instance_id)};
             //if (m_current_instance != next_instance) // commented because now internal will be togthe nearest internal point first.
-            //    m_avoid_crossing_perimeters.use_external_mp_once();
+            //    this->use_external_mp_once_for_travel();
             m_current_instance = next_instance;
             this->set_origin(unscale(offset));
             assert(m_gcode_label_objects_start.empty());
@@ -5147,14 +5151,14 @@ void GCodeGenerator::process_layer_single_object(
         Vec2d offset = this->origin(); 
         this->set_origin(0., 0.);
         if (this->m_layer != nullptr && this->m_layer->id() == 0) {
-            m_avoid_crossing_perimeters.use_external_mp(true);
+            this->use_external_mp_for_travel(true);
             assert(print_args.print_instance.print_object.brim().entities()[print_args.print_instance.instance_id]->is_collection());
             if (const ExtrusionEntityCollection *coll = dynamic_cast<const ExtrusionEntityCollection *>(
                     print_args.print_instance.print_object.brim().entities()[print_args.print_instance.instance_id])) {
                 for (const ExtrusionEntity* ee : coll->entities())
                     gcode += this->extrude_entity(ExtrusionEntityReference{*ee, false}, "Brim"sv);
             }
-            m_avoid_crossing_perimeters.use_external_mp(false);
+            this->use_external_mp_for_travel(false);
             m_avoid_crossing_perimeters.disable_once();
             m_last_too_small.polyline.clear();
         }
@@ -9883,6 +9887,361 @@ void GCodeGenerator::ensure_end_object_change_labels(std::string& gcode) {
     }
 }
 
+static std::vector<float> gcode_no_travel_slab_slice_zs(const Layer &layer)
+{
+    const coord_t bottom_z = layer.scaled_bottom_z();
+    const coord_t print_z  = layer.scaled_print_z();
+    const coord_t mid_z    = bottom_z + (print_z - bottom_z) / 2;
+
+    std::vector<coord_t> scaled_zs;
+    auto add_z = [&scaled_zs, bottom_z, print_z](coord_t z) {
+        z = std::clamp(z, bottom_z, print_z);
+        if (std::find(scaled_zs.begin(), scaled_zs.end(), z) == scaled_zs.end())
+            scaled_zs.emplace_back(z);
+    };
+
+    if (print_z > bottom_z + 2 * SCALED_EPSILON) {
+        add_z(bottom_z + SCALED_EPSILON);
+        add_z(print_z - SCALED_EPSILON);
+    } else {
+        add_z(mid_z);
+    }
+
+    if (layer.slice_z >= 0.) {
+        const coord_t slice_z = scale_t(layer.slice_z);
+        if (slice_z >= bottom_z && slice_z <= print_z)
+            add_z(slice_z);
+    } else {
+        add_z(mid_z);
+    }
+
+    std::sort(scaled_zs.begin(), scaled_zs.end());
+
+    std::vector<float> zs;
+    zs.reserve(scaled_zs.size());
+    for (coord_t z : scaled_zs)
+        zs.emplace_back(float(unscaled(z)));
+    return zs;
+}
+
+void GCodeGenerator::use_external_mp_for_travel(bool use)
+{
+    m_use_external_mp_for_travel = use;
+    m_avoid_crossing_perimeters.use_external_mp(use);
+}
+
+void GCodeGenerator::use_external_mp_once_for_travel()
+{
+    m_use_external_mp_once_for_travel = true;
+    m_avoid_crossing_perimeters.use_external_mp_once();
+}
+
+void GCodeGenerator::reset_avoid_crossing_once_modifiers()
+{
+    m_use_external_mp_once_for_travel = false;
+    m_avoid_crossing_perimeters.reset_once_modifiers();
+}
+
+const ExPolygons& GCodeGenerator::no_travel_expolygons_for_object_slab(const PrintObject &object, coord_t print_z) const
+{
+    static const ExPolygons empty;
+
+    NoTravelCache &cache = m_no_travel_cache[&object];
+    if (!cache.initialized) {
+        cache.initialized = true;
+
+        std::map<coord_t, std::vector<float>> zs_by_print_z;
+        auto append_layer_zs = [&zs_by_print_z](const Layer &layer) {
+            std::vector<float> &dst = zs_by_print_z[layer.scaled_print_z()];
+            for (float z : gcode_no_travel_slab_slice_zs(layer))
+                if (std::find(dst.begin(), dst.end(), z) == dst.end())
+                    dst.emplace_back(z);
+        };
+        for (const Layer *layer : object.layers())
+            append_layer_zs(*layer);
+        for (const SupportLayer *layer : object.support_layers())
+            append_layer_zs(*layer);
+
+        std::vector<coord_t> print_zs;
+        std::vector<float>   zs;
+        for (const auto &[layer_print_z, layer_zs] : zs_by_print_z) {
+            for (float slice_z : layer_zs) {
+                print_zs.emplace_back(layer_print_z);
+                zs.emplace_back(slice_z);
+            }
+        }
+
+        std::vector<ExPolygons> slices = object.slice_model_volumes(ModelVolumeType::NO_TRAVEL, zs);
+        if (!slices.empty()) {
+            assert(slices.size() == print_zs.size());
+            const size_t count = std::min(slices.size(), print_zs.size());
+            for (size_t i = 0; i < count; ++i) {
+                if (!slices[i].empty())
+                    append(cache.by_print_z[print_zs[i]], std::move(slices[i]));
+            }
+            for (auto &[layer_print_z, expolygons] : cache.by_print_z)
+                expolygons = union_ex(expolygons);
+        }
+    }
+
+    auto it = cache.by_print_z.find(print_z);
+    return it == cache.by_print_z.end() ? empty : it->second;
+}
+
+ExPolygons GCodeGenerator::no_travel_expolygons_for_layer_slab(const Layer &layer) const
+{
+    return this->no_travel_expolygons_for_object_slab(*layer.object(), layer.scaled_print_z());
+}
+
+ExPolygons GCodeGenerator::no_travel_expolygons_for_external_layer_slab(const Layer &layer) const
+{
+    ExPolygons out;
+    const coord_t print_z = layer.scaled_print_z();
+    for (const PrintObject *object : layer.object()->print()->objects()) {
+        const ExPolygons &object_no_travel = this->no_travel_expolygons_for_object_slab(*object, print_z);
+        if (object_no_travel.empty())
+            continue;
+        for (const PrintInstance &instance : object->instances()) {
+            const size_t first = out.size();
+            append(out, object_no_travel);
+            for (size_t i = first; i < out.size(); ++i)
+                out[i].translate(instance.shift);
+        }
+    }
+    return out.empty() ? ExPolygons{} : union_ex(out);
+}
+
+static bool no_travel_contains(const ExPolygons &no_travel, const Point &point)
+{
+    for (const ExPolygon &expoly : no_travel)
+        if (expoly.contains(point, true))
+            return true;
+    return false;
+}
+
+static Point no_travel_nearest_boundary_point(const ExPolygons &no_travel, const Point &point)
+{
+    Point  best = point;
+    double best_distance_squared = std::numeric_limits<double>::max();
+
+    for (const ExPolygon &expoly : no_travel) {
+        const Point  projected = expoly.point_projection(point);
+        const double distance_squared = (projected - point).cast<double>().squaredNorm();
+        if (distance_squared < best_distance_squared) {
+            best_distance_squared = distance_squared;
+            best = projected;
+        }
+    }
+
+    return best;
+}
+
+static void no_travel_append_point(Polyline &dst, const Point &point)
+{
+    if (dst.empty() || !dst.back().coincides_with_epsilon(point))
+        dst.points.emplace_back(point);
+}
+
+static void no_travel_append_polyline(Polyline &dst, const Polyline &src)
+{
+    for (const Point &point : src.points)
+        no_travel_append_point(dst, point);
+}
+
+static Polygon no_travel_routing_polygon(const Point &from, const Point &to)
+{
+    Polygon polygon;
+    polygon.points.reserve(6);
+    polygon.points.emplace_back(from);
+    polygon.points.emplace_back(to);
+
+    const coord_t dx = to.x() - from.x();
+    const coord_t dy = to.y() - from.y();
+    if (std::abs(dx) > std::abs(dy)) {
+        if (dx > 0) {
+            polygon.points.emplace_back(MAX_COORD_T, to.y());
+            polygon.points.emplace_back(MAX_COORD_T, MAX_COORD_T);
+            polygon.points.emplace_back(-MAX_COORD_T, MAX_COORD_T);
+            polygon.points.emplace_back(-MAX_COORD_T, from.y());
+        } else {
+            polygon.points.emplace_back(-MAX_COORD_T, to.y());
+            polygon.points.emplace_back(-MAX_COORD_T, -MAX_COORD_T);
+            polygon.points.emplace_back(MAX_COORD_T, -MAX_COORD_T);
+            polygon.points.emplace_back(MAX_COORD_T, from.y());
+        }
+    } else {
+        if (dy > 0) {
+            polygon.points.emplace_back(to.x(), MAX_COORD_T);
+            polygon.points.emplace_back(-MAX_COORD_T, MAX_COORD_T);
+            polygon.points.emplace_back(-MAX_COORD_T, -MAX_COORD_T);
+            polygon.points.emplace_back(from.x(), -MAX_COORD_T);
+        } else {
+            polygon.points.emplace_back(to.x(), -MAX_COORD_T);
+            polygon.points.emplace_back(MAX_COORD_T, -MAX_COORD_T);
+            polygon.points.emplace_back(MAX_COORD_T, MAX_COORD_T);
+            polygon.points.emplace_back(from.x(), MAX_COORD_T);
+        }
+    }
+
+    if (!polygon.is_counter_clockwise())
+        polygon.reverse();
+    return polygon;
+}
+
+static int no_travel_ensure_contour_point(Polygon &contour, const Point &point)
+{
+    int point_idx = contour.find_point(point, SCALED_EPSILON * 10);
+    if (point_idx >= 0)
+        return point_idx;
+
+    if (contour.size() < 2)
+        return -1;
+
+    const auto [projected, projection_idx] = contour.point_projection(point);
+    if (projection_idx == size_t(-1))
+        return -1;
+
+    // Projected NO_TRAVEL entry/exit points often land in the middle of an edge.
+    // Insert them as contour vertices so the contour walker can route along the edge
+    // instead of falling back to a direct segment through the forbidden area.
+    const double max_projection_error = double(SCALED_EPSILON * 20);
+    if ((projected - point).cast<double>().squaredNorm() > max_projection_error * max_projection_error)
+        return -1;
+
+    const size_t insert_idx = std::min(projection_idx + 1, contour.points.size());
+    contour.points.insert(contour.points.begin() + insert_idx, point);
+    return int(insert_idx);
+}
+
+static Polyline no_travel_contour_path(const Polygon &contour, size_t from_idx, size_t to_idx, bool forward)
+{
+    Polyline out;
+    if (contour.empty())
+        return out;
+
+    const size_t count = contour.size();
+    size_t idx = from_idx;
+    for (size_t guard = 0; guard <= count; ++guard) {
+        no_travel_append_point(out, contour.points[idx]);
+        if (idx == to_idx)
+            break;
+        idx = forward ? (idx + 1) % count : (idx + count - 1) % count;
+    }
+    return out;
+}
+
+static void no_travel_consider_candidate_contour(Polygon contour, const Point &from, const Point &to, Polyline &best)
+{
+    if (contour.size() < 2)
+        return;
+
+    const int from_idx = no_travel_ensure_contour_point(contour, from);
+    const int to_idx   = no_travel_ensure_contour_point(contour, to);
+    if (from_idx < 0 || to_idx < 0)
+        return;
+
+    Polyline forward = no_travel_contour_path(contour, size_t(from_idx), size_t(to_idx), true);
+    Polyline reverse = no_travel_contour_path(contour, size_t(from_idx), size_t(to_idx), false);
+    for (Polyline *path : { &forward, &reverse }) {
+        if (path->size() < 2)
+            continue;
+        path->points.front() = from;
+        path->points.back()  = to;
+        ensure_valid(*path);
+        if (path->size() > 1 && (best.empty() || path->length() < best.length()))
+            best = std::move(*path);
+    }
+}
+
+static void no_travel_consider_candidate(const ExPolygons &candidates, const Point &from, const Point &to, Polyline &best)
+{
+    for (const ExPolygon &candidate : candidates) {
+        no_travel_consider_candidate_contour(candidate.contour, from, to, best);
+        for (const Polygon &hole : candidate.holes)
+            no_travel_consider_candidate_contour(hole, from, to, best);
+    }
+}
+
+static bool no_travel_route_segment(const Point &from, const Point &to, const ExPolygons &no_travel, Polyline &out)
+{
+    out = Polyline(from, to);
+    if (from.coincides_with_epsilon(to))
+        return false;
+
+    const bool from_inside = no_travel_contains(no_travel, from);
+    const bool to_inside   = no_travel_contains(no_travel, to);
+    if (!from_inside && !to_inside && intersection_pl(out, no_travel).empty())
+        return false;
+
+    const Point route_from = from_inside ? no_travel_nearest_boundary_point(no_travel, from) : from;
+    const Point route_to   = to_inside   ? no_travel_nearest_boundary_point(no_travel, to)   : to;
+
+    Polyline best;
+    if (!route_from.coincides_with_epsilon(route_to)) {
+        const Polygon routing_polygon = no_travel_routing_polygon(route_from, route_to);
+        no_travel_consider_candidate(diff_ex(routing_polygon, no_travel), route_from, route_to, best);
+        no_travel_consider_candidate(union_ex(no_travel, ExPolygon(routing_polygon)), route_from, route_to, best);
+    }
+
+    if (best.empty()) {
+        if (!from_inside && !to_inside)
+            return false;
+
+        // When an endpoint is inside NO_TRAVEL, only the entry/exit leg is allowed
+        // to violate the area. Do not accept a fallback route whose middle segment
+        // crosses the forbidden polygons again.
+        const Polyline middle(route_from, route_to);
+        if (!route_from.coincides_with_epsilon(route_to) && !intersection_pl(middle, no_travel).empty())
+            return false;
+    }
+
+    Polyline routed;
+    no_travel_append_point(routed, from);
+    if (!best.empty()) {
+        no_travel_append_polyline(routed, best);
+    } else {
+        no_travel_append_point(routed, route_from);
+        no_travel_append_point(routed, route_to);
+    }
+    no_travel_append_point(routed, to);
+    ensure_valid(routed);
+
+    if (routed.size() < 2)
+        return false;
+
+    out = std::move(routed);
+    return true;
+}
+
+static bool no_travel_route_polyline(Polyline &travel, ExPolygons no_travel)
+{
+    if (travel.size() < 2 || no_travel.empty())
+        return false;
+
+    no_travel = union_ex(no_travel);
+    expolygons_simplify(no_travel, scale_t(1));
+
+    bool changed = false;
+    Polyline routed;
+    no_travel_append_point(routed, travel.front());
+    for (size_t i = 1; i < travel.size(); ++i) {
+        Polyline segment;
+        if (no_travel_route_segment(travel.points[i - 1], travel.points[i], no_travel, segment)) {
+            no_travel_append_polyline(routed, segment);
+            changed = true;
+        } else {
+            no_travel_append_point(routed, travel.points[i]);
+        }
+    }
+
+    ensure_valid(routed);
+    if (changed && routed.size() > 1) {
+        travel = std::move(routed);
+        return true;
+    }
+    return false;
+}
+
 // This method accepts &point in print coordinates.
 // note: currently, role is only used to check against support by needs_retraction
 Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, ExtrusionRole role)
@@ -9897,8 +10256,9 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
     //not used anymore, not reliable
     bool could_be_wipe_disabled       = false;
     // Save state of use_external_mp_once for the case that will be needed to call twice m_avoid_crossing_perimeters.travel_to.
-    const bool used_external_mp_once  = m_avoid_crossing_perimeters.used_external_mp_once();
+    const bool used_external_mp_once  = m_use_external_mp_once_for_travel;
     const bool used_disabled_once  = m_avoid_crossing_perimeters.disabled_once();
+    const bool use_external_mp_for_no_travel = this->uses_external_mp_for_travel();
 
     //can use the avoid crossing algo?
     bool can_avoid_cross_peri = this->last_pos_defined() && m_config.avoid_crossing_perimeters
@@ -9928,7 +10288,7 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
         needs_retraction = needs_retraction && this->can_cross_perimeter(travel, true);
 
     // Re-allow avoid_crossing_perimeters for the next travel moves
-    m_avoid_crossing_perimeters.reset_once_modifiers();
+    this->reset_avoid_crossing_once_modifiers();
 
     // generate G-code for the travel move
     if (needs_retraction) {
@@ -9989,7 +10349,7 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
 
                  // If in the previous call of m_avoid_crossing_perimeters.travel_to was use_external_mp_once set to true restore this value for next call.
                 if (used_external_mp_once)
-                    m_avoid_crossing_perimeters.use_external_mp_once();
+                    this->use_external_mp_once_for_travel();
                 if (used_disabled_once)
                     m_avoid_crossing_perimeters.disable_once();
                 
@@ -9999,7 +10359,7 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
                 updated_first_pos = true;
                 // If state of use_external_mp_once was changed reset it to right value.
                 if (used_external_mp_once)
-                    m_avoid_crossing_perimeters.reset_once_modifiers();
+                    this->reset_avoid_crossing_once_modifiers();
             }
         }
         if (this->last_pos_defined() && !updated_first_pos) {
@@ -10244,6 +10604,34 @@ Polyline GCodeGenerator::travel_to(std::string &gcode, const Point &point, Extru
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // NO_TRAVEL is a same-layer XY constraint; keep it independent from avoid_crossing_perimeters and Z collision lifts.
+    if (m_layer != nullptr) {
+        ExPolygons no_travel = use_external_mp_for_no_travel ?
+            this->no_travel_expolygons_for_external_layer_slab(*m_layer) :
+            this->no_travel_expolygons_for_layer_slab(*m_layer);
+        if (!no_travel.empty()) {
+            gcode+="; check no_travel\n";
+            Polyline candidate = travel;
+            if (candidate.size() <= 1 && !this->last_pos_defined()) {
+                const Vec3d writer_pos    = m_writer.get_position();
+                const Point writer_start  = this->gcode_to_point(Vec2d(writer_pos.x(), writer_pos.y()));
+                if (!writer_start.coincides_with_epsilon(point))
+                    candidate = Polyline(writer_start, point);
+            }
+
+            const Point scaled_origin = use_external_mp_for_no_travel ?
+                Point::new_scale(m_origin(0), m_origin(1)) : Point(0, 0);
+            if (use_external_mp_for_no_travel)
+                candidate.translate(scaled_origin);
+            if (no_travel_route_polyline(candidate, std::move(no_travel))) {
+                if (use_external_mp_for_no_travel)
+                    candidate.translate(-scaled_origin);
+                travel = std::move(candidate);
+                gcode+="; use no_travel\n";
             }
         }
     }
@@ -10602,7 +10990,7 @@ std::string GCodeGenerator::travel_to(
         m_wipe.reset_path();
     }
 
-    this->m_avoid_crossing_perimeters.reset_once_modifiers();
+    this->reset_avoid_crossing_once_modifiers();
 
     const unsigned extruder_id = this->m_writer.extruder()->id();
     const double retract_length = this->m_config.retract_length.get_at(extruder_id);

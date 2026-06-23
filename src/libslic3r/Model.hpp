@@ -341,6 +341,7 @@ enum class ModelVolumeType : int {
     SEAM_POSITION_INSIDE,
     BRIM_PATCH,
     BRIM_NEGATIVE,
+    NO_TRAVEL,
 };
 
 // A printable object, possibly having multiple print volumes (each with its own set of parameters and materials),
@@ -866,6 +867,7 @@ public:
     bool                is_brim_patch()         const { return m_type == ModelVolumeType::BRIM_PATCH; }
     bool                is_brim_negative()      const { return m_type == ModelVolumeType::BRIM_NEGATIVE; }
     bool                is_brim()               const { return m_type == ModelVolumeType::BRIM_PATCH || m_type == ModelVolumeType::BRIM_NEGATIVE; }
+    bool                is_no_travel()          const { return m_type == ModelVolumeType::NO_TRAVEL; }
     bool                is_text()               const { return text_configuration.has_value(); }
     bool                is_svg() const { return emboss_shape.has_value()  && !text_configuration.has_value(); }
     bool                is_the_only_one_part() const; // behave like an object

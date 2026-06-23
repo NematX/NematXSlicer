@@ -178,7 +178,7 @@ wxBitmapBundle* SettingsFactory::get_category_bitmap(const Slic3r::OptionCategor
 //-------------------------------------
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
-static const constexpr std::array<std::pair<const char *, const char *>, 11> ADD_VOLUME_MENU_ITEMS = {{
+static const constexpr std::array<std::pair<const char *, const char *>, 12> ADD_VOLUME_MENU_ITEMS = {{
     //       menu_item Name              menu_item bitmap name
     {L("Add part"),              "add_part" },           // ~ModelVolumeType::MODEL_PART
     {L("Add negative volume"),   "add_negative" },       // ~ModelVolumeType::NEGATIVE_VOLUME
@@ -191,6 +191,7 @@ static const constexpr std::array<std::pair<const char *, const char *>, 11> ADD
     {L("Enforce seam position"),     "add_seam"},            // ~ModelVolumeType::SEAM_POSITION_INSIDE
     {L("Add brim patch"),        "add_brim_patch"},      // ~ModelVolumeType::BRIM_PATCH
     {L("Add brim negative"),     "add_brim_negative"},   // ~ModelVolumeType::BRIM_NEGATIVE
+    {L("Add no-travel modifier"), "add_modifier"},       // ~ModelVolumeType::NO_TRAVEL
 }};
 
 // Note: id accords to type of the sub-object (adding volume), so sequence of the menu items is important
@@ -683,7 +684,8 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
     wxString combined_support_str = _L("Add support blocker/enforcer");
     wxString combined_brim_str = _L("Add Brim patch/blocker");
     wxString combined_seam_str  =_L("Add seam position");
-    for (const wxString &item_name : {combined_support_str, combined_brim_str, combined_seam_str}) {
+    wxString combined_no_travel_str = _L("Add no-travel area");
+    for (const wxString &item_name : {combined_support_str, combined_brim_str, combined_seam_str, combined_no_travel_str}) {
         int item_id = menu->FindItem(item_name);
         if (item_id != wxNOT_FOUND)
             menu->Destroy(item_id);
@@ -713,6 +715,12 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
             [this](wxCommandEvent&) { obj_list()->load_generic_subobject(L("Square"), ModelVolumeType::BRIM_NEGATIVE); },
             ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::BRIM_NEGATIVE)].second, nullptr,
             [this]() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
+        if (menu_type != mtObjectSLA) {
+            append_menu_item(menu, wxID_ANY, _(ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::NO_TRAVEL)].first), "",
+                [this](wxCommandEvent&) { obj_list()->load_generic_subobject(L("Box"), ModelVolumeType::NO_TRAVEL); },
+                ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::NO_TRAVEL)].second, nullptr,
+                [this]() { return obj_list()->is_instance_or_object_selected(); }, m_parent);
+        }
 
         return;
     }
@@ -796,6 +804,12 @@ void MenuFactory::append_menu_items_add_volume(MenuType menu_type)
         append_submenu_add_generic(sub_menu_both, sub_menu_blocker, ModelVolumeType::BRIM_NEGATIVE);
         append_submenu(sub_menu_both, sub_menu_blocker, wxID_ANY, _L("Other blockers "), "", "", selected_func, m_parent);
         append_submenu(menu, sub_menu_both, wxID_ANY, combined_brim_str, "", "add_brim", selected_func, m_parent);
+    }
+    if (menu_type != mtObjectSLA) {
+        auto& item_no_travel = ADD_VOLUME_MENU_ITEMS[int(ModelVolumeType::NO_TRAVEL)];
+        wxMenu* sub_menu_no_travel = new wxMenu;
+        append_submenu_add_generic(menu, sub_menu_no_travel, ModelVolumeType::NO_TRAVEL);
+        append_submenu(menu, sub_menu_no_travel, wxID_ANY, combined_no_travel_str, "", item_no_travel.second, selected_func, m_parent);
     }
 }
 
