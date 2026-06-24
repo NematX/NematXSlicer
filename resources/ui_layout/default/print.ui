@@ -688,7 +688,7 @@ group:Infill
 	end_line
     infill_description:tag$Simple
     #pattern top: monotonic monotonicfilled concentric concentricfilled
-	setting:tags$Simple:script:depends$top_fill_pattern:label_width$20:label$Top infill pattern:enum$monotonic$Monotonic$monotonicgapfill$Monotonic(filled)$concentric$Concentric$concentricgapfill$Concentric (filled)$other$Other:s_simple_top_fill_pattern
+	setting:tags$Simple:script:depends$top_fill_pattern$infill_filled_top:label_width$20:label$Top infill pattern:enum$monotonic$Monotonic$monotonicgapfill$Monotonic(filled)$concentric$Concentric$concentricgapfill$Concentric (filled)$other$Other:s_simple_top_fill_pattern
     infill_top_description:tag$Simple 
     setting:tags$Simple:script:depends$fill_angle_cross$fill_angle_template$fill_angle_increment:enum$unidir$Unidirectional$cross$Cross-Ply$manydir$Quasi-Isotropic$other$Other:label$Infill direction:s_fill_angle
 group:Advanced

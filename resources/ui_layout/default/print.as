@@ -376,23 +376,23 @@ void s_noperi_set(string &out set_val, int idx)
 // s_simple_fill_pattern
 int s_simple_fill_pattern_get(string &out get_val)
 {
-	string seam_pos;
-	get_string("fill_pattern", seam_pos);
-    if (seam_pos == "rectilinear")
+	string fill_value;
+	get_string("fill_pattern", fill_value);
+    if (fill_value == "rectilinear")
         return 0;
-    if (seam_pos == "grid")
+    if (fill_value == "grid")
         return 1;
-    if (seam_pos == "triangles")
+    if (fill_value == "triangles")
         return 2;
-    if (seam_pos == "stars")
+    if (fill_value == "stars")
         return 3;
-    if (seam_pos == "cubic")
+    if (fill_value == "cubic")
         return 4;
-    if (seam_pos == "gyroid")
+    if (fill_value == "gyroid")
         return 5;
-    if (seam_pos == "honeycomb")
+    if (fill_value == "honeycomb")
         return 6;
-    if (seam_pos == "lightning")
+    if (fill_value == "lightning")
         return 7;
 	return 8;
 }
@@ -409,23 +409,25 @@ void s_simple_fill_pattern_set(string &in set_val, int idx)
 // s_simple_top_fill_pattern
 int s_simple_top_fill_pattern_get(string &out get_val)
 {
-	string seam_pos;
-	get_string("top_fill_pattern", seam_pos);
-    if (seam_pos == "monotonic")
-        return 0;
-    if (seam_pos == "monotonicgapfill")
-        return 1;
-    if (seam_pos == "concentric")
-        return 2;
-    if (seam_pos == "concentricgapfill")
-        return 3;
+	string fill_value;
+	get_string("top_fill_pattern", fill_value);
+	bool is_filled = get_bool("infill_filled_top");
+    if (fill_value == "monotonic")
+        return is_filled ? 1 : 0;
+    if (fill_value == "concentric")
+        return is_filled ? 3 : 2;
 	return 4;
 }
 
 void s_simple_top_fill_pattern_set(string &in set_val, int idx)
 {
     if (set_val != "other") {
-        set_string("top_fill_pattern", set_val);
+		if (idx <= 1){
+			set_string("top_fill_pattern", "monotonic");
+		} else{
+			set_string("top_fill_pattern", "concentric");
+		}
+		set_bool("infill_filled_top", ( (idx%2) == 1));
     } else {
         back_initial_value("fill_pattern");
     }
