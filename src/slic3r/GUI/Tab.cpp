@@ -1060,6 +1060,19 @@ void Tab::update_changed_tree_ui()
             dirty_state.hidden_modified |= is_modified;
         }
     };
+    // Scripted options do not have their own status entry in m_options_list.
+    // Their depends_on entries may be scalar keys or indexed vector-like keys,
+    // so resolve both forms before reading the real dirty flags.
+    auto for_each_status_key = [this](const std::string &opt_key, const auto &fn) {
+        const OptionKeyIdx scalar_key = OptionKeyIdx::scalar(opt_key);
+        if (m_options_list.find(scalar_key) != m_options_list.end()) {
+            fn(scalar_key);
+            return;
+        }
+        for (const auto &opt : m_options_list)
+            if (opt.first.key == opt_key)
+                fn(opt.first);
+    };
 
     while (cur_item) {
         auto title = m_treectrl->GetItemText(cur_item);
@@ -1117,6 +1130,19 @@ void Tab::update_changed_tree_ui()
             {
                 for (const OptionKeyIdx &opt_key_idx : group->opt_set()) {
                     add_option_state(dirty_state, opt_key_idx, group->option_is_visible(opt_key_idx, m_mode));
+                }
+                // m_opt_set intentionally excludes scripted options because they are not
+                // config-backed fields. If a visible script depends on dirty real options,
+                // show that dirty state on this page.
+                for (const auto &opt_def : group->option_defs()) {
+                    const Option &option = opt_def.second;
+                    if (!option.opt.is_script || !group->option_is_visible(opt_def.first, m_mode))
+                        continue;
+
+                    for (const std::string &dep_key : option.opt.depends_on)
+                        for_each_status_key(dep_key, [&](const OptionKeyIdx &dep_key_idx) {
+                            add_option_state(dirty_state, dep_key_idx, true);
+                        });
                 }
             }
 
@@ -1188,11 +1214,33 @@ void Tab::on_roll_back_value(const bool to_sys /*= true*/, RollbackScope scope /
         assert(it_opt != m_options_list.end());
         return it_opt != m_options_list.end() && (it_opt->second & os) == 0;
     };
+    // Same dependency lookup as in update_changed_tree_ui(): scripted widgets
+    // expose dirty state through their real config dependencies.
+    auto for_each_status_key = [this](const std::string &opt_key, const auto &fn) {
+        const OptionKeyIdx scalar_key = OptionKeyIdx::scalar(opt_key);
+        if (m_options_list.find(scalar_key) != m_options_list.end()) {
+            fn(scalar_key);
+            return;
+        }
+        for (const auto &opt : m_options_list)
+            if (opt.first.key == opt_key)
+                fn(opt.first);
+    };
+    auto dependency_needs_rollback = [&for_each_status_key, &needs_rollback](const std::string &opt_key) {
+        bool needs = false;
+        for_each_status_key(opt_key, [&needs, &needs_rollback](const OptionKeyIdx &opt_key_idx) {
+            needs |= needs_rollback(opt_key_idx);
+        });
+        return needs;
+    };
     auto rollback_option = [to_sys](const ConfigOptionsGroupShp &group, const OptionKeyIdx &opt_key_idx) {
         to_sys ? group->back_to_sys_value(opt_key_idx) : group->back_to_initial_value(opt_key_idx);
     };
 
     m_postpone_update_ui = true;
+    // Once a scripted option has reset its dependencies, skip the regular
+    // config-backed rollback pass for those same keys to avoid duplicate resets.
+    std::set<OptionKeyIdx> scripted_reset_deps;
     // TODO: / FIXME: remove group->title == "xx" for checks
     for (auto group : m_active_page->m_optgroups) {
         const OptionKeyIdx extruders_count = OptionKeyIdx::scalar("extruders_count");
@@ -1249,7 +1297,30 @@ void Tab::on_roll_back_value(const bool to_sys /*= true*/, RollbackScope scope /
                 }
             }
         }
+        for (const auto &opt_def : group->option_defs()) {
+            const OptionKeyIdx &script_key = opt_def.first;
+            const Option &option = opt_def.second;
+            if (!option.opt.is_script || !option_in_scope(group, script_key))
+                continue;
+
+            // Reset the script key itself, not each dependency directly: the script
+            // may have custom reset logic before falling back to depends_on.
+            bool rollback_script = false;
+            for (const std::string &dep_key : option.opt.depends_on)
+                rollback_script |= dependency_needs_rollback(dep_key);
+
+            if (!rollback_script)
+                continue;
+
+            rollback_option(group, script_key);
+            for (const std::string &dep_key : option.opt.depends_on)
+                for_each_status_key(dep_key, [&scripted_reset_deps](const OptionKeyIdx &dep_key_idx) {
+                    scripted_reset_deps.insert(dep_key_idx);
+                });
+        }
         for (const auto &opt_key_idx : group->opt_set()) {
+            if (scripted_reset_deps.find(opt_key_idx) != scripted_reset_deps.end())
+                continue;
             if (option_in_scope(group, opt_key_idx) && needs_rollback(opt_key_idx))
                 rollback_option(group, opt_key_idx);
         }
