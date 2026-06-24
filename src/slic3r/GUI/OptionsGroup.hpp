@@ -236,7 +236,9 @@ public:
     // we have to set same max contrtol width to all of them
 	void				set_max_win_width(int max_win_width);
 	void				set_use_custom_ctrl(bool use_custom_ctrl) { m_use_custom_ctrl = use_custom_ctrl; }
-	//const std::map<OptionKeyIdx, Option>& get_options() { return m_options; }
+    // UI option definitions appended to this group. Unlike ConfigOptionsGroup::opt_set(),
+    // this also contains scripted options that are not backed directly by m_config.
+    const std::map<OptionKeyIdx, Option>& option_defs() const { return m_options; }
 
 	bool				is_activated() { return sizer != nullptr; }
 	bool				use_custom_ctrl() { return m_use_custom_ctrl; }
