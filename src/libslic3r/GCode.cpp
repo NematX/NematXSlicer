@@ -4654,7 +4654,9 @@ LayerResult GCodeGenerator::process_layer(
         }
     }
 
-    if (used_extruders_set.empty()) {
+    const bool empty_wipe_tower_layer = layers.front().islands.size() == 1 && *layers.front().islands.begin() == nullptr;
+    // A wipe-tower-only layer has no object/support extrusions, so do not fallback to layer_tools as object extruders.
+    if (used_extruders_set.empty() && !empty_wipe_tower_layer) {
         // If empty → copy all
         used_extruders = layer_tools.extruders;
     } else {
@@ -4685,6 +4687,14 @@ LayerResult GCodeGenerator::process_layer(
         last_extruder = used_extruders.back();
     }
 
+    const std::vector<uint16_t> object_extruders = used_extruders;
+    const std::unordered_set<uint16_t> object_extruders_set(object_extruders.begin(), object_extruders.end());
+    std::vector<uint16_t> tower_extruders = object_extruders;
+    auto append_tower_extruder = [&tower_extruders](uint16_t extruder_id) {
+        if (std::find(tower_extruders.begin(), tower_extruders.end(), extruder_id) == tower_extruders.end())
+            tower_extruders.push_back(extruder_id);
+    };
+
     bool ignore_wipetower = true;
     if (print.wipe_tower2()->has_toolchange()) {
         std::vector<const Layer *> current_layers;
@@ -4711,30 +4721,39 @@ LayerResult GCodeGenerator::process_layer(
             }
             assert(m_wipe_tower_current_layer);
             assert(!layer_tools.extruders.empty());
-            if (layers.front().islands.size() == 1 && *layers.front().islands.begin() == nullptr) {
-                // empty wieptower layer, you just need to print it and return
-                assert(layers.front().extruders_order.size() == 1 && layers.front().extruders_order.front() == uint16_t(-1));
-                assert(m_writer.tool());
-                last_extruder = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
-                used_extruders = {last_extruder};
-                m_wipe_tower_current_layer->init(current_layers, used_extruders, std::vector<uint16_t>{});
-            } else if (m_writer.tool() && !layer_tools.extruders.empty() &&
-                m_writer.tool()->id() != layer_tools.extruders.front()) {
-                // last extruder don't print anything here, plan to change to another one right away.
-                // note: the extruders may not be used in this layer, and so not present in layer_tools
-                std::vector<uint16_t> extruder_with_empty_first;
-                extruder_with_empty_first.push_back(m_writer.tool()->id());
-                extruder_with_empty_first.insert(extruder_with_empty_first.end(), layer_tools.extruders.begin(),
-                                                 layer_tools.extruders.end());
-                auto it = std::find(extruder_with_empty_first.begin() + 1, extruder_with_empty_first.end(),
-                                    m_writer.tool()->id());
-                if (it != extruder_with_empty_first.end()) {
-                    extruder_with_empty_first.erase(it);
-                }
-                m_wipe_tower_current_layer->init(current_layers, extruder_with_empty_first, std::vector<uint16_t>{});
-            } else {
-                m_wipe_tower_current_layer->init(current_layers, layer_tools.extruders, std::vector<uint16_t>{});
+            if (print.wipe_tower2()->separate_filament()) {
+                // In separate-filament mode, some materials must keep their tower section alive even
+                // on layers where they do not print the object/support. They are visited only by the
+                // wipe tower path below; object/skirt/brim emission still uses object_extruders_set.
+                for (uint16_t extruder_id : print.wipe_tower2()->active_separate_filament_tools_for_layer(layer.scaled_print_z()))
+                    append_tower_extruder(extruder_id);
             }
+
+            if (tower_extruders.empty()) {
+                assert(m_writer.tool());
+                tower_extruders.push_back(uint16_t(m_writer.tool()->id()));
+            }
+
+            auto it_tower_previous = std::find(tower_extruders.begin(), tower_extruders.end(), previous_extruder_id);
+            if (it_tower_previous != tower_extruders.end())
+                std::rotate(tower_extruders.begin(), it_tower_previous, it_tower_previous + 1);
+            last_extruder = tower_extruders.back();
+
+            std::vector<uint16_t> wipe_tower_init_extruders = tower_extruders;
+            if (m_writer.tool() && !wipe_tower_init_extruders.empty() &&
+                m_writer.tool()->id() != wipe_tower_init_extruders.front()) {
+                wipe_tower_init_extruders.insert(wipe_tower_init_extruders.begin(), m_writer.tool()->id());
+                auto it_duplicate = std::find(wipe_tower_init_extruders.begin() + 1, wipe_tower_init_extruders.end(),
+                                              m_writer.tool()->id());
+                if (it_duplicate != wipe_tower_init_extruders.end())
+                    wipe_tower_init_extruders.erase(it_duplicate);
+            }
+
+            if (empty_wipe_tower_layer) {
+                // Empty wipe tower layer: print/maintain tower sections only, no object extrusion follows.
+                assert(layers.front().extruders_order.size() == 1 && layers.front().extruders_order.front() == uint16_t(-1));
+            }
+            m_wipe_tower_current_layer->init(current_layers, wipe_tower_init_extruders, std::vector<uint16_t>{});
         }
         //if (finish_wipe_tower_until > 0) {
         //    // finish wipetower at this layer
@@ -4747,11 +4766,11 @@ LayerResult GCodeGenerator::process_layer(
 
 
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
-    for (const uint16_t extruder_id : used_extruders)
+    for (const uint16_t extruder_id : tower_extruders)
     {
         // set extruder
         uint16_t old_extruder_id = uint16_t(m_writer.tool() != nullptr ? m_writer.tool()->id() : 0);
-        if (!ignore_wipetower && m_wipe_tower_current_layer && (old_extruder_id != extruder_id || used_extruders.size() < 2)) {
+        if (!ignore_wipetower && m_wipe_tower_current_layer && (old_extruder_id != extruder_id || tower_extruders.size() < 2)) {
             assert(m_writer.tool());
             assert(m_writer.get_tool(extruder_id));
             ExtrusionEntityCollection wt_extrusions = m_wipe_tower_current_layer->tool_change(&layer, old_extruder_id, extruder_id, m_writer.get_tool(extruder_id)->retracted());
@@ -4806,6 +4825,8 @@ LayerResult GCodeGenerator::process_layer(
         }
 
         assert(extruder_id == m_writer.tool()->id());
+        if (object_extruders_set.find(extruder_id) == object_extruders_set.end())
+            continue;
 
         if (has_custom_gcode_to_emit && extruder_id_for_custom_gcode == int(extruder_id)) {
             assert(m_writer.tool()->id() == extruder_id_for_custom_gcode);

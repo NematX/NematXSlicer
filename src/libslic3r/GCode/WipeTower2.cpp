@@ -65,6 +65,26 @@ Vec2d WipeTower2::position() const {
 coord_t WipeTower2::extra_spacing() const {
     return m_object_config ? scale_t(m_object_config->wipe_tower_extra_spacing.value) : 0;
 }
+
+// Opt-in mode for incompatible materials: split the wipe tower into adjacent Y sections,
+// so each filament only purges, wipes, outlines and fills its own material area.
+bool WipeTower2::separate_filament() const {
+    return m_object_config && m_object_config->wipe_tower_separate_filament.value;
+}
+
+std::vector<uint16_t> WipeTower2::active_separate_filament_tools_for_layer(coord_t print_z) const {
+    std::vector<uint16_t> tools;
+    if (!this->separate_filament() || m_printz_to_WTLayer_data.find(print_z) == m_printz_to_WTLayer_data.end())
+        return tools;
+
+    // A separate-filament section is a continuous column from the first wipe tower layer
+    // up to the last layer that may need this material for purge, wipe or tower support.
+    for (const auto &[tool_id, section] : m_filament_section_plan)
+        if (section.length > 0 && print_z <= section.last_section_z)
+            tools.push_back(tool_id);
+    return tools;
+}
+
 double WipeTower2::rotation_angle() const {
     return m_object_config ? m_object_config->wipe_tower_rotation_angle.value : 0;
 }
@@ -121,6 +141,8 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
     coord_t max_line_width = 0;
     std::set<uint16_t> init_extruders;
     const ConfigOptionFloatOrPercent &line_width_config = m_object_config->wipe_tower_extrusion_width;
+    m_filament_section_plan.clear();
+    m_separate_filament_total_depth = 0;
 
     // create a list of all layers ordered by Z
     std::vector<const Layer *> ordered_layers;
@@ -305,54 +327,117 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
     assert(m_printz_to_WTLayer_data.size() <= ordering.layer_tools().size());
 
     // compute estimated tower length for each layer
-    uint16_t previous_tool_id = uint16_t(-1);
-    for (auto &entry : m_printz_to_WTLayer_data) {
-        WipeTowerLayerData &wp_layer = *entry.second;
-        const size_t nb_toolchange = 0;
-        coord_t total_wipe_tower_length = 0;
-        for (auto &entry : wp_layer.extruders_data) {
-            ZLayerData &extruder_data = entry.second;
-            extruder_data.estimated_wipe_tower_length = 0;
-            for (uint16_t tool_id : extruder_data.extruders) {
-                // how many lines we need to reserve?
-                if (tool_id != previous_tool_id && previous_tool_id < m_filament_change_data.size()) {
-                    // unloading
-                    const FilamentToolchangeInfo &fil_info = m_filament_change_data[previous_tool_id];
-                    assert(fil_info.tool_id == previous_tool_id);
-                    // also purge the nozzle before retracting.
-                    distf_t filament_dist = scale_d(
-                        fil_info.purge_volume /
-                        (unscaled(fil_info.purge_width) * unscaled(wp_layer.extrusion_height)));
-                    // count the lines
-                    int nb_lines = 1 + filament_dist / (width() - EPSILON);
-                    extruder_data.estimated_wipe_tower_length += nb_lines * fil_info.purge_spacing;
-                }
-                if (tool_id != previous_tool_id) {
-                    // loading
-                    const FilamentToolchangeInfo &fil_info = m_filament_change_data[tool_id];
-                    assert(fil_info.tool_id == tool_id);
-                    distf_t filament_dist = scale_d(
-                        fil_info.wipe_volume_min /
-                        (unscaled(fil_info.wipe_width) * unscaled(wp_layer.extrusion_height)));
-                    // count the lines
-                    int nb_lines = 1 + filament_dist / (width() - EPSILON);
-                    extruder_data.estimated_wipe_tower_length += nb_lines * fil_info.wipe_spacing;
-                }
-                previous_tool_id = tool_id;
-            }
-            total_wipe_tower_length += extruder_data.estimated_wipe_tower_length;
-        }
-        wp_layer.estimated_wipe_tower_length = total_wipe_tower_length;
-    }
+    const bool separate_filament_sections = this->separate_filament();
+    // Keep the legacy full-width line estimate reusable: one line consumes one Y spacing,
+    // and zero-volume operations still need one printable line when a real toolchange exists.
+    auto reserve_wipe_tower_length = [this](double volume, coord_t line_width, coord_t layer_height, coord_t spacing) -> coord_t {
+        distf_t filament_dist = scale_d(volume / (unscaled(line_width) * unscaled(layer_height)));
+        int nb_lines = 1 + filament_dist / (width() - EPSILON);
+        return nb_lines * spacing;
+    };
+    if (separate_filament_sections) {
+        coord_t worst_layer_height = 0;
+        std::map<uint16_t, coord_t> last_section_z_by_tool;
 
-    // ensure the estimated_wipe_tower_length doesn't shrink
-    auto it_previous = m_printz_to_WTLayer_data.rbegin();
-    auto it_current = it_previous;
-    for (it_current++; it_current != m_printz_to_WTLayer_data.rend(); it_previous = it_current, it_current++) {
-        WipeTowerLayerData &wp_layer_prev = *it_previous->second;
-        WipeTowerLayerData &wp_layer_curr = *it_current->second;
-        wp_layer_curr.estimated_wipe_tower_length = std::max(wp_layer_curr.estimated_wipe_tower_length,
-                                                             wp_layer_prev.estimated_wipe_tower_length);
+        for (const auto &wp_layer_ptr : m_WTLayer_data) {
+            const WipeTowerLayerData &wp_layer = *wp_layer_ptr;
+            if (wp_layer.extrusion_height > 0)
+                worst_layer_height = worst_layer_height == 0 ?
+                    wp_layer.extrusion_height :
+                    std::min(worst_layer_height, wp_layer.extrusion_height);
+
+            for (const auto &[real_z, extruder_data] : wp_layer.extruders_data)
+                for (uint16_t tool_id : extruder_data.extruders)
+                    if (tool_id < m_filament_change_data.size())
+                        last_section_z_by_tool[tool_id] = std::max(last_section_z_by_tool[tool_id], real_z);
+        }
+
+        if (worst_layer_height <= 0)
+            worst_layer_height = scale_t(0.1);
+
+        // Fixed material sections are packed once, by tool id. Their positions do not depend
+        // on which toolchanges happen on a specific layer, so incompatible materials never mix.
+        for (const auto &[tool_id, last_section_z] : last_section_z_by_tool) {
+            const FilamentToolchangeInfo &fil_info = m_filament_change_data[tool_id];
+            const coord_t purge_length = reserve_wipe_tower_length(fil_info.purge_volume, fil_info.purge_width,
+                                                                   worst_layer_height, fil_info.purge_spacing);
+            const coord_t wipe_length = reserve_wipe_tower_length(fil_info.wipe_volume_min, fil_info.wipe_width,
+                                                                  worst_layer_height, fil_info.wipe_spacing);
+            const coord_t min_printable_length = std::max(
+                reserve_wipe_tower_length(0., fil_info.purge_width, worst_layer_height, fil_info.purge_spacing),
+                reserve_wipe_tower_length(0., fil_info.wipe_width, worst_layer_height, fil_info.wipe_spacing));
+            const coord_t perimeter_y_margin = std::max(fil_info.purge_spacing, fil_info.wipe_spacing);
+
+            FilamentSectionPlan &section = m_filament_section_plan[tool_id];
+            section.tool_id = tool_id;
+            section.y_start = m_separate_filament_total_depth;
+            // Add one protected lane at each Y side: section perimeters get their own rows,
+            // while purge/wipe lines use the remaining middle of the material section.
+            section.length = std::max({ purge_length, wipe_length, min_printable_length }) + 2 * perimeter_y_margin;
+            section.last_section_z = last_section_z;
+            m_separate_filament_total_depth += section.length;
+        }
+
+        for (auto &wp_layer_ptr : m_WTLayer_data) {
+            WipeTowerLayerData &wp_layer = *wp_layer_ptr;
+            wp_layer.estimated_wipe_tower_offset_by_tool.clear();
+            wp_layer.estimated_wipe_tower_length_by_tool.clear();
+            wp_layer.estimated_wipe_tower_length = m_separate_filament_total_depth;
+            for (auto &[real_z, extruder_data] : wp_layer.extruders_data)
+                extruder_data.estimated_wipe_tower_length = 0;
+
+            // A section remains present on every wipe tower layer until that filament's last use.
+            for (const auto &[tool_id, section] : m_filament_section_plan) {
+                if (section.length <= 0 || wp_layer.extrusion_z > section.last_section_z)
+                    continue;
+                wp_layer.estimated_wipe_tower_offset_by_tool[tool_id] = section.y_start;
+                wp_layer.estimated_wipe_tower_length_by_tool[tool_id] = section.length;
+            }
+        }
+    } else {
+        uint16_t previous_tool_id = uint16_t(-1);
+        for (auto &entry : m_printz_to_WTLayer_data) {
+            WipeTowerLayerData &wp_layer = *entry.second;
+            coord_t total_wipe_tower_length = 0;
+            wp_layer.estimated_wipe_tower_length_by_tool.clear();
+            wp_layer.estimated_wipe_tower_offset_by_tool.clear();
+            for (auto &entry : wp_layer.extruders_data) {
+                ZLayerData &extruder_data = entry.second;
+                extruder_data.estimated_wipe_tower_length = 0;
+                for (uint16_t tool_id : extruder_data.extruders) {
+                    // how many lines we need to reserve?
+                    if (tool_id != previous_tool_id && previous_tool_id < m_filament_change_data.size()) {
+                        // unloading
+                        const FilamentToolchangeInfo &fil_info = m_filament_change_data[previous_tool_id];
+                        assert(fil_info.tool_id == previous_tool_id);
+                        extruder_data.estimated_wipe_tower_length += reserve_wipe_tower_length(
+                            fil_info.purge_volume, fil_info.purge_width, wp_layer.extrusion_height,
+                            fil_info.purge_spacing);
+                    }
+                    if (tool_id != previous_tool_id) {
+                        // loading
+                        const FilamentToolchangeInfo &fil_info = m_filament_change_data[tool_id];
+                        assert(fil_info.tool_id == tool_id);
+                        extruder_data.estimated_wipe_tower_length += reserve_wipe_tower_length(
+                            fil_info.wipe_volume_min, fil_info.wipe_width, wp_layer.extrusion_height,
+                            fil_info.wipe_spacing);
+                    }
+                    previous_tool_id = tool_id;
+                }
+                total_wipe_tower_length += extruder_data.estimated_wipe_tower_length;
+            }
+            wp_layer.estimated_wipe_tower_length = total_wipe_tower_length;
+        }
+
+        // ensure the estimated_wipe_tower_length doesn't shrink
+        auto it_previous = m_printz_to_WTLayer_data.rbegin();
+        auto it_current = it_previous;
+        for (it_current++; it_current != m_printz_to_WTLayer_data.rend(); it_previous = it_current, it_current++) {
+            WipeTowerLayerData &wp_layer_prev = *it_previous->second;
+            WipeTowerLayerData &wp_layer_curr = *it_current->second;
+            wp_layer_curr.estimated_wipe_tower_length = std::max(wp_layer_curr.estimated_wipe_tower_length,
+                                                                 wp_layer_prev.estimated_wipe_tower_length);
+        }
     }
 }
 
@@ -635,13 +720,32 @@ ExtrusionEntityCollection WipeTower2::prime(
     return tool_extrusions;
 }
 
-coord_t WipeTowerLayer::compute_y(coord_t raw_y) {
+coord_t WipeTowerLayer::compute_y(coord_t raw_y) const {
     coord_t delta = (m_wipetower_max_y_pos - m_max_y_pos) / 2;
+    if (m_wipe_tower_info->separate_filament())
+        return delta + raw_y;
     if ((int(unscaled(this->extrusion_z)) % 2) == 0) {
         return delta + raw_y;
     } else {
         return delta + m_max_y_pos - raw_y;
     }
+}
+
+// Convert a Y position expressed inside one filament section to the actual tower Y coordinate.
+coord_t WipeTowerLayer::section_y(uint16_t tool_id, coord_t raw_y) const {
+    auto it = filament_sections.find(tool_id);
+    if (it == filament_sections.end())
+        return compute_y(raw_y);
+    // raw_y is local to the filament section; convert it back to the layer-wide tower coordinate.
+    return compute_y(it->second.y_start + raw_y);
+}
+
+// Toolchange parking should stay near the active filament section, not the center of the whole tower.
+coord_t WipeTowerLayer::section_center_y(uint16_t tool_id) const {
+    auto it = filament_sections.find(tool_id);
+    if (it == filament_sections.end())
+        return compute_y(m_current_y_pos);
+    return compute_y(it->second.y_start + it->second.length / 2);
 }
 
 void WipeTowerLayer::init(const std::vector<const Layer *> layers,
@@ -700,6 +804,123 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                                          wipe_tower_pos.y() +
                                              std::min(compute_y(0), compute_y(data.estimated_wipe_tower_length)));
 
+    const bool separate_filament_sections = m_wipe_tower_info->separate_filament();
+
+    // Build the physical section geometry used by separate-filament mode. Each section has
+    // its own perimeter flow and local Y cursor, while the whole tower keeps one outer brim.
+    if (separate_filament_sections && filament_sections.empty()) {
+        // Material sections are real tower sub-areas: each gets its own perimeter and cursor.
+        for (const auto &[tool_id, y_start] : data.estimated_wipe_tower_offset_by_tool) {
+            auto length_it = data.estimated_wipe_tower_length_by_tool.find(tool_id);
+            if (length_it == data.estimated_wipe_tower_length_by_tool.end() || length_it->second <= 0)
+                continue;
+
+            const WipeTower2::FilamentToolchangeInfo &fil_info = m_wipe_tower_info->m_filament_change_data[tool_id];
+            FilamentSection &section = filament_sections[tool_id];
+            section.tool_id = tool_id;
+            section.y_start = y_start;
+            section.length = length_it->second;
+            section.perimeter_flow = Flow::new_from_width(unscaled(fil_info.wipe_width),
+                                                          m_config->nozzle_diameter.get_at(tool_id),
+                                                          unscaled(extrusion_height), 1.f, false);
+
+            // X keeps the full tower width, like the legacy tower. Only Y needs protected rows
+            // because material sections are adjacent and their perimeters must not overlap.
+            section.perimeter_y_margin = std::min(std::max(fil_info.purge_spacing, fil_info.wipe_spacing),
+                                                  section.length / 4);
+            section.current_y_pos = section.perimeter_y_margin;
+            const coord_t x0 = 0;
+            const coord_t x1 = wipe_tower_width;
+            const coord_t y0 = section.y_start + section.perimeter_y_margin / 2;
+            const coord_t y1 = section.y_start + section.length - section.perimeter_y_margin / 2;
+            if (x1 <= x0 || y1 <= y0)
+                continue;
+
+            Polygon perimeter({ Point(x0, compute_y(y1)), Point(x1, compute_y(y1)),
+                                Point(x1, compute_y(y0)), Point(x0, compute_y(y0)) });
+            perimeter.make_counter_clockwise();
+            section.perimeters.push_back(perimeter.split_at_first_point());
+            append(tower_perimeters, section.perimeters);
+        }
+
+        if (!filament_sections.empty()) {
+            // Reuse the first section flow for shared helpers such as the first-layer brim.
+            perimeter_tool_idx = filament_sections.begin()->first;
+            tower_perimeter_flow = filament_sections.begin()->second.perimeter_flow;
+        }
+
+        if (extrusion_z == extrusion_height && !filament_sections.empty()) {
+            Polygon outer_perimeter({ wipe_tower_left_pos, wipe_tower_right_pos,
+                                      wipe_tower_right_bot_pos, wipe_tower_left_bot_pos });
+            outer_perimeter.make_counter_clockwise();
+
+            PrintRegionConfig brim_region_config = *m_wipe_tower_info->m_region_config;
+            brim_region_config.parent = m_object_config;
+            double nozzle_diameter = m_config->nozzle_diameter.get_at(perimeter_tool_idx);
+            brim_flow = Flow::new_from_config_width(frPerimeter,
+                                                    *Flow::extrusion_width_option("brim", brim_region_config),
+                                                    *Flow::extrusion_spacing_option("brim", brim_region_config),
+                                                    (float) nozzle_diameter, (float) unscaled(extrusion_height),
+                                                    (perimeter_tool_idx < m_config->nozzle_diameter.size()) ?
+                                                        m_object_config->get_computed_value("filament_max_overlap",
+                                                                                            perimeter_tool_idx) :
+                                                        1);
+            const double spacing = brim_flow.spacing();
+            size_t loops_num = (m_object_config->wipe_tower_brim_width.get_abs_value(nozzle_diameter) + spacing / 2) /
+                spacing;
+
+            for (size_t i = 0; i < loops_num; i++) {
+                Polygons polys = offset(outer_perimeter, scale_(spacing));
+                assert(polys.size() == 1);
+                if (polys.empty())
+                    break;
+                outer_perimeter = polys.front();
+                brim.push_back(outer_perimeter.split_at_first_point());
+            }
+            std::reverse(brim.begin(), brim.end());
+        }
+    }
+
+    // Generate the zig-zag purge/wipe polyline into either the legacy global cursor or the
+    // per-tool section cursor. This is the central placement switch for separated sections.
+    auto append_wipe_tower_lines = [&](uint16_t tool_id, coord_t spacing, int nblines, Polyline &lines) {
+        if (separate_filament_sections) {
+            auto section_it = filament_sections.find(tool_id);
+            if (section_it == filament_sections.end())
+                return;
+            FilamentSection &section = section_it->second;
+            // In separate mode the cursor is per filament, so purge and wipe cannot consume another material's area.
+            for (size_t iline = 0; iline < nblines; iline++) {
+                section.current_y_pos += spacing / 2;
+                const coord_t y = section_y(tool_id, section.current_y_pos);
+                if (iline % 2 == 0) {
+                    lines.points.push_back(Point(wipe_tower_left_pos.x(), y));
+                    lines.points.push_back(Point(wipe_tower_right_pos.x(), y));
+                } else {
+                    lines.points.push_back(Point(wipe_tower_right_pos.x(), y));
+                    lines.points.push_back(Point(wipe_tower_left_pos.x(), y));
+                }
+                section.current_y_pos += spacing / 2;
+            }
+        } else {
+            for (size_t iline = 0; iline < nblines; iline++) {
+                m_current_y_pos += spacing / 2;
+                if (iline % 2 == 0) {
+                    lines.points.push_back(
+                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
+                    lines.points.push_back(
+                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
+                } else {
+                    lines.points.push_back(
+                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
+                    lines.points.push_back(
+                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
+                }
+                m_current_y_pos += spacing / 2;
+            }
+        }
+    };
+
     // create toolchanges
     for (size_t i = 1; i < ordered_extruders.size(); i++) {
         std::tuple<coord_t, uint16_t, uint16_t> key(layers.front()->scaled_print_z(), ordered_extruders[i - 1],
@@ -723,46 +944,26 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
             distf_t dist_purge = scale_d(fil_info_prev.purge_volume /
                                          (unscaled(fil_info_prev.purge_width) * unscaled(extrusion_height)));
             int nblines_purge = ((dist_purge - 1) / wipe_tower_width) + 1;
-            for (size_t iline = 0; iline < nblines_purge; iline++) {
-                m_current_y_pos += fil_info_prev.purge_spacing / 2;
-                if (iline % 2 == 0) {
-                    toolchange.purge_lines.points.push_back(
-                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                    toolchange.purge_lines.points.push_back(
-                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                } else {
-                    toolchange.purge_lines.points.push_back(
-                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                    toolchange.purge_lines.points.push_back(
-                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                }
-                m_current_y_pos += fil_info_prev.purge_spacing / 2;
-            }
+            append_wipe_tower_lines(toolchange.from_tool_id, fil_info_prev.purge_spacing, nblines_purge,
+                                    toolchange.purge_lines);
         }
         // wipe
-        if (fil_info_next.wipe_volume_min > 0) {
+        const bool force_minimal_wipe_line = separate_filament_sections &&
+            toolchange.from_tool_id != toolchange.to_tool_id &&
+            filament_sections.find(toolchange.to_tool_id) != filament_sections.end();
+        if (fil_info_next.wipe_volume_min > 0 || force_minimal_wipe_line) {
             toolchange.wipe_flow = Flow::new_from_width(unscaled(fil_info_next.wipe_width),
                                                         m_config->nozzle_diameter.get_at(toolchange.to_tool_id),
                                                         unscaled(extrusion_height), 1.f, false);
             Polyline polyline_wipe;
-            distf_t dist_wipe = scale_d(fil_info_next.wipe_volume_min /
-                                        (unscaled(fil_info_next.wipe_width) * unscaled(extrusion_height)));
-            int nblines_wipe = ((dist_wipe - 1) / wipe_tower_width) + 1;
-            for (size_t iline = 0; iline < nblines_wipe; iline++) {
-                m_current_y_pos += fil_info_next.wipe_spacing / 2;
-                if (iline % 2 == 0) {
-                    toolchange.wipe_lines.points.push_back(
-                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                    toolchange.wipe_lines.points.push_back(
-                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                } else {
-                    toolchange.wipe_lines.points.push_back(
-                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                    toolchange.wipe_lines.points.push_back(
-                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                }
-                m_current_y_pos += fil_info_next.wipe_spacing / 2;
+            int nblines_wipe = 1;
+            if (fil_info_next.wipe_volume_min > 0) {
+                distf_t dist_wipe = scale_d(fil_info_next.wipe_volume_min /
+                                            (unscaled(fil_info_next.wipe_width) * unscaled(extrusion_height)));
+                nblines_wipe = ((dist_wipe - 1) / wipe_tower_width) + 1;
             }
+            append_wipe_tower_lines(toolchange.to_tool_id, fil_info_next.wipe_spacing, nblines_wipe,
+                                    toolchange.wipe_lines);
             if (wipetower_layer_idx % 2 == 1) {
                 toolchange.wipe_lines.reverse();
             }
@@ -772,7 +973,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
     // TODO create purges
 
     // create perimeter (from first extruder encountered)
-    if (tower_perimeters.empty()) {
+    if (!separate_filament_sections && tower_perimeters.empty()) {
         perimeter_tool_idx = ordered_extruders.front();
         const WipeTower2::FilamentToolchangeInfo &fil_info_next =
             m_wipe_tower_info->m_filament_change_data[ordered_extruders.front()];
@@ -909,7 +1110,7 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer,
         need_move_into_wp = true;
     }
 
-    if (old_tool == perimeter_tool_idx) {
+    if (!m_wipe_tower_info->separate_filament() && old_tool == perimeter_tool_idx) {
         print_perimeter(collection, true);
     }
 
@@ -918,8 +1119,13 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer,
         std::tuple<coord_t, uint16_t, uint16_t> key(layer->scaled_print_z(), old_tool, new_tool);
         assert(m_toolchanges.find(key) != m_toolchanges.end());
         if (auto it = m_toolchanges.find(key); it != m_toolchanges.end()) {
-            const Toolchange &toolchange = it->second;
+            Toolchange &toolchange = it->second;
             assert(layer == toolchange.layer);
+            if (m_wipe_tower_info->separate_filament()) {
+                // The outgoing filament is still loaded: finish its own section before the unload path
+                // and avoid the maintenance toolchanges that finish_layer() used to generate.
+                print_and_fill_current_section_before_departure(collection, old_tool);
+            }
             // unload can be made in-place. if a move is made, it's only in the wipetower and so the travel will take
             // care of the z offset
             bool moved_into_wp = toolchange_Unload(collection, toolchange.purge_lines, toolchange.from_tool_id,
@@ -927,7 +1133,10 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer,
             if (m_object_config->wipe_tower_rest_in_middle.value || (need_move_into_wp && !moved_into_wp)) // force move in middle to ooze inside the wp.
             {
                 // move to center before toolchange, just in case it ooze
-                const Point center_pos(m_wipe_tower_info->width() / 2, compute_y(m_current_y_pos));
+                const Point center_pos(m_wipe_tower_info->width() / 2,
+                                       m_wipe_tower_info->separate_filament() ?
+                                           section_center_y(old_tool) :
+                                           compute_y(m_current_y_pos));
                 ExtrusionNop travel = ExtrusionNop();
                 travel.position = center_pos;
                 travel.set_role(ExtrusionRole::Travel);
@@ -938,7 +1147,10 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer,
                 // travel a bit outside so the ooze won't do a mess in our wipetower.
                 double nozzle_diameter_mm = m_config->nozzle_diameter.get_at(old_tool);
                 coord_t brim_width = scale_t(m_object_config->wipe_tower_brim_width.get_abs_value(nozzle_diameter_mm));
-                const Point center_pos(scale_t(-1) - brim_width / 2, compute_y(m_current_y_pos));
+                const Point center_pos(scale_t(-1) - brim_width / 2,
+                                       m_wipe_tower_info->separate_filament() ?
+                                           section_center_y(old_tool) :
+                                           compute_y(m_current_y_pos));
                 ExtrusionNop travel = ExtrusionNop();
                 travel.position = center_pos;
                 travel.set_role(ExtrusionRole::Travel);
@@ -950,9 +1162,13 @@ ExtrusionEntityCollection WipeTowerLayer::tool_change(const Layer *layer,
             toolchange_load(collection, toolchange.wipe_lines, toolchange.to_tool_id);
             toolchange_Wipe(collection, toolchange.wipe_lines, toolchange.wipe_flow, toolchange.to_tool_id,
                             de_retraction_new_tool);
+            toolchange.done = true;
         }
     }
-    if (new_tool == perimeter_tool_idx) {
+    if (m_wipe_tower_info->separate_filament()) {
+        // After loading, the incoming filament starts by closing/supporting its own section.
+        print_perimeter(collection, false, new_tool);
+    } else if (new_tool == perimeter_tool_idx) {
         print_perimeter(collection);
     }
 
@@ -1521,7 +1737,10 @@ void WipeTowerLayer::toolchange_Change(ExtrusionEntityCollection &collection, co
 // note:
 //  get_speed_reduction -> in writer, for wipetowerwipe speed
 
-bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection, bool for_toolchange) {
+// Emit one tower perimeter. In separate-filament mode, tool_id selects the material section
+// perimeter to print; in legacy mode the same function prints the single global perimeter.
+bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection, bool for_toolchange, uint16_t tool_id) {
+    bool printed = false;
     if (!brim_done && !brim.empty()) {
         ExtrusionAttributes extr_flow_attr(ExtrusionRole::Skirt,
                                            ExtrusionFlow{tower_perimeter_flow.mm3_per_mm(),
@@ -1539,9 +1758,45 @@ bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection, bool
         }
         collection.append(std::move(brim_coll));
         brim_done = true;
+        printed = true;
     }
+
+    if (m_wipe_tower_info->separate_filament()) {
+        if (tool_id == uint16_t(-1)) {
+            // Used by finish_layer-style maintenance: emit any section perimeter still missing.
+            for (auto &[section_tool_id, section] : filament_sections)
+                printed |= print_perimeter(collection, for_toolchange, section_tool_id);
+            return printed;
+        }
+
+        auto section_it = filament_sections.find(tool_id);
+        if (section_it == filament_sections.end())
+            return printed;
+
+        FilamentSection &section = section_it->second;
+        if (section.perimeter_done || section.perimeters.empty())
+            return printed;
+
+        ExtrusionAttributes extr_flow_attr(ExtrusionRole::WipeTower,
+                                           ExtrusionFlow{section.perimeter_flow.mm3_per_mm(),
+                                                         section.perimeter_flow.width(),
+                                                         section.perimeter_flow.height()});
+        for (const Polyline &perimeter : section.perimeters) {
+            if (perimeter.front() == perimeter.back()) {
+                ExtrusionLoop loop;
+                loop.paths.emplace_back(ArcPolyline(perimeter), extr_flow_attr, nullptr, true);
+                collection.append(std::move(loop));
+            } else {
+                collection.append(ExtrusionPath(ArcPolyline(perimeter), extr_flow_attr, nullptr, true));
+            }
+        }
+        last_point = section.perimeters.back().back();
+        section.perimeter_done = true;
+        return true;
+    }
+
     if (perimeter_done || tower_perimeters.empty())
-        return false;
+        return printed;
 
     ExtrusionAttributes extr_flow_attr(ExtrusionRole::WipeTower,
                                        ExtrusionFlow{tower_perimeter_flow.mm3_per_mm(), tower_perimeter_flow.width(),
@@ -1559,6 +1814,85 @@ bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection, bool
     last_point = tower_perimeters.back().back();
     perimeter_done = true;
     return true;
+}
+
+// Finish the unused part of a single material section with the same filament as that section.
+// This avoids bonding incompatible materials together just to keep the tower mechanically complete.
+bool WipeTowerLayer::fill_filament_section(ExtrusionEntityCollection &collection, uint16_t tool_id)
+{
+    auto section_it = filament_sections.find(tool_id);
+    if (section_it == filament_sections.end())
+        return false;
+
+    FilamentSection &section = section_it->second;
+    if (section.fill_done)
+        return false;
+    section.fill_done = true;
+
+    const WipeTower2::FilamentToolchangeInfo &fil_info = m_wipe_tower_info->m_filament_change_data[tool_id];
+    Flow infill_flow = Flow::new_from_width(unscaled(fil_info.wipe_width),
+                                            m_config->nozzle_diameter.get_at(tool_id),
+                                            unscaled(extrusion_height), 1.f, false);
+
+    const coord_t usable_y_end = section.length - section.perimeter_y_margin;
+    if (section.current_y_pos + infill_flow.scaled_width() >= usable_y_end)
+        return false;
+
+    // Fill only the part of this material section that was not already consumed by purge/wipe lines.
+    Polygon section_contour(section.perimeters.empty() ? Points{} : section.perimeters.back().points);
+    if (section_contour.empty())
+        return false;
+    section_contour.make_counter_clockwise();
+
+    ExPolygons fill_areas = offset_ex(section_contour, -infill_flow.scaled_spacing() / 3);
+    if (section.current_y_pos > 0) {
+        const coord_t y0 = section.y_start;
+        const coord_t y1 = section.y_start + section.current_y_pos;
+        const Point left_top(0, std::max(compute_y(y0), compute_y(y1)));
+        const Point right_top(m_wipe_tower_info->width(), std::max(compute_y(y0), compute_y(y1)));
+        const Point left_bot(0, std::min(compute_y(y0), compute_y(y1)));
+        const Point right_bot(m_wipe_tower_info->width(), std::min(compute_y(y0), compute_y(y1)));
+        Polygon used_area(Points{right_top, left_top, left_bot, right_bot});
+        fill_areas = diff_ex(fill_areas, Polygons{used_area});
+    }
+
+    if (fill_areas.empty())
+        return false;
+
+    std::unique_ptr<Fill> filler;
+    FillParams params;
+    params.role = ExtrusionRole::WipeTower;
+    params.flow = infill_flow;
+    const bool first_layer = extrusion_z == extrusion_height;
+
+    for (ExPolygon &fill_area : fill_areas) {
+        Surface surface(stPosBottom | stDensSolid, ExPolygon(fill_area));
+        if (first_layer) {
+            filler.reset(Fill::new_from_type(ipMonotonicLines));
+            filler->angle = Geometry::deg2rad(45.f);
+            params.density = 1.f;
+        } else {
+            filler.reset(Fill::new_from_type(ipRectilinear));
+            filler->angle = Geometry::deg2rad(45.f);
+            params.density = .1f;
+            surface = Surface(stPosInternal | stDensSparse, ExPolygon(fill_area));
+        }
+        filler->bounding_box = get_extents(surface.expolygon);
+        filler->init_spacing(infill_flow.spacing(), params);
+        filler->fill_surface_extrusion(&surface, params, collection.set_entities());
+    }
+
+    return true;
+}
+
+// In separate-filament mode, a section must be maintained while its own filament is still loaded.
+// The section cursor already reserves the purge/wipe rows, so the fill can be emitted before unload
+// without colliding with the later ramming path.
+bool WipeTowerLayer::print_and_fill_current_section_before_departure(ExtrusionEntityCollection &collection, uint16_t tool_id)
+{
+    bool printed = print_perimeter(collection, true, tool_id);
+    printed |= fill_filament_section(collection, tool_id);
+    return printed;
 }
 
 bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_t current_extruder, bool force) {
@@ -1592,6 +1926,12 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
     }
     m_is_finished = true;
 
+    if (m_wipe_tower_info->separate_filament()) {
+        // Last active extruder of the layer has no departure toolchange, so finish only its own
+        // section here. Other sections were filled just before their corresponding unload.
+        return print_and_fill_current_section_before_departure(collection, current_extruder);
+    }
+
     uint16_t old_tool = current_extruder;
 
     const WipeTower2::FilamentToolchangeInfo &fil_info = m_wipe_tower_info->m_filament_change_data[current_extruder];
@@ -1610,15 +1950,21 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
     // Slow down on the 1st layer.
     bool first_layer = extrusion_z == extrusion_height;
     float speed_factor = 60.f;
-    float print_speed = m_object_config->support_material_speed;
-    if (first_layer && m_object_config->first_layer_speed > 0)
-        print_speed = m_object_config->first_layer_speed;
-    if (print_speed <= 0)
+    float print_speed = m_object_config->get_computed_value("support_material_speed", current_extruder);
+    if (print_speed <= 0) {
         print_speed = m_wipe_tower_info->m_region_config->get_computed_value("perimeter_speed", current_extruder);
+    }
+    if (print_speed <= 0) {
+        print_speed = m_config->get_computed_value("max_print_speed", current_extruder);
+    }
     if (print_speed <= 0) {
         assert(false);
         print_speed = 60.f;
     }
+    if (first_layer && m_object_config->first_layer_speed > 0) {
+        print_speed = m_object_config->first_layer_speed.get_abs_value(print_speed);
+    }
+    assert(print_speed > 0);
 
     // if nothing to fill
     if (m_current_y_pos + infill_flow.scaled_width() >= m_max_y_pos) {

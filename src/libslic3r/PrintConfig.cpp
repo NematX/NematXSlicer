@@ -5870,9 +5870,9 @@ void PrintConfigDef::init_fff_params()
     def = this->add("retract_restart_wipe_toolchange", coPercents);
     def->label = L("Wipe the unretraction");
     def->full_label = L("Wipe the unretraction (Toolchange)");
-    def->tooltip = L("When unretraction is triggered after changing tool in a wipe tower, the last part of the "
-                     "unretraction is made into a wipe move instead of a static unretraction on top of the wipe "
-                     "tower. This percentage is the perdcetage of the unretraction that is made into a wipe move");
+    def->tooltip = L("When unretraction is triggered after changing tools in a wipe tower, the last part of the "
+                     "unretraction is performed as a wipe move instead of a static unretraction on top of the wipe "
+                     "tower. This percentage defines how much of the unretraction is performed as a wipe move");
     def->sidetext = L("%");
     def->mode = comExpert | comSuSi;
     def->is_vector_extruder = true;
@@ -8016,6 +8016,14 @@ void PrintConfigDef::init_fff_params()
     def->min = 100.;
     def->max = 300.;
     def->set_default_value(new ConfigOptionPercent(100.));
+
+    def = this->add("wipe_tower_separate_filament", coBool);
+    def->label = L("Separate filament sections");
+    def->category = OptionCategory::mmsetup;
+    def->tooltip = L("Purge each filament in its own wipe tower section, with a dedicated perimeter around each section. "
+                     "This avoids relying on adhesion between incompatible materials inside the wipe tower.");
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("wipe_into_infill", coBool);
     def->category = OptionCategory::wipe;
@@ -11250,6 +11258,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "filament_wipe_speed", // filament override
 "wipe_tower_extrusion_width",
 "wipe_tower_rest_in_middle",
+"wipe_tower_separate_filament",
 "wipe_tower_speed",
 "wipe_tower_wipe_starting_speed",
 "xy_size_compensation",

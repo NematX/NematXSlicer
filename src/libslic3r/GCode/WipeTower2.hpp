@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <map>
 #include <sstream>
 #include <set>
 #include <string>
@@ -78,6 +79,8 @@ public:
     coord_t width() const;
     Vec2d position() const;
     coord_t extra_spacing() const;
+    bool separate_filament() const;
+    std::vector<uint16_t> active_separate_filament_tools_for_layer(coord_t print_z) const;
     double rotation_angle() const;
     //((ConfigOptionFloat,                wipe_tower_per_color_wipe))
     //((ConfigOptionFloat,                wipe_tower_cone_angle))
@@ -107,6 +110,17 @@ public:
     };
     // one per extruder
     std::vector<FilamentToolchangeInfo> m_filament_change_data;
+
+    struct FilamentSectionPlan
+    {
+        uint16_t tool_id = uint16_t(-1);
+        coord_t y_start = 0;
+        coord_t length = 0;
+        coord_t last_section_z = 0;
+    };
+    // Separate-filament sections are planned once for the whole print so their Y placement is stable.
+    std::map<uint16_t, FilamentSectionPlan> m_filament_section_plan;
+    coord_t m_separate_filament_total_depth = 0;
 
     // fused layers (with same z & height) info (general layer, can have multiple object or only one)
     struct ObjectLayerData
@@ -140,6 +154,8 @@ public:
         std::vector<ObjectLayerData *> fused_with;
         std::map<coord_t, ZLayerData> extruders_data;
         coord_t estimated_wipe_tower_length; // from extruder toolchange
+        std::map<uint16_t, coord_t> estimated_wipe_tower_length_by_tool;
+        std::map<uint16_t, coord_t> estimated_wipe_tower_offset_by_tool;
         //distf_t worst_needed_length;
         //distf_t worst_needed_length_with_fused;
         std::vector<const Layer *> layers() const;
@@ -240,6 +256,20 @@ public:
     uint16_t perimeter_tool_idx = uint16_t(-1);
     bool perimeter_done = false;
 
+    struct FilamentSection
+    {
+        uint16_t tool_id = uint16_t(-1);
+        coord_t y_start = 0;
+        coord_t length = 0;
+        coord_t perimeter_y_margin = 0;
+        coord_t current_y_pos = 0;
+        Flow perimeter_flow;
+        Polylines perimeters;
+        bool perimeter_done = false;
+        bool fill_done = false;
+    };
+    std::map<uint16_t, FilamentSection> filament_sections;
+
     bool y_down = true;
     Point last_point;
 
@@ -303,9 +333,13 @@ protected:
                          const double de_retraction_new_tool);
     void toolchange_Change(ExtrusionEntityCollection &collection, const uint16_t new_tool);
 
-    bool print_perimeter(ExtrusionEntityCollection &collection, bool for_toolchange = false);
+    bool print_perimeter(ExtrusionEntityCollection &collection, bool for_toolchange = false, uint16_t tool_id = uint16_t(-1));
+    bool fill_filament_section(ExtrusionEntityCollection &collection, uint16_t tool_id);
+    bool print_and_fill_current_section_before_departure(ExtrusionEntityCollection &collection, uint16_t tool_id);
 
-    coord_t compute_y(coord_t raw_y);
+    coord_t compute_y(coord_t raw_y) const;
+    coord_t section_y(uint16_t tool_id, coord_t raw_y) const;
+    coord_t section_center_y(uint16_t tool_id) const;
 
 };
 

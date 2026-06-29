@@ -605,6 +605,7 @@ group:Wipe tower
 		setting:label$Line width:wipe_tower_extrusion_width
 		setting:label$Spacing between lines:wipe_tower_extra_spacing
 	end_line
+	setting:wipe_tower_separate_filament
 	setting:wipe_tower_no_sparse_layers
 	setting:wipe_tower_rest_in_middle
 	line:Priming
