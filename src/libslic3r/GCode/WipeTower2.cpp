@@ -72,6 +72,10 @@ bool WipeTower2::separate_filament() const {
     return m_object_config && m_object_config->wipe_tower_separate_filament.value;
 }
 
+bool WipeTower2::only_solid() const {
+    return m_object_config && m_object_config->wipe_tower_only_solid.value;
+}
+
 std::vector<uint16_t> WipeTower2::active_separate_filament_tools_for_layer(coord_t print_z) const {
     std::vector<uint16_t> tools;
     if (!this->separate_filament() || m_printz_to_WTLayer_data.find(print_z) == m_printz_to_WTLayer_data.end())
@@ -1837,6 +1841,39 @@ bool WipeTowerLayer::fill_filament_section(ExtrusionEntityCollection &collection
     const coord_t usable_y_end = section.length - section.perimeter_y_margin;
     if (section.current_y_pos + infill_flow.scaled_width() >= usable_y_end)
         return false;
+    if (m_wipe_tower_info->only_solid()) {
+        Polyline full_lines;
+        coord_t cursor = section.current_y_pos;
+        const coord_t line_spacing = fil_info.wipe_spacing > 0 ? fil_info.wipe_spacing : infill_flow.scaled_spacing();
+        if (line_spacing <= 0)
+            return false;
+
+        // Continue the same dense wipe-style zig-zag after the purge/wipe rows already reserved in this section.
+        size_t line_idx = size_t(std::max<coord_t>(0, cursor - section.perimeter_y_margin) / line_spacing);
+        while (cursor + line_spacing / 2 < usable_y_end) {
+            cursor += line_spacing / 2;
+            const coord_t y = section_y(tool_id, cursor);
+            if (line_idx % 2 == 0) {
+                full_lines.points.emplace_back(0, y);
+                full_lines.points.emplace_back(m_wipe_tower_info->width(), y);
+            } else {
+                full_lines.points.emplace_back(m_wipe_tower_info->width(), y);
+                full_lines.points.emplace_back(0, y);
+            }
+            cursor += line_spacing / 2;
+            ++line_idx;
+        }
+        section.current_y_pos = cursor;
+
+        if (full_lines.size() < 2)
+            return false;
+
+        ExtrusionAttributes extr_flow_attr(ExtrusionRole::WipeTower,
+                                           ExtrusionFlow{infill_flow.mm3_per_mm(), infill_flow.width(),
+                                                         infill_flow.height()});
+        collection.append(ExtrusionPath(full_lines, extr_flow_attr, nullptr, false));
+        return true;
+    }
 
     // Fill only the part of this material section that was not already consumed by purge/wipe lines.
     Polygon section_contour(section.perimeters.empty() ? Points{} : section.perimeters.back().points);
@@ -1966,12 +2003,49 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
     }
     assert(print_speed > 0);
 
-    // if nothing to fill
-    if (m_current_y_pos + infill_flow.scaled_width() >= m_max_y_pos) {
+    const coord_t wipe_tower_width = m_wipe_tower_info->width();
+    const bool only_solid = m_wipe_tower_info->only_solid();
+    const coord_t line_spacing = only_solid ?
+        (fil_info.wipe_spacing > 0 ? fil_info.wipe_spacing : infill_flow.scaled_spacing()) :
+        0;
+
+    // Dense wipe-style fill places lines by their center. Keep this test aligned with the
+    // generation loop so a final single line is not rejected by the wider extrusion-width check.
+    if (only_solid) {
+        if (line_spacing <= 0 || m_current_y_pos + line_spacing / 2 >= m_max_y_pos)
+            return smthg_printed;
+    } else if (m_current_y_pos + infill_flow.scaled_width() >= m_max_y_pos) {
         return smthg_printed;
     }
 
-    const coord_t wipe_tower_width = m_wipe_tower_info->width();
+    if (only_solid) {
+        Polyline full_lines;
+        coord_t cursor = m_current_y_pos;
+
+        // Continue the dense wipe-style tower rows after the purge/wipe rows already reserved on this layer.
+        size_t line_idx = size_t(std::max<coord_t>(0, cursor) / line_spacing);
+        while (cursor + line_spacing / 2 < m_max_y_pos) {
+            cursor += line_spacing / 2;
+            const coord_t y = compute_y(cursor);
+            if (line_idx % 2 == 0) {
+                full_lines.points.emplace_back(0, y);
+                full_lines.points.emplace_back(wipe_tower_width, y);
+            } else {
+                full_lines.points.emplace_back(wipe_tower_width, y);
+                full_lines.points.emplace_back(0, y);
+            }
+            cursor += line_spacing / 2;
+            ++line_idx;
+        }
+        m_current_y_pos = cursor;
+
+        if (full_lines.size() < 2)
+            return smthg_printed;
+
+        collection.append(ExtrusionPath(full_lines, extr_flow_attr, nullptr, false));
+        return true;
+    }
+
     const Point wipe_tower_left_pos(0, std::max(compute_y(0), compute_y(m_current_y_pos)));
     const Point wipe_tower_right_pos(wipe_tower_width, std::max(compute_y(0), compute_y(m_current_y_pos)));
     const Point wipe_tower_left_bot_pos(0, std::min(compute_y(0), compute_y(m_current_y_pos)));

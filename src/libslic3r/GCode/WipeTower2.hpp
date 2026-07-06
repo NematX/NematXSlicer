@@ -80,6 +80,7 @@ public:
     Vec2d position() const;
     coord_t extra_spacing() const;
     bool separate_filament() const;
+    bool only_solid() const;
     std::vector<uint16_t> active_separate_filament_tools_for_layer(coord_t print_z) const;
     double rotation_angle() const;
     //((ConfigOptionFloat,                wipe_tower_per_color_wipe))

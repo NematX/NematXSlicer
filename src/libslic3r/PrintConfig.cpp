@@ -8017,6 +8017,13 @@ void PrintConfigDef::init_fff_params()
     def->max = 300.;
     def->set_default_value(new ConfigOptionPercent(100.));
 
+    def = this->add("wipe_tower_only_solid", coBool);
+    def->label = L("Solid wipe tower spare layers");
+    def->category = OptionCategory::mmsetup;
+    def->tooltip = L("If enabled, wipe tower maintenance areas are filled with dense wipe-like lines instead of sparse infill.");
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("wipe_tower_separate_filament", coBool);
     def->label = L("Separate filament sections");
     def->category = OptionCategory::mmsetup;
@@ -11257,6 +11264,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "filament_wipe_return", // filament override
 "filament_wipe_speed", // filament override
 "wipe_tower_extrusion_width",
+"wipe_tower_only_solid",
 "wipe_tower_rest_in_middle",
 "wipe_tower_separate_filament",
 "wipe_tower_speed",
