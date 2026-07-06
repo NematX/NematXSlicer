@@ -60,8 +60,6 @@ static Polylines wipe_tower_perimeter_loops(const Polygon &base_contour, int per
     if (perimeters_count <= 0)
         return loops;
 
-
-    loops.push_back(base_contour.split_at_first_point());
     // Store loops from outside to inside. The innermost loop stays at back()
     // because sparse/full fill clips against tower_perimeters.back().
     for (int loop_idx = perimeters_count - 1; loop_idx >= 0; --loop_idx) {
@@ -73,6 +71,30 @@ static Polylines wipe_tower_perimeter_loops(const Polygon &base_contour, int per
     }
 
     return loops;
+}
+
+static std::pair<coord_t, coord_t> wipe_tower_zigzag_line_xs(coord_t x_min, coord_t x_max, coord_t spacing,
+                                                            bool left_to_right, bool has_prev, bool has_next)
+{
+    if (x_max < x_min)
+        std::swap(x_min, x_max);
+
+    const coord_t width = x_max - x_min;
+    const coord_t max_inset = width > SCALED_EPSILON ? (width - SCALED_EPSILON) / 2 : 0;
+    const coord_t inset = std::min(std::max<coord_t>(0, spacing / 2), max_inset);
+
+    // The vertical hop between two zig-zag rows adds one spacing of path length.
+    // Shortening both connected row ends by spacing / 2 keeps the total requested
+    // wipe length correct and keeps the centerline inside the tower/section volume.
+    if (left_to_right) {
+        const coord_t x_start = has_prev ? x_min + inset : x_min;
+        const coord_t x_end   = has_next ? x_max - inset : x_max;
+        return { x_start, x_end };
+    }
+
+    const coord_t x_start = has_prev ? x_max - inset : x_max;
+    const coord_t x_end   = has_next ? x_min + inset : x_min;
+    return { x_start, x_end };
 }
 
 coord_t WipeTower2::floatz_tolayer_coord(double z) {
@@ -1049,29 +1071,24 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
             for (size_t iline = 0; iline < nblines; iline++) {
                 section.current_y_pos += spacing / 2;
                 const coord_t y = section_y(tool_id, section.current_y_pos);
-                if (iline % 2 == 0) {
-                    lines.points.push_back(Point(wipe_tower_left_pos.x(), y));
-                    lines.points.push_back(Point(wipe_tower_right_pos.x(), y));
-                } else {
-                    lines.points.push_back(Point(wipe_tower_right_pos.x(), y));
-                    lines.points.push_back(Point(wipe_tower_left_pos.x(), y));
-                }
+                const bool left_to_right = iline % 2 == 0;
+                const auto [x_start, x_end] = wipe_tower_zigzag_line_xs(
+                    wipe_tower_left_pos.x(), wipe_tower_right_pos.x(), spacing,
+                    left_to_right, iline > 0, iline + 1 < size_t(nblines));
+                lines.points.push_back(Point(x_start, y));
+                lines.points.push_back(Point(x_end, y));
                 section.current_y_pos += spacing / 2;
             }
         } else {
             for (size_t iline = 0; iline < nblines; iline++) {
                 m_current_y_pos += spacing / 2;
-                if (iline % 2 == 0) {
-                    lines.points.push_back(
-                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                    lines.points.push_back(
-                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                } else {
-                    lines.points.push_back(
-                        Point(wipe_tower_right_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                    lines.points.push_back(
-                        Point(wipe_tower_left_pos.x(), compute_y(wipe_tower_pos.y() + m_current_y_pos)));
-                }
+                const coord_t y = compute_y(wipe_tower_pos.y() + m_current_y_pos);
+                const bool left_to_right = iline % 2 == 0;
+                const auto [x_start, x_end] = wipe_tower_zigzag_line_xs(
+                    wipe_tower_left_pos.x(), wipe_tower_right_pos.x(), spacing,
+                    left_to_right, iline > 0, iline + 1 < size_t(nblines));
+                lines.points.push_back(Point(x_start, y));
+                lines.points.push_back(Point(x_end, y));
                 m_current_y_pos += spacing / 2;
             }
         }
@@ -2016,15 +2033,14 @@ bool WipeTowerLayer::fill_filament_section(ExtrusionEntityCollection &collection
         // Continue the same dense wipe-style zig-zag after the purge/wipe rows already reserved in this section.
         size_t line_idx = size_t(std::max<coord_t>(0, cursor - section.perimeter_y_margin) / line_spacing);
         while (cursor + line_spacing / 2 < usable_y_end) {
+            const bool has_next = cursor + line_spacing + line_spacing / 2 < usable_y_end;
             cursor += line_spacing / 2;
             const coord_t y = section_y(tool_id, cursor);
-            if (line_idx % 2 == 0) {
-                full_lines.points.emplace_back(0, y);
-                full_lines.points.emplace_back(m_wipe_tower_info->width(), y);
-            } else {
-                full_lines.points.emplace_back(m_wipe_tower_info->width(), y);
-                full_lines.points.emplace_back(0, y);
-            }
+            const bool left_to_right = line_idx % 2 == 0;
+            const auto [x_start, x_end] = wipe_tower_zigzag_line_xs(
+                0, m_wipe_tower_info->width(), line_spacing, left_to_right, line_idx > 0, has_next);
+            full_lines.points.emplace_back(x_start, y);
+            full_lines.points.emplace_back(x_end, y);
             cursor += line_spacing / 2;
             ++line_idx;
         }
@@ -2193,15 +2209,14 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
         // Continue the dense wipe-style tower rows after the purge/wipe rows already reserved on this layer.
         size_t line_idx = size_t(std::max<coord_t>(0, cursor) / line_spacing);
         while (cursor + line_spacing / 2 < m_max_y_pos) {
+            const bool has_next = cursor + line_spacing + line_spacing / 2 < m_max_y_pos;
             cursor += line_spacing / 2;
             const coord_t y = compute_y(cursor);
-            if (line_idx % 2 == 0) {
-                full_lines.points.emplace_back(0, y);
-                full_lines.points.emplace_back(wipe_tower_width, y);
-            } else {
-                full_lines.points.emplace_back(wipe_tower_width, y);
-                full_lines.points.emplace_back(0, y);
-            }
+            const bool left_to_right = line_idx % 2 == 0;
+            const auto [x_start, x_end] = wipe_tower_zigzag_line_xs(
+                0, wipe_tower_width, line_spacing, left_to_right, line_idx > 0, has_next);
+            full_lines.points.emplace_back(x_start, y);
+            full_lines.points.emplace_back(x_end, y);
             cursor += line_spacing / 2;
             ++line_idx;
         }
