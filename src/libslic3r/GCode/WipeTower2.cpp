@@ -229,7 +229,7 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                             fil.purge_volume = m_config->filament_multitool_ramming_volume.get_at(extr_id);
                         }
                         fil.purge_width = line_width;
-                        fil.purge_spacing = m_object_config->wipe_tower_extra_spacing.get_abs_value(fil.purge_width);
+                        fil.purge_spacing = scale_t(m_object_config->wipe_tower_extra_spacing.get_abs_value(unscaled(fil.purge_width)));
                         // wipe
                         fil.wipe_speed = m_config->wipe_tower_speed.value;
                         if (m_config->filament_max_wipe_tower_speed.get_at(extr_id) > 0) {
@@ -239,7 +239,7 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                         assert(fil.wipe_speed > 0);
                         fil.wipe_width = line_width;
                         fil.wipe_volume_min = m_config->filament_minimal_purge_on_wipe_tower.get_at(extr_id);
-                        fil.wipe_spacing = m_object_config->wipe_tower_extra_spacing.get_abs_value(fil.wipe_width);
+                        fil.wipe_spacing = scale_t(m_object_config->wipe_tower_extra_spacing.get_abs_value(unscaled(fil.wipe_width)));
                     }
                 }
             }
@@ -809,6 +809,11 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                                              std::min(compute_y(0), compute_y(data.estimated_wipe_tower_length)));
 
     const bool separate_filament_sections = m_wipe_tower_info->separate_filament();
+    auto perimeter_to_wipe_margin = [this](const Flow &perimeter_flow) -> coord_t {
+        const coord_t infill_overlap = scale_t(
+            m_wipe_tower_info->m_region_config->infill_overlap.get_abs_value(perimeter_flow.spacing()));
+        return std::max<coord_t>(0, perimeter_flow.scaled_spacing() - infill_overlap);
+    };
 
     // Build the physical section geometry used by separate-filament mode. Each section has
     // its own perimeter flow and local Y cursor, while the whole tower keeps one outer brim.
@@ -828,13 +833,14 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                                                           m_config->nozzle_diameter.get_at(tool_id),
                                                           unscaled(extrusion_height), 1.f, false);
 
-            // X keeps the full tower width, like the legacy tower. Only Y needs protected rows
-            // because material sections are adjacent and their perimeters must not overlap.
+            // X uses the same perimeter/infill rule as object geometry: spacing minus infill encroachment.
+            // Y reserves purge/wipe spacing because these lines consume rows inside adjacent material sections.
+            const coord_t perimeter_x_margin = perimeter_to_wipe_margin(section.perimeter_flow);
             section.perimeter_y_margin = std::min(std::max(fil_info.purge_spacing, fil_info.wipe_spacing),
                                                   section.length / 4);
             section.current_y_pos = section.perimeter_y_margin;
-            const coord_t x0 = 0;
-            const coord_t x1 = wipe_tower_width;
+            const coord_t x0 = -perimeter_x_margin;
+            const coord_t x1 = wipe_tower_width + perimeter_x_margin;
             const coord_t y0 = section.y_start + section.perimeter_y_margin / 2;
             const coord_t y1 = section.y_start + section.length - section.perimeter_y_margin / 2;
             if (x1 <= x0 || y1 <= y0)
@@ -1016,7 +1022,7 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
         perimeter.points.push_back(wipe_tower_left_bot_pos);
         perimeter.reverse(); // built as CW, nede to fix it to CCW.
         assert(perimeter.is_counter_clockwise());
-        Polygons big_rectangle = offset(perimeter, (tower_perimeter_flow.scaled_width()) / 2);
+        Polygons big_rectangle = offset(perimeter, perimeter_to_wipe_margin(tower_perimeter_flow));
         assert(!big_rectangle.empty());
         perimeter = big_rectangle.front();
         tower_perimeters.push_back(perimeter.split_at_first_point());
