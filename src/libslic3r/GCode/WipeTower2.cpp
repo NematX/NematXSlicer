@@ -35,6 +35,46 @@
 
 namespace Slic3r {
 
+static coord_t wipe_tower_perimeter_to_wipe_margin(const Flow &perimeter_flow, const PrintRegionConfig &region_config)
+{
+    const coord_t infill_overlap = scale_t(region_config.infill_overlap.get_abs_value(perimeter_flow.spacing()));
+    return std::max<coord_t>(0, perimeter_flow.scaled_spacing() / 2 - infill_overlap);
+}
+
+static coord_t wipe_tower_section_y_margin(const Flow &perimeter_flow, const PrintRegionConfig &region_config,
+                                           int perimeters_count, coord_t purge_spacing, coord_t wipe_spacing)
+{
+    if (perimeters_count <= 0)
+        return std::max(purge_spacing, wipe_spacing);
+
+    // Reserve enough room outside the wipe/fill zone for all perimeter centerlines.
+    return wipe_tower_perimeter_to_wipe_margin(perimeter_flow, region_config) +
+        (perimeters_count - 1) * perimeter_flow.scaled_spacing() +
+        perimeter_flow.scaled_spacing() / 2;
+}
+
+static Polylines wipe_tower_perimeter_loops(const Polygon &base_contour, int perimeters_count,
+                                            coord_t margin, coord_t spacing)
+{
+    Polylines loops;
+    if (perimeters_count <= 0)
+        return loops;
+
+
+    loops.push_back(base_contour.split_at_first_point());
+    // Store loops from outside to inside. The innermost loop stays at back()
+    // because sparse/full fill clips against tower_perimeters.back().
+    for (int loop_idx = perimeters_count - 1; loop_idx >= 0; --loop_idx) {
+        Polygons offset_contours = offset(base_contour, margin + loop_idx * spacing);
+        assert(!offset_contours.empty());
+        if (offset_contours.empty())
+            continue;
+        loops.push_back(offset_contours.front().split_at_first_point());
+    }
+
+    return loops;
+}
+
 coord_t WipeTower2::floatz_tolayer_coord(double z) {
     assert(z < 10000);
     assert(z >= 0);
@@ -74,6 +114,10 @@ bool WipeTower2::separate_filament() const {
 
 bool WipeTower2::only_solid() const {
     return m_object_config && m_object_config->wipe_tower_only_solid.value;
+}
+
+int WipeTower2::perimeters_count() const {
+    return m_object_config ? std::max(0, m_object_config->wipe_tower_perimeters.value) : 1;
 }
 
 std::vector<uint16_t> WipeTower2::active_separate_filament_tools_for_layer(coord_t print_z) const {
@@ -359,6 +403,8 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
         if (worst_layer_height <= 0)
             worst_layer_height = scale_t(0.1);
 
+        const int perimeter_count = this->perimeters_count();
+
         // Fixed material sections are packed once, by tool id. Their positions do not depend
         // on which toolchanges happen on a specific layer, so incompatible materials never mix.
         for (const auto &[tool_id, last_section_z] : last_section_z_by_tool) {
@@ -370,7 +416,11 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
             const coord_t min_printable_length = std::max(
                 reserve_wipe_tower_length(0., fil_info.purge_width, worst_layer_height, fil_info.purge_spacing),
                 reserve_wipe_tower_length(0., fil_info.wipe_width, worst_layer_height, fil_info.wipe_spacing));
-            const coord_t perimeter_y_margin = std::max(fil_info.purge_spacing, fil_info.wipe_spacing);
+            const Flow perimeter_flow = Flow::new_from_width(unscaled(fil_info.wipe_width),
+                                                             m_config->nozzle_diameter.get_at(tool_id),
+                                                             unscaled(worst_layer_height), 1.f, false);
+            const coord_t perimeter_y_margin = wipe_tower_section_y_margin(
+                perimeter_flow, *m_region_config, perimeter_count, fil_info.purge_spacing, fil_info.wipe_spacing);
 
             FilamentSectionPlan &section = m_filament_section_plan[tool_id];
             section.tool_id = tool_id;
@@ -752,6 +802,69 @@ coord_t WipeTowerLayer::section_center_y(uint16_t tool_id) const {
     return compute_y(it->second.y_start + it->second.length / 2);
 }
 
+Polygon WipeTowerLayer::virtual_tower_contour() const {
+    const coord_t y0 = compute_y(0);
+    const coord_t y1 = compute_y(m_max_y_pos);
+    Polygon contour({ Point(0, std::max(y0, y1)),
+                      Point(m_wipe_tower_info->width(), std::max(y0, y1)),
+                      Point(m_wipe_tower_info->width(), std::min(y0, y1)),
+                      Point(0, std::min(y0, y1)) });
+    contour.make_counter_clockwise();
+    return contour;
+}
+
+Polygon WipeTowerLayer::virtual_section_contour(const FilamentSection &section) const {
+    const coord_t y0 = compute_y(section.y_start);
+    const coord_t y1 = compute_y(section.y_start + section.length);
+    Polygon contour({ Point(0, std::max(y0, y1)),
+                      Point(m_wipe_tower_info->width(), std::max(y0, y1)),
+                      Point(m_wipe_tower_info->width(), std::min(y0, y1)),
+                      Point(0, std::min(y0, y1)) });
+    //
+    //const Point wipe_tower_pos(0, 0); // = Point::new_scale(m_wipe_tower_info->position());
+    //const Point wipe_tower_left_pos(wipe_tower_pos.x(),
+    //                                wipe_tower_pos.y() +
+    //                                    std::max(compute_y(0), compute_y(section.length)));
+    //const Point wipe_tower_right_pos(wipe_tower_pos.x() + m_wipe_tower_info->width(),
+    //                                 wipe_tower_pos.y() +
+    //                                     std::max(compute_y(0), compute_y(section.length)));
+    //const Point wipe_tower_left_bot_pos(wipe_tower_pos.x(),
+    //                                    wipe_tower_pos.y() +
+    //                                        std::min(compute_y(0), compute_y(section.length)));
+    //const Point wipe_tower_right_bot_pos(wipe_tower_pos.x() + m_wipe_tower_info->width(),
+    //                                     wipe_tower_pos.y() +
+    //                                         std::min(compute_y(0), compute_y(section.length)));
+    //coord_t wipe_tower_max_z = m_wipe_tower_info->m_printz_to_WTLayer_data.rbegin()->second->extrusion_z;
+    //double rayon = std::tan(Geometry::deg2rad(m_object_config->wipe_tower_cone_angle.value / 2.f)) *
+    //    unscaled(wipe_tower_max_z - extrusion_z);
+    //// Vec2f center = (wt_box.lu + wt_box.rd) / 2.;
+    //Vec2f center(unscaled(m_wipe_tower_info->width() / 2), unscaled(m_wipetower_max_y_pos / 2));
+    //const auto [R, support_scale] =
+    //    m_wipe_tower_info->get_wipe_tower_cone_base(tower_perimeter_flow.width(), tower_perimeter_flow.height(),
+    //                                                unscaled(section.length),
+    //                                                m_object_config->wipe_tower_cone_angle.value);
+    //// First generate vector of annotated point which form the boundary.
+    //Polygon contour;
+    //contour.points.push_back(wipe_tower_left_pos);
+    //double length_mm = unscaled(m_max_y_pos);
+    //double alpha_start = std::asin((0.5 * length_mm) / rayon);
+    //if (!std::isnan(alpha_start) && rayon > 0.5 * length_mm + 0.01) {
+    //    for (double alpha = alpha_start; alpha < M_PI - alpha_start + 0.001;
+    //            alpha += (M_PI - 2 * alpha_start) / 40.) {
+    //        contour.points.push_back(Point::new_scale(center.x() - rayon * std::cos(alpha) / support_scale,
+    //                                                    center.y() + rayon * std::sin(alpha)));
+    //    }
+    //}
+    //contour.points.push_back(wipe_tower_right_pos);
+    //contour.points.push_back(wipe_tower_right_bot_pos);
+    //for (int i = int(contour.points.size()) - 3; i > 0; --i) {
+    //    contour.points.emplace_back(contour.points[i].x(), m_wipetower_max_y_pos - contour.points[i].y());
+    //}
+    //contour.points.push_back(wipe_tower_left_bot_pos);
+    contour.make_counter_clockwise();
+    return contour;
+}
+
 void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                           const std::vector<uint16_t> &ordered_extruders,
                           const std::vector<uint16_t> &purges) {
@@ -809,10 +922,9 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                                              std::min(compute_y(0), compute_y(data.estimated_wipe_tower_length)));
 
     const bool separate_filament_sections = m_wipe_tower_info->separate_filament();
+    const int perimeters_count = m_wipe_tower_info->perimeters_count();
     auto perimeter_to_wipe_margin = [this](const Flow &perimeter_flow) -> coord_t {
-        const coord_t infill_overlap = scale_t(
-            m_wipe_tower_info->m_region_config->infill_overlap.get_abs_value(perimeter_flow.spacing()));
-        return std::max<coord_t>(0, perimeter_flow.scaled_spacing() - infill_overlap);
+        return wipe_tower_perimeter_to_wipe_margin(perimeter_flow, *m_wipe_tower_info->m_region_config);
     };
 
     // Build the physical section geometry used by separate-filament mode. Each section has
@@ -833,23 +945,26 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
                                                           m_config->nozzle_diameter.get_at(tool_id),
                                                           unscaled(extrusion_height), 1.f, false);
 
-            // X uses the same perimeter/infill rule as object geometry: spacing minus infill encroachment.
-            // Y reserves purge/wipe spacing because these lines consume rows inside adjacent material sections.
             const coord_t perimeter_x_margin = perimeter_to_wipe_margin(section.perimeter_flow);
-            section.perimeter_y_margin = std::min(std::max(fil_info.purge_spacing, fil_info.wipe_spacing),
-                                                  section.length / 4);
+            const coord_t perimeter_spacing = section.perimeter_flow.scaled_spacing();
+            section.perimeter_y_margin = wipe_tower_section_y_margin(
+                section.perimeter_flow, *m_wipe_tower_info->m_region_config, perimeters_count,
+                fil_info.purge_spacing, fil_info.wipe_spacing);
             section.current_y_pos = section.perimeter_y_margin;
-            const coord_t x0 = -perimeter_x_margin;
-            const coord_t x1 = wipe_tower_width + perimeter_x_margin;
-            const coord_t y0 = section.y_start + section.perimeter_y_margin / 2;
-            const coord_t y1 = section.y_start + section.length - section.perimeter_y_margin / 2;
-            if (x1 <= x0 || y1 <= y0)
+            const coord_t fill_y0 = section.y_start + section.perimeter_y_margin;
+            const coord_t fill_y1 = section.y_start + section.length - section.perimeter_y_margin;
+            if (fill_y1 <= fill_y0)
                 continue;
 
-            Polygon perimeter({ Point(x0, compute_y(y1)), Point(x1, compute_y(y1)),
-                                Point(x1, compute_y(y0)), Point(x0, compute_y(y0)) });
-            perimeter.make_counter_clockwise();
-            section.perimeters.push_back(perimeter.split_at_first_point());
+            // Build the same kind of wipe/fill contour as the non-separated tower, then
+            // generate the section perimeter loops through the shared offset helper.
+            Polygon section_fill_contour({ Point(0, compute_y(fill_y1)),
+                                           Point(wipe_tower_width, compute_y(fill_y1)),
+                                           Point(wipe_tower_width, compute_y(fill_y0)),
+                                           Point(0, compute_y(fill_y0)) });
+            section_fill_contour.make_counter_clockwise();
+            section.perimeters = wipe_tower_perimeter_loops(section_fill_contour, perimeters_count,
+                                                            perimeter_x_margin, perimeter_spacing);
             append(tower_perimeters, section.perimeters);
         }
 
@@ -860,8 +975,39 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
         }
 
         if (extrusion_z == extrusion_height && !filament_sections.empty()) {
-            Polygon outer_perimeter({ wipe_tower_left_pos, wipe_tower_right_pos,
-                                      wipe_tower_right_bot_pos, wipe_tower_left_bot_pos });
+            bool has_outer_point = false;
+            coord_t min_x = 0;
+            coord_t max_x = 0;
+            coord_t min_y = 0;
+            coord_t max_y = 0;
+            auto update_outer_bounds = [&](const Point &point) {
+                if (!has_outer_point) {
+                    min_x = max_x = point.x();
+                    min_y = max_y = point.y();
+                    has_outer_point = true;
+                } else {
+                    min_x = std::min(min_x, point.x());
+                    max_x = std::max(max_x, point.x());
+                    min_y = std::min(min_y, point.y());
+                    max_y = std::max(max_y, point.y());
+                }
+            };
+            for (const auto &[tool_id, section] : filament_sections) {
+                if (section.perimeters.empty()) {
+                    for (const Point &point : virtual_section_contour(section).points)
+                        update_outer_bounds(point);
+                } else {
+                    for (const Polyline &section_perimeter : section.perimeters)
+                        for (const Point &point : section_perimeter.points)
+                            update_outer_bounds(point);
+                }
+            }
+
+            // Brim must start outside the actual outer loop, or the virtual section envelope
+            // when wipe tower perimeters are disabled.
+            Polygon outer_perimeter = has_outer_point ?
+                Polygon({ Point(min_x, max_y), Point(max_x, max_y), Point(max_x, min_y), Point(min_x, min_y) }) :
+                Polygon({ wipe_tower_left_pos, wipe_tower_right_pos, wipe_tower_right_bot_pos, wipe_tower_left_bot_pos });
             outer_perimeter.make_counter_clockwise();
 
             PrintRegionConfig brim_region_config = *m_wipe_tower_info->m_region_config;
@@ -1022,10 +1168,14 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
         perimeter.points.push_back(wipe_tower_left_bot_pos);
         perimeter.reverse(); // built as CW, nede to fix it to CCW.
         assert(perimeter.is_counter_clockwise());
-        Polygons big_rectangle = offset(perimeter, perimeter_to_wipe_margin(tower_perimeter_flow));
-        assert(!big_rectangle.empty());
-        perimeter = big_rectangle.front();
-        tower_perimeters.push_back(perimeter.split_at_first_point());
+        const coord_t perimeter_margin = perimeter_to_wipe_margin(tower_perimeter_flow);
+        const coord_t perimeter_spacing = tower_perimeter_flow.scaled_spacing();
+        tower_perimeters = wipe_tower_perimeter_loops(perimeter, perimeters_count,
+                                                      perimeter_margin, perimeter_spacing);
+        // after wipe_tower_perimeter_loops, the outer periemter need an update
+        if (!tower_perimeters.empty()) {
+            perimeter = Polygon(tower_perimeters.back().points);
+        }
 
         // brim (first layer only)
         if (extrusion_z == extrusion_height) {
@@ -1648,10 +1798,12 @@ void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection,
                 speed = int(floor(m_config->retract_speed.get_at(tool_id) + 0.5));
             }
             ExtrusionNop path_move = ExtrusionNop();
-            if (m_config->retract_restart_toolchange_on_perimeter.get_at(tool_id)) {
-                assert(total_length(tower_perimeters) > 0);
+            const double tower_perimeters_length = total_length(tower_perimeters);
+            const bool restart_on_printed_perimeter =
+                m_config->retract_restart_toolchange_on_perimeter.get_at(tool_id) && tower_perimeters_length > 0.;
+            if (restart_on_printed_perimeter) {
                 coord_t dist = wipetower_layer_idx * scale_t(5);
-                dist = dist % coord_t(total_length(tower_perimeters));
+                dist = dist % coord_t(tower_perimeters_length);
                 for (size_t i = 0; i < tower_perimeters.size(); i++) {
                     if (dist >= coord_t(tower_perimeters[i].length())) {
                         dist -= coord_t(tower_perimeters[i].length());
@@ -1680,7 +1832,7 @@ void WipeTowerLayer::toolchange_Wipe(ExtrusionEntityCollection &collection,
             ExtrusionNop path_pre_unretract = ExtrusionNop();
             path_pre_unretract.set_role(ExtrusionRole::WipeTowerWipe);
             path_pre_unretract.add_property(ExtrusionPropertySpeed(speed));
-            if (m_config->retract_restart_toolchange_on_perimeter.get_at(tool_id)) {
+            if (restart_on_printed_perimeter) {
                 path_pre_unretract.add_property(ExtrusionPropertyModifier().set_disable_lift().set_enforce_unlift());
             } else {
                 path_pre_unretract.add_property(ExtrusionPropertyModifier().set_enforce_unlift());
@@ -1747,8 +1899,8 @@ void WipeTowerLayer::toolchange_Change(ExtrusionEntityCollection &collection, co
 // note:
 //  get_speed_reduction -> in writer, for wipetowerwipe speed
 
-// Emit one tower perimeter. In separate-filament mode, tool_id selects the material section
-// perimeter to print; in legacy mode the same function prints the single global perimeter.
+// Emit tower perimeter loops. In separate-filament mode, tool_id selects the material section
+// to outline; in legacy mode the same function prints the global tower loops.
 bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection, bool for_toolchange, uint16_t tool_id) {
     bool printed = false;
     if (!brim_done && !brim.empty()) {
@@ -1784,8 +1936,12 @@ bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection, bool
             return printed;
 
         FilamentSection &section = section_it->second;
-        if (section.perimeter_done || section.perimeters.empty())
+        if (section.perimeter_done)
             return printed;
+        if (section.perimeters.empty()) {
+            section.perimeter_done = true;
+            return printed;
+        }
 
         ExtrusionAttributes extr_flow_attr(ExtrusionRole::WipeTower,
                                            ExtrusionFlow{section.perimeter_flow.mm3_per_mm(),
@@ -1805,13 +1961,16 @@ bool WipeTowerLayer::print_perimeter(ExtrusionEntityCollection &collection, bool
         return true;
     }
 
-    if (perimeter_done || tower_perimeters.empty())
+    if (perimeter_done)
         return printed;
+    if (tower_perimeters.empty()) {
+        perimeter_done = true;
+        return printed;
+    }
 
     ExtrusionAttributes extr_flow_attr(ExtrusionRole::WipeTower,
                                        ExtrusionFlow{tower_perimeter_flow.mm3_per_mm(), tower_perimeter_flow.width(),
                                                      tower_perimeter_flow.height()});
-    assert(tower_perimeters.front() == tower_perimeters.back());
     for (size_t i = 0; i < tower_perimeters.size(); i++) {
         if (tower_perimeters[i].front() == tower_perimeters[i].back()) {
             ExtrusionLoop loop;
@@ -1882,7 +2041,10 @@ bool WipeTowerLayer::fill_filament_section(ExtrusionEntityCollection &collection
     }
 
     // Fill only the part of this material section that was not already consumed by purge/wipe lines.
-    Polygon section_contour(section.perimeters.empty() ? Points{} : section.perimeters.back().points);
+    // If perimeters are disabled, a virtual contour clips the fill without extruding a boundary.
+    Polygon section_contour = section.perimeters.empty() ?
+        virtual_section_contour(section) :
+        Polygon(section.perimeters.back().points);
     if (section_contour.empty())
         return false;
     section_contour.make_counter_clockwise();
@@ -2063,7 +2225,10 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
     params.flow = infill_flow;
     Polygon wt_used(
         Points{wipe_tower_right_pos, wipe_tower_left_pos, wipe_tower_left_bot_pos, wipe_tower_right_bot_pos});
-    Polygon wt_contour(tower_perimeters.back().points);
+    // If perimeters are disabled, sparse fill still needs a clipping area, but no printed boundary.
+    Polygon wt_contour = tower_perimeters.empty() ?
+        virtual_tower_contour() :
+        Polygon(tower_perimeters.back().points);
     // BoundingBox bbox = get_extents(wt_contour.points);
     // bbox.offset(scale_(1.));
     // static int iii=0;

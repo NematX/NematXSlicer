@@ -8024,6 +8024,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("wipe_tower_perimeters", coInt);
+    def->label = L("Wipe tower perimeters");
+    def->category = OptionCategory::mmsetup;
+    def->tooltip = L("Number of perimeter loops printed around the wipe tower or each separate filament section. "
+                     "Set to zero to disable wipe tower perimeters while keeping purge, wipe, fill and brim.");
+    def->mode = comExpert | comSuSi;
+    def->min = 0;
+    def->set_default_value(new ConfigOptionInt(1));
+
     def = this->add("wipe_tower_separate_filament", coBool);
     def->label = L("Separate filament sections");
     def->category = OptionCategory::mmsetup;
@@ -11265,6 +11274,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "filament_wipe_speed", // filament override
 "wipe_tower_extrusion_width",
 "wipe_tower_only_solid",
+"wipe_tower_perimeters",
 "wipe_tower_rest_in_middle",
 "wipe_tower_separate_filament",
 "wipe_tower_speed",

@@ -877,6 +877,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionInt,                  wipe_tower_extruder))
     ((ConfigOptionFloatOrPercent,       wipe_tower_extrusion_width))
     ((ConfigOptionFloat,                wipe_tower_per_color_wipe))
+    ((ConfigOptionInt,                  wipe_tower_perimeters))
     ((ConfigOptionBool,                 wipe_tower_rest_in_middle))
     ((ConfigOptionBool,                 wipe_tower_only_solid))
     ((ConfigOptionBool,                 wipe_tower_separate_filament))

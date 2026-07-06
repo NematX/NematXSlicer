@@ -607,6 +607,7 @@ group:Wipe tower
 	end_line
 	setting:wipe_tower_separate_filament
 	setting:wipe_tower_only_solid
+	setting:wipe_tower_perimeters
 	setting:wipe_tower_no_sparse_layers
 	setting:wipe_tower_rest_in_middle
 	line:Priming

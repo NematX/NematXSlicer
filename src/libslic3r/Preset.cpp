@@ -901,6 +901,7 @@ static std::vector<std::string> s_Preset_print_options {
         "wipe_tower_cone_angle",
         "wipe_tower_extra_spacing",
         "wipe_tower_only_solid",
+        "wipe_tower_perimeters",
         "wipe_tower_separate_filament",
         "wipe_tower_extruder",
         "wipe_tower_extrusion_width",

@@ -81,6 +81,7 @@ public:
     coord_t extra_spacing() const;
     bool separate_filament() const;
     bool only_solid() const;
+    int perimeters_count() const;
     std::vector<uint16_t> active_separate_filament_tools_for_layer(coord_t print_z) const;
     double rotation_angle() const;
     //((ConfigOptionFloat,                wipe_tower_per_color_wipe))
@@ -341,6 +342,8 @@ protected:
     coord_t compute_y(coord_t raw_y) const;
     coord_t section_y(uint16_t tool_id, coord_t raw_y) const;
     coord_t section_center_y(uint16_t tool_id) const;
+    Polygon virtual_tower_contour() const;
+    Polygon virtual_section_contour(const FilamentSection &section) const;
 
 };
 
