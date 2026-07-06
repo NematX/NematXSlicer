@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <sstream>
 #include <set>
 #include <string>
@@ -254,9 +255,7 @@ public:
     Polylines brim;
     bool brim_done = false;
     Flow tower_perimeter_flow;
-    Polylines tower_perimeters;
     uint16_t perimeter_tool_idx = uint16_t(-1);
-    bool perimeter_done = false;
 
     struct FilamentSection
     {
@@ -270,7 +269,7 @@ public:
         bool perimeter_done = false;
         bool fill_done = false;
     };
-    std::map<uint16_t, FilamentSection> filament_sections;
+    std::map<uint16_t, std::shared_ptr<FilamentSection>> filament_sections;
 
     bool y_down = true;
     Point last_point;
@@ -319,6 +318,7 @@ public:
 
     ExtrusionEntityCollection tool_change(const Layer *layer, uint16_t old_tool, uint16_t new_tool, double de_retraction_new_tool = 0);
     bool finish_layer(ExtrusionEntityCollection &collection, uint16_t current_extruder, bool force = false);
+    bool perimeters_done() const;
 
 protected:
     void toolchange_load(ExtrusionEntityCollection &collection,
@@ -342,6 +342,13 @@ protected:
     coord_t compute_y(coord_t raw_y) const;
     coord_t section_y(uint16_t tool_id, coord_t raw_y) const;
     coord_t section_center_y(uint16_t tool_id) const;
+    FilamentSection* section_for_tool(uint16_t tool_id);
+    const FilamentSection* section_for_tool(uint16_t tool_id) const;
+    FilamentSection* default_section();
+    const FilamentSection* default_section() const;
+    std::vector<FilamentSection*> unique_filament_sections();
+    std::vector<const FilamentSection*> unique_filament_sections() const;
+    void build_brim_from_filament_sections(uint16_t brim_tool_id, double nozzle_diameter);
     Polygon virtual_tower_contour() const;
     Polygon virtual_section_contour(const FilamentSection &section) const;
 

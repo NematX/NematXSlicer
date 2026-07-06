@@ -2751,10 +2751,10 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                                     std::vector<std::pair<coord_t, ObjectsLayerToPrint>> wt_layers_to_print;
                                     for (auto &z_to_wt_layer : m_wipe_tower_layers) {
                                         const std::shared_ptr<WipeTowerLayer> &wt_layer = z_to_wt_layer.second;
-                                        assert(wt_layer->extrusion_z > previous_wipe_tower_z || wt_layer->perimeter_done);
+                                        assert(wt_layer->extrusion_z > previous_wipe_tower_z || wt_layer->perimeters_done());
                                         if (wt_layer->extrusion_z >= layer_group.front().layer()->scaled_print_z()) {
                                             break;
-                                        } else if (!wt_layer->perimeter_done && wt_layer->m_toolchanges.empty()) {
+                                        } else if (!wt_layer->perimeters_done() && wt_layer->m_toolchanges.empty()) {
                                             assert(!wt_layer->layers.empty());
                                             // print it
                                             wt_layers_to_print.emplace_back(wt_layer->extrusion_z,
@@ -2780,7 +2780,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                                                 }
                                             }
                                         } else {
-                                            assert(wt_layer->perimeter_done ||
+                                            assert(wt_layer->perimeters_done() ||
                                                    wt_layer->extrusion_z >=
                                                        layer_group.front().layer()->scaled_print_z());
                                         }
