@@ -655,6 +655,7 @@ void GCodeProcessor::apply_config(const PrintConfig& config)
     m_result.filament_diameters.resize(extruders_count);
     m_result.filament_densities.resize(extruders_count);
     m_result.filament_cost.resize(extruders_count);
+    m_fan_speed_per_extruder.resize(extruders_count);
     m_extruder_temps.resize(extruders_count);
     m_extruder_temps_config.resize(extruders_count);
     m_extruder_temps_first_layer_config.resize(extruders_count);
@@ -1115,6 +1116,7 @@ void GCodeProcessor::reset()
     m_forced_height = 0.0f;
     m_mm3_per_mm = 0.0f;
     m_fan_speed = 0.0f;
+    m_fan_speed_per_extruder.clear();
     m_z_offset = 0.0f;
     m_speed_factor_override_percentage.clear();
     m_extrude_factor_override_percentage.clear();
@@ -2029,6 +2031,15 @@ void GCodeProcessor::process_gcode_line(const GCodeReader::GCodeLine& line, bool
                         case '6': { process_M106(line); break; } // Set fan speed
                         case '7': { process_M107(line); break; } // Disable fan
                         case '8': { process_M108(line); break; } // Set tool (Sailfish)
+                        case '9': { process_M109(line); break; } // Set extruder temperature and wait
+                        default: break;
+                        }
+                        break;
+                    case '2':
+                        switch (cmd[3]) {
+                        case '4': { process_M104(line); break; } // Set extruder temperature
+                        case '6': { process_M106(line); break; } // Set fan speed
+                        case '7': { process_M107(line); break; } // Disable fan
                         case '9': { process_M109(line); break; } // Set extruder temperature and wait
                         default: break;
                         }
@@ -3736,7 +3747,15 @@ void GCodeProcessor::process_M104(const GCodeReader::GCodeLine& line)
 
         set_extruder_temp(new_temp, id);
     } else if (line.has_value('=', new_temp)) {
-        set_extruder_temp(new_temp, m_extruder_id);
+        size_t id = m_extruder_id;
+        if (m_flavor == GCodeFlavor::gcfNematX) {
+            if (line.cmd() == "M104") {
+                id = 0;
+            } else if (line.cmd() == "M124") {
+                id = 1;
+            }
+        }
+        set_extruder_temp(new_temp, id);
     }
 }
 
@@ -3752,12 +3771,48 @@ void GCodeProcessor::process_M106(const GCodeReader::GCodeLine& line)
         } else {
             m_fan_speed = 100.0f;
         }
+        if (m_flavor != GCodeFlavor::gcfNematX) {
+            if (m_fan_speed_per_extruder.size() > m_extruder_id) {
+                m_fan_speed_per_extruder[m_extruder_id] = m_fan_speed;
+            }
+        } else {
+            size_t id = m_extruder_id;
+            if (line.cmd() == "M106") {
+                id = 0;
+            } else if (line.cmd() == "M126"){
+                id = 1;
+            } else {
+                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encoutered unkown fan speed change command: "<<line.cmd();
+            }
+            if (m_fan_speed_per_extruder.size() > id) {
+                m_fan_speed_per_extruder[id] = m_fan_speed;
+            }
+            if (m_fan_speed_per_extruder.size() > m_extruder_id) {
+                m_fan_speed = m_fan_speed_per_extruder[m_extruder_id];
+            }
+        }
     }
 }
 
 void GCodeProcessor::process_M107(const GCodeReader::GCodeLine& line)
 {
     m_fan_speed = 0.0f;
+    if (m_flavor != GCodeFlavor::gcfNematX) {
+        if (m_fan_speed_per_extruder.size() > m_extruder_id) {
+            m_fan_speed_per_extruder[m_extruder_id] = m_fan_speed;
+        }
+    } else {
+        if (line.cmd() == "M107") {
+            m_fan_speed_per_extruder[0] = 0.0;
+        } else if (line.cmd() == "M127"){
+            m_fan_speed_per_extruder[1] = 0.0;
+        } else {
+            BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encoutered unkown fan speed change command: "<<line.cmd();
+        }
+        if (m_fan_speed_per_extruder.size() > m_extruder_id) {
+            m_fan_speed = m_fan_speed_per_extruder[m_extruder_id];
+        }
+    }
 }
 
 void GCodeProcessor::process_M108(const GCodeReader::GCodeLine& line)
@@ -3777,7 +3832,7 @@ void GCodeProcessor::process_M108(const GCodeReader::GCodeLine& line)
 
 void GCodeProcessor::process_M109(const GCodeReader::GCodeLine& line)
 {
-    float new_temp;
+    float new_temp = -1;
     size_t id = (size_t)-1;
     if (line.has_value('R', new_temp)) {
         float val;
@@ -3793,8 +3848,15 @@ void GCodeProcessor::process_M109(const GCodeReader::GCodeLine& line)
     } else if (line.has_value('=', new_temp)) {
         id = m_extruder_id;
     }
+    if (m_flavor == GCodeFlavor::gcfNematX) {
+        if (line.cmd() == "M109") {
+            id = 0;
+        } else if (line.cmd() == "M129") {
+            id = 1;
+        }
+    }
 
-    if (id != (size_t)-1)
+    if (id != (size_t)-1 && new_temp >= 0)
         set_extruder_temp(new_temp, id);
 }
 
@@ -4165,6 +4227,9 @@ void GCodeProcessor::process_toolchange(uint16_t new_id)
 
         m_result.extruders_count = std::max<size_t>(m_result.extruders_count, m_extruder_id + 1);
 
+        if (m_fan_speed_per_extruder.size() > m_extruder_id) {
+            m_fan_speed = m_fan_speed_per_extruder[m_extruder_id];
+        }
 
         // store tool change move
         store_move_vertex(EMoveType::Tool_change);
