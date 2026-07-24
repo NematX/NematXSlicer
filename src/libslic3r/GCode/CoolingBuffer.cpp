@@ -1007,64 +1007,64 @@ std::string CoolingBuffer::apply_layer_cooldown(
 #define FAN_CONFIG(OPT) m_config.OPT.is_enabled(m_current_extruder) ? m_config.OPT.get_at(m_current_extruder) : -1
     const int min_fan_speed             = m_config.fan_printer_min_speed;
     assert(min_fan_speed >= 0);
-    int initial_default_fan_speed = FAN_CONFIG(default_fan_speed);
-    //if default_fan_speed activated, be sure it's at least the mins
-    if (initial_default_fan_speed > 0 && initial_default_fan_speed < min_fan_speed)
-        initial_default_fan_speed = min_fan_speed;
-    // 0 was deprecated, replaced by 1: allow 1 to still be 0 (and it's now deprecated)
-    if (initial_default_fan_speed == 1)
-        initial_default_fan_speed = 0;
-    //initialise the speed array
-    for (uint8_t i = 0; i < uint8_t(GCodeExtrusionRole::Count); i++) {
-        fan_control[i] = false;
-        fan_speeds[i] = 0;
-        default_fan_speed[i] = initial_default_fan_speed;
+    auto change_extruder_set_fan = [this, layer_id, layer_time, &new_gcode, 
+            &fan_control, &fan_speeds, &default_fan_speed, min_fan_speed]()
+    {
+        int initial_default_fan_speed = FAN_CONFIG(default_fan_speed);
+        //if default_fan_speed activated, be sure it's at least the mins
+        if (initial_default_fan_speed > 0 && initial_default_fan_speed < min_fan_speed)
+            initial_default_fan_speed = min_fan_speed;
         // 0 was deprecated, replaced by 1: allow 1 to still be 0 (and it's now deprecated)
-        if (default_fan_speed[i] == 1) default_fan_speed[i] = 0;
-    }
-    //set the fan controls
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::BridgeInfill)] = FAN_CONFIG(bridge_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::InternalBridgeInfill)] = FAN_CONFIG(internal_bridge_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::TopSolidInfill)] = FAN_CONFIG(top_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::Ironing)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::TopSolidInfill)];
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterialInterface)] = FAN_CONFIG(support_material_interface_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterial)] = FAN_CONFIG(support_material_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::ExternalPerimeter)] = FAN_CONFIG(external_perimeter_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::ThinWall)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::ExternalPerimeter)];
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::Perimeter)] = FAN_CONFIG(perimeter_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::SolidInfill)] = FAN_CONFIG(solid_infill_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::InternalInfill)] = FAN_CONFIG(infill_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::OverhangPerimeter)] = FAN_CONFIG(overhangs_fan_speed);
-    default_fan_speed[ uint8_t(GCodeExtrusionRole::GapFill)] = FAN_CONFIG(gap_fill_fan_speed);
-    if (m_config.overhangs_dynamic_fan_speed.is_enabled(m_current_extruder)) {
-        //const GraphData graph = m_config.overhangs_dynamic_fan_speed.get_at(m_current_extruder);
-        //default_fan_speed[ uint8_t(GCodeExtrusionRole::OverhangPerimeter)] = graph.data().front().y();
-        default_fan_speed[ uint8_t(GCodeExtrusionRole::OverhangPerimeter)] =  -1;
-    }
-    // if disabled, and default is not default
-    if (default_fan_speed[uint8_t(GCodeExtrusionRole::TopSolidInfill)] < 0) {
-        default_fan_speed[ uint8_t(GCodeExtrusionRole::TopSolidInfill)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::SolidInfill)];
-    }
-    if (default_fan_speed[uint8_t(GCodeExtrusionRole::SupportMaterialInterface)] < 0) {
-        default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterialInterface)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterial)];
-    }
-    if (default_fan_speed[uint8_t(GCodeExtrusionRole::InternalBridgeInfill)] < 0) {
-        default_fan_speed[ uint8_t(GCodeExtrusionRole::InternalBridgeInfill)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::BridgeInfill)];
-    }
-    // if default is enabled, it takes over the settings that are disabled.
-    if (initial_default_fan_speed >= 0) {
-        for (int i = 0; i < uint8_t(GCodeExtrusionRole::Count); i++) {
-            // this setting is disbaled. As default is not, it will use the default value
-            // (but for overhangs that use perimeter/external (they are given by the gcode tags)
-            //TODO: a different tag for both
-            if (default_fan_speed[i] < 0 && i != uint8_t(GCodeExtrusionRole::OverhangPerimeter)) {
-                default_fan_speed[i] = initial_default_fan_speed;
+        if (initial_default_fan_speed == 1)
+            initial_default_fan_speed = 0;
+        //initialise the speed array
+        for (uint8_t i = 0; i < uint8_t(GCodeExtrusionRole::Count); i++) {
+            fan_control[i] = false;
+            fan_speeds[i] = 0;
+            default_fan_speed[i] = initial_default_fan_speed;
+            // 0 was deprecated, replaced by 1: allow 1 to still be 0 (and it's now deprecated)
+            if (default_fan_speed[i] == 1) default_fan_speed[i] = 0;
+        }
+        //set the fan controls
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::BridgeInfill)] = FAN_CONFIG(bridge_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::InternalBridgeInfill)] = FAN_CONFIG(internal_bridge_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::TopSolidInfill)] = FAN_CONFIG(top_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::Ironing)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::TopSolidInfill)];
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterialInterface)] = FAN_CONFIG(support_material_interface_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterial)] = FAN_CONFIG(support_material_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::ExternalPerimeter)] = FAN_CONFIG(external_perimeter_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::ThinWall)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::ExternalPerimeter)];
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::Perimeter)] = FAN_CONFIG(perimeter_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::SolidInfill)] = FAN_CONFIG(solid_infill_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::InternalInfill)] = FAN_CONFIG(infill_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::OverhangPerimeter)] = FAN_CONFIG(overhangs_fan_speed);
+        default_fan_speed[ uint8_t(GCodeExtrusionRole::GapFill)] = FAN_CONFIG(gap_fill_fan_speed);
+        if (m_config.overhangs_dynamic_fan_speed.is_enabled(m_current_extruder)) {
+            //const GraphData graph = m_config.overhangs_dynamic_fan_speed.get_at(m_current_extruder);
+            //default_fan_speed[ uint8_t(GCodeExtrusionRole::OverhangPerimeter)] = graph.data().front().y();
+            default_fan_speed[ uint8_t(GCodeExtrusionRole::OverhangPerimeter)] =  -1;
+        }
+        // if disabled, and default is not default
+        if (default_fan_speed[uint8_t(GCodeExtrusionRole::TopSolidInfill)] < 0) {
+            default_fan_speed[ uint8_t(GCodeExtrusionRole::TopSolidInfill)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::SolidInfill)];
+        }
+        if (default_fan_speed[uint8_t(GCodeExtrusionRole::SupportMaterialInterface)] < 0) {
+            default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterialInterface)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::SupportMaterial)];
+        }
+        if (default_fan_speed[uint8_t(GCodeExtrusionRole::InternalBridgeInfill)] < 0) {
+            default_fan_speed[ uint8_t(GCodeExtrusionRole::InternalBridgeInfill)] = default_fan_speed[ uint8_t(GCodeExtrusionRole::BridgeInfill)];
+        }
+        // if default is enabled, it takes over the settings that are disabled.
+        if (initial_default_fan_speed >= 0) {
+            for (int i = 0; i < uint8_t(GCodeExtrusionRole::Count); i++) {
+                // this setting is disbaled. As default is not, it will use the default value
+                // (but for overhangs that use perimeter/external (they are given by the gcode tags)
+                //TODO: a different tag for both
+                if (default_fan_speed[i] < 0 && i != uint8_t(GCodeExtrusionRole::OverhangPerimeter)) {
+                    default_fan_speed[i] = initial_default_fan_speed;
+                }
             }
         }
-    }
-    auto change_extruder_set_fan = [this, layer_id, layer_time, &new_gcode, 
-            &fan_control, &fan_speeds, &default_fan_speed, initial_default_fan_speed, min_fan_speed]()
-    {
         std::pair<int, int> custom_fan_speed_limits{fan_speeds[0], 100 }; // TODO REVIEW 2.7: min-max. min is min_fan_speed if always on.
         int enable_fan_first_layers = EXTRUDER_CONFIG(enable_fan_first_layers);
         int disable_fan_first_layers = EXTRUDER_CONFIG(disable_fan_first_layers) + enable_fan_first_layers;
