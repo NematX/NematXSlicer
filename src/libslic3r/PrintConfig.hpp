@@ -1401,6 +1401,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionFloats,               nozzle_diameter))
     ((ConfigOptionBool,                 only_retract_when_crossing_perimeters))
     ((ConfigOptionBool,                 ooze_prevention))
+    ((ConfigOptionBool,                 disable_fan_from_unused_extruder))
     ((ConfigOptionString,               output_filename_format))
     ((ConfigOptionGraphs,               overhangs_dynamic_fan_speed))
     ((ConfigOptionInts,                 overhangs_fan_speed))

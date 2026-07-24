@@ -1458,6 +1458,25 @@ std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, bool gcode_comm
     return gcode.str();
 }
 
+
+std::string GCodeWriter::disable_fan(uint16_t old_extruder_id, bool after_toolchange)
+{
+    if (after_toolchange) {
+        if (gcfNematX == this->config.gcode_flavor.value) {
+            std::string gcode = (old_extruder_id == 0 ? "M106=0" : "M126=0");
+            if (this->config.gcode_comments)
+                gcode += " ; disable fan for unused extruder" ;
+            gcode += "\n";
+            return gcode;
+        }
+    } else {
+        if (gcfNematX != this->config.gcode_flavor.value) {
+            return set_fan(0, 0);
+        }
+    }
+    return "";
+}
+
 std::string GCodeWriter::set_fan(const uint8_t speed, uint16_t default_tool)
 {
     const Tool *tool = m_tool == nullptr ? get_tool(default_tool) : m_tool;

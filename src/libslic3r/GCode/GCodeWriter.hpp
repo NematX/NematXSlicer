@@ -136,6 +136,7 @@ public:
     // Keeping the state is left to the CoolingBuffer, which runs asynchronously on another thread.
     std::string set_fan(uint8_t speed, uint16_t default_tool = 0);
     uint8_t get_fan() { return m_last_fan_speed; }
+    std::string disable_fan(uint16_t extruder_id, bool after_toolchange);
 
     GCodeFormatter get_default_gcode_formatter() const { return GCodeFormatter(config.gcode_precision_xyz, config.gcode_precision_e); }
 

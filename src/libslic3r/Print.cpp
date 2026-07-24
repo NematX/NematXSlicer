@@ -108,6 +108,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver& /* ne
         //"cooling",
         "default_fan_speed",
         "deretract_speed",
+        "disable_fan_from_unused_extruder",
         "disable_fan_first_layers",
         "duplicate_distance",
         "overhangs_dynamic_fan_speed",

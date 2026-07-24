@@ -113,7 +113,6 @@ namespace Slic3r {
         if (!gcode.empty() && gcode.back() != '\n')
             gcode += '\n';
     }
-    
 
     // Return true if tch_prefix is found in custom_gcode
     static bool custom_gcode_changes_tool(const std::string& custom_gcode, const std::string& tch_prefix, unsigned next_extruder)
@@ -11613,8 +11612,21 @@ std::string GCodeGenerator::set_extruder(uint16_t extruder_id, coord_t print_z, 
     if (m_ooze_prevention.enable && m_writer.tool() != nullptr)
         gcode += m_ooze_prevention.pre_toolchange(*this);
 
+    // check for fan disabling
+    const bool disable_unused_extruder_fan =
+        m_config.disable_fan_from_unused_extruder.value &&
+        !no_toolchange &&
+        old_extruder_id != uint16_t(-1) &&
+        old_extruder_id != extruder_id;
+
     if (!no_toolchange) {
+        if (disable_unused_extruder_fan) {
+            gcode += m_writer.disable_fan(old_extruder_id, false);
+        }
         gcode += toolchange(extruder_id, print_z);
+        if (disable_unused_extruder_fan) {
+            gcode += m_writer.disable_fan(old_extruder_id, true);
+        }
     }else m_writer.toolchange(extruder_id);
 
     // Set the temperature if the wipe tower didn't (not needed for non-single extruder MM)

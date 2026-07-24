@@ -4681,6 +4681,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
 
+    def = this->add("disable_fan_from_unused_extruder", coBool);
+    def->label = L("Disable fan from unused extruder");
+    def->category = OptionCategory::mmsetup;
+    def->tooltip = L("Disable the part cooling fan of the extruder left by a toolchange. "
+                     "Firmwares without a dedicated inactive-tool fan command will receive M107 before the toolchange, "
+                     "while the old extruder is still active.");
+    def->mode = comExpert | comSuSi;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("output_filename_format", coString);
     def->label = L("Output filename format");
     def->category = OptionCategory::output;
@@ -10941,6 +10950,7 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "curve_smoothing_cutoff_dist",
 "curve_smoothing_precision",
 "default_speed",
+"disable_fan_from_unused_extruder",
 "enforce_full_fill_volume",
 "enforce_retract_top_surface",
 // "exact_last_layer_height",

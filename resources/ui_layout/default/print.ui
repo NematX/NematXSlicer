@@ -619,6 +619,7 @@ group:Advanced
 		setting:label$First layer:print_first_layer_bed_temperature
 		setting:label$Other layers:print_bed_temperature
 	end_line
+	setting:disable_fan_from_unused_extruder
 	setting:interface_shells
 	line:Segmented regions
 		setting:label$Maximum width:mmu_segmented_region_max_width
