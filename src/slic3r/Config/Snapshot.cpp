@@ -426,16 +426,16 @@ const Snapshot&	SnapshotDB::take_snapshot(AppConfig &app_config, Snapshot::Reaso
     {
         std::lock_guard<std::recursive_mutex> lk(app_config.config_lock);
         AppConfig::VendorMap vendor_map = app_config.vendors();
-        for (auto it = vendor_map.begin(); it != vendor_map.end();) {
-            const auto &vendor_entry = *it;
+        for (auto it_vendor = vendor_map.begin(); it_vendor != vendor_map.end();) {
+            const auto &vendor_entry = *it_vendor;
             Snapshot::VendorConfig cfg;
             cfg.name = vendor_entry.first;
             cfg.models_variants_installed = vendor_entry.second;
-            for (auto it = cfg.models_variants_installed.begin(); it != cfg.models_variants_installed.end();)
-                if (it->second.empty())
-                    cfg.models_variants_installed.erase(it ++);
+            for (auto it_model = cfg.models_variants_installed.begin(); it_model != cfg.models_variants_installed.end();)
+                if (it_model->second.empty())
+                    cfg.models_variants_installed.erase(it_model ++);
                 else
-                    ++ it;
+                    ++ it_model;
             // Read the active config bundle, parse the config version.
             PresetBundle bundle;
             if (!boost::filesystem::exists(data_dir / "vendor" / (cfg.name + ".ini"))) {
@@ -444,8 +444,10 @@ const Snapshot&	SnapshotDB::take_snapshot(AppConfig &app_config, Snapshot::Reaso
                     << "Failed opening the vendor file '"
                     << (data_dir / "vendor" / (cfg.name + ".ini")).generic_string()
                     << "', it has been deleted, now unistalling this vendor to sanitize the configuration.";
-                it = vendor_map.erase(it);
+                it_vendor = vendor_map.erase(it_vendor);
                 continue;
+            } else {
+                it_vendor++;
             }
             bundle.load_configbundle((data_dir / "vendor" / (cfg.name + ".ini")).string(), PresetBundle::LoadConfigBundleAttribute::LoadVendorOnly, ForwardCompatibilitySubstitutionRule::EnableSilent);
             for (const auto &vp : bundle.vendors)
@@ -456,10 +458,10 @@ const Snapshot&	SnapshotDB::take_snapshot(AppConfig &app_config, Snapshot::Reaso
                 // Load the config index for the vendor.
                 Index index;
                 index.load(data_dir / "vendor" / (cfg.name + ".idx"));
-                auto it = index.find(cfg.version.config_version);
-                if (it != index.end()) {
-                    cfg.version.min_slic3r_version = it->min_slic3r_version;
-                    cfg.version.max_slic3r_version = it->max_slic3r_version;
+                auto it_version = index.find(cfg.version.config_version);
+                if (it_version != index.end()) {
+                    cfg.version.min_slic3r_version = it_version->min_slic3r_version;
+                    cfg.version.max_slic3r_version = it_version->max_slic3r_version;
                 }
             } catch (const std::runtime_error & /* err */) {
             }
