@@ -552,7 +552,9 @@ int TriangleSelector::neighbor_child(const Triangle &tr, int vertexi, int vertex
     // Find the triangle edge.
     int edge = tr.verts_idxs[0] == vertexi ? 0 : tr.verts_idxs[1] == vertexi ? 1 : 2;
     assert(tr.verts_idxs[edge] == vertexi);
-    assert(tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexj);
+    assert(tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexj
+        // added because of {vj,vi,vi} triangle
+        || (tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexi && tr.verts_idxs[next_idx_modulo(next_idx_modulo(edge, 3),3)] == vertexj));
 
     int child_idx;
     if (tr.number_of_split_sides() == 1) {
@@ -601,7 +603,9 @@ std::pair<int, int> TriangleSelector::triangle_subtriangles(const Triangle &tr, 
     // Find the triangle edge.
     int edge = tr.verts_idxs[0] == vertexi ? 0 : tr.verts_idxs[1] == vertexi ? 1 : 2;
     assert(tr.verts_idxs[edge] == vertexi);
-    assert(tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexj);
+    assert(tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexj
+        // added because of {vj,vi,vi} triangle
+        || (tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexi && tr.verts_idxs[next_idx_modulo(next_idx_modulo(edge, 3),3)] == vertexj));
 
     if (tr.number_of_split_sides() == 1) {
         return edge == next_idx_modulo(tr.special_side(), 3) ? std::make_pair(tr.children[0], tr.children[1]) :
@@ -632,7 +636,9 @@ int TriangleSelector::triangle_midpoint(const Triangle &tr, int vertexi, int ver
     // Find the triangle edge.
     int edge = tr.verts_idxs[0] == vertexi ? 0 : tr.verts_idxs[1] == vertexi ? 1 : 2;
     assert(tr.verts_idxs[edge] == vertexi);
-    assert(tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexj);
+    assert(tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexj
+        // added because of {vj,vi,vi} triangle
+        || (tr.verts_idxs[next_idx_modulo(edge, 3)] == vertexi && tr.verts_idxs[next_idx_modulo(next_idx_modulo(edge, 3),3)] == vertexj));
 
     if (tr.number_of_split_sides() == 1) {
         return edge == next_idx_modulo(tr.special_side(), 3) ?

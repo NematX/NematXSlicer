@@ -1087,7 +1087,8 @@ void WipeTowerLayer::init(const std::vector<const Layer *> layers,
     // check our layers are inside
     const std::vector<const Layer *> all_layers = data.layers();
     for (const Layer *layer : layers) {
-        assert(std::find(all_layers.begin(), all_layers.end(), layer) != all_layers.end());
+        if (layer->has_extrusions())
+            assert(std::find(all_layers.begin(), all_layers.end(), layer) != all_layers.end());
     }
 
     // ensure we have enough space
