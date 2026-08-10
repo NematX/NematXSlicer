@@ -473,6 +473,43 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                 wp_layer.estimated_wipe_tower_length_by_tool[tool_id] = section.length;
             }
         }
+        // for the last layers with the same filament, the wieptower can be removed.
+        size_t last_wipetower_idx_layer = size_t(-1);
+        uint16_t last_extruder_idx = uint16_t(-1);
+        for (size_t idx_layer = m_WTLayer_data.size() - 1; idx_layer < m_WTLayer_data.size(); --idx_layer) {
+            last_wipetower_idx_layer = idx_layer;
+            WipeTowerLayerData &wp_layer = *m_WTLayer_data[idx_layer];
+            if (last_extruder_idx == uint16_t(-1)) {
+                if (wp_layer.estimated_wipe_tower_length_by_tool.empty()) {
+                    continue;
+                } else if (wp_layer.estimated_wipe_tower_length_by_tool.size() == 1) {
+                    last_extruder_idx = wp_layer.estimated_wipe_tower_length_by_tool.begin()->first;
+                    continue;
+                } else {
+                    break;
+                }
+            } else {
+                if (wp_layer.estimated_wipe_tower_length_by_tool.empty()) {
+                    continue;
+                } else if (wp_layer.estimated_wipe_tower_length_by_tool.size() == 1) {
+                    if (last_extruder_idx == wp_layer.estimated_wipe_tower_length_by_tool.begin()->first) {
+                        continue;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            }
+        }
+        if (last_wipetower_idx_layer < size_t(-1)) {
+            for (size_t idx_layer = last_wipetower_idx_layer + 1; idx_layer < m_WTLayer_data.size(); ++idx_layer) {
+                WipeTowerLayerData &wp_layer = *m_WTLayer_data[idx_layer];
+                wp_layer.estimated_wipe_tower_length_by_tool.clear();
+                wp_layer.estimated_wipe_tower_offset_by_tool.clear();
+            }
+        }
+
     } else {
         uint16_t previous_tool_id = uint16_t(-1);
         for (auto &entry : m_printz_to_WTLayer_data) {
@@ -2168,11 +2205,13 @@ bool WipeTowerLayer::fill_filament_section(ExtrusionEntityCollection &collection
             filler.reset(Fill::new_from_type(ipMonotonicLines));
             filler->angle = Geometry::deg2rad(45.f);
             params.density = 1.f;
+            collection.append(ExtrusionNop(ExtrusionPropertyCustomGcode(ExtrusionPropertyCustomGcode::Code::COMMENT, "Solid infill of unused wipe tower area for the first layer")));
         } else {
             filler.reset(Fill::new_from_type(ipRectilinear));
             filler->angle = Geometry::deg2rad(45.f);
             params.density = .1f;
             surface = Surface(stPosInternal | stDensSparse, ExPolygon(fill_area));
+            collection.append(ExtrusionNop(ExtrusionPropertyCustomGcode(ExtrusionPropertyCustomGcode::Code::COMMENT, "Sparse infill of unused wipe tower area")));
         }
         filler->bounding_box = get_extents(surface.expolygon);
         filler->init_spacing(infill_flow.spacing(), params);
@@ -2345,6 +2384,7 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
             filler.reset(Fill::new_from_type(ipMonotonicLines));
             filler->angle = Geometry::deg2rad(45.f);
             params.density = 1.f;
+            collection.append(ExtrusionNop(ExtrusionPropertyCustomGcode(ExtrusionPropertyCustomGcode::Code::COMMENT, "Solid infill of unfinished wipe tower area for first layer")));
         } else {
             // sparse infill
             // TODO bridge flow if enough void below
@@ -2352,6 +2392,7 @@ bool WipeTowerLayer::finish_layer(ExtrusionEntityCollection &collection, uint16_
             filler->angle = Geometry::deg2rad(45.f);
             params.density = .1f;
             surface = Surface(stPosInternal | stDensSparse, ExPolygon(offset_expoly));
+            collection.append(ExtrusionNop(ExtrusionPropertyCustomGcode(ExtrusionPropertyCustomGcode::Code::COMMENT, "Sparse infill of unfinished wipe tower area")));
         }
         filler->bounding_box = get_extents(surface.expolygon);
         filler->init_spacing(infill_flow.spacing(), params);
