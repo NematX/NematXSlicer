@@ -7861,6 +7861,7 @@ void PrintConfigDef::init_fff_params()
         "\nIf set to zero, a value of 80mm/s is used.");
     def->sidetext = L("mm/s");
     def->mode = comAdvancedE | comSuSi;
+    def->min = 0;
     def->set_default_value(new ConfigOptionFloat(80.));
 
     def = this->add("wipe_tower_wipe_starting_speed", coFloatOrPercent);

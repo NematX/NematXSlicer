@@ -298,6 +298,9 @@ void WipeTower2::init(const Print *print, const SpanOfConstPtrs<PrintObject> &ob
                         fil.purge_spacing = scale_t(m_object_config->wipe_tower_extra_spacing.get_abs_value(unscaled(fil.purge_width)));
                         // wipe
                         fil.wipe_speed = m_config->wipe_tower_speed.value;
+                        if (fil.wipe_speed <= 0) {
+                            fil.wipe_speed = 80.;
+                        }
                         if (m_config->filament_max_wipe_tower_speed.get_at(extr_id) > 0) {
                             fil.wipe_speed = std::min(fil.wipe_speed,
                                                       m_config->filament_max_wipe_tower_speed.get_at(extr_id));
