@@ -1,0 +1,31 @@
+name: Prime shared Ubuntu dependency caches
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or SHA whose dependency recipes should be cached.
+        required: true
+        type: string
+
+jobs:
+  gtk2-dependencies:
+    uses: ./.github/workflows/build_ubuntu.yml
+    with:
+      appimage_artifact_name: unused-gtk2-dependency-primer.AppImage
+      build_args: g
+      checkout_ref: ${{ inputs.source_ref }}
+      dependencies_only: true
+      gtk_package: libgtk2.0-dev
+      gtk_version: '2'
+      tgz_artifact_name: unused-gtk2-dependency-primer.tgz
+  gtk3-dependencies:
+    uses: ./.github/workflows/build_ubuntu.yml
+    with:
+      appimage_artifact_name: unused-gtk3-dependency-primer.AppImage
+      build_args: ''
+      checkout_ref: ${{ inputs.source_ref }}
+      dependencies_only: true
+      gtk_package: libgtk-3-dev
+      gtk_version: '3'
+      tgz_artifact_name: unused-gtk3-dependency-primer.tgz

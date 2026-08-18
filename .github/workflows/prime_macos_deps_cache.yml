@@ -1,0 +1,35 @@
+name: Prime shared macOS dependency caches
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or SHA whose dependency recipes should be cached.
+        required: true
+        type: string
+
+jobs:
+  arm-dependencies:
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: arm
+      checkout_ref: ${{ inputs.source_ref }}
+      dependencies_only: true
+      dependency_build_args: -ad
+      dmg_artifact_name: unused-arm-dependency-primer.dmg
+      package_build_args: -asi
+      runner: macos-14
+      tgz_artifact_name: unused-arm-dependency-primer.tgz
+      use_texinfo: false
+  intel-dependencies:
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: intel
+      checkout_ref: ${{ inputs.source_ref }}
+      dependencies_only: true
+      dependency_build_args: -xd
+      dmg_artifact_name: unused-intel-dependency-primer.dmg
+      package_build_args: -xsi
+      runner: macos-15-intel
+      tgz_artifact_name: unused-intel-dependency-primer.tgz
+      use_texinfo: true
