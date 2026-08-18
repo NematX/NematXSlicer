@@ -1,0 +1,117 @@
+name: macOS nightly and release candidate v2
+
+on:
+  push:
+    branches:
+      - Nigthly
+      - nightly_dev
+      - nightly_master
+      - nightly_macos
+      - nightly_macos_intel
+      - nightly_2.7.63
+      - debug_macos
+      - beta
+      - stable
+      - rc
+      - beta-rc
+      - stable-rc
+      - rc-macintel
+    tags:
+      - '*.*.*'
+  workflow_dispatch:
+
+jobs:
+  nightly-arm:
+    if: github.ref_type == 'branch' && contains(fromJSON('["Nigthly","nightly_dev","nightly_master","nightly_macos","nightly_2.7.63","debug_macos","beta","stable"]'), github.ref_name)
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: arm
+      dependency_build_args: -ad
+      dmg_artifact_name: nightly_${{ github.event.repository.name }}-macOS-arm.dmg
+      package_build_args: -asiv
+      runner: macos-14
+      tgz_artifact_name: nightly_${{ github.event.repository.name }}-macOS-arm.tgz
+      use_texinfo: false
+  nightly-intel:
+    if: github.ref_type == 'branch' && contains(fromJSON('["Nigthly","nightly_dev","nightly_master","nightly_macos_intel","nightly_2.7.63","debug_macos","beta","stable"]'), github.ref_name)
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: intel
+      dependency_build_args: -xd
+      dmg_artifact_name: nightly_${{ github.event.repository.name }}-macOS-intel.dmg
+      package_build_args: -xsiv
+      runner: macos-15-intel
+      tgz_artifact_name: nightly_${{ github.event.repository.name }}-macOS-intel.tgz
+      use_texinfo: true
+  rc-arm:
+    if: github.ref_type == 'branch' && contains(fromJSON('["rc","beta-rc","stable-rc"]'), github.ref_name)
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: arm
+      dependency_build_args: -ad
+      dmg_artifact_name: rc_${{ github.event.repository.name }}-macOS-arm.dmg
+      package_build_args: -asi
+      runner: macos-14
+      tgz_artifact_name: rc_${{ github.event.repository.name }}-macOS-arm.tgz
+      use_texinfo: false
+  rc-intel:
+    if: github.ref_type == 'branch' && contains(fromJSON('["rc","rc-macintel"]'), github.ref_name)
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: intel
+      dependency_build_args: -xd
+      dmg_artifact_name: rc_${{ github.event.repository.name }}-macOS.dmg
+      package_build_args: -xsi
+      runner: macos-15-intel
+      tgz_artifact_name: rc_${{ github.event.repository.name }}-macOS.tgz
+      use_texinfo: true
+  release-arm:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: arm
+      dependency_build_args: -ad
+      dmg_artifact_name: release_${{ github.event.repository.name }}-macOS-arm.dmg
+      package_build_args: -asi
+      runner: macos-14
+      tgz_artifact_name: release_${{ github.event.repository.name }}-macOS-arm.tgz
+      use_texinfo: false
+  release-intel:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: intel
+      dependency_build_args: -xd
+      dmg_artifact_name: release_${{ github.event.repository.name }}-macOS-intel.dmg
+      package_build_args: -xsi
+      runner: macos-15-intel
+      tgz_artifact_name: release_${{ github.event.repository.name }}-macOS-intel.tgz
+      use_texinfo: true
+  sign-release-arm:
+    if: github.ref_type == 'tag'
+    needs: release-arm
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/sign_macos.yml
+    secrets: inherit
+    with:
+      enabled: true
+      artifact_name: release_${{ github.event.repository.name }}-macOS-arm.dmg
+      artifact_suffix: arm
+      runner: macos-14
+      signed_artifact_name: signed_${{ github.event.repository.name }}-macOS-arm
+  sign-release-intel:
+    if: github.ref_type == 'tag'
+    needs: release-intel
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/sign_macos.yml
+    secrets: inherit
+    with:
+      enabled: true
+      artifact_name: release_${{ github.event.repository.name }}-macOS-intel.dmg
+      artifact_suffix: intel
+      runner: macos-15-intel
+      signed_artifact_name: signed_${{ github.event.repository.name }}-macOS-intel

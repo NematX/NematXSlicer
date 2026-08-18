@@ -1,0 +1,144 @@
+name: Sign macOS release artifact
+
+on:
+  workflow_call:
+    inputs:
+      enabled:
+        default: false
+        required: false
+        type: boolean
+      artifact_name:
+        required: true
+        type: string
+      artifact_suffix:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      signed_artifact_name:
+        required: true
+        type: string
+
+jobs:
+  sign:
+    if: inputs.enabled
+    runs-on: ${{ inputs.runner }}
+    environment: release-signing
+    permissions:
+      actions: read
+      contents: read
+
+    steps:
+    - name: Validate release tag
+      shell: bash
+      run: |
+        if [[ "${GITHUB_REF_TYPE}" != 'tag' || ! "${GITHUB_REF_NAME}" =~ ^[0-9]+(\.[0-9]+){2,}(-beta)?$ ]]; then
+          echo "Invalid release tag '${GITHUB_REF_NAME}'." >&2
+          exit 1
+        fi
+
+    - name: Download unsigned DMG
+      uses: actions/download-artifact@v4
+      with:
+        name: ${{ inputs.artifact_name }}
+        path: unsigned
+
+    - name: Import Developer ID certificate
+      shell: bash
+      env:
+        APPLE_SIGNING_CERTIFICATE_BASE64: ${{ secrets.APPLE_SIGNING_CERTIFICATE_BASE64 }}
+        APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
+      run: |
+        set -euo pipefail
+        certificate_path="${RUNNER_TEMP}/developer-id-application.p12"
+        keychain_path="${RUNNER_TEMP}/release-signing.keychain-db"
+
+        if [[ -z "${APPLE_SIGNING_CERTIFICATE_BASE64}" || -z "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" ]]; then
+          echo "The release-signing environment did not provide the Apple signing certificate or password secret." >&2
+          exit 1
+        fi
+        echo "${APPLE_SIGNING_CERTIFICATE_BASE64}" | base64 -D > "${certificate_path}"
+        security create-keychain -p "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" "${keychain_path}"
+        security set-keychain-settings -lut 21600 "${keychain_path}"
+        security unlock-keychain -p "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" "${keychain_path}"
+        security import "${certificate_path}" -f pkcs12 -A -t cert -k "${keychain_path}" -P "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${APPLE_SIGNING_CERTIFICATE_PASSWORD}" "${keychain_path}"
+        security list-keychain -d user -s "${keychain_path}"
+        rm -f "${certificate_path}"
+
+    - name: Extract and sign app bundle
+      shell: bash
+      env:
+        APPLE_DEVELOPER_ID_APPLICATION: ${{ vars.APPLE_DEVELOPER_ID_APPLICATION }}
+      run: |
+        set -euo pipefail
+        unsigned_dmg="$(find unsigned -maxdepth 1 -name '*.dmg' -print -quit)"
+        mount_path="${RUNNER_TEMP}/unsigned-dmg"
+        signed_app_parent="${RUNNER_TEMP}/signed-app"
+
+        test -n "${unsigned_dmg}"
+        test -n "${APPLE_DEVELOPER_ID_APPLICATION}"
+        mkdir -p "${mount_path}" "${signed_app_parent}"
+        hdiutil attach "${unsigned_dmg}" -nobrowse -readonly -mountpoint "${mount_path}"
+        app_path="$(find "${mount_path}" -maxdepth 2 -type d -name '*.app' -print -quit)"
+        test -n "${app_path}"
+        ditto "${app_path}" "${signed_app_parent}/NematXSlicer.app"
+        hdiutil detach "${mount_path}"
+
+        signed_app="${signed_app_parent}/NematXSlicer.app"
+        while IFS= read -r binary; do
+          codesign --force --options runtime --timestamp --sign "${APPLE_DEVELOPER_ID_APPLICATION}" "${binary}"
+        done < <(find "${signed_app}/Contents" -type f -exec file {} \; | awk -F: '/Mach-O/ { print $1 }')
+        codesign --force --options runtime --timestamp --sign "${APPLE_DEVELOPER_ID_APPLICATION}" "${signed_app}"
+        codesign --verify --deep --strict --verbose=2 "${signed_app}"
+
+    - name: Package signed app
+      shell: bash
+      run: |
+        set -euo pipefail
+        signed_app_parent="${RUNNER_TEMP}/signed-app"
+        output_dir="${RUNNER_TEMP}/signed-artifacts"
+        mkdir -p "${output_dir}"
+        hdiutil create -volname NematXSlicer -srcfolder "${signed_app_parent}/NematXSlicer.app" -ov -format UDZO "${output_dir}/NematXSlicer-macOS-${{ inputs.artifact_suffix }}.dmg"
+        tar -czf "${output_dir}/NematXSlicer-macOS-${{ inputs.artifact_suffix }}.tgz" -C "${signed_app_parent}" NematXSlicer.app
+
+    - name: Notarize and staple DMG
+      shell: bash
+      env:
+        APPLE_NOTARY_PRIVATE_KEY_BASE64: ${{ secrets.APPLE_NOTARY_PRIVATE_KEY_BASE64 }}
+        APPLE_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+        APPLE_NOTARY_ISSUER_ID: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+      run: |
+        set -euo pipefail
+        api_key_path="${RUNNER_TEMP}/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+        signed_dmg="${RUNNER_TEMP}/signed-artifacts/NematXSlicer-macOS-${{ inputs.artifact_suffix }}.dmg"
+
+        test -n "${APPLE_NOTARY_KEY_ID}"
+        test -n "${APPLE_NOTARY_ISSUER_ID}"
+        printf '%s' "${APPLE_NOTARY_PRIVATE_KEY_BASE64}" | base64 -D > "${api_key_path}"
+        xcrun notarytool submit "${signed_dmg}" --key "${api_key_path}" --key-id "${APPLE_NOTARY_KEY_ID}" --issuer "${APPLE_NOTARY_ISSUER_ID}" --wait
+        xcrun stapler staple "${signed_dmg}"
+        rm -f "${api_key_path}"
+
+    - name: Verify signed and notarized distribution
+      shell: bash
+      run: |
+        set -euo pipefail
+        signed_dmg="${RUNNER_TEMP}/signed-artifacts/NematXSlicer-macOS-${{ inputs.artifact_suffix }}.dmg"
+        mount_path="${RUNNER_TEMP}/signed-dmg"
+
+        xcrun stapler validate "${signed_dmg}"
+        mkdir -p "${mount_path}"
+        hdiutil attach "${signed_dmg}" -nobrowse -readonly -mountpoint "${mount_path}"
+        signed_app="$(find "${mount_path}" -maxdepth 2 -type d -name '*.app' -print -quit)"
+        test -n "${signed_app}"
+        codesign --verify --deep --strict --verbose=2 "${signed_app}"
+        spctl --assess --type execute --verbose=4 "${signed_app}"
+        hdiutil detach "${mount_path}"
+
+    - name: Upload signed artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.signed_artifact_name }}
+        path: ${{ runner.temp }}/signed-artifacts
