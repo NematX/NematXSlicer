@@ -5,7 +5,10 @@ ProcessorCount(NPROC)
 set(_conf_cmd "./config")
 set(_cross_arch "")
 set(_cross_comp_prefix_line "")
-if (CMAKE_CROSSCOMPILING)
+if (APPLE AND CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
+    set(_conf_cmd "./Configure")
+    set(_cross_arch "darwin64-arm64-cc")
+elseif (CMAKE_CROSSCOMPILING)
     set(_conf_cmd "./Configure")
     set(_cross_comp_prefix_line "--cross-compile-prefix=${TOOLCHAIN_PREFIX}-")
 
@@ -19,8 +22,8 @@ endif ()
 
 ExternalProject_Add(dep_OpenSSL
     EXCLUDE_FROM_ALL ON
-    URL "https://github.com/openssl/openssl/archive/OpenSSL_1_1_0l.tar.gz"
-    URL_HASH SHA256=e2acf0cf58d9bff2b42f2dc0aee79340c8ffe2c5e45d3ca4533dd5d4f5775b1d
+    URL "https://github.com/openssl/openssl/archive/OpenSSL_1_1_1w.tar.gz"
+    URL_HASH SHA256=2130e8c2fb3b79d1086186f78e59e8bc8d1a6aedf17ab3907f4cb9ae20918c41
     DOWNLOAD_DIR ${${PROJECT_NAME}_DEP_DOWNLOAD_DIR}/OpenSSL
     BUILD_IN_SOURCE ON
     CONFIGURE_COMMAND ${_conf_cmd} ${_cross_arch}
