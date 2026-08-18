@@ -1,0 +1,17 @@
+name: Prime shared Windows dependency cache
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Branch, tag, or SHA whose dependency recipes should be cached.
+        required: true
+        type: string
+
+jobs:
+  dependencies:
+    uses: ./.github/workflows/build_windows.yml
+    with:
+      checkout_ref: ${{ inputs.source_ref }}
+      dependencies_only: true
+      package_artifact_name: unused-dependency-primer-artifact
