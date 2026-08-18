@@ -1,0 +1,259 @@
+name: Build Windows package
+
+on:
+  workflow_call:
+    inputs:
+      checkout_ref:
+        default: ''
+        required: false
+        type: string
+      create_unsigned_msi:
+        default: false
+        required: false
+        type: boolean
+      dependencies_only:
+        default: false
+        required: false
+        type: boolean
+      date_version:
+        default: false
+        required: false
+        type: boolean
+      msi_artifact_name:
+        default: ''
+        required: false
+        type: string
+      msi_file_name:
+        default: ''
+        required: false
+        type: string
+      package_artifact_name:
+        required: true
+        type: string
+      release_suffix:
+        default: ''
+        required: false
+        type: string
+
+jobs:
+  build_dep:
+    runs-on: windows-2022
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIR: ${{ github.workspace }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.checkout_ref || github.sha }}
+    - uses: ilammy/msvc-dev-cmd@v1
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+    - name: Reset sccache statistics
+      run: sccache --zero-stats
+    - name: Create dependency build directory
+      run: mkdir deps/build
+    - name: Restore dependency cache
+      id: cache-action
+      uses: actions/cache@v4
+      with:
+        key: windows-deps-v5-${{ hashFiles('deps/CMakeLists.txt', 'deps/autobuild.cmake', 'deps/+Blosc/Blosc.cmake', 'deps/+Boost/Boost.cmake', 'deps/+CGAL/CGAL.cmake', 'deps/+Cereal/Cereal.cmake', 'deps/+Catch2/Catch2.cmake', 'deps/+CURL/CURL.cmake', 'deps/+EXPAT/EXPAT.cmake', 'deps/+GLEW/GLEW.cmake', 'deps/+GMP/GMP.cmake', 'deps/+JPEG/JPEG.cmake', 'deps/+LibBGCode/LibBGCode.cmake', 'deps/+MPFR/MPFR.cmake', 'deps/+NLopt/NLopt.cmake', 'deps/+NanoSVG/NanoSVG.cmake', 'deps/+OCCT/OCCT.cmake', 'deps/+OCCT/occt_toolkit.cmake', 'deps/+OpenCSG/OpenCSG.cmake', 'deps/+OpenEXR/OpenEXR.cmake', 'deps/+OpenSSL/OpenSSL.cmake', 'deps/+OpenVDB/OpenVDB.cmake', 'deps/+PNG/PNG.cmake', 'deps/+Qhull/Qhull.cmake', 'deps/+TBB/TBB.cmake', 'deps/+ZLIB/ZLIB.cmake', 'deps/+heatshrink/CMakeLists.txt', 'deps/+heatshrink/heatshrink.cmake', 'deps/+wxWidgets/wxWidgets.cmake', 'cmake/modules/*.cmake') }}
+        path: deps/build/destdir
+    - name: Report dependency cache result
+      shell: powershell
+      run: |
+        Write-Host "Dependency cache exact hit: ${{ steps.cache-action.outputs.cache-hit }}"
+        Write-Host "Dependency cache key family: windows-deps-v5"
+    - name: Build dependencies
+      if: steps.cache-action.outputs.cache-hit != 'true'
+      working-directory: ./deps/build
+      shell: powershell
+      run: |
+        cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+        if ($LASTEXITCODE -ne 0) { throw 'CMake dependency configuration failed.' }
+
+        $maxAttempts = 3
+        for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+          Write-Host "Building dependencies (attempt $attempt of $maxAttempts)."
+          msbuild /m ALL_BUILD.vcxproj
+          if ($LASTEXITCODE -eq 0) {
+            break
+          }
+
+          if ($attempt -eq $maxAttempts) {
+            throw "Dependency build failed after $maxAttempts attempts."
+          }
+
+          $delaySeconds = 30 * [math]::Pow(2, $attempt - 1)
+          Write-Warning "Dependency build failed; retrying in $delaySeconds seconds to recover transient source-download failures."
+          Start-Sleep -Seconds $delaySeconds
+        }
+    - name: Report sccache statistics
+      if: always()
+      run: sccache --show-stats
+
+  build:
+    if: ${{ !inputs.dependencies_only }}
+    runs-on: windows-2022
+    needs: build_dep
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIR: ${{ github.workspace }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.checkout_ref || github.sha }}
+    - uses: ilammy/msvc-dev-cmd@v1
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+    - name: Reset sccache statistics
+      run: sccache --zero-stats
+    - name: Add date to version
+      if: inputs.date_version
+      shell: powershell
+      run: |
+        copy version.inc version.date.inc
+        (Get-Content version.date.inc) | Foreach-Object {$_ -replace "\+UNKNOWN", ("-" + [datetime]::Today.ToString("yyyy-MM-dd"))} | Set-Content version.date.inc
+    - name: Remove unknown version suffix
+      if: ${{ !inputs.date_version }}
+      shell: powershell
+      run: |
+        copy version.inc version.date.inc
+        (Get-Content version.date.inc) | Foreach-Object {$_ -replace "\+UNKNOWN", ""} | Set-Content version.date.inc
+    - name: Restore dependency cache
+      id: cache-action
+      uses: actions/cache@v4
+      with:
+        key: windows-deps-v5-${{ hashFiles('deps/CMakeLists.txt', 'deps/autobuild.cmake', 'deps/+Blosc/Blosc.cmake', 'deps/+Boost/Boost.cmake', 'deps/+CGAL/CGAL.cmake', 'deps/+Cereal/Cereal.cmake', 'deps/+Catch2/Catch2.cmake', 'deps/+CURL/CURL.cmake', 'deps/+EXPAT/EXPAT.cmake', 'deps/+GLEW/GLEW.cmake', 'deps/+GMP/GMP.cmake', 'deps/+JPEG/JPEG.cmake', 'deps/+LibBGCode/LibBGCode.cmake', 'deps/+MPFR/MPFR.cmake', 'deps/+NLopt/NLopt.cmake', 'deps/+NanoSVG/NanoSVG.cmake', 'deps/+OCCT/OCCT.cmake', 'deps/+OCCT/occt_toolkit.cmake', 'deps/+OpenCSG/OpenCSG.cmake', 'deps/+OpenEXR/OpenEXR.cmake', 'deps/+OpenSSL/OpenSSL.cmake', 'deps/+OpenVDB/OpenVDB.cmake', 'deps/+PNG/PNG.cmake', 'deps/+Qhull/Qhull.cmake', 'deps/+TBB/TBB.cmake', 'deps/+ZLIB/ZLIB.cmake', 'deps/+heatshrink/CMakeLists.txt', 'deps/+heatshrink/heatshrink.cmake', 'deps/+wxWidgets/wxWidgets.cmake', 'cmake/modules/*.cmake') }}
+        path: deps/build/destdir
+    - name: Report dependency cache result
+      shell: powershell
+      run: |
+        Write-Host "Dependency cache exact hit: ${{ steps.cache-action.outputs.cache-hit }}"
+        Write-Host "Dependency cache key family: windows-deps-v5"
+    - name: Create gettext directory
+      shell: powershell
+      run: New-Item -ItemType Directory -Force msgfmt_bin | Out-Null
+    - name: Download gettext
+      working-directory: ./msgfmt_bin
+      shell: powershell
+      run: |
+        (new-object System.Net.WebClient).DownloadFile("https://github.com/supermerill/SuperSlicer_deps/releases/download/gettext/gettext-tools-static-0.18.1.1.zip", "gettext.zip")
+    - name: Extract gettext
+      working-directory: ./msgfmt_bin
+      shell: cmd
+      run: '"C:/Program Files/7-Zip/7z.exe" x gettext.zip'
+    - name: Add msgfmt to path
+      shell: powershell
+      working-directory: msgfmt_bin
+      run: echo "$pwd;" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+    - name: Create build directory
+      shell: powershell
+      run: New-Item -ItemType Directory -Force build | Out-Null
+    - name: Configure build
+      working-directory: ./build
+      run: |
+        cmake .. -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="$env:GITHUB_WORKSPACE\deps\build\destdir\usr\local" -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+    - name: Build slicer
+      working-directory: ./build
+      run: msbuild /m /P:Configuration=Release INSTALL.vcxproj
+    - name: Build translations
+      working-directory: ./build
+      run: |
+        msbuild /m /P:Configuration=Release gettext_po_to_mo.vcxproj
+        msbuild /m /P:Configuration=Release gettext_make_pot.vcxproj
+    - name: Build OCCT wrapper
+      working-directory: ./build
+      run: msbuild /m /P:Configuration=Release src\occt_wrapper\OCCTWrapper.vcxproj
+    - name: Copy runtime DLLs
+      working-directory: ./build
+      run: msbuild /m /P:Configuration=Release src\slic3rDllsCopy.vcxproj
+    - name: Create package directory
+      working-directory: ./build
+      shell: powershell
+      run: New-Item -ItemType Directory -Force package | Out-Null
+    - name: Download legacy DLL package
+      working-directory: ./build
+      shell: powershell
+      run: '(new-object System.Net.WebClient).DownloadFile("https://github.com/supermerill/SuperSlicer_deps/releases/download/1.8/Slic3r_win_build.zip", "Slic3r_win_build.zip")'
+    - name: Extract legacy DLL package
+      working-directory: ./build
+      shell: cmd
+      run: '"C:/Program Files/7-Zip/7z.exe" x Slic3r_win_build.zip'
+    - name: Copy legacy DLL content
+      working-directory: ./build
+      shell: cmd
+      run: |
+        xcopy /RCYIE Slic3r_win_build\local-settings.bat package\${{ github.event.repository.name }}_local-settings.bat
+        xcopy /RCYIE Slic3r_win_build\mesa package\
+    - name: Copy resources and profiles
+      working-directory: ./build
+      shell: cmd
+      run: |
+        xcopy /RCYIE ..\resources package\resources
+        del /S /Q package\resources\localization\*.so
+        python ..\src\platform\download_vendor_bundles.py package/resources
+    - name: Copy executables and libraries
+      working-directory: ./build
+      shell: cmd
+      run: |
+        xcopy /RCYIE src\release\*.dll package\
+        xcopy /RCYIE src\release\*.exe package\
+        xcopy /RCYIE c:\windows\system32\VCRUNTIME140* package\
+        xcopy /RCYIE c:\windows\system32\msvcp140* package\
+        del package\opengl32.dll
+    - name: Upload package artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.package_artifact_name }}
+        path: build/package/
+    - name: Install WiX Toolset
+      if: inputs.create_unsigned_msi
+      run: choco install wixtoolset -y
+    - name: Prepare license file for MSI
+      if: inputs.create_unsigned_msi
+      shell: powershell
+      working-directory: ./build
+      run: |
+        $licenseContent = Get-Content ..\LICENSE -Raw
+        $rtfContent = "{\rtf1\ansi\deff0 {\fonttbl {\f0 Times New Roman;}}{\f0\fs20 " + $licenseContent.Replace('\', '\\').Replace("`n", "\par ") + "}}"
+        $rtfContent | Out-File -FilePath "package\LICENSE.rtf" -Encoding ASCII
+    - name: Harvest files for MSI
+      if: inputs.create_unsigned_msi
+      shell: cmd
+      working-directory: ./build
+      run: heat.exe dir package -dr INSTALLFOLDER -cg Package -gg -sreg -srd -var var.SourceDir -out files.wxs -sfrag
+    - name: Generate installer version
+      if: inputs.create_unsigned_msi && inputs.date_version
+      shell: powershell
+      run: |
+        $fullVersion = (Get-Content version.inc | Select-String -Pattern 'set\(SLIC3R_RC_VERSION_DOTS "(.*?)"\)' | ForEach-Object { $_.Matches.Groups[1].Value })
+        $dateSuffix = Get-Date -Format 'yyMMdd'
+        $installerVersion = "$fullVersion$dateSuffix" -replace '\.[0-9]([+-].+)?', '.0'
+        if ([string]::IsNullOrWhiteSpace($installerVersion)) { throw 'Installer version could not be determined.' }
+        "InstallerVersion=$installerVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    - name: Generate release installer version
+      if: inputs.create_unsigned_msi && !inputs.date_version
+      shell: powershell
+      run: |
+        $fullVersion = (Get-Content version.inc | Select-String -Pattern 'set\(SLIC3R_RC_VERSION_DOTS "(.*?)"\)' | ForEach-Object { $_.Matches.Groups[1].Value })
+        $installerVersion = "$fullVersion" -replace '\.[0-9]([+-].+)?', '.0'
+        if ([string]::IsNullOrWhiteSpace($installerVersion)) { throw 'Installer version could not be determined.' }
+        "InstallerVersion=$installerVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+    - name: Build MSI installer
+      if: inputs.create_unsigned_msi
+      shell: cmd
+      working-directory: ./build
+      run: |
+        set MSIFileName=${{ github.event.repository.name }}_%InstallerVersion%.msi
+        candle.exe -dSourceDir="package" -dInstallerVersion="%InstallerVersion%" -dReleaseSuffix="${{ inputs.release_suffix }}" src\winInstaller.wxs files.wxs
+        light.exe -b package -ext WixUIExtension winInstaller.wixobj files.wixobj -o %MSIFileName% -sw1076
+        copy %MSIFileName% "${{ inputs.msi_file_name }}"
+    - name: Upload unsigned MSI artifact
+      if: inputs.create_unsigned_msi
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.msi_artifact_name }}
+        path: build/${{ inputs.msi_file_name }}
+    - name: Report sccache statistics
+      if: always()
+      run: sccache --show-stats

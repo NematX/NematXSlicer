@@ -1,0 +1,144 @@
+name: Build macOS package
+
+on:
+  workflow_call:
+    inputs:
+      architecture:
+        required: true
+        type: string
+      checkout_ref:
+        default: ''
+        required: false
+        type: string
+      dependency_build_args:
+        required: true
+        type: string
+      dependencies_only:
+        default: false
+        required: false
+        type: boolean
+      package_build_args:
+        required: true
+        type: string
+      dmg_artifact_name:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      tgz_artifact_name:
+        required: true
+        type: string
+      use_texinfo:
+        default: false
+        required: false
+        type: boolean
+
+jobs:
+  build_dep:
+    runs-on: ${{ inputs.runner }}
+    env:
+      CMAKE_EXTRA_ARGS: -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIR: ${{ github.workspace }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.checkout_ref || github.sha }}
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+    - name: Reset sccache statistics
+      run: sccache --zero-stats
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: "3.31.x"
+    - name: Install Autoconf
+      run: |
+        brew update
+        brew install autoconf
+    - name: Install Automake
+      run: |
+        curl -O -L https://github.com/supermerill/SuperSlicer_deps/releases/download/automake/automake-1.16.5.tar.gz
+        tar -xzf automake-1.16.5.tar.gz
+        cd automake-*
+        ./configure
+        make
+        sudo make install
+    - name: Install makeinfo
+      if: inputs.use_texinfo
+      run: brew install texinfo
+    - name: Create dependency build directory
+      run: mkdir deps/build
+    - name: Restore dependency cache
+      id: cache-action
+      uses: actions/cache@v4
+      with:
+        key: macos-${{ inputs.architecture }}-deps-v4-${{ hashFiles('deps/CMakeLists.txt', 'deps/autobuild.cmake', 'deps/+Blosc/Blosc.cmake', 'deps/+Boost/Boost.cmake', 'deps/+CGAL/CGAL.cmake', 'deps/+Cereal/Cereal.cmake', 'deps/+Catch2/Catch2.cmake', 'deps/+CURL/CURL.cmake', 'deps/+EXPAT/EXPAT.cmake', 'deps/+GLEW/GLEW.cmake', 'deps/+GMP/GMP.cmake', 'deps/+JPEG/JPEG.cmake', 'deps/+LibBGCode/LibBGCode.cmake', 'deps/+MPFR/MPFR.cmake', 'deps/+NLopt/NLopt.cmake', 'deps/+NanoSVG/NanoSVG.cmake', 'deps/+OCCT/OCCT.cmake', 'deps/+OCCT/occt_toolkit.cmake', 'deps/+OpenCSG/OpenCSG.cmake', 'deps/+OpenEXR/OpenEXR.cmake', 'deps/+OpenSSL/OpenSSL.cmake', 'deps/+OpenVDB/OpenVDB.cmake', 'deps/+PNG/PNG.cmake', 'deps/+Qhull/Qhull.cmake', 'deps/+TBB/TBB.cmake', 'deps/+ZLIB/ZLIB.cmake', 'deps/+heatshrink/CMakeLists.txt', 'deps/+heatshrink/heatshrink.cmake', 'deps/+wxWidgets/wxWidgets.cmake', 'cmake/modules/*.cmake') }}
+        path: deps/build/destdir
+    - name: Report dependency cache result
+      run: |
+        echo "Dependency cache exact hit: ${{ steps.cache-action.outputs.cache-hit }}"
+        echo "Dependency cache key family: macos-${{ inputs.architecture }}-deps-v4"
+    - name: Build dependencies
+      if: steps.cache-action.outputs.cache-hit != 'true'
+      run: ./BuildMacOS.sh ${{ inputs.dependency_build_args }}
+
+  build:
+    if: ${{ !inputs.dependencies_only }}
+    runs-on: ${{ inputs.runner }}
+    needs: build_dep
+    env:
+      CMAKE_EXTRA_ARGS: -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIR: ${{ github.workspace }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.checkout_ref || github.sha }}
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: "3.31.x"
+    - name: Install Autoconf
+      run: |
+        brew update
+        brew install autoconf
+    - name: Install Automake
+      run: |
+        curl -O -L https://github.com/supermerill/SuperSlicer_deps/releases/download/automake/automake-1.16.5.tar.gz
+        tar -xzf automake-1.16.5.tar.gz
+        cd automake-*
+        ./configure
+        make
+        sudo make install
+    - name: Install makeinfo
+      if: inputs.use_texinfo
+      run: brew install texinfo
+    - name: Restore dependency cache
+      id: cache-action
+      uses: actions/cache@v4
+      with:
+        key: macos-${{ inputs.architecture }}-deps-v4-${{ hashFiles('deps/CMakeLists.txt', 'deps/autobuild.cmake', 'deps/+Blosc/Blosc.cmake', 'deps/+Boost/Boost.cmake', 'deps/+CGAL/CGAL.cmake', 'deps/+Cereal/Cereal.cmake', 'deps/+Catch2/Catch2.cmake', 'deps/+CURL/CURL.cmake', 'deps/+EXPAT/EXPAT.cmake', 'deps/+GLEW/GLEW.cmake', 'deps/+GMP/GMP.cmake', 'deps/+JPEG/JPEG.cmake', 'deps/+LibBGCode/LibBGCode.cmake', 'deps/+MPFR/MPFR.cmake', 'deps/+NLopt/NLopt.cmake', 'deps/+NanoSVG/NanoSVG.cmake', 'deps/+OCCT/OCCT.cmake', 'deps/+OCCT/occt_toolkit.cmake', 'deps/+OpenCSG/OpenCSG.cmake', 'deps/+OpenEXR/OpenEXR.cmake', 'deps/+OpenSSL/OpenSSL.cmake', 'deps/+OpenVDB/OpenVDB.cmake', 'deps/+PNG/PNG.cmake', 'deps/+Qhull/Qhull.cmake', 'deps/+TBB/TBB.cmake', 'deps/+ZLIB/ZLIB.cmake', 'deps/+heatshrink/CMakeLists.txt', 'deps/+heatshrink/heatshrink.cmake', 'deps/+wxWidgets/wxWidgets.cmake', 'cmake/modules/*.cmake') }}
+        path: deps/build/destdir
+    - name: Report dependency cache result
+      run: |
+        echo "Dependency cache exact hit: ${{ steps.cache-action.outputs.cache-hit }}"
+        echo "Dependency cache key family: macos-${{ inputs.architecture }}-deps-v4"
+    - name: Build slicer
+      run: ./BuildMacOS.sh ${{ inputs.package_build_args }}
+    - name: Upload DMG
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.dmg_artifact_name }}
+        path: build/${{ github.event.repository.name }}-macOS-${{ inputs.architecture }}.dmg
+    - name: Upload TGZ
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.tgz_artifact_name }}
+        path: build/${{ github.event.repository.name }}-macOS-${{ inputs.architecture }}.tgz
+    - name: Report sccache statistics
+      if: always()
+      run: sccache --show-stats
