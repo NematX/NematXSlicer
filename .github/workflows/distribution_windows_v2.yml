@@ -1,0 +1,63 @@
+name: Windows nightly and release candidate v2
+
+on:
+  push:
+    branches:
+      - Nigthly
+      - nightly_dev
+      - nightly_master
+      - nightly_2.7.63
+      - debug_win
+      - nightly_win
+      - beta
+      - stable
+      - rc
+      - beta-rc
+      - stable-rc
+    tags:
+      - '*.*.*'
+  workflow_dispatch:
+
+jobs:
+  nightly:
+    if: github.ref_type == 'branch' && contains(fromJSON('["Nigthly","nightly_dev","nightly_master","nightly_2.7.63","debug_win","nightly_win","beta","stable"]'), github.ref_name)
+    uses: ./.github/workflows/build_windows.yml
+    with:
+      create_unsigned_msi: true
+      date_version: true
+      package_artifact_name: nightly_${{ github.event.repository.name }}-win64
+      msi_artifact_name: nightly_${{ github.event.repository.name }}-win64.msi
+      msi_file_name: nightly_${{ github.event.repository.name }}-win64.msi
+      release_suffix: -Beta-Nightly
+  release-candidate:
+    if: github.ref_type == 'branch' && contains(fromJSON('["rc","debug_win","beta-rc","stable-rc"]'), github.ref_name)
+    uses: ./.github/workflows/build_windows.yml
+    with:
+      create_unsigned_msi: true
+      date_version: false
+      package_artifact_name: rc_${{ github.event.repository.name }}-win64
+      msi_artifact_name: rc_${{ github.event.repository.name }}-win64.msi
+      msi_file_name: rc_${{ github.event.repository.name }}-win64.msi
+      release_suffix: ''
+  release-build:
+    if: github.ref_type == 'tag'
+    uses: ./.github/workflows/build_windows.yml
+    with:
+      create_unsigned_msi: true
+      date_version: false
+      package_artifact_name: release_${{ github.event.repository.name }}-win64
+      msi_artifact_name: release_${{ github.event.repository.name }}-win64.msi
+      msi_file_name: release_${{ github.event.repository.name }}-win64.msi
+      release_suffix: ''
+  sign-release:
+    if: github.ref_type == 'tag'
+    needs: release-build
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/sign_windows.yml
+    with:
+      artifact_name: release_${{ github.event.repository.name }}-win64
+      msi_artifact_name: release_${{ github.event.repository.name }}-win64.msi
+      signed_artifact_name: signed_${{ github.event.repository.name }}-win64
