@@ -1,0 +1,31 @@
+name: CI Ubuntu v2
+
+on:
+  push:
+    branches:
+      - ci/code-signing
+  workflow_dispatch:
+
+concurrency:
+  group: ci-ubuntu-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - build_args: g
+            gtk_package: libgtk2.0-dev
+            gtk_version: '2'
+          - build_args: ''
+            gtk_package: libgtk-3-dev
+            gtk_version: '3'
+    uses: ./.github/workflows/build_ubuntu.yml
+    with:
+      appimage_artifact_name: ci-v2-${{ github.event.repository.name }}-linux-x64-GTK${{ matrix.gtk_version }}.AppImage
+      build_args: ${{ matrix.build_args }}
+      gtk_package: ${{ matrix.gtk_package }}
+      gtk_version: ${{ matrix.gtk_version }}
+      tgz_artifact_name: ci-v2-${{ github.event.repository.name }}-linux-x64-GTK${{ matrix.gtk_version }}.tgz

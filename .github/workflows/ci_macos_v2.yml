@@ -1,0 +1,37 @@
+name: CI macOS v2
+
+on:
+  push:
+    branches:
+      - ci/code-signing
+  workflow_dispatch:
+
+concurrency:
+  group: ci-macos-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - architecture: arm
+            runner: macos-14
+            dependency_build_args: -ad
+            package_build_args: -asiv
+            use_texinfo: false
+          - architecture: intel
+            runner: macos-15-intel
+            dependency_build_args: -xd
+            package_build_args: -xsiv
+            use_texinfo: true
+    uses: ./.github/workflows/build_macos.yml
+    with:
+      architecture: ${{ matrix.architecture }}
+      dependency_build_args: ${{ matrix.dependency_build_args }}
+      package_build_args: ${{ matrix.package_build_args }}
+      dmg_artifact_name: ci-v2-${{ github.event.repository.name }}-macOS-${{ matrix.architecture }}.dmg
+      runner: ${{ matrix.runner }}
+      tgz_artifact_name: ci-v2-${{ github.event.repository.name }}-macOS-${{ matrix.architecture }}.tgz
+      use_texinfo: ${{ matrix.use_texinfo }}

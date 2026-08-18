@@ -1,0 +1,19 @@
+name: CI Windows v2
+
+on:
+  push:
+    branches:
+      - ci/code-signing
+  workflow_dispatch:
+
+concurrency:
+  group: ci-windows-v2-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/build_windows.yml
+    with:
+      create_unsigned_msi: false
+      date_version: true
+      package_artifact_name: ci-v2-${{ github.event.repository.name }}-win64

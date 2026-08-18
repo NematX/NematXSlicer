@@ -1,0 +1,96 @@
+name: Build Ubuntu package
+
+on:
+  workflow_call:
+    inputs:
+      appimage_artifact_name:
+        required: true
+        type: string
+      build_args:
+        required: true
+        type: string
+      checkout_ref:
+        default: ''
+        required: false
+        type: string
+      date_version:
+        default: true
+        required: false
+        type: boolean
+      dependencies_only:
+        default: false
+        required: false
+        type: boolean
+      gtk_package:
+        required: true
+        type: string
+      gtk_version:
+        required: true
+        type: string
+      tgz_artifact_name:
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      CMAKE_EXTRA_ARGS: -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIR: ${{ github.workspace }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ inputs.checkout_ref || github.sha }}
+    - name: Setup sccache
+      uses: mozilla-actions/sccache-action@v0.0.11
+    - name: Reset sccache statistics
+      run: sccache --zero-stats
+    - name: Setup CMake
+      uses: jwlawson/actions-setup-cmake@v2
+      with:
+        cmake-version: '3.16.x'
+    - name: Install GTK dependencies
+      run: |
+        sudo apt update
+        sudo apt install --yes ${{ inputs.gtk_package }}
+        sudo ./BuildLinux.sh -u
+    - name: Restore dependency cache
+      id: cache-action
+      uses: actions/cache@v4
+      with:
+        key: ubuntu-gtk${{ inputs.gtk_version }}-deps-v4-${{ hashFiles('deps/CMakeLists.txt', 'deps/autobuild.cmake', 'deps/+Blosc/Blosc.cmake', 'deps/+Boost/Boost.cmake', 'deps/+CGAL/CGAL.cmake', 'deps/+Cereal/Cereal.cmake', 'deps/+Catch2/Catch2.cmake', 'deps/+CURL/CURL.cmake', 'deps/+EXPAT/EXPAT.cmake', 'deps/+GLEW/GLEW.cmake', 'deps/+GMP/GMP.cmake', 'deps/+JPEG/JPEG.cmake', 'deps/+LibBGCode/LibBGCode.cmake', 'deps/+MPFR/MPFR.cmake', 'deps/+NLopt/NLopt.cmake', 'deps/+NanoSVG/NanoSVG.cmake', 'deps/+OCCT/OCCT.cmake', 'deps/+OCCT/occt_toolkit.cmake', 'deps/+OpenCSG/OpenCSG.cmake', 'deps/+OpenEXR/OpenEXR.cmake', 'deps/+OpenSSL/OpenSSL.cmake', 'deps/+OpenVDB/OpenVDB.cmake', 'deps/+PNG/PNG.cmake', 'deps/+Qhull/Qhull.cmake', 'deps/+TBB/TBB.cmake', 'deps/+ZLIB/ZLIB.cmake', 'deps/+heatshrink/CMakeLists.txt', 'deps/+heatshrink/heatshrink.cmake', 'deps/+wxWidgets/wxWidgets.cmake', 'cmake/modules/*.cmake') }}
+        path: deps/build/destdir
+    - name: Report dependency cache result
+      run: |
+        echo "Dependency cache exact hit: ${{ steps.cache-action.outputs.cache-hit }}"
+        echo "Dependency cache key family: ubuntu-gtk${{ inputs.gtk_version }}-deps-v4"
+    - name: Build dependencies
+      if: steps.cache-action.outputs.cache-hit != 'true'
+      run: ./BuildLinux.sh -${{ inputs.build_args }}d
+    - name: Build slicer, TGZ, and AppImage
+      if: ${{ !inputs.dependencies_only }}
+      shell: bash
+      run: |
+        version_arg=''
+        if [[ '${{ inputs.date_version }}' == 'true' ]]; then
+          version_arg='v'
+        fi
+        ./BuildLinux.sh -${{ inputs.build_args }}si${version_arg}
+    - name: Upload TGZ
+      if: ${{ !inputs.dependencies_only }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.tgz_artifact_name }}
+        path: build/${{ github.event.repository.name }}-linux-x64-GTK${{ inputs.gtk_version }}.tgz
+        if-no-files-found: error
+    - name: Upload AppImage
+      if: ${{ !inputs.dependencies_only }}
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.appimage_artifact_name }}
+        path: build/${{ github.event.repository.name }}-linux-x64-GTK${{ inputs.gtk_version }}.AppImage
+        if-no-files-found: error
+    - name: Report sccache statistics
+      if: always()
+      run: sccache --show-stats
