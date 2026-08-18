@@ -76,6 +76,7 @@ fi
 
 BUILD_ARCH="x86_64"
 BUILD_ARCH_x86="x86_64"
+MACOS_DEPLOYMENT_TARGET="10.14"
 
 while getopts ":idaxbhcsltwrv" opt; do
   case ${opt} in
@@ -88,6 +89,7 @@ while getopts ":idaxbhcsltwrv" opt; do
     a )
         BUILD_ARCH="arm64"
         BUILD_IMG_ARCH="-a"
+        MACOS_DEPLOYMENT_TARGET="11.0"
         ;;
     x )
         BUILD_ARCH="x86_64"
@@ -261,11 +263,11 @@ then
     # cmake deps
     if [[ "$BUILD_ARCH" == "$BUILD_ARCH_x86" ]]
     then
-        echo "Cmake command: cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET=\"10.14\" ${BUILD_ARCH} "
-        cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET="10.14" $BUILD_ARGS
+        echo "Cmake command: cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET=\"${MACOS_DEPLOYMENT_TARGET}\" ${BUILD_ARCH} "
+        cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" $BUILD_ARGS
     else
-        echo "Cmake command: cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET=\"10.14\" ${BUILD_ARCH} "
-        cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET="10.14" $BUILD_ARGS
+        echo "Cmake command: cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET=\"${MACOS_DEPLOYMENT_TARGET}\" ${BUILD_ARCH} "
+        cmake .. -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" $BUILD_ARGS
     fi
     if [ $? -eq 0 ]
     then
@@ -405,9 +407,9 @@ then
     pushd build > /dev/null
     if [[ "$BUILD_ARCH" == "$BUILD_ARCH_x86" ]]
     then
-        cmake .. -DCMAKE_PREFIX_PATH="$PWD/../deps/build/destdir/usr/local" -DCMAKE_OSX_DEPLOYMENT_TARGET="10.14" -DSLIC3R_STATIC=1 ${BUILD_ARGS}
+        cmake .. -DCMAKE_PREFIX_PATH="$PWD/../deps/build/destdir/usr/local" -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" -DSLIC3R_STATIC=1 ${BUILD_ARGS}
     else
-        cmake .. -DCMAKE_PREFIX_PATH="$PWD/../deps/build/destdir/usr/local" -DCMAKE_OSX_DEPLOYMENT_TARGET="10.14" -DSLIC3R_STATIC=1 ${BUILD_ARGS}
+        cmake .. -DCMAKE_PREFIX_PATH="$PWD/../deps/build/destdir/usr/local" -DCMAKE_OSX_DEPLOYMENT_TARGET="${MACOS_DEPLOYMENT_TARGET}" -DSLIC3R_STATIC=1 ${BUILD_ARGS}
     fi
     if [ $? -eq 0 ]
     then
