@@ -43,6 +43,34 @@ jobs:
       runner: macos-15-intel
       tgz_artifact_name: nightly_${{ github.event.repository.name }}-macOS-intel.tgz
       use_texinfo: true
+  sign-beta-arm:
+    if: github.ref_type == 'branch' && github.ref_name == 'beta'
+    needs: nightly-arm
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/sign_macos.yml
+    secrets: inherit
+    with:
+      allow_beta_branch: true
+      artifact_name: nightly_${{ github.event.repository.name }}-macOS-arm.dmg
+      artifact_suffix: arm
+      runner: macos-14
+      signed_artifact_name: signed_nightly_${{ github.event.repository.name }}-macOS-arm
+  sign-beta-intel:
+    if: github.ref_type == 'branch' && github.ref_name == 'beta'
+    needs: nightly-intel
+    permissions:
+      actions: read
+      contents: read
+    uses: ./.github/workflows/sign_macos.yml
+    secrets: inherit
+    with:
+      allow_beta_branch: true
+      artifact_name: nightly_${{ github.event.repository.name }}-macOS-intel.dmg
+      artifact_suffix: intel
+      runner: macos-15-intel
+      signed_artifact_name: signed_nightly_${{ github.event.repository.name }}-macOS-intel
   rc-arm:
     if: github.ref_type == 'branch' && contains(fromJSON('["rc","beta-rc","stable-rc"]'), github.ref_name)
     uses: ./.github/workflows/build_macos.yml
