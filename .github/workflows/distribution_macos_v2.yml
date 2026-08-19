@@ -53,6 +53,7 @@ jobs:
     secrets: inherit
     with:
       allow_beta_branch: true
+      enabled: true
       artifact_name: nightly_${{ github.event.repository.name }}-macOS-arm.dmg
       artifact_suffix: arm
       runner: macos-14
@@ -67,6 +68,7 @@ jobs:
     secrets: inherit
     with:
       allow_beta_branch: true
+      enabled: true
       artifact_name: nightly_${{ github.event.repository.name }}-macOS-intel.dmg
       artifact_suffix: intel
       runner: macos-15-intel
