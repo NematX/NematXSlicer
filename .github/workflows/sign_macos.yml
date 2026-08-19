@@ -10,6 +10,10 @@ on:
       artifact_name:
         required: true
         type: string
+      allow_beta_branch:
+        default: false
+        required: false
+        type: boolean
       artifact_suffix:
         required: true
         type: string
@@ -30,13 +34,20 @@ jobs:
       contents: read
 
     steps:
-    - name: Validate release tag
+    - name: Validate signing ref
       shell: bash
+      env:
+        ALLOW_BETA_BRANCH: ${{ inputs.allow_beta_branch }}
       run: |
-        if [[ "${GITHUB_REF_TYPE}" != 'tag' || ! "${GITHUB_REF_NAME}" =~ ^[0-9]+(\.[0-9]+){2,}(-beta)?$ ]]; then
-          echo "Invalid release tag '${GITHUB_REF_NAME}'." >&2
-          exit 1
+        set -euo pipefail
+        if [[ "${GITHUB_REF_TYPE}" == 'tag' && "${GITHUB_REF_NAME}" =~ ^[0-9]+(\.[0-9]+){2,}(-beta)?$ ]]; then
+          exit 0
         fi
+        if [[ "${ALLOW_BETA_BRANCH}" == 'true' && "${GITHUB_REF_TYPE}" == 'branch' && "${GITHUB_REF_NAME}" == 'beta' ]]; then
+          exit 0
+        fi
+        echo "Signing is permitted only for a version tag or the beta branch." >&2
+        exit 1
 
     - name: Download unsigned DMG
       uses: actions/download-artifact@v4
