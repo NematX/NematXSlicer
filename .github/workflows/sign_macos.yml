@@ -148,8 +148,13 @@ jobs:
         spctl --assess --type execute --verbose=4 "${signed_app}"
         hdiutil detach "${mount_path}"
 
-    - name: Upload signed artifacts
+    - name: Upload signed DMG
       uses: actions/upload-artifact@v4
       with:
-        name: ${{ inputs.signed_artifact_name }}
-        path: ${{ runner.temp }}/signed-artifacts
+        name: ${{ inputs.signed_artifact_name }}.dmg
+        path: ${{ runner.temp }}/signed-artifacts/NematXSlicer-macOS-${{ inputs.artifact_suffix }}.dmg
+    - name: Upload signed TGZ
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.signed_artifact_name }}.tgz
+        path: ${{ runner.temp }}/signed-artifacts/NematXSlicer-macOS-${{ inputs.artifact_suffix }}.tgz
