@@ -1,6 +1,7 @@
 // Configuration inventory uses isolated directories; preference checks use in-memory AppConfig methods without the GUI installation chooser.
 #include <catch_main.hpp>
 #include "libslic3r/Config/AppConfig.hpp"
+#include "libslic3r/Semver.hpp"
 #include "libslic3r_version.h"
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -52,6 +53,19 @@ bool same_path(fs::path first, fs::path second)
 {
     return first.lexically_normal().make_preferred() == second.lexically_normal().make_preferred();
 }
+}
+
+TEST_CASE("Copied prerelease versions remain comparable", "[Version]")
+{
+    using Slic3r::Semver;
+    const Semver copied_version = [] {
+        const Semver source_version("2.7.63.4-beta-2026-08-19+build.19");
+        return Semver(source_version);
+    }();
+
+    REQUIRE(copied_version == *Semver::parse("2.7.63.4-beta-2026-08-19"));
+    REQUIRE(copied_version < *Semver::parse("2.7.63.4"));
+    REQUIRE(copied_version.to_string() == "2.7.63.4-beta-2026-08-19+build.19");
 }
 
 TEST_CASE("Font size defaults preserve historical integer parsing", "[AppConfig][font_size]")
