@@ -81,3 +81,15 @@ TEST_CASE("Check parsing and comparing of config versions", "[Version]") {
     REQUIRE(! v.is_slic3r_supported(*Semver::parse("1.38.0-alpha1")));
     REQUIRE(! v.is_slic3r_supported(*Semver::parse("1.37.0-alpha")));
 }
+
+TEST_CASE("Copied prerelease versions remain comparable", "[Version]") {
+    using namespace Slic3r;
+
+    Semver copied_version = [&] {
+        Semver source_version("2.7.63.4-beta-2026-08-19");
+        return Semver(source_version);
+    }();
+
+    REQUIRE(copied_version == *Semver::parse("2.7.63.4-beta-2026-08-19"));
+    REQUIRE(copied_version < *Semver::parse("2.7.63.4"));
+}

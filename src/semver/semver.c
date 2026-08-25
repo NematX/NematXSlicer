@@ -683,10 +683,10 @@ semver_t
 semver_copy(const semver_t *ver) {
   semver_t res = *ver;
   if (ver->metadata != NULL) {
-    res.metadata = strdup(ver->metadata);
+    res.metadata = semver_strdup(ver->metadata);
   }
   if (ver->prerelease != NULL) {
-      res.prerelease = strdup(ver->prerelease);
+      res.prerelease = semver_strdup(ver->prerelease);
   }
   if (ver->counters != NULL) {
       res.counters = semver_intdup(ver->counters, ver->counter_size);
