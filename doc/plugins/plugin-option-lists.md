@@ -84,14 +84,14 @@ therefore deterministic, but they are not detected as errors.
 
 ## GUI rules
 
-Pattern lists publish their activation rules where the setting is defined.
-Because a plugin-id enum stores ids, use `STRING_EQUALS` instead of an integer
-enum comparison:
+Pattern lists publish an activation reason for each target where the setting is
+defined. Because a plugin-id enum stores ids, use `STRING_EQUALS` instead of an
+integer enum comparison. The activation group of a rule derives from its target
+setting, so no group is declared:
 
 ```cpp
-GuiRule::enable_any({ "solid_fill_pattern" })
+GuiRule::activate({ "solid_fill_pattern" })
     .when(has_solid)
     .scope(RAW_PRESET_TYPE_FFF_PRINT)
-    .group(FFF_PRINT_GUI_RULE_GROUP)
     .add_to(orchestrator);
 ```
