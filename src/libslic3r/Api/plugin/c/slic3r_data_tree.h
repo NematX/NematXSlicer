@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 4u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 4u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 5u
 
 /*
 Data-tree access for a sliced Print.
@@ -171,6 +171,9 @@ typedef uint16_t raw_surface_type;
 
 /* Second layer over bridge */
 #define RAW_SURFACE_TYPE_MOD_OVERBRIDGE (1 << 8)
+
+/* Support modifier: the surface belongs to a support auxiliary layer (support base or interface), not to the object. */
+#define RAW_SURFACE_TYPE_MOD_SUPPORT (1 << 9)
 
 /* Check if flag is set */
 #define RAW_SURFACE_TYPE_HAS(type, flag) (((type) & (flag)) != 0)

@@ -41,7 +41,7 @@ C++ convenience builder for raw_surface_type.
 It enforces the expected order at compile time:
 1. choose exactly one position: top(), bottom(), internal(), perimeter()
 2. choose exactly one density: solid(), sparse(), empty()
-3. optionally add modifiers: bridge(), overbridge()
+3. optionally add modifiers: bridge(), overbridge(), support()
 
 Use raw() or operator() to retrieve the final C ABI bitmask.
 
@@ -63,6 +63,12 @@ public:
     constexpr srf_type_modifiers overbridge() const
     {
         return srf_type_modifiers(raw_surface_type(m_value | RAW_SURFACE_TYPE_MOD_OVERBRIDGE));
+    }
+
+    // Add membership in a support auxiliary layer without changing position or density.
+    constexpr srf_type_modifiers support() const
+    {
+        return srf_type_modifiers(raw_surface_type(m_value | RAW_SURFACE_TYPE_MOD_SUPPORT));
     }
 
     constexpr raw_surface_type raw() const { return m_value; }
@@ -135,7 +141,8 @@ inline constexpr raw_surface_type k_surface_type_density_flags =
 
 inline constexpr raw_surface_type k_surface_type_modifier_flags =
     RAW_SURFACE_TYPE_MOD_BRIDGE |
-    RAW_SURFACE_TYPE_MOD_OVERBRIDGE;
+    RAW_SURFACE_TYPE_MOD_OVERBRIDGE |
+    RAW_SURFACE_TYPE_MOD_SUPPORT;
 
 // raw_surface_type is a bitmask. These helpers keep plugins readable and avoid
 // repeating ad-hoc `(type & flag)` expressions with slightly different names.
@@ -234,6 +241,12 @@ constexpr bool surface_type_is_bridge(raw_surface_type type)
 constexpr bool surface_type_is_overbridge(raw_surface_type type)
 {
     return surface_type_has_flag(type, RAW_SURFACE_TYPE_MOD_OVERBRIDGE);
+}
+
+// Test whether the type marks support auxiliary geometry.
+constexpr bool surface_type_is_support(raw_surface_type type)
+{
+    return surface_type_has_flag(type, RAW_SURFACE_TYPE_MOD_SUPPORT);
 }
 
 class Surface

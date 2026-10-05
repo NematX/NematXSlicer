@@ -340,6 +340,7 @@ A collection is either temporary in the storage, or embedded in a region-island.
 | `SurfaceCollection::surfaces` | Create/append/clear on a mutable collection; publication by moving the content | Published source collection then read by consumers; the source handle stays with its storage |
 | `Surface::m_id` | Value getter; construction/copy yields a new ID, move transfers it, copy assignment keeps the destination ID | No C setter; not a persistent identity across copies |
 | `Surface::surface_type` | Chosen at append, read-only getters/flags | No direct C setter on an existing surface |
+| `stModSupport` / `RAW_SURFACE_TYPE_MOD_SUPPORT` | Modifier bit identifying support auxiliary-layer surfaces; combines with position and density for bottom interface, sparse base and top interface | Type remains read-only after publication |
 | `Surface::expolygon` | Owned geometry; constant C getter | Replacement by publishing new surfaces, not generic geometric editing via MutableSurface |
 | `Surface::m_thickness` | Copied indirectly by the native callback `append_surface_like` | No individual C getter/setter |
 | `Surface::thickness_layers` | Same indirect copy | Same restriction |

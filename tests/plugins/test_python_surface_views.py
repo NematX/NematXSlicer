@@ -180,6 +180,23 @@ class PythonSurfaceViewTests(unittest.TestCase):
         self.assertEqual(appended["properties"], {42: b"metadata"})
         collection.free_from_storage()
 
+    def test_support_surface_type_builder_and_predicate(self):
+        """Support membership composes with density, position and bridge modifiers."""
+        from slic3r_api import surface_type_is_support
+
+        views = self.surfaces
+        base = views.srf_type().internal().sparse()
+        support = base.support()
+        self.assertEqual(support.raw(), views.RAW_SURFACE_TYPE_POS_INTERNAL |
+                         views.RAW_SURFACE_TYPE_DENS_SPARSE | views.RAW_SURFACE_TYPE_MOD_SUPPORT)
+        self.assertEqual(views.RAW_SURFACE_TYPE_MOD_SUPPORT, 1 << 9)
+        self.assertTrue(surface_type_is_support(support.raw()))
+        self.assertFalse(surface_type_is_support(base.raw()))
+        combined = support.bridge().overbridge().raw()
+        mask = (views.RAW_SURFACE_TYPE_MOD_SUPPORT | views.RAW_SURFACE_TYPE_MOD_BRIDGE |
+                views.RAW_SURFACE_TYPE_MOD_OVERBRIDGE)
+        self.assertEqual(combined & mask, mask)
+
     def test_append_like_move_uses_the_same_stable_snapshot(self):
         host = ReallocatingSurfaceHost()
         api = type("Api", (), {"host": host})()

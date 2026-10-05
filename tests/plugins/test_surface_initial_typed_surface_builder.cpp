@@ -8,6 +8,7 @@
 #include "libslic3r/Api/internal/LayerAccess.hpp"
 #include "libslic3r/Api/internal/LayerRegionAccess.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
+#include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -24,6 +25,26 @@
 #include <memory>
 #include <string>
 #include <vector>
+
+TEST_CASE("Support surface modifier preserves position and density", "[plugins][surface][surface-type]")
+{
+    using namespace slic3r_api;
+    static_assert(uint16_t(Slic3r::stModSupport) == RAW_SURFACE_TYPE_MOD_SUPPORT, "Host and API support bits agree");
+    constexpr raw_surface_type type = srf_type().internal().sparse().support().bridge().overbridge().raw();
+    CHECK(type == (RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE |
+                   RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_BRIDGE | RAW_SURFACE_TYPE_MOD_OVERBRIDGE));
+    CHECK(surface_type_is_support(type));
+    CHECK_FALSE(surface_type_is_support(srf_type().internal().sparse().raw()));
+    CHECK(surface_type_position(type) == RAW_SURFACE_TYPE_POS_INTERNAL);
+    CHECK(surface_type_density(type) == RAW_SURFACE_TYPE_DENS_SPARSE);
+    CHECK(surface_type_modifiers(type) == (RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_BRIDGE | RAW_SURFACE_TYPE_MOD_OVERBRIDGE));
+    const Slic3r::Surface surface(Slic3r::stPosInternal | Slic3r::stDensSparse | Slic3r::stModSupport, Slic3r::ExPolygon{});
+    CHECK(surface.has_mod_support());
+    CHECK(Slic3r::surfaceType_to_string(surface.surface_type) == "posInternal||densSparse||modSupport");
+    CHECK(Slic3r::surface_type_to_color_name(surface.surface_type) == "rgb(255,128,0)");
+    CHECK(Slic3r::surface_type_to_color_name(Slic3r::stPosTop | Slic3r::stDensSolid | Slic3r::stModSupport) == "rgb(255,128,0)");
+    CHECK(Slic3r::surface_type_to_color_name(Slic3r::SurfaceType(-1)) == "rgb(255,0,0)");
+}
 
 namespace {
 using namespace Slic3r;
