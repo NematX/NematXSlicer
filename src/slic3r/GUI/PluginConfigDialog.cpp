@@ -423,6 +423,7 @@ wxString step_name(slicing_step_t step)
     case STEP_POST_INFILL:               return _L("Infill post-processing");
     case STEP_SUPPORT_DEMAND:            return _L("Support demand");
     case STEP_SUPPORT:                   return _L("Support generation");
+    case STEP_SUPPORT_TOOLPATH:          return _L("Support toolpaths");
     case STEP_FINALIZE_SLICING:          return _L("Slicing finalization");
     case STEP_CHECK_CONFLICT:            return _L("Conflict detection");
     case STEP_ORDERING:                  return _L("Extrusion ordering");
@@ -484,6 +485,7 @@ std::optional<PluginPhase> phase_for_step(slicing_step_t step)
         return PluginPhase::SurfacesInfill;
     case STEP_SUPPORT_DEMAND:
     case STEP_SUPPORT:
+    case STEP_SUPPORT_TOOLPATH:
     case STEP_SKIRT_BRIM:
     case STEP_ALERT_SUPPORTS_NEEDED:
     case STEP_WIPETOWER:
@@ -1209,6 +1211,7 @@ void PluginConfigDialog::build_navigation()
         STEP_SURFACE_GENERATION, STEP_PRE_INFILL, STEP_INFILL_GROUP, STEP_INFILL, STEP_POST_INFILL,
         INFILL_PATTERN, INFILL_SURFACE_RECIPE_MODIFIER, BRIDGE_DETECTOR,
         STEP_ALERT_SUPPORTS_NEEDED, STEP_SKIRT_BRIM, STEP_SUPPORT_DEMAND, STEP_SUPPORT,
+        STEP_SUPPORT_TOOLPATH,
         STEP_WIPETOWER, WIPE_TOWER_WIPE, STEP_SUPPORT_SPOT,
         STEP_FINALIZE_SLICING, STEP_ORDERING, SEAM_PLACER,
         STEP_CHECK_CONFLICT, STEP_LAYER_EXTRUSION_EDIT, STEP_LAYER_STICHING,

@@ -128,6 +128,7 @@ add_executable(${_TEST_NAME}_tests
     test_dense_infill.cpp
     test_support_demand_modifiers.cpp
     test_support_demand_overhangs.cpp
+    test_support_toolpath_step.cpp
     test_surface_clean_infill_surfaces.cpp
     test_surface_initial_typed_surface_builder.cpp
     test_surface_infill_region_compatibility_splitter.cpp

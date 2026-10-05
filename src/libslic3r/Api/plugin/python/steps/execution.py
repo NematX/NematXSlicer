@@ -44,6 +44,7 @@ from slic3r_api_generated import (
     RunCtxPrepareInfill,
     RunCtxSkirtBrim,
     RunCtxSupportDemand,
+    RunCtxSupportToolpath,
     STEP_EXTRUSION_EDIT,
     STEP_EXTRUSION_SIMPLIFICATION,
     STEP_FINALIZE_SLICING,
@@ -59,6 +60,7 @@ from slic3r_api_generated import (
     STEP_SUPPORT,
     STEP_SUPPORT_DEMAND,
     STEP_SUPPORT_SPOT,
+    STEP_SUPPORT_TOOLPATH,
     STEP_WIPETOWER,
 )
 from slic3r_datatree_views import (
@@ -191,6 +193,24 @@ class SupportContext(_PrintObjectContext):
         return self._print()
 
     def support_object(self) -> Object:
+        return self._object()
+
+
+@abi_requires_headers("steps/slic3r_step_support_toolpath.h")
+class SupportToolpathContext(_PrintObjectContext):
+    """One object's support auxiliary surfaces, ready for toolpath algorithms."""
+
+    @classmethod
+    def from_support_toolpath_run_context(cls, api, address: int):
+        """Validate the step and non-null payload handles, returning None on mismatch."""
+        return cls._from_run_context(api, address, STEP_SUPPORT_TOOLPATH, RunCtxSupportToolpath, ("print", "object"))
+
+    def support_toolpath_print(self) -> Print:
+        """The print being processed; use it only during this callback."""
+        return self._print()
+
+    def support_toolpath_object(self) -> Object:
+        """The object whose support auxiliary layers the algorithm processes."""
         return self._object()
 
 
@@ -646,5 +666,6 @@ __all__ = [
     "SupportContext",
     "SupportDemandContext",
     "SupportSpotContext",
+    "SupportToolpathContext",
     "WipeTowerContext",
 ]

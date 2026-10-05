@@ -92,6 +92,7 @@ std::string plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
                                               const std::string &group_id);
 
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator);
+// Plugins to run for a step: one per exclusive group, sorted by priority.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,
                                                           const ConfigBase *config);

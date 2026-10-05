@@ -244,6 +244,32 @@ class PythonExecutionContextTests(unittest.TestCase):
         self.assertEqual(calls, [(ctypes.addressof(common), 41)])
         self.assertTrue(keepalive is not None)
 
+    def test_support_toolpath_context_borrows_and_validates_handles(self):
+        """The toolpath context rejects wrong steps and missing print or object handles."""
+        generated = self.generated
+        payload = generated.RunCtxSupportToolpath(ctypes.c_void_p(31), ctypes.c_void_p(32))
+        common, keepalive = self.make_common(generated.STEP_SUPPORT_TOOLPATH, payload)
+        api = types.SimpleNamespace(host=types.SimpleNamespace())
+        factory = self.execution.SupportToolpathContext.from_support_toolpath_run_context
+        context = factory(api, ctypes.addressof(common))
+        self.assertIsNotNone(context)
+        self.assertEqual(context.support_toolpath_print().address, 31)
+        self.assertEqual(context.support_toolpath_object().address, 32)
+        self.assertIsInstance(self.api_module.Slic3rAPI.support_toolpath_context(api, ctypes.addressof(common)),
+                              self.execution.SupportToolpathContext)
+        common.step = generated.STEP_SUPPORT
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        common.step = generated.STEP_SUPPORT_TOOLPATH
+        payload.object = None
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        payload.object = ctypes.c_void_p(32)
+        payload.print = None
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        common.data = None
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        self.assertIsNone(factory(api, 0))
+        self.assertTrue(keepalive)
+
     def test_progress_reports_visible_phase_and_finishes_after_all_runs(self):
         reports = []
         payload = self.generated.RunCtxPrepareInfill(ctypes.c_void_p(1), ctypes.c_void_p(2))

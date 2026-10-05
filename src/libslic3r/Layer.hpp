@@ -261,6 +261,9 @@ LayerSupportProperty stored in the Layer property container. Callers that need
 support metadata should read that property directly so auxiliary layers remain
 generic.
 */
+// Summarize the support buckets of one support layer: SupportMaterial for base
+// only, SupportMaterialInterface for interface only, Mixed for both, None for
+// neither.
 ExtrusionRole support_layer_role(const Layer &layer);
 void          simplify_support_extrusion_path(Layer &layer);
 

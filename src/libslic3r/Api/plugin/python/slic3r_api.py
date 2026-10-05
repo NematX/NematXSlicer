@@ -1047,6 +1047,11 @@ class Slic3rAPI:
     def support_demand_context(self, address: int) -> SupportDemandContext | None:
         return SupportDemandContext.from_support_demand_run_context(self, address)
 
+    @abi_requires_headers("steps/slic3r_step_support_toolpath.h")
+    def support_toolpath_context(self, address: int) -> SupportToolpathContext | None:
+        """Support toolpath context, or None when the step or payload does not match."""
+        return SupportToolpathContext.from_support_toolpath_run_context(self, address)
+
     @abi_requires_headers("steps/slic3r_step_support_spot.h")
     def support_spot_context(self, address: int) -> SupportSpotContext | None:
         return SupportSpotContext.from_support_spot_run_context(self, address)

@@ -149,6 +149,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/c/steps/slic3r_step_support.h
 	Api/plugin/c/steps/slic3r_step_support_demand.h
 	Api/plugin/c/steps/slic3r_step_support_spot.h
+	Api/plugin/c/steps/slic3r_step_support_toolpath.h
 	Api/plugin/c/steps/slic3r_step_surface_generation.h
 	Api/plugin/c/steps/slic3r_step_skirt_brim.h
 	Api/plugin/c/steps/slic3r_step_wipe_tower_wipe.h
@@ -563,6 +564,8 @@ set(SLIC3R_SOURCES
 	Steps/StepRunner.hpp
 	Steps/StepSupportDemand.cpp
 	Steps/StepSupportDemand.hpp
+	Steps/StepSupportToolpath.cpp
+	Steps/StepSupportToolpath.hpp
 	Steps/StepSurfaceGeneration.cpp
 	Steps/StepSurfaceGeneration.hpp
 	Updater/Http.cpp

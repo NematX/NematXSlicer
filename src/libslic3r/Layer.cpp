@@ -1368,17 +1368,21 @@ void simplify_support_extrusion_path(Layer &layer) {
 }
 
 ExtrusionRole support_layer_role(const Layer &layer) {
-    ExtrusionRole role = ExtrusionRole::None;
+    // Track both buckets separately: SupportMaterialInterface already contains
+    // the SupportMaterial bit, so OR-ing the two roles would hide a layer that
+    // needs both the base and the interface extruder.
+    bool has_base = false;
+    bool has_interface = false;
     for (const LayerSliceIsland &island : layer.islands()) {
         for (const LayerRegionIsland &region_island : island.regions_islands()) {
-            if (region_island.has_extrusion(LayerRegionIsland::SUPPORT)) {
-                role |= ExtrusionRole::SupportMaterial;
-            }
-            if (region_island.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
-                role |= ExtrusionRole::SupportMaterialInterface;
-            }
+            has_base = has_base || region_island.has_extrusion(LayerRegionIsland::SUPPORT);
+            has_interface = has_interface || region_island.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE);
         }
     }
-    return role;
+    if (has_base && has_interface)
+        return ExtrusionRole::Mixed;
+    if (has_base)
+        return ExtrusionRole::SupportMaterial;
+    return has_interface ? ExtrusionRole::SupportMaterialInterface : ExtrusionRole::None;
 }
 }

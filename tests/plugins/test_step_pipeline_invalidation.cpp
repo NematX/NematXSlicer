@@ -1345,6 +1345,7 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
         { STEP_INFILL, Checkpoint::Slicing },
         { STEP_POST_INFILL, Checkpoint::Slicing },
         { STEP_SUPPORT, Checkpoint::Slicing },
+        { STEP_SUPPORT_TOOLPATH, Checkpoint::Slicing },
         { STEP_SKIRT_BRIM, Checkpoint::Slicing },
         { STEP_FINALIZE_SLICING, Checkpoint::Slicing },
         { STEP_ORDERING, Checkpoint::Print },
@@ -1376,6 +1377,10 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
     // Numeric ABI values deliberately disagree with the execution order here.
     CHECK(STEP_SKIRT_BRIM < STEP_SUPPORT);
     CHECK(Slic3r::Steps::executes_before(STEP_SUPPORT, STEP_SKIRT_BRIM));
+    CHECK(Slic3r::Steps::executes_before(STEP_SUPPORT, STEP_SUPPORT_TOOLPATH));
+    CHECK(Slic3r::Steps::executes_before(STEP_SUPPORT_TOOLPATH, STEP_SKIRT_BRIM));
+    CHECK(contains_step(Slic3r::Steps::dependent_steps_closure(STEP_SUPPORT), STEP_SUPPORT_TOOLPATH));
+    CHECK(contains_step(Slic3r::Steps::dependent_steps_closure(STEP_SUPPORT_TOOLPATH), STEP_SKIRT_BRIM));
 }
 
 TEST_CASE("A setting read by a plugin invalidates no later than that plugin",

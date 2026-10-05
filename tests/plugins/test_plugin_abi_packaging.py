@@ -93,7 +93,7 @@ class AbiPackagingTests(unittest.TestCase):
         catalog = json.loads(self.generator.generate_abi_catalog())
         for symbol in ("PLUGIN_ERROR_OK", "PLUGIN_ERROR_GENERAL"):
             self.assertEqual(catalog["python_symbols"][symbol], ["slic3r_plugin_types.h"])
-        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [3, 0])
+        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [3, 1])
 
     def test_union_and_failed_generation_never_publish_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -136,6 +136,8 @@ class AbiPackagingTests(unittest.TestCase):
             first = self.generator.generate_abi_catalog()
             self.assertEqual(first, self.generator.generate_abi_catalog())
             catalog = json.loads(first)
+            self.assertEqual(catalog["headers"]["steps/slic3r_step_support_toolpath.h"]["version"], [1, 0])
+            self.assertIn("steps/slic3r_step_support_toolpath.h", catalog["python_symbols"]["RunCtxSupportToolpath"])
             self.assertIn("slic3r_extrusion_entity.h", catalog["c_functions"]["extrusion_is_loop"])
             self.assertIn("slic3r_geometry.h", catalog["python_symbols"]["CPoint"])
             self.assertIn("slic3r_plugin_types.h", catalog["python_symbols"]["PLUGIN_SETUP"])
@@ -391,6 +393,7 @@ class AbiPackagingTests(unittest.TestCase):
                 "infill_grouping_context": "steps/slic3r_step_infill_group.h",
                 "infill_context": "steps/slic3r_step_infill.h",
                 "support_demand_context": "steps/slic3r_step_support_demand.h",
+                "support_toolpath_context": "steps/slic3r_step_support_toolpath.h",
                 "skirt_brim_context": "steps/slic3r_step_skirt_brim.h",
                 "ordering_context": "steps/slic3r_step_ordering.h",
                 "gcode_context": "steps/slic3r_step_gcode.h",
@@ -399,6 +402,7 @@ class AbiPackagingTests(unittest.TestCase):
             for method, header in execution_methods.items():
                 with self.subTest(execution_method=method):
                     self.assertIn(header, bindings.methods[method])
+            self.assertIn("steps/slic3r_step_support_toolpath.h", bindings.symbols["SupportToolpathContext"])
 
             self.assertIn(
                 "slic3r_plugin_run_context.h",
