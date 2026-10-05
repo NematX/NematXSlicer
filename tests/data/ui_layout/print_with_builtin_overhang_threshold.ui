@@ -356,7 +356,6 @@ group:Raft
 	setting:raft_expansion
 group:Options for support material and raft
 	setting:support_material_style
-	setting:step_support_plugin
 	setting:support_material_layer_height
 	line:Z-offset
 		setting:width$13:support_material_contact_distance_type

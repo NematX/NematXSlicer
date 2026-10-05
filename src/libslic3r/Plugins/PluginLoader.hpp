@@ -10,6 +10,7 @@
 #include <string>
 
 #include "PluginActivationConfig.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
 namespace boost {
 namespace filesystem {
@@ -65,6 +66,9 @@ void load_plugin_packages_from_repository(const boost::filesystem::path &reposit
 // Register built-in plugins, load plugin libraries from the runtime plugin
 // repository, activate the configured subset, then initialize active plugins.
 void load_plugins();
+
+// Register the built-in demand producers and filters for startup or test initialization.
+void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator);
 
 // Register selector settings for active exclusive plugin groups.
 //

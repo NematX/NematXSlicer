@@ -495,6 +495,8 @@ set(SLIC3R_SOURCES
 	Plugins/Surface/TopSurfaceExpansion.hpp
 	Plugins/Support/SupportDemandBridgeRemoval.cpp
 	Plugins/Support/SupportDemandBridgeRemoval.hpp
+	Plugins/Support/SupportDemandBuildplateOnly.cpp
+	Plugins/Support/SupportDemandBuildplateOnly.hpp
 	Plugins/Support/SupportDemandModifiers.cpp
 	Plugins/Support/SupportDemandModifiers.hpp
 	Plugins/Support/SupportDemandOverhangs.cpp

@@ -773,7 +773,9 @@ By-value fields of `raw_infill_pattern_params`, all from the same recipe: `patte
 
 `c_flow` owns `width`, `spacing`, `height`, `nozzle_diameter`, `is_bridge`, `spacing_ratio`, `mm3_per_mm`. This record does not own the regions from which its values are computed.
 
-The pattern generation callback borrows the provided buffers, without allocating or clearing the output itself. The default generator provides a fresh output. The support demand is island data (see the `LayerSliceIsland` table): `STEP_SUPPORT_DEMAND` runs right after `STEP_POST_SLICING`, so every later step can read it. Support generation remains unimplemented.
+The pattern generation callback borrows the provided buffers, without allocating or clearing the output itself. The default generator provides a fresh output. The support demand is island data (see the `LayerSliceIsland` table): `STEP_SUPPORT_DEMAND` runs right after `STEP_POST_SLICING`, so every later step can read it.
+
+`STEP_SUPPORT` calls every active support family in priority order, once per object, after infill and before `STEP_SUPPORT_TOOLPATH`. It has no host selector. Each family checks the object's support enablement and `support_material_style`, leaving other objects intact. Families read island demand and publish auxiliary layers marked with `LayerSupportProperty` and typed surfaces: `support | top | solid` for upper contacts/interfaces, `support | bottom | solid` for lower contacts/interfaces (plus `bridge` for a lower contact using bridge flow), and `support | internal | sparse` for the base. They do not write extrusions. No built-in support family is registered.
 
 `STEP_SUPPORT_TOOLPATH` resumes from `Checkpoint::Slicing` like `STEP_SUPPORT`. Its plugin-defined role groups select sparse, bottom-interface and top-interface algorithms independently; selected plugins run sequentially by priority. The dispatcher does nothing when no provider is active. No built-in support toolpath algorithm is registered.
 

@@ -598,6 +598,7 @@ void StepExclusiveGroup::set_enum_plugins(const std::vector<std::pair<std::strin
     refresh_storage_pointers();
 }
 
+// Host-selected steps share one selector per step; families such as support select their objects themselves.
 const std::map<slicing_step_t, StepExclusiveGroup> &get_exclusive_steps()
 {
     static const std::map<slicing_step_t, StepExclusiveGroup> s_groups = {
@@ -606,7 +607,6 @@ const std::map<slicing_step_t, StepExclusiveGroup> &get_exclusive_steps()
         {STEP_PERIMETER,          make_exclusive_step_group(STEP_PERIMETER,          "step_perimeter_plugin",          "Perimeter plugin",          RAW_OPTION_CATEGORY_PERIMETER, "Perimeter step plugin")},
         {STEP_INFILL_GROUP,       make_exclusive_step_group(STEP_INFILL_GROUP,       "step_infill_group_plugin",       "Infill grouping plugin",    RAW_OPTION_CATEGORY_INFILL,    "Infill grouping step plugin")},
         {STEP_INFILL,             make_exclusive_step_group(STEP_INFILL,             "step_infill_plugin",             "Infill plugin",             RAW_OPTION_CATEGORY_INFILL,    "Infill step plugin")},
-        {STEP_SUPPORT,            make_exclusive_step_group(STEP_SUPPORT,            "step_support_plugin",            "Support plugin",            RAW_OPTION_CATEGORY_SUPPORT,   "Support step plugin")},
         {STEP_WIPETOWER,          make_exclusive_step_group(STEP_WIPETOWER,          "step_wipetower_plugin",          "Wipe tower plugin",         RAW_OPTION_CATEGORY_OUTPUT,    "Wipe tower step plugin")},
         {STEP_LAYER_STICHING,     make_exclusive_step_group(STEP_LAYER_STICHING,     "step_layer_stiching_plugin",     "Layer stitching plugin",    RAW_OPTION_CATEGORY_OUTPUT,    "Layer stitching step plugin")},
         {STEP_GCODE,              make_exclusive_step_group(STEP_GCODE,              "step_gcode_plugin",              "G-code plugin",             RAW_OPTION_CATEGORY_OUTPUT,    "G-code step plugin")},

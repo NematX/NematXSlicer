@@ -20,7 +20,11 @@ before STEP_SKIRT_BRIM. With no active plugin the step does nothing.
 
 Support families publish auxiliary layers marked with the support layer
 property. Their region-island surfaces carry RAW_SURFACE_TYPE_MOD_SUPPORT plus
-position and density bits: bottom interface, sparse base, or top interface.
+position and density bits: support | bottom | solid for lower contacts and
+interfaces, support | internal | sparse for the base, and support | top | solid
+for upper contacts and interfaces. A lower contact using bridge flow also
+carries the bridge modifier. Algorithms distinguish contacts from intermediate
+interfaces themselves when needed.
 
 Toolpath algorithms declare one role through their exclusive group:
 "support_toolpath_sparse", "support_toolpath_bottom_interface", or
@@ -31,7 +35,8 @@ interface 100, top interface 200). A later role can read earlier extrusions.
 
 Each algorithm receives the whole object and walks its auxiliary layers,
 islands and region islands to find support surfaces of its role. It may group
-surfaces, process work in parallel, and call INFILL_PATTERN plugins internally.
+surfaces and process work in parallel. No INFILL_PATTERN service is available
+in this payload.
 It writes extrusions into the support-layer region islands through data-tree
 mutators. Auxiliary layers remain editable through STEP_FINALIZE_SLICING.
 Use the print and object handles only during the callback; never free them.

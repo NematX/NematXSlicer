@@ -6,7 +6,7 @@
 #define slic3r_step_support_h_
 
 #define SLIC3R_PLUGIN_API_STEP_SUPPORT_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR 0u
+#define SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR 1u
 
 #include "slic3r_step_common.h"
 
@@ -15,10 +15,22 @@ extern "C" {
 #endif
 
 /*
-Payload for STEP_SUPPORT.
+Payload for STEP_SUPPORT, called once per object after STEP_SUPPORT_DEMAND and
+the infill steps, and before STEP_SUPPORT_TOOLPATH. All active plugins run in
+priority order; there is no host selector for this step.
 
-This step generates support layers, support surfaces and/or support extrusion
-for one object, depending on the registered plugin.
+A support family handles only objects with support enabled and a
+support_material_style that it implements. It leaves all other objects intact.
+It reads island demand through layer_island_get_support_demand(), builds
+auxiliary layers marked with LayerSupportProperty, and publishes fill surfaces:
+- support | top | solid: upper contacts and interfaces;
+- support | bottom | solid: lower contacts and interfaces, with bridge added
+  when a lower contact uses bridge flow;
+- support | internal | sparse: the support base.
+
+The family writes no extrusions: STEP_SUPPORT_TOOLPATH generates them from
+these surfaces. Use the print and object handles only during the callback;
+never free them.
 */
 typedef struct run_ctx_generate_support {
     const print_handle *print;

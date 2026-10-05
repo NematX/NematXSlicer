@@ -100,10 +100,10 @@
 #include "libslic3r/Plugins/Surface/InfillRegionCompatibilitySplitter.hpp"
 #include "libslic3r/Plugins/Surface/SolidShells.hpp"
 #include "libslic3r/Plugins/Surface/TopSurfaceExpansion.hpp"
-#include "libslic3r/Plugins/Support/SupportDemandBridgeRemoval.hpp"
-#include "libslic3r/Plugins/Support/SupportDemandModifiers.hpp"
-#include "libslic3r/Plugins/Support/SupportDemandOverhangs.hpp"
-#include "libslic3r/Plugins/Support/SupportDemandPainting.hpp"
+
+
+
+
 #include "libslic3r/Plugins/WipeTower/ToolChangeUnretract.hpp"
 #include "libslic3r/Plugins/WipeTower/ToolChangeWipe.hpp"
 #include "libslic3r/Plugins/WipeTower/WipeTowerManager.hpp"
@@ -752,6 +752,7 @@ void ensure_plugin_test_runtime_initialized()
         }
         register_exclusive_pruning_test_plugins(orchestrator_handle_value);
         register_support_toolpath_test_providers(orchestrator_handle_value);
+        register_support_step_test_providers(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateToolChangePlugin::register_create_tool_change_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateTransitionScopePlugin::register_create_transition_scope_plugin(
@@ -784,14 +785,7 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::PolyholesPlugin::register_polyholes_plugin(orchestrator_handle_value);
         slic3r_api::NozzleCleaningPlugin::register_nozzle_cleaning_plugin(orchestrator_handle_value);
-        slic3r_api::Support::SupportDemandOverhangsPlugin::register_support_demand_overhangs_plugin(
-            orchestrator_handle_value);
-        slic3r_api::Support::SupportDemandPaintingPlugin::register_support_demand_painting_plugin(
-            orchestrator_handle_value);
-        slic3r_api::Support::SupportDemandModifiersPlugin::register_support_demand_modifiers_plugin(
-            orchestrator_handle_value);
-        slic3r_api::Support::SupportDemandBridgeRemovalPlugin::register_support_demand_bridge_removal_plugin(
-            orchestrator_handle_value);
+        register_builtin_support_demand_plugins(orchestrator_handle_value);
         slic3r_api::GuiRulesCorePlugin::register_gui_rules_core_plugin(orchestrator_handle_value);
         slic3r_api::Perimeter::ArachnePerimeterGeneratorPlugin::register_arachne_perimeter_generator_plugin(
             orchestrator_handle_value);
@@ -942,6 +936,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "support.demand.overhangs");
         activate_plugin_or_fail(orchestrator, "support.demand.painting");
         activate_plugin_or_fail(orchestrator, "support.demand.modifiers");
+        activate_plugin_or_fail(orchestrator, "support.demand.buildplate_only");
         activate_plugin_or_fail(orchestrator, "support.demand.bridge_removal");
         activate_plugin_or_fail(orchestrator, "gui_rules.core");
         activate_plugin_or_fail(orchestrator, "perimeter.generator.arachne");
@@ -1006,6 +1001,8 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.set_plugin_active("slic3r.test.seam_placer.regional", false);
         orchestrator.set_plugin_active("test.plugin_storage.support", false);
         orchestrator.set_plugin_active(Test::ProbePatternPlugin::probe_pattern_id, false);
+        orchestrator.set_plugin_active("test.support.family.early", false);
+        orchestrator.set_plugin_active("test.support.family.late", false);
         for (const char *id : {"test.support_toolpath.sparse", "test.support_toolpath.bottom",
                                "test.support_toolpath.top", "test.support_toolpath.alternate"})
             orchestrator.set_plugin_active(id, false);

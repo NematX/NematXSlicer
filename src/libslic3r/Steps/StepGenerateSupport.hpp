@@ -20,7 +20,7 @@ void clear(Print &print);
 void prepare(Print &print);
 bool validate_pre(const Print &print, std::string *error = nullptr);
 bool validate_post(const Print &print, std::string *error = nullptr);
-// Support generation reads the demand stored in the layer islands.
+// Run active support families on each object using the demand stored in its islands.
 void run_step(Orchestrator &orchestrator, Print &print);
 
 } // namespace Steps::StepGenerateSupport

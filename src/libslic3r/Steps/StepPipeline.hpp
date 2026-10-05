@@ -83,6 +83,7 @@ struct StepExclusivePluginGroup
     std::vector<Plugin *> plugins;
 };
 
+// Steps for which the host selects exactly one active provider.
 const std::map<slicing_step_t, StepExclusiveGroup> &get_exclusive_steps();
 
 // Return the stable generated option key used by a plugin-defined exclusive
