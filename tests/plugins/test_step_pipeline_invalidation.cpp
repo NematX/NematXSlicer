@@ -1335,6 +1335,7 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
         { STEP_LAYER_HEIGHT, Checkpoint::None },
         { STEP_SLICING, Checkpoint::None },
         { STEP_POST_SLICING, Checkpoint::None },
+        { STEP_SUPPORT_DEMAND, Checkpoint::Slicing },
         { STEP_PRE_PERIMETER, Checkpoint::Slicing },
         { STEP_PERIMETER, Checkpoint::Slicing },
         { STEP_POST_PERIMETER, Checkpoint::Slicing },
@@ -1343,7 +1344,6 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
         { STEP_INFILL_GROUP, Checkpoint::Slicing },
         { STEP_INFILL, Checkpoint::Slicing },
         { STEP_POST_INFILL, Checkpoint::Slicing },
-        { STEP_SUPPORT_DEMAND, Checkpoint::Slicing },
         { STEP_SUPPORT, Checkpoint::Slicing },
         { STEP_SKIRT_BRIM, Checkpoint::Slicing },
         { STEP_FINALIZE_SLICING, Checkpoint::Slicing },
@@ -1367,7 +1367,7 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
 
     // Each checkpoint resumes at the first step it does not contain.
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::None) == STEP_LAYER_HEIGHT);
-    CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Slicing) == STEP_PRE_PERIMETER);
+    CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Slicing) == STEP_SUPPORT_DEMAND);
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Print) == STEP_ORDERING);
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Ordering) == STEP_WIPETOWER);
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Plan) == STEP_GCODE);

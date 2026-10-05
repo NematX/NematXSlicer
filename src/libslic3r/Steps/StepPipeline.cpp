@@ -69,6 +69,7 @@ const std::vector<slicing_step_t> &execution_order()
         STEP_LAYER_HEIGHT,
         STEP_SLICING,
         STEP_POST_SLICING,
+        STEP_SUPPORT_DEMAND,
         STEP_PRE_PERIMETER,
         STEP_PERIMETER,
         STEP_POST_PERIMETER,
@@ -77,7 +78,6 @@ const std::vector<slicing_step_t> &execution_order()
         STEP_INFILL_GROUP,
         STEP_INFILL,
         STEP_POST_INFILL,
-        STEP_SUPPORT_DEMAND,
         STEP_SUPPORT,
         STEP_SKIRT_BRIM,
         STEP_FINALIZE_SLICING,
@@ -150,7 +150,7 @@ slicing_step_t checkpoint_resume_step(const Checkpoint checkpoint)
 {
     switch (checkpoint) {
     case Checkpoint::None:     return STEP_LAYER_HEIGHT;
-    case Checkpoint::Slicing:  return STEP_PRE_PERIMETER;
+    case Checkpoint::Slicing:  return STEP_SUPPORT_DEMAND;
     case Checkpoint::Print:    return STEP_ORDERING;
     case Checkpoint::Ordering: return STEP_WIPETOWER;
     case Checkpoint::Plan:     return STEP_GCODE;
@@ -165,7 +165,8 @@ const std::map<slicing_step_t, std::vector<slicing_step_t>> &step_dependents()
     static const std::map<slicing_step_t, std::vector<slicing_step_t>> dependents {
         {STEP_LAYER_HEIGHT, {STEP_SLICING}},
         {STEP_SLICING, {STEP_POST_SLICING}},
-        {STEP_POST_SLICING, {STEP_PRE_PERIMETER}},
+        {STEP_POST_SLICING, {STEP_SUPPORT_DEMAND}},
+        {STEP_SUPPORT_DEMAND, {STEP_PRE_PERIMETER}},
         {STEP_PRE_PERIMETER, {STEP_PERIMETER}},
         {STEP_PERIMETER, {STEP_POST_PERIMETER}},
         {STEP_POST_PERIMETER, {STEP_SURFACE_GENERATION}},
@@ -173,8 +174,7 @@ const std::map<slicing_step_t, std::vector<slicing_step_t>> &step_dependents()
         {STEP_PRE_INFILL, {STEP_INFILL_GROUP}},
         {STEP_INFILL_GROUP, {STEP_INFILL}},
         {STEP_INFILL, {STEP_POST_INFILL}},
-        {STEP_POST_INFILL, {STEP_SUPPORT_DEMAND}},
-        {STEP_SUPPORT_DEMAND, {STEP_SUPPORT}},
+        {STEP_POST_INFILL, {STEP_SUPPORT}},
         {STEP_SUPPORT, {STEP_SKIRT_BRIM}},
         {STEP_SKIRT_BRIM, {STEP_FINALIZE_SLICING}},
         {STEP_FINALIZE_SLICING, {STEP_ORDERING}},
@@ -942,7 +942,12 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
     // This helper is shared by slice preparation and export. Print::process()
     // stops it at STEP_FINALIZE_SLICING, while Orchestrator::export_gcode() calls it
     // again with only the export-side steps marked for execution.
-    StepSupportDemand::State support_demand;
+    run_step_if_requested(print, STEP_SUPPORT_DEMAND, [&] {
+        begin_step(print, STEP_SUPPORT_DEMAND, L("Detecting support demand"));
+        StepSupportDemand::prepare(print);
+        StepSupportDemand::run_step(orchestrator, print);
+    });
+    if (stop_after(STEP_SUPPORT_DEMAND, until)) return;
 
     run_step_if_requested(print, STEP_PRE_PERIMETER, [&] {
         begin_step(print, STEP_PRE_PERIMETER, L("Preparing perimeters"));
@@ -1006,17 +1011,10 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
     });
     if (stop_after(STEP_POST_INFILL, until)) return;
 
-    run_step_if_requested(print, STEP_SUPPORT_DEMAND, [&] {
-        begin_step(print, STEP_SUPPORT_DEMAND, L("Detecting support demand"));
-        StepSupportDemand::prepare(print);
-        StepSupportDemand::run_step(orchestrator, print, support_demand);
-    });
-    if (stop_after(STEP_SUPPORT_DEMAND, until)) return;
-
     run_step_if_requested(print, STEP_SUPPORT, [&] {
         begin_step(print, STEP_SUPPORT, L("Generating support material"));
         StepGenerateSupport::prepare(print);
-        StepGenerateSupport::run_step(orchestrator, print, support_demand);
+        StepGenerateSupport::run_step(orchestrator, print);
     });
     if (stop_after(STEP_SUPPORT, until)) return;
 
@@ -1154,9 +1152,11 @@ void StepPipeline::clear_checkpoint_outputs(Print &print, const Checkpoint check
     // The edited plan is stale; the resume clones a new one from the kept Ordering copy.
     if (checkpoint == Checkpoint::Ordering)
         print.release_live_printing_plan();
-    // At None the layers themselves will be deleted, so visiting their region-islands would duplicate work.
-    if (checkpoint == Checkpoint::Slicing)
+    // At None the layers themselves will be deleted, so visiting their islands would duplicate work.
+    if (checkpoint == Checkpoint::Slicing) {
         StepGeneratePerimeter::clear(print);
+        StepSupportDemand::clear(print);
+    }
     // Auxiliary layers may borrow main-layer data and must disappear before those main layers.
     if (checkpoint <= Checkpoint::Slicing)
         StepPrepareForPeriemters::clear(print);
@@ -1211,7 +1211,7 @@ std::string StepPipeline::run_gcode(Orchestrator &orchestrator, Print &print,
     // Resume from the latest valid checkpoint, restoring the ordered plan copy
     // when plan editors are the first steps to replay.
     print.prepare_checkpoint_resume();
-    initialize_pipeline_progress(orchestrator, print, STEP_PRE_PERIMETER);
+    initialize_pipeline_progress(orchestrator, print, checkpoint_resume_step(Checkpoint::Slicing));
     std::string reader_plugin_id;
     run_remaining_steps(orchestrator, print, path, STEP_GCODE, thumbnail_renderer,
                         &reader_plugin_id, result);

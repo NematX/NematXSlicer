@@ -5,7 +5,7 @@
 #ifndef slic3r_step_support_demand_h_
 #define slic3r_step_support_demand_h_
 
-#define SLIC3R_PLUGIN_API_STEP_SUPPORT_DEMAND_MAJOR 1u
+#define SLIC3R_PLUGIN_API_STEP_SUPPORT_DEMAND_MAJOR 2u
 #define SLIC3R_PLUGIN_API_STEP_SUPPORT_DEMAND_MINOR 0u
 
 #include "slic3r_step_common.h"
@@ -17,95 +17,53 @@ extern "C" {
 /*
 Payload for STEP_SUPPORT_DEMAND.
 
-This step builds the list of island areas that ask for support. It runs before
-support generation: the output of the last plugin in this step becomes the
-support demand consumed by later support steps.
+This step builds, for every layer island of the object, the areas that ask for
+support. It runs right after STEP_POST_SLICING, before the perimeters, so every
+later step can read the demand with layer_island_get_support_demand(). Support
+generation consumes it; plugins of the steps between may refine it with
+support_demand_get_island_mutable() (bridge removal in STEP_POST_PERIMETER).
+
+The demand is stored in each LayerSliceIsland. It is empty when the step
+starts; plugins run in priority order and each one reads and edits what the
+previous ones left.
 
 Normal plugin usage:
 
 1. Cast the generic plugin_run_context with plugin_ctx_as_support_demand().
    If it returns NULL, the current run is not STEP_SUPPORT_DEMAND.
 
-2. Read the object geometry from ctx->object. The object, its layers, and its
-   layer islands are borrowed host handles. They are stable only for the
-   current setup_run()/run() call and must not be stored for later runs.
+2. Walk the object geometry from ctx->object: its layers and layer islands are
+   borrowed, read-only host handles, stable only for the current
+   setup_run()/run() call.
 
-3. Read or edit the current demand set through ctx->demand and the callbacks in
-   run_ctx_support_demand. The demand set is keyed by layer_island_handle:
-   each entry says "this island has these ExPolygons asking for support".
+3. Read an island's demand with layer_island_get_support_demand(), or get it
+   in mutable form with support_demand_get_island_mutable() and edit the
+   returned collection in place: add, replace, clip or clear its ExPolygons.
+   Demand areas should stay inside the island slice.
 
-4. To add or replace demand for one island, create/fill an
-   expolygon_collection_handle in plugin storage, then call ctx->set().
-   ctx->set() moves the collection contents into the demand set, so the source
-   handle remains valid but should be considered empty afterwards.
-
-5. To refine previous plugins, iterate islands with entry_count() and
-   entry_island(), then fetch each island's polygons with get(). You may mutate
-   the returned expolygon_collection_handle directly.
-
-6. To remove demand for one island, call set() with polygons == NULL, or with
-   an empty polygon collection. To discard every demand entry, call clear().
-
-The print/object data tree is read-only context for this step. Only the demand
-working set is mutable.
+The print/object data tree is read-only context for this step; the demand of
+each island is the only mutable data.
 */
-typedef struct support_demand_handle support_demand_handle;
 
 /*
-Return the number of demand entries currently stored in demand.
+Return the mutable support demand of one layer island.
 
-The count may change after set() or clear(). If a plugin
-mutates the demand set while iterating, it should query the count again or use a
-simple restart/while loop strategy instead of keeping old indices.
+run_ctx is the plugin_run_context of the calling plugin: during a pipeline
+run, the host allows the edit while the running step is between
+STEP_SUPPORT_DEMAND and STEP_SUPPORT inclusive, in execution order, so any
+plugin of those steps may refine the demand (for example from the perimeters
+or the bridges actually extruded). In another step it reports an error through
+run_ctx and returns NULL: before the window the demand is not built yet, after
+it support generation has consumed it. Outside a pipeline run (no running
+step) the edit is allowed, like other data-tree edits. NULL arguments return
+NULL.
+
+Steps run objects in parallel: edit only islands of the object you process.
+The collection is owned by the island: edit it in place and never release it
+with storage_free(). It stays valid until the island is destroyed.
 */
-typedef uint32_t (*support_demand_entry_count_fn)(const support_demand_handle *demand);
-
-/*
-Return the layer island key for entry idx.
-
-The returned handle is borrowed from the host object data tree. It identifies
-which layer island owns the demand polygons at the same idx. Returns NULL when
-demand is NULL or idx is invalid.
-*/
-typedef const layer_island_handle *(*support_demand_entry_island_fn)(const support_demand_handle *demand, uint32_t idx);
-
-/*
-Return mutable demand polygons for one layer island.
-
-Returns NULL if this island currently has no demand entry. The returned handle
-is owned by the demand working set. Do not release it with storage_free().
-Mutating this collection immediately mutates the demand entry. The handle may be
-invalidated by set() or clear() on the same support_demand_handle.
-*/
-typedef expolygon_collection_handle *(*support_demand_get_fn)(support_demand_handle *demand,
-                                                              const layer_island_handle *island);
-
-/*
-Replace the demand polygons for one layer island.
-
-polygons is a mutable collection handle created by the plugin, usually through
-storage_new_expolygons(ctx->plugin_storage). The host moves the contents of
-polygons into the demand set; it does not take ownership of the handle itself.
-After the call, polygons remains valid for the plugin but its content is empty
-or otherwise unspecified by the host move operation.
-
-If an entry already exists for island, it is replaced. If it does not exist, it
-is created. If polygons is NULL, or if polygons is empty, the island entry is
-removed instead. Empty demand entries are not kept in the demand set.
-
-Returns non-zero on success.
-*/
-typedef int32_t (*support_demand_set_fn)(support_demand_handle *demand,
-                                         const layer_island_handle *island,
-                                         expolygon_collection_handle *polygons);
-
-/*
-Remove every demand entry from the working set.
-
-Use this when a plugin intentionally replaces the entire demand result instead
-of refining previous plugins.
-*/
-typedef void (*support_demand_clear_fn)(support_demand_handle *demand);
+SLIC3R_HOST_API expolygon_collection_handle *support_demand_get_island_mutable(const plugin_run_context *run_ctx,
+                                                                               const layer_island_handle *island);
 
 typedef struct run_ctx_support_demand {
     /*
@@ -119,38 +77,6 @@ typedef struct run_ctx_support_demand {
     layers and layer islands to decide where support is needed.
     */
     const object_handle *object;
-
-    /*
-    Mutable island-keyed demand working set. Do not access it directly; use the
-    callbacks below so the host can keep its internal representation consistent.
-    */
-    support_demand_handle *demand;
-
-    /*
-    Enumerate current demand entries.
-
-    entry_count() gives the number of entries. For each index in
-    [0, entry_count), entry_island() returns the island key. Use get() with that
-    key to access the mutable ExPolygons for the island.
-    */
-    support_demand_entry_count_fn entry_count;
-    support_demand_entry_island_fn entry_island;
-
-    /*
-    Find the mutable demand polygons for one island. Returns NULL if the island
-    does not currently ask for support.
-    */
-    support_demand_get_fn get;
-
-    /*
-    Add or replace demand for one island by moving polygon contents from a
-    plugin-owned collection handle. Passing NULL or an empty collection removes
-    the island entry.
-    */
-    support_demand_set_fn set;
-
-    /* Remove all island entries from the demand working set. */
-    support_demand_clear_fn clear;
 } run_ctx_support_demand;
 
 /*

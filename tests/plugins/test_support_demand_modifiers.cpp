@@ -3,7 +3,6 @@
 #include "plugin_test_helpers.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
-#include "libslic3r/Api/host/steps/SupportDemandStep.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
@@ -212,9 +211,10 @@ void run_until_support_demand_input(Orchestrator &orchestrator, Print &print)
     Steps::StepPostSlicing::run_step(orchestrator, print);
 }
 
-void run_until_support_demand_input_with_extrusions(Orchestrator &orchestrator, Print &print)
+// Run the perimeter steps after STEP_SUPPORT_DEMAND: bridge removal refines the
+// demand in STEP_POST_PERIMETER, once the perimeter extrusions exist.
+void run_perimeter_steps(Orchestrator &orchestrator, Print &print)
 {
-    run_until_support_demand_input(orchestrator, print);
     Steps::StepPrepareForPeriemters::prepare(print);
     Steps::StepPrepareForPeriemters::run_step(orchestrator, print);
     Steps::StepGeneratePerimeter::prepare(print);
@@ -230,18 +230,20 @@ void run_until_support_demand_input_with_extrusions(Orchestrator &orchestrator, 
     REQUIRE(has_perimeters);
 }
 
-DemandSummary summarize_support_demand(ApiHost::Steps::SupportDemandSet &demand)
+// Sum the support demand stored in the object's islands; entry_count counts the
+// islands that ask for support.
+DemandSummary summarize_support_demand(const PrintObject &object)
 {
     DemandSummary summary;
-    summary.entry_count = demand.entry_count();
-    for (uint32_t entry_idx = 0; entry_idx < demand.entry_count(); ++entry_idx) {
-        const LayerSliceIsland *island = demand.entry_island(entry_idx);
-        ExPolygons *polygons = demand.get(island);
-        if (polygons == nullptr)
-            continue;
-        summary.polygon_count += polygons->size();
-        summary.area_mm2 += unscaled(unscaled(area(*polygons)));
-    }
+    for (const Layer &layer : object.layers())
+        for (const LayerSliceIsland &island : layer.islands()) {
+            const ExPolygons &polygons = island.support_demand();
+            if (polygons.empty())
+                continue;
+            ++summary.entry_count;
+            summary.polygon_count += polygons.size();
+            summary.area_mm2 += unscaled(unscaled(area(polygons)));
+        }
     return summary;
 }
 
@@ -253,15 +255,11 @@ DemandSummary run_support_demand(Model &&model, const DynamicPrintConfig &config
     init_print_from_model(model, print, config);
 
     Orchestrator &orchestrator = Orchestrator::instance();
+    run_until_support_demand_input(orchestrator, print);
+    Steps::StepSupportDemand::run_step(orchestrator, print);
     if (prepare_extrusions)
-        run_until_support_demand_input_with_extrusions(orchestrator, print);
-    else
-        run_until_support_demand_input(orchestrator, print);
-
-    Steps::StepSupportDemand::State state;
-    Steps::StepSupportDemand::run_step(orchestrator, print, state);
-    ApiHost::Steps::SupportDemandSet &demand = state.demand_for(print.object(0));
-    DemandSummary summary = summarize_support_demand(demand);
+        run_perimeter_steps(orchestrator, print);
+    DemandSummary summary = summarize_support_demand(print.object(0));
     if (prepare_extrusions) {
         const PrintObject &object = print.object(0);
         REQUIRE(object.layer_count() >= 2);

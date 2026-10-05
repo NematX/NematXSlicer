@@ -43,7 +43,7 @@ enum class Checkpoint : uint8_t
     // Nothing is reusable: slice everything from STEP_LAYER_HEIGHT.
     None,
     // Layer heights and slices (STEP_LAYER_HEIGHT to STEP_POST_SLICING) are
-    // kept and frozen; the pipeline resumes at STEP_PRE_PERIMETER.
+    // kept and frozen; the pipeline resumes at STEP_SUPPORT_DEMAND.
     Slicing,
     // The whole Print data tree (objects, layers, regions, islands) is kept
     // and frozen after STEP_FINALIZE_SLICING; resumes at STEP_ORDERING.

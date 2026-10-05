@@ -44,8 +44,8 @@ allowance when it is valid; otherwise, half the smallest external-perimeter
 width of the island is used.
 
 The calculation is performed independently for each layer island. The result
-is limited to the current island slice and stored in the host-owned demand
-map. This stage identifies areas that need support; it does not generate the
+is limited to the current island slice and stored in the island's support
+demand. This stage identifies areas that need support; it does not generate the
 support extrusions themselves.
 */
 
@@ -126,7 +126,7 @@ coord_t lower_layer_offset(const ObjectSupportDemandConfig &config,
     return island_external_perimeter_width(island) / 2;
 }
 
-void add_to_demand(const run_ctx_support_demand &ctx,
+void add_to_demand(const plugin_run_context *run_ctx,
                    const LayerIsland &island,
                    storage_handle *storage,
                    ClipperOperand &unsupported)
@@ -138,14 +138,11 @@ void add_to_demand(const run_ctx_support_demand &ctx,
     StoredExPolygonCollection polygons = unsupported.to_expolygon_collection();
     polygons.ensure_valid();
 
-    expolygon_collection_handle *existing = ctx.get(ctx.demand, island.handle());
-    if (existing != nullptr) {
-        ExPolygonCollection existing_polygons(existing);
-        polygons = clipper_union2(clipper(existing_polygons), clipper(polygons)).to_expolygon_collection();
-        polygons.ensure_valid();
-    }
+    const ExPolygonCollection existing = island.support_demand();
+    if (!existing.empty())
+        polygons = clipper_union2(clipper(existing), clipper(polygons)).to_expolygon_collection();
 
-    ctx.set(ctx.demand, island.handle(), polygons.mutable_handle());
+    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), polygons.mutable_handle());
 }
 
 } // namespace
@@ -207,7 +204,7 @@ void SupportDemandOverhangs::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
     const run_ctx_support_demand *ctx = plugin_ctx_as_support_demand(run_ctx);
-    if (ctx == nullptr || ctx->object == nullptr || ctx->demand == nullptr)
+    if (ctx == nullptr || ctx->object == nullptr)
         return;
 
     const Object object(ctx->object);
@@ -244,7 +241,7 @@ void SupportDemandOverhangs::run_impl(const plugin_run_context *run_ctx) const
                 lower_support = clipper_offset(lower_support, double(offset));
 
             ClipperOperand unsupported = clipper_diff_with_safety_offset(clipper(island.slice()), lower_support);
-            add_to_demand(*ctx, island, storage, unsupported);
+            add_to_demand(run_ctx, island, storage, unsupported);
             progress().increment();
         }
     }

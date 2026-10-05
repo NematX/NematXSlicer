@@ -13,7 +13,6 @@
 namespace Slic3r {
 class Orchestrator;
 class Print;
-namespace Steps::StepSupportDemand { class State; }
 
 namespace Steps::StepGenerateSupport {
 
@@ -21,8 +20,8 @@ void clear(Print &print);
 void prepare(Print &print);
 bool validate_pre(const Print &print, std::string *error = nullptr);
 bool validate_post(const Print &print, std::string *error = nullptr);
+// Support generation reads the demand stored in the layer islands.
 void run_step(Orchestrator &orchestrator, Print &print);
-void run_step(Orchestrator &orchestrator, Print &print, const StepSupportDemand::State &support_demand);
 
 } // namespace Steps::StepGenerateSupport
 } // namespace Slic3r

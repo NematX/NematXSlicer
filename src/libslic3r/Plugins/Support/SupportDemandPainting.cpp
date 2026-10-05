@@ -41,7 +41,7 @@ polygons from surviving a boolean difference because of rounding differences.
 
 The projected painting is computed once per object and reused for all islands
 at the corresponding layer. The resulting polygon collection replaces the
-host-owned demand entry for that island. This stage modifies support demand
+support demand of that island. This stage modifies support demand
 only; it does not generate or remove support extrusions directly.
 */
 
@@ -73,16 +73,16 @@ bool has_layer_painting(const std::vector<StoredPolygonCollection> &by_layer, ui
     return layer_idx < by_layer.size() && !by_layer[layer_idx].empty();
 }
 
-void set_demand_from_operand(const run_ctx_support_demand &ctx,
+void set_demand_from_operand(const plugin_run_context *run_ctx,
                              const LayerIsland &island,
                              ClipperOperand &&operand)
 {
     StoredExPolygonCollection polygons = operand.to_expolygon_collection();
     polygons.ensure_valid();
-    ctx.set(ctx.demand, island.handle(), polygons.mutable_handle());
+    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), polygons.mutable_handle());
 }
 
-void add_painting_to_island(const run_ctx_support_demand &ctx,
+void add_painting_to_island(const plugin_run_context *run_ctx,
                             const LayerIsland &island,
                             const ClipperContext &clipper,
                             const std::vector<StoredPolygonCollection> &painting,
@@ -95,15 +95,14 @@ void add_painting_to_island(const run_ctx_support_demand &ctx,
     if (enforced.empty())
         return;
 
-    expolygon_collection_handle *existing_handle = ctx.get(ctx.demand, island.handle());
-    if (existing_handle != nullptr) {
-        ExPolygonCollection existing(existing_handle);
+    const ExPolygonCollection existing = island.support_demand();
+    if (!existing.empty()) {
         enforced = clipper_union2(clipper(existing), enforced);
     }
-    set_demand_from_operand(ctx, island, std::move(enforced));
+    set_demand_from_operand(run_ctx, island, std::move(enforced));
 }
 
-void remove_painting_from_island(const run_ctx_support_demand &ctx,
+void remove_painting_from_island(const plugin_run_context *run_ctx,
                                  const LayerIsland &island,
                                  const ClipperContext &clipper,
                                  const std::vector<StoredPolygonCollection> &painting,
@@ -112,14 +111,13 @@ void remove_painting_from_island(const run_ctx_support_demand &ctx,
     if (!has_layer_painting(painting, layer_idx))
         return;
 
-    expolygon_collection_handle *existing_handle = ctx.get(ctx.demand, island.handle());
-    if (existing_handle == nullptr)
+    const ExPolygonCollection existing = island.support_demand();
+    if (existing.empty())
         return;
 
-    ExPolygonCollection existing(existing_handle);
     ClipperOperand blocked = clipper_offset(clipper(painting[layer_idx]), 1000. * double(SCALED_EPSILON));
     ClipperOperand remaining = clipper_diff(clipper(existing), blocked);
-    set_demand_from_operand(ctx, island, std::move(remaining));
+    set_demand_from_operand(run_ctx, island, std::move(remaining));
 }
 
 } // namespace
@@ -182,7 +180,7 @@ void SupportDemandPainting::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
     const run_ctx_support_demand *ctx = plugin_ctx_as_support_demand(run_ctx);
-    if (ctx == nullptr || ctx->object == nullptr || ctx->demand == nullptr)
+    if (ctx == nullptr || ctx->object == nullptr)
         return;
 
     const Object object(ctx->object);
@@ -206,8 +204,8 @@ void SupportDemandPainting::run_impl(const plugin_run_context *run_ctx) const
             throw_if_cancelled(run_ctx);
 
             const LayerIsland island = layer.island(island_idx);
-            add_painting_to_island(*ctx, island, clipper, enforcers, layer_idx);
-            remove_painting_from_island(*ctx, island, clipper, blockers, layer_idx);
+            add_painting_to_island(run_ctx, island, clipper, enforcers, layer_idx);
+            remove_painting_from_island(run_ctx, island, clipper, blockers, layer_idx);
             progress().increment();
         }
     }

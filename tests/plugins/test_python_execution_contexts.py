@@ -223,40 +223,26 @@ class PythonExecutionContextTests(unittest.TestCase):
         ))
         self.assertTrue(keepalive)
 
-    def test_support_demand_callbacks_preserve_move_and_borrow_semantics(self):
+    def test_support_demand_edit_goes_through_the_run_context(self):
         generated = self.generated
-        islands = (ctypes.c_void_p * 1)(ctypes.c_void_p(41))
-        state = {"polygons": 51, "cleared": False, "set": None}
-        entry_count = generated.SUPPORT_DEMAND_ENTRY_COUNT(lambda _demand: 1)
-        entry_island = generated.SUPPORT_DEMAND_ENTRY_ISLAND(lambda _demand, idx: islands[int(idx)])
-        get_cb = generated.SUPPORT_DEMAND_GET(lambda _demand, _island: state["polygons"])
+        calls = []
 
-        def set_value(_demand, island, polygons):
-            state["set"] = (int(island or 0), int(polygons or 0))
-            return 1
+        def get_mutable(run_ctx, island):
+            calls.append((int(run_ctx.value or 0), int(island.value or 0)))
+            return 51
 
-        set_cb = generated.SUPPORT_DEMAND_SET(set_value)
-        clear_cb = generated.SUPPORT_DEMAND_CLEAR(lambda _demand: state.__setitem__("cleared", True))
-        payload = generated.RunCtxSupportDemand(
-            ctypes.c_void_p(1), ctypes.c_void_p(2), ctypes.c_void_p(3),
-            entry_count, entry_island, get_cb, set_cb, clear_cb,
-        )
+        payload = generated.RunCtxSupportDemand(ctypes.c_void_p(1), ctypes.c_void_p(2))
         common, keepalive = self.make_common(generated.STEP_SUPPORT_DEMAND, payload)
-        keepalive.extend((islands, entry_count, entry_island, get_cb, set_cb, clear_cb))
-        api = types.SimpleNamespace(host=types.SimpleNamespace())
+        api = types.SimpleNamespace(host=types.SimpleNamespace(support_demand_get_island_mutable=get_mutable))
         context = self.execution.SupportDemandContext.from_support_demand_run_context(
             api, ctypes.addressof(common)
         )
 
-        self.assertEqual(context.support_demand_entry_count(), 1)
-        island = context.support_demand_entry_island(0)
-        self.assertEqual(island.address, 41)
-        self.assertEqual(context.support_demand_get(island).address, 51)
-        source = types.SimpleNamespace(c_handle=lambda: ctypes.c_void_p(61))
-        self.assertTrue(context.support_demand_set(island, source))
-        self.assertEqual(state["set"], (41, 61))
-        context.support_demand_clear()
-        self.assertTrue(state["cleared"])
+        island = types.SimpleNamespace(c_handle=lambda: ctypes.c_void_p(41))
+        demand = context.support_demand_get_island_mutable(island)
+        self.assertEqual(demand.address, 51)
+        self.assertEqual(calls, [(ctypes.addressof(common), 41)])
+        self.assertTrue(keepalive is not None)
 
     def test_progress_reports_visible_phase_and_finishes_after_all_runs(self):
         reports = []

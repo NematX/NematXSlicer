@@ -607,11 +607,18 @@ class InfillSurfaceRecipeModifierContext(_InfillSurfaceContext):
 
 @abi_requires_headers("steps/slic3r_step_support_demand.h")
 class SupportDemandContext(_PrintObjectContext):
-    """Mutable island-to-ExPolygons working set used before support generation."""
+    """
+    STEP_SUPPORT_DEMAND payload: the print and the object whose islands get a
+    support demand.
+
+    Read an island's demand with LayerIsland.support_demand(); edit it in place
+    through support_demand_get_island_mutable(), available on every run context
+    from STEP_SUPPORT_DEMAND through STEP_SUPPORT.
+    """
 
     @classmethod
     def from_support_demand_run_context(cls, api, address: int):
-        fields = ("print", "object", "demand", "entry_count", "entry_island", "get", "set", "clear")
+        fields = ("print", "object")
         return cls._from_run_context(api, address, STEP_SUPPORT_DEMAND, RunCtxSupportDemand, fields)
 
     def support_demand_print(self) -> Print:
@@ -619,26 +626,6 @@ class SupportDemandContext(_PrintObjectContext):
 
     def support_demand_object(self) -> Object:
         return self._object()
-
-    def support_demand_entry_count(self) -> int:
-        return int(self.payload.entry_count(self.payload.demand))
-
-    def support_demand_entry_island(self, index: int) -> LayerIsland | None:
-        handle = self.payload.entry_island(self.payload.demand, int(index))
-        return None if not handle else LayerIsland(self.api, handle)
-
-    def support_demand_get(self, island: LayerIsland) -> MutableExPolygonCollection | None:
-        """Borrow mutable polygons invalidated by a later set() or clear()."""
-        handle = self.payload.get(self.payload.demand, _void_p(island))
-        return None if not handle else MutableExPolygonCollection(self.api, handle)
-
-    def support_demand_set(self, island: LayerIsland, polygons=None) -> bool:
-        """Move collection contents to the host; the source wrapper stays valid."""
-        return bool(self.payload.set(self.payload.demand, _void_p(island), _void_p(polygons)))
-
-    def support_demand_clear(self) -> None:
-        """Remove all entries and invalidate collections previously returned by get()."""
-        self.payload.clear(self.payload.demand)
 
 
 __all__ = [

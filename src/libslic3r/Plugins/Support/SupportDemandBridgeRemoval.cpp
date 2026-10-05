@@ -14,6 +14,7 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_post_perimeter.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
 
@@ -21,9 +22,14 @@
 Support-demand bridge removal
 =============================
 
-This plugin provides a STEP_SUPPORT_DEMAND post-process for the
-`dont_support_bridges` object setting. It edits the support-demand areas before
-support generation; it does not remove already-generated support extrusions.
+This plugin refines the support demand for the `dont_support_bridges` object
+setting. It runs in STEP_POST_PERIMETER, once the perimeters are final, because
+it finds bridges from the perimeter and gap-fill extrusions; the demand itself
+was written by STEP_SUPPORT_DEMAND right after slicing. It edits the islands'
+support demand before support generation; it does not remove generated support
+extrusions. Its priority puts it after the plugins that add perimeters over
+overhangs and before the ones that only alter their look (fuzzy skin) or tag
+them (overhang detection).
 
 For each object layer after the first, the plugin examines perimeter and gap
 fill extrusion trees in every island. Straight segments are split at their
@@ -52,8 +58,7 @@ The normal call flow is:
                 |   |-- split straight segments at support intersections
                 |   `-- keep unsupported intervals anchored at both ends
                 `-- remove_bridges_from_island_demand()
-                    |-- subtract bridge areas from the current demand
-                    `-- publish the remaining demand
+                    `-- subtract bridge areas from the island's demand
 
 Curved extrusion segments are ignored by the bridge-area detector. The
 operation is limited to the current island and its immediately lower layer;
@@ -191,15 +196,6 @@ std::vector<double> lower_support_intersection_parameters(const ExPolygonCollect
     return parameters;
 }
 
-void set_demand_from_operand(const run_ctx_support_demand &ctx,
-                             const LayerIsland &island,
-                             ClipperOperand &&operand)
-{
-    StoredExPolygonCollection polygons = operand.to_expolygon_collection();
-    polygons.ensure_valid();
-    ctx.set(ctx.demand, island.handle(), polygons.mutable_handle());
-}
-
 void append_bridge_segment_area(storage_handle *storage,
                                 const ExPolygonCollection &lower_support,
                                 const BridgeLineFlow &flow,
@@ -308,23 +304,23 @@ ClipperOperand bridge_areas_for_island(storage_handle *storage,
     return bridges.empty() ? std::move(bridges) : clipper_union(bridges);
 }
 
-void remove_bridges_from_island_demand(const run_ctx_support_demand &ctx,
+void remove_bridges_from_island_demand(const plugin_run_context *run_ctx,
                                        storage_handle *storage,
                                        const Layer &lower_layer,
                                        const LayerIsland &island,
                                        const ClipperContext &clipper)
 {
-    expolygon_collection_handle *existing_handle = ctx.get(ctx.demand, island.handle());
-    if (existing_handle == nullptr)
+    const ExPolygonCollection existing = island.support_demand();
+    if (existing.empty())
         return;
 
     ClipperOperand bridges = bridge_areas_for_island(storage, lower_layer, island, clipper);
     if (bridges.empty())
         return;
 
-    ExPolygonCollection existing(existing_handle);
-    ClipperOperand remaining = clipper_diff_with_safety_offset(clipper(existing), bridges);
-    set_demand_from_operand(ctx, island, std::move(remaining));
+    StoredExPolygonCollection remaining =
+        clipper_diff_with_safety_offset(clipper(existing), bridges).to_expolygon_collection();
+    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), remaining.mutable_handle());
 }
 
 } // namespace
@@ -353,7 +349,7 @@ const char *SupportDemandBridgeRemoval::description_impl() const noexcept
 
 slicing_step_t SupportDemandBridgeRemoval::step_impl() const noexcept
 {
-    return STEP_SUPPORT_DEMAND;
+    return STEP_POST_PERIMETER;
 }
 
 const char *const *SupportDemandBridgeRemoval::dependencies_impl() const noexcept
@@ -363,7 +359,9 @@ const char *const *SupportDemandBridgeRemoval::dependencies_impl() const noexcep
 
 int32_t SupportDemandBridgeRemoval::priority_impl() const noexcept
 {
-    return 15;
+    // After ExtraPerimetersOnOverhangs (-20) and ExtraPerimeterOverhangWave (-19),
+    // which add perimeters over overhangs; before FuzzySkin (0) and DetectOverhang (50).
+    return -10;
 }
 
 int32_t SupportDemandBridgeRemoval::used_config_keys(raw_used_config_key *keys) const noexcept
@@ -402,7 +400,7 @@ void SupportDemandBridgeRemoval::inilialize_impl(storage_handle *) const
     def.printer_technology = RAW_PT_FFF;
     def.label = "Don't support bridges";
     def.category = RAW_OPTION_CATEGORY_SUPPORT;
-    def.invalidates_step = STEP_SLICING;
+    def.invalidates_step = STEP_POST_PERIMETER;
     def.tooltip = "Experimental option for preventing support material from being generated under bridged areas.";
     def.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_PRUSA;
     def.default_serialized_value = "1";
@@ -425,7 +423,7 @@ void SupportDemandBridgeRemoval::inilialize_impl(storage_handle *) const
 void SupportDemandBridgeRemoval::setup_run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
-    const run_ctx_support_demand *ctx = plugin_ctx_as_support_demand(run_ctx);
+    const run_ctx_post_perimeter_generation *ctx = plugin_ctx_as_post_perimeter_generation(run_ctx);
     if (ctx == nullptr || ctx->object == nullptr)
         return;
 
@@ -438,8 +436,8 @@ void SupportDemandBridgeRemoval::setup_run_impl(const plugin_run_context *run_ct
 void SupportDemandBridgeRemoval::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
-    const run_ctx_support_demand *ctx = plugin_ctx_as_support_demand(run_ctx);
-    if (ctx == nullptr || ctx->object == nullptr || ctx->demand == nullptr)
+    const run_ctx_post_perimeter_generation *ctx = plugin_ctx_as_post_perimeter_generation(run_ctx);
+    if (ctx == nullptr || ctx->object == nullptr)
         return;
 
     const Object object(ctx->object);
@@ -460,7 +458,7 @@ void SupportDemandBridgeRemoval::run_impl(const plugin_run_context *run_ctx) con
             throw_if_cancelled(run_ctx);
 
             const LayerIsland island = layer.island(island_idx);
-            remove_bridges_from_island_demand(*ctx, storage, lower_layer, island, clipper);
+            remove_bridges_from_island_demand(run_ctx, storage, lower_layer, island, clipper);
             progress().increment();
         }
     }

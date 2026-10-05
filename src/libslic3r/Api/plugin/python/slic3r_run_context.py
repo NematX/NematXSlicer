@@ -84,6 +84,23 @@ class PluginRunContextView:
                 self.common.host_context, float(progress), _optional_bytes(message)
             )
 
+    @abi_requires_headers("steps/slic3r_step_support_demand.h")
+    def support_demand_get_island_mutable(self, island):
+        """
+        Borrow one island's support demand for in-place edits.
+
+        During a pipeline run it is allowed from STEP_SUPPORT_DEMAND through
+        STEP_SUPPORT; in another step the host reports an error and None is
+        returned. The collection is owned by the
+        island: never free it.
+        """
+        from slic3r_geometry_views import MutableExPolygonCollection
+
+        handle = self.api.host.support_demand_get_island_mutable(
+            ctypes.c_void_p(ctypes.addressof(self.common)), ctypes.c_void_p(_address(island))
+        )
+        return None if not handle else MutableExPolygonCollection(self.api, handle)
+
 
 class PluginCancelled(Exception):
     """

@@ -10,11 +10,12 @@
 
 namespace slic3r_api { namespace Support { namespace SupportDemandBridgeRemovalPlugin {
 
-// STEP_SUPPORT_DEMAND refinement plugin.
+// STEP_POST_PERIMETER refinement of the support demand.
 //
-// It runs after overhangs, support painting and support modifier volumes. When
-// dont_support_bridges is enabled, it removes support demand under straight
-// extrusion spans whose ends are both supported by the lower layer.
+// The demand is written by STEP_SUPPORT_DEMAND (overhangs, painting, modifier
+// volumes). When dont_support_bridges is enabled, this plugin removes the demand
+// under straight perimeter and gap-fill spans whose ends are both supported by
+// the lower layer.
 class SupportDemandBridgeRemoval : public PluginBase
 {
 public:

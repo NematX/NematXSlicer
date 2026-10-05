@@ -29,7 +29,7 @@ Member names are those of the native storage, not necessarily those of the API g
 |---|---|
 | `apply` | Preparation of model/configuration inputs by the host, outside concurrent plugin execution. |
 | `None` | Before `STEP_LAYER_HEIGHT`: current model and configuration; resumes at `STEP_LAYER_HEIGHT`. |
-| `Slicing` | After `STEP_POST_SLICING`: profile, main layers and slicing geometry kept; resume at `STEP_PRE_PERIMETER`. |
+| `Slicing` | After `STEP_POST_SLICING`: profile, main layers and slicing geometry kept; resume at `STEP_SUPPORT_DEMAND`. |
 | `Print` | After `STEP_FINALIZE_SLICING`: source tree finalized; resume at `STEP_ORDERING`. |
 | `Ordering` | After `STEP_ORDERING`: optional save of the plan, which remains editable in its working copy. |
 | `Plan` | After `STEP_EXTRUSION_SIMPLIFICATION`: final plan read-only for `STEP_GCODE`. |
@@ -306,6 +306,7 @@ Owner: `Layer::m_islands`. **Freezing `m_slice` does not freeze `m_extrusions`.*
 | `m_infill_free_areas` | ExPolygons without overlap, const getters | Same production | Same freeze; empty may mean no restriction |
 | `m_infill_areas_bboxes` | Native cache recomputed with the areas | Host setter of the areas | Not directly exposed; the C infill bbox getter computes the first area |
 | `m_perimeter_slices` | Native derived contours, no dedicated C getter | Perimeter production | Derived source output, global `Print` freeze |
+| `m_support_demand` | ExPolygons asking for support; const getter `layer_island_get_support_demand()` | `STEP_SUPPORT_DEMAND` builds it; any plugin from `STEP_SUPPORT_DEMAND` through `STEP_SUPPORT` may refine it (bridge removal in `STEP_POST_PERIMETER`) with `support_demand_get_island_mutable(run_ctx, island)`, which checks the running step | Emptied by the `STEP_SUPPORT_DEMAND` cleanup at a `Slicing` replay; read by support generation |
 | `overlaps_above` | Vector of links borrowing the upper islands | Final post-slicing rebuild | Main topology fixed from `Slicing` |
 | `overlaps_below` | Links to the layer below | Same phase | Same rule |
 | `Link::to` | Pointer to another island, exposed | Graph construction | Invalid if the target is rebuilt |
@@ -764,19 +765,15 @@ Sources: `src/libslic3r/Api/host/steps/LayerHeightStep.hpp:20`, `src/libslic3r/S
 | `InfillStepHostContext::recipe_modifier_plugins` | List of borrowed providers | Step context lifetime |
 | `run_ctx_generate_infill::{host_context,resolve_pattern_id,pattern_plugin_id,report_pattern_assignments,modify_surface_recipe,generate_pattern,append_region_island_extrusion}` | Borrowed `InfillStepHostContext` with the pattern service, copied discovery groups and recipe-modifier contexts; no exception crosses these callbacks. `resolve_pattern_id` returns INVALID on a contained failure, while normal inactive-id fallback remains a warning; `pattern_plugin_id` is never NULL and returns "" for an unknown id. `report_pattern_assignments` copies generator-owned arrays during `setup_run()`; a contained failure requests a stop before pattern initialization. `modify_surface_recipe` runs modifiers in priority order against one mutable recipe; the chain stops on failure and preserves earlier edits, so the recipe is not consumed. `generate_pattern` returns 0 and empties caller-owned output on a contained failure or pending stop; ordinary refusals keep their existing result and message. `append_region_island_extrusion` stages moved children before appending to the role bucket; on failure, previously published paths remain unchanged, while the caller-owned source may be partly consumed. That callback has no print handle, so print cancellation is handled by the generator and runner. Other failures add a plugin error message and request cancellation | The context and runtime IDs live only for the current `STEP_INFILL` call. The host retains copied assignments and their borrowed print-geometry handles until the call ends; source arrays need only survive their report callback |
 | `InfillPatternService::Pattern::{host_context,execution_error,run_context}`, `InfillStepHostContext::recipe_modifier_host_contexts` | Owned contexts for the callbacks; pattern contexts and plugin storage entries are created before any call, so calls may run concurrently | Lifetime of the step call |
-| `StepSupportDemand::State::m_demands` | Map borrowed object → owned SupportDemandSet | Reset/destroyed in the pipeline; not a Print member |
-| `SupportDemandSet::m_entries` | Vector of Entry by value | Addition/erasure may invalidate views |
-| `SupportDemandSet::Entry::island` | Source borrow | The set does not own the island |
-| `SupportDemandSet::Entry::polygons` | Owned ExPolygons, mutable getter | Modify/set/clear during demand processing; not a persistent checkpoint |
-| `SupportDemandRunContext::context_step` | Payload borrowing the set | Wrapper lifetime; does not own the demand |
+| `support_demand_get_island_mutable(run_ctx, island)` | Host function returning the island-owned demand (`LayerSliceIsland::m_support_demand`); refused outside `STEP_SUPPORT_DEMAND`..`STEP_SUPPORT` | The collection lives as long as the island |
 
 By-value fields of `raw_infill_pattern_params`, all from the same recipe: `pattern_id`, `surface_type`, `extrusion_role`, `flow`, `density`, `flow_mult`, `connection`, `add_gap_fill`, `gap_fill_enabled`, `dont_adjust`, `monotonic`, `fill_exactly`, `complete`, `use_arachne`, `can_angle_cross`, `extruder`, `priority`, `spacing`, `angle`, `bridge_angle`, `bridge_type`, `layer_height`, `z`, `layer_id`, `overlap`, `bridge_offset`, `fill_resolution`, `link_max_length`, `loop_clipping`, `anchor_length`, `anchor_length_max`, `max_sparse_infill_spacing`.
 
 `c_flow` owns `width`, `spacing`, `height`, `nozzle_diameter`, `is_bridge`, `spacing_ratio`, `mm3_per_mm`. This record does not own the regions from which its values are computed.
 
-The pattern generation callback borrows the provided buffers, without allocating or clearing the output itself. The default generator provides a fresh output. Support generation remains unimplemented; the existence of the demand working set does not prove a persistent support output.
+The pattern generation callback borrows the provided buffers, without allocating or clearing the output itself. The default generator provides a fresh output. The support demand is island data (see the `LayerSliceIsland` table): `STEP_SUPPORT_DEMAND` runs right after `STEP_POST_SLICING`, so every later step can read it. Support generation remains unimplemented.
 
-Sources: `src/libslic3r/Plugins/Infill/DefaultInfillGenerator.cpp:279`, `src/libslic3r/Api/plugin/c/steps/slic3r_step_infill.h:40`, `src/libslic3r/Steps/StepSupportDemand.hpp:25`.
+Sources: `src/libslic3r/Plugins/Infill/DefaultInfillGenerator.cpp:279`, `src/libslic3r/Api/plugin/c/steps/slic3r_step_infill.h:40`, `src/libslic3r/Steps/StepSupportDemand.hpp`.
 
 ### C++ computed views
 

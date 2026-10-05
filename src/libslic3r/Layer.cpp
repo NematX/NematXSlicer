@@ -166,6 +166,11 @@ ExPolygons &ApiInternal::LayerIslandAccess::perimeter_slices_mutable(LayerSliceI
     return island.m_perimeter_slices;
 }
 
+ExPolygons &ApiInternal::LayerIslandAccess::support_demand_mutable(LayerSliceIsland &island)
+{
+    return island.m_support_demand;
+}
+
 Layer::Layer(size_t id, PrintObject *object, coord_t height, coord_t print_z, double slice_z, bool /*scaledok*/)
     : upper_layer(nullptr)
     , lower_layer(nullptr)
