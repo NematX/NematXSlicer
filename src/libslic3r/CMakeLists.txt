@@ -493,6 +493,13 @@ set(SLIC3R_SOURCES
 	Plugins/Surface/SolidShells.hpp
 	Plugins/Surface/TopSurfaceExpansion.cpp
 	Plugins/Surface/TopSurfaceExpansion.hpp
+	Plugins/Support/Grid/GridSupportGenerator.cpp
+	Plugins/Support/Grid/GridSupportGenerator.hpp
+	Plugins/Support/Grid/GridSupportLayers.hpp
+	Plugins/Support/Grid/GridSupportParams.cpp
+	Plugins/Support/Grid/GridSupportParams.hpp
+	Plugins/Support/Grid/SupportFamilyGrid.cpp
+	Plugins/Support/Grid/SupportFamilyGrid.hpp
 	Plugins/Support/SupportDemandBridgeRemoval.cpp
 	Plugins/Support/SupportDemandBridgeRemoval.hpp
 	Plugins/Support/SupportDemandBuildplateOnly.cpp

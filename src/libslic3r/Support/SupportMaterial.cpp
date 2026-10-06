@@ -2324,6 +2324,7 @@ size_t safe_ceil_fraction(coord_t distance, coord_t increment){
     return count;
 }
 
+// Plan the intermediate support slabs between the sorted contact extremes and set the contact heights still missing.
 SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_support_layers(
     const PrintObject   &object,
     const SupportGeneratorLayersPtr   &bottom_contacts,
@@ -2387,12 +2388,12 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
         std::min(m_slicing_params->max_suport_layer_height, std::max(0.,// m_slicing_params->min_suport_layer_height,
             m_object_config->support_material_interface_layer_height.get_effective_value(m_support_params.support_material_interface_flow.nozzle_diameter()))));
     if (!extremes.empty() &&
-         (extremes.front()->scaled_height() > 0 ||
+         extremes.front()->layer_type == SupporLayerType::TopContact &&
+         (extremes.front()->scaled_bottom_z() == 0 ||
           (m_slicing_params->raft_interface_top_z > 0 &&
            extremes.front()->scaled_extreme_z() ==
                scale_to_layer_coord(m_slicing_params->raft_interface_top_z)))) {
-        // This is a raft contact layer, its height has been decided in this->top_contact_layers().
-        // Ignore this layer when calculating the intermediate support layers.
+        // This top contact sits on the bed or raft interface and already has its thickness; no intermediate slab belongs beneath it.
         assert(extremes.front()->layer_type == SupporLayerType::TopContact);
         ++ idx_extreme_first;
     }
@@ -2411,7 +2412,7 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
             // This is a bottom of a synchronized (or soluble) top contact layer, its height has been decided in this->top_contact_layers().
             assert(extr2->layer_type == SupporLayerType::TopContact);
             assert(extr2->scaled_height() > 0);
-            assert(extr2->unscaled_bottom_z() == m_slicing_params->first_print_layer_height);
+            assert(extr2->scaled_bottom_z() == scale_to_layer_coord(m_slicing_params->first_print_layer_height));
             assert(extr2->unscaled_print_z() >= m_slicing_params->first_print_layer_height + unscaled(m_support_params._support_layer_height_min) - EPSILON);
             if (intermediate_layers.empty() ||
                 intermediate_layers.back()->scaled_print_z() < scale_to_layer_coord(m_slicing_params->first_print_layer_height)) {

@@ -150,6 +150,7 @@ after the available plugin set is known.
 #include "libslic3r/Plugins/WipeTower/ToolChangeUnretract.hpp"
 #include "libslic3r/Plugins/WipeTower/ToolChangeWipe.hpp"
 #include "libslic3r/Plugins/WipeTower/WipeTowerManager.hpp"
+#include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandBuildplateOnly.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandModifiers.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandOverhangs.hpp"
@@ -944,7 +945,7 @@ void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator)
 
 } // namespace
 
-// Register the five demand providers as built-ins; call once before plugin initialization so settings see the same providers as production.
+// Register demand providers and the grid/snug family before plugin initialization; startup and tests reuse this list so their support providers agree.
 void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
 {
     register_builtin_plugin(orchestrator, "support.demand.overhangs",
@@ -957,6 +958,8 @@ void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Support::SupportDemandBuildplateOnlyPlugin::register_support_demand_buildplate_only_plugin);
     register_builtin_plugin(orchestrator, "support.demand.bridge_removal",
         slic3r_api::Support::SupportDemandBridgeRemovalPlugin::register_support_demand_bridge_removal_plugin);
+    register_builtin_plugin(orchestrator, "support.family.grid",
+        slic3r_api::Support::Grid::register_support_family_grid_plugin);
 }
 
 bool resolve_plugin_startup_activation_config(const boost::filesystem::path &data_directory,
