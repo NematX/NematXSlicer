@@ -68,6 +68,8 @@ const raw_used_config_key k_used_config_keys[] = {
     {"overhangs_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"perimeter_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"solid_infill_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"support_material_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"support_material_interface_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"thin_walls_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"top_solid_infill_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"travel_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
@@ -667,11 +669,18 @@ double role_acceleration(const ExtrusionSettingsContext &context,
     const double external = effective_value(region, "external_perimeter_acceleration", perimeter);
     const double solid = effective_value(region, "solid_infill_acceleration", acceleration);
     const double bridge = effective_value(region, "bridge_acceleration", acceleration);
+    // Support acceleration is also the base of the interface and brim/skirt
+    // values; zero in any of them inherits its base.
+    const double support = effective_value(context.object_config, "support_material_acceleration", acceleration);
 
     // Select the most specific role override while retaining the family
     // fallback for disabled or zero options.
     if (RAW_EXTRUSION_ROLE_IS_SKIRT(role))
-        acceleration = effective_value(context.object_config, "brim_acceleration", acceleration);
+        acceleration = effective_value(context.object_config, "brim_acceleration", support);
+    else if (RAW_EXTRUSION_ROLE_IS_SUPPORT(role))
+        acceleration = RAW_EXTRUSION_ROLE_IS_SUPPORT_INTERFACE(role) ?
+            effective_value(context.object_config, "support_material_interface_acceleration", support) :
+            support;
     else if (role == RAW_EXTRUSION_ROLE_GAP_FILL)
         acceleration = effective_value(region, "gap_fill_acceleration", perimeter);
     else if (role == RAW_EXTRUSION_ROLE_THIN_WALL)
@@ -763,7 +772,8 @@ void collect_unresolved_roles(MutableExtrusionEntity entity,
         return;
     }
 
-    if (leaf_disposition(entity, state) == LeafDisposition::Editable && state.acceleration <= 0.f)
+    if (leaf_disposition(entity, state, EPropertySpeedField::Acceleration) == LeafDisposition::Editable &&
+        state.acceleration <= 0.f)
         roles.insert(state.attributes.extrusion_role());
 }
 
@@ -866,7 +876,8 @@ void assign_acceleration_tree(MutableExtrusionEntity entity,
         return;
     }
 
-    const LeafDisposition disposition = leaf_disposition(entity, state);
+    const LeafDisposition disposition =
+        leaf_disposition(entity, state, EPropertySpeedField::Acceleration);
     if (disposition == LeafDisposition::Empty || state.acceleration > 0.f)
         return;
 

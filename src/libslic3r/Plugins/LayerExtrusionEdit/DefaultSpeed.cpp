@@ -76,6 +76,8 @@ const raw_used_config_key k_used_config_keys[] = {
     {"overhangs_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"perimeter_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"solid_infill_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"support_material_interface_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"support_material_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"thin_walls_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"top_solid_infill_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"travel_speed", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
@@ -841,10 +843,26 @@ double role_speed(const ExtrusionSettingsContext &context,
     const double external = effective_value(region, "external_perimeter_speed", perimeter);
     const double solid = effective_value(region, "solid_infill_speed", auto_base);
     const double bridge = effective_value(region, "bridge_speed", auto_base);
+    // Support speed follows the autospeed base. It is also the base of the
+    // interface and brim/skirt percentages.
+    const double support = effective_value(context.object_config, "support_material_speed", auto_base);
 
-    // Resolve roles outside the perimeter and infill families first.
-    if (RAW_EXTRUSION_ROLE_IS_SKIRT(role))
-        return effective_value(context.object_config, "brim_speed", auto_base);
+    // Resolve roles outside the perimeter and infill families first. For
+    // brim/skirt and support interface, a percentage refines the support
+    // speed, while zero means autospeed for that feature itself, whatever the
+    // support speed is.
+    if (RAW_EXTRUSION_ROLE_IS_SKIRT(role)) {
+        const double brim = context.object_config.effective_float_or_percent_or_default(
+            "brim_speed", support, 0.0);
+        return brim > 0.0 ? brim : auto_base;
+    }
+    if (RAW_EXTRUSION_ROLE_IS_SUPPORT(role)) {
+        if (!RAW_EXTRUSION_ROLE_IS_SUPPORT_INTERFACE(role))
+            return support;
+        const double interface_speed = context.object_config.effective_float_or_percent_or_default(
+            "support_material_interface_speed", support, 0.0);
+        return interface_speed > 0.0 ? interface_speed : auto_base;
+    }
     if (RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_MILL))
         return region.float_or_default("milling_speed", 0.0);
     if (role == RAW_EXTRUSION_ROLE_GAP_FILL)

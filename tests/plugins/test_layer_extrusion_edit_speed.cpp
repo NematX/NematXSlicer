@@ -3,6 +3,7 @@
 #include "gcode_test_helpers.hpp"
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+
 #include "test_data.hpp"
 
 #include <algorithm>
@@ -13,6 +14,8 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -54,7 +57,9 @@ STEP_LAYER_EXTRUSION_EDIT process-parameter tests
 The production step edits clones owned by PrintingPlan, not Layer output. Each
 fixture therefore creates a small auxiliary layer with real object and region
 configuration, publishes native extrusion paths, and lets STEP_ORDERING create
-the same clone hierarchy that the future G-code pipeline consumes.
+the same clone hierarchy that the future G-code pipeline consumes. One support
+test instead slices a real object with grid support and exports it through
+STEP_GCODE, as the pipeline refuses any geometric leaf left without a speed.
 
 Tests inspect effective process values through the extrusion tree because the
 default plugins deliberately hoist identical speed and acceleration values to
@@ -1490,6 +1495,140 @@ TEST_CASE("Layer extrusion editor resolves role speed and acceleration fallbacks
     check_role(ExtrusionRole::Skirt, 7.f, 50.f);
 }
 
+TEST_CASE("Layer extrusion editor resolves support and interface speeds",
+          "[plugins][layer-extrusion-edit][speed][support]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    // Run the default editors on one support leaf and one interface leaf, then
+    // return their effective speeds in that order.
+    const auto support_speeds = [](std::initializer_list<ConfigBase::SetDeserializeItem> overrides) {
+        PreparedSpeedPrint prepared;
+        DynamicPrintConfig config = speed_config({
+            {"default_acceleration", "1000"}, {"first_layer_speed", "100%"},
+            {"first_layer_acceleration", "100%"}, {"max_print_speed", "73"},
+            {"max_volumetric_speed", "0"}, {"filament_max_speed", "0"},
+            {"filament_max_volumetric_speed", "0"}
+        });
+        config.set_deserialize_strict(overrides);
+        prepare_ordered_plan(prepared, config, {{
+            {ExtrusionRole::SupportMaterial, 0.2}, {ExtrusionRole::SupportMaterialInterface, 0.2}
+        }});
+        run_default_editors(prepared);
+        const std::map<uint16_t, ObservedLeaf> leaves =
+            observed_by_role(observed_plan_leaves(prepared.print));
+        REQUIRE(leaves.count(uint16_t(ExtrusionRole::SupportMaterial)) == 1);
+        REQUIRE(leaves.count(uint16_t(ExtrusionRole::SupportMaterialInterface)) == 1);
+        return std::make_pair(leaves.at(uint16_t(ExtrusionRole::SupportMaterial)).speed,
+                              leaves.at(uint16_t(ExtrusionRole::SupportMaterialInterface)).speed);
+    };
+
+    SECTION("a fixed support speed is the base of the interface percentage") {
+        const std::pair<float, float> speeds = support_speeds({
+            {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"}
+        });
+        CHECK(speeds.first == 40.f);
+        CHECK(speeds.second == 20.f);
+    }
+
+    SECTION("a zero interface speed falls back to max print speed without autospeed") {
+        const std::pair<float, float> speeds = support_speeds({
+            {"support_material_speed", "40"}, {"support_material_interface_speed", "0"}
+        });
+        CHECK(speeds.first == 40.f);
+        CHECK(speeds.second == 73.f);
+    }
+
+    SECTION("a zero interface speed uses autospeed, not the support speed") {
+        // Only the interface leaf joins autospeed: 0.2 mm3/mm at 100 mm/s
+        // reaches the 20 mm3/s target.
+        const std::pair<float, float> speeds = support_speeds({
+            {"support_material_speed", "40"}, {"support_material_interface_speed", "0"},
+            {"max_print_speed", "100"}, {"max_volumetric_speed", "20"}
+        });
+        CHECK(speeds.first == 40.f);
+        CHECK(speeds.second == 100.f);
+    }
+
+    SECTION("a zero support speed falls back to max print speed without autospeed") {
+        const std::pair<float, float> speeds = support_speeds({
+            {"support_material_speed", "0"}, {"support_material_interface_speed", "0"}
+        });
+        CHECK(speeds.first == 73.f);
+        CHECK(speeds.second == 73.f);
+    }
+
+    SECTION("a zero support speed uses autospeed as the interface base") {
+        // The 0.2 mm3/mm flow at 100 mm/s reaches the 20 mm3/s target.
+        const std::pair<float, float> speeds = support_speeds({
+            {"support_material_speed", "0"}, {"support_material_interface_speed", "50%"},
+            {"max_print_speed", "100"}, {"max_volumetric_speed", "20"}
+        });
+        CHECK(speeds.first == 100.f);
+        CHECK(speeds.second == 50.f);
+    }
+
+    SECTION("the first layer speed caps support paths") {
+        const std::pair<float, float> speeds = support_speeds({
+            {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
+            {"first_layer_speed", "30"}, {"first_layer_min_speed", "0"}
+        });
+        CHECK(speeds.first == 30.f);
+        CHECK(speeds.second == 20.f);
+    }
+}
+
+TEST_CASE("Layer extrusion editor resolves brim speed over the support speed",
+          "[plugins][layer-extrusion-edit][speed][support][brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    // The plugin publishes brim_speed as a percentage of the support speed.
+    const ConfigOptionDef *def = PrintConfigDef::instance().get("brim_speed");
+    REQUIRE(def != nullptr);
+    CHECK(def->ratio_over == "support_material_speed");
+    CHECK(def->default_value->serialize() == "50%");
+
+    // Run the default editors on one skirt/brim leaf and return its speed.
+    const auto brim_speed = [](std::initializer_list<ConfigBase::SetDeserializeItem> overrides) {
+        PreparedSpeedPrint prepared;
+        DynamicPrintConfig config = speed_config({
+            {"default_acceleration", "1000"}, {"first_layer_speed", "100%"},
+            {"first_layer_acceleration", "100%"}, {"max_print_speed", "73"},
+            {"max_volumetric_speed", "0"}, {"filament_max_speed", "0"},
+            {"filament_max_volumetric_speed", "0"}, {"support_material_speed", "40"}
+        });
+        config.set_deserialize_strict(overrides);
+        prepare_ordered_plan(prepared, config, {{{ExtrusionRole::Skirt, 0.2}}});
+        run_default_editors(prepared);
+        const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+        REQUIRE(leaves.size() == 1);
+        return leaves.front().speed;
+    };
+
+    SECTION("a fixed brim speed is used as is") {
+        CHECK(brim_speed({{"brim_speed", "25"}}) == 25.f);
+    }
+
+    SECTION("a brim percentage applies to the support speed") {
+        CHECK(brim_speed({{"brim_speed", "50%"}}) == 20.f);
+    }
+
+    SECTION("the default brim speed is half the support speed") {
+        CHECK(brim_speed({}) == 20.f);
+    }
+
+    SECTION("a zero brim speed falls back to max print speed without autospeed") {
+        CHECK(brim_speed({{"brim_speed", "0"}}) == 73.f);
+    }
+
+    SECTION("a zero brim speed uses autospeed, not the support speed") {
+        // 0.2 mm3/mm at 100 mm/s reaches the 20 mm3/s target.
+        CHECK(brim_speed({{"brim_speed", "0"}, {"max_print_speed", "100"},
+                          {"max_volumetric_speed", "20"}}) == 100.f);
+    }
+}
+
 TEST_CASE("Layer extrusion editor preserves overrides and applies first-layer caps",
           "[plugins][layer-extrusion-edit][speed][acceleration][limits]")
 {
@@ -1575,8 +1714,10 @@ TEST_CASE("Layer extrusion editor computes autospeed from real eligible flow",
         {"max_print_speed", "100"}, {"max_volumetric_speed", "50"},
         {"autospeed_min_thin_flow", "!0"}, {"first_layer_speed", "100%"},
         {"first_layer_acceleration", "100%"}, {"filament_max_speed", "0"},
-        {"filament_max_volumetric_speed", "0"}
+        {"filament_max_volumetric_speed", "0"}, {"support_material_speed", "35"}
     });
+    // The explicit support speed keeps the thin support flow out of the
+    // shared target, and the wipe tower is never edited by this plugin.
     ExtrusionSpec forced{ExtrusionRole::Perimeter, 0.001};
     forced.force_e_per_mm = true;
     prepare_ordered_plan(prepared, config, {{
@@ -1599,11 +1740,12 @@ TEST_CASE("Layer extrusion editor computes autospeed from real eligible flow",
             ++excluded_count;
     }
     std::sort(editable_speeds.begin(), editable_speeds.end());
-    REQUIRE(editable_speeds.size() == 3);
-    CHECK(editable_speeds[0] == 50.f);
-    CHECK(editable_speeds[1] == 100.f);
+    REQUIRE(editable_speeds.size() == 4);
+    CHECK(editable_speeds[0] == 35.f);
+    CHECK(editable_speeds[1] == 50.f);
     CHECK(editable_speeds[2] == 100.f);
-    CHECK(excluded_count == 2);
+    CHECK(editable_speeds[3] == 100.f);
+    CHECK(excluded_count == 1);
 }
 
 TEST_CASE("Layer extrusion editor supports autospeed percentages and thin-flow floor",
