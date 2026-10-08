@@ -1,7 +1,7 @@
 /* Native support keeps its temporary slabs inside generate(), then destroys
    them after path generation. These tests also run its geometry phases to
    inspect the slab thicknesses before paths can be split by overlapping slabs.
-   Explicit member-pointer instantiation gives this test access to six private
+   Explicit member-pointer instantiation gives this test access to seven private
    phases without changing native source or redefining its class. The deque
    owns the slabs and the vectors point into it for the duration of a comparison. */
 #ifndef support_grid_legacy_slabs_hpp_
@@ -46,6 +46,12 @@ struct TrimContactStage {
     // Select native contact-overlap trimming.
     friend Type native_stage(TrimContactStage);
 };
+struct CoveredStage {
+    using Type = std::vector<Polygons> (PrintObjectSupportMaterial::*)(const PrintObject &) const;
+    // Select the native build-plate coverage used by buildplate-only support.
+    friend Type native_stage(CoveredStage);
+};
+template struct NativeStage<CoveredStage, &PrintObjectSupportMaterial::buildplate_covered>;
 template struct NativeStage<TopStage, &PrintObjectSupportMaterial::top_contact_layers>;
 template struct NativeStage<BottomStage, &PrintObjectSupportMaterial::bottom_contact_layers_and_layer_support_areas>;
 template struct NativeStage<IntermediateStage, &PrintObjectSupportMaterial::raft_and_intermediate_support_layers>;
@@ -63,11 +69,10 @@ inline void native_slabs(const PrintObject &object, const PrintObjectSupportMate
 {
     const FFFSupport::SupportParameters params(object);
     const SlicingParameters &slicing = object.slicing_parameters();
-    // The comparison models never request buildplate-only filtering or raft.
-    // An empty covered set is the native input for that configuration.
-    REQUIRE_FALSE(object.config().support_material_buildplate_only.value);
+    // The comparison models never request a raft. The build-plate coverage is computed as the native
+    // generate() does; it is empty unless buildplate-only support is requested.
     REQUIRE(object.config().raft_layers.value == 0);
-    std::vector<Polygons> covered, areas;
+    std::vector<Polygons> covered = (generator.*native_stage(CoveredStage{}))(object), areas;
     result.top = (generator.*native_stage(TopStage{}))(object, covered, result.storage);
     result.bottom = (generator.*native_stage(BottomStage{}))(object, result.top, covered, result.storage, areas);
     result.base = (generator.*native_stage(IntermediateStage{}))(object, result.bottom, result.top, result.storage);

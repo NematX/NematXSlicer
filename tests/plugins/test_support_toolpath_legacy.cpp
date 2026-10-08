@@ -174,59 +174,111 @@ TEST_CASE("Native sparse first layer uses the support flange flow", "[plugins][s
     CHECK(counts.first_width == Approx(0.7));
 }
 
+// Collect the leaves of a plugin-API extrusion tree in traversal order.
+void collect_api_leaves(const slic3r_api::ExtrusionEntity &entity, std::vector<slic3r_api::ExtrusionEntity> &leaves)
+{
+    if (entity.has_polyline()) {
+        leaves.push_back(entity);
+        return;
+    }
+    for (uint32_t index = 0; index < entity.child_count(); ++index)
+        collect_api_leaves(entity.child(index), leaves);
+}
+
+// Length in millimetres of the polyline of one plugin-API leaf.
+double api_length(const slic3r_api::ExtrusionEntity &leaf)
+{
+    const std::vector<c_point> points = leaf.points();
+    double length = 0;
+    for (size_t index = 1; index < points.size(); ++index)
+        length += std::hypot(double(points[index].x - points[index - 1].x), double(points[index].y - points[index - 1].y));
+    return unscaled(length);
+}
+
 // Drive the modulation helper with synthetic slabs: a path crossing an overlapping footprint is
 // split and its flow scaled by the remaining height, and an empty overlap list leaves it untouched.
 TEST_CASE("Native support path modulation splits and thins overlapping paths", "[plugins][support-toolpath-legacy]")
 {
-    const Flow flow = Flow::new_from_config_width(frSupportMaterial, ConfigOptionFloatOrPercent(0.4, false),
-        ConfigOptionFloatOrPercent(0.4, false), 0.4f, 0.2f, 0.f);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const coord_t layer_z = scale_to_layer_coord(1.);
-    Polyline line;
-    line.append(Point(0, 0));
-    line.append(Point(scale_i(10.), 0));
+    const std::vector<c_point> line{c_point{0, 0}, c_point{scale_i(10.), 0}};
+    slic3r_api::EPropertyAttributes attributes;
+    attributes.extrusion_role(int32_t(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL)).mm3_per_mm(0.1).width(0.4f).height(0.2f);
     // One slab 0.1 mm below the layer top, covering the middle of the path.
-    Polygon square;
-    square.points = {Point(scale_i(4.), -scale_i(1.)), Point(scale_i(6.), -scale_i(1.)),
-                     Point(scale_i(6.), scale_i(1.)), Point(scale_i(4.), scale_i(1.))};
-    const std::vector<ToolpathInternal::Overlap> overlapping{{scale_to_layer_coord(0.9), Polygons{square}}};
-    ExtrusionEntityCollection split;
-    ExtrusionPath split_path(ExtrusionAttributes(ExtrusionRole::SupportMaterial, flow), nullptr);
-    split_path.set_polyline(line);
-    split.append(std::move(split_path));
-    ToolpathInternal::modulate(split, layer_z, overlapping, SCALED_EPSILON);
-    // A split source path keeps its fragments in one nested collection, so the leaves are gathered.
-    std::vector<const ExtrusionEntity *> leaves;
-    collect_leaves(split, leaves);
+    const std::vector<c_point> square{c_point{scale_i(4.), -scale_i(1.)}, c_point{scale_i(6.), -scale_i(1.)},
+                                      c_point{scale_i(6.), scale_i(1.)}, c_point{scale_i(4.), scale_i(1.)}};
+    slic3r_api::StoredPolygonCollection footprint(handle);
+    slic3r_api::StoredPolygon polygon(handle);
+    polygon.insert_array(0, square.data(), uint32_t(square.size()));
+    footprint.push_back(polygon);
+    std::vector<ToolpathInternal::Overlap> overlapping;
+    overlapping.push_back(ToolpathInternal::Overlap{scale_to_layer_coord(0.9), std::move(footprint)});
+    slic3r_api::StoredExtrusionEntity split(handle);
+    slic3r_api::StoredExtrusionEntity split_path(handle, line);
+    split_path.set_flags(uint32_t(RAW_EXTRUSION_FLAG_REVERSIBLE));
+    split_path.get_or_add(slic3r_api::EPropertyAttributes::key) = attributes;
+    split.append_child_move(split_path.mutable_view());
+    ToolpathInternal::modulate(handle, split.mutable_view(), layer_z, overlapping, SCALED_EPSILON);
     // The path is cut at the overlap boundary: one thinned middle path between two unchanged parts.
+    std::vector<slic3r_api::ExtrusionEntity> leaves;
+    collect_api_leaves(split.readonly(), leaves);
     REQUIRE(leaves.size() == 3);
     double thinned_length = 0, thinned_height = 0, thinned_mm3 = 0;
-    for (const ExtrusionEntity *leaf : leaves) {
-        const ExtrusionAttributes *attributes = leaf->get_property<ExtrusionAttributes>();
-        REQUIRE(attributes != nullptr);
-        double length = 0;
-        for (const ArcPolyline &polyline : leaf->as_polylines()) length += unscaled(polyline.length());
-        if (attributes->height < flow.height()) {
-            thinned_length = length;
-            thinned_height = attributes->height;
-            thinned_mm3 = attributes->mm3_per_mm;
+    std::vector<double> heights;
+    for (const slic3r_api::ExtrusionEntity &leaf : leaves) {
+        const slic3r_api::EPropertyAttributes *leaf_attributes = leaf.get(slic3r_api::EPropertyAttributes::key);
+        REQUIRE(leaf_attributes != nullptr);
+        heights.push_back(leaf_attributes->c_extrusion_property_attributes::height);
+        CHECK(!leaf.reversible());
+        if (leaf_attributes->c_extrusion_property_attributes::height < 0.2f) {
+            thinned_length = api_length(leaf);
+            thinned_height = leaf_attributes->c_extrusion_property_attributes::height;
+            thinned_mm3 = leaf_attributes->mm3_per_mm();
         }
     }
     CHECK(thinned_height == Approx(0.1));
-    CHECK(thinned_mm3 == Approx(flow.mm3_per_mm() * 0.1 / 0.2));
+    CHECK(thinned_mm3 == Approx(0.1 * 0.1 / 0.2));
     CHECK(thinned_length == Approx(2.4)); // The 2 mm footprint plus half the flow width on both sides.
+    // The fragments form one group in the source order. Like the native multipath, neither the group nor its
+    // fragments may be reversed or sorted, so the printing direction is kept; the first child insertion would make
+    // the group sortable, which is why the flags are cleared after the children.
+    const slic3r_api::ExtrusionEntity modulated = split.readonly().child(0);
+    REQUIRE(modulated.child_count() == 3);
+    CHECK(!modulated.reversible());
+    CHECK(!modulated.sortable());
+    CHECK(modulated.continuous());
+    REQUIRE(heights.size() == 3);
+    CHECK(heights[0] == Approx(0.2));
+    CHECK(heights[1] == Approx(0.1));
+    CHECK(heights[2] == Approx(0.2));
+    // Each fragment starts exactly where the previous one ends; the chain starts at the source start and ends at its end.
+    for (size_t index = 0; index + 1 < leaves.size(); ++index) {
+        const std::vector<c_point> ending = leaves[index].points();
+        const std::vector<c_point> starting = leaves[index + 1].points();
+        CHECK(ending.back().x == starting.front().x);
+        CHECK(ending.back().y == starting.front().y);
+    }
+    const std::vector<c_point> first_points = leaves.front().points();
+    const std::vector<c_point> last_points = leaves.back().points();
+    CHECK(first_points.front().x == line.front().x);
+    CHECK(first_points.front().y == line.front().y);
+    CHECK(unscaled(std::hypot(double(last_points.back().x - line.back().x), double(last_points.back().y - line.back().y))) < 1e-3);
     // Without overlapping slabs the helper must leave the path untouched.
-    ExtrusionEntityCollection untouched;
-    ExtrusionPath untouched_path(ExtrusionAttributes(ExtrusionRole::SupportMaterial, flow), nullptr);
-    untouched_path.set_polyline(std::move(line));
-    untouched.append(std::move(untouched_path));
-    ToolpathInternal::modulate(untouched, layer_z, {}, SCALED_EPSILON);
+    slic3r_api::StoredExtrusionEntity untouched(handle);
+    slic3r_api::StoredExtrusionEntity untouched_path(handle, line);
+    untouched_path.set_flags(uint32_t(RAW_EXTRUSION_FLAG_REVERSIBLE));
+    untouched_path.get_or_add(slic3r_api::EPropertyAttributes::key) = attributes;
+    untouched.append_child_move(untouched_path.mutable_view());
+    ToolpathInternal::modulate(handle, untouched.mutable_view(), layer_z, {}, SCALED_EPSILON);
     leaves.clear();
-    collect_leaves(untouched, leaves);
+    collect_api_leaves(untouched.readonly(), leaves);
     REQUIRE(leaves.size() == 1);
-    const ExtrusionAttributes *attributes = leaves.front()->get_property<ExtrusionAttributes>();
-    REQUIRE(attributes != nullptr);
-    CHECK(attributes->height == flow.height());
-    CHECK(attributes->mm3_per_mm == Approx(flow.mm3_per_mm()));
+    CHECK(leaves.front().reversible());
+    const slic3r_api::EPropertyAttributes *leaf_attributes = leaves.front().get(slic3r_api::EPropertyAttributes::key);
+    REQUIRE(leaf_attributes != nullptr);
+    CHECK(leaf_attributes->c_extrusion_property_attributes::height == 0.2f);
+    CHECK(leaf_attributes->mm3_per_mm() == Approx(0.1));
 }
 
 // With no interface layers and separate support extruders the contact cannot merge into the base, so
@@ -296,11 +348,11 @@ TEST_CASE("Native contacts print with base settings without interface layers", "
 // support regions could merge and the intermediate rectilinear filler otherwise.
 TEST_CASE("Native support pattern keeps bridging contacts away from the sparse pattern", "[plugins][support-toolpath-legacy]")
 {
-    CHECK(ToolpathInternal::surface_pattern(false, true, true, false, ipSupportBase, ipHoneycomb) == ipRectilinear);
-    CHECK(ToolpathInternal::surface_pattern(false, true, false, false, ipSupportBase, ipHoneycomb) == ipSupportBase);
-    CHECK(ToolpathInternal::surface_pattern(false, false, false, false, ipConcentric, ipHoneycomb) == ipRectilinear);
-    CHECK(ToolpathInternal::surface_pattern(true, true, false, true, ipConcentric, ipHoneycomb) == ipHoneycomb);
-    CHECK(ToolpathInternal::surface_pattern(true, true, false, false, ipConcentric, ipHoneycomb) == ipRectilinear);
+    CHECK(ToolpathInternal::surface_pattern(false, true, true, false, "supportbase", "honeycomb") == "rectilinear");
+    CHECK(ToolpathInternal::surface_pattern(false, true, false, false, "supportbase", "honeycomb") == "supportbase");
+    CHECK(ToolpathInternal::surface_pattern(false, false, false, false, "concentric", "honeycomb") == "rectilinear");
+    CHECK(ToolpathInternal::surface_pattern(true, true, false, true, "concentric", "honeycomb") == "honeycomb");
+    CHECK(ToolpathInternal::surface_pattern(true, true, false, false, "concentric", "honeycomb") == "rectilinear");
 }
 
 // An automatic bottom pattern resolving to the sparse pattern must not reach the bridging bottom

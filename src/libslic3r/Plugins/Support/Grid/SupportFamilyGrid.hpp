@@ -1,12 +1,12 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* This built-in support family handles grid and snug styles. It reads demand
-   from object islands and runs native geometry calculations, then publishes
-   auxiliary slices, support properties and typed fill surfaces through the
-   plugin API. Extrusion generation belongs to a later support-toolpath step. */
+   from object islands, computes the support geometry and publishes auxiliary
+   slices, support properties and typed fill surfaces, all through the plugin
+   API. Extrusion generation belongs to a later support-toolpath step. */
 #ifndef plugins_support_grid_family_hpp_
 #define plugins_support_grid_family_hpp_
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
-#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 
 namespace slic3r_api::Support::Grid {
 namespace Internal {
@@ -20,8 +20,9 @@ namespace Internal {
 // Decide whether the native generator would have merged a contact area into the base layer, which
 // makes the family publish that contact as base; a bridging contact never merges.
 bool merged_into_base(bool merge, bool base_takes_contact, bool z_has_base, bool bridging);
-// Remove from the surfaces every area the covering surfaces already print, so each area keeps one owner.
-Slic3r::Polygons resolve_overlap(const Slic3r::Polygons &surfaces, const Slic3r::Polygons &covering);
+// Remove from the surfaces every area the covering surfaces already print, so each area keeps one owner;
+// the result lives in the storage of surfaces.
+StoredPolygonCollection resolve_overlap(const StoredPolygonCollection &surfaces, const StoredPolygonCollection &covering);
 }
 class SupportFamilyGrid final : public PluginBase {
 public:

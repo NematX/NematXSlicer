@@ -3,39 +3,20 @@
 #include "LegacySupportPaths.hpp"
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
-#include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 
 /* The host registers all three algorithms as ordinary built-in plugins.
-   Their shared setting list includes the grid flow dependencies and the
-   region settings passed to Fill. Exceptions from calculation or publication
+   Their setting list is the shared support geometry list of the Common
+   library plus the path list (patterns, angles and the region settings passed
+   to Fill). Exceptions from calculation or publication
    are reported by PluginBase, rather than escaping the plugin C ABI. */
 
 namespace slic3r_api::Support::Toolpath {
-// Copy flow, pattern and region keys into the caller's buffer; a null buffer returns the required size, and the provider owns the key names.
+// Declare the shared support geometry keys, then the pattern, angle and filler region keys; a null buffer returns the required count.
 int32_t SupportToolpathLegacy::used_config_keys(raw_used_config_key *keys) const noexcept
 {
-    static const raw_used_config_key used[] = {
-        {"support_material_pattern", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"support_material_with_sheath", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"support_material_top_interface_pattern", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"support_material_bottom_interface_pattern", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"support_material_interface_contact_loops", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"support_material_angle_height", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"support_material_interface_angle", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"support_material_interface_angle_increment", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"raft_first_layer_density", RAW_CO_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"gap_fill_min_area", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"gap_fill_min_width", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"gap_fill_max_width", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"gap_fill_min_length", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"gap_fill_extension", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"fill_smooth_width", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-        {"fill_smooth_distribution", RAW_CO_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
-    };
-    const plugin_instance grid = Grid::SupportFamilyGrid::instance(m_orchestrator).c_instance();
-    const int32_t grid_count = grid.vt->used_config_keys(grid.ctx, keys);
-    if (keys) std::copy(std::begin(used), std::end(used), keys + grid_count);
-    return grid_count + int32_t(std::size(used));
+    const int32_t count = Common::append_used_config_keys(keys, 0, Common::support_geometry_keys());
+    return Common::append_used_config_keys(keys, count, Common::support_path_keys());
 }
 
 // Run this role with callback-local calculation state and finish its progress; calculation and API errors are reported by PluginBase.

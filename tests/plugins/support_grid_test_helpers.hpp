@@ -8,6 +8,9 @@
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "libslic3r/Plugins/Support/Grid/GridSupportGenerator.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -121,6 +124,29 @@ inline void toolpaths(Print &print)
     print.set_running_step(STEP_SUPPORT_TOOLPATH);
     Steps::StepSupportToolpath::prepare(print);
     Steps::StepSupportToolpath::run_step(Orchestrator::instance(), print);
+}
+// The plugin API views of a sliced print and of its first object.
+inline slic3r_api::Print print_view(const Print &print) { return slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)); }
+inline slic3r_api::Object object_view(const PrintObject &object) { return slic3r_api::Object(reinterpret_cast<const object_handle *>(&object)); }
+// The support parameters the grid family computes for an object, through the plugin API.
+inline slic3r_api::Support::Common::SupportParams params(const Print &print, const PrintObject &object)
+{
+    return slic3r_api::Support::Common::SupportParams(print_view(print), object_view(object));
+}
+// Run the grid generator on a sliced object, as the family does, and keep its slabs for inspection.
+// The storage is declared first so it outlives the slabs that live in it.
+struct Generated {
+    PluginStorage storage;
+    slic3r_api::Support::Grid::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    Generated(const Print &print, const PrintObject &object)
+    {
+        slic3r_api::Support::Grid::generate_support(nullptr, print_view(print), object_view(object), params(print, object), support);
+    }
+};
+// The host polygons behind an API polygon collection.
+inline const Polygons &native(const slic3r_api::StoredPolygonCollection &polygons)
+{
+    return *reinterpret_cast<const Polygons *>(polygons.handle());
 }
 }
 #endif
