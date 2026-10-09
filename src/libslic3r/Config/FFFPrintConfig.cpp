@@ -952,6 +952,7 @@ void init_categories(PrintConfigDef &definition)
         "support_tree_branch_diameter_angle",
         "support_tree_branch_diameter_double_wall", 
         "support_tree_branch_distance",
+        "support_tree_max_overhang",
         "support_tree_tip_diameter",
         "support_tree_top_rate",
         // miscellaneous
@@ -6771,6 +6772,24 @@ void init_fff_params(PrintConfigDef &definition)
                      "causing better overhang but making support harder to remove.");
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionFloat(1.));
+
+    // Largest horizontal overhang of a branch outline between two support layers. A nearly vertical branch
+    // can use thick layers, while a strongly inclined one needs thin layers to stay under this overhang.
+    def = definition.add("support_tree_max_overhang", coFloatOrPercent, ptFFF);
+    def->label = L("Max branch overhang");
+    def->category = OptionCategory::support;
+    def->invalidates_step = STEP_SUPPORT;
+    // TRN PrintSettings: "Organic supports" > "Max branch overhang"
+    def->tooltip = L("Maximum horizontal overhang of a tree branch outline from one support layer to the next. "
+                     "A nearly vertical branch allows thick support layers, while a strongly inclined branch needs thin layers "
+                     "to stay under this overhang. It also limits the branch angle, so that the overhang can be printed "
+                     "at the minimum layer height. If expressed as percentage (for example 50%), it will be calculated "
+                     "over the support material extrusion width.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "support_material_extrusion_width";
+    def->min = 0;
+    def->mode = comAdvancedE | comPrusa;
+    def->set_default_value(new ConfigOptionFloatOrPercent(50, true));
 
     def = definition.add("support_tree_top_rate", coPercent, ptFFF);
     def->label = L("Branch Density");

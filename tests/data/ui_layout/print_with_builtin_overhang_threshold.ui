@@ -395,6 +395,7 @@ group:Organic supports
 		setting:label$Maximum:support_tree_angle
 		setting:label$Preferred:support_tree_angle_slow
 	end_line
+	setting:support_tree_max_overhang
 	line:Branch diameter
 		setting:label$_:support_tree_branch_diameter
 		setting:label$Angle:support_tree_branch_diameter_angle
