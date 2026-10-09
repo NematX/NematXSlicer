@@ -269,6 +269,31 @@ std::string exclusive_group_ui_fragment(const std::string &key,
            "end_line\n";
 }
 
+// Place a plugin selector beside the settings it chooses between: the seam
+// selector beside the seam settings, the support toolpath selectors beside the
+// support settings. Other groups keep the neutral fallback.
+std::string plugin_group_ui_fragment(const StepExclusiveGroup &group,
+                                     const std::string &line_label)
+{
+    if (group.step == SEAM_PLACER && group.group_id == "seam_placer_plugin") {
+        // Keep this regional service selector beside the other seam settings
+        // even when a provider supplies a friendlier label.
+        return "page:Perimeters & Shell\n"
+               "group:Seam\n"
+               "line:" + line_label + "\n"
+               "setting:" + group.option_key_storage + "\n"
+               "end_line\n";
+    }
+    if (group.step == STEP_SUPPORT_TOOLPATH) {
+        return "page:Support material\n"
+               "group:Support toolpaths\n"
+               "line:" + line_label + "\n"
+               "setting:" + group.option_key_storage + "\n"
+               "end_line\n";
+    }
+    return exclusive_group_ui_fragment(group.option_key_storage, line_label);
+}
+
 std::string sanitized_config_key_part(const std::string &text)
 {
     std::string out;
@@ -494,20 +519,18 @@ StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
         group.option_def.invalidates_step = STEP_ANY;
 
     /*
-    Seam placement is selected by the effective PrintRegion configuration.
-    Other plugin groups keep their project-level selector because their
-    consumers execute one implementation for the complete print.
+    Seam placement is selected by the effective PrintRegion configuration, and
+    support toolpath algorithms by each PrintObject. Other plugin groups keep
+    their project-level selector because their consumers execute one
+    implementation for the complete print.
     */
     if (step == SEAM_PLACER && group_id == "seam_placer_plugin") {
         group.option_def.container_type = RAW_CONTAINER_TYPE_REGION;
         group.option_def.invalidates_step = STEP_ORDERING;
-        group.ui_fragment =
-            "page:Perimeters & Shell\n"
-            "group:Seam\n"
-            "line:" + label + "\n"
-            "setting:" + key + "\n"
-            "end_line\n";
+    } else if (step == STEP_SUPPORT_TOOLPATH) {
+        group.option_def.container_type = RAW_CONTAINER_TYPE_OBJECT;
     }
+    group.ui_fragment = plugin_group_ui_fragment(group, label);
     group.refresh_storage_pointers();
     return group;
 }
@@ -525,20 +548,7 @@ void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin
 
         if (!plugin->get_exclusive_group_label().empty()) {
             group.label_storage = plugin->get_exclusive_group_label();
-            if (group.step == SEAM_PLACER &&
-                group.group_id == "seam_placer_plugin") {
-                // Keep this regional service selector beside the other seam
-                // settings even when a provider supplies a friendlier label.
-                group.ui_fragment =
-                    "page:Perimeters & Shell\n"
-                    "group:Seam\n"
-                    "line:" + group.label_storage + "\n"
-                    "setting:" + group.option_key_storage + "\n"
-                    "end_line\n";
-            } else {
-                group.ui_fragment = exclusive_group_ui_fragment(
-                    group.option_key_storage, group.label_storage);
-            }
+            group.ui_fragment = plugin_group_ui_fragment(group, group.label_storage);
         }
         if (!plugin->get_exclusive_group_tooltip().empty())
             group.tooltip_storage = plugin->get_exclusive_group_tooltip();
@@ -761,6 +771,30 @@ std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestr
     return selected_plugins;
 }
 
+// Walk the active providers in priority order and keep each one with the objects whose own selector chose it.
+std::vector<ObjectStepPlugin> selected_plugins_per_object(Orchestrator &orchestrator,
+                                                          slicing_step_t step,
+                                                          const Print &print)
+{
+    std::vector<std::vector<Plugin *>> selected_by_object;
+    selected_by_object.reserve(print.objects().size());
+    for (const PrintObject &object : print.objects())
+        selected_by_object.push_back(selected_or_active_plugins_for_step(orchestrator, step, &object.config()));
+
+    std::vector<ObjectStepPlugin> plugins;
+    for (Plugin *plugin : orchestrator.get_active_plugins_for_step(step)) {
+        ObjectStepPlugin entry {plugin, {}};
+        for (size_t object_idx = 0; object_idx < selected_by_object.size(); ++object_idx) {
+            const std::vector<Plugin *> &selected = selected_by_object[object_idx];
+            if (std::find(selected.begin(), selected.end(), plugin) != selected.end())
+                entry.object_indices.push_back(object_idx);
+        }
+        if (!entry.object_indices.empty())
+            plugins.push_back(std::move(entry));
+    }
+    return plugins;
+}
+
 Plugin *selected_or_active_plugin_for_step(Orchestrator &orchestrator,
                                            slicing_step_t step,
                                            const ConfigBase *config)
@@ -848,12 +882,18 @@ void initialize_pipeline_progress(Orchestrator &orchestrator,
         if (!print.should_execute_step(step))
             continue;
 
-        const std::vector<Plugin *> plugins = selected_or_active_plugins_for_step(
-            orchestrator, step, &print.full_print_config());
         std::vector<std::string> &unit_ids = units_by_step[step];
-        for (const Plugin *plugin : plugins)
-            if (plugin != nullptr)
-                unit_ids.push_back(plugin->get_id());
+        // Support toolpath selectors are per object, so the plan lists every provider that any object selects.
+        if (step == STEP_SUPPORT_TOOLPATH) {
+            for (const ObjectStepPlugin &entry : selected_plugins_per_object(orchestrator, step, print))
+                unit_ids.push_back(entry.plugin->get_id());
+        } else {
+            const std::vector<Plugin *> plugins = selected_or_active_plugins_for_step(
+                orchestrator, step, &print.full_print_config());
+            for (const Plugin *plugin : plugins)
+                if (plugin != nullptr)
+                    unit_ids.push_back(plugin->get_id());
+        }
         if (unit_ids.empty())
             unit_ids.emplace_back();
     }

@@ -11,6 +11,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -218,27 +219,31 @@ inline void validate_or_report(bool (*validator)(const Print &, std::string *),
     assert(false && "Step data tree validation failed");
 }
 
+// Run one plugin on the listed objects. setup() prepares one run per listed
+// object, while each run sees its real object index among object_count objects.
 template<class PayloadFactory>
 void run_object_step_plugin(Orchestrator &orchestrator,
                             Print &print,
                             slicing_step_t step,
                             Plugin &plugin,
-                            size_t run_count,
+                            const std::vector<size_t> &object_indices,
+                            size_t object_count,
                             PayloadFactory payload_factory)
 {
-    assert(run_count <= UINT32_MAX);
+    assert(object_indices.size() <= UINT32_MAX);
     std::atomic_bool execution_error { false };
     plugin_host_context host_context =
         prepare_guarded_plugin_host_context(orchestrator, step, plugin, print, execution_error);
-    host_context.object_count = run_count;
+    host_context.object_count = object_count;
     plugin_run_context run_context = orchestrator.prepare_plugin_run_context(step, &plugin, &host_context);
-    plugin.setup(run_context, uint32_t(run_count));
+    plugin.setup(run_context, uint32_t(object_indices.size()));
     throw_if_plugin_stopped(orchestrator, print, step, plugin, execution_error, "setup");
 
     // Prepare every object payload before any object run starts. This gives
     // plugins a deterministic discovery pass even if the host executes the
     // per-object setup in parallel.
-    parallel_for(size_t(0), run_count, [&host_context, &payload_factory, &run_context, &plugin](const size_t idx) {
+    parallel_for(size_t(0), object_indices.size(), [&host_context, &object_indices, &payload_factory, &run_context, &plugin](const size_t run_idx) {
+        const size_t idx = object_indices[run_idx];
         plugin_run_context context_copy = run_context;
         plugin_host_context host_context_copy = host_context;
         host_context_copy.object_idx = idx;
@@ -252,7 +257,8 @@ void run_object_step_plugin(Orchestrator &orchestrator,
     });
     throw_if_plugin_stopped(orchestrator, print, step, plugin, execution_error, "setup_run");
 
-    parallel_for(size_t(0), run_count, [&host_context, &payload_factory, &run_context, &plugin](const size_t idx) {
+    parallel_for(size_t(0), object_indices.size(), [&host_context, &object_indices, &payload_factory, &run_context, &plugin](const size_t run_idx) {
+        const size_t idx = object_indices[run_idx];
         plugin_run_context context_copy = run_context;
         plugin_host_context host_context_copy = host_context;
         host_context_copy.object_idx = idx;
@@ -265,6 +271,20 @@ void run_object_step_plugin(Orchestrator &orchestrator,
         plugin.run(context_copy);
     });
     throw_if_plugin_stopped(orchestrator, print, step, plugin, execution_error, "run");
+}
+
+// Run one plugin on objects 0 .. run_count-1 of a print with run_count objects.
+template<class PayloadFactory>
+void run_object_step_plugin(Orchestrator &orchestrator,
+                            Print &print,
+                            slicing_step_t step,
+                            Plugin &plugin,
+                            size_t run_count,
+                            PayloadFactory payload_factory)
+{
+    std::vector<size_t> object_indices(run_count);
+    std::iota(object_indices.begin(), object_indices.end(), size_t(0));
+    run_object_step_plugin(orchestrator, print, step, plugin, object_indices, run_count, payload_factory);
 }
 
 template<class PayloadFactory>

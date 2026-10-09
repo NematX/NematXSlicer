@@ -4,9 +4,10 @@
 ///|/
 
 /* Support families build auxiliary layers and typed surfaces at STEP_SUPPORT.
-   This step dispatches selected toolpath algorithms once per object, in priority
-   order. Outputs belong to region islands, not to the dispatcher, and disappear
-   with the auxiliary layers when the Slicing checkpoint is replayed. */
+   This step dispatches the toolpath algorithms in priority order, each one on the
+   objects that selected it. Outputs belong to region islands, not to the
+   dispatcher, and disappear with the auxiliary layers when the Slicing checkpoint
+   is replayed. */
 #ifndef steps_stepsupporttoolpath_hpp_
 #define steps_stepsupporttoolpath_hpp_
 
@@ -26,7 +27,7 @@ void prepare(Print &print);
 bool validate_pre(const Print &print, std::string &error);
 // Accept the output tree without imposing algorithm-specific requirements.
 bool validate_post(const Print &print, std::string &error);
-// Run selected support toolpath algorithms sequentially for every object.
+// Run the selected support toolpath algorithms sequentially on the objects that selected them.
 void run_step(Orchestrator &orchestrator, Print &print);
 
 } // namespace Steps::StepSupportToolpath

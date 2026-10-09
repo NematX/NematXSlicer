@@ -76,10 +76,12 @@ RAW_SURFACE_TYPE_MOD_BRANCH on top of support | internal | sparse.
 Toolpath algorithms declare one role through their exclusive group:
 "support_toolpath_sparse", "support_toolpath_branch",
 "support_toolpath_bottom_interface", or "support_toolpath_top_interface". When
-several plugins share a role the host generates a selector setting, and only
-the selected plugin of that role runs. Selected plugins run sequentially by
-priority (recommended: sparse 0, branch 50, bottom interface 100, top interface
-200). A later role can read earlier extrusions.
+several plugins share a role the host generates a selector setting for each
+object, and only the plugin selected for that object runs on it. Selected
+plugins run sequentially by priority (recommended: sparse 0, branch 50, bottom
+interface 100, top interface 200), each on the objects that selected it. A later
+role can read earlier extrusions. setup() of an algorithm receives the number of
+objects it runs on, so its progress counts only those runs.
 
 The branch role prints the surfaces marked RAW_SURFACE_TYPE_MOD_BRANCH and no
 other role does: sparse, bottom and top algorithms skip branch surfaces.

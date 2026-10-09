@@ -42,8 +42,36 @@ struct RecordedCall {
     size_t matched_surfaces;
 };
 
+// What setup() of one provider received: the number of runs it prepares and the object count of the print.
+struct SetupRecord {
+    std::string id;
+    uint32_t run_count;
+    size_t object_count;
+};
+
+// The object index and object that one setup_run() or run() call of a provider was given.
+struct ObjectRecord {
+    std::string id;
+    size_t object_idx;
+    const object_handle *object;
+};
+
 std::mutex call_mutex;
 std::vector<RecordedCall> calls;
+std::vector<SetupRecord> setup_records;
+std::vector<ObjectRecord> setup_run_records;
+std::vector<ObjectRecord> run_records;
+
+// The records of one provider, in the order they were made.
+template<class Record>
+std::vector<Record> records_of(const std::vector<Record> &records, const char *id)
+{
+    std::vector<Record> out;
+    for (const Record &record : records)
+        if (record.id == id)
+            out.push_back(record);
+    return out;
+}
 
 class SupportToolpathProbe final : public slic3r_api::PluginBase
 {
@@ -69,6 +97,10 @@ private:
     int32_t priority_impl() const noexcept override { return m_priority; }
     // Find sparse support surfaces and record this object's callback.
     void run_impl(const plugin_run_context *context) const override;
+    // Record the run count and the print's object count that setup() is given.
+    void setup_impl(const plugin_run_context *context, uint32_t run_count) const override;
+    // Record the object index and object that this setup_run() call is given.
+    void setup_run_impl(const plugin_run_context *context) const override;
 
     const char *m_id;
     const char *m_group;
@@ -118,8 +150,29 @@ void SupportToolpathProbe::run_impl(const plugin_run_context *context) const
             }
         }
     }
+    const plugin_host_context *host_context = static_cast<const plugin_host_context *>(context->host_context);
     const std::lock_guard<std::mutex> lock(call_mutex);
     calls.push_back({m_id, payload->object, matched});
+    run_records.push_back({m_id, host_context->object_idx, payload->object});
+}
+
+// Record the run count and the object count of the host context, which the runner fills before setup().
+void SupportToolpathProbe::setup_impl(const plugin_run_context *context, uint32_t run_count) const
+{
+    const plugin_host_context *host_context = static_cast<const plugin_host_context *>(context->host_context);
+    const std::lock_guard<std::mutex> lock(call_mutex);
+    setup_records.push_back({m_id, run_count, host_context->object_count});
+}
+
+// Record the object index of the host context and the object of the payload, as this setup_run() call sees them.
+void SupportToolpathProbe::setup_run_impl(const plugin_run_context *context) const
+{
+    const run_ctx_support_toolpath *payload = plugin_ctx_as_support_toolpath(context);
+    if (payload == nullptr || payload->object == nullptr)
+        throw std::runtime_error("Missing support toolpath object payload");
+    const plugin_host_context *host_context = static_cast<const plugin_host_context *>(context->host_context);
+    const std::lock_guard<std::mutex> lock(call_mutex);
+    setup_run_records.push_back({m_id, host_context->object_idx, payload->object});
 }
 
 // Create the test providers once and share the same instances across tests.
@@ -142,6 +195,10 @@ public:
     {
         Test::Plugins::ensure_plugin_test_runtime_initialized();
         calls.clear();
+        setup_records.clear();
+        setup_run_records.clear();
+        run_records.clear();
+
         for (SupportToolpathProbe *probe : probes())
             REQUIRE(Orchestrator::instance().set_plugin_active(probe->id(), true));
     }
@@ -402,8 +459,7 @@ public:
         Test::Plugins::ensure_plugin_test_runtime_initialized();
         pattern_records.clear();
         m_supportbase_was_active = Orchestrator::instance().is_plugin_active("supportbase");
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
-            REQUIRE(Orchestrator::instance().set_plugin_active(id, false));
+
         REQUIRE(Orchestrator::instance().set_plugin_active(SupportPatternProbe::k_id, true));
         REQUIRE(Orchestrator::instance().set_plugin_active("supportbase", true));
     }
@@ -485,6 +541,97 @@ TEST_CASE("Support toolpath role selectors choose only one top algorithm", "[plu
     CHECK(calls[0].id == probes()[0]->id());
     CHECK(calls[selected == 2 ? 1 : 2].id == probes()[1]->id());
     CHECK(calls[selected == 2 ? 2 : 1].id == probes()[selected]->id());
+}
+
+// Each object picks its own top-interface algorithm; a role runs only on the objects that picked its algorithm, in priority order.
+TEST_CASE("Support toolpath role selectors are chosen per object", "[plugins][support-toolpath]")
+{
+    const ScopedToolpathProbes activation;
+    const std::string key = Steps::plugin_exclusive_group_option_key(
+        Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, "support_toolpath_top_interface");
+    bool found_group = false;
+    for (const Steps::StepExclusivePluginGroup &group : Steps::active_exclusive_plugin_groups(Orchestrator::instance())) {
+        if (group.group.step == STEP_SUPPORT_TOOLPATH && group.group.group_id == "support_toolpath_top_interface") {
+            found_group = true;
+            CHECK(group.group.option_def.container_type == RAW_CONTAINER_TYPE_OBJECT);
+        }
+    }
+    REQUIRE(found_group);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    REQUIRE(print.objects().size() == 2);
+    model.objects()[0].config.set_deserialize_strict(key, std::string(probes()[2]->id()));
+    model.objects()[1].config.set_deserialize_strict(key, std::string(probes()[3]->id()));
+    print.apply(model, config);
+    run_toolpaths(print);
+
+    const object_handle *first = reinterpret_cast<const object_handle *>(&print.object(0));
+    const object_handle *second = reinterpret_cast<const object_handle *>(&print.object(1));
+    // Sparse (0) and bottom (100) run on both objects; the alternate (50) only on the second and the top (200) only on the first.
+    REQUIRE(calls.size() == 6);
+    CHECK(calls[0].id == probes()[0]->id());
+    CHECK(calls[1].id == probes()[0]->id());
+    CHECK(((calls[0].object == first && calls[1].object == second) ||
+           (calls[0].object == second && calls[1].object == first)));
+    CHECK(calls[2].id == probes()[3]->id());
+    CHECK(calls[2].object == second);
+    CHECK(calls[3].id == probes()[1]->id());
+    CHECK(calls[4].id == probes()[1]->id());
+    CHECK(((calls[3].object == first && calls[4].object == second) ||
+           (calls[3].object == second && calls[4].object == first)));
+    CHECK(calls[5].id == probes()[2]->id());
+    CHECK(calls[5].object == first);
+
+    // alternate runs on the second object only: setup() prepares one run and the host reports both objects, and both
+    // per-run phases of alternate see index 1 and the second object.
+    const char *alternate = probes()[3]->id();
+    const std::vector<SetupRecord> alternate_setups = records_of(setup_records, alternate);
+    const std::vector<ObjectRecord> alternate_setup_runs = records_of(setup_run_records, alternate);
+    const std::vector<ObjectRecord> alternate_runs = records_of(run_records, alternate);
+    REQUIRE(alternate_setups.size() == 1);
+    REQUIRE(alternate_setup_runs.size() == 1);
+    REQUIRE(alternate_runs.size() == 1);
+    CHECK(alternate_setups.front().run_count == 1);
+    CHECK(alternate_setups.front().object_count == 2);
+    CHECK(alternate_setup_runs.front().object_idx == 1);
+    CHECK(alternate_setup_runs.front().object == second);
+    CHECK(alternate_runs.front().object_idx == 1);
+    CHECK(alternate_runs.front().object == second);
+}
+
+// The progress plan lists every provider that some object selects, so a full pipeline with per-object selectors completes it.
+TEST_CASE("Per-object support toolpath selectors complete the pipeline progress plan", "[plugins][support-toolpath]")
+{
+    const ScopedToolpathProbes activation;
+    const std::string key = Steps::plugin_exclusive_group_option_key(
+        Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, "support_toolpath_top_interface");
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    model.objects()[0].config.set_deserialize_strict(key, std::string(probes()[2]->id()));
+    model.objects()[1].config.set_deserialize_strict(key, std::string(probes()[3]->id()));
+    print.apply(model, config);
+    REQUIRE_NOTHROW(print.process());
+
+    const object_handle *first = reinterpret_cast<const object_handle *>(&print.object(0));
+    const object_handle *second = reinterpret_cast<const object_handle *>(&print.object(1));
+    const auto count_calls = [](const char *id, const object_handle *object) {
+        return std::count_if(calls.begin(), calls.end(), [id, object](const RecordedCall &call) {
+            return call.id == id && call.object == object;
+        });
+    };
+    CHECK(count_calls(probes()[0]->id(), first) == 1);
+    CHECK(count_calls(probes()[0]->id(), second) == 1);
+    CHECK(count_calls(probes()[1]->id(), first) == 1);
+    CHECK(count_calls(probes()[1]->id(), second) == 1);
+    CHECK(count_calls(probes()[2]->id(), first) == 1);
+    CHECK(count_calls(probes()[2]->id(), second) == 0);
+    CHECK(count_calls(probes()[3]->id(), first) == 0);
+    CHECK(count_calls(probes()[3]->id(), second) == 1);
 }
 
 // Publish typed auxiliary surfaces through the API before checking the sparse algorithm's extrusion.

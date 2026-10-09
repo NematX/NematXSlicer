@@ -97,6 +97,18 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,
                                                           const ConfigBase *config);
+
+// A provider of a per-object step with the indices of the objects it runs on.
+struct ObjectStepPlugin
+{
+    Plugin *plugin = nullptr;
+    std::vector<size_t> object_indices;
+};
+// Providers of a per-object step, in priority order. Each object selects its own providers from its
+// configuration, so a provider appears once, with every object that selected it.
+std::vector<ObjectStepPlugin> selected_plugins_per_object(Orchestrator &orchestrator,
+                                                          slicing_step_t step,
+                                                          const Print &print);
 Plugin *selected_or_active_plugin_for_step(Orchestrator &orchestrator,
                                            slicing_step_t step,
                                            const ConfigBase *config);

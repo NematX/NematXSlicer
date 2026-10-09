@@ -12,12 +12,14 @@
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "InfillPatternService.hpp"
+#include "StepPipeline.hpp"
 #include "StepRunner.hpp"
 
-/* The object-step runner selects one algorithm per exclusive role group and
-   orders the selected algorithms by priority. Each callback processes one
-   object's support surfaces and adds extrusions through the data tree.
-   The dispatcher does not store geometry or plugin output.
+/* Each object selects one algorithm per exclusive role group through its own
+   configuration. The dispatcher runs the selected algorithms by priority, each
+   on the objects that selected it. Each callback processes one object's support
+   surfaces and adds extrusions through the data tree. The dispatcher does not
+   store geometry or plugin output.
 
    Algorithms may fill surfaces with INFILL_PATTERN plugins through the payload
    callbacks. One InfillPatternService is built before the first algorithm runs
@@ -112,7 +114,7 @@ bool validate_post(const Print &, std::string &)
     return true;
 }
 
-// Run the selected toolpath algorithms on every object.
+// Run each selected toolpath algorithm, in priority order, on the objects whose own selector chose it.
 void run_step(Orchestrator &orchestrator, Print &print)
 {
     Detail::validate_or_report(validate_pre, print, "Support-toolpath pre-step validation");
@@ -127,20 +129,24 @@ void run_step(Orchestrator &orchestrator, Print &print)
     // Without an active algorithm the runner never builds a payload; the null
     // check keeps the factory safe even if that selection rule changes.
     InfillPatternService *service = patterns.has_value() ? &*patterns : nullptr;
-    Detail::run_object_step_plugins(orchestrator,
-                                    print,
-                                    STEP_SUPPORT_TOOLPATH,
-                                    &print.full_print_config(),
-                                    print.objects().size(),
-                                    [&print, service](const size_t object_idx) {
-        run_ctx_support_toolpath context = {};
-        context.print = reinterpret_cast<const print_handle *>(&print);
-        context.object = reinterpret_cast<const object_handle *>(&print.object(object_idx));
-        context.host_context = service;
-        context.resolve_pattern_id = &resolve_pattern_id_callback;
-        context.generate_pattern = &generate_pattern_callback;
-        return context;
-    });
+    for (const ObjectStepPlugin &entry : selected_plugins_per_object(orchestrator, STEP_SUPPORT_TOOLPATH, print)) {
+        Detail::run_object_step_plugin(orchestrator,
+                                       print,
+                                       STEP_SUPPORT_TOOLPATH,
+                                       *entry.plugin,
+                                       entry.object_indices,
+                                       print.objects().size(),
+                                       [&print, service](const size_t object_idx) {
+            run_ctx_support_toolpath context = {};
+            context.print = reinterpret_cast<const print_handle *>(&print);
+            context.object = reinterpret_cast<const object_handle *>(&print.object(object_idx));
+            context.host_context = service;
+            context.resolve_pattern_id = &resolve_pattern_id_callback;
+            context.generate_pattern = &generate_pattern_callback;
+            return context;
+        });
+        print.pipeline_progress().complete_plugin(STEP_SUPPORT_TOOLPATH, entry.plugin->get_id());
+    }
     Detail::validate_or_report(validate_post, print, "Support-toolpath post-step validation");
 }
 
