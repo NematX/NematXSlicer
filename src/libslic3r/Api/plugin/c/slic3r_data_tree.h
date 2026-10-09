@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 4u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 5u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 6u
 
 /*
 Data-tree access for a sliced Print.
@@ -174,6 +174,9 @@ typedef uint16_t raw_surface_type;
 
 /* Support modifier: the surface belongs to a support auxiliary layer (support base or interface), not to the object. */
 #define RAW_SURFACE_TYPE_MOD_SUPPORT (1 << 9)
+
+/* Branch modifier: the surface is the body of a tree branch, printed by the branch toolpath role. */
+#define RAW_SURFACE_TYPE_MOD_BRANCH (1 << 10)
 
 /* Check if flag is set */
 #define RAW_SURFACE_TYPE_HAS(type, flag) (((type) & (flag)) != 0)

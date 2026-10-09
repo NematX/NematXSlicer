@@ -31,6 +31,7 @@ from slic3r_api_generated import (
     RAW_SURFACE_TYPE_DENS_SOLID,
     RAW_SURFACE_TYPE_DENS_SPARSE,
     RAW_SURFACE_TYPE_DENS_VOID,
+    RAW_SURFACE_TYPE_MOD_BRANCH,
     RAW_SURFACE_TYPE_MOD_BRIDGE,
     RAW_SURFACE_TYPE_MOD_OVERBRIDGE,
     RAW_SURFACE_TYPE_MOD_SUPPORT,
@@ -74,7 +75,7 @@ def _require_handle(handle, name: str = "handle") -> int:
 
 
 # Small builder for raw_surface_type. It mirrors the intended order:
-# position -> density -> optional bridge, overbridge and support modifiers.
+# position -> density -> optional bridge, overbridge, support and branch modifiers.
 class SurfaceTypeBuilder:
     def __init__(self, value: int = RAW_SURFACE_TYPE_NONE) -> None:
         self.value = int(value)
@@ -110,6 +111,10 @@ class SurfaceTypeBuilder:
         """Add support auxiliary-layer membership, preserving position and density."""
         return SurfaceTypeBuilder(self.value | RAW_SURFACE_TYPE_MOD_SUPPORT)
 
+    def branch(self) -> "SurfaceTypeBuilder":
+        """Mark a support surface as the body of a tree branch."""
+        return SurfaceTypeBuilder(self.value | RAW_SURFACE_TYPE_MOD_BRANCH)
+
     def raw(self) -> int:
         return self.value
 
@@ -124,6 +129,11 @@ def srf_type() -> SurfaceTypeBuilder:
 def surface_type_is_support(surface_type: int) -> bool:
     """Test whether a type marks a surface in support auxiliary geometry."""
     return (int(surface_type) & RAW_SURFACE_TYPE_MOD_SUPPORT) != 0
+
+
+def surface_type_is_branch(surface_type: int) -> bool:
+    """Test whether a type marks the body of a tree branch."""
+    return (int(surface_type) & RAW_SURFACE_TYPE_MOD_BRANCH) != 0
 
 
 # Borrowed Surface view over either a native handle or a c_surface snapshot.
@@ -478,5 +488,6 @@ __all__ = [
     "SurfaceCollection",
     "SurfaceTypeBuilder",
     "srf_type",
+    "surface_type_is_branch",
     "surface_type_is_support",
 ]

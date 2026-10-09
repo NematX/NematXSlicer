@@ -6,7 +6,7 @@
 #define slic3r_step_support_toolpath_h_
 
 #define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MINOR 1u
+#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MINOR 2u
 
 #include "slic3r_step_common.h"
 #include "slic3r_step_infill.h"
@@ -70,14 +70,19 @@ position and density bits: support | bottom | solid for lower contacts and
 interfaces, support | internal | sparse for the base, and support | top | solid
 for upper contacts and interfaces. A lower contact using bridge flow also
 carries the bridge modifier. Algorithms distinguish contacts from intermediate
-interfaces themselves when needed.
+interfaces themselves when needed. A tree branch body carries
+RAW_SURFACE_TYPE_MOD_BRANCH on top of support | internal | sparse.
 
 Toolpath algorithms declare one role through their exclusive group:
-"support_toolpath_sparse", "support_toolpath_bottom_interface", or
-"support_toolpath_top_interface". When several plugins share a role the host
-generates a selector setting, and only the selected plugin of that role runs.
-Selected plugins run sequentially by priority (recommended: sparse 0, bottom
-interface 100, top interface 200). A later role can read earlier extrusions.
+"support_toolpath_sparse", "support_toolpath_branch",
+"support_toolpath_bottom_interface", or "support_toolpath_top_interface". When
+several plugins share a role the host generates a selector setting, and only
+the selected plugin of that role runs. Selected plugins run sequentially by
+priority (recommended: sparse 0, branch 50, bottom interface 100, top interface
+200). A later role can read earlier extrusions.
+
+The branch role prints the surfaces marked RAW_SURFACE_TYPE_MOD_BRANCH and no
+other role does: sparse, bottom and top algorithms skip branch surfaces.
 
 Each algorithm receives the whole object and walks its auxiliary layers,
 islands and region islands to find support surfaces of its role. It may group

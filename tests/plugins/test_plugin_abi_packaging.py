@@ -136,7 +136,7 @@ class AbiPackagingTests(unittest.TestCase):
             first = self.generator.generate_abi_catalog()
             self.assertEqual(first, self.generator.generate_abi_catalog())
             catalog = json.loads(first)
-            self.assertEqual(catalog["headers"]["steps/slic3r_step_support_toolpath.h"]["version"], [1, 1])
+            self.assertEqual(catalog["headers"]["steps/slic3r_step_support_toolpath.h"]["version"], [1, 2])
             self.assertIn("steps/slic3r_step_support_toolpath.h", catalog["python_symbols"]["RunCtxSupportToolpath"])
             self.assertIn("slic3r_extrusion_entity.h", catalog["c_functions"]["extrusion_is_loop"])
             self.assertIn("slic3r_geometry.h", catalog["python_symbols"]["CPoint"])
@@ -468,7 +468,7 @@ class AbiPackagingTests(unittest.TestCase):
         """The auxiliary mutator (data tree 4.1), the object flows (4.2) and their millimeter variants (4.3) declare the data-tree header."""
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
-            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [4, 3])
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [4, 6])
             self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
             for function in ("object_get_support_flow", "object_get_region_flow",
                              "object_get_support_flow_mm", "object_get_region_flow_mm"):

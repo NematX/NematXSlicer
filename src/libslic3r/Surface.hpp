@@ -54,6 +54,8 @@ enum SurfaceType  : uint16_t {
     stModOverBridge = 1 << 8,
     /// Support modifier: the surface belongs to a support auxiliary layer (support base or interface), not to the object.
     stModSupport = 1 << 9,
+    /// Branch modifier: the surface is the body of a tree branch, printed by the branch toolpath role.
+    stModBranch = 1 << 10,
 };
 inline SurfaceType operator|(SurfaceType a, SurfaceType b) {
     return static_cast<SurfaceType>(static_cast<uint16_t>(a) | static_cast<uint16_t>(b));
@@ -207,6 +209,8 @@ public:
     bool has_mod_overBridge() const;
     // True when the surface belongs to a support auxiliary layer.
     bool has_mod_support() const;
+    // True when the surface is the body of a tree branch.
+    bool has_mod_branch() const;
 };
 
 typedef std::vector<Surface> Surfaces;
