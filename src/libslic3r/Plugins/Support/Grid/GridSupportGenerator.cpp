@@ -112,19 +112,19 @@ bool point_less(c_point a, c_point b);
 // Return, for each object layer, the area covered by the layers below it; build-plate-only contacts and columns must not stand on it.
 std::vector<Polys> buildplate_covered(const Run &run);
 // Build and merge top-contact slabs from the sliced object's island demand.
-void top_contacts(const Run &run, const std::vector<Polys> &covered, GeneratedSupport &out);
+void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::GeneratedSupport &out);
 // Project each top contact downwards and create bottom contacts on object top surfaces.
-std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &covered, GeneratedSupport &out);
+std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &covered, Common::GeneratedSupport &out);
 // Place intermediate slabs between contact extremes and assign missing top-contact heights.
-void intermediate_layers(const Run &run, GeneratedSupport &out);
+void intermediate_layers(const Run &run, Common::GeneratedSupport &out);
 // Subtract object slices and bridge footprints from slabs with the configured clearance.
-void trim_by_object(const Run &run, GeneratorLayers &layers);
+void trim_by_object(const Run &run, Common::GeneratorLayers &layers);
 // Fill intermediate slabs from projected columns and remove portions inside contacts.
-void base_layers(const Run &run, const std::vector<Polys> &areas, GeneratedSupport &out);
+void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out);
 // Carve dense top and bottom interface regions from the sparse base slabs.
-void interface_layers(const Run &run, GeneratedSupport &out);
+void interface_layers(const Run &run, Common::GeneratedSupport &out);
 // Expand column feet in several steps while avoiding object and brim areas.
-void expand_feet(const Run &run, GeneratedSupport &out);
+void expand_feet(const Run &run, Common::GeneratedSupport &out);
 // Rasterize polygons into a zero-bordered grayscale image using AGG's winding fill.
 std::vector<unsigned char> rasterize(int size_x, int size_y, double pixel, c_point origin, const Polys &polys);
 // Chain raster boundary edges into scaled contours, optionally closing single-pixel holes.
@@ -141,16 +141,16 @@ double bridging_height_avg_mm(const Run &run, const Layer &layer, const LayerReg
 // Whether the object has a brim under its first layer, the native PrintObject::has_brim().
 bool has_brim(const Run &run);
 // Allocate a slab owned by the result's deque and initialize its integer Z dimensions.
-GeneratorLayer &add_layer(GeneratedSupport &out, LayerType type, coord_t z, coord_t bottom, coord_t height);
+Common::GeneratorLayer &add_layer(Common::GeneratedSupport &out, Common::LayerType type, coord_t z, coord_t bottom, coord_t height);
 // Merge close top contacts into the lower contact, preserving the first-layer thickness.
-void merge_contacts(const Run &run, GeneratorLayers &layers);
+void merge_contacts(const Run &run, Common::GeneratorLayers &layers);
 // Return the number of equal steps needed to cover a positive distance.
 size_t ceil_steps(coord_t distance, coord_t step);
 } // namespace
 
 // Run geometric phases on a sliced object with demand; the result owns every slab and the object receives no layers or extrusions here.
 void generate_support(const plugin_run_context *context, const Print &print, const Object &object,
-                      const Common::SupportParams &params, GeneratedSupport &out)
+                      const Common::SupportParams &params, Common::GeneratedSupport &out)
 {
     const Run run(context, print, object, params, out.storage);
     const std::vector<Polys> covered = run.buildplate_only ? buildplate_covered(run) : std::vector<Polys>();
@@ -160,8 +160,8 @@ void generate_support(const plugin_run_context *context, const Print &print, con
     intermediate_layers(run, out);
     trim_by_object(run, out.top);
     base_layers(run, areas, out);
-    for (GeneratorLayer *top : out.top)
-        for (const GeneratorLayer *bottom : out.bottom)
+    for (Common::GeneratorLayer *top : out.top)
+        for (const Common::GeneratorLayer *bottom : out.bottom)
             if (bottom->bottom_print_z() <= top->bottom_z && top->print_z <= bottom->print_z)
                 top->polygons = polygons(clipper_diff(run.clipper(top->polygons), run.clipper(bottom->polygons)));
     interface_layers(run, out);
@@ -260,7 +260,7 @@ std::vector<Polys> buildplate_covered(const Run &run)
 }
 
 // Intersect demand with each region, apply the active lower-slice margin, and rasterize contacts; allocated slabs remain in out even when merging empties them.
-void top_contacts(const Run &run, const std::vector<Polys> &covered, GeneratedSupport &out)
+void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
     const ClipperContext &clipper = run.clipper;
@@ -318,7 +318,7 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, GeneratedSu
             if (z < first_z) continue;
             if (z < first_z + p.min_height) { z = first_z; bottom = 0; height = first_z; }
         }
-        GeneratorLayer &contact = add_layer(out, LayerType::TopContact, z, bottom, height);
+        Common::GeneratorLayer &contact = add_layer(out, Common::LayerType::TopContact, z, bottom, height);
         contact.object_above = id;
         const Grid grid(run, contacts, margin);
         contact.contact_polygons.emplace(grid.extract(-3, true));
@@ -347,7 +347,7 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, GeneratedSu
             coord_t bridge_z = layer.print_z() - bridge_height - scale_to_layer_coord(p.gap_above);
             if (bridge_z >= first_z && bridge_z < z) {
                 if (bridge_z < first_z + p.min_height) bridge_z = first_z;
-                GeneratorLayer &bridge = add_layer(out, LayerType::TopContact, bridge_z,
+                Common::GeneratorLayer &bridge = add_layer(out, Common::LayerType::TopContact, bridge_z,
                     bridge_z == first_z ? 0 : bridge_z, bridge_z == first_z ? first_z : 0);
                 bridge.object_above = id;
                 bridge.polygons = contact.polygons.readonly().clone(run.storage);
@@ -361,7 +361,7 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, GeneratedSu
 }
 
 // Project a sliced object's owned contacts into one area per object layer; bottom collision spans use the next object height for plane gaps or initial contact height otherwise, unchanged by Z alignment; cancellation propagates.
-std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &covered, GeneratedSupport &out)
+std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &covered, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
     const ClipperContext &clipper = run.clipper;
@@ -374,7 +374,7 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
         throw_if_cancelled(run.context);
         const Layer &layer = run.layers[id];
         for (; contact_idx >= 0 && out.top[contact_idx]->print_z >= layer.print_z(); --contact_idx) {
-            GeneratorLayer &top = *out.top[contact_idx];
+            Common::GeneratorLayer &top = *out.top[contact_idx];
             Polys polygons_above(run.storage);
             polygons_above.move_from(*top.contact_polygons);
             polygons_above.append_move_from(polygons(clipper_offset(clipper(*top.overhang_polygons), double(SCALED_EPSILON))));
@@ -391,7 +391,7 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
                 run.layers[id + 1].height() : (p.soluble ? layer.upper_layer().height() : scale_to_layer_coord(p.bottom_flow_mm.height));
             const coord_t bottom = layer.print_z() + scale_to_layer_coord(p.gap_below);
             const coord_t z = p.soluble ? layer.upper_layer().print_z() : bottom + height_block;
-            GeneratorLayer &contact = add_layer(out, LayerType::BottomContact, z, bottom, z - bottom);
+            Common::GeneratorLayer &contact = add_layer(out, Common::LayerType::BottomContact, z, bottom, z - bottom);
             contact.height_block = height_block;
             contact.object_below = size_t(id);
             contact.bridging = !p.soluble;
@@ -433,24 +433,24 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
 }
 
 // Divide owned contact intervals into printable slabs, sharing synchronized heights and rounding inserted boundaries to the machine step; only contacts below the first-layer height acquire collision spans, and incompatible thicknesses assert.
-void intermediate_layers(const Run &run, GeneratedSupport &out)
+void intermediate_layers(const Run &run, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
     const bool sync = run.synchronize;
     if (sync) {
         // Contacts at one print Z need a common printable bottom, otherwise a thinner top slab would shorten the published bottom contact's gap.
-        for (GeneratorLayer *top : out.top)
-            for (const GeneratorLayer *bottom : out.bottom)
+        for (Common::GeneratorLayer *top : out.top)
+            for (const Common::GeneratorLayer *bottom : out.bottom)
                 if (top->height == 0 && top->print_z == bottom->print_z) {
                     top->bottom_z = bottom->bottom_z;
                     top->height = bottom->height;
                 }
     }
-    GeneratorLayers extremes = out.top;
+    Common::GeneratorLayers extremes = out.top;
     extremes.insert(extremes.end(), out.bottom.begin(), out.bottom.end());
-    std::sort(extremes.begin(), extremes.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+    std::sort(extremes.begin(), extremes.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
         return a->extreme_z() < b->extreme_z() || (a->extreme_z() == b->extreme_z() &&
-            a->type == LayerType::TopContact && b->type == LayerType::BottomContact);
+            a->type == Common::LayerType::TopContact && b->type == Common::LayerType::BottomContact);
     });
     const coord_t first = scale_to_layer_coord(p.first_layer_height);
     const coord_t base_step = scale_to_layer_coord(run.layer_height.value == 0 ? p.max_support_height :
@@ -459,11 +459,11 @@ void intermediate_layers(const Run &run, GeneratedSupport &out)
         std::min(p.max_support_height, c_float_or_percent_get_effective_value(&run.interface_layer_height, p.interface_flow_mm.nozzle_diameter)));
     const coord_t machine_step = scale_to_layer_coord(p.z_step);
     coord_t previous_extreme = 0;
-    GeneratorLayer *previous = nullptr;
-    for (GeneratorLayer *current : extremes) {
+    Common::GeneratorLayer *previous = nullptr;
+    for (Common::GeneratorLayer *current : extremes) {
         coord_t end = current->extreme_z();
         if (end < first) {
-            assert(current->type == LayerType::TopContact);
+            assert(current->type == Common::LayerType::TopContact);
             current->height = current->print_z;
             // The first bed contact already has its thickness and is excluded from collision-span planning.
             if (current != extremes.front() || current->bottom_z != 0)
@@ -475,30 +475,30 @@ void intermediate_layers(const Run &run, GeneratedSupport &out)
         coord_t start = previous_extreme;
         if (start == 0) {
             if (out.base.empty() || out.base.back()->print_z < first)
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, first, 0, first));
+                out.base.push_back(&add_layer(out, Common::LayerType::Intermediate, first, 0, first));
             start = first;
         }
         if (end <= start) { previous = current; previous_extreme = end; continue; }
         coord_t distance = end - start;
         assert(distance >= p.min_height);
         if (sync) {
-            if (previous && previous->type == LayerType::TopContact && current->type == LayerType::BottomContact &&
+            if (previous && previous->type == Common::LayerType::TopContact && current->type == Common::LayerType::BottomContact &&
                 previous->print_z == current->print_z && previous->bottom_z == current->bottom_z) {
                 // This interval is the shared contact slab, not several smaller object-Z slabs; sparse columns at the same Z keep that thickness too.
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, end, start, distance));
+                out.base.push_back(&add_layer(out, Common::LayerType::Intermediate, end, start, distance));
                 previous = current;
                 previous_extreme = end;
                 continue;
             }
             // Soluble contacts already have a bottom on an object Z. Non-soluble contacts retain their top Z and acquire a printable thickness here.
-            const bool unknown_top = current->type == LayerType::TopContact && current->height == 0;
+            const bool unknown_top = current->type == Common::LayerType::TopContact && current->height == 0;
             coord_t last = start;
             for (const Layer &layer : run.layers) {
                 const coord_t z = layer.print_z();
                 if (z <= start) continue;
                 if (z > end || (unknown_top && z == end)) break;
                 if (z - last < p.min_height) continue;
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
+                out.base.push_back(&add_layer(out, Common::LayerType::Intermediate, z, last, z - last));
                 last = z;
             }
             if (unknown_top) {
@@ -513,7 +513,7 @@ void intermediate_layers(const Run &run, GeneratedSupport &out)
                 for (size_t i = 1; i < count; ++i) {
                     const coord_t next = check_z_step(scale_to_layer_coord(unscaled(start_z) + unscaled(end - start_z) * i / count), machine_step);
                     assert(next - last >= p.min_height && next - last <= interface_step);
-                    out.base.push_back(&add_layer(out, LayerType::Intermediate, next, last, next - last));
+                    out.base.push_back(&add_layer(out, Common::LayerType::Intermediate, next, last, next - last));
                     last = next;
                 }
                 current->bottom_z = last;
@@ -532,7 +532,7 @@ void intermediate_layers(const Run &run, GeneratedSupport &out)
                 for (size_t i = 1; i <= count; ++i) {
                     const coord_t z = i == count ? end : check_z_step(scale_to_layer_coord(unscaled(start_z) + unscaled(end - start_z) * i / count), machine_step);
                     assert(z - last >= p.min_height && z - last <= base_step);
-                    out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
+                    out.base.push_back(&add_layer(out, Common::LayerType::Intermediate, z, last, z - last));
                     last = z;
                 }
             }
@@ -557,10 +557,10 @@ void intermediate_layers(const Run &run, GeneratedSupport &out)
                 else { step = base_step; dense_step = (distance - step * middle) / (top + bottom); }
             }
             size_t total = top + bottom + middle;
-            if (previous && previous->type == LayerType::TopContact &&
+            if (previous && previous->type == Common::LayerType::TopContact &&
                 previous->print_z + p.min_height > previous->bottom_z + scale_to_layer_coord(unscaled(step))) {
                 start = previous->print_z;
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, start, previous->bottom_z, previous->height));
+                out.base.push_back(&add_layer(out, Common::LayerType::Intermediate, start, previous->bottom_z, previous->height));
                 distance = end - start;
                 if (distance == 0) { previous = current; previous_extreme = end; continue; }
                 --total;
@@ -583,7 +583,7 @@ void intermediate_layers(const Run &run, GeneratedSupport &out)
                 }
                 total = top + bottom + middle;
             }
-            if (!p.soluble && current->type == LayerType::TopContact && current->height == 0) {
+            if (!p.soluble && current->type == Common::LayerType::TopContact && current->height == 0) {
                 if (top > 0) { --top; current->height = scale_to_layer_coord(unscaled(dense_step)); }
                 else if (middle > 0) { --middle; current->height = scale_to_layer_coord(unscaled(step)); }
                 else { --bottom; current->height = scale_to_layer_coord(unscaled(dense_step)); }
@@ -601,24 +601,24 @@ void intermediate_layers(const Run &run, GeneratedSupport &out)
                         scale_to_layer_coord(p.z_step)), dense ? interface_step : base_step);
                 }
                 assert(z > last);
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
+                out.base.push_back(&add_layer(out, Common::LayerType::Intermediate, z, last, z - last));
                 last = z;
             }
         }
         previous = current;
         previous_extreme = end;
     }
-    for (const GeneratorLayer *layer : out.top) assert(layer->height > 0);
+    for (const Common::GeneratorLayer *layer : out.top) assert(layer->height > 0);
 }
 
 // Remove object silhouettes within the slab's gap-expanded Z range, including thick bridge fills and perimeter footprints above it; slab geometry is replaced in place.
-void trim_by_object(const Run &run, GeneratorLayers &layers)
+void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
 {
     const Common::SupportParams &p = run.p;
     const ClipperContext &clipper = run.clipper;
     const bool filament = run.distance_type == Common::ContactDistanceType::Filament;
     const raw_surface_type bridge_fill = srf_type().bottom().solid().bridge().raw();
-    for (GeneratorLayer *support : layers) {
+    for (Common::GeneratorLayer *support : layers) {
         if (support->polygons.empty()) continue;
         ExPolys trimming(run.storage);
         size_t id = 0;
@@ -682,23 +682,23 @@ void trim_by_object(const Run &run, GeneratorLayers &layers)
 }
 
 // Select the cached projection at each slab's top, subtract enclosing contacts, and trim against the object; base slabs stay owned by out.
-void base_layers(const Run &run, const std::vector<Polys> &areas, GeneratedSupport &out)
+void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out)
 {
     const ClipperContext &clipper = run.clipper;
-    for (GeneratorLayer *base : out.base) {
+    for (Common::GeneratorLayer *base : out.base) {
         int below = -1;
         for (size_t id = 0; id < run.layers.size() && run.layers[id].print_z() <= base->print_z; ++id) below = int(id);
         Polys polys = (below < 0 ? areas.front() : areas[below]).readonly().clone(run.storage);
         if (below < 0)
-            for (const GeneratorLayer *top : out.top)
+            for (const Common::GeneratorLayer *top : out.top)
                 if (top->bottom_z >= base->print_z && top->print_z <= run.layers[0].print_z()) polys.append_copy_from(top->polygons);
         Polys trimming(run.storage);
-        for (const GeneratorLayer *top : out.top) {
+        for (const Common::GeneratorLayer *top : out.top) {
             assert(!(base->print_z > top->bottom_z + SCALED_EPSILON && base->bottom_z < top->bottom_z - SCALED_EPSILON));
             if (top->bottom_z < base->print_z && top->print_z > base->bottom_z &&
                 base->print_z <= top->print_z && base->bottom_z >= top->bottom_z) trimming.append_copy_from(top->polygons);
         }
-        for (const GeneratorLayer *bottom : out.bottom) {
+        for (const Common::GeneratorLayer *bottom : out.bottom) {
             assert(!(base->print_z > bottom->print_z + SCALED_EPSILON && base->bottom_z < bottom->print_z - SCALED_EPSILON));
             if (bottom->bottom_print_z() < base->print_z && bottom->print_z > base->bottom_print_z() &&
                 base->print_z <= bottom->print_z && base->bottom_z >= bottom->bottom_print_z()) trimming.append_copy_from(bottom->polygons);
@@ -706,13 +706,13 @@ void base_layers(const Run &run, const std::vector<Polys> &areas, GeneratedSuppo
         base->polygons = trimming.empty() ? std::move(polys) :
             polygons(clipper_diff_with_safety_offset(clipper(polys), clipper(trimming)));
         base->polygons.ensure_valid(run.p.resolution);
-        base->type = LayerType::Base;
+        base->type = Common::LayerType::Base;
     }
     trim_by_object(run, out.base);
 }
 
 // Project contacts through the configured number of base slabs and regularize their union; top and bottom regions are separated after union so their published surface types stay distinct.
-void interface_layers(const Run &run, GeneratedSupport &out)
+void interface_layers(const Run &run, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
     const ClipperContext &clipper = run.clipper;
@@ -728,17 +728,17 @@ void interface_layers(const Run &run, GeneratedSupport &out)
         return closed;
     };
     for (size_t i = 0; i < out.base.size(); ++i) {
-        GeneratorLayer &base = *out.base[i];
+        Common::GeneratorLayer &base = *out.base[i];
         Polys top(run.storage), bottom(run.storage);
         if (p.top_interfaces > 0) {
             const coord_t z = out.base[std::min(out.base.size() - 1, i + p.top_interfaces - 1)]->print_z;
-            for (const GeneratorLayer *contact : out.top)
+            for (const Common::GeneratorLayer *contact : out.top)
                 if (contact->print_z >= base.print_z && contact->bottom_z <= z)
                     top.append_copy_from(snug ? *contact->overhang_polygons : contact->polygons);
         }
         if (p.bottom_interfaces > 0) {
             const coord_t z = out.base[i + 1 > p.bottom_interfaces ? i + 1 - p.bottom_interfaces : 0]->bottom_z;
-            for (const GeneratorLayer *contact : out.bottom)
+            for (const Common::GeneratorLayer *contact : out.bottom)
                 if (contact->print_z >= z && contact->print_z <= base.bottom_z) bottom.append_copy_from(contact->polygons);
         }
         if (top.empty() && bottom.empty()) continue;
@@ -757,11 +757,11 @@ void interface_layers(const Run &run, GeneratedSupport &out)
             top_part = polygons(clipper_intersection(clipper(united), clipper(regular_top)));
         }
         Polys bottom_part = polygons(clipper_diff(clipper(united), clipper(top_part)));
-        for (const std::pair<LayerType, Polys *> &part : {
-                std::pair<LayerType, Polys *>{LayerType::TopInterface, &top_part},
-                std::pair<LayerType, Polys *>{LayerType::BottomInterface, &bottom_part}}) {
+        for (const std::pair<Common::LayerType, Polys *> &part : {
+                std::pair<Common::LayerType, Polys *>{Common::LayerType::TopInterface, &top_part},
+                std::pair<Common::LayerType, Polys *>{Common::LayerType::BottomInterface, &bottom_part}}) {
             if (part.second->empty()) continue;
-            GeneratorLayer &layer = add_layer(out, part.first, base.print_z, base.bottom_z, base.height);
+            Common::GeneratorLayer &layer = add_layer(out, part.first, base.print_z, base.bottom_z, base.height);
             layer.polygons = std::move(*part.second);
             out.interfaces.push_back(&layer);
         }
@@ -771,14 +771,14 @@ void interface_layers(const Run &run, GeneratedSupport &out)
 }
 
 // Enlarge the first base slab by the configured foot expansion without crossing the first object slice; subtract the configured brim from all bed-contacting slabs.
-void expand_feet(const Run &run, GeneratedSupport &out)
+void expand_feet(const Run &run, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
     const ClipperContext &clipper = run.clipper;
     const coord_t first = scale_to_layer_coord(p.first_layer_height);
     Polys interface(run.storage);
-    for (GeneratorLayers *layers : {&out.top, &out.interfaces})
-        for (const GeneratorLayer *layer : *layers)
+    for (Common::GeneratorLayers *layers : {&out.top, &out.interfaces})
+        for (const Common::GeneratorLayer *layer : *layers)
             if (layer->bottom_print_z() == 0)
                 interface.append_move_from(polygons(clipper_offset(clipper(layer->polygons), float(scale_d(EPSILON)), join_type, 0.)));
     if (!out.base.empty() && out.base.front()->bottom_print_z() == 0) {
@@ -814,8 +814,8 @@ void expand_feet(const Run &run, GeneratedSupport &out)
             }
         }
         brim = polygons(clipper_union(clipper(brim)));
-        for (GeneratorLayers *layers : {&out.top, &out.base, &out.interfaces})
-            for (GeneratorLayer *layer : *layers)
+        for (Common::GeneratorLayers *layers : {&out.top, &out.base, &out.interfaces})
+            for (Common::GeneratorLayer *layer : *layers)
                 if (layer->print_z <= first) layer->polygons = polygons(clipper_diff(clipper(layer->polygons), clipper(brim)));
     }
 }
@@ -1125,35 +1125,35 @@ bool has_brim(const Run &run)
 }
 
 // Append a slab to the owning deque and return its stable reference; Z dimensions must lie on the layer grid or assert, and only intermediate/base slabs start with a full-height collision span.
-GeneratorLayer &add_layer(GeneratedSupport &out, LayerType type, coord_t z, coord_t bottom, coord_t height)
+Common::GeneratorLayer &add_layer(Common::GeneratedSupport &out, Common::LayerType type, coord_t z, coord_t bottom, coord_t height)
 {
     assert(scale_to_layer_coord(unscaled(z)) == z && scale_to_layer_coord(unscaled(height)) == height);
     out.slabs.emplace_back(out.storage);
-    GeneratorLayer &layer = out.slabs.back();
+    Common::GeneratorLayer &layer = out.slabs.back();
     layer.type = type;
     layer.print_z = z;
     layer.bottom_z = bottom;
     layer.height = height;
     // A top contact is already cleared against the lower layer; its zero collision span excludes the coplanar object layer from trimming.
-    layer.height_block = type == LayerType::Intermediate || type == LayerType::Base ? height : 0;
+    layer.height_block = type == Common::LayerType::Intermediate || type == Common::LayerType::Base ? height : 0;
     return layer;
 }
 
 // Sort contacts and union slabs closer than the minimum thickness into the lower slab without changing its collision span; moved source geometry is cleared while deque storage stays alive.
-void merge_contacts(const Run &run, GeneratorLayers &layers)
+void merge_contacts(const Run &run, Common::GeneratorLayers &layers)
 {
     const Common::SupportParams &p = run.p;
     const ClipperContext &clipper = run.clipper;
-    std::sort(layers.begin(), layers.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) { return a->print_z < b->print_z; });
-    GeneratorLayers merged;
+    std::sort(layers.begin(), layers.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) { return a->print_z < b->print_z; });
+    Common::GeneratorLayers merged;
     for (size_t i = 0; i < layers.size();) {
-        GeneratorLayer &target = *layers[i];
+        Common::GeneratorLayer &target = *layers[i];
         const coord_t first = scale_to_layer_coord(p.first_layer_height);
         const bool first_group = target.print_z < first + p.min_height;
         const coord_t limit = first_group ? first + p.min_height - 1 : target.print_z + p.min_height;
         size_t j = i + 1;
         for (; j < layers.size() && layers[j]->print_z <= limit; ++j) {
-            GeneratorLayer &source = *layers[j];
+            Common::GeneratorLayer &source = *layers[j];
             target.polygons = polygons(clipper_union2(clipper(target.polygons), clipper(source.polygons)));
             *target.contact_polygons = polygons(clipper_union2(clipper(*target.contact_polygons), clipper(*source.contact_polygons)));
             *target.overhang_polygons = polygons(clipper_union2(clipper(*target.overhang_polygons), clipper(*source.overhang_polygons)));

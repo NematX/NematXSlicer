@@ -9,6 +9,7 @@
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportLayers.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Grid/GridSupportGenerator.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -137,7 +138,7 @@ inline slic3r_api::Support::Common::SupportParams params(const Print &print, con
 // The storage is declared first so it outlives the slabs that live in it.
 struct Generated {
     PluginStorage storage;
-    slic3r_api::Support::Grid::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    slic3r_api::Support::Common::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
     Generated(const Print &print, const PrintObject &object)
     {
         slic3r_api::Support::Grid::generate_support(nullptr, print_view(print), object_view(object), params(print, object), support);

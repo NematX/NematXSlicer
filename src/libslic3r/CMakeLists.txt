@@ -497,13 +497,15 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/ClipperResults.hpp
 	Plugins/Support/Common/PerimeterFill.cpp
 	Plugins/Support/Common/PerimeterFill.hpp
+	Plugins/Support/Common/SupportLayers.hpp
 	Plugins/Support/Common/SupportParams.cpp
 	Plugins/Support/Common/SupportParams.hpp
+	Plugins/Support/Common/SupportPublication.cpp
+	Plugins/Support/Common/SupportPublication.hpp
 	Plugins/Support/Common/SupportSettings.cpp
 	Plugins/Support/Common/SupportSettings.hpp
 	Plugins/Support/Grid/GridSupportGenerator.cpp
 	Plugins/Support/Grid/GridSupportGenerator.hpp
-	Plugins/Support/Grid/GridSupportLayers.hpp
 	Plugins/Support/Grid/SupportFamilyGrid.cpp
 	Plugins/Support/Grid/SupportFamilyGrid.hpp
 	Plugins/Support/SupportDemandBridgeRemoval.cpp

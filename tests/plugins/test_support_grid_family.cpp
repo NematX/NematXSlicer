@@ -1,5 +1,6 @@
 #include "support_grid_test_helpers.hpp"
 #include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 
 /* Grid-family tests inspect geometric output before toolpath generation. A
@@ -250,12 +251,12 @@ TEST_CASE("Synchronized support shares close top and bottom contacts without a s
     const PrintObject &object = print.object(0);
     const slic3r_api::Support::Common::SupportParams params = SG::params(print, object);
     const SG::Generated run(print, object);
-    const slic3r_api::Support::Grid::GeneratedSupport &generated = run.support;
+    const slic3r_api::Support::Common::GeneratedSupport &generated = run.support;
     REQUIRE_FALSE(generated.top.empty());
     REQUIRE_FALSE(generated.bottom.empty());
-    for (const slic3r_api::Support::Grid::GeneratorLayer *top : generated.top)
+    for (const slic3r_api::Support::Common::GeneratorLayer *top : generated.top)
         CHECK(top->print_z == scale_to_layer_coord(1.6 - 0.35));
-    for (const slic3r_api::Support::Grid::GeneratorLayer *bottom : generated.bottom) {
+    for (const slic3r_api::Support::Common::GeneratorLayer *bottom : generated.bottom) {
         CHECK(bottom->bottom_z == scale_to_layer_coord(0.8 + 0.23));
         CHECK(bottom->print_z == scale_to_layer_coord(1.25));
         CHECK(bottom->height == scale_to_layer_coord(0.22));
@@ -340,12 +341,12 @@ TEST_CASE("Grid family resolves the top and bottom overlap of one layer", "[plug
         polygons_copy(out.mutable_handle(), reinterpret_cast<const polygon_collection_handle *>(&polygons));
         return out;
     };
-    const Polygons resolved_bottom = SG::native(slic3r_api::Support::Grid::Internal::resolve_overlap(stored(bottom), stored(top)));
+    const Polygons resolved_bottom = SG::native(slic3r_api::Support::Common::Internal::resolve_overlap(stored(bottom), stored(top)));
     // The shared area stays on the top surface only, and the rest of the bottom area is kept.
     CHECK(intersection(resolved_bottom, top).empty());
     CHECK(area(resolved_bottom) == Approx(area(bottom) - area(shared)));
     const Polygons interfaces = union_(top, resolved_bottom);
-    const Polygons resolved_sparse = SG::native(slic3r_api::Support::Grid::Internal::resolve_overlap(stored(sparse), stored(interfaces)));
+    const Polygons resolved_sparse = SG::native(slic3r_api::Support::Common::Internal::resolve_overlap(stored(sparse), stored(interfaces)));
     // The base keeps only the area no interface covers, so the three kinds are disjoint.
     CHECK(intersection(resolved_sparse, interfaces).empty());
     CHECK(area(resolved_sparse) == Approx(area(sparse) - area(intersection(sparse, interfaces))));
@@ -357,7 +358,7 @@ TEST_CASE("Grid family resolves the top and bottom overlap of one layer", "[plug
 // is the smallest of that Z, has the contact's thickness or does not exist.
 TEST_CASE("Grid family types a mergeable contact as base", "[plugins][support-grid]")
 {
-    using slic3r_api::Support::Grid::Internal::merged_into_base;
+    using slic3r_api::Support::Common::Internal::merged_into_base;
     CHECK_FALSE(merged_into_base(false, true, true, false));  // Separate extruders never merge.
     CHECK(merged_into_base(true, true, true, false));         // Same layer, same thickness, same flag.
     CHECK_FALSE(merged_into_base(true, true, true, true));    // A bridging contact never merges.

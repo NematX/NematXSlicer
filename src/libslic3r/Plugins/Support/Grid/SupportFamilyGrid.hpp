@@ -1,29 +1,14 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* This built-in support family handles grid and snug styles. It reads demand
-   from object islands, computes the support geometry and publishes auxiliary
-   slices, support properties and typed fill surfaces, all through the plugin
-   API. Extrusion generation belongs to a later support-toolpath step. */
+   from object islands, computes the support slabs and publishes them through
+   the shared publication (Common/SupportPublication.hpp) as auxiliary slices,
+   support properties and typed fill surfaces, all through the plugin API.
+   Extrusion generation belongs to a later support-toolpath step. */
 #ifndef plugins_support_grid_family_hpp_
 #define plugins_support_grid_family_hpp_
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
-#include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 
 namespace slic3r_api::Support::Grid {
-namespace Internal {
-/* Every area of one auxiliary layer is printed by exactly one role. A support layer holds three
-   kinds of surfaces: the upper ones (contacts touching the object above and the interfaces below
-   them), the lower ones (contacts touching the object below and the interfaces above them) and the
-   sparse base that carries the load down to the bed. They must stay disjoint, otherwise the same
-   area is extruded twice. When the gap between the object above and the object below is thinner
-   than the support layers, one area is both upper and lower: the upper surface keeps it, as the
-   native generator merged the lower contact into the upper one. */
-// Decide whether the native generator would have merged a contact area into the base layer, which
-// makes the family publish that contact as base; a bridging contact never merges.
-bool merged_into_base(bool merge, bool base_takes_contact, bool z_has_base, bool bridging);
-// Remove from the surfaces every area the covering surfaces already print, so each area keeps one owner;
-// the result lives in the storage of surfaces.
-StoredPolygonCollection resolve_overlap(const StoredPolygonCollection &surfaces, const StoredPolygonCollection &covering);
-}
 class SupportFamilyGrid final : public PluginBase {
 public:
     // Return the process-lifetime built-in provider.

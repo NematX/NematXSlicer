@@ -55,13 +55,16 @@ TEST_CASE("Production demand registrations include all producers and filters", "
                       [](const Plugin::UsedConfigKey &key) { return key.key == "support_material_buildplate_only"; }));
 }
 
-TEST_CASE("Buildplate-only demand removes all expanded lower coverage and does nothing when disabled", "[plugins][support-demand]")
+TEST_CASE("Buildplate-only demand removes expanded lower coverage for grid and snug objects only", "[plugins][support-demand]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool enabled = GENERATE(false, true);
+    const char *style = GENERATE("grid", "snug", "organic");
+    const bool filtered = enabled && std::string(style) != "organic";
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"layer_height", "1"}, {"first_layer_height", "1"},
                                    {"nozzle_diameter", "2"}, {"max_layer_height", "1"},
+                                   {"support_material_style", style},
                                    {"support_material_buildplate_only", enabled ? "1" : "0"}});
     Print print;
     Model model;
@@ -102,8 +105,8 @@ TEST_CASE("Buildplate-only demand removes all expanded lower coverage and does n
     filter.run(context);
     const ExPolygons expected[] = {
         demand,
-        enabled ? ExPolygons {rectangle(4.01, 10.)} : demand,
-        enabled ? ExPolygons {rectangle(4.01, 5.99), rectangle(8.01, 10.)} : demand
+        filtered ? ExPolygons {rectangle(4.01, 10.)} : demand,
+        filtered ? ExPolygons {rectangle(4.01, 5.99), rectangle(8.01, 10.)} : demand
     };
     for (size_t idx = 0; idx < 3; ++idx) {
         const ExPolygons &actual = object.layer(idx).island(0).support_demand();

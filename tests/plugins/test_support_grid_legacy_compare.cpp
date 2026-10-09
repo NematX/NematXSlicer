@@ -28,7 +28,7 @@ namespace {
 void run_comparison(int model_id, bool same_tool = false);
 // Check published geometry and contact spacing independently of the native comparison; on_object false
 // means support may not rest on the object (build plate only).
-void check_family(const PrintObject &object, const slic3r_api::Support::Grid::GeneratedSupport &support,
+void check_family(const PrintObject &object, const slic3r_api::Support::Common::GeneratedSupport &support,
                   const slic3r_api::Support::Common::SupportParams &params, int model_id, bool on_object = true);
 // Populate deprecated region caches and concrete extrusion classes for native support.
 void prepare_legacy_inputs(PrintObject &object);
@@ -434,10 +434,10 @@ void run_comparison(int model_id, bool same_tool)
 }
 
 // Check published slabs without changing them; temporary contacts identify adjacent object layers for gap arithmetic, and model_id selects roofs or supporting platforms.
-void check_family(const PrintObject &object, const slic3r_api::Support::Grid::GeneratedSupport &support,
+void check_family(const PrintObject &object, const slic3r_api::Support::Common::GeneratedSupport &support,
                   const slic3r_api::Support::Common::SupportParams &p, int model_id, bool on_object)
 {
-    using namespace slic3r_api::Support::Grid;
+    using namespace slic3r_api::Support::Common;
     REQUIRE_FALSE(object.auxiliary_layers().empty());
     bool top = false, bottom = false, base = false;
     std::set<size_t> ids;

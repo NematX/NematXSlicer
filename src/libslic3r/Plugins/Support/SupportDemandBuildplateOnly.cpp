@@ -5,6 +5,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 
 /* Buildplate-only support keeps demand only where a vertical column can reach
    the bed without crossing the object. For layer i, covered is the union
@@ -13,6 +14,8 @@
    replaced by demand minus covered through support_demand_get_island_mutable.
    This removes overhang, painted and modifier demand alike; unlike the legacy
    support generator, it does not keep enforced support above the object.
+   The filter applies to grid and snug objects only: the tree and organic
+   families route their branches to the bed themselves and keep their demand.
    With support_material_buildplate_only disabled, the filter does nothing.
    The plugin API supplies all geometry and settings. Temporary results use
    plugin storage and the object keeps the published demand. */
@@ -26,15 +29,17 @@ SupportDemandBuildplateOnly &SupportDemandBuildplateOnly::instance(orchestrator_
     return provider;
 }
 
-// Declare the existing boolean key; its definition specifies neither container nor preset metadata. Report one entry when no array is supplied.
+// Declare the buildplate-only switch and the support style that selects the objects it applies to. Report two entries when no array is supplied.
 int32_t SupportDemandBuildplateOnly::used_config_keys(raw_used_config_key *keys) const noexcept
 {
-    if (keys != nullptr)
+    if (keys != nullptr) {
         keys[0] = {"support_material_buildplate_only", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE};
-    return 1;
+        keys[1] = {"support_material_style", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE};
+    }
+    return 2;
 }
 
-// Subtract expanded lower slices from every island's demand; disabled or missing object contexts are skipped and cancellation stops the filter.
+// Subtract expanded lower slices from the demand of grid and snug objects; other styles, disabled filters and missing object contexts are skipped, and cancellation stops the filter.
 void SupportDemandBuildplateOnly::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
@@ -43,7 +48,10 @@ void SupportDemandBuildplateOnly::run_impl(const plugin_run_context *run_ctx) co
         return;
 
     const Object object(ctx->object);
-    if (!object.config().get("support_material_buildplate_only").get_bool()) {
+    const Config config = object.config();
+    const Common::SupportStyle style = Common::support_style(config);
+    const bool grid_or_snug = style == Common::SupportStyle::Grid || style == Common::SupportStyle::Snug;
+    if (!grid_or_snug || !config.get("support_material_buildplate_only").get_bool()) {
         progress().finish_run();
         return;
     }

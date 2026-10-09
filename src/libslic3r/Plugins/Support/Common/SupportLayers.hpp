@@ -1,5 +1,10 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
-/* Generator layers are temporary slabs: print_z is their top, bottom_z their
+/* Temporary support slabs, the data a support family hands to the publication.
+
+   A support family fills a GeneratedSupport: its slabs are owned by one deque
+   and listed by role (top contacts, bottom contacts, base slabs, interfaces).
+   SupportPublication.hpp then turns the slabs into auxiliary layers of the object.
+   Generator layers are temporary slabs: print_z is their top, bottom_z their
    geometric bottom, and height their printable thickness. Contacts meet the
    object, interfaces extend contacts, and base slabs form sparse columns.
    A deque owns the slabs until generation ends, so vectors may safely point
@@ -12,8 +17,8 @@
 
        GeneratorLayer slab(storage);
        slab.contact_polygons.emplace(storage); // only for a top contact */
-#ifndef plugins_support_grid_layers_hpp_
-#define plugins_support_grid_layers_hpp_
+#ifndef plugins_support_common_layers_hpp_
+#define plugins_support_common_layers_hpp_
 
 #include <deque>
 #include <optional>
@@ -21,7 +26,7 @@
 
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 
-namespace slic3r_api::Support::Grid {
+namespace slic3r_api::Support::Common {
 enum class LayerType { TopContact, BottomContact, TopInterface, BottomInterface, Base, Intermediate };
 
 struct GeneratorLayer {
@@ -60,5 +65,13 @@ inline void GeneratorLayer::reset()
     contact_polygons.reset();
     overhang_polygons.reset();
 }
-} // namespace slic3r_api::Support::Grid
+
+struct GeneratedSupport {
+    // Keep the slabs and their temporary geometry in storage.
+    explicit GeneratedSupport(storage_handle *storage) : storage(storage) {}
+    storage_handle *storage;
+    LayerStorage slabs;
+    GeneratorLayers top, bottom, base, interfaces;
+};
+} // namespace slic3r_api::Support::Common
 #endif
