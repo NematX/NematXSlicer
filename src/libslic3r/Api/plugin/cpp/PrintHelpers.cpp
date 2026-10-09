@@ -3,6 +3,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "PrintHelpers.hpp"
+#include "PrintingPlanViews.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,12 +19,13 @@ PrintObject, and Extruder classes without making those host-only classes part
 of the plugin API. They are compatibility helpers for plugin algorithms, not a
 second source of persistent print state.
 
-The implementation covers four related tasks:
+The implementation covers five related tasks:
 
     |-- normalize configured one-based extruder ids to zero-based ids
     |-- collect object, support, and skirt extruders
     |-- resolve first-layer heights from absolute or nozzle-relative settings
-    `-- convert volumetric extrusion into E-axis distance per millimeter
+    |-- convert volumetric extrusion into E-axis distance per millimeter
+    `-- derive the actual height of one finalized plan layer group
 
 Configuration lengths and areas arrive in user-facing millimeters, while
 `coord_t` and `c_flow` geometry values use scaled internal coordinates. The
@@ -96,6 +98,14 @@ void append_support_extruders(const Print &print,
 }
 
 } // namespace
+
+// Read a borrowed finalized layer group and return its first source height, or its Z gap from previous_print_z when source-free; the group is not mutated and validation failures remain the caller's responsibility.
+coord_t printing_layer_height(const ConstPrintingLayerGroup &layer, coord_t previous_print_z)
+{
+    if (layer.layer_count() > 0)
+        return layer.layer(0).height();
+    return layer.print_z() - previous_print_z;
+}
 
 coord_t check_z_step(coord_t val, coord_t z_step)
 {

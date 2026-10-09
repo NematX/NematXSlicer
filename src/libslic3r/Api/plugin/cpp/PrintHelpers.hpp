@@ -13,6 +13,8 @@
 
 namespace slic3r_api {
 
+class ConstPrintingLayerGroup;
+
 /*
 Print helper functions for plugin algorithms
 ============================================
@@ -21,6 +23,8 @@ These helpers reimplement small pieces of classic Print/PrintObject logic using
 only C API views. They are meant for plugins that need the same derived values
 as the host, but must not include host-only classes such as Print, Flow or
 Extruder.
+They also derive the actual height of one finalized plan layer group from its
+source layers or its Z gap in the plan.
 
 All extruder ids returned by these helpers are zero-based, matching the C++ host
 convention used by nozzle_diameter and filament vector settings. Config settings
@@ -76,6 +80,9 @@ multiplier.
 double e_per_mm(const Print &print, extruder_index_t extruder_id, double mm3_per_mm);
 
 coord_t check_z_step(coord_t val, coord_t z_step);
+
+// Return the shared actual height of a finalized layer group; previous_print_z is the print_z of the preceding plan layer or 0 for the first layer, DefaultGCodeFirmwareSession::reliable_layer_height verifies that source layers in one group agree, and a source-free group uses its Z gap.
+coord_t printing_layer_height(const ConstPrintingLayerGroup &layer, coord_t previous_print_z);
 
 } // namespace slic3r_api
 

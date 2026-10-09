@@ -7,12 +7,14 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <vector>
 
 #include <boost/filesystem.hpp>
+#include <tbb/global_control.h>
 
 #include "plugin_test_helpers.hpp"
 #include "gcode_test_helpers.hpp"
@@ -222,6 +224,7 @@ TEST_CASE("Configured layer and filament scripts become scoped plan events",
     CHECK_FALSE(changed_tool.events.has_before());
     CHECK_FALSE(plan.events.has_after());
 }
+// Verify the between-object event sees the legacy object index on the producer-selected side of the move.
 TEST_CASE("Between-object scripts select the requested side of the group move",
           "[plugins][gcode][script-type][extrusion-edit][sequential]")
 {
@@ -244,7 +247,7 @@ TEST_CASE("Between-object scripts select the requested side of the group move",
     config.option<ConfigOptionStrings>("start_filament_gcode")->set(std::vector<std::string>{""});
     config.option<ConfigOptionStrings>("end_filament_gcode")->set(std::vector<std::string>{""});
     config.option<ConfigOptionString>("between_objects_gcode")->value =
-        "; between [previous_object_id]:[previous_object_name] [next_object_id]:[next_object_name]";
+        "; between [previous_object_id]:[previous_object_name] [next_object_id]:[next_object_name] I[current_object_idx]";
 
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -285,7 +288,7 @@ TEST_CASE("Between-object scripts select the requested side of the group move",
     CHECK(firmware.begin_group(plan_view.group(1)).empty());
     CHECK(firmware.begin_group(plan_view.group(2)).empty());
     CHECK(firmware.write_event(plan_view.group(2).events().before()) ==
-          "; between 0:First_object 1:Second_object\n");
+          "; between 0:First_object 1:Second_object I1\n");
 
     config.option<ConfigOptionBool>("between_objects_gcode_before_move")->value = true;
     Steps::StepExtrusionEdition::clear(print);
@@ -300,7 +303,7 @@ TEST_CASE("Between-object scripts select the requested side of the group move",
     before_move_firmware.setup(print_view.config());
     CHECK(before_move_firmware.begin_group(refreshed_plan_view.group(0)).empty());
     CHECK(before_move_firmware.write_event(refreshed_plan_view.group(0).events().after()) ==
-          "; between 0:First_object 1:Second_object\n");
+          "; between 0:First_object 1:Second_object I0\n");
 }
 TEST_CASE("Single-extruder multimaterial finalizes only the active logical tool",
           "[plugins][gcode][script-type][extrusion-edit]")
@@ -538,6 +541,185 @@ TEST_CASE("Layer scripts report consumed filament",
     orchestrator.reset_plugin_cancel();
     remove_output_pair(output_path);
 }
+
+// Verify accumulated filament volume and weight remain separated by logical tool in and out of SEMM.
+TEST_CASE("Scripts read per-filament extruded volume and weight",
+          "[plugins][gcode][script-type][firmware][integration][script-globals]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    const double filament_area = 1.75 * 1.75 * PI / 4.0;
+    for (const bool semm : {false, true}) {
+        Print print;
+        select_printing_plan_writer(print);
+        configure_standard_firmware(print, 2);
+        PrintConfig &config = const_cast<PrintConfig &>(print.config());
+        config.single_extruder_multi_material.value = semm;
+        config.filament_density.set({1.25, 2.0});
+        config.option<ConfigOptionString>("start_gcode")->value.clear();
+        config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+            std::vector<std::string>{"", ""});
+        config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+            std::vector<std::string>{"", ""});
+        config.before_layer_gcode.value =
+            "; USED L[layer_num] {layer_used_filament[0]} {layer_used_filament[1]}";
+        config.option<ConfigOptionString>("end_gcode")->value =
+            "; EV {extruded_volume[0]} {extruded_volume[1]} {extruded_volume_total} "
+            "W {extruded_weight[0]} {extruded_weight[1]} {extruded_weight_total} O[current_object_idx]";
+
+        PrintingPlan &plan = print.mutable_printing_plan();
+        plan.groups.emplace_back();
+        PrintingGroup &group = plan.groups.front();
+        group.layers.emplace_back();
+        group.layers.back().print_z = scale_i(0.2);
+        group.layers.back().tool_groups.emplace_back();
+        group.layers.back().tool_groups.back().extruder_id = 0;
+        append_path_extrusion(
+            group.layers.back().tool_groups.back(),
+            make_firmware_path(
+                ArcPolyline(Points{Point(scale_i(0.0), scale_i(0.0)),
+                                   Point(scale_i(1.0), scale_i(0.0))}),
+                15.f, 400.f));
+        group.layers.back().tool_groups.emplace_back();
+        group.layers.back().tool_groups.back().extruder_id = 1;
+        append_path_extrusion(
+            group.layers.back().tool_groups.back(),
+            make_firmware_path(
+                ArcPolyline(Points{Point(scale_i(2.0), scale_i(0.0)),
+                                   Point(scale_i(4.0), scale_i(0.0))}),
+                15.f, 400.f));
+        group.layers.emplace_back();
+        group.layers.back().print_z = scale_i(0.4);
+        group.layers.back().tool_groups.emplace_back();
+        group.layers.back().tool_groups.back().extruder_id = 1;
+        append_path_extrusion(
+            group.layers.back().tool_groups.back(),
+            make_firmware_path(
+                ArcPolyline(Points{Point(scale_i(4.0), scale_i(0.0)),
+                                   Point(scale_i(5.0), scale_i(0.0))}),
+                15.f, 400.f));
+
+        Steps::StepExtrusionEdition::clear(print);
+        Steps::StepExtrusionEdition::run_step(Orchestrator::instance(), print);
+
+        const boost::filesystem::path output_path = temporary_gcode_path();
+        remove_output_pair(output_path);
+        Orchestrator &orchestrator = Orchestrator::instance();
+        orchestrator.reset_plugin_cancel();
+        try {
+            Steps::StepGenerateGcode::run_step(orchestrator, print, output_path.string());
+            const std::string output = read_text_file(output_path);
+            INFO(output);
+
+            const size_t used_position = output.find("; USED L1 ");
+            REQUIRE(used_position != std::string::npos);
+            const size_t used_begin = used_position + std::string("; USED L1 ").size();
+            const size_t used_separator = output.find(' ', used_begin);
+            REQUIRE(used_separator != std::string::npos);
+            const double used_zero = std::stod(output.substr(used_begin, used_separator - used_begin));
+            const size_t used_end = output.find('\n', used_separator + 1);
+            REQUIRE(used_end != std::string::npos);
+            const double used_one = std::stod(output.substr(used_separator + 1,
+                                                               used_end - used_separator - 1));
+            CHECK(used_zero == Approx(0.08 / filament_area).margin(1e-6));
+            CHECK(used_one == Approx(0.16 / filament_area).margin(1e-6));
+
+            const size_t ev_position = output.find("; EV ");
+            REQUIRE(ev_position != std::string::npos);
+            const size_t ev_begin = ev_position + std::string("; EV ").size();
+            const size_t ev_end = output.find('\n', ev_begin);
+            const std::string ev_line = output.substr(
+                ev_begin, ev_end == std::string::npos ? std::string::npos : ev_end - ev_begin);
+            std::istringstream ev_stream(ev_line);
+            std::vector<double> values(6);
+            std::string weight_label;
+            std::string object_label;
+            ev_stream >> values[0] >> values[1] >> values[2] >> weight_label
+                      >> values[3] >> values[4] >> values[5] >> object_label;
+            REQUIRE_FALSE(ev_stream.fail());
+            REQUIRE(weight_label == "W");
+            CHECK(values[0] == Approx(0.08).margin(1e-6));
+            CHECK(values[1] == Approx(0.24).margin(1e-6));
+            CHECK(values[2] == Approx(0.32).margin(1e-6));
+            CHECK(values[3] == Approx(0.0001).margin(1e-6));
+            CHECK(values[4] == Approx(0.00048).margin(1e-6));
+            CHECK(values[5] == Approx(0.00058).margin(1e-6));
+            REQUIRE(object_label == "O0");
+        } catch (...) {
+            orchestrator.reset_plugin_cancel();
+            remove_output_pair(output_path);
+            throw;
+        }
+        orchestrator.reset_plugin_cancel();
+        remove_output_pair(output_path);
+    }
+}
+
+// Verify firmware layer state and z-hop are live values unless a producer Config freezes a layer field.
+TEST_CASE("Scripts read the firmware layer and z-hop unless the producer froze them",
+          "[plugins][gcode][firmware][custom-gcode][script-globals]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    Print print;
+    configure_standard_firmware(print, 1);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.z_offset.value = 0.1;
+    DynamicPrintConfig &full_config = const_cast<DynamicPrintConfig &>(print.full_print_config());
+    full_config.set_key_value("layer_height", new ConfigOptionFloat(0.25));
+
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    PrintingGroup &group = plan.groups.front();
+    group.layers.emplace_back();
+    group.layers.back().print_z = scale_i(0.2);
+    group.layers.back().tool_groups.emplace_back();
+    group.layers.back().tool_groups.back().extruder_id = 0;
+    group.layers.emplace_back();
+    group.layers.back().print_z = scale_i(0.5);
+    group.layers.back().tool_groups.emplace_back();
+    group.layers.back().tool_groups.back().extruder_id = 0;
+
+    GCodeScriptProcessor host_processor(print, Orchestrator::instance());
+    const slic3r_api::GCodeGeneration::GCodeScriptProcessorView scripts(
+        host_processor.c_processor());
+    PluginStorage storage;
+    storage_handle *storage_handle_value = reinterpret_cast<storage_handle *>(&storage);
+    ScriptStateFirmwareProbe firmware(scripts, storage_handle_value);
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::PrintingPlan plan_view = printing_plan_view(print);
+    firmware.setup(print_view.config());
+    const std::string script = "L[layer_num] Z{layer_z} H{layer_current_height} J{zhop}";
+
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, script) ==
+          "L-1 Z0 H0 J0\n");
+    CHECK(firmware.begin_layer(plan_view.group(0).layer_group(0)).find(";LAYER_CHANGE\n") == 0);
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, "G1 X1 Y1 Z0.9") ==
+          "G1 X1 Y1 Z0.9\n");
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, script) ==
+          "L0 Z0.2 H0.2 J0.6\n");
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, "G1 Z0.3") ==
+          "G1 Z0.3\n");
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, script) ==
+          "L0 Z0.2 H0.2 J0\n");
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, "G1 Z0.25") ==
+          "G1 Z0.25\n");
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, script) ==
+          "L0 Z0.2 H0.2 J0\n");
+    CHECK(firmware.begin_layer(plan_view.group(0).layer_group(1)).find(";LAYER_CHANGE\n") == 0);
+    CHECK(firmware.process_script(GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, script) ==
+          "L1 Z0.5 H0.3 J0\n");
+
+    slic3r_api::StoredConfig frozen_config(storage_handle_value);
+    frozen_config.get_or_add("layer_num", SLIC3R_CONFIG_OPTION_INT).set_int(7);
+    frozen_config.get_or_add("layer_current_height", SLIC3R_CONFIG_OPTION_FLOAT).set_float(0.15);
+    CHECK(firmware.process_script(
+              GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, script, &frozen_config) ==
+          "L7 Z0.5 H0.15 J0\n");
+
+    CHECK(firmware.process_script(
+              GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, "{layer_height}") == "0.25\n");
+}
 TEST_CASE("First layer bed temperature follows used tools unless overridden",
           "[plugins][gcode][script-type][temperature]") {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -666,4 +848,269 @@ TEST_CASE("Settings scripts plugin owns the configured script settings",
     // The configured scripts stay always editable: the plugin owns no rule.
     for (const Orchestrator::PluginGuiRule &rule : orchestrator.gui_rules().rules())
         CHECK(rule.owner != "gcode.settings_scripts");
+}
+
+// Export two real objects in parallel and sequential modes, then compare every script value with the finalized plan and produced layer markers.
+TEST_CASE("Exported scripts read the legacy export variables",
+          "[plugins][gcode][script-type][integration][script-globals]")
+{
+    const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    for (const bool sequential : {false, true}) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(2);
+        config.set_deserialize_strict({
+            {"wipe_tower", "0"},
+            {"filament_diameter", "1.75,1.75"},
+            {"extrusion_multiplier", "1,1"},
+            {"filament_density", "1.25,2"},
+            {"filament_type", "PLA;PETG"},
+            {"perimeter_extruder", "1"},
+            {"infill_extruder", "1"},
+            {"solid_infill_extruder", "1"},
+            {"top_solid_layers", "0"},
+            {"bottom_solid_layers", "0"},
+            {"complete_objects", sequential ? "1" : "0"},
+            {"step_perimeter_plugin", "perimeter.generator.classic"},
+            {"step_surface_generation_plugin", "surface.initial_typed_surface_builder"},
+            {"step_wipetower_plugin", "wipe_tower.manager.default"},
+            {"layer_height", "0.3"},
+            {"fill_density", "20%"}});
+        config.option<ConfigOptionString>("start_gcode")->value =
+            "; GS T[initial_tool] F[initial_filament_type] C[total_toolchanges] "
+            "L[total_layer_count] A[all_layer_count] N[num_extruders] "
+            "U{if is_extruder_used[0]}1{else}0{endif}"
+            "{if is_extruder_used[1]}1{else}0{endif}"
+            "{if is_extruder_used[2]}1{else}0{endif} "
+            "V{extruded_volume_total} O[current_object_idx] K[layer_num] "
+            "H{layer_current_height}\n"
+            "; GB {bounding_box[0]} {bounding_box[1]} {bounding_box[2]} "
+            "{bounding_box[3]} {bounding_box[4]} {bounding_box[5]}\n"
+            "; GF {first_layer_print_min[0]} {first_layer_print_min[1]} "
+            "{first_layer_print_max[0]} {first_layer_print_max[1]}\n"
+            "; GP {print_bed_size[0]} {print_bed_size[1]}";
+        config.option<ConfigOptionString>("feature_gcode")->value =
+            "; GFEAT [layer_num] {layer_z} {layer_current_height} {max_layer_z}";
+        config.option<ConfigOptionString>("end_gcode")->value =
+            "; GE O[current_object_idx] V{extruded_volume_total} "
+            "{extruded_volume[0]} {extruded_volume[1]}";
+        config.option<ConfigOptionString>("between_objects_gcode")->value =
+            "; GO [current_object_idx]";
+        config.option<ConfigOptionString>("toolchange_gcode")->value.clear();
+        config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+            std::vector<std::string>{"", ""});
+        config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+            std::vector<std::string>{"", ""});
+
+        Print print;
+        Model model;
+        Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
+                         print, model, config);
+        for (const char *key : {"perimeter_extruder", "infill_extruder", "solid_infill_extruder"})
+            model.objects()[1].config.set_deserialize_strict(key, "2");
+        print.apply(model, config);
+        REQUIRE_NOTHROW(print.process());
+
+        extruder_index_t initial_tool = EXTRUDER_ID_UNKNOWN;
+        extruder_index_t previous_tool = EXTRUDER_ID_UNKNOWN;
+        int32_t expected_toolchanges = 0;
+        int32_t expected_all_layer_count = 0;
+        coord_t expected_max_print_z = 0;
+        const PrintObject &first_object = print.objects().front();
+        std::set<coord_t> object_layer_zs;
+        for (const Layer &layer : first_object.layers())
+            if (layer.has_extrusions())
+                object_layer_zs.insert(layer.scaled_print_z());
+        const int32_t expected_total_layer_count = sequential ?
+            int32_t(object_layer_zs.size() * 2) : int32_t(object_layer_zs.size());
+        const double expected_first_layer_height = first_object.layers().front().unscaled_height();
+
+        const boost::filesystem::path output_path = temporary_gcode_path();
+        remove_output_pair(output_path);
+        Orchestrator &orchestrator = Orchestrator::instance();
+        orchestrator.reset_plugin_cancel();
+        try {
+            REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), nullptr));
+            const std::string output = read_text_file(output_path);
+            INFO(output);
+
+            const PrintingPlan *plan = print.printing_plan();
+            REQUIRE(plan != nullptr);
+            for (const PrintingGroup &group : plan->groups)
+                for (const PrintingLayerGroup &layer : group.layers) {
+                    ++expected_all_layer_count;
+                    expected_max_print_z = std::max(expected_max_print_z, layer.print_z);
+                    for (const PrintingToolGroup &tool : layer.tool_groups) {
+                        if (tool.extruder_id == EXTRUDER_ID_UNKNOWN)
+                            continue;
+                        if (initial_tool == EXTRUDER_ID_UNKNOWN)
+                            initial_tool = tool.extruder_id;
+                        else if (previous_tool != EXTRUDER_ID_UNKNOWN && previous_tool != tool.extruder_id)
+                            ++expected_toolchanges;
+                        previous_tool = tool.extruder_id;
+                    }
+                }
+            REQUIRE(initial_tool != EXTRUDER_ID_UNKNOWN);
+            const double expected_max_layer_z = unscaled(expected_max_print_z);
+            const std::string expected_filament_type = print.config().filament_type.get_at(
+                static_cast<size_t>(initial_tool));
+
+            std::string start_line;
+            std::string bounding_box_line;
+            std::string first_layer_line;
+            std::string bed_line;
+            std::string end_line;
+            size_t layer_change_count = 0;
+            size_t feature_count = 0;
+            std::set<int32_t> feature_layers;
+            double last_layer_z = 0.0;
+            double last_layer_height = 0.0;
+            std::istringstream output_lines(output);
+            std::string line;
+            while (std::getline(output_lines, line)) {
+                if (!line.empty() && line.back() == '\r')
+                    line.pop_back();
+                if (line == ";LAYER_CHANGE")
+                    ++layer_change_count;
+                else if (line.rfind(";Z:", 0) == 0)
+                    last_layer_z = std::stod(line.substr(3));
+                else if (line.rfind(";HEIGHT:", 0) == 0)
+                    last_layer_height = std::stod(line.substr(8));
+                else if (line.rfind("; GS ", 0) == 0)
+                    start_line = line;
+                else if (line.rfind("; GB ", 0) == 0)
+                    bounding_box_line = line;
+                else if (line.rfind("; GF ", 0) == 0)
+                    first_layer_line = line;
+                else if (line.rfind("; GP ", 0) == 0)
+                    bed_line = line;
+                else if (line.rfind("; GE ", 0) == 0)
+                    end_line = line;
+                else if (line.rfind("; GFEAT ", 0) == 0) {
+                    ++feature_count;
+                    std::istringstream feature_values(line.substr(8));
+                    int32_t feature_layer = -1;
+                    double feature_z = 0.0;
+                    double feature_height = 0.0;
+                    double feature_max_z = 0.0;
+                    const bool parsed = static_cast<bool>(feature_values >> feature_layer >>
+                                                           feature_z >> feature_height >> feature_max_z);
+                    REQUIRE(parsed);
+                    REQUIRE(layer_change_count > 0);
+                    CHECK(feature_layer == int32_t(layer_change_count - 1));
+                    CHECK(feature_z == Approx(last_layer_z).margin(1e-6));
+                    CHECK(feature_height == Approx(last_layer_height).margin(1e-6));
+                    CHECK(feature_max_z == Approx(expected_max_layer_z).margin(1e-6));
+                    feature_layers.insert(feature_layer);
+                }
+            }
+
+            REQUIRE_FALSE(start_line.empty());
+            REQUIRE_FALSE(bounding_box_line.empty());
+            REQUIRE_FALSE(first_layer_line.empty());
+            REQUIRE_FALSE(bed_line.empty());
+            REQUIRE_FALSE(end_line.empty());
+            REQUIRE(feature_count > 0);
+            CHECK(feature_layers.size() == size_t(expected_all_layer_count));
+
+            std::istringstream start_values(start_line.substr(5));
+            std::string token;
+            bool has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == std::string("T") + std::to_string(initial_tool));
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == std::string("F") + expected_filament_type);
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == std::string("C") + std::to_string(expected_toolchanges));
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == std::string("L") + std::to_string(expected_total_layer_count));
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == std::string("A") + std::to_string(expected_all_layer_count));
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == "N2");
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == "U110");
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(std::stod(token.substr(1)) == Approx(0.0).margin(1e-6));
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == "O0");
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == "K0");
+            has_token = static_cast<bool>(start_values >> token);
+            REQUIRE(has_token);
+            CHECK(std::stod(token.substr(1)) == Approx(expected_first_layer_height).margin(1e-6));
+
+            std::istringstream bounding_box_values(bounding_box_line.substr(5));
+            std::vector<double> bounding_box;
+            for (size_t idx = 0; idx < 6; ++idx) {
+                double value = 0.0;
+                const bool parsed = static_cast<bool>(bounding_box_values >> value);
+                REQUIRE(parsed);
+                bounding_box.push_back(value);
+            }
+            CHECK(bounding_box[2] == Approx(0.0).margin(1e-3));
+            CHECK(bounding_box[5] == Approx(20.0).margin(1e-3));
+            CHECK(bounding_box[3] - bounding_box[0] >= 20.0);
+            CHECK(bounding_box[4] - bounding_box[1] >= 20.0);
+
+            std::istringstream first_layer_values(first_layer_line.substr(5));
+            std::vector<double> first_layer_box;
+            for (size_t idx = 0; idx < 4; ++idx) {
+                double value = 0.0;
+                const bool parsed = static_cast<bool>(first_layer_values >> value);
+                REQUIRE(parsed);
+                first_layer_box.push_back(value);
+            }
+            CHECK(first_layer_box[0] <= bounding_box[0] + 1e-3);
+            CHECK(first_layer_box[1] <= bounding_box[1] + 1e-3);
+            CHECK(first_layer_box[2] >= bounding_box[3] - 1e-3);
+            CHECK(first_layer_box[3] >= bounding_box[4] - 1e-3);
+
+            std::istringstream bed_values(bed_line.substr(5));
+            double bed_width = 0.0;
+            double bed_depth = 0.0;
+            const bool parsed_bed = static_cast<bool>(bed_values >> bed_width >> bed_depth);
+            REQUIRE(parsed_bed);
+            const BoundingBoxf bed_box(print.config().bed_shape.get_values());
+            REQUIRE(bed_box.defined);
+            CHECK(bed_width == Approx(bed_box.max.x() - bed_box.min.x()).margin(1e-6));
+            CHECK(bed_depth == Approx(bed_box.max.y() - bed_box.min.y()).margin(1e-6));
+
+            std::istringstream end_values(end_line.substr(5));
+            has_token = static_cast<bool>(end_values >> token);
+            REQUIRE(has_token);
+            CHECK(token == (sequential ? "O1" : "O0"));
+            has_token = static_cast<bool>(end_values >> token);
+            REQUIRE(has_token);
+            const double total_volume = std::stod(token.substr(1));
+            double tool_zero_volume = 0.0;
+            double tool_one_volume = 0.0;
+            const bool parsed_volumes = static_cast<bool>(end_values >> tool_zero_volume >> tool_one_volume);
+            REQUIRE(parsed_volumes);
+            CHECK(tool_zero_volume > 0.0);
+            CHECK(tool_one_volume > 0.0);
+            CHECK(total_volume == Approx(tool_zero_volume + tool_one_volume).margin(1e-6));
+
+            if (sequential)
+                CHECK(output.find("; GO 1") != std::string::npos);
+            else
+                CHECK(output.find("; GO ") == std::string::npos);
+        } catch (...) {
+            orchestrator.reset_plugin_cancel();
+            remove_output_pair(output_path);
+            throw;
+        }
+        orchestrator.reset_plugin_cancel();
+        remove_output_pair(output_path);
+    }
 }

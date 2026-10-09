@@ -16,9 +16,11 @@ coordinates their runtime reset and synchronization as one logical tool.
 
 namespace slic3r_api { namespace GCodeGeneration {
 
+// Load one tool's configured state, including filament density, then reset its owned runtime components; the Config is borrowed, missing density is zero, and component validation or allocation failures propagate.
 void DefaultExtruder::setup(const Config &config)
 {
     Tool::setup(config);
+    m_filament_density = config.vector_float_or_default("filament_density", m_id, 0.0);
 
     // Convert configuration units at the owner boundary so the reusable
     // component classes remain independent of setting names and Config views.

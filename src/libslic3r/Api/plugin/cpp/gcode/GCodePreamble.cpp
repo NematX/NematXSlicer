@@ -393,6 +393,7 @@ std::string GCodePreamble::post_start()
     return output;
 }
 
+// Prepare and execute one script with borrowed producer values, firmware execution state and writable machine outputs; the returned text is owned by the caller, while missing host options, parser errors and state failures propagate without retaining producer ownership.
 std::string GCodePreamble::process_script(
     gcode_script_type script_type,
     const std::string &script,
@@ -418,6 +419,56 @@ std::string GCodePreamble::process_script(
         processing_tool = processing_extruder_id;
     if (processing_tool >= m_session.m_extruders.size())
         throw std::invalid_argument("A custom G-code script references an unknown processing extruder.");
+
+    // Host-created execution options receive the state immediately before this
+    // script. Per-tool lengths stay separated in SEMM, and producer-frozen layer
+    // values take precedence over the firmware layer state.
+    const bool frozen_layer_num = producer_config != nullptr && producer_config->has("layer_num");
+    const bool frozen_layer_z = producer_config != nullptr && producer_config->has("layer_z");
+    const bool frozen_layer_height = producer_config != nullptr &&
+        producer_config->has("layer_current_height");
+    if (!frozen_layer_num)
+        config.set("layer_num", m_session.m_layer_num);
+    if (!frozen_layer_z)
+        config.set("layer_z", unscaled(m_session.m_layer_print_z));
+    if (!frozen_layer_height)
+        config.set("layer_current_height", unscaled(m_session.m_layer_height));
+
+    double zhop = 0.0;
+    const std::optional<c_vec3d> gantry_position = m_session.m_gantry.position();
+    if (m_session.m_layer_num >= 0 && gantry_position) {
+        const double tool_z_offset = m_session.m_current_extruder_idx ?
+            m_session.extruder(*m_session.m_current_extruder_idx).z_offset() : 0.0;
+        const double layer_machine_z = unscaled(m_session.m_layer_print_z) +
+            m_session.m_gantry.z_offset() - tool_z_offset;
+        const double lift = gantry_position->z - layer_machine_z;
+        if (lift > EPSILON)
+            zhop = lift;
+    }
+    config.set("zhop", zhop);
+
+    const std::vector<double> used_filament = m_session.filament_used_mm();
+    std::vector<double> volumes;
+    std::vector<double> weights;
+    volumes.reserve(m_session.m_extruders.size());
+    weights.reserve(m_session.m_extruders.size());
+    double total_volume = 0.0;
+    double total_weight = 0.0;
+    for (size_t tool_idx = 0; tool_idx < m_session.m_extruders.size(); ++tool_idx) {
+        const double volume = used_filament[tool_idx] *
+            m_session.m_extruders[tool_idx].extrusion_axis().filament_crossection();
+        const double weight = volume * m_session.m_extruders[tool_idx].filament_density() * 0.001;
+        volumes.push_back(volume);
+        weights.push_back(weight);
+        total_volume += volume;
+        total_weight += weight;
+    }
+    config.set("current_object_idx", m_session.m_current_object_idx);
+    config.set("extruded_volume", volumes);
+    config.set("extruded_weight", weights);
+    config.set("extruded_volume_total", total_volume);
+    config.set("extruded_weight_total", total_weight);
+
     m_session.complete_script_context(script_type, processing_tool, config);
 
     std::vector<double> used_filament_snapshot;
@@ -427,7 +478,7 @@ std::string GCodePreamble::process_script(
         std::vector<double> layer_used_filament;
         layer_used_filament.reserve(m_session.m_extruders.size());
         for (size_t tool_idx = 0; tool_idx < m_session.m_extruders.size(); ++tool_idx) {
-            const double used = m_session.m_extruders[tool_idx].extrusion_axis().used_filament();
+            const double used = used_filament[tool_idx];
             used_filament_snapshot.push_back(used);
             layer_used_filament.push_back(used - m_session.m_last_layer_used_filament[tool_idx]);
         }

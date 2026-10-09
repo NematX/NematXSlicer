@@ -30,6 +30,9 @@ DefaultGCodeFirmwareSession turns ordered PrintingPlan extrusions into a
 modern Marlin-style command stream. The session owns all machine state for one
 export: position, E coordinates, selected tool, requested process values and
 the values already sent to the printer.
+Before each custom script, the standard firmware fills execution values such as
+object index, per-filament usage, current layer and z-hop; producer-frozen
+layer values remain authoritative.
 
 The traversal and state transition algorithm is deliberately non-virtual. A
 derived firmware changes syntax by overriding one small protected encoder, for
@@ -86,7 +89,9 @@ public:
     // Reader. Provider wiring calls this before the session is published.
     void set_reader_state_id(orchestrator_runtime_id reader_state_id);
     std::string reader_plugin_id() const override { return "gcode.reader.default"; }
+    // Advance the sequential object index for later real groups and return any group-start travel.
     std::string begin_group(const ConstPrintingGroup &group) override;
+    // Emit layer markers and record the current plan layer number, Z and actual height.
     std::string begin_layer(const ConstPrintingLayerGroup &layer) override;
     std::string begin_tool_group(const ConstPrintingToolGroup &tool_group) override;
     std::string write_extrusion(const ConstPrintingExtrusion &extrusion) override;
@@ -265,7 +270,7 @@ private:
     class ExtrusionWriterVisitor;
     class GCodeStateInterpreter;
 
-    // Select a tool, transfer SEMM runtime and reset absolute E after emitted selections.
+    // Select a tool, transfer SEMM runtime, settle filament usage and reset absolute E after emitted selections.
     std::string select_extruder(extruder_index_t tool_id, bool emit_command = true);
     std::string move_to_group_start(const ConstPrintingGroup &group);
     std::string write_extrusion_tree(const ExtrusionEntity &root);
@@ -308,9 +313,13 @@ private:
     // whatever the explicit retraction operations and declarations set,
     // because the reader cannot prove it. Unknown reader values deliberately
     // invalidate the corresponding cache so later generated commands establish
-    // a safe, explicit state. This does not emit G-code and is a no-op when no
-    // reader service is available.
+    // a safe, explicit state. This does not emit G-code, settles filament usage
+    // after a reported tool change, and is a no-op when no reader service is available.
     void synchronize_after_custom_gcode(const std::string &text);
+    // Close the current per-tool filament interval and start measuring the selected tool's axis; call immediately after every m_current_extruder_idx change outside setup so m_usage_tool follows, and SEMM state copying does not alter the departing tool's axis.
+    void settle_filament_usage();
+    // Return per-tool filament lengths, including the currently open interval, without changing session counters.
+    std::vector<double> filament_used_mm() const;
     void apply_requested_state(const RequestedState &state);
     c_vec3d machine_position(c_point point, coord_t z_offset) const;
     double segment_length_mm(const c_extrusion_segment &segment) const;
@@ -327,6 +336,19 @@ private:
     std::optional<float> m_marker_width;
     std::optional<float> m_marker_height;
     std::vector<double> m_last_layer_used_filament;
+    // Filament length used by each tool over its closed selection periods. In SEMM the
+    // logical tools share one E axis, so an axis total mixes filaments; the open period
+    // of m_usage_tool is measured on its axis from m_usage_start_mm. E moves from a
+    // script with no current tool, or addressed by T to a tool that is not selected,
+    // are assigned to no tool, as in the legacy generator.
+    std::vector<double> m_filament_used_mm;
+    std::optional<extruder_index_t> m_usage_tool;
+    double m_usage_start_mm = 0.0;
+    // Zero-based index of the sequential object being printed, like the legacy current_object_idx.
+    int32_t m_current_object_idx = 0;
+    // Current plan layer for scripts: begin_layer() count minus one (-1 before the first layer) and its height; m_layer_print_z already holds its print Z.
+    int32_t m_layer_num = -1;
+    coord_t m_layer_height = 0;
     std::optional<extruder_index_t> m_script_processing_tool;
     bool m_xyz_relative_mode = false;
     bool m_units_in_mm = true;

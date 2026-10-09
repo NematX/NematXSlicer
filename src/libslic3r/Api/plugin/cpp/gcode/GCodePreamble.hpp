@@ -23,6 +23,7 @@ public:
     std::string finish();
     std::string pre_start(const std::string &resolved);
     std::string post_start();
+    // Prepare the host context, fill firmware execution values except producer-frozen layer values, run the script, and reconcile machine state.
     std::string process_script(gcode_script_type type, const std::string &script,
         const Config *producer_config, extruder_index_t processing_tool);
 private:

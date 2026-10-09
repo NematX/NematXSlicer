@@ -18,6 +18,7 @@
 
 #include "libslic3r/Api/plugin/cpp/ExtrusionTreeVisitors.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeLineParser.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeStateTracker.hpp"
 #include "libslic3r/ExtrusionRole.hpp"
@@ -392,8 +393,7 @@ private:
     std::string m_output;
 };
 
-// Copy settings from the borrowed Config and reset owned machine/cache state;
-// invalid tool counts or component settings throw before the session is ready.
+// Copy settings from the borrowed Config and reset owned machine, filament-counter and script-layer state; invalid tool counts or component settings throw before the session is ready, and no Config ownership is retained.
 void DefaultGCodeFirmwareSession::setup(const Config &config)
 {
     // The widest per-tool vector defines how many tool-state objects are
@@ -430,12 +430,18 @@ void DefaultGCodeFirmwareSession::setup(const Config &config)
     m_marker_width.reset();
     m_marker_height.reset();
     m_last_layer_used_filament.assign(m_extruders.size(), 0.0);
+    m_filament_used_mm.assign(m_extruders.size(), 0.0);
+    m_usage_tool.reset();
+    m_usage_start_mm = 0.0;
     m_script_processing_tool.reset();
     m_xyz_relative_mode = false;
     m_units_in_mm = true;
     m_e_relative_mode = config.bool_or_default("use_relative_e_distances", false);
     m_e_position_known = true;
     m_seen_object_group = false;
+    m_current_object_idx = 0;
+    m_layer_num = -1;
+    m_layer_height = 0;
     m_use_firmware_retraction = config.bool_or_default("use_firmware_retraction", false);
     m_single_extruder_multi_material = config.bool_or_default("single_extruder_multi_material", false);
     m_wipe_tag_open = false;
@@ -529,6 +535,7 @@ std::string DefaultGCodeFirmwareSession::begin_print(const Print &print, const C
         m_preamble->begin(print, plan, blocks);
 }
 
+// Inspect a borrowed plan group, increment the sequential object index for later real objects, and return any required start travel; an uninitialized session throws and the group remains unowned.
 std::string DefaultGCodeFirmwareSession::begin_group(const ConstPrintingGroup &group)
 {
     if (!m_is_setup)
@@ -542,9 +549,11 @@ std::string DefaultGCodeFirmwareSession::begin_group(const ConstPrintingGroup &g
         m_seen_object_group = true;
         return {};
     }
+    ++m_current_object_idx;
     return move_to_group_start(group);
 }
 
+// Emit markers for a borrowed plan layer, advance the zero-based script layer counter, and store the layer height (first source layer height, or the Z gap from the previous plan layer without source layers) before changing print Z; an uninitialized session or invalid source height throws and no ownership is retained.
 std::string DefaultGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGroup &layer)
 {
     if (!m_is_setup)
@@ -555,6 +564,8 @@ std::string DefaultGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGro
     if (height)
         output += ";HEIGHT:" + format_number(*height) + "\n";
 
+    m_layer_height = printing_layer_height(layer, m_layer_print_z);
+    ++m_layer_num;
     m_layer_print_z = layer.print_z();
     if (height)
         m_marker_height = *height;
@@ -888,10 +899,28 @@ const DefaultExtruder &DefaultGCodeFirmwareSession::current_extruder() const
     return extruder(*m_current_extruder_idx);
 }
 
-// Resolve a configured tool, optionally encode its selection, then transfer
-// shared SEMM runtime state before the dialect hook; invalid IDs/encoders throw.
-// Emitted absolute-E selections reset coordinates, not retraction or usage.
-// No ownership changes, and selecting the current tool returns no command.
+// Close the previously selected tool's axis interval and begin one at the selected tool's current used-filament value; callers invoke this immediately after every m_current_extruder_idx change outside setup so m_usage_tool follows, and SEMM state copying does not alter the departing tool's axis; this mutates only session counters, and invalid tool ownership propagates from extruder().
+void DefaultGCodeFirmwareSession::settle_filament_usage()
+{
+    if (m_usage_tool)
+        m_filament_used_mm.at(*m_usage_tool) +=
+            extruder(*m_usage_tool).extrusion_axis().used_filament() - m_usage_start_mm;
+    m_usage_tool = m_current_extruder_idx;
+    m_usage_start_mm = m_usage_tool ?
+        extruder(*m_usage_tool).extrusion_axis().used_filament() : 0.0;
+}
+
+// Copy closed per-tool usage and add the currently selected tool's open axis interval; return values own no session state, and inconsistent tool indices propagate as range failures.
+std::vector<double> DefaultGCodeFirmwareSession::filament_used_mm() const
+{
+    std::vector<double> used = m_filament_used_mm;
+    if (m_usage_tool)
+        used.at(*m_usage_tool) +=
+            extruder(*m_usage_tool).extrusion_axis().used_filament() - m_usage_start_mm;
+    return used;
+}
+
+// Resolve a configured tool, optionally emit its selection, transfer shared SEMM state, and close/open its filament interval; invalid IDs or encoders throw, absolute-E output resets only E coordinates, and selecting the current tool returns no command.
 std::string DefaultGCodeFirmwareSession::select_extruder(extruder_index_t tool_id, bool emit_command)
 {
     DefaultExtruder &selected = extruder(tool_id);
@@ -922,6 +951,7 @@ std::string DefaultGCodeFirmwareSession::select_extruder(extruder_index_t tool_i
         m_e_position_known = true;
     }
     m_current_extruder_idx = tool_id;
+    settle_filament_usage();
     return output;
 }
 
@@ -1520,7 +1550,7 @@ std::string DefaultGCodeFirmwareSession::write_custom_gcode(
     return output;
 }
 
-// Replay borrowed text with the selected Reader and adopt proven machine values.
+// Replay borrowed text with the selected Reader, adopt only proven machine values, and settle the per-tool usage interval after any reported tool change.
 // The retraction state is not adopted: the reader cannot prove it, and only the
 // explicit retraction operations and script declarations change it.
 // Unknown values invalidate caches; Reader or state validation errors propagate.
@@ -1624,6 +1654,7 @@ void DefaultGCodeFirmwareSession::synchronize_after_custom_gcode(const std::stri
         m_current_extruder_idx = static_cast<extruder_index_t>(*active_tool);
     else
         m_current_extruder_idx.reset();
+    settle_filament_usage();
 
     // Reconcile independent peripheral state for every known tool. A missing
     // item clears the cached acknowledgement rather than preserving a stale

@@ -7,6 +7,7 @@
 #include <limits>
 #include <memory>
 #include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -279,6 +280,140 @@ TEST_CASE("Host G-code script processor prepares typed isolated contexts",
         independent_host.c_processor());
     CHECK_THROWS(independent_scripts.prepare(registered_script_type(orchestrator, "unknown_script"))
                      .process("{firmware_script_counter}", 0));
+}
+
+// Verify host-published export constants and zero-initialized execution options before firmware runs.
+TEST_CASE("Host G-code script processor publishes export constants and execution options",
+          "[plugins][gcode][custom-gcode][script-globals]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    Print print;
+    configure_standard_firmware(print, 2);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.bed_shape.set({{-10., -5.}, {190., -5.}, {190., 215.}, {-10., 215.}});
+    config.option<ConfigOptionString>("thumbnails_color")->value = "#102030";
+    config.option<ConfigOptionStrings>("filament_colour")->set(
+        std::vector<std::string>{"#FF0000", "#00ff00"});
+    config.option<ConfigOptionStrings>("extruder_colour")->set(
+        std::vector<std::string>{"", "#0000FF"});
+    config.option<ConfigOptionStrings>("filament_type")->set(
+        std::vector<std::string>{"PLA", "PETG"});
+    DynamicPrintConfig &full_config = const_cast<DynamicPrintConfig &>(print.full_print_config());
+    full_config.set_key_value("layer_height", new ConfigOptionFloat(0.25));
+
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    plan.groups[0].layers.emplace_back();
+    plan.groups[0].layers[0].print_z = scale_i(0.2);
+    plan.groups[0].layers[0].tool_groups.emplace_back();
+    plan.groups[0].layers[0].tool_groups[0].extruder_id = 1;
+    plan.groups[0].layers[0].tool_groups.emplace_back();
+    plan.groups[0].layers[0].tool_groups[1].extruder_id = 0;
+    plan.groups[0].layers.emplace_back();
+    plan.groups[0].layers[1].print_z = scale_i(0.4);
+    plan.groups[0].layers[1].tool_groups.emplace_back();
+    plan.groups[0].layers[1].tool_groups[0].extruder_id = EXTRUDER_ID_UNKNOWN;
+    plan.groups[0].layers[1].tool_groups.emplace_back();
+    plan.groups[0].layers[1].tool_groups[1].extruder_id = 0;
+    plan.groups[0].layers[1].tool_groups.emplace_back();
+    plan.groups[0].layers[1].tool_groups[2].extruder_id = 1;
+    plan.groups.emplace_back();
+    plan.groups[1].layers.emplace_back();
+    plan.groups[1].layers[0].print_z = scale_i(0.6);
+
+    GCodeScriptProcessor host_processor(print, Orchestrator::instance());
+    const slic3r_api::GCodeGeneration::GCodeScriptProcessorView scripts(
+        host_processor.c_processor());
+    const slic3r_api::GCodeGeneration::GCodeScriptContext context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+
+    CHECK(context.process(
+              "T[initial_tool] E[initial_extruder] F[initial_filament_type] "
+              "C[total_toolchanges] A[all_layer_count] L[total_layer_count] N[num_extruders]",
+              0) == "T1 E1 FPETG C2 A3 L0 N2");
+
+    const slic3r_api::GCodeGeneration::GCodeScriptContext used_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    CHECK(used_context.process("{if is_extruder_used[0]}1{else}0{endif}", 0) == "1");
+    const slic3r_api::GCodeGeneration::GCodeScriptContext used_one_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    CHECK(used_one_context.process("{if is_extruder_used[1]}1{else}0{endif}", 0) == "1");
+    const slic3r_api::GCodeGeneration::GCodeScriptContext used_two_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    CHECK(used_two_context.process("{if is_extruder_used[2]}1{else}0{endif}", 0) == "0");
+    const slic3r_api::GCodeGeneration::GCodeScriptContext used_254_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    CHECK(used_254_context.process("{if is_extruder_used[254]}1{else}0{endif}", 0) == "0");
+
+    const slic3r_api::GCodeGeneration::GCodeScriptContext bed_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    CHECK(bed_context.process(
+              "{print_bed_min[0]} {print_bed_min[1]} {print_bed_max[0]} "
+              "{print_bed_max[1]} {print_bed_size[0]} {print_bed_size[1]}", 0) ==
+          "-10 -5 190 215 200 220");
+    const slic3r_api::GCodeGeneration::GCodeScriptContext colour_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    CHECK(colour_context.process(
+              "{thumbnails_color_int} {filament_colour_int[0]} {filament_colour_int[1]} "
+              "{extruder_colour_int[0]} {extruder_colour_int[1]}", 0) ==
+          "1056816 16711680 65280 0 255");
+
+    const slic3r_api::GCodeGeneration::GCodeScriptContext dimension_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    const std::string dimension_output = dimension_context.process(
+        "{bounding_box[0]} {bounding_box[1]} {bounding_box[2]} {bounding_box[3]} "
+        "{bounding_box[4]} {bounding_box[5]} {first_layer_print_min[0]} "
+        "{first_layer_print_min[1]} {first_layer_print_max[0]} {first_layer_print_max[1]} "
+        "{first_layer_print_size[0]} {first_layer_print_size[1]}", 0);
+    std::istringstream dimension_stream(dimension_output);
+    std::vector<double> dimension_values;
+    double dimension_value = 0.0;
+    while (dimension_stream >> dimension_value)
+        dimension_values.push_back(dimension_value);
+    REQUIRE(dimension_values.size() == 12);
+    for (size_t idx = 0; idx < 6; ++idx)
+        CHECK(dimension_values[idx] == Approx(0.0).margin(1e-6));
+
+    const Polygon hull = print.first_layer_convex_hull_with_wipe_towers();
+    std::vector<Vec2d> hull_points;
+    for (const Point &point : hull)
+        hull_points.emplace_back(unscaled(point.x()), unscaled(point.y()));
+    if (hull_points.empty())
+        hull_points.emplace_back(Vec2d::Zero());
+    const BoundingBoxf hull_box(hull_points);
+    const Vec2d expected_hull_min = hull_box.min;
+    const Vec2d expected_hull_max = hull_box.max;
+    CHECK(dimension_values[6] == Approx(expected_hull_min.x()).margin(1e-6));
+    CHECK(dimension_values[7] == Approx(expected_hull_min.y()).margin(1e-6));
+    CHECK(dimension_values[8] == Approx(expected_hull_max.x()).margin(1e-6));
+    CHECK(dimension_values[9] == Approx(expected_hull_max.y()).margin(1e-6));
+    CHECK(dimension_values[10] == Approx(expected_hull_max.x() - expected_hull_min.x()).margin(1e-6));
+    CHECK(dimension_values[11] == Approx(expected_hull_max.y() - expected_hull_min.y()).margin(1e-6));
+
+    const slic3r_api::GCodeGeneration::GCodeScriptContext execution_context = scripts.prepare(
+        registered_script_type(Orchestrator::instance(), "unknown_script"));
+    CHECK(execution_context.config().get_int("current_object_idx") == 0);
+    CHECK(execution_context.config().get_int("layer_num") == -1);
+    CHECK(execution_context.config().get_float("layer_z") == Approx(0.0).margin(1e-6));
+    CHECK(execution_context.config().get_float("layer_current_height") == Approx(0.0).margin(1e-6));
+    CHECK(execution_context.config().get_float("zhop") == Approx(0.0).margin(1e-6));
+    CHECK(execution_context.config().get_float("extruded_volume_total") == Approx(0.0).margin(1e-6));
+    CHECK(execution_context.config().get_float("extruded_weight_total") == Approx(0.0).margin(1e-6));
+    CHECK_FALSE(execution_context.config().has("layer_height"));
+    CHECK(execution_context.process("[layer_height]", 0) == "0.25");
+    const std::vector<double> execution_volumes = execution_context.config().get_floats("extruded_volume");
+    const std::vector<double> execution_weights = execution_context.config().get_floats("extruded_weight");
+    REQUIRE(execution_volumes.size() == 2);
+    REQUIRE(execution_weights.size() == 2);
+    CHECK(execution_volumes[0] == Approx(0.0).margin(1e-6));
+    CHECK(execution_volumes[1] == Approx(0.0).margin(1e-6));
+    CHECK(execution_weights[0] == Approx(0.0).margin(1e-6));
+    CHECK(execution_weights[1] == Approx(0.0).margin(1e-6));
+
+    const slic3r_api::GCodeGeneration::GCodeScriptContext feature_context = scripts.prepare(
+        GCODE_SCRIPT_TYPE_FEATURE_GCODE);
+    CHECK(feature_context.config().get_float("max_layer_z") == Approx(0.6).margin(1e-6));
 }
 TEST_CASE("Firmware scripts import validated machine state atomically",
           "[plugins][gcode][firmware][custom-gcode]")

@@ -30,6 +30,14 @@ the firmware adds the current machine state before processing the script.
 Calls are synchronous, sequential and non-reentrant. The Config returned by
 prepare() is borrowed until the next prepare(). Result strings are borrowed
 until the next prepare() or process() call on the same processor.
+
+Every prepared Config contains the machine options position, e_retracted and
+e_restart_extra, plus e_position when E is absolute. It also contains the
+read-only execution options current_object_idx, extruded_volume,
+extruded_weight, extruded_volume_total, extruded_weight_total, layer_num,
+layer_z, layer_current_height and zhop. Firmware fills both families before
+process(); standard firmware preserves producer values for layer_num, layer_z
+and layer_current_height when the producer Config already contains them.
 */
 
 typedef enum raw_gcode_script_status {

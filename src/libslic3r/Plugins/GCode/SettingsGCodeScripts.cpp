@@ -18,6 +18,7 @@
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp"
@@ -57,9 +58,10 @@ available. This preserves the required order relative to tool selection and
 the restoration of extrusion state.
 
 Placeholder values are copied into a Config snapshot for every event. They
-include layer number and Z, previous and maximum layer Z, object IDs, and
-previous/next or filament extruder IDs. The plan hierarchy is not resized while
-scripts are appended, so borrowed event roots remain valid during the pass.
+include layer number, Z, actual layer height, previous and maximum layer Z,
+object IDs, and previous/next or filament extruder IDs. The plan hierarchy is
+not resized while scripts are appended, so borrowed event roots remain valid
+during the pass.
 Empty scripts produce no event. A plan with no tool group still receives
 plan- and layer-level scripts, but cannot receive a tool-specific start script
 until a tool group and its transition scope exist. In single-extruder
@@ -89,6 +91,8 @@ struct LayerContext
 {
     int32_t number = -1;
     coord_t print_z = 0;
+    // Actual thickness shared with the firmware for this finalized layer group.
+    coord_t height = 0;
 };
 
 struct PlanSummary
@@ -101,7 +105,7 @@ struct PlanSummary
     std::optional<LayerContext> last_layer;
 };
 
-// Read global facts once before scripts are inserted, including values needed by plan-level events.
+// Read global layer, height and tool facts once before scripts are inserted; the returned summary owns no plan data and cancellation or invalid views propagate.
 PlanSummary summarize_plan(const ConstPrintingPlan &plan,
                            const plugin_run_context *run_ctx);
 // Resolve a single real-object catalog group to its stable placeholder object index.
@@ -115,7 +119,7 @@ void initialize_settings_gcode_scripts_settings(orchestrator_handle *orchestrato
 // Add one typed scalar to the temporary Config transported with a script.
 void set_int_argument(MutableConfig &config, const char *key, int32_t value);
 void set_float_argument(MutableConfig &config, const char *key, double value);
-// Build the common layer placeholders from the final global traversal position.
+// Build an owned producer Config from the final global layer position, including actual height and preceding Z; storage must remain valid for the returned handle and Config failures propagate.
 StoredConfig layer_arguments(storage_handle *storage,
                              const LayerContext &layer,
                              const std::optional<LayerContext> &previous_layer,
@@ -167,7 +171,9 @@ PlanSummary summarize_plan(const ConstPrintingPlan &plan,
                 throw_if_cancelled(run_ctx);
             const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
             summary.max_print_z = std::max(summary.max_print_z, layer.print_z());
-            const LayerContext current_layer{layer_number++, layer.print_z()};
+            const coord_t previous_print_z = summary.last_layer ? summary.last_layer->print_z : 0;
+            const LayerContext current_layer{
+                layer_number++, layer.print_z(), printing_layer_height(layer, previous_print_z)};
             if (!summary.first_layer)
                 summary.first_layer = current_layer;
             summary.previous_layer = summary.last_layer;
@@ -235,6 +241,8 @@ StoredConfig layer_arguments(storage_handle *storage,
     set_float_argument(arguments, "previous_layer_z",
                        previous_layer ? unscaled(previous_layer->print_z) : 0.0);
     set_float_argument(arguments, "max_layer_z", unscaled(max_print_z));
+    // before_layer_gcode runs before the firmware begins its layer, so its actual height comes from this producer snapshot like layer_num and layer_z.
+    set_float_argument(arguments, "layer_current_height", unscaled(layer.height));
     return arguments;
 }
 
@@ -556,6 +564,7 @@ private:
     void inilialize_impl(storage_handle *) const override {
         initialize_settings_gcode_scripts_settings(m_orchestrator);
     }
+    // Append configured scripts to borrowed plan scopes without resizing the plan hierarchy.
     void run_impl(const plugin_run_context *run_context) const override {
         throw_if_cancelled(run_context);
         const run_ctx_extrusion_edition *context = plugin_ctx_as_extrusion_edition(run_context);
@@ -638,7 +647,10 @@ private:
                     throw_if_cancelled(run_context);
                 PrintingLayerGroup layer = group.layer_group(layer_idx);
                 PrintingScopeEvents layer_events = layer.events();
-                const LayerContext current_layer{layer_number++, layer.print_z()};
+                const coord_t previous_print_z = previous_layer ? previous_layer->print_z : 0;
+                const LayerContext current_layer{
+                    layer_number++, layer.print_z(), printing_layer_height(
+                        ConstPrintingLayerGroup(layer), previous_print_z)};
                 const StoredConfig current_layer_arguments = layer_arguments(
                     run_context->plugin_storage, current_layer, previous_layer, summary.max_print_z);
 
