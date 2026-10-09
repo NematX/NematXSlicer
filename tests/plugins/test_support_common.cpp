@@ -1,3 +1,4 @@
+#include "plugin_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 
 #include <algorithm>
@@ -762,6 +763,7 @@ TEST_CASE("Support plugins declare their keys from the Common library", "[plugin
 
 TEST_CASE("Perimeter-wrapped support fill equals the native FillWithPerimeter", "[plugins][support-common]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const ActiveSupportBase active_supportbase;
     PatternServiceFixture fixture;
 

@@ -506,6 +506,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/SupportPublication.hpp
 	Plugins/Support/Common/SupportSettings.cpp
 	Plugins/Support/Common/SupportSettings.hpp
+	Plugins/Support/Common/SupportZPlacement.cpp
+	Plugins/Support/Common/SupportZPlacement.hpp
 	Plugins/Support/Grid/GridSupportGenerator.cpp
 	Plugins/Support/Grid/GridSupportGenerator.hpp
 	Plugins/Support/Grid/SupportFamilyGrid.cpp
