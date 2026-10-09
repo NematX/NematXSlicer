@@ -6655,7 +6655,9 @@ void init_fff_params(PrintConfigDef &definition)
     // TRN PrintSettings : "Synchronize with object layers"
     def->tooltip = L("Synchronize support layers with the object print layers. This is useful "
                    "with multi-material printers, where the extruder switch is expensive. "
-                   "This option is only available when top contact Z distance is set to zero.");
+                   "Contact layers keep the configured Z distances. Intermediate layers follow object layers; "
+                   "extra layers may be inserted near contacts to respect support layer height limits."
+                   "\nOnly grid and snug supports use it: tree and organic supports choose their layer heights from the branch slopes.");
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
 

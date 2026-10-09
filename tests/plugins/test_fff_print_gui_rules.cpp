@@ -298,7 +298,9 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     set("support_material_angle_height", have_support && !organic);
     set("support_material_layer_height", have_support && !organic);
 
-    set("support_material_synchronize_layers", soluble);
+    // Contact gaps do not disable synchronization of intermediate support layers; only grid and snug use it.
+    set("support_material_synchronize_layers", have_support &&
+        (style == SupportMaterialStyle::smsGrid || style == SupportMaterialStyle::smsSnug));
 
     const bool raft_soluble = config.opt_enum<SupportZDistanceType>("raft_contact_distance_type") == zdNone;
     set("raft_contact_distance", raft && !raft_soluble);

@@ -386,10 +386,11 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
                "support_material_angle_height", "support_material_layer_height" },
              without_organic_supports(have_support));
 
-    add_rule({ "support_material_synchronize_layers" }, any_of({
-        all_of({ true_("support_material"), int_equals("support_material_contact_distance_type", int(zdNone)) }),
-        all_of({ non_zero("raft_layers"), int_equals("support_material_contact_distance_type", int(zdNone)) })
-    }));
+    // Synchronization also retains object Z positions for non-soluble support, while contacts keep their separation gaps.
+    // Only the grid and snug family follows it: tree and organic supports choose their layer heights from the branch slopes.
+    add_rule({ "support_material_synchronize_layers" }, all_of({ have_support, any_of({
+        int_equals("support_material_style", int(SupportMaterialStyle::smsGrid)),
+        int_equals("support_material_style", int(SupportMaterialStyle::smsSnug)) }) }));
 
     // raft
     add_rule({ "raft_contact_distance" }, all_of({
