@@ -116,6 +116,7 @@ SupportStyle parse_support_style(const std::string &serialized)
 {
     if (serialized == "grid") return SupportStyle::Grid;
     if (serialized == "snug") return SupportStyle::Snug;
+    if (serialized == "tree") return SupportStyle::Tree;
     if (serialized == "organic") return SupportStyle::Organic;
     return SupportStyle::Unknown;
 }

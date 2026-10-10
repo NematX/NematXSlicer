@@ -32,8 +32,8 @@
 
 namespace slic3r_api::Support::Common {
 
-// support_material_style: "grid", "snug" or "organic".
-enum class SupportStyle { Grid, Snug, Organic, Unknown };
+// support_material_style: "grid", "snug", "tree" or "organic"; tree and organic are the two styles of the tree family.
+enum class SupportStyle { Grid, Snug, Tree, Organic, Unknown };
 // support_material_contact_distance_type: "filament", "plane" or "none" (soluble).
 enum class ContactDistanceType { Filament, Plane, None, Unknown };
 // support_material_pattern, the base pattern: "rectilinear", "rectilinear-grid" or "honeycomb".

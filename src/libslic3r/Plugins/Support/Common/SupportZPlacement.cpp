@@ -39,6 +39,8 @@ bool has_bridges(storage_handle *storage, const Layer &layer);
 bool bridging_fills(const ExtrusionEntity &entity, const EPropertyAttributes *attributes = nullptr);
 // Return the number of equal steps needed to cover a positive distance.
 size_t ceil_steps(coord_t distance, coord_t step);
+// Round a length up to a whole number of grid steps.
+coord_t round_up_to_grid(coord_t value, coord_t grid);
 } // namespace
 
 // Create the contact of object layer id under that layer, in the Z of the native rules: a soluble contact fills the object layer
@@ -111,6 +113,47 @@ void merge_contacts(const SupportParams &p, GeneratedSupport &out)
     layers = std::move(merged);
 }
 
+// Place the bottom contact on object layer id. Its Z starts above the layer by the gap below, and its thickness is the bottom
+// flow height; a soluble contact fills the upper layer instead. Non-soluble contacts whose Z lands within the minimum height of a
+// top contact take that contact's Z, as the native generator does, so the list is searched from the first contact that can match.
+GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const SupportParams &p, ContactDistanceType distance_type,
+                                   size_t id, const StoredPolygonCollection &touching, const StoredPolygonCollection &top_surfaces,
+                                   GeneratedSupport &out)
+{
+    const ClipperContext clipper(out.storage);
+    const Layer &layer = layers[id];
+    const coord_t height_block = distance_type == ContactDistanceType::Plane ? layers[id + 1].height() :
+        (p.soluble ? layers[id + 1].height() : scale_to_layer_coord(p.bottom_flow_mm.height));
+    const coord_t bottom = layer.print_z() + scale_to_layer_coord(p.gap_below);
+    const coord_t z = p.soluble ? layers[id + 1].print_z() : bottom + height_block;
+    GeneratorLayer &contact = add_layer(out, LayerType::BottomContact, z, bottom, z - bottom);
+    contact.height_block = height_block;
+    contact.object_below = id;
+    contact.bridging = !p.soluble;
+    contact.polygons = touching.readonly().clone(out.storage);
+    if (p.bottom_expansion.value > 0)
+        contact.polygons = clipper_intersection(clipper(top_surfaces), clipper_offset(clipper(touching),
+            scale_d(c_float_or_percent_get_effective_value(&p.bottom_expansion, p.bottom_flow_mm.width)), join_type, 0.)).to_polygon_collection();
+    if (!p.soluble) {
+        const auto first_at_or_above = std::lower_bound(out.top.begin(), out.top.end(), layer.print_z(),
+            [](const GeneratorLayer *top, coord_t print_z) { return top->print_z < print_z; });
+        const size_t first = size_t(first_at_or_above - out.top.begin());
+        for (size_t idx = first > 0 ? first - 1 : 0; idx < out.top.size() && out.top[idx]->print_z <= z + p.min_height; ++idx) {
+            const coord_t thickness = out.top[idx]->print_z - contact.bottom_z;
+            if (out.top[idx]->print_z >= z - p.min_height && thickness >= p.min_height &&
+                thickness <= scale_to_layer_coord(p.max_support_height)) {
+                contact.print_z = out.top[idx]->print_z;
+                contact.height = contact.print_z - contact.bottom_z;
+                assert(contact.height >= p.min_height);
+                break;
+            }
+        }
+    }
+    contact.polygons.ensure_valid(p.resolution);
+    out.bottom.push_back(&contact);
+    return contact;
+}
+
 // Divide the owned contact intervals into printable slabs, bottom first. Synchronized slabs follow the object layers; a splitter
 // selects the handed-over layout; otherwise the native grid arithmetic spaces each interval in one pass.
 // Borrow spacing, layers and splitter; append slabs owned by out and set contact thicknesses. Invalid spacing asserts; allocation failures propagate.
@@ -156,7 +199,7 @@ void place_intermediate_slabs(const SlabSpacing &spacing, const std::vector<Laye
         }
         if (end <= start) { previous = current; previous_extreme = end; continue; }
         coord_t distance = end - start;
-        assert(distance >= min_height);
+        assert(split_middle || distance >= min_height);
         if (sync) {
             if (previous && previous->type == LayerType::TopContact && current->type == LayerType::BottomContact &&
                 previous->print_z == current->print_z && previous->bottom_z == current->bottom_z) {
@@ -292,15 +335,14 @@ void place_intermediate_slabs(const SlabSpacing &spacing, const std::vector<Laye
 
 namespace {
 // The stacks are placed at the interface step rounded down to the Z grid. They are kept when the middle they leave is zero or at least
-// min_height; otherwise the interval is split evenly into dense slabs, each within the interface step, and an unknown top contact is the last of them.
+// min_height; otherwise the interval is split evenly into dense slabs, within the interface step when feasible (see the header), and an unknown top contact is the last of them.
 coord_t place_handed_over_interval(const SlabSpacing &spacing, const MiddleSplitter &split_middle, GeneratedSupport &out,
                                    const GeneratorLayer *previous, GeneratorLayer *current, coord_t start, coord_t end)
 {
     const coord_t min_height = spacing.min_height;
     // The Z grid of the boundaries: the machine step, or the layer grid when the machine step is disabled.
     const coord_t zgrid = std::max(spacing.machine_step, SCALED_LAYER_Z_STEP);
-    const coord_t dense = spacing.interface_step - spacing.interface_step % zgrid;
-    assert(dense >= min_height);
+    const coord_t dense = handed_over_dense_height(spacing.interface_step, min_height, spacing.machine_step);
     size_t bottom = spacing.bottom_interface_layers > 0 ? size_t(spacing.bottom_interface_layers - 1) : 0;
     // The previous top contact keeps its span as one slab and the interval starts above it. A contact on the first layer is
     // already covered by the first-layer slab, so it adds nothing here.
@@ -345,27 +387,36 @@ coord_t place_handed_over_interval(const SlabSpacing &spacing, const MiddleSplit
         assert(last == end);
         return end;
     }
-    // Even split: boundaries are rounded down to the Z grid from start, so each slab is one of the two grid multiples around the even
-    // thickness, which keeps every slab within [min_height, dense] when the minimum height is on the grid.
-    const size_t count = ceil_steps(distance, dense);
+    // Even split in whole grid steps: every slab takes the floor or the ceiling of the average, so it stays within the dense step.
+    // The count is the fewest that keeps the dense step, and it is capped so that the floor still reaches the minimum height;
+    // when no count does both, the slabs are at least the minimum height and may exceed the dense step, and an interval shorter
+    // than the minimum keeps one slab thinner than the minimum.
+    const coord_t units = distance / zgrid;
+    const coord_t dense_units = dense / zgrid;
+    const coord_t min_units = std::max<coord_t>(1, round_up_to_grid(min_height, zgrid) / zgrid);
+    const coord_t count = std::max<coord_t>(1, std::min((units + dense_units - 1) / dense_units, units / min_units));
     coord_t last = start;
-    for (size_t i = 1; i < count; ++i) {
-        const coord_t z = start + coord_t(int64_t(distance) * int64_t(i) / int64_t(count) / zgrid * zgrid);
-        assert(z - last >= min_height && z - last <= dense);
+    for (coord_t i = 1; i < count; ++i) {
+        const coord_t z = start + zgrid * (units * i / count);
         out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
         last = z;
     }
     if (unknown_top) {
         current->bottom_z = last;
         current->height = end - last;
-        assert(current->height >= min_height && current->height <= dense);
         return last;
     }
-    assert(end - last >= min_height && end - last <= dense);
     out.base.push_back(&add_layer(out, LayerType::Intermediate, end, last, end - last));
     return end;
 }
 } // namespace
+
+// The dense step is the interface step on the machine Z grid (the layer grid when the machine step is off), raised to the minimum height.
+coord_t handed_over_dense_height(coord_t interface_step, coord_t min_height, coord_t machine_step)
+{
+    const coord_t zgrid = std::max(machine_step, SCALED_LAYER_Z_STEP);
+    return std::max({interface_step - interface_step % zgrid, round_up_to_grid(min_height, zgrid), zgrid});
+}
 
 // Allocate the slab in out.slabs and set its type and Z; only intermediate and base slabs start with a full-height collision span.
 GeneratorLayer &add_layer(GeneratedSupport &out, LayerType type, coord_t z, coord_t bottom, coord_t height)
@@ -539,6 +590,11 @@ size_t ceil_steps(coord_t distance, coord_t step)
     const size_t count = size_t(std::ceil((double(distance) - EPSILON) / double(step)));
     assert(count > 0);
     return count;
+}
+
+coord_t round_up_to_grid(coord_t value, coord_t grid)
+{
+    return (value + grid - 1) / grid * grid;
 }
 } // namespace
 } // namespace slic3r_api::Support::Common

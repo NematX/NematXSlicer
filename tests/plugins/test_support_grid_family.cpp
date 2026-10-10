@@ -11,8 +11,8 @@
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
 
-// Dispatch sliced slabs with real or cleared demand and check that only grid/snug with nonempty demand publish owned auxiliary layers.
-TEST_CASE("Grid family filters styles and empty demand", "[plugins][support-grid]")
+// Dispatch sliced slabs with real or cleared demand: every style with nonempty demand is published by its family, and cleared demand publishes nothing.
+TEST_CASE("Support families publish each style with demand and skip empty demand", "[plugins][support-grid]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const char *style = GENERATE("grid", "snug", "organic");
@@ -44,7 +44,7 @@ TEST_CASE("Grid family filters styles and empty demand", "[plugins][support-grid
                 expolygons_clear(support_demand_get_island_mutable(&ctx, reinterpret_cast<const layer_island_handle *>(&island)));
     }
     SG::family(print);
-    const bool expected = !empty && std::string(style) != "organic";
+    const bool expected = !empty;
     CHECK(print.object(0).auxiliary_layers().empty() == !expected);
     for (const Layer &layer : print.object(0).auxiliary_layers())
         CHECK(layer.get_property<LayerSupportProperty>() != nullptr);

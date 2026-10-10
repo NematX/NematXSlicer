@@ -143,6 +143,12 @@ SupportParams::SupportParams(const Print &print, const Object &object)
     max_support_height = check_z_step_mm(max_support_height, z_step);
     // Mixed nozzles can invert the bounds; applying the minimum then the maximum matches native slicing parameters.
     layer_height = std::min(maximum, std::max(minimum, check_z_step_mm(object_layer_height, z_step)));
+    // The support body prints with its own extruder, or with the object extruders when it uses the current one.
+    if (base_extruder > 0)
+        support_min_height = min_layer_height_from_nozzle(print_config, base_id, z_step);
+    else
+        for (extruder_index_t id : extruders)
+            support_min_height = std::max(support_min_height, min_layer_height_from_nozzle(print_config, uint32_t(id), z_step));
 
     // Vertical gaps: soluble support touches the object.
     if (!soluble) {

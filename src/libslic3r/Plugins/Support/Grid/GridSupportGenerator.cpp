@@ -25,6 +25,7 @@
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportInterfaces.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 
 /* A contact is a dense slab next to the object; a column is its projection
@@ -60,8 +61,6 @@ namespace slic3r_api::Support::Grid {
 namespace {
 using Polys = StoredPolygonCollection;
 using ExPolys = StoredExPolygonCollection;
-// Slabs are allocated by the shared Z placement.
-using Common::add_layer;
 constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
 
 // The views, parameters and object settings every phase reads, gathered once per run.
@@ -124,8 +123,6 @@ void intermediate_layers(const Run &run, Common::GeneratedSupport &out);
 void trim_by_object(const Run &run, Common::GeneratorLayers &layers);
 // Fill intermediate slabs from projected columns and remove portions inside contacts.
 void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out);
-// Carve dense top and bottom interface regions from the sparse base slabs.
-void interface_layers(const Run &run, Common::GeneratedSupport &out);
 // Expand column feet in several steps while avoiding object and brim areas.
 void expand_feet(const Run &run, Common::GeneratedSupport &out);
 // Rasterize polygons into a zero-bordered grayscale image using AGG's winding fill.
@@ -152,7 +149,7 @@ void generate_support(const plugin_run_context *context, const Print &print, con
         for (const Common::GeneratorLayer *bottom : out.bottom)
             if (bottom->bottom_print_z() <= top->bottom_z && top->print_z <= bottom->print_z)
                 top->polygons = polygons(clipper_diff(run.clipper(top->polygons), run.clipper(bottom->polygons)));
-    interface_layers(run, out);
+    Common::carve_interfaces(params, run.style == Common::SupportStyle::Snug, out);
     expand_feet(run, out);
 }
 
@@ -352,32 +349,7 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
         Polys touching = polygons(clipper_intersection(clipper(top_surfaces), clipper(projection)));
         touching.ensure_valid(p.resolution);
         if (!touching.empty()) {
-            const coord_t height_block = run.distance_type == Common::ContactDistanceType::Plane ?
-                run.layers[id + 1].height() : (p.soluble ? layer.upper_layer().height() : scale_to_layer_coord(p.bottom_flow_mm.height));
-            const coord_t bottom = layer.print_z() + scale_to_layer_coord(p.gap_below);
-            const coord_t z = p.soluble ? layer.upper_layer().print_z() : bottom + height_block;
-            Common::GeneratorLayer &contact = add_layer(out, Common::LayerType::BottomContact, z, bottom, z - bottom);
-            contact.height_block = height_block;
-            contact.object_below = size_t(id);
-            contact.bridging = !p.soluble;
-            contact.polygons = touching.readonly().clone(run.storage);
-            if (p.bottom_expansion.value > 0)
-                contact.polygons = polygons(clipper_intersection(clipper(top_surfaces), clipper_offset(clipper(touching),
-                    scale_d(c_float_or_percent_get_effective_value(&p.bottom_expansion, p.bottom_flow_mm.width)), join_type, 0.)));
-            if (!p.soluble) {
-                for (size_t idx = size_t(std::max(0, contact_idx)); idx < out.top.size() && out.top[idx]->print_z <= z + p.min_height; ++idx) {
-                    const coord_t thickness = out.top[idx]->print_z - contact.bottom_z;
-                    if (out.top[idx]->print_z >= z - p.min_height && thickness >= p.min_height &&
-                        thickness <= scale_to_layer_coord(p.max_support_height)) {
-                        contact.print_z = out.top[idx]->print_z;
-                        contact.height = contact.print_z - contact.bottom_z;
-                        assert(contact.height >= p.min_height);
-                        break;
-                    }
-                }
-            }
-            contact.polygons.ensure_valid(p.resolution);
-            out.bottom.push_back(&contact);
+            const Common::GeneratorLayer &contact = Common::add_bottom_contact(run.layers, p, run.distance_type, size_t(id), touching, top_surfaces, out);
             touching = polygons(clipper_offset(clipper(touching), double(SCALED_EPSILON)));
             for (size_t above = size_t(id + 1); above < run.layers.size() && run.layers[above].print_z() < contact.print_z; ++above)
                 areas[above] = polygons(clipper_diff(clipper(areas[above]), clipper(touching)));
@@ -472,65 +444,6 @@ void base_layers(const Run &run, const std::vector<Polys> &areas, Common::Genera
         base->type = Common::LayerType::Base;
     }
     trim_by_object(run, out.base);
-}
-
-// Project contacts through the configured number of base slabs and regularize their union; top and bottom regions are separated after union so their published surface types stay distinct.
-void interface_layers(const Run &run, Common::GeneratedSupport &out)
-{
-    const Common::SupportParams &p = run.p;
-    const ClipperContext &clipper = run.clipper;
-    const bool snug = run.style == Common::SupportStyle::Snug;
-    const double smoothing = p.interface_flow.spacing * 1.5;
-    const double radius = p.interface_flow.spacing / p.interface_density;
-    // Snug interfaces are closed then smoothed outwards; grid ones are only united with a safety offset.
-    const auto regularize = [&](const Polys &polys) {
-        if (!snug)
-            return polygons(clipper_union_with_safety_offset(clipper(polys)));
-        Polys closed = polygons(clipper_offset2(clipper(polys), smoothing + radius, -smoothing, join_type, 0.));
-        closed.smooth_outward(coord_t(smoothing));
-        return closed;
-    };
-    for (size_t i = 0; i < out.base.size(); ++i) {
-        Common::GeneratorLayer &base = *out.base[i];
-        Polys top(run.storage), bottom(run.storage);
-        if (p.top_interfaces > 0) {
-            const coord_t z = out.base[std::min(out.base.size() - 1, i + p.top_interfaces - 1)]->print_z;
-            for (const Common::GeneratorLayer *contact : out.top)
-                if (contact->print_z >= base.print_z && contact->bottom_z <= z)
-                    top.append_copy_from(snug ? *contact->overhang_polygons : contact->polygons);
-        }
-        if (p.bottom_interfaces > 0) {
-            const coord_t z = out.base[i + 1 > p.bottom_interfaces ? i + 1 - p.bottom_interfaces : 0]->bottom_z;
-            for (const Common::GeneratorLayer *contact : out.bottom)
-                if (contact->print_z >= z && contact->print_z <= base.bottom_z) bottom.append_copy_from(contact->polygons);
-        }
-        if (top.empty() && bottom.empty()) continue;
-        Polys united = bottom.readonly().clone(run.storage);
-        united.append_copy_from(top);
-        const Polys regular = regularize(united);
-        united = polygons(clipper_intersection(clipper(regular), clipper(base.polygons)));
-        united.ensure_valid(p.resolution);
-        if (united.empty()) continue;
-        // When both projections meet, the regularized top projection takes the overlap and the bottom interface takes the remaining union.
-        Polys top_part(run.storage);
-        if (!top.empty() && bottom.empty())
-            top_part = united.readonly().clone(run.storage);
-        else if (!top.empty()) {
-            const Polys regular_top = regularize(top);
-            top_part = polygons(clipper_intersection(clipper(united), clipper(regular_top)));
-        }
-        Polys bottom_part = polygons(clipper_diff(clipper(united), clipper(top_part)));
-        for (const std::pair<Common::LayerType, Polys *> &part : {
-                std::pair<Common::LayerType, Polys *>{Common::LayerType::TopInterface, &top_part},
-                std::pair<Common::LayerType, Polys *>{Common::LayerType::BottomInterface, &bottom_part}}) {
-            if (part.second->empty()) continue;
-            Common::GeneratorLayer &layer = add_layer(out, part.first, base.print_z, base.bottom_z, base.height);
-            layer.polygons = std::move(*part.second);
-            out.interfaces.push_back(&layer);
-        }
-        base.polygons = polygons(clipper_diff(clipper(base.polygons), clipper(united)));
-        base.polygons.ensure_valid(p.resolution);
-    }
 }
 
 // Enlarge the first base slab by the configured foot expansion without crossing the first object slice; subtract the configured brim from all bed-contacting slabs.

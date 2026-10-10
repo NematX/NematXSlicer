@@ -40,6 +40,8 @@ struct SupportParams
     // ---- Geometry (native Slicing.cpp derivation) ----
     // First layer, nominal support layer and thickest support layer heights, Z-step rounded (mm).
     double first_layer_height = 0, layer_height = 0, max_support_height = 0;
+    // Thinnest layer of the support body (mm): its extruder's minimum, or with the current extruder the largest minimum of the object extruders.
+    double support_min_height = 0;
     // Vertical gaps above and below the support (mm), zero when soluble; machine Z step (mm).
     double gap_above = 0, gap_below = 0, z_step = 0;
     // Soluble support: contact distance type "none", no vertical gap.

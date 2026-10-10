@@ -16,8 +16,12 @@
    step rounded down to the machine Z step, and a top contact is one more dense slab of that step. When the
    stacks leave a middle that is thinner than the minimum height, or the interval is shorter than its stacks, the
    interval is split evenly into dense slabs instead, with no middle; an unknown top contact is the last of them.
-   Every dense slab of the handed-over layout lies between the minimum height and the dense step; the minimum
-   height and the interface step are expected on the machine Z step, as the object layers are.
+   The dense step is the interface step rounded down to the machine Z step, raised to the minimum height when that is
+   larger, so user settings never trigger an assertion. An interval split evenly puts every dense slab between the minimum
+   height and the dense step when that is feasible: the split needs n = ceil(length / dense step) slabs, and it is feasible
+   when the length is at least n times the minimum height. When it is not, two degradations apply. An interval shorter than
+   the minimum height becomes one slab thinner than the minimum. When the n slabs would be thinner than the minimum, the
+   split uses fewer slabs, which are at least the minimum height and thicker than the dense step.
 
    The grid and the tree share the contacts and their dense stacks, so both families print contacts and
    interfaces alike. Contacts follow the native rules: a contact lies the contact distance under the object layer
@@ -78,11 +82,21 @@ TopContactSlabs add_top_contacts(const std::vector<Layer> &layers, const Config 
 // Union each top contact within the minimum height above a lower one into that lower contact, and remove the merged
 // slabs from out.top. Every top contact must already have its contact_polygons and overhang_polygons set, since the union reads them.
 void merge_contacts(const SupportParams &p, GeneratedSupport &out);
+// Create the bottom contact that stands on the top surfaces of object layer id and list it in out.bottom. Its polygons are the
+// touching area, grown by the bottom expansion and kept on the top surfaces. Its Z is the gap above the layer plus the bottom
+// flow height (the upper layer in soluble mode), and it snaps onto the first top contact that the minimum height allows.
+// top_surfaces and touching are polygon collections in the plugin storage; the layers must hold id + 1.
+GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const SupportParams &p, ContactDistanceType distance_type,
+                                   size_t id, const StoredPolygonCollection &touching, const StoredPolygonCollection &top_surfaces,
+                                   GeneratedSupport &out);
 // Fill every interval between neighbouring extremes with slabs appended to out.base, bottom first. Without a splitter the
 // grid layout spaces the middle uniformly; with one, the handed-over layout gives the middle of each interval to it.
 // A splitter cannot be combined with synchronize.
 void place_intermediate_slabs(const SlabSpacing &spacing, const std::vector<Layer> &layers, GeneratedSupport &out,
                               const MiddleSplitter &split_middle = nullptr);
+// Thickness of the dense slabs of the handed-over layout: the interface step rounded down to the machine Z step, raised to the
+// minimum height (rounded up to the step) when that is larger. The tips of a tree stack their interfaces at this thickness too.
+coord_t handed_over_dense_height(coord_t interface_step, coord_t min_height, coord_t machine_step);
 // Allocate a slab owned by out.slabs with the given type and Z dimensions, which must lie on the layer grid.
 GeneratorLayer &add_layer(GeneratedSupport &out, LayerType type, coord_t z, coord_t bottom, coord_t height);
 // Append to out the XY footprint of each overhang perimeter in an extrusion tree, grown by gap.

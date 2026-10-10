@@ -497,6 +497,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/ClipperResults.hpp
 	Plugins/Support/Common/PerimeterFill.cpp
 	Plugins/Support/Common/PerimeterFill.hpp
+	Plugins/Support/Common/SupportInterfaces.cpp
+	Plugins/Support/Common/SupportInterfaces.hpp
 	Plugins/Support/Common/SupportLayers.hpp
 	Plugins/Support/Common/SupportParams.cpp
 	Plugins/Support/Common/SupportParams.hpp
@@ -532,6 +534,20 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Toolpath/SupportToolpathBranch.hpp
 	Plugins/Support/Toolpath/SupportToolpathLegacy.cpp
 	Plugins/Support/Toolpath/SupportToolpathLegacy.hpp
+	Plugins/Support/Tree/SupportFamilyTree.cpp
+	Plugins/Support/Tree/SupportFamilyTree.hpp
+	Plugins/Support/Tree/TreeElements.hpp
+	Plugins/Support/Tree/TreeRouting.cpp
+	Plugins/Support/Tree/TreeRouting.hpp
+	Plugins/Support/Tree/TreeSettings.cpp
+	Plugins/Support/Tree/TreeSettings.hpp
+	Plugins/Support/Tree/TreeStorage.hpp
+	Plugins/Support/Tree/TreeSupportGenerator.cpp
+	Plugins/Support/Tree/TreeSupportGenerator.hpp
+	Plugins/Support/Tree/TreeVolumes.cpp
+	Plugins/Support/Tree/TreeVolumes.hpp
+	Plugins/Support/Tree/TreeZPlanner.cpp
+	Plugins/Support/Tree/TreeZPlanner.hpp
 	Plugins/WipeTower/ToolChangeUnretract.cpp
 	Plugins/WipeTower/ToolChangeUnretract.hpp
 	Plugins/WipeTower/ToolChangeWipe.cpp

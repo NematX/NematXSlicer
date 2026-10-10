@@ -697,8 +697,8 @@ TEST_CASE("Support enum helpers read every serialized value", "[plugins][support
         config.set_deserialize_strict("support_material_style", value);
         const SupportMaterialStyle native = config.opt_enum<SupportMaterialStyle>("support_material_style");
         const Common::SupportStyle expected = native == smsGrid ? Common::SupportStyle::Grid :
-            native == smsSnug ? Common::SupportStyle::Snug : native == smsOrganic ? Common::SupportStyle::Organic :
-            Common::SupportStyle::Unknown;
+            native == smsSnug ? Common::SupportStyle::Snug : native == smsTree ? Common::SupportStyle::Tree :
+            native == smsOrganic ? Common::SupportStyle::Organic : Common::SupportStyle::Unknown;
         CHECK(expected != Common::SupportStyle::Unknown);
         CHECK(Common::support_style(view) == expected);
     }
@@ -730,7 +730,7 @@ TEST_CASE("Support enum helpers read every serialized value", "[plugins][support
                 CHECK(Common::base_pattern_plugin_id(pattern, density, sheath) == pattern_name(native_id));
             }
     }
-    CHECK(Common::parse_support_style("tree") == Common::SupportStyle::Unknown);
+    CHECK(Common::parse_support_style("tree") == Common::SupportStyle::Tree);
     CHECK(Common::parse_contact_distance_type("") == Common::ContactDistanceType::Unknown);
     CHECK(Common::parse_base_pattern("lightning") == Common::BasePattern::Unknown);
 
