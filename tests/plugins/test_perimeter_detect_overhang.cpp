@@ -1,11 +1,19 @@
+///|/ Copyright (c) SuperSlicer 2026 Remi Durand.
+///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
+///|/
+
 #include <catch2/catch.hpp>
 
 #include "perimeter_test_helpers.hpp"
 
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 
 #include <algorithm>
 #include <limits>
+
+// These tests generate perimeter trees from explicit layer polygons, run overhang
+// classification against a lower slice, and inspect path geometry and properties.
 
 namespace {
 using namespace Slic3r;
@@ -273,6 +281,53 @@ TEST_CASE("Detect overhang merges tiny supported crossings into the loop", "[plu
     CHECK(extrusion_length(capture.external_perimeters) ==
           Approx(extrusion_length(run_detect_overhang_case(config, half_width_lower_support()).external_perimeters))
               .epsilon(0.001));
+}
+
+// Generate a triangular perimeter partly supported by a lower rectangle, then
+// inspect owned trees without mutation; every LOOP-marked entity must be closed.
+TEST_CASE("Detect overhang keeps diagonal split loops closed", "[plugins][perimeter][detect-overhang]")
+{
+    const DynamicPrintConfig config = detect_overhang_config({
+        {"overhangs_width", "0.2"},
+        {"overhangs_width_speed", "0.2"}
+    });
+    const ExPolygon target(Polygon({
+        Point(scale_i(-2.), scale_i(-1.)),
+        Point(scale_i(2.), scale_i(-0.64)),
+        Point(scale_i(-2.), scale_i(1.))
+    }));
+    const ExPolygon lower_support = rectangle_expolygon(-3., -2., 0., 2.);
+    const PerimeterRunCapture baseline = run_perimeter_and_post_case_with_lower_area(
+        config, {SIMPLE_PERIMETER_GENERATOR}, {}, target, lower_support, 1);
+    size_t baseline_flagged = 0;
+    size_t baseline_broken = 0;
+    count_flagged_loops(baseline.external_perimeters, baseline_flagged, baseline_broken);
+    REQUIRE(baseline_flagged > 0);
+    REQUIRE(baseline_broken == 0);
+
+    // The unsupported diagonal ends at the loop's starting vertex. Sampling
+    // must retain that exact endpoint, not truncate an interpolated coordinate.
+    const PerimeterRunCapture capture = run_perimeter_and_post_case_with_lower_area(
+        config, {SIMPLE_PERIMETER_GENERATOR}, {DETECT_OVERHANG}, target, lower_support, 1);
+    REQUIRE(detected_overhang_stats(capture).overhang_properties > 0);
+    size_t flagged = 0;
+    size_t broken = 0;
+    count_flagged_loops(capture.external_perimeters, flagged, broken);
+    REQUIRE(flagged > 0);
+    CHECK(broken == 0);
+
+    // Match the source vertices as an exact subsequence, including the repeated
+    // closing vertex; split fragments may add samples and duplicate junctions.
+    Points source_points;
+    Points result_points;
+    baseline.external_perimeters.collect_points(source_points);
+    capture.external_perimeters.collect_points(result_points);
+    size_t preserved = 0;
+    for (const Point &point : result_points)
+        if (preserved < source_points.size() && point == source_points[preserved])
+            ++preserved;
+    CHECK(preserved == source_points.size());
+    CHECK(total_polyline_points(capture.external_perimeters) > total_polyline_points(baseline.external_perimeters));
 }
 
 TEST_CASE("Detect overhang separates flow and speed thresholds", "[plugins][perimeter][detect-overhang]")

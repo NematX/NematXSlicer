@@ -162,6 +162,11 @@ struct Fragment
 // Replace a leaf with its classified fragments while retaining their fixed order.
 void replace_root_leaf_with_fragments(MutableExtrusionEntity root, std::vector<Fragment> &fragments);
 
+// Return an owned subdivision of borrowed points with exact original vertices; non-positive limits leave the path unchanged, and cancellation or allocation failures propagate.
+std::vector<c_point> densify_points(const std::vector<c_point> &points,
+                                   coord_t max_segment_length,
+                                   const plugin_run_context *run_ctx);
+
 StoredPolyline polyline_from_points(storage_handle *storage, const std::vector<c_point> &points)
 {
     StoredPolyline polyline(storage);
@@ -365,6 +370,12 @@ void merge_tiny_fragments(std::vector<Fragment> &fragments)
     }
 }
 
+// Return owned measuring spans from borrowed path points without changing the
+// input. Positive max_segment_length determines the subdivision count; paths with
+// fewer than two points or non-positive limits are copied unchanged. Intermediate
+// points are interpolated, but original vertices are copied exactly: point_at()
+// truncates to integer coordinates, and a shifted vertex would open a closed loop.
+// Cancellation through run_ctx and allocation failures propagate to the caller.
 std::vector<c_point> densify_points(const std::vector<c_point> &points,
                                    coord_t max_segment_length,
                                    const plugin_run_context *run_ctx)
@@ -385,8 +396,9 @@ std::vector<c_point> densify_points(const std::vector<c_point> &points,
         const c_point current = points[idx];
         const double length = norm(current - previous);
         const uint32_t parts = std::max<uint32_t>(1u, uint32_t(std::ceil(length / double(max_segment_length))));
-        for (uint32_t part = 1; part <= parts; ++part)
+        for (uint32_t part = 1; part < parts; ++part)
             out.push_back(point_at(previous, current, length * double(part) / double(parts)));
+        out.push_back(current);
     }
     return out;
 }
