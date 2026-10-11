@@ -17,6 +17,7 @@
 #define plugins_support_tree_routing_hpp_
 
 #include <cstddef>
+#include <limits>
 #include <vector>
 
 #include "libslic3r/libslic3r.h"
@@ -56,9 +57,15 @@ struct RoutedTree {
     std::vector<TreeNode> nodes;
 };
 
+// Marks a link to no node: the node below a trunk bottom, or a node that no other node carries.
+inline constexpr size_t no_node = std::numeric_limits<size_t>::max();
+
 // Route the tree branches of one object. The top contacts are added to support.top; the returned trees support them.
 std::vector<RoutedTree> route_trees(const Print &print, const PrintObject &object, const slic3r_api::Support::Common::SupportParams &params,
                                     const TreeSettings &settings, slic3r_api::Support::Common::GeneratedSupport &support);
+
+// The index of the node below each node of the tree, or no_node. Each node is carried by at most one node below it.
+std::vector<size_t> nodes_below(const RoutedTree &tree);
 
 } // namespace TreeFamily
 } // namespace Slic3r

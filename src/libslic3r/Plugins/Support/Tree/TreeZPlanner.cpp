@@ -47,11 +47,16 @@ std::vector<coord_t> fitting_cut(coord_t start, coord_t to, const Limits &limits
 void rebalance_tail(std::vector<coord_t> &tops, coord_t from, coord_t to, const Limits &limits);
 } // namespace
 
+coord_t planning_grid(coord_t z_step)
+{
+    return std::max(z_step, planning_step);
+}
+
 // Cut [from, to] into slabs of the planned heights; the rest below to is added last, or rebalanced with the slabs below it.
 std::vector<coord_t> plan_branch_slabs(coord_t from, coord_t to, const std::vector<OverhangLayer> &layers, coord_t max_overhang,
                                        coord_t min_height, coord_t max_height, coord_t z_step)
 {
-    const coord_t grid = std::max(z_step, planning_step);
+    const coord_t grid = planning_grid(z_step);
     const coord_t lowest = std::max(grid, round_up(min_height, grid));
     const coord_t highest = std::max(lowest, round_down(max_height, grid));
     const Limits limits{ layers, max_overhang, lowest, highest, grid };

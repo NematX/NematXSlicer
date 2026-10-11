@@ -536,11 +536,15 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Toolpath/SupportToolpathLegacy.hpp
 	Plugins/Support/Tree/SupportFamilyTree.cpp
 	Plugins/Support/Tree/SupportFamilyTree.hpp
+	Plugins/Support/Tree/TreeBranchMesh.cpp
+	Plugins/Support/Tree/TreeBranchMesh.hpp
 	Plugins/Support/Tree/TreeElements.hpp
 	Plugins/Support/Tree/TreeRouting.cpp
 	Plugins/Support/Tree/TreeRouting.hpp
 	Plugins/Support/Tree/TreeSettings.cpp
 	Plugins/Support/Tree/TreeSettings.hpp
+	Plugins/Support/Tree/TreeSmoothing.cpp
+	Plugins/Support/Tree/TreeSmoothing.hpp
 	Plugins/Support/Tree/TreeStorage.hpp
 	Plugins/Support/Tree/TreeSupportGenerator.cpp
 	Plugins/Support/Tree/TreeSupportGenerator.hpp

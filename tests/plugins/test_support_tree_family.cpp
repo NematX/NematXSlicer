@@ -4,10 +4,12 @@
 #include "libslic3r/GCode/ToolOrdering.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
+#include "libslic3r/Plugins/Support/Tree/TreeBranchMesh.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeRouting.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSettings.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeStorage.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSupportGenerator.hpp"
+#include "libslic3r/Plugins/Support/Tree/TreeSmoothing.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeZPlanner.hpp"
 
 #include <algorithm>
@@ -17,6 +19,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <stdexcept>
 
 /* Tree-family tests: the slabs that the tree and organic styles publish. The branch slab planner is checked on synthetic
    overhang layers, the slabs of small objects on their geometry (interfaces, floors, heights, XY distance, branch overhang),
@@ -586,7 +589,8 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     root.carries = { 0 };
     PluginStorage storage;
     Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
-    TF::generate_tree_slabs(nullptr, print, object, { TF::RoutedTree{ { upper, root } } }, false, support);
+    std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
+    TF::generate_tree_slabs(nullptr, print, object, trees, false, support);
     const coord_t block_z = object.layer(block_top).scaled_print_z(), root_z = object.layer(root_layer).scaled_print_z();
     REQUIRE_FALSE(support.bottom.empty());
     for (const Common::GeneratorLayer *contact : support.bottom) {
@@ -842,7 +846,8 @@ TEST_CASE("Tree floors keep the gap and the contact footprint free of branch sur
     root.carries = { 0 };
     PluginStorage storage;
     Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
-    TF::generate_tree_slabs(nullptr, print, object, { TF::RoutedTree{ { upper, root } } }, false, support);
+    std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
+    TF::generate_tree_slabs(nullptr, print, object, trees, false, support);
     REQUIRE_FALSE(support.bottom.empty());
     const Common::GeneratorLayer &floor = *support.bottom.front();
     const Polygons footprint = SG::native(floor.polygons);
@@ -956,4 +961,402 @@ TEST_CASE("Tree family declares its keys and warns once for a raft", "[plugins][
     for (const Orchestrator::PluginMessage &message : Orchestrator::instance().consume_plugin_messages())
         if (message.plugin_id == "support.family.tree" && message.level == Orchestrator::PluginMessageLevel::Warning) ++warnings;
     CHECK(warnings == 1);
+}
+
+// The outline of every layer of the object grown by the XY distance, which the branches keep clear of.
+namespace {
+std::vector<Polygons> keep_out_outlines(const PrintObject &object, coord_t gap_xy)
+{
+    std::vector<Polygons> outlines;
+    outlines.reserve(object.layer_count());
+    for (size_t id = 0; id < object.layer_count(); ++id)
+        outlines.push_back(to_polygons(offset_ex(object.layer(id).lslices(), float(gap_xy), ClipperLib::jtRound)));
+    return outlines;
+}
+
+// The volume in cubic millimeters of the base slabs: the area of each slab times its height.
+double base_volume_mm3(const std::vector<BaseSlab> &slabs)
+{
+    double volume = 0.;
+    for (const BaseSlab &slab : slabs)
+        volume += unscaled(unscaled(area(slab.polygons))) * unscaled(slab.print_z - slab.bottom_z);
+    return volume;
+}
+// The tolerance of the drawn checks in millimeters: the sections are measured where they are printed, so only rounding is left.
+constexpr double section_tolerance_mm = 0.002;
+
+// The middle Z of a base slab, in scaled units, where its branches are drawn.
+coord_t middle_z(const BaseSlab &slab)
+{
+    return slab.bottom_z + (slab.print_z - slab.bottom_z) / 2;
+}
+
+// The number of gaps in a stack of base slabs, bottom first. Two neighbouring slabs that hold branches must overlap. A run of empty
+// slabs between two slabs that hold branches is a gap when they overlap, since the branch is then present below and above the run.
+size_t branch_gaps(const std::vector<BaseSlab> &slabs)
+{
+    size_t gaps = 0;
+    size_t previous = slabs.size();
+    for (size_t idx = 0; idx < slabs.size(); ++idx) {
+        if (slabs[idx].polygons.empty())
+            continue;
+        if (previous < slabs.size()) {
+            const bool overlap = !intersection(slabs[previous].polygons, slabs[idx].polygons).empty();
+            const bool run = idx > previous + 1;
+            if (run ? overlap : !overlap)
+                ++gaps;
+        }
+        previous = idx;
+    }
+    return gaps;
+}
+
+// A square with the given corner and side, in millimeters.
+Polygons square_mm(double x, double y, double side)
+{
+    Polygon polygon;
+    polygon.points = { Point::new_scale(x, y), Point::new_scale(x + side, y), Point::new_scale(x + side, y + side), Point::new_scale(x, y + side) };
+    return Polygons{ polygon };
+}
+// A node of a chain in millimeters: its XY position and the object layer it lies on.
+struct ChainPoint {
+    double x_mm, y_mm;
+    size_t layer;
+};
+// A chain of nodes listed from the tip down to the root, as RoutedTree lists its nodes: each node after the first carries the
+// node before it, the one above it. The tip and the root are locked, and the nodes between them are free.
+TF::RoutedTree chain_tree(const PrintObject &object, const std::vector<ChainPoint> &points)
+{
+    TF::RoutedTree tree;
+    for (size_t idx = 0; idx < points.size(); ++idx) {
+        TF::TreeNode node;
+        node.layer = points[idx].layer;
+        node.print_z = object.layer(node.layer).unscaled_print_z();
+        node.position = Point::new_scale(points[idx].x_mm, points[idx].y_mm);
+        node.radius = scale_to_layer_coord(0.4);
+        if (idx > 0)
+            node.carries = { idx - 1 };
+        tree.nodes.push_back(node);
+    }
+    return tree;
+}
+// A node in millimeters: its XY position and its print Z.
+Vec3d node_mm(const TF::TreeNode &node)
+{
+    return Vec3d(unscaled(node.position.x()), unscaled(node.position.y()), node.print_z);
+}
+// The sharpest turning angle of a tree in degrees: at each node with one node below and one above, the angle between the
+// segment from the node below and the segment to the node above.
+double sharpest_bend_deg(const TF::RoutedTree &tree)
+{
+    const std::vector<size_t> below = TF::nodes_below(tree);
+    double sharpest = 0.;
+    for (size_t idx = 0; idx < tree.nodes.size(); ++idx) {
+        const TF::TreeNode &node = tree.nodes[idx];
+        if (below[idx] == TF::no_node || node.carries.size() != 1)
+            continue;
+        const Vec3d in = node_mm(node) - node_mm(tree.nodes[below[idx]]);
+        const Vec3d out = node_mm(tree.nodes[node.carries.front()]) - node_mm(node);
+        const double cosine = std::clamp(in.dot(out) / (in.norm() * out.norm()), -1., 1.);
+        sharpest = std::max(sharpest, std::acos(cosine) * 180. / M_PI);
+    }
+    return sharpest;
+}
+// A bent branch of five nodes from a tip at (0, 0) mm to a root at (8, 0) mm: the bend sits at the middle node.
+TF::RoutedTree bent_branch(const PrintObject &object)
+{
+    return chain_tree(object, { { 0., 0., 20 }, { 0., 0., 16 }, { 0., 0., 12 }, { 4., 0., 8 }, { 8., 0., 4 } });
+}
+// A branch whose only free node stands 25 mm off the line of its tip and its root.
+TF::RoutedTree stray_node_branch(const PrintObject &object)
+{
+    return chain_tree(object, { { 0., 0., 12 }, { 25., 0., 8 }, { 0., 0., 4 } });
+}
+} // namespace
+
+// A sphere whose circle reaches d into the outline is pushed out by min(d + the gap, the cap) in one iteration: its center moves
+// by that distance along the normal of the outline. The gap is 0.1 mm and the cap 0.5 mm, the values of TreeSmoothing.cpp.
+TEST_CASE("Organic push moves a penetrating sphere by the nudge distance in one iteration", "[plugins][support-tree-organic][smoothing]")
+{
+    const double radius_mm = 0.5, gap_mm = 0.1, cap_mm = 0.5;
+    const double penetration_mm = GENERATE(0.1, 0.3, 0.45);
+    CAPTURE(penetration_mm);
+    const std::vector<double> print_z{ 0.2 };
+    const std::vector<Polygons> keep_out{ square_mm(0., 0., 10.) };
+    const Vec2d center(10. + radius_mm - penetration_mm, 5.);
+    const Vec2d pushed = TF::push_sphere_out_of_outline(0, radius_mm, center, print_z, keep_out);
+    const double expected_mm = std::min(penetration_mm + gap_mm, cap_mm);
+    CAPTURE(pushed.x(), pushed.y(), expected_mm);
+    CHECK(std::abs((pushed.x() - center.x()) - expected_mm) <= tolerance_mm);
+    CHECK(std::abs(pushed.y() - center.y()) <= tolerance_mm);
+}
+
+// Smoothing moves the free nodes of a bent organic branch, and no node ends up inside the object outline grown by the XY
+// distance. A node with a radius keeps its circle clear of the outline, within the tolerance.
+TEST_CASE("Organic smoothing moves the nodes of a bent branch and keeps them out of the object",
+    "[plugins][support-tree-organic][smoothing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = SG::config("organic", false, 0);
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_tree_max_overhang", "0.2"}});
+    Print print;
+    Model model;
+    Test::init_print({diagonal_roof()}, print, model, config);
+    SG::prefix(print);
+    const Routed routed(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<Polygons> keep_out = keep_out_outlines(object, routed.settings.xy_min_distance);
+    std::vector<TF::RoutedTree> smoothed = routed.trees;
+    TF::smooth_organic_branches(object, keep_out, smoothed, [] {});
+    size_t moved = 0;
+    double largest_move_mm = 0.;
+    for (size_t tree_id = 0; tree_id < smoothed.size(); ++tree_id) {
+        const std::vector<size_t> below = TF::nodes_below(routed.trees[tree_id]);
+        for (size_t idx = 0; idx < smoothed[tree_id].nodes.size(); ++idx) {
+            const TF::TreeNode &raw = routed.trees[tree_id].nodes[idx];
+            const TF::TreeNode &node = smoothed[tree_id].nodes[idx];
+            if (node.position != raw.position) {
+                ++moved;
+                largest_move_mm = std::max(largest_move_mm, unscaled((node.position - raw.position).cast<double>().norm()));
+            }
+            const double clearance_mm = distance_to_region_mm(node.position, keep_out[node.layer]);
+            const bool free = !node.carries.empty() && (below[idx] != TF::no_node || node.layer == 0);
+            CAPTURE(tree_id, idx, node.layer, clearance_mm);
+            CHECK(clearance_mm > 0.);
+            if (free)
+                CHECK(clearance_mm >= unscaled(node.radius) - tolerance_mm);
+        }
+    }
+    CAPTURE(moved, largest_move_mm);
+    CHECK(moved > 0);
+    CHECK(largest_move_mm > 0.01);
+}
+
+// A bent branch that no sphere touches is relaxed until its bend settles: its free nodes move, and its sharpest bend falls to at
+// most half of its value.
+TEST_CASE("Organic relaxation smooths a collision-free bent branch until its bend settles", "[plugins][support-tree-organic][smoothing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<Polygons> keep_out(object.layer_count(), square_mm(-30., -30., 10.));
+    std::vector<TF::RoutedTree> trees{ bent_branch(object) };
+    // Guard: the fixture starts clear of the outline, so the branch is collision-free.
+    for (const TF::TreeNode &node : trees.front().nodes)
+        REQUIRE(distance_to_region_mm(node.position, keep_out[node.layer]) > unscaled(node.radius));
+    const std::vector<TF::TreeNode> raw = trees.front().nodes;
+    const double bend_before = sharpest_bend_deg(trees.front());
+    const size_t iterations = TF::smooth_organic_branches(object, keep_out, trees, [] {});
+    const double bend_after = sharpest_bend_deg(trees.front());
+    size_t moved = 0;
+    for (size_t idx = 0; idx < raw.size(); ++idx)
+        moved += trees.front().nodes[idx].position != raw[idx].position ? 1 : 0;
+    CAPTURE(iterations, bend_before, bend_after, moved);
+    CHECK(moved == 3);
+    CHECK(bend_after <= 0.5 * bend_before);
+}
+
+// The relaxation stops once a pass moves no node more than 0.01 mm, and never runs more than 100 iterations: a node that keeps
+// moving by the step cap runs to the cap.
+TEST_CASE("Organic relaxation stops once the nodes settle and never runs past its iteration cap", "[plugins][support-tree-organic][smoothing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<Polygons> keep_out(object.layer_count(), square_mm(-30., -30., 10.));
+    // The count is exact: the relaxation is deterministic, so a change of the threshold or of the rule moves it.
+    SECTION("a bend that settles stops after its exact count") {
+        std::vector<TF::RoutedTree> trees{ bent_branch(object) };
+        const size_t iterations = TF::smooth_organic_branches(object, keep_out, trees, [] {});
+        CAPTURE(iterations);
+        CHECK(iterations == 33);
+    }
+    SECTION("a node that keeps moving runs to the cap") {
+        std::vector<TF::RoutedTree> trees{ stray_node_branch(object) };
+        const size_t iterations = TF::smooth_organic_branches(object, keep_out, trees, [] {});
+        const double x_mm = unscaled(trees.front().nodes[1].position.x());
+        CAPTURE(iterations, x_mm);
+        CHECK(iterations == 100);
+        CHECK(std::abs(x_mm - 5.) <= tolerance_mm);
+    }
+}
+
+// An exception from the cancel callback ends the relaxation before anything is written back, so the trees keep their positions.
+TEST_CASE("Organic relaxation leaves the trees unchanged when the cancel callback throws", "[plugins][support-tree-organic][smoothing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<Polygons> keep_out(object.layer_count(), square_mm(-30., -30., 10.));
+    std::vector<TF::RoutedTree> trees{ bent_branch(object) };
+    const std::vector<TF::TreeNode> raw = trees.front().nodes;
+    REQUIRE_THROWS_AS(TF::smooth_organic_branches(object, keep_out, trees, [] { throw std::runtime_error("cancelled"); }),
+        std::runtime_error);
+    for (size_t idx = 0; idx < raw.size(); ++idx)
+        CHECK(trees.front().nodes[idx].position == raw[idx].position);
+}
+
+// The branch meshes of the organic style fill the branches that the circles of the tree style fill. Their volume stays within a
+// quarter of the circles: a tilted tube is cut into wider sections than its circles, and the end caps close the tubes. No branch is
+// lost between the slabs, so the branches stay connected from the contact to the bed (branch_gaps()).
+TEST_CASE("Organic branch meshes fill the volume of the tree circles and stay connected", "[plugins][support-tree-organic][drawing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+    SG::prefix(print);
+    const TreeSlabs circles(print, false);
+    const TreeSlabs meshes(print, true);
+    const std::vector<BaseSlab> circle_base = base_slabs(circles.support);
+    const std::vector<BaseSlab> mesh_base = base_slabs(meshes.support);
+    const double circle_volume = base_volume_mm3(circle_base);
+    const double mesh_volume = base_volume_mm3(mesh_base);
+    CAPTURE(circle_volume, mesh_volume);
+    REQUIRE(circle_volume > 0.);
+    CHECK(std::abs(mesh_volume / circle_volume - 1.) <= 0.25);
+    CAPTURE(mesh_base.size());
+    CHECK(branch_gaps(mesh_base) == 0);
+}
+
+// A branch that is present below and above a slab must be present in it. A removed slab in a drawn stack is a gap, while a branch that
+// ends below an empty slab and another that starts above it are not.
+TEST_CASE("A branch present below and above a slab must be present in it", "[plugins][support-tree-organic][continuity]")
+{
+    const Polygons column = square_mm(0., 0., 1.);
+    const Polygons elsewhere = square_mm(5., 5., 1.);
+    CHECK(branch_gaps({ BaseSlab{ 0, scale_to_layer_coord(0.2), column }, BaseSlab{ scale_to_layer_coord(0.2), scale_to_layer_coord(0.4), {} }, BaseSlab{ scale_to_layer_coord(0.4), scale_to_layer_coord(0.6), column } }) == 1);
+    CHECK(branch_gaps({ BaseSlab{ 0, scale_to_layer_coord(0.2), column }, BaseSlab{ scale_to_layer_coord(0.2), scale_to_layer_coord(0.4), {} }, BaseSlab{ scale_to_layer_coord(0.4), scale_to_layer_coord(0.6), elsewhere } }) == 0);
+    CHECK(branch_gaps({ BaseSlab{ 0, scale_to_layer_coord(0.2), column }, BaseSlab{ scale_to_layer_coord(0.2), scale_to_layer_coord(0.4), elsewhere } }) == 1);
+
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+    SG::prefix(print);
+    const TreeSlabs meshes(print, true);
+    std::vector<BaseSlab> stack = base_slabs(meshes.support);
+    CHECK(branch_gaps(stack) == 0);
+    size_t removed = 0;
+    for (size_t idx = 1; idx + 1 < stack.size() && removed == 0; ++idx)
+        if (!stack[idx - 1].polygons.empty() && !stack[idx].polygons.empty() && !stack[idx + 1].polygons.empty() &&
+            !intersection(stack[idx - 1].polygons, stack[idx + 1].polygons).empty()) {
+            CAPTURE(idx);
+            stack[idx].polygons.clear();
+            removed = idx;
+        }
+    REQUIRE(removed > 0);
+    CHECK(branch_gaps(stack) == 1);
+}
+
+// Every root that stands on the bed has a circular stem below it and a tilted branch above it. The drawn slabs on either side of the root's Z
+// are both present and overlap, and their outline overhang stays within the limit.
+TEST_CASE("Circular stems join the tilted branch meshes without a gap or a step above the limit", "[plugins][support-tree-organic][junction]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double limit_mm = 0.2;
+    DynamicPrintConfig config = SG::config("organic", false, 0);
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_tree_max_overhang", std::to_string(limit_mm)}});
+    Print print;
+    Model model;
+    Test::init_print({diagonal_roof()}, print, model, config);
+    SG::prefix(print);
+    const Routed routed(print);
+    const TreeSlabs slabs(print, true);
+    const std::vector<BaseSlab> base = base_slabs(slabs.support);
+    size_t junctions = 0;
+    for (const TF::RoutedTree &tree : routed.trees) {
+        const std::vector<size_t> below = TF::nodes_below(tree);
+        for (size_t idx = 0; idx < tree.nodes.size(); ++idx) {
+            if (below[idx] != TF::no_node || tree.nodes[idx].layer != 0)
+                continue;
+            const coord_t root_z = scale_to_layer_coord(tree.nodes[idx].print_z);
+            for (size_t k = 1; k < base.size(); ++k) {
+                if (middle_z(base[k - 1]) >= root_z || middle_z(base[k]) <= root_z)
+                    continue;
+                ++junctions;
+                CAPTURE(idx, root_z, k);
+                CHECK(!base[k - 1].polygons.empty());
+                CHECK(!base[k].polygons.empty());
+                if (!base[k - 1].polygons.empty() && !base[k].polygons.empty()) {
+                    CHECK(!intersection(base[k].polygons, base[k - 1].polygons).empty());
+                    CHECK(overhang_mm(base[k].polygons, base[k - 1].polygons) <= limit_mm + section_tolerance_mm);
+                }
+            }
+        }
+    }
+    CAPTURE(junctions);
+    CHECK(junctions >= 2);
+}
+
+// The overhang rate that the planner starts from is measured on the layer boundaries, but the branches are drawn at the middle of each slab.
+// A bent organic branch with several slabs inside one object layer keeps the drawn overhang between consecutive slabs within the limit.
+TEST_CASE("Bent organic slabs keep the drawn overhang within the limit inside each object layer", "[plugins][support-tree-organic][planner]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double limit_mm = GENERATE(0.2, 0.1);
+    CAPTURE(limit_mm);
+    DynamicPrintConfig config = SG::config("organic", false, 0);
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_tree_max_overhang", std::to_string(limit_mm)}});
+    Print print;
+    Model model;
+    Test::init_print({diagonal_roof()}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const TreeSlabs slabs(print, true);
+    const std::vector<BaseSlab> base = base_slabs(slabs.support);
+    size_t layers_with_several = 0;
+    for (size_t id = 0; id < object.layer_count(); ++id) {
+        size_t inside = 0;
+        for (const BaseSlab &slab : base)
+            inside += middle_z(slab) > object.layer(id).scaled_bottom_z() && middle_z(slab) < object.layer(id).scaled_print_z() ? 1 : 0;
+        layers_with_several += inside >= 2 ? 1 : 0;
+    }
+    CAPTURE(layers_with_several, base.size());
+    REQUIRE(layers_with_several > 0);
+    for (size_t idx = 1; idx < base.size(); ++idx)
+        if (!base[idx].polygons.empty() && !base[idx - 1].polygons.empty()) {
+            const double overhang = overhang_mm(base[idx].polygons, base[idx - 1].polygons);
+            CAPTURE(idx, overhang);
+            CHECK(overhang <= limit_mm + section_tolerance_mm);
+        }
+}
+
+// The rings of the end caps of a tilted branch reach beyond the poles of the caps. A slice between the bottom pole and the lowest
+// point of the bottom cap, or above the top pole, still cuts the branch, so its section is not empty.
+TEST_CASE("Branch meshes slice where their tilted end caps reach beyond the poles", "[plugins][support-tree-organic][mesh]")
+{
+    TF::TreeNode upper;
+    upper.layer = 6;
+    upper.print_z = 1.2;
+    upper.position = Point::new_scale(0.28, 0.);
+    upper.radius = scale_to_layer_coord(0.4);
+    TF::TreeNode lower;
+    lower.layer = 5;
+    lower.print_z = 1.0;
+    lower.position = Point::new_scale(0., 0.);
+    lower.radius = scale_to_layer_coord(0.4);
+    lower.carries = { 0 };
+    TF::RoutedTree tree;
+    tree.nodes = { upper, lower };
+    const std::vector<coord_t> zs = { scale_to_layer_coord(0.7), scale_to_layer_coord(1.5) };
+    const std::vector<Polygons> sections = TF::slice_branch_meshes({ tree }, zs, [] {});
+    REQUIRE(sections.size() == zs.size());
+    // Each cap is the half of a sphere of radius 0.4 mm on the side of its normal, cut 0.3 mm from its centre: a disc of radius 0.2646
+    // mm, of which the tilted half keeps about 0.21 mm2. The faceted rings of the cap keep at least half of the disc.
+    for (size_t idx = 0; idx < zs.size(); ++idx) {
+        const double area_mm2 = unscaled(unscaled(area(sections[idx])));
+        CAPTURE(idx, area_mm2);
+        CHECK(area_mm2 >= 0.5 * M_PI * 0.07);
+        CHECK(area_mm2 <= M_PI * 0.07);
+    }
 }

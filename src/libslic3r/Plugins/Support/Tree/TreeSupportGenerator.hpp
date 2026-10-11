@@ -3,10 +3,10 @@
 
    generate_tree_support() routes the branches (TreeRouting.hpp), then builds the slabs that the family publishes:
    floors under the branches that stand on the model, the span between the extremes cut by the branch planner
-   (TreeZPlanner.hpp), the object print Z values snapped into the slab bounds, the circles of the branches drawn in every
-   slab, the object outline removed, and the dense interfaces carved under the contacts and above the floors
-   (Common/SupportInterfaces.hpp). generate_tree_slabs() builds the same slabs from trees routed beforehand. Organic
-   branches become branch slabs, tree branches sparse base slabs. Nothing is published here: the family publishes the slabs. */
+   (TreeZPlanner.hpp), the object print Z values snapped into the slab bounds, the branches drawn in every slab (circles for
+   tree, smoothed meshes for organic, TreeBranchMesh.hpp), the object outline removed, and the dense interfaces carved under the contacts and above the floors
+   (Common/SupportInterfaces.hpp). generate_tree_slabs() builds the same slabs from trees routed beforehand. Organic trees are smoothed
+   first (TreeSmoothing.hpp), and their branches become branch slabs, tree branches sparse base slabs. Nothing is published here: the family publishes the slabs. */
 #ifndef plugins_support_tree_generator_hpp_
 #define plugins_support_tree_generator_hpp_
 
@@ -29,8 +29,8 @@ void generate_tree_support(const plugin_run_context *context, const Print &print
                            slic3r_api::Support::Common::GeneratedSupport &out);
 
 // Fill out with the slabs of the given routed trees of one object, the contacts already in out.top. The same rules as
-// generate_tree_support(), without the routing.
-void generate_tree_slabs(const plugin_run_context *context, const Print &print, const PrintObject &object, const std::vector<RoutedTree> &trees,
+// generate_tree_support(), without the routing; organic trees are smoothed in place before the slabs are built.
+void generate_tree_slabs(const plugin_run_context *context, const Print &print, const PrintObject &object, std::vector<RoutedTree> &trees,
                          bool organic, slic3r_api::Support::Common::GeneratedSupport &out);
 
 // Snaps the bounds of the slabs onto the object print Z values within the layer merge tolerance of them, merges the support

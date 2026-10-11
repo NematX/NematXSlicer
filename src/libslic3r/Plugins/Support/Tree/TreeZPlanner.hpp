@@ -33,6 +33,9 @@ struct OverhangLayer {
     double rate = 0;
 };
 
+// The Z grid of the planned heights and bounds: the machine Z step, and at least 0.01 mm.
+coord_t planning_grid(coord_t z_step);
+
 // Tops of the branch slabs that fill [from, to], bottom first; the last top is to. The layers are sorted by Z and do not overlap.
 // The minimum and maximum heights and the Z step are scaled; a minimum or maximum off the step is rounded to it.
 std::vector<coord_t> plan_branch_slabs(coord_t from, coord_t to, const std::vector<OverhangLayer> &layers, coord_t max_overhang,

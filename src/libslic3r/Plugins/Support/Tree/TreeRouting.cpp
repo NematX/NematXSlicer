@@ -2167,4 +2167,15 @@ static size_t find_root(std::vector<size_t> &forest, size_t idx)
     return idx;
 }
 
+std::vector<size_t> nodes_below(const RoutedTree &tree)
+{
+    std::vector<size_t> below(tree.nodes.size(), no_node);
+    for (size_t idx = 0; idx < tree.nodes.size(); ++idx)
+        for (const size_t upper : tree.nodes[idx].carries) {
+            assert(below[upper] == no_node);
+            below[upper] = idx;
+        }
+    return below;
+}
+
 } // namespace Slic3r::TreeFamily

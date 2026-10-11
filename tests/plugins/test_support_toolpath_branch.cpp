@@ -800,6 +800,83 @@ TEST_CASE("Blob islands replace their first piece or append after sheaths", "[pl
     }
 }
 
+// An organic tree print exports stationary support moves after approach travel. With retraction disabled, positive E-only
+// support moves are exactly deposits; their sum and the reader's whole support volume match the published geometry.
+// Organic slabs carry the branch surface bit; the tree style publishes sparse Base slabs. The 0.8 mm width and equal
+// tip diameter leave compact thin sections at the sampled layer heights with the default branch diameter.
+TEST_CASE("Tree tips export deposits with conserved support volume", "[plugins][support-branch-blob][deposit][gcode]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = SG::config("organic", false, 0, true);
+    config.set_deserialize_strict({{"support_tree_tip_diameter", "0.8"}, {"support_material_extrusion_width", "0.8"},
+        {"seam_visibility", "0"}, {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"machine_limits_usage", "ignore"},
+        {"use_relative_e_distances", "1"}, {"retract_length", "0,0"}, {"retract_restart_extra", "0,0"},
+        {"wipe", "0,0"}, {"filament_diameter", "1.75,1.75"}, {"extrusion_multiplier", "1.3,1.3"}, {"gcode_precision_e", "5"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+    std::string code;
+    print.process();
+    // Measure the published support trees before export and separately accumulate the explicit deposit commands.
+    double volume = 0., deposit_volume = 0.;
+    size_t deposits = 0;
+    for (const Layer &layer : print.object(0).auxiliary_layers()) {
+        for (const std::pair<const std::pair<extruder_index_t, uint16_t>, SG::PathMeasure> &item : SG::measure_layer(layer))
+            if (item.first.second == uint16_t(ExtrusionRole::SupportMaterial))
+                volume += item.second.volume;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                if (region.has_extrusion(LayerRegionIsland::SUPPORT))
+                    for_each_leaf(region.extrusion(LayerRegionIsland::SUPPORT), [&](const ExtrusionEntity &leaf) {
+                        if (!slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&leaf)).is_deposit()) return;
+                        CHECK(layer.scaled_bottom_z() > 0);
+                        deposit_volume += leaf.get_property<ExtrusionPropertySpecialCommand>()->extra_data;
+                        ++deposits;
+                    });
+    }
+    CAPTURE(volume, print.object(0).auxiliary_layers().size());
+    REQUIRE(deposits > 0);
+    try {
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        code = Test::GCode::read_text_file(path);
+    } catch (...) {
+        Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Test::GCode::remove_output_pair(path);
+    // Track the last XY approach and the active role; comments and machine-setting commands do not interrupt that approach.
+    double emitted_e = 0.;
+    size_t emitted_deposits = 0;
+    bool approached = false;
+    std::string type, line;
+    std::istringstream stream(code);
+    while (std::getline(stream, line)) {
+        if (line.rfind(";TYPE:", 0) == 0) type = line.substr(6);
+        const std::string command = line.substr(0, line.find(';'));
+        if (command.rfind("G0 ", 0) != 0 && command.rfind("G1 ", 0) != 0) continue;
+        const bool xy = command.find(" X") != std::string::npos || command.find(" Y") != std::string::npos;
+        const size_t e = command.find(" E");
+        if (xy) approached = e == std::string::npos;
+        if (type == "Support material" && !xy && e != std::string::npos && std::stod(command.substr(e + 2)) > 0.) {
+            CHECK(approached);
+            CHECK(command.rfind("G1 ", 0) == 0);
+            emitted_e += std::stod(command.substr(e + 2));
+            ++emitted_deposits;
+            approached = false;
+        }
+    }
+    CHECK(emitted_deposits == deposits);
+    const double filament_area = 0.25 * PI * 1.75 * 1.75;
+    CHECK(emitted_e == Approx(deposit_volume * 1.3 / filament_area).margin(double(deposits) * 1e-5));
+    // Read both moving paths and stationary deposits back through the public reader, including the extrusion multiplier.
+    GCodeReaderService reader(Orchestrator::instance(), &print);
+    const GCodeProcessorResult result = reader.read_for_viewer("gcode.reader.marlin2", code);
+    CHECK(result.print_statistics.volumes_per_role_per_extruder.at(GCodeExtrusionRole::SupportMaterial).at(0) ==
+        Approx(volume * 1.3).margin(0.01));
+}
+
 // The centreline of a thin strip: variable-width paths with the support attributes, inside the strip, along its length. A strip
 // wider than the nozzle is printed as wide as it is, up to 1.5 widths of island and the rounded ends of the line.
 TEST_CASE("The centreline of a thin strip runs inside it with the width of the strip", "[plugins][support-toolpath][support-toolpath-branch]")
