@@ -5,8 +5,10 @@
    floors under the branches that stand on the model, the span between the extremes cut by the branch planner
    (TreeZPlanner.hpp), the object print Z values snapped into the slab bounds, the branches drawn in every slab (circles for
    tree, smoothed meshes for organic, TreeBranchMesh.hpp), the object outline removed, and the dense interfaces carved under the contacts and above the floors
-   (Common/SupportInterfaces.hpp). generate_tree_slabs() builds the same slabs from trees routed beforehand. Organic trees are smoothed
-   first (TreeSmoothing.hpp), and their branches become branch slabs, tree branches sparse base slabs. Nothing is published here: the family publishes the slabs. */
+   (Common/SupportInterfaces.hpp). Without interface layers the contacts keep only the branches drawn in them.
+   generate_tree_slabs() builds the same slabs from trees routed beforehand. Organic trees are smoothed first
+   (TreeSmoothing.hpp), and their branches become branch slabs, tree branches sparse base slabs. Nothing is published here:
+   the family publishes the slabs. */
 #ifndef plugins_support_tree_generator_hpp_
 #define plugins_support_tree_generator_hpp_
 

@@ -23,8 +23,14 @@ using SG::prepare_legacy_inputs;
 namespace {
 // Bounds set from the measured values in the table (SLIC3R_TREE_COMPARE_TABLE). With interface layers, the roofs of both
 // families cover 94 to 100 percent of the demand and of each other: the contacts sit on different grids, so the bound leaves
-// room for their edges. Without interface layers the legacy contacts are tips only (15 to 18 percent), so it is not bounded.
+// room for their edges. The share of the legacy roof that ours covers is bounded by it with and without interface layers
+// (without them ours covers 99 percent of the legacy tips).
 constexpr double roof_cover_min = 0.75;
+// Without interface layers the roofs are the branches under the overhang: the legacy tips cover 16 to 19 percent of the demand,
+// ours 11 to 30 percent (the tree sections widen down from the tips, and the organic meshes are tilted). Each side stays between
+// a twentieth and two fifths of the demand, and the two sides agree within a factor of two.
+constexpr double tip_cover_min = 0.05, tip_cover_max = 0.4;
+constexpr double tip_ratio_min = 0.5, tip_ratio_max = 2.;
 // Extruded volume (measured 0.85 to 1.13): the branch paths and sparse bases differ in spacing and sheath.
 constexpr double volume_ratio_min = 0.5, volume_ratio_max = 2.;
 // Islands on the bed (measured 0.8 to 1.25): the trees are spaced differently, so their counts agree to a factor of two.
@@ -192,15 +198,24 @@ void compare(int model_id, const char *style, int interfaces)
     for (const Band &band : bands) {
         CAPTURE(band.z, band.demand, band.plugin, band.legacy, band.shared);
         REQUIRE(band.plugin > 0.);
-        CHECK(band.plugin / band.demand >= roof_cover_min);
+        if (interfaces > 0) {
+            CHECK(band.plugin / band.demand >= roof_cover_min);
+        } else {
+            CHECK(band.plugin / band.demand >= tip_cover_min);
+            CHECK(band.plugin / band.demand <= tip_cover_max);
+        }
         if (legacy_object == nullptr)
             continue;
         REQUIRE(band.legacy > 0.);
         CHECK(band.shared / band.legacy >= roof_cover_min);
-        // Without interface layers the legacy contacts are branch tips only, so its footprint is a fraction of the demand.
         if (interfaces > 0) {
             CHECK(band.legacy / band.demand >= roof_cover_min);
             CHECK(band.shared / band.plugin >= roof_cover_min);
+        } else {
+            CHECK(band.legacy / band.demand >= tip_cover_min);
+            CHECK(band.legacy / band.demand <= tip_cover_max);
+            CHECK(band.plugin / band.legacy >= tip_ratio_min);
+            CHECK(band.plugin / band.legacy <= tip_ratio_max);
         }
     }
     REQUIRE(plugin.first_islands > 0);

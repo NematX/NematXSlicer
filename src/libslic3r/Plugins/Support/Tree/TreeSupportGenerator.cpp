@@ -45,10 +45,13 @@
       the organic branches, refine_branch_slabs() then cuts the middle slabs whose drawn sections overhang more than the limit;
    4. align_slab_bounds() snaps every slab bound that lies within the layer merge tolerance of an object print Z onto it,
       merges the support bounds that lie within the tolerance of each other, and merges the slabs that collapse;
-   5. the contacts are trimmed by the object outline, and their footprints are projected into the base slabs under them;
+   5. the contacts are trimmed by the object outline, and with two or more interface layers their footprints are projected
+      into the base slabs under them;
    6. draw_branches() adds the branches that cross each base slab, then trims the slab: circles for the tree branches and
-      the root stems, branch meshes for the organic branches (TreeBranchMesh.hpp);
-   7. carve_interfaces() splits the dense interfaces out, and the remaining base slabs take their branch type. */
+      the root stems, branch meshes for the organic branches (TreeBranchMesh.hpp). Without interface layers,
+      draw_tip_contacts() replaces each contact footprint by the branches drawn at the middle of the contact, with the tip
+      stretches that cross it; then clear_under_floors() removes the floor footprints from the base slabs and these contacts;
+   7. carve_interfaces() splits the dense interfaces out, and the base slabs take their branch type. */
 
 namespace Slic3r::TreeFamily {
 namespace Common = slic3r_api::Support::Common;
@@ -148,8 +151,9 @@ void merge_collapsed_slabs(Common::GeneratedSupport &out);
 Common::GeneratorLayer *collapse_neighbor(const Common::GeneratorLayers &listed, const Common::GeneratorLayer &collapsed);
 // Starts the stem of every root that rests on a floor at the top of that floor.
 void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<RootRest> &rests);
-// Removes the footprint of every floor from the base slabs that lie below the top of the floor and above the object under it.
-void clear_under_floors(const PrintObject &object, Common::GeneratedSupport &out);
+// Removes the footprint of every floor from the branch slabs (the base slabs and the tip contacts) that lie below the top of the
+// floor and above the object under it.
+void clear_under_floors(const PrintObject &object, const Common::GeneratorLayers &slabs, const Common::GeneratorLayers &floors);
 // Removes from the slab the outline of every object layer that the slab overlaps, grown by the XY distance.
 void trim_slab(Common::GeneratorLayer &slab, const PrintObject &object, const std::vector<Polygons> &keep_out);
 // Adds to every base slab the branches that cross it, then trims each slab against the object. Tree branches are circles;
@@ -157,6 +161,14 @@ void trim_slab(Common::GeneratorLayer &slab, const PrintObject &object, const st
 void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
                    const std::vector<Polygons> &keep_out, const PrintObject &object, const std::function<void()> &throw_on_cancel,
                    Common::GeneratedSupport &out);
+// Without interface layers a top contact holds only the branches drawn at its middle and the tip stretches that cross it, and it
+// takes the branch type of the base slabs; its footprint is not kept.
+void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
+                       const std::vector<Polygons> &keep_out, const PrintObject &object, const std::function<void()> &throw_on_cancel,
+                       Common::GeneratedSupport &out);
+// The circles of the tip stretches that cross a Z. A tip stretch runs from its tip up to the object layer above it, as in the tree
+// style; an organic tip is only a half sphere on its own node, which can stop below that Z.
+Polygons tip_circles(const std::vector<RoutedTree> &trees, const PrintObject &object, coord_t middle_z);
 } // namespace
 
 // Route the branches of one object, then build its slabs from the routed trees.
@@ -204,7 +216,12 @@ void generate_tree_slabs(const plugin_run_context *context, const Print &print, 
     Common::project_interface_contacts(params, out);
     slic3r_api::throw_if_cancelled(context);
     draw_branches(segments, trees, organic, keep_out, object, throw_on_cancel, out);
-    clear_under_floors(object, out);
+    Common::GeneratorLayers drawn_slabs = out.base;
+    if (config.get("support_material_interface_layers").get_int() <= 0) {
+        draw_tip_contacts(segments, trees, organic, keep_out, object, throw_on_cancel, out);
+        drawn_slabs.insert(drawn_slabs.end(), out.top.begin(), out.top.end());
+    }
+    clear_under_floors(object, drawn_slabs, out.bottom);
     Common::carve_interfaces(params, false, out);
     for (Common::GeneratorLayer *slab : out.base)
         slab->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
@@ -664,12 +681,12 @@ void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<Ro
                 rest.bottom_z = floor->print_z;
 }
 
-void clear_under_floors(const PrintObject &object, Common::GeneratedSupport &out)
+void clear_under_floors(const PrintObject &object, const Common::GeneratorLayers &slabs, const Common::GeneratorLayers &floors)
 {
-    for (const Common::GeneratorLayer *floor : out.bottom) {
+    for (const Common::GeneratorLayer *floor : floors) {
         const coord_t object_top = object.layer(floor->object_below).scaled_print_z();
         const Polygons &footprint = native_polygons(floor->polygons);
-        for (Common::GeneratorLayer *slab : out.base)
+        for (Common::GeneratorLayer *slab : slabs)
             if (slab->print_z > object_top && slab->print_z <= floor->print_z)
                 native_polygons(slab->polygons) = diff(native_polygons(slab->polygons), footprint);
     }
@@ -707,6 +724,43 @@ void draw_branches(const std::vector<Segment> &segments, const std::vector<Route
             area = union_(area);
         trim_slab(*slab, object, keep_out);
     }
+}
+
+// Each contact is drawn at its middle, like the base slabs, and the tip stretches that cross the middle are added to it. So a tip
+// at or below the middle reaches it, although an organic tip ends in a half sphere on its own node that can stop short of it.
+void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
+                       const std::vector<Polygons> &keep_out, const PrintObject &object, const std::function<void()> &throw_on_cancel,
+                       Common::GeneratedSupport &out)
+{
+    std::vector<coord_t> middles;
+    middles.reserve(out.top.size());
+    for (const Common::GeneratorLayer *contact : out.top)
+        middles.push_back(slab_middle_z(*contact));
+    const std::vector<Polygons> sections = branch_sections(segments, trees, organic, middles, throw_on_cancel);
+    for (size_t idx = 0; idx < out.top.size(); ++idx) {
+        Common::GeneratorLayer *contact = out.top[idx];
+        Polygons &area = native_polygons(contact->polygons);
+        area = sections[idx];
+        const Polygons tips = tip_circles(trees, object, middles[idx]);
+        area.insert(area.end(), tips.begin(), tips.end());
+        if (!area.empty())
+            area = union_(area);
+        trim_slab(*contact, object, keep_out);
+        contact->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
+    }
+}
+
+Polygons tip_circles(const std::vector<RoutedTree> &trees, const PrintObject &object, coord_t middle_z)
+{
+    Polygons circles;
+    for (const RoutedTree &tree : trees)
+        for (const TreeNode &node : tree.nodes) {
+            if (!node.carries.empty() || node.layer + 1 >= object.layer_count())
+                continue;
+            if (object.layer(node.layer).scaled_print_z() <= middle_z && object.layer(node.layer + 1).scaled_print_z() >= middle_z)
+                circles.push_back(branch_circle(node.position.cast<double>(), node.radius));
+        }
+    return circles;
 }
 } // namespace
 } // namespace Slic3r::TreeFamily

@@ -393,6 +393,138 @@ TEST_CASE("Tree contacts carry their interface slabs at the interface step", "[p
     }
 }
 
+// The area in square millimeters of the branch sections that a contact at the Z holds, as the generator draws them there: the
+// discs of the tree stretches, each from a node up to the node it carries or from a tip up to the layer above it, with the radius
+// interpolated at that Z; or the slices of the organic branch meshes. The organic tip circles that draw_tip_contacts adds for tips
+// at or below the middle are not counted: the tips of this fixture lie above the middles, so none applies.
+double contact_branch_mm2(const PrintObject &object, const std::vector<TF::RoutedTree> &trees, bool organic, coord_t z)
+{
+    if (organic) {
+        const std::vector<Polygons> sections = TF::slice_branch_meshes(trees, { z }, [] {});
+        return unscaled(unscaled(area(union_(sections.front()))));
+    }
+    double total = 0.;
+    for (const TF::RoutedTree &tree : trees)
+        for (const TF::TreeNode &node : tree.nodes) {
+            const coord_t bottom_z = object.layer(node.layer).scaled_print_z();
+            const auto add = [&](coord_t top_z, coord_t top_radius) {
+                if (bottom_z > z || top_z < z)
+                    return;
+                const double t = double(z - bottom_z) / double(top_z - bottom_z);
+                total += M_PI * sqr(unscaled(double(node.radius) + double(top_radius - node.radius) * t));
+            };
+            if (node.carries.empty() && node.layer + 1 < object.layer_count())
+                add(object.layer(node.layer + 1).scaled_print_z(), node.radius);
+            for (const size_t upper : node.carries)
+                add(object.layer(tree.nodes[upper].layer).scaled_print_z(), tree.nodes[upper].radius);
+        }
+    return total;
+}
+
+// Without interface layers the top contact is no roof: its branches run through it, and it publishes the branch sections drawn at
+// its middle, typed as the branches of its style, instead of the footprint of the overhang. Every tip lies on the contact, and the
+// published area matches the branch sections that the generator draws there.
+TEST_CASE("Tree contacts without interface layers publish the branches under them alone", "[plugins][support-tree-family][slabs]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool organic = GENERATE(false, true);
+    CAPTURE(organic);
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config(organic ? "organic" : "tree", false, 0));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    Routed routed(print);
+    TF::generate_tree_slabs(nullptr, print, object, routed.trees, organic, routed.support);
+    REQUIRE_FALSE(routed.support.top.empty());
+    double overhang_mm2 = 0.;
+    for (size_t id = 1; id < object.layer_count(); ++id)
+        overhang_mm2 += unscaled(unscaled(area(diff_ex(object.layer(id).lslices(), object.layer(id - 1).lslices()))));
+    std::vector<Point> tips;
+    for (const TF::RoutedTree &tree : routed.trees)
+        for (const TF::TreeNode &node : tree.nodes)
+            if (node.carries.empty() && node.layer + 1 < object.layer_count())
+                tips.push_back(node.position);
+    REQUIRE_FALSE(tips.empty());
+    Polygons contact_area;
+    std::vector<coord_t> contact_zs;
+    double expected_mm2 = 0.;
+    for (const Common::GeneratorLayer *contact : routed.support.top) {
+        CHECK(contact->type == (organic ? Common::LayerType::Branch : Common::LayerType::Base));
+        const Polygons &polygons = SG::native(contact->polygons);
+        contact_area.insert(contact_area.end(), polygons.begin(), polygons.end());
+        contact_zs.push_back(contact->print_z);
+        expected_mm2 += contact_branch_mm2(object, routed.trees, organic, contact->bottom_z + (contact->print_z - contact->bottom_z) / 2);
+    }
+    for (const Point &tip : tips)
+        CHECK(distance_to_region_mm(tip, contact_area) <= tolerance_mm);
+    SG::family(print);
+    const SurfaceType branch_type = stModSupport | stModBranch | stPosInternal | stDensSparse;
+    const SurfaceType sparse_type = stModSupport | stPosInternal | stDensSparse;
+    double published_mm2 = 0., typed_mm2 = 0.;
+    for (const Layer &layer : object.auxiliary_layers()) {
+        if (std::find(contact_zs.begin(), contact_zs.end(), layer.scaled_print_z()) == contact_zs.end())
+            continue;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces()) {
+                    const double surface_mm2 = unscaled(unscaled(area(surface.expolygon)));
+                    published_mm2 += surface_mm2;
+                    if (surface.surface_type == (organic ? branch_type : sparse_type))
+                        typed_mm2 += surface_mm2;
+                }
+    }
+    CAPTURE(overhang_mm2, expected_mm2, published_mm2, tips.size());
+    CHECK(published_mm2 <= 0.5 * overhang_mm2);
+    CHECK(published_mm2 == Approx(expected_mm2).epsilon(0.1));
+    CHECK(typed_mm2 == Approx(published_mm2));
+}
+
+// An organic tip ends in a half sphere on its own node, which can stop below the middle of a contact that is thin next to the
+// object layers above it. A tip below the middle of a contact reaches it, so the tips are published at the contact Z in both styles.
+TEST_CASE("Tips below a thin contact are published at its Z", "[plugins][support-tree-organic][slabs]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool organic = GENERATE(false, true);
+    CAPTURE(organic);
+    DynamicPrintConfig config = SG::config(organic ? "organic" : "tree", false, 0);
+    config.set_deserialize_strict({{"layer_height", "0.3"}, {"support_material_layer_height", "0.05"},
+        {"support_material_contact_distance", "0.05"}, {"support_tree_tip_diameter", "0.4"}, {"support_material_extrusion_width", "0.4"}});
+    TriangleMesh post = make_cube(4., 8., 4.1);
+    TriangleMesh roof = make_cube(12., 8., 1.);
+    roof.translate(0.f, 0.f, 4.1f);
+    post.merge(roof);
+    Print print;
+    Model model;
+    Test::init_print({ post }, print, model, config);
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    Routed routed(print);
+    TF::generate_tree_slabs(nullptr, print, object, routed.trees, organic, routed.support);
+    REQUIRE_FALSE(routed.support.top.empty());
+    const coord_t contact_z = routed.support.top.front()->print_z;
+    REQUIRE(unscaled(contact_z) == Approx(4.05));
+    Common::publish(nullptr, SG::object_view(object), routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    Polygons published;
+    for (const Layer &layer : object.auxiliary_layers())
+        if (layer.scaled_print_z() == contact_z)
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    for (const Surface &surface : region.fill_surfaces()) {
+                        const Polygons polygons = to_polygons(surface.expolygon);
+                        published.insert(published.end(), polygons.begin(), polygons.end());
+                    }
+    REQUIRE_FALSE(published.empty());
+    size_t tips = 0;
+    for (const TF::RoutedTree &tree : routed.trees)
+        for (const TF::TreeNode &node : tree.nodes)
+            if (node.carries.empty() && node.layer + 1 < object.layer_count()) {
+                ++tips;
+                CHECK(distance_to_region_mm(node.position, published) <= tolerance_mm);
+            }
+    REQUIRE(tips > 0);
+}
+
 // The base and dense slabs lie between the minimum and the largest thickness, and every slab edge sits on the layer Z grid,
 // where the object layers and the contacts already sit.
 TEST_CASE("Tree slabs keep their heights within the support limits", "[plugins][support-tree-family][slabs]")
@@ -862,6 +994,97 @@ TEST_CASE("Tree floors keep the gap and the contact footprint free of branch sur
         if (slab->print_z == floor.print_z)
             CHECK(slab->height == floor.height);
     }
+}
+
+// A floor under an organic foot: the foot's half sphere reaches into the Z span of the floor. A contact of another overhang that has
+// the print Z of that floor, with another thickness, samples the foot. The contact must leave the footprint of the floor: the
+// published layers that overlap the floor share no area with the floor layer.
+TEST_CASE("Tip contacts keep out of the footprints of floors that share their print Z", "[plugins][support-tree-family][floors]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    TriangleMesh block = make_cube(10., 10., 4.);
+    TriangleMesh column = make_cube(2., 10., 7.);
+    column.translate(50., 0., 0.);
+    block.merge(column);
+    Print print;
+    Model model;
+    place_print({ { block, Vec3d(100., 100., 0.), "" } }, SG::config("organic", false, 0), print, model);
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    const TF::TreeSettings settings(object, SG::params(print, object));
+    const size_t foot_layer = layer_at_height(object, 4.4), tip_layer = layer_at_height(object, 4.6);
+    const ExPolygons block_slices = object.layer(layer_at_height(object, 4.)).lslices();
+    const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
+        [](const ExPolygon &a, const ExPolygon &b) { return a.area() < b.area(); });
+    const Point centre = get_extents(block_slice).center();
+    const auto make_trees = [&]() {
+        TF::TreeNode upper;
+        upper.layer = tip_layer;
+        upper.print_z = object.layer(tip_layer).unscaled_print_z();
+        upper.position = centre;
+        upper.radius = settings.branch_radius;
+        TF::TreeNode foot;
+        foot.layer = foot_layer;
+        foot.print_z = object.layer(foot_layer).unscaled_print_z();
+        foot.position = centre;
+        foot.radius = settings.branch_radius;
+        foot.carries = { 0 };
+        TF::RoutedTree pillar;
+        for (size_t layer = tip_layer + 1; layer-- > 0;) {
+            TF::TreeNode node;
+            node.layer = layer;
+            node.print_z = object.layer(layer).unscaled_print_z();
+            node.position = Point::new_scale(30., 30.);
+            node.radius = settings.branch_radius;
+            if (layer < tip_layer)
+                node.carries = { pillar.nodes.size() - 1 };
+            pillar.nodes.push_back(node);
+        }
+        return std::vector<TF::RoutedTree>{ TF::RoutedTree{ { upper, foot } }, pillar };
+    };
+    PluginStorage probe_storage;
+    Common::GeneratedSupport probe{ reinterpret_cast<storage_handle *>(&probe_storage) };
+    std::vector<TF::RoutedTree> probe_trees = make_trees();
+    TF::generate_tree_slabs(nullptr, print, object, probe_trees, true, probe);
+    REQUIRE(probe.bottom.size() == 1);
+    const coord_t floor_top = probe.bottom.front()->print_z, floor_height = probe.bottom.front()->height;
+    REQUIRE(unscaled(floor_top) == Approx(4.4));
+    PluginStorage storage;
+    Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
+    Common::GeneratorLayer &other = Common::add_layer(support, Common::LayerType::TopContact, floor_top,
+        floor_top - floor_height - scale_to_layer_coord(0.1), floor_height + scale_to_layer_coord(0.1));
+    support.top = { &other };
+    std::vector<TF::RoutedTree> trees = make_trees();
+    TF::generate_tree_slabs(nullptr, print, object, trees, true, support);
+    Common::publish(nullptr, SG::object_view(object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    const auto surfaces_of = [](const Layer &layer) {
+        ExPolygons surfaces;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces())
+                    surfaces.push_back(surface.expolygon);
+        return surfaces;
+    };
+    const Layer *floor_layer = nullptr;
+    for (const Layer &layer : object.auxiliary_layers())
+        if (layer.scaled_print_z() == floor_top && layer.scaled_height() == floor_height)
+            floor_layer = &layer;
+    REQUIRE(floor_layer != nullptr);
+    const ExPolygons floor_surfaces = surfaces_of(*floor_layer);
+    size_t overlaps = 0;
+    for (const Layer &layer : object.auxiliary_layers()) {
+        if (&layer == floor_layer)
+            continue;
+        const coord_t shared_bottom = std::max(layer.scaled_bottom_z(), floor_layer->scaled_bottom_z());
+        const coord_t shared_top = std::min(layer.scaled_print_z(), floor_layer->scaled_print_z());
+        if (shared_top <= shared_bottom)
+            continue;
+        ++overlaps;
+        const double shared_mm2 = unscaled(unscaled(area(intersection_ex(surfaces_of(layer), floor_surfaces))));
+        CAPTURE(layer.scaled_bottom_z(), layer.scaled_print_z(), shared_mm2);
+        CHECK(shared_mm2 <= 1e-4);
+    }
+    REQUIRE(overlaps > 0);
 }
 
 // Organic branches are published as branch surfaces, which the branch sheath prints, and tree branches as plain sparse surfaces.
