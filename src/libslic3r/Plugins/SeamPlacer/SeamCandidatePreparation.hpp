@@ -10,6 +10,8 @@ This private header describes the object-local candidate material shared by
 the built-in Cost, Aligned and Contiguous seam providers. Cost may merge
 candidates by LayerRegionIsland, while the cross-layer providers keep each
 external perimeter separate and use stable traversal identities for ties.
+Handles are borrowed: the collector neither owns nor mutates host-owned
+extrusion trees.
 */
 
 #ifndef slic3r_Plugins_SeamPlacer_SeamCandidatePreparation_hpp_
@@ -48,10 +50,11 @@ struct Candidate {
     size_t stable_order = 0;
 };
 
-/* One atomic perimeter loop discovered in an extrusion tree. distance_only
-   summarizes all effective roles in the marked subtree; providers use it to
-   keep technical loops as projection targets without treating them as
-   seam-candidate sources. */
+/* One borrowed atomic loop identity discovered in an extrusion tree. Roles
+   descend to children, but only segment-bearing nodes prove perimeter geometry.
+   distance_only is true when the loop's own marker carries SKIRT or its marked
+   subtree has no geometric perimeter role. Providers project such technical
+   loops without treating them as seam-candidate sources. */
 struct CollectedLoop {
     const extrusion_entity_handle *loop = nullptr;
     bool distance_only = false;

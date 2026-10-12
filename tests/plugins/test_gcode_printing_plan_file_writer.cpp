@@ -44,6 +44,7 @@
 #include "libslic3r/Plugins/GCode/Firmware/PrusaGCodeFirmware.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/RepRapGCodeFirmware.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/SprinterGCodeFirmware.hpp"
+#include "libslic3r/Plugins/SeamPlacer/SeamCandidatePreparation.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/PrintObject.hpp"
@@ -796,6 +797,84 @@ TEST_CASE("Orchestrator export_gcode still routes through ordering and STEP_GCOD
         throw;
     }
     remove_output_pair(output_path);
+}
+
+// Export an unflattened object-owned brim through the real Cost ordering and
+// file writer, retaining marked auxiliary loops as distance-only seam targets.
+TEST_CASE("PrintingPlan writer exports a cube with composed brim and cost seams",
+          "[plugins][gcode][seam-placer][cost][integration][seambrim-export]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Plugin *cost_plugin = orchestrator.get_plugin("seam_placer.cost");
+    REQUIRE(cost_plugin != nullptr);
+    const bool cost_was_active = orchestrator.is_plugin_active(cost_plugin);
+    REQUIRE(orchestrator.set_plugin_active(cost_plugin, true));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"brim_width", "3.2"}, {"brim_per_object", "1"},
+        {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"},
+        {"brim_ears", "0"}, {"seam_visibility", "0"}, {"skirts", "0"}});
+    const std::string seam_selector = Steps::plugin_exclusive_group_option_key(
+        orchestrator, SEAM_PLACER, "seam_placer_plugin");
+    const std::string ordering_selector = Steps::plugin_exclusive_group_option_key(
+        orchestrator, STEP_ORDERING, "ordering.extrusion_tree");
+    REQUIRE_FALSE(seam_selector.empty());
+    REQUIRE_FALSE(ordering_selector.empty());
+    config.set_deserialize_strict(seam_selector, "seam_placer.cost");
+    config.set_deserialize_strict(ordering_selector, "ordering.extrusion_tree.advanced");
+    Model model;
+    Print print;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    try {
+        print.process();
+        size_t marked_loops = 0;
+        const PrintObject &object = print.object(0);
+        for (const Layer &layer : object.auxiliary_layers()) {
+            const LayerAdhesionProperty *adhesion = layer.get_property<LayerAdhesionProperty>();
+            if (adhesion == nullptr || !adhesion->is_brim()) continue;
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region_island : island.regions_islands()) {
+                    if (!region_island.has_extrusion(LayerRegionIsland::PERIMETERS)) continue;
+                    const slic3r_api::ExtrusionEntity root(reinterpret_cast<const extrusion_entity_handle *>(
+                        &region_island.extrusion(LayerRegionIsland::PERIMETERS)));
+                    const std::vector<slic3r_api::SeamPlacement::CandidatePreparation::CollectedLoop>
+                        loops = slic3r_api::SeamPlacement::CandidatePreparation::collect_perimeter_loops(
+                            root, RAW_EXTRUSION_ROLE_PERIMETER);
+                    for (const slic3r_api::SeamPlacement::CandidatePreparation::CollectedLoop &loop : loops) {
+                        const slic3r_api::ExtrusionEntity entity(loop.loop);
+                        const c_extrusion_property_perimeter *perimeter = static_cast<const c_extrusion_property_perimeter *>(
+                            entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+                        REQUIRE(perimeter != nullptr);
+                        CHECK((perimeter->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_SKIRT) != 0);
+                        CHECK(entity.segment_count() == 0);
+                        REQUIRE(entity.child_count() == 1);
+                        CHECK(entity.child(0).segment_count() > 0);
+                        CHECK(loop.distance_only);
+                        CHECK_FALSE(loop.has_external_geometry);
+                        ++marked_loops;
+                    }
+                }
+        }
+        REQUIRE(marked_loops > 1);
+        const std::string generated_path = orchestrator.export_gcode(
+            print, output_path.string(), nullptr, nullptr);
+        CHECK(generated_path == output_path.string());
+        REQUIRE(boost::filesystem::exists(output_path));
+        const std::string gcode = read_text_file(output_path);
+        CHECK(gcode.find("G1 ") != std::string::npos);
+        CHECK(gcode.find(";TYPE:Skirt") != std::string::npos);
+    } catch (...) {
+        remove_output_pair(output_path);
+        orchestrator.set_plugin_active(cost_plugin, cost_was_active);
+        throw;
+    }
+    remove_output_pair(output_path);
+    orchestrator.set_plugin_active(cost_plugin, cost_was_active);
 }
 
 TEST_CASE("PrintingPlan writer exports a cube with cost seam placement",
