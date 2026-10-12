@@ -11,16 +11,32 @@
    - getWallRestriction: the object walls a branch must not cross between two consecutive layers.
 
    Every area is computed for a (radius, layer) key and kept in a cache. precalculate() computes the keys a tree can
-   request up to its top layer, so the router only reads the caches.
+   request up to its top layer, so the router normally only reads the caches. A key that precalculate() did not cover is
+   computed by the getter that misses it (see Concurrency).
 
        TreeVolumes volumes(object, settings);
        volumes.precalculate(max_layer, throw_on_cancel);
-       const Polygons &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist); */
+       const Polygons &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist);
+
+   Concurrency: once the constructor and precalculate() have returned, the getters are called from many threads at once, and any
+   of them may have to compute a missing key. The constructor and precalculate() must complete before the first concurrent getter:
+   precalculate() writes members that the getters read without a lock (m_precalculated, m_ignorable_radii). Moving a TreeVolumes,
+   clearing a cache and destroying it need exclusive access as well.
+   - Each cache guards its maps with a short lock, taken only for a lookup or an insertion. No lock is held while an area is
+     computed or while waiting for TBB tasks, as the computations run parallel_for and call other getters.
+   - A getter that misses a key computes the whole range of that key, from its first layer to the requested layer, without
+     reading what the caches hold, then inserts it. Insertion never replaces a value: the first one published wins. Two threads
+     that compute the same key at the same time duplicate work, and both get the same (deterministic) areas. After its own
+     computation, a getter finds its key in the cache.
+   - A published area is never modified or moved while its TreeVolumes is alive: the layers are kept in a std::deque, which does
+     not relocate its elements when it grows. A reference returned by a getter stays valid while other threads insert, until the
+     TreeVolumes is moved, cleared or destroyed. */
 #ifndef plugins_support_tree_volumes_hpp_
 #define plugins_support_tree_volumes_hpp_
 
 #include <cassert>
 #include <cstddef>
+#include <deque>
 #include <functional>
 #include <map>
 #include <mutex>
@@ -68,7 +84,7 @@ public:
      * \brief Precalculate the collisions, avoidances and placeable areas of every radius a tree can request up to max_layer.
      *
      * Knowledge about the branch angles and the radii of the tips limits the keys to the ones that may actually be used.
-     * Requests for other keys still work, but they are computed on demand and are slower.
+     * Requests for other keys still work from any thread, but they are computed on demand and are slower.
      */
     void precalculate(const coord_t max_layer, std::function<void()> throw_on_cancel);
 
@@ -93,6 +109,8 @@ public:
 
     /*!
      * \brief Provides the area where a branch of this radius completely fits on the model on this layer.
+     * Radius 0 gives the top surfaces of the object, which are computed together with the collision of radius 0.
+     * Without resting on the model there is no such area, and the collision is returned for radius 0.
      * \param radius The radius of the node of interest
      * \param layer_idx The layer of interest
      */
@@ -154,10 +172,13 @@ private:
 
     // A cache key: the radius and the layer of an area.
     using RadiusLayerPair             = std::pair<coord_t, LayerIndex>;
-    // Cache of areas by layer, then by radius. References returned by getArea() stay valid after later insertions.
+    // Cache of areas by layer, then by radius, shared by all the threads. Every access takes the mutex for its own duration only.
+    // An area is never replaced or moved once inserted: the layers are in a std::deque, which keeps its elements in place when it
+    // grows (a std::vector of maps would copy them on MSVC, where a map is not nothrow movable), and std::map nodes do not move.
+    // So a reference returned by getArea() stays valid while other threads insert.
     class RadiusLayerPolygonCache {
         using LayerData = std::map<coord_t, Polygons>;
-        using Layers = std::vector<LayerData>;
+        using Layers = std::deque<LayerData>;
     public:
         RadiusLayerPolygonCache() = default;
         RadiusLayerPolygonCache(RadiusLayerPolygonCache &&rhs) : m_data(std::move(rhs.m_data)) {}
@@ -166,6 +187,8 @@ private:
         RadiusLayerPolygonCache(const RadiusLayerPolygonCache&) = delete;
         RadiusLayerPolygonCache& operator=(const RadiusLayerPolygonCache&) = delete;
 
+        // The insertions below keep the area that is already cached for a key: a thread that computed the same key at the same
+        // time loses nothing, as both computed the same area.
         void insert(std::vector<std::pair<RadiusLayerPair, Polygons>> &&in) {
             std::lock_guard<std::mutex> guard(m_mutex);
             for (auto &d : in)
@@ -198,18 +221,12 @@ private:
 
             return std::optional<std::reference_wrapper<const Polygons>>{it->second};
         }
-        // Return the highest computed layer for this radius, or -1 when none is computed above layer 0.
-        LayerIndex getMaxCalculatedLayer(coord_t radius) const {
-            std::lock_guard<std::mutex> guard(m_mutex);
-            auto layer_idx = LayerIndex(m_data.size()) - 1;
-            for (; layer_idx > 0; -- layer_idx)
-                if (const auto &layer = m_data[layer_idx]; layer.find(radius) != layer.end())
-                    break;
-            // Placeable areas do not exist on layer 0, so layer 0 may be missing while layer 1 exists.
-            return layer_idx == 0 ? -1 : layer_idx;
-        }
 
-        void clear() { m_data.clear(); }
+        // Drops every area. References returned by getArea() become invalid, so no other thread may use the cache meanwhile.
+        void clear() {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            m_data.clear();
+        }
 
     private:
         LayerData&          get_allocate_layer_data(LayerIndex layer_idx) {
@@ -228,6 +245,12 @@ private:
     /*!
      * \brief Creates the collision areas of every radius and layer up to max_layer_idx and stores them in the cache.
      * \param keys RadiusLayerPairs of all requested areas. Every radius will be calculated up to the provided layer.
+     *
+     * The calculate*() functions always compute the whole range of a key: from layer 0 for the collisions, from layer 1 for the
+     * placeable areas, the avoidances and the wall restrictions, which have nothing to compute on layer 0 (the placeable areas
+     * insert an empty layer 0, so that every layer of the range is found). They never look at what the caches hold, so a getter
+     * can call them from any thread once precalculate() has returned (see Concurrency above); what a cache already holds for a
+     * key is kept, and is equal to the new area.
      */
     void calculateCollision(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel);
     void calculateCollision(const coord_t radius, const LayerIndex max_layer_idx, std::function<void()> throw_on_cancel);
@@ -239,7 +262,9 @@ private:
     void calculateAvoidance(RadiusLayerPair key, bool to_build_plate, bool to_model) {
         calculateAvoidance(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }, to_build_plate, to_model, []{});
     }
+    // Placeable areas of every key, each up to the layer of its key.
     void calculatePlaceables(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel);
+    // Placeable areas of one radius on layers 0 to max_required_layer, from the ones of radius 0; layer 0 stays empty.
     void calculatePlaceables(const coord_t radius, const LayerIndex max_required_layer, std::function<void()> throw_on_cancel);
     // Wall restrictions are the collision of one layer intersected with the collision of the layer below.
     void calculateWallRestrictions(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel);

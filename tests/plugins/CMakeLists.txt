@@ -92,6 +92,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_grid_family.cpp
     test_support_grid_legacy_compare.cpp
     test_support_tree_routing.cpp
+    test_support_tree_volumes.cpp
 test_support_tree_family.cpp
     test_support_tree_legacy_compare.cpp
     test_support_publication.cpp
