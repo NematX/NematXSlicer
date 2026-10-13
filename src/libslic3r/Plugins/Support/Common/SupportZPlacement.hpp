@@ -105,12 +105,14 @@ void bridge_areas(storage_handle *storage, const ExtrusionEntity &entity, coord_
 // Height of the bridges of a layer region, the native LayerRegion::bridging_height_avg_mm().
 double bridging_height_avg_mm(const Config &print_config, const Layer &layer, const LayerRegion &region);
 // Footprints, grown by gap_xy, of the object bridges (thick bridge fills and overhang perimeters) whose thread starts below
-// the top of the slab plus the gap above, found in the object layers from the first one that begins at or above that top.
+// the top of the slab plus the gap above, found in the object layers from the first one that begins at or above from_z. The layers
+// that begin below from_z are not examined: the caller removes their outlines itself, so from_z is the slab top plus the gap above
+// for a caller whose outline trimming reaches that far, and the slab top for one that trims only the layers its Z span crosses.
 // A slab must not stand where those threads hang. The bridge height follows p.distance_type. The areas are raw offsets, neither
 // united nor normalized: the caller unites and normalizes them as it needs. Empty for a soluble support. The caller owns the
 // returned collection. An exception from bridging_height_avg_mm (unknown bridge type) propagates.
 StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::vector<Layer> &layers, const Config &print_config,
-                                           const SupportParams &p, const GeneratorLayer &slab);
+                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab);
 
 } // namespace slic3r_api::Support::Common
 #endif

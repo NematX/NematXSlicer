@@ -55,23 +55,6 @@ Polygons layer_outline(const PrintObject &object, size_t layer)
 }
 
 
-// Print a mesh whose object has the given layer height profile, as the production slicing reads it.
-void init_print_with_profile(Print &print, Model &model, TriangleMesh mesh, const std::vector<coordf_t> &profile, const DynamicPrintConfig &config)
-{
-    ModelObject *object = model.add_object();
-    object->name += "object.stl";
-    object->add_volume(std::move(mesh));
-    object->layer_height_profile.set(profile);
-    object->add_instance();
-    model.center_instances_around_point({ 100, 100 });
-    for (ModelObject &mo : model.objects()) {
-        mo.ensure_on_bed();
-        print.auto_assign_extruders(&mo);
-    }
-    print.apply(model, config);
-    print.validate();
-    print.set_status_silent();
-}
 // A low platform with a roof on a post beside it: the roof overhangs past the platform's far side, so its branches must go
 // around the platform to reach the bed. The branch centres cross the thin layers of the profile on the way down.
 TriangleMesh narrow_platform_overhang()
@@ -165,7 +148,7 @@ TEST_CASE("Tree branch moves follow the real height of each layer", "[plugins][s
     config.set_deserialize_strict({{"support_material_buildplate_only", "1"}});
     Print print;
     Model model;
-    init_print_with_profile(print, model, narrow_platform_overhang(), std::vector<coordf_t>{0., 0.2, 1., 0.05, 2., 0.2, 2.4, 0.05, 2.6, 0.3, 7., 0.3}, config);
+    SG::init_print_with_profile(print, model, narrow_platform_overhang(), std::vector<coordf_t>{0., 0.2, 1., 0.05, 2., 0.2, 2.4, 0.05, 2.6, 0.3, 7., 0.3}, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
     const TF::TreeSettings settings(object, SG::params(print, object));
@@ -355,7 +338,7 @@ TEST_CASE("Tips keep the demand that a merged top contact absorbs next to a brid
     post.merge(shelf);
     Print print;
     Model model;
-    init_print_with_profile(print, model, std::move(post), std::vector<coordf_t>{0., 0.2, 3.999, 0.2, 4.0, 0.05, 4.05, 0.05, 4.051, 0.2, 4.55, 0.2}, config);
+    SG::init_print_with_profile(print, model, std::move(post), std::vector<coordf_t>{0., 0.2, 3.999, 0.2, 4.0, 0.05, 4.05, 0.05, 4.051, 0.2, 4.55, 0.2}, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
     // The thin layer is the one that the profile dips to; the layer above it keeps the bridge height, so it has no bridge contact.

@@ -75,6 +75,23 @@ inline DynamicPrintConfig config(const char *style = "grid", bool soluble = fals
     }
     return result;
 }
+// Build a print of a mesh whose object has the given layer height profile, as the production slicing reads it.
+inline void init_print_with_profile(Print &print, Model &model, TriangleMesh mesh, const std::vector<coordf_t> &profile, const DynamicPrintConfig &config)
+{
+    ModelObject *object = model.add_object();
+    object->name += "object.stl";
+    object->add_volume(std::move(mesh));
+    object->layer_height_profile.set(profile);
+    object->add_instance();
+    model.center_instances_around_point({ 100, 100 });
+    for (ModelObject &mo : model.objects()) {
+        mo.ensure_on_bed();
+        print.auto_assign_extruders(&mo);
+    }
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+}
 // Run the production slicing steps through post-infill, keeping auxiliary geometry editable for either support implementation.
 inline void prefix(Print &print)
 {

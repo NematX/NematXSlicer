@@ -408,7 +408,7 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
             if (layer.bottom_z() >= upper) break;
             trimming.append_move_from(clipper_offset(clipper(layer.slices()), double(p.gap_xy), join_type, 0.).to_expolygon_collection());
         }
-        trimming.append_move_from(Common::bridge_footprint(run.storage, run.layers, run.print_config, p, *support));
+        trimming.append_move_from(Common::bridge_footprint(run.storage, run.layers, run.print_config, p, upper, *support));
         trimming.ensure_valid(p.resolution);
         const ExPolys united = Common::native_expolygons(clipper_union(clipper(trimming)));
         support->polygons = polygons(clipper_diff(clipper(support->polygons), clipper(united)));

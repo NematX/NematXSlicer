@@ -45,12 +45,15 @@
       the organic branches, refine_branch_slabs() then cuts the middle slabs whose drawn sections overhang more than the limit;
    4. align_slab_bounds() snaps every slab bound that lies within the layer merge tolerance of an object print Z onto it,
       merges the support bounds that lie within the tolerance of each other, and merges the slabs that collapse;
-   5. the contacts are trimmed by the object outline, and with two or more interface layers their footprints are projected
-      into the base slabs under them;
-   6. draw_branches() adds the branches that cross each base slab, then trims the slab: circles for the tree branches and
-      the root stems, branch meshes for the organic branches (TreeBranchMesh.hpp). Without interface layers,
-      draw_tip_contacts() replaces each contact footprint by the branches drawn at the middle of the contact, with the tip
-      stretches that cross it; then clear_under_floors() removes the floor footprints from the base slabs and these contacts;
+   5. the contacts are trimmed by the object outline; the floors and, with interface layers, the top contacts are then trimmed
+      by the bridge footprints of the object layers above them (trim_bridge_footprints(), from the top of each slab); with two
+      or more interface layers the contact footprints are then projected into the base slabs under them;
+   6. draw_branches() adds the branches that cross each base slab, then trims the slab by the object outline and, from its own
+      top, by the bridge footprints: circles for the tree branches and the root stems, branch meshes for the organic branches
+      (TreeBranchMesh.hpp). Without interface layers, draw_tip_contacts() replaces each contact footprint by the branches drawn
+      at the middle of the contact, with the tip stretches that cross it, and the rebuilt contacts are trimmed by the bridge
+      footprints again, from their own top; then clear_under_floors() removes the floor footprints from the base slabs and these
+      contacts;
    7. carve_interfaces() splits the dense interfaces out, and the base slabs take their branch type. */
 
 namespace Slic3r::TreeFamily {
@@ -156,6 +159,12 @@ void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<Ro
 void clear_under_floors(const PrintObject &object, const Common::GeneratorLayers &slabs, const Common::GeneratorLayers &floors);
 // Removes from the slab the outline of every object layer that the slab overlaps, grown by the XY distance.
 void trim_slab(Common::GeneratorLayer &slab, const PrintObject &object, const std::vector<Polygons> &keep_out);
+// Removes from each slab the footprint of the object bridges whose threads hang over it, grown by the XY gap, so that no support is
+// printed where a bridge thread is extruded. The object layers that the slab's Z span crosses are already removed by trim_slab(),
+// so the bridges are searched in the layers that begin at or above the slab top. A slab that ends under the bridge threads keeps
+// its footprint: it supports them.
+void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const std::vector<slic3r_api::Layer> &layers,
+                            const slic3r_api::Config &print_config, const Common::SupportParams &params, storage_handle *storage);
 // Adds to every base slab the branches that cross it, then trims each slab against the object. Tree branches are circles;
 // organic branches are the sections of their meshes, with the stems as circles.
 void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
@@ -213,12 +222,28 @@ void generate_tree_slabs(const plugin_run_context *context, const Print &print, 
         trim_slab(*contact, object, keep_out);
     for (Common::GeneratorLayer *contact : out.bottom)
         trim_slab(*contact, object, keep_out);
+    // The top contacts and the floors lose the bridge footprint before publication, for themselves. Trimming the contacts before the
+    // projection keeps the projected areas aligned with the grid, which trims its contacts before carving the interfaces; the later
+    // trim of the base slabs also keeps the slabs of the thread band free of the footprint.
+    // Without interface layers the contacts are rebuilt below from the branches, and trimmed again there.
+    const bool without_interfaces = config.get("support_material_interface_layers").get_int() <= 0;
+    const slic3r_api::Config print_config = print_view.config();
+    const auto trim_bridges = [&](const Common::GeneratorLayers &slabs) {
+        trim_bridge_footprints(slabs, layers, print_config, params, out.storage);
+    };
+    if (!without_interfaces)
+        trim_bridges(out.top);
+    trim_bridges(out.bottom);
     Common::project_interface_contacts(params, out);
     slic3r_api::throw_if_cancelled(context);
     draw_branches(segments, trees, organic, keep_out, object, throw_on_cancel, out);
+    // The branches drawn in the base and branch slabs are trimmed too: a slab can reach into the thread band when the bridge is
+    // thicker than a layer (thin support layers, high bridge flow ratio). The interfaces are carved out of these slabs afterwards.
+    trim_bridges(out.base);
     Common::GeneratorLayers drawn_slabs = out.base;
-    if (config.get("support_material_interface_layers").get_int() <= 0) {
+    if (without_interfaces) {
         draw_tip_contacts(segments, trees, organic, keep_out, object, throw_on_cancel, out);
+        trim_bridges(out.top);
         drawn_slabs.insert(drawn_slabs.end(), out.top.begin(), out.top.end());
     }
     clear_under_floors(object, drawn_slabs, out.bottom);
@@ -705,6 +730,25 @@ void trim_slab(Common::GeneratorLayer &slab, const PrintObject &object, const st
     }
     if (!outline.empty())
         area = diff(area, outline);
+}
+
+// Edits the polygons of each slab in place. For every slab with polygons, Common::bridge_footprint() builds a temporary collection
+// in the storage (owned by this function) with the raw offsets of the bridge areas, grown by gap_xy and starting at the object layers
+// that begin at or above the slab top (from_z = slab->print_z). The offsets are normalized, united, and subtracted from the slab.
+// A slab without polygons, and a slab that no bridge reaches, are left unchanged. Errors of the helper (unknown bridge type) propagate.
+void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const std::vector<slic3r_api::Layer> &layers,
+                            const slic3r_api::Config &print_config, const Common::SupportParams &params, storage_handle *storage)
+{
+    for (Common::GeneratorLayer *slab : slabs) {
+        Polygons &area = native_polygons(slab->polygons);
+        if (area.empty())
+            continue;
+        slic3r_api::StoredExPolygonCollection footprint = Common::bridge_footprint(storage, layers, print_config, params, slab->print_z, *slab);
+        if (footprint.empty())
+            continue;
+        footprint.ensure_valid(params.resolution);
+        area = diff(area, to_polygons(union_ex(native_expolygons(footprint))));
+    }
 }
 
 void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,

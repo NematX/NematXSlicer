@@ -1583,3 +1583,241 @@ TEST_CASE("Branch meshes slice where their tilted end caps reach beyond the pole
         CHECK(area_mm2 <= M_PI * 0.07);
     }
 }
+
+namespace {
+// A post, a thin cantilever roof (0.05 mm) on top of it and a shelf past the roof tip. The roof layer overhangs the post, so it
+// carries a bridge, and the shelf is a second demand just above it. The layer heights follow the profile: 0.2 mm, 0.05 mm for the roof.
+TriangleMesh bridge_shelf_mesh()
+{
+    TriangleMesh post = make_cube(2., 8., 4.);
+    TriangleMesh roof = make_cube(6., 8., 0.05);
+    roof.translate(0.f, 0.f, 4.f);
+    TriangleMesh shelf = make_cube(2., 8., 0.5);
+    shelf.translate(6.f, 0.f, 4.05f);
+    post.merge(roof);
+    post.merge(shelf);
+    return post;
+}
+
+// The filament contact distance gives a bridge contact at the bridge height: nozzle bridges of a quarter of the flow are 0.2 mm high.
+DynamicPrintConfig bridge_contact_config(bool organic, int interfaces, const char *bridge_flow_ratio = "25%")
+{
+    DynamicPrintConfig config = SG::config(organic ? "organic" : "tree", false, interfaces);
+    config.set_deserialize_strict({{"support_material_contact_distance_type", "filament"}, {"bridge_type", "nozzle"},
+        {"bridge_flow_ratio", bridge_flow_ratio}});
+    return config;
+}
+
+// The object layer of the roof: the layer that the profile thins to 0.05 mm.
+size_t thin_layer_of(const PrintObject &object)
+{
+    size_t thin_layer = object.layer_count();
+    for (size_t layer = 0; layer < object.layer_count(); ++layer)
+        if (std::abs(object.layer(layer).unscaled_height() - 0.05) < 1e-4)
+            thin_layer = layer;
+    return thin_layer;
+}
+
+// The bridge threads of one object layer, hanging in [print_z - bridge height, print_z], and the footprint they cover.
+struct ThreadBand {
+    coord_t start = 0, end = 0;
+    ExPolygons footprint;
+};
+
+// The thread band of an object layer and its footprint, measured with a probe slab whose top plus the gap above lies 1 um over the start of
+// the threads of the layer: the footprint holds the bridges of that layer only, and its threads hang over the probe slab.
+ThreadBand thread_band(const Print &print, const PrintObject &object, size_t bridge_layer)
+{
+    const slic3r_api::Object object_view = SG::object_view(object);
+    std::vector<slic3r_api::Layer> layers;
+    for (uint32_t id = 0; id < object_view.layer_count(); ++id)
+        layers.push_back(object_view.layer(id));
+    const Common::SupportParams params = SG::params(print, object);
+    const slic3r_api::Layer layer = layers[bridge_layer];
+    ThreadBand band;
+    band.end = object.layer(bridge_layer).scaled_print_z();
+    band.start = band.end - scale_to_layer_coord(Common::bridging_height_avg_mm(SG::print_view(print).config(), layer, layer.region(0)));
+    PluginStorage storage;
+    Common::GeneratedSupport probe{ reinterpret_cast<storage_handle *>(&storage) };
+    const coord_t probe_z = band.start - scale_to_layer_coord(params.gap_above) + scale_to_layer_coord(0.001);
+    Common::GeneratorLayer &slab = Common::add_layer(probe, Common::LayerType::TopContact, probe_z, probe_z - scale_to_layer_coord(0.2),
+        scale_to_layer_coord(0.2));
+    const slic3r_api::StoredExPolygonCollection footprint = Common::bridge_footprint(probe.storage, layers, SG::print_view(print).config(),
+        params, slab.print_z, slab);
+    band.footprint = union_ex(TF::native_expolygons(footprint));
+    return band;
+}
+
+// Every slab that publication prints: the contacts, the base slabs and the dense interface slabs.
+std::vector<const Common::GeneratorLayer *> printed_slabs(const Common::GeneratedSupport &support)
+{
+    std::vector<const Common::GeneratorLayer *> slabs;
+    for (const Common::GeneratorLayers *list : { &support.top, &support.bottom, &support.base, &support.interfaces })
+        slabs.insert(slabs.end(), list->begin(), list->end());
+    return slabs;
+}
+
+// Whether the Z span of a slab meets the thread band shifted down by the gap above, where the object layer can no longer take support
+// under the threads. A slab that ends at the bottom of that band stands under the threads and supports them.
+bool in_thread_band(const Common::GeneratorLayer &slab, const ThreadBand &band, coord_t gap_above)
+{
+    return slab.print_z > band.start - gap_above + SCALED_EPSILON && slab.bottom_print_z() < band.end - gap_above;
+}
+
+// The area in mm2 that a slab shares with the bridge footprint.
+double footprint_overlap_mm2(const Common::GeneratorLayer &slab, const ThreadBand &band)
+{
+    return unscaled(unscaled(area(intersection_ex(SG::native(slab.polygons), to_polygons(band.footprint)))));
+}
+// Checks that no printed slab in the thread band carries the footprint of the bridge, and returns the number of slabs in the band.
+size_t count_slabs_in_band(const Common::GeneratedSupport &support, const ThreadBand &band, coord_t gap_above)
+{
+    size_t in_band = 0;
+    for (const Common::GeneratorLayer *slab : printed_slabs(support))
+        if (in_thread_band(*slab, band, gap_above)) {
+            ++in_band;
+            CAPTURE(slab->type, unscaled(slab->bottom_print_z()), unscaled(slab->print_z));
+            CHECK(footprint_overlap_mm2(*slab, band) <= 1e-4);
+        }
+    return in_band;
+}
+}
+
+// A thin roof layer with a bridge makes two top contacts, one at the normal contact distance and one at the bridge height under the
+// bridge. Both survive the merge of the contacts. No printed slab that meets the band where the bridge threads hang carries the
+// bridge footprint, but the bridge contact under the band keeps it, so the bridge stays supported. The case runs 8 combinations:
+// tree or organic style, 0 or 3 interface layers, and a bridge flow ratio of 25 % or 200 %.
+TEST_CASE("Tree slabs keep the bridge footprint out of the bridge thread band", "[plugins][support-tree-family][bridge]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool organic = GENERATE(false, true);
+    const int interfaces = GENERATE(0, 3);
+    // A bridge of a quarter of the flow hangs 0.2 mm high; a double flow bridge hangs 0.57 mm high, which puts base slabs in its band.
+    const bool thick_bridge = GENERATE(false, true);
+    CAPTURE(organic, interfaces, thick_bridge);
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, bridge_shelf_mesh(), std::vector<coordf_t>{0., 0.2, 3.999, 0.2, 4.0, 0.05, 4.05, 0.05, 4.051, 0.2, 4.55, 0.2},
+        bridge_contact_config(organic, interfaces, thick_bridge ? "200%" : "25%"));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const size_t thin_layer = thin_layer_of(object);
+    REQUIRE(thin_layer + 1 < object.layer_count());
+    const Common::SupportParams params = SG::params(print, object);
+    const coord_t gap_above = scale_to_layer_coord(params.gap_above);
+    const ThreadBand band = thread_band(print, object, thin_layer);
+    REQUIRE(band.start < object.layer(thin_layer).scaled_bottom_z());
+    REQUIRE_FALSE(band.footprint.empty());
+    Routed routed(print);
+    TF::generate_tree_slabs(nullptr, print, object, routed.trees, organic, routed.support);
+    // Both contacts of the roof layer survive the merge: one at the bridge height, one at the normal contact distance.
+    const coord_t bridge_z = band.start - gap_above, normal_z = object.layer(thin_layer).scaled_bottom_z() - gap_above;
+    const Common::GeneratorLayer *bridge_contact = nullptr, *normal_contact = nullptr;
+    for (const Common::GeneratorLayer *contact : routed.support.top) {
+        if (contact->object_above != thin_layer)
+            continue;
+        if (std::abs(contact->print_z - bridge_z) <= 4 * SCALED_EPSILON)
+            bridge_contact = contact;
+        if (std::abs(contact->print_z - normal_z) <= 4 * SCALED_EPSILON)
+            normal_contact = contact;
+    }
+    REQUIRE(bridge_contact != nullptr);
+    REQUIRE(normal_contact != nullptr);
+    CHECK(count_slabs_in_band(routed.support, band, gap_above) > 0);
+    // The thick bridge has base slabs of its own in the band, besides the normal contact that is typed as a base slab.
+    if (thick_bridge && interfaces == 0) {
+        size_t base_in_band = 0;
+        for (const Common::GeneratorLayer *slab : routed.support.base)
+            base_in_band += in_thread_band(*slab, band, gap_above) && !slab->polygons.empty() ? 1 : 0;
+        CHECK(base_in_band > 0);
+    }
+    // The bridge is supported: the contact under the band keeps the footprint.
+    CHECK(footprint_overlap_mm2(*bridge_contact, band) > 0.);
+}
+
+// A root that rests on the block under a bridge: the floor is a bottom contact on the block, as thick as the bridge, so its Z span
+// meets the band where the threads of the bridge above hang. The floor does not print the footprint of the bridge. In the second
+// scenario the bridge is 0.8 mm high and the floor (4.2 to 5.0) ends at the bottom of the bridge layer: the layer starts below the
+// floor top plus the gap above, so only the bridge search from the slab top reaches it.
+TEST_CASE("Tree floors keep the bridge footprint out of the bridge thread band", "[plugins][support-tree-family][bridge]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool organic = GENERATE(false, true);
+    const int interfaces = GENERATE(0, 3);
+    // The roof height, the bridge flow ratio, and the heights of the tip and of the root of the branch.
+    struct Scenario { double roof_z; const char *ratio; double tip_z, root_z; };
+    const Scenario scenario = GENERATE(Scenario{ 4.8, "100%", 4.6, 4.2 }, Scenario{ 5.0, "400%", 4.8, 4.4 });
+    CAPTURE(organic, interfaces, scenario.roof_z, scenario.ratio);
+    TriangleMesh block = make_cube(10., 10., 4.);
+    TriangleMesh post = make_cube(2., 10., scenario.roof_z);
+    post.translate(18.f, 0.f, 0.f);
+    TriangleMesh roof = make_cube(14., 10., 0.05);
+    roof.translate(6.f, 0.f, float(scenario.roof_z));
+    block.merge(post);
+    block.merge(roof);
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(block),
+        std::vector<coordf_t>{0., 0.2, scenario.roof_z - 0.001, 0.2, scenario.roof_z, 0.05, scenario.roof_z + 0.05, 0.05},
+        bridge_contact_config(organic, interfaces, scenario.ratio));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const size_t thin_layer = thin_layer_of(object);
+    REQUIRE(thin_layer < object.layer_count());
+    const coord_t gap_above = scale_to_layer_coord(SG::params(print, object).gap_above);
+    const ThreadBand band = thread_band(print, object, thin_layer);
+    REQUIRE_FALSE(band.footprint.empty());
+    // One branch stands on the block under the roof, 3 mm from the block centre, toward the post.
+    const TF::TreeSettings settings(object, SG::params(print, object));
+    const ExPolygons block_slices = object.layer(layer_at_height(object, 4.)).lslices();
+    const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
+        [](const ExPolygon &a, const ExPolygon &b) { return a.area() < b.area(); });
+    const Point position = get_extents(block_slice).center() + Point::new_scale(3., 0.);
+    // The branch runs from a tip under the roof contact down to a root over the block, which rests on the block.
+    TF::RoutedTree branch;
+    for (size_t layer = layer_at_height(object, scenario.tip_z) + 1; layer-- > layer_at_height(object, scenario.root_z);) {
+        TF::TreeNode node;
+        node.layer = layer;
+        node.print_z = object.layer(layer).unscaled_print_z();
+        node.position = position;
+        node.radius = settings.branch_radius;
+        if (!branch.nodes.empty())
+            node.carries = { branch.nodes.size() - 1 };
+        branch.nodes.push_back(node);
+    }
+    Routed routed(print);
+    routed.trees = { branch };
+    TF::generate_tree_slabs(nullptr, print, object, routed.trees, organic, routed.support);
+    REQUIRE_FALSE(routed.support.bottom.empty());
+    for (const Common::GeneratorLayer *floor : routed.support.bottom)
+        REQUIRE(in_thread_band(*floor, band, gap_above));
+    CHECK(count_slabs_in_band(routed.support, band, gap_above) > 0);
+}
+
+// Thin interface layers under a thick bridge put the dense interface slabs of the roof contact in the band where the bridge threads
+// hang. The interfaces are projected from the top contact, so they must not print the footprint of the bridge either.
+TEST_CASE("Tree interface slabs keep the bridge footprint out of the bridge thread band", "[plugins][support-tree-family][bridge]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool organic = GENERATE(false, true);
+    CAPTURE(organic);
+    DynamicPrintConfig config = bridge_contact_config(organic, 3, "200%");
+    config.set_deserialize_strict({{"support_material_interface_layer_height", "0.05"}});
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, bridge_shelf_mesh(), std::vector<coordf_t>{0., 0.2, 3.999, 0.2, 4.0, 0.05, 4.05, 0.05, 4.051, 0.2, 4.55, 0.2}, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const size_t thin_layer = thin_layer_of(object);
+    REQUIRE(thin_layer + 1 < object.layer_count());
+    const coord_t gap_above = scale_to_layer_coord(SG::params(print, object).gap_above);
+    const ThreadBand band = thread_band(print, object, thin_layer);
+    REQUIRE_FALSE(band.footprint.empty());
+    Routed routed(print);
+    TF::generate_tree_slabs(nullptr, print, object, routed.trees, organic, routed.support);
+    size_t interfaces_in_band = 0;
+    for (const Common::GeneratorLayer *slab : routed.support.interfaces)
+        interfaces_in_band += in_thread_band(*slab, band, gap_above) && !slab->polygons.empty() ? 1 : 0;
+    REQUIRE(interfaces_in_band > 1);
+    CHECK(count_slabs_in_band(routed.support, band, gap_above) >= interfaces_in_band);
+}

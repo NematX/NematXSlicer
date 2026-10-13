@@ -489,8 +489,9 @@ double bridging_height_avg_mm(const Config &print_config, const Layer &layer, co
 
 // Collect, for a slab whose top is print_z + gap_above (the limit), the footprints of the object bridges that hang in its way.
 // A bridge thread is printed in [layer.print_z - bridge_height, layer.print_z], so it matters when it starts below the limit.
-// The walk starts at the first object layer with bottom_z >= limit (earlier layers are the caller's plain outline trimming)
-// and, per layer, does two independent passes:
+// The walk starts at the first object layer with bottom_z >= from_z: layers that start below from_z are the caller's own outline
+// trimming. A caller that trims no layer beyond the slab's own Z span passes the slab's print_z; a caller whose outline trimming
+// reaches up to the limit passes the limit. For each layer the walk does two independent passes:
 //  - Region pass: regions are visited in order and the pass stops at the FIRST region whose thread starts at or above the
 //    limit; later regions of that layer are not examined. Each region visited before that adds the bridge fill surfaces of
 //    the work region islands it belongs to, grown by gap_xy, and sets overlaps. If the first region already stops the pass,
@@ -500,7 +501,7 @@ double bridging_height_avg_mm(const Config &print_config, const Layer &layer, co
 // The layer walk ends after the first layer whose region pass left overlaps false. A soluble support gets nothing.
 // The result is a new collection owned by the caller.
 StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::vector<Layer> &layers, const Config &print_config,
-                                           const SupportParams &p, const GeneratorLayer &slab)
+                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab)
 {
     StoredExPolygonCollection footprint(storage);
     if (p.soluble) return footprint;
@@ -509,7 +510,7 @@ StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::v
     const raw_surface_type bridge_fill = srf_type().bottom().solid().bridge().raw();
     const coord_t upper = slab.print_z + scale_to_layer_coord(p.gap_above);
     size_t id = 0;
-    while (id < layers.size() && layers[id].bottom_z() < upper) ++id;
+    while (id < layers.size() && layers[id].bottom_z() < from_z) ++id;
     for (; id < layers.size(); ++id) {
         const Layer &layer = layers[id];
         bool overlaps = false;
