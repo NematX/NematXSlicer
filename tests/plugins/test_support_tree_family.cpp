@@ -24,7 +24,7 @@
 /* Tree-family tests: the slabs that the tree and organic styles publish. The branch slab planner is checked on synthetic
    overhang layers, the slabs of small objects on their geometry (interfaces, floors, heights, XY distance, branch overhang),
    then the published surfaces and the G-code of a whole print. The grid is unchanged by this family, which the grid
-   comparison tests cover. */
+   comparison tests cover. The Print::validate checks of the tree family settings (the [validate] case) are checked here too. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -1820,4 +1820,153 @@ TEST_CASE("Tree interface slabs keep the bridge footprint out of the bridge thre
         interfaces_in_band += in_thread_band(*slab, band, gap_above) && !slab->polygons.empty() ? 1 : 0;
     REQUIRE(interfaces_in_band > 1);
     CHECK(count_slabs_in_band(routed.support, band, gap_above) >= interfaces_in_band);
+}
+
+// Print::validate rejects a support branch diameter that the support extrusion width cannot print or that is smaller than the
+// tip, for the tree and the organic styles alike (both run the tree family), and accepts sane diameters for both. A tip thinner
+// than the extrusion width is rejected for the tree style only: its sections are sparse-filled Base surfaces, which drop areas
+// narrower than half a spacing, while the organic Branch surfaces print such sections as a deposit or along their medial axis.
+TEST_CASE("Print validation checks the support tree diameters for the tree and organic styles", "[plugins][support-tree-family][validate]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    struct Diameters { const char *tip, *branch, *message; };
+    const Diameters invalid[] = {
+        {"0.4", "0.7", "branch diameter must not be smaller than 2x support material extrusion width"},
+        {"1.5", "1", "branch diameter must not be smaller than support tree tip diameter"},
+    };
+    for (const char *style : {"tree", "organic"}) {
+        const auto validation = [style](const Diameters &diameters) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", style},
+                {"support_material_extrusion_width", "0.4"},
+                {"support_tree_tip_diameter", diameters.tip}, {"support_tree_branch_diameter", diameters.branch}});
+            Model model;
+            Print print;
+            Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+            return print.validate();
+        };
+        for (const Diameters &diameters : invalid) {
+            INFO("style " << style << " tip " << diameters.tip << " branch " << diameters.branch);
+            const std::pair<PrintBase::PrintValidationError, std::string> result = validation(diameters);
+            CHECK(result.first == PrintBase::PrintValidationError::pveWrongSettings);
+            CHECK(result.second.find("Organic support") == 0);
+            CHECK(result.second.find(diameters.message) != std::string::npos);
+        }
+        // A tip of 0.1 mm is below the 0.4 mm extrusion width: only the tree style refuses it.
+        const Diameters thin_tip{"0.1", "2", "tip diameter must not be smaller than support material extrusion width"};
+        const bool thin_tip_refused = std::string(style) == "tree";
+        {
+            INFO("style " << style << " tip " << thin_tip.tip << " branch " << thin_tip.branch);
+            const std::pair<PrintBase::PrintValidationError, std::string> result = validation(thin_tip);
+            CHECK((result.first == PrintBase::PrintValidationError::pveWrongSettings) == thin_tip_refused);
+            CHECK(result.second.empty() == !thin_tip_refused);
+            if (thin_tip_refused) {
+                CHECK(result.second.find("Organic support") == 0);
+                CHECK(result.second.find(thin_tip.message) != std::string::npos);
+            }
+        }
+        INFO("style " << style);
+        const std::pair<PrintBase::PrintValidationError, std::string> result = validation({"0.8", "2", ""});
+        CHECK(result.first == PrintBase::PrintValidationError::pveNone);
+        CHECK(result.second.empty());
+    }
+}
+
+// Tree and organic supports validate with a variable layer height profile on the object.
+TEST_CASE("Print validation accepts tree and organic supports with a variable layer height", "[plugins][support-tree-family][validate][variable-layer-height]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, SG::slab(), std::vector<coordf_t>{0., 0.2, 2., 0.2, 2.01, 0.1, 4., 0.1, 4.01, 0.3, 5., 0.3},
+        SG::config(style, false, 3));
+    REQUIRE(print.object(0).model_object()->has_custom_layering());
+    const std::pair<PrintBase::PrintValidationError, std::string> result = print.validate();
+    CHECK(result.first == PrintBase::PrintValidationError::pveNone);
+    CHECK(result.second.empty());
+}
+
+// A tree or organic support under an object with thin and thick layer bands is generated and exported on the real layer heights.
+TEST_CASE("Tree and organic supports are generated and exported on a variable layer height", "[plugins][support-tree-family][variable-layer-height][gcode]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    // A tall post under a wide roof: the branches stand on the bed and cross the 0.2, 0.1 and 0.3 mm bands of the profile.
+    TriangleMesh mesh = make_cube(4., 8., 6.);
+    TriangleMesh roof = make_cube(12., 8., 1.);
+    roof.translate(0., 0., 6.);
+    mesh.merge(roof);
+    DynamicPrintConfig config = SG::config(style, false, 3, true);
+    config.set_deserialize_strict({
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"seam_visibility", "0"},
+        {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
+        {"max_print_speed", "80"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
+        {"max_volumetric_speed", "0"}, {"filament_max_speed", "0,0"},
+        {"filament_max_volumetric_speed", "0,0"}, {"slowdown_below_layer_time", "0,0"},
+        {"use_relative_e_distances", "1"}, {"wipe", "0,0"}, {"filament_diameter", "1.75,1.75"}
+    });
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(mesh),
+        std::vector<coordf_t>{0., 0.2, 2., 0.2, 2.01, 0.1, 4., 0.1, 4.01, 0.3, 7., 0.3}, config);
+    REQUIRE(print.validate().first == PrintBase::PrintValidationError::pveNone);
+    const boost::filesystem::path path = Slic3r::Test::GCode::temporary_gcode_path();
+    std::string code;
+    try {
+        print.process();
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        code = Slic3r::Test::GCode::read_text_file(path);
+    } catch (...) {
+        Slic3r::Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Slic3r::Test::GCode::remove_output_pair(path);
+    CHECK(code.find(";TYPE:Support material") != std::string::npos);
+
+    // The object really has layers of the three heights.
+    const PrintObject &object = print.object(0);
+    std::set<long> object_heights;
+    for (const Layer &layer : object.layers()) {
+        object_heights.insert(std::lround(layer.unscaled_height() * 1000.));
+    }
+    CAPTURE(object_heights);
+    CHECK(object_heights.size() >= 3);
+
+    // The support lives on several layers of different heights, each with a non-empty section and a height that fits its Z.
+    std::set<long> support_heights;
+    size_t supported_layers = 0;
+    double previous_top = 0., highest_support_top = 0.;
+    for (const Layer &layer : object.auxiliary_layers()) {
+        // The support layers stack without gap or overlap, from the bed to the roof.
+        CHECK(layer.unscaled_print_z() - layer.unscaled_height() == Approx(previous_top).margin(1e-4));
+        previous_top = layer.unscaled_print_z();
+        if (layer.islands().empty())
+            continue;
+        ++supported_layers;
+        highest_support_top = std::max(highest_support_top, layer.unscaled_print_z());
+        support_heights.insert(std::lround(layer.unscaled_height() * 1000.));
+        CHECK(layer.unscaled_height() > 0.);
+        CHECK(layer.unscaled_print_z() > 0.);
+        CHECK(layer.unscaled_print_z() - layer.unscaled_height() >= -1e-6);
+    }
+    CAPTURE(support_heights, supported_layers);
+    CHECK(supported_layers > 5);
+    CHECK(support_heights.size() >= 2);
+    // The support follows the object: the highest support layer stops under the first object layer that contains the roof (sliced
+    // at its middle, so its bottom is not the 6 mm of the mesh) by the 0.2 mm top contact distance. The post section is 32 mm2
+    // and the roof section 96 mm2: the first layer wider than 60 mm2 is the roof layer.
+    double roof_layer_bottom = -1.;
+    for (const Layer &layer : object.layers())
+        if (unscaled(unscaled(area(layer.lslices()))) > 60.) {
+            roof_layer_bottom = layer.unscaled_print_z() - layer.unscaled_height();
+            break;
+        }
+    INFO("style " << style << " roof layer bottom " << roof_layer_bottom << " highest support top " << highest_support_top);
+    REQUIRE(roof_layer_bottom > 0.);
+    CHECK(highest_support_top == Approx(roof_layer_bottom - 0.2).margin(1e-3));
 }

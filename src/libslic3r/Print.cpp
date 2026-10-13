@@ -1113,8 +1113,7 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
 
     // Cache of layer height profiles for checking:
     // 1) Whether all layers are synchronized if printing with wipe tower and / or unsynchronized supports.
-    // 2) Whether layer height is constant for Organic supports.
-    // 3) Whether build volume Z is not violated.
+    // 2) Whether build volume Z is not violated.
     std::vector<std::vector<coordf_t>> layer_height_profiles;
     auto layer_height_profile = [this, &layer_height_profiles](const size_t print_object_idx) -> const std::vector<coordf_t>& {
         const PrintObject       &print_object = *m_objects[print_object_idx];
@@ -1145,16 +1144,6 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     bool has_custom_layering = std::find_if(m_objects.begin(), m_objects.end(), 
         [](const PrintObjectUPtr &object) { return object->model_object()->has_custom_layering(); }) 
         != m_objects.end();
-
-    // Custom layering is not allowed for tree supports as of now.
-    for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++ print_object_idx)
-        if (const PrintObject &print_object = *m_objects[print_object_idx];
-            print_object.has_support_material() && print_object.config().support_material_style.value == smsOrganic &&
-            print_object.model_object()->has_custom_layering()) {
-            if (const std::vector<coordf_t> &layers = layer_height_profile(print_object_idx); ! layers.empty())
-                if (! check_object_layers_fixed(print_object.slicing_parameters(), layers))
-                    return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("Variable layer height is not supported with Organic supports.") };
-        }
 
     if (this->has_wipe_tower() && ! m_objects.empty()) {
         // Make sure all extruders use same diameter filament and have the same nozzle diameter
@@ -1267,11 +1256,18 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
                            "If support is to be printed with the current extruder (support_material_extruder == 0 or support_material_interface_extruder == 0), "
                            "all nozzles have to be of the same diameter.") };
                 }
-                if (object->config().support_material_style.value == smsOrganic) {
+                // The tree and organic styles run the same plugin family and clamp the tip diameter to the branch diameter,
+                // so both styles need branches that the support extrusion width can print. The tip diameter is checked against
+                // the extrusion width for the tree style only. Organic branch sections thinner than the extrusion width print
+                // as a stationary deposit when compact and along their medial axis when elongated (parts under the medial axis
+                // width thresholds still print nothing). Tree sections are sparse-filled Base surfaces, which drop areas
+                // narrower than half a spacing, so the tree tip must be at least the extrusion width.
+                if (object->config().support_material_style.value == smsTree || object->config().support_material_style.value == smsOrganic) {
                     float extrusion_width = std::min(
                         support_material_flow(object.get()).width(),
                         support_material_interface_flow(object.get()).width());
-                    if (object->config().support_tree_tip_diameter < extrusion_width - EPSILON)
+                    if (object->config().support_material_style.value == smsTree &&
+                        object->config().support_tree_tip_diameter < extrusion_width - EPSILON)
                         return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("Organic support tree tip diameter must not be smaller than support material extrusion width.") };
                     if (object->config().support_tree_branch_diameter < 2. * extrusion_width - EPSILON)
                         return { PrintBase::PrintValidationError::pveWrongSettings, _u8L("Organic support branch diameter must not be smaller than 2x support material extrusion width.") };
