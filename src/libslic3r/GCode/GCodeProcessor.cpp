@@ -59,6 +59,30 @@ static const std::vector<std::string> DEFAULT_EXTRUDER_COLORS = { "#FF8000", "#D
 
 namespace Slic3r {
 
+// Copies nonzero result heights selected by opening move IDs; missing IDs or zero heights use Z at indices 0 and 1,
+// then the difference from the preceding Z, matching Slic3r::DoubleSlider::Control::get_label. Z values are ordered and
+// IDs index the result vector; a shorter ID list leaves unmatched Z entries on the fallback. Returns one owned height
+// per Z without retaining inputs; allocation failures propagate, and an empty Z list produces an empty result.
+std::vector<double> calculate_gcode_layer_heights(const std::vector<double>& layer_zs,
+    const std::vector<uint16_t>& opening_layer_ids, const std::vector<float>& layers_max_height)
+{
+    std::vector<double> heights;
+    heights.reserve(layer_zs.size());
+    for (size_t layer_index = 0; layer_index < layer_zs.size(); ++layer_index) {
+        double layer_height = layer_zs[layer_index];
+        if (layer_index > 1)
+            layer_height -= layer_zs[layer_index - 1];
+
+        if (layer_index < opening_layer_ids.size()) {
+            const size_t layer_id = opening_layer_ids[layer_index];
+            if (layer_id < layers_max_height.size() && layers_max_height[layer_id] != 0.0f)
+                layer_height = layers_max_height[layer_id];
+        }
+        heights.push_back(layer_height);
+    }
+    return heights;
+}
+
 // G-code tool selectors arrive as wider parser values. Keep invalid values
 // out of the signed public identity before converting them to extruder_index_t.
 static std::optional<extruder_index_t> checked_extruder_index(const int64_t value)

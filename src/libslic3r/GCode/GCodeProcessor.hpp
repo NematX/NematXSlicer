@@ -231,6 +231,10 @@ namespace Slic3r {
         void reset();
     };
 
+    // Return heights for viewer layers (Z entries opened by a move's layer_id), falling back to the slider's Z-gap rule.
+    std::vector<double> calculate_gcode_layer_heights(const std::vector<double>& layer_zs,
+        const std::vector<uint16_t>& opening_layer_ids, const std::vector<float>& layers_max_height);
+
 
     class GCodeProcessor
     {

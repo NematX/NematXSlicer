@@ -42,6 +42,10 @@
 #include "Plater.hpp"
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
+
+/* Calculates slider labels from Z, time, area, and height data, and renders ruler graduations and G-code markers.
+   TickCodeInfo data determines marker placement and the text shown at those ticks. */
+
 namespace Slic3r {
 
 using GUI::from_u8;
@@ -466,6 +470,13 @@ void Control::SetLayersAreas(const std::vector<float>& layers_areas)
     for(float area : layers_areas)
         m_layers_areas.push_back(area);
 }
+
+// Copies the supplied heights into slider-owned storage; empty input restores Z-gap labels, returns no status, and allocation failures propagate.
+void Control::SetLayersMaxHeights(const std::vector<double>& layers_max_heights)
+{
+    m_layers_max_heights = layers_max_heights;
+}
+
 bool Control::ensure_correctly_filled() const
 {
     bool ok = true;
@@ -784,6 +795,11 @@ static wxString short_and_splitted_time(const std::string& time)
     return from_u8(get_s());
 }
 
+// Formats tick using label_type; supplied heights are read only for ltHeightWithLayer when
+// show_layer_height_doubleslider is enabled, and missing entries use the Z-gap rule in
+// calculate_gcode_layer_heights. Empty m_values with m_label_koef == 1.0 returns the numeric tick first.
+// Invalid arrays yield empty text and out-of-range ticks yield "ErrVal". The wxString owns its text,
+// slider state is unchanged, and allocation failures propagate.
 wxString Control::get_label(int tick, LabelType label_type/* = ltHeightWithLayer*/) const
 {
     if (!ensure_correctly_filled())
@@ -853,15 +869,17 @@ wxString Control::get_label(int tick, LabelType label_type/* = ltHeightWithLayer
             if (show_lheight) {
                 nb_lines++;
                 double layer_height = 0;
-                if (value >= m_values.size()) {
-                    const auto st1 = value;
-                    const auto st2 = m_values.size();
-                    layer_height = m_values.empty() ? m_label_koef : m_values.back() - (m_values.size() > 1 ? m_values[m_values.size() - 2] : 0);
-                    assert(value == m_values.size());
-                } else if (value == 0) {
-                    layer_height = m_values.empty() ? m_label_koef : m_values[value];
+                if (value < m_layers_max_heights.size()) {
+                    layer_height = m_layers_max_heights[value];
                 } else {
-                    layer_height = m_values.empty() ? m_label_koef : m_values[value] - (value > 1 ? m_values[value - 1] : 0);
+                    if (value >= m_values.size()) {
+                        layer_height = m_values.empty() ? m_label_koef : m_values.back() - (m_values.size() > 1 ? m_values[m_values.size() - 2] : 0);
+                        assert(value == m_values.size());
+                    } else if (value == 0) {
+                        layer_height = m_values.empty() ? m_label_koef : m_values[value];
+                    } else {
+                        layer_height = m_values.empty() ? m_label_koef : m_values[value] - (value > 1 ? m_values[value - 1] : 0);
+                    }
                 }
                 str = str + comma + wxString::Format("%.*f", 2, layer_height);
                 comma = "\n";
