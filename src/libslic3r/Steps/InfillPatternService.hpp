@@ -14,7 +14,10 @@
    How to use it from a step:
    1. Build one service before any plugin of the step can call a pattern, or
       build it on the first call and make that construction complete before
-      any other thread reads the service. The constructor gives every active
+      any other thread reads the service (STEP_SUPPORT builds it lazily under
+      std::call_once, because its setup() calls are only worth paying when a
+      family samples a pattern; see StepGenerateSupport.cpp). The constructor
+      gives every active
       pattern plugin a compact runtime id (1, 2, ...; 0 stays
       INFILL_PATTERN_RUNTIME_ID_INVALID), its guarded host context, its error
       flag and a prepared plugin_run_context. It throws when a setup() fails;

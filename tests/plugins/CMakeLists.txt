@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
     test_bridge_detector_cancellation.cpp
     mesh_queries_c_fixture.c
     plugin_api_headers_c_fixture.c
+    support_pattern_c_fixture.c
     mesh_query_visibility_reference.cpp
     test_mesh_queries.cpp
     test_triangle_mesh_storage.cpp
@@ -132,6 +133,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_toolpath_step.cpp
     test_support_step.cpp
     test_layer_extrusion_edit_support_acceleration.cpp
+    test_support_pattern_service.cpp
     test_surface_clean_infill_surfaces.cpp
     test_surface_initial_typed_surface_builder.cpp
     test_surface_infill_region_compatibility_splitter.cpp

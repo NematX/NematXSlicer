@@ -753,6 +753,7 @@ void ensure_plugin_test_runtime_initialized()
         register_exclusive_pruning_test_plugins(orchestrator_handle_value);
         register_support_toolpath_test_providers(orchestrator_handle_value);
         register_support_step_test_providers(orchestrator_handle_value);
+        register_support_pattern_service_test_provider(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateToolChangePlugin::register_create_tool_change_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateTransitionScopePlugin::register_create_transition_scope_plugin(
@@ -1003,6 +1004,8 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.set_plugin_active(Test::ProbePatternPlugin::probe_pattern_id, false);
         orchestrator.set_plugin_active("test.support.family.early", false);
         orchestrator.set_plugin_active("test.support.family.late", false);
+        orchestrator.set_plugin_active("test.support.patterns", false);
+
         for (const char *id : {"test.support_toolpath.sparse", "test.support_toolpath.bottom",
                                "test.support_toolpath.top", "test.support_toolpath.alternate",
                                "test.support_toolpath.patterns"})

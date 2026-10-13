@@ -187,13 +187,43 @@ class SupportContext(_PrintObjectContext):
 
     @classmethod
     def from_support_run_context(cls, api, address: int):
-        return cls._from_run_context(api, address, STEP_SUPPORT, RunCtxGenerateSupport, ("print", "object"))
+        """Validate the step, handles and pattern callbacks, returning None on mismatch."""
+        fields = ("print", "object", "resolve_pattern_id", "generate_pattern")
+        return cls._from_run_context(api, address, STEP_SUPPORT, RunCtxGenerateSupport, fields)
 
     def support_print(self) -> Print:
         return self._print()
 
     def support_object(self) -> Object:
         return self._object()
+
+    def support_resolve_pattern_id(self, plugin_id: str) -> int:
+        """Runtime id of an INFILL_PATTERN plugin, valid only during this step run."""
+        return int(self.payload.resolve_pattern_id(self._payload_ptr, plugin_id.encode("utf-8")))
+
+    def support_generate_pattern(
+        self, pattern_id: int, layer, island, region_island, primary_region,
+        surface, no_overlap_areas, params, output: MutableExtrusionEntity,
+    ) -> bool:
+        """Fill ``surface`` into the caller-owned ``output``; the host never publishes it at this step.
+
+        The caller only reads ``output`` (for example to sample points).
+        ``layer``, ``island``, ``region_island``, ``primary_region`` and
+        ``no_overlap_areas`` may be None at this step. ``params`` is a complete
+        caller-built RawInfillPatternParams (see the C header for the fields to
+        set). False means nothing was generated: an unknown id, a pattern
+        refused by this step, or an error contained by the host (a pattern
+        setup() or run failure, or a cancellation). In the last case ``output``
+        is left as an empty collection, no exception is raised, and the step
+        stops with the standard "was cancelled" error once the family returns;
+        return from the family soon.
+        """
+        params_ptr = ctypes.byref(params) if isinstance(params, RawInfillPatternParams) else params
+        return bool(self.payload.generate_pattern(
+            self._payload_ptr, int(pattern_id), _void_p(layer), _void_p(island),
+            _void_p(region_island), _void_p(primary_region), _void_p(surface),
+            _void_p(no_overlap_areas), params_ptr, _void_p(output),
+        ))
 
 
 @abi_requires_headers("steps/slic3r_step_support_toolpath.h")

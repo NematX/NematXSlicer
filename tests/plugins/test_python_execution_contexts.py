@@ -244,6 +244,53 @@ class PythonExecutionContextTests(unittest.TestCase):
         self.assertEqual(calls, [(ctypes.addressof(common), 41)])
         self.assertTrue(keepalive is not None)
 
+    def test_support_context_exposes_the_pattern_callbacks(self):
+        """The support context validates its pattern callbacks and passes missing handles as NULL."""
+        generated = self.generated
+        calls = []
+
+        def resolve(ctx, plugin_id):
+            calls.append(("resolve", ctypes.cast(ctx, ctypes.c_void_p).value, plugin_id))
+            return 9
+
+        def generate(ctx, pattern_id, layer, island, region_island, primary_region,
+                     surface, no_overlap_areas, params, output):
+            calls.append(("generate", ctypes.cast(ctx, ctypes.c_void_p).value, pattern_id, layer, island,
+                          region_island, primary_region, surface, no_overlap_areas,
+                          params.contents.density, output))
+            return 0
+
+        resolve_cb = generated.SUPPORT_RESOLVE_PATTERN_ID(resolve)
+        generate_cb = generated.SUPPORT_GENERATE_PATTERN(generate)
+        payload = generated.RunCtxGenerateSupport(
+            ctypes.c_void_p(31), ctypes.c_void_p(32), ctypes.c_void_p(33), resolve_cb, generate_cb
+        )
+        common, keepalive = self.make_common(generated.STEP_SUPPORT, payload)
+        keepalive.extend((resolve_cb, generate_cb))
+        api = types.SimpleNamespace(host=types.SimpleNamespace())
+        factory = self.execution.SupportContext.from_support_run_context
+        context = factory(api, ctypes.addressof(common))
+        self.assertIsNotNone(context)
+        self.assertEqual(context.support_print().address, 31)
+        self.assertEqual(context.support_object().address, 32)
+
+        # Both callbacks receive the payload itself as their context; a failed call reports False.
+        self.assertEqual(context.support_resolve_pattern_id("rectilinear"), 9)
+        params = generated.RawInfillPatternParams()
+        params.density = 0.5
+        self.assertFalse(context.support_generate_pattern(9, None, None, None, None, 46, None, params, 47))
+        self.assertEqual(calls, [
+            ("resolve", ctypes.addressof(payload), b"rectilinear"),
+            ("generate", ctypes.addressof(payload), 9, None, None, None, None, 46, None, 0.5, 47),
+        ])
+
+        payload.generate_pattern = generated.SUPPORT_GENERATE_PATTERN()
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        payload.generate_pattern = generate_cb
+        payload.resolve_pattern_id = generated.SUPPORT_RESOLVE_PATTERN_ID()
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        self.assertTrue(keepalive is not None)
+
     def test_support_toolpath_context_borrows_and_validates_handles(self):
         """The toolpath context rejects wrong steps, missing handles and missing pattern callbacks."""
         generated = self.generated

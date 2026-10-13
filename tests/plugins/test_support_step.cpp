@@ -96,7 +96,7 @@ TEST_CASE("Support families all run once per object in priority order without a 
     REQUIRE(print.objects().size() == 2);
     CHECK(Steps::get_exclusive_steps().count(STEP_SUPPORT) == 0);
     CHECK(print.full_print_config().option("step_support_plugin") == nullptr);
-    CHECK(SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR == 1u);
+    CHECK(SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR == 2u);
     Steps::StepGenerateSupport::run_step(orchestrator, print);
     REQUIRE(calls.size() == 4);
     CHECK(calls[0].priority == 0);

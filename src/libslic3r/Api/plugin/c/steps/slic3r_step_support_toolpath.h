@@ -15,12 +15,24 @@
 extern "C" {
 #endif
 
+/* Declare the payload tag here so C callback prototypes do not introduce distinct prototype-scope types. */
+struct run_ctx_support_toolpath;
+
 /*
 Resolve a stable INFILL_PATTERN plugin id, for example "rectilinear" or
 "supportbase", to the runtime id used by generate_pattern() during this step
-run. Same semantics as run_ctx_generate_infill::resolve_pattern_id(): an
-inactive id falls back to the first active pattern with a warning, and
-INFILL_PATTERN_RUNTIME_ID_INVALID is returned only when no pattern is active.
+run. The id fallback works as in run_ctx_generate_infill::resolve_pattern_id():
+an inactive id falls back to the first active pattern with a warning.
+INFILL_PATTERN_RUNTIME_ID_INVALID is returned when:
+- no pattern is active, or ctx is NULL or has no host state (ordinary
+  refusals; the step goes on);
+- the step is already stopping, because the plugin cancellation is requested
+  or the print is cancelled: it is returned at once, without a message;
+- an exception was contained: an error message is added and the plugin
+  cancellation is requested, so the step stops when the algorithm returns. A
+  cancellation of the print adds no message and no plugin cancellation: the
+  host rethrows it when the algorithm returns.
+No exception ever leaves the callback.
 Runtime ids are valid only for the current step run; never store them.
 
 ctx is the run_ctx_support_toolpath received by the plugin.
@@ -30,9 +42,9 @@ typedef infill_pattern_runtime_id (*support_toolpath_resolve_pattern_id_fn)(
     const char *pattern_plugin_id);
 
 /*
-Fill one surface with the INFILL_PATTERN plugin selected by pattern_id. Same
-arguments and semantics as run_ctx_generate_infill::generate_pattern(), with
-the support toolpath payload as ctx.
+Fill one surface with the INFILL_PATTERN plugin selected by pattern_id. The
+arguments are those of run_ctx_generate_infill::generate_pattern(), with the
+support toolpath payload as ctx.
 
 The pattern receives ctx->print and ctx->object, the given layer, island,
 region_island, primary_region (may be NULL on support layers), surface,
@@ -41,12 +53,22 @@ output must be an empty mutable extrusion entity owned by the caller for the
 call; the caller then publishes its content itself, for example by moving it
 into a region-island extrusion root.
 
-Returns 1 when the pattern ran, even if it produced nothing, and 0 when nothing
-was generated because of an error: an unknown runtime id (warning message), or
-a pattern that needs the STEP_INFILL initialization pass (lightning,
-adaptivecubic, supportcubic; error message). No recipe modifier is applied.
-An error reported by the pattern itself, or a cancellation, stops the step as
-for any plugin error.
+Returns 1 when the pattern ran, even if it produced nothing. Returns 0 in these
+cases, which differ in what happens to output and to the step:
+- ordinary refusal: ctx, its host state, params or output is NULL (nothing is
+  touched), an
+  unknown runtime id (warning message), or a pattern that needs the STEP_INFILL
+  initialization pass (lightning, adaptivecubic, supportcubic; error message).
+  The step goes on; output is untouched;
+- already stopping: the plugin cancellation is requested or the print is
+  cancelled. It returns at once with output left as an empty collection and no
+  message;
+- contained exception: the pattern reported an error or any other C++
+  exception was raised. output is left as an empty collection, an error message
+  is added and the plugin cancellation is requested, so the step stops when the
+  algorithm returns. A cancellation of the print is not recorded: it gives the
+  same 0 and the host rethrows it when the algorithm returns.
+No recipe modifier is applied. No exception ever leaves the callback.
 */
 typedef int32_t (*support_toolpath_generate_pattern_fn)(
     const struct run_ctx_support_toolpath *ctx,

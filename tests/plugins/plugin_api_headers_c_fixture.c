@@ -8,7 +8,7 @@
    make the compiler type-check the parameters and return type of the declarations; the pragmas below
    turn an incompatible pointer assignment into an error (MSVC only warns by default). Compile-time
    array checks verify the type and value of the slicing step constants.
-   The three step headers use their real dependencies. Exact C callback assignments
+   The four step headers use their real dependencies. Exact C callback assignments
    and payload-field calls check that callback parameters use file-scope payload
    types, not distinct structs introduced inside function prototypes. The step
    calls are type-checked in an uncalled function and never reach a live host. */
@@ -23,6 +23,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_clipper.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_infill.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_perimeter.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_wipetower.h"
 #ifdef __cplusplus
 #error This fixture must be compiled as C.
@@ -83,6 +84,25 @@ static int32_t c_perimeter_group(const run_ctx_generate_perimeter *ctx,
     return 1;
 }
 
+/* Borrow the support payload and id string without reading host state; return a fixed id. */
+static infill_pattern_runtime_id c_toolpath_resolve(const run_ctx_support_toolpath *ctx, const char *id)
+{
+    (void)ctx; (void)id;
+    return 1;
+}
+
+/* Borrow all support generation arguments without touching output; return success. */
+static int32_t c_toolpath_generate(const run_ctx_support_toolpath *ctx, infill_pattern_runtime_id id,
+    const layer_handle *layer, const layer_island_handle *island,
+    const layer_region_island_handle *region_island, const layer_region_handle *region,
+    const surface_handle *surface, const expolygon_collection_handle *areas,
+    const raw_infill_pattern_params *params, extrusion_entity_handle *output)
+{
+    (void)ctx; (void)id; (void)layer; (void)island; (void)region_island;
+    (void)region; (void)surface; (void)areas; (void)params; (void)output;
+    return 1;
+}
+
 /* Borrow the tower payloads without dispatching a service or mutating either; return success. */
 static int32_t c_wipe_call(const run_ctx_generate_wipe_tower *ctx, uint32_t index,
     run_ctx_wipe_tower_wipe *payload)
@@ -91,10 +111,10 @@ static int32_t c_wipe_call(const run_ctx_generate_wipe_tower *ctx, uint32_t inde
     return 1;
 }
 
-/* Type-check all seven callback assignments and calls on real payload pointers.
+/* Type-check all nine callback assignments and calls on real payload pointers.
    This externally visible function is never called by the test: no host service runs. */
 void test_step_callback_types_c(run_ctx_generate_infill *infill, run_ctx_generate_perimeter *perimeter,
-    run_ctx_generate_wipe_tower *tower)
+    run_ctx_support_toolpath *toolpath, run_ctx_generate_wipe_tower *tower)
 {
     infill_resolve_pattern_id_fn resolve = c_infill_resolve;
     infill_pattern_plugin_id_fn id = c_infill_id;
@@ -102,6 +122,8 @@ void test_step_callback_types_c(run_ctx_generate_infill *infill, run_ctx_generat
     infill_modify_surface_recipe_fn modify = c_infill_modify;
     infill_report_pattern_assignments_fn report = c_infill_report;
     perimeter_run_region_group_fn group = c_perimeter_group;
+    support_toolpath_resolve_pattern_id_fn support_resolve = c_toolpath_resolve;
+    support_toolpath_generate_pattern_fn support_generate = c_toolpath_generate;
     wipe_tower_call_plugin_fn wipe = c_wipe_call;
     infill->resolve_pattern_id = resolve;
     infill->pattern_plugin_id = id;
@@ -109,6 +131,8 @@ void test_step_callback_types_c(run_ctx_generate_infill *infill, run_ctx_generat
     infill->modify_surface_recipe = modify;
     infill->report_pattern_assignments = report;
     perimeter->run_region_group = group;
+    toolpath->resolve_pattern_id = support_resolve;
+    toolpath->generate_pattern = support_generate;
     tower->call_wipe_plugin = wipe;
     (void)infill->resolve_pattern_id(infill, "rectilinear");
     (void)infill->pattern_plugin_id(infill, 1);
@@ -116,6 +140,8 @@ void test_step_callback_types_c(run_ctx_generate_infill *infill, run_ctx_generat
     (void)infill->modify_surface_recipe(infill, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
     (void)infill->report_pattern_assignments(infill, 1, NULL, 0);
     (void)perimeter->run_region_group(perimeter, NULL, 0, NULL, NULL, NULL);
+    (void)toolpath->resolve_pattern_id(toolpath, "rectilinear");
+    (void)toolpath->generate_pattern(toolpath, 1, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
     (void)tower->call_wipe_plugin(tower, 0, NULL);
 }
 

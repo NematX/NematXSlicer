@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "plugin_test_helpers.hpp"
+#include "probe_pattern_plugin.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
@@ -251,9 +252,25 @@ struct SupportSurface {
     const surface_handle *surface = nullptr;
 };
 
+// What the pattern probe saw when its call of the failing probe pattern came back (failure scenario).
+struct FailureRecord {
+    // True when the algorithm ran to its end: the statements after the failed callback were executed.
+    bool reached_end = false;
+    // Runtime id of the probe pattern, and the result and paths of the call that failed.
+    infill_pattern_runtime_id probe_id = INFILL_PATTERN_RUNTIME_ID_INVALID;
+    int32_t result = -1;
+    size_t paths = SIZE_MAX;
+    // A second call once the step is stopping, and a resolve after it (the sentinel is not a possible answer).
+    int32_t again_result = -1;
+    size_t again_paths = SIZE_MAX;
+    infill_pattern_runtime_id resolve_after = infill_pattern_runtime_id(0x7fffffff);
+};
+
 std::mutex pattern_mutex;
 std::vector<PatternRecord> pattern_records;
-
+// When true the pattern probe only runs the failure scenario and fills failure_records.
+bool failure_scenario = false;
+std::vector<FailureRecord> failure_records;
 class SupportPatternProbe final : public slic3r_api::PluginBase
 {
 public:
@@ -283,6 +300,8 @@ SupportPatternProbe &pattern_probe();
 SupportSurface find_support_surface(const object_handle *object);
 // Build the complete recipe a support algorithm must provide for one pattern.
 raw_infill_pattern_params support_params(const object_handle *object, infill_pattern_runtime_id pattern_id);
+// Call the failing probe pattern, then the callbacks again, and record what each call returned.
+FailureRecord run_failure_scenario(const run_ctx_support_toolpath *payload, const SupportSurface &support);
 // Count the generated paths and sum their lengths.
 PatternStats pattern_stats(const ExtrusionEntityCollection &output);
 // Fill the surface by calling one pattern plugin like STEP_INFILL does, without the support service.
@@ -308,6 +327,13 @@ void SupportPatternProbe::run_impl(const plugin_run_context *context) const
                                          reinterpret_cast<extrusion_entity_handle *>(&output));
     };
 
+    if (failure_scenario) {
+        const FailureRecord failure = run_failure_scenario(payload, support);
+        const std::lock_guard<std::mutex> lock(pattern_mutex);
+        failure_records.push_back(failure);
+        return;
+    }
+
     PatternRecord record;
     record.object = payload->object;
     ExtrusionEntityCollection rectilinear;
@@ -323,6 +349,29 @@ void SupportPatternProbe::run_impl(const plugin_run_context *context) const
 
     const std::lock_guard<std::mutex> lock(pattern_mutex);
     pattern_records.push_back(record);
+}
+
+// The probe statements after the failed callback are what only a contained failure lets run: an
+// exception leaving the callback would end the algorithm at the call.
+FailureRecord run_failure_scenario(const run_ctx_support_toolpath *payload, const SupportSurface &support)
+{
+    const auto generate = [payload, &support](infill_pattern_runtime_id pattern_id, ExtrusionEntityCollection &output) {
+        const raw_infill_pattern_params params = support_params(payload->object, pattern_id);
+        return payload->generate_pattern(payload, pattern_id, support.layer, support.island, support.region_island,
+                                         nullptr, support.surface, nullptr, &params,
+                                         reinterpret_cast<extrusion_entity_handle *>(&output));
+    };
+    FailureRecord record;
+    record.probe_id = payload->resolve_pattern_id(payload, Test::ProbePatternPlugin::probe_pattern_id);
+    ExtrusionEntityCollection output;
+    record.result = generate(record.probe_id, output);
+    record.paths = pattern_stats(output).paths;
+    ExtrusionEntityCollection again;
+    record.again_result = generate(record.probe_id, again);
+    record.again_paths = pattern_stats(again).paths;
+    record.resolve_after = payload->resolve_pattern_id(payload, "rectilinear");
+    record.reached_end = true;
+    return record;
 }
 
 SupportPatternProbe &pattern_probe()
@@ -474,6 +523,71 @@ public:
 
 private:
     bool m_supportbase_was_active = false;
+};
+
+// Make the failing probe pattern active next to the pattern probe, with the given failure mode of
+// its run() (see probe_pattern_plugin.hpp), and the pattern probe run the failure scenario. The destructor
+// restores the activation and the probe state, clears the plugin cancellation a failure leaves, and drops
+// the messages.
+class ScopedFailingPattern
+{
+public:
+    // mode: 1 and 2 make run() fail after a partial write (child group, leaf); 0 leaves it intact.
+    // cancel_print: the print that run() cancels instead of generating, or null.
+    ScopedFailingPattern(int mode, Print *cancel_print)
+    {
+        namespace Probe = Test::ProbePatternPlugin;
+        m_probe_was_active = Orchestrator::instance().is_plugin_active(Probe::probe_pattern_id);
+        REQUIRE(Orchestrator::instance().set_plugin_active(Probe::probe_pattern_id, true));
+        Probe::pattern_fail_run = mode;
+        Probe::pattern_wrote_before_failure = false;
+        Probe::pattern_cancel_print = cancel_print;
+        failure_records.clear();
+        failure_scenario = true;
+        Orchestrator::instance().reset_plugin_cancel();
+        (void) Orchestrator::instance().consume_plugin_messages();
+    }
+    ~ScopedFailingPattern()
+    {
+        namespace Probe = Test::ProbePatternPlugin;
+        failure_scenario = false;
+        Probe::pattern_fail_run = 0;
+        Probe::pattern_cancel_print = nullptr;
+        Orchestrator::instance().set_plugin_active(Probe::probe_pattern_id, m_probe_was_active);
+        Orchestrator::instance().reset_plugin_cancel();
+        (void) Orchestrator::instance().consume_plugin_messages();
+    }
+    ScopedFailingPattern(const ScopedFailingPattern &) = delete;
+    ScopedFailingPattern &operator=(const ScopedFailingPattern &) = delete;
+
+private:
+    bool m_probe_was_active = false;
+};
+
+// Count the plugin messages of the level whose text contains `text` (an empty text matches every message)
+// and, when plugin_id is not empty, that were reported by that plugin (an empty plugin_id matches any plugin).
+size_t count_messages(const std::vector<Orchestrator::PluginMessage> &messages, Orchestrator::PluginMessageLevel level,
+                      const std::string &text, const std::string &plugin_id = {})
+{
+    return size_t(std::count_if(messages.begin(), messages.end(), [&](const Orchestrator::PluginMessage &message) {
+        return message.level == level && message.message.find(text) != std::string::npos &&
+               (plugin_id.empty() || message.plugin_id == plugin_id);
+    }));
+}
+
+// Print with one object holding one sparse support surface, as the pattern tests need.
+struct SupportedPrint {
+    Print print;
+    Model model;
+    PluginStorage storage;
+
+    SupportedPrint()
+    {
+        Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+        const ExPolygon area(Polygon({Point(0, 0), Point(scale_i(10.), 0),
+                                      Point(scale_i(10.), scale_i(10.)), Point(0, scale_i(10.))}));
+        add_sparse_support_surface(print.object(0), storage, area);
+    }
 };
 } // namespace
 
@@ -738,6 +852,79 @@ TEST_CASE("Support toolpath algorithms fill surfaces through infill pattern plug
     });
     CHECK(refusals == 4);
     CHECK(unknown == 4);
+}
+
+// A pattern that fails in run() is a contained failure: the callbacks return the failure value and
+// empty the output, the algorithm goes on, and the step stops once it returns, as a plugin stopped by the
+// pattern plugin's error. The statements the probe runs after the failed callback prove the containment
+// (an exception leaving the callback would end the algorithm there), and the stop text naming the pattern
+// plugin (not "stopped after plugin ... reported an error") proves that the algorithm itself never raised.
+TEST_CASE("Support toolpath pattern callbacks contain a failing pattern", "[plugins][support-toolpath][support-pattern-service]")
+{
+    // 1: the pattern wrote a group in a child of the output; 2: it wrote a path directly on it (a leaf).
+    const int how = GENERATE(1, 2);
+    CAPTURE(how);
+    const ScopedPatternProbe activation;
+    const ScopedFailingPattern failing(how, nullptr);
+    SupportedPrint supported;
+    Orchestrator &host = Orchestrator::instance();
+    (void) host.consume_plugin_messages();
+
+    std::string failure;
+    try {
+        run_toolpaths(supported.print);
+    } catch (const std::exception &error) {
+        failure = error.what();
+    }
+    const std::vector<Orchestrator::PluginMessage> messages = host.consume_plugin_messages();
+
+    REQUIRE(failure_records.size() == 1);
+    const FailureRecord &record = failure_records.front();
+    CHECK(Test::ProbePatternPlugin::pattern_wrote_before_failure);
+    // The algorithm ran to its end: the failed call returned the failure value and left an empty output.
+    CHECK(record.reached_end);
+    CHECK(record.probe_id != INFILL_PATTERN_RUNTIME_ID_INVALID);
+    CHECK(record.result == 0);
+    CHECK(record.paths == 0);
+    // The step is stopping: the next calls fail at once.
+    CHECK(record.again_result == 0);
+    CHECK(record.again_paths == 0);
+    CHECK(record.resolve_after == INFILL_PATTERN_RUNTIME_ID_INVALID);
+    // The runner then stopped the step as a healthy plugin, and names the pattern plugin that failed.
+    namespace Probe = Test::ProbePatternPlugin;
+    CAPTURE(failure);
+    CHECK(failure.find("STEP_SUPPORT_TOOLPATH stopped during ") != std::string::npos);
+    CHECK(failure.find("of plugin '" + std::string(SupportPatternProbe::k_id) + "' after plugin '" +
+                       std::string(Probe::probe_pattern_id) + "' reported an error.") != std::string::npos);
+    // Earlier diagnostics were drained: the only error is the original message of the pattern plugin; the
+    // callbacks and the runner add no message of their own, whatever their wording.
+    CHECK(count_messages(messages, Orchestrator::PluginMessageLevel::Error, "probe pattern run failure", Probe::probe_pattern_id) == 1);
+    CHECK(count_messages(messages, Orchestrator::PluginMessageLevel::Error, "") == 1);
+}
+
+// A cancellation of the print inside a pattern is not an error: the callbacks return the failure value
+// like for any failure, but record nothing and request no plugin cancellation; the runner rethrows the
+// cancellation when the algorithm returns.
+TEST_CASE("Support toolpath pattern callbacks leave a print cancellation to the runner", "[plugins][support-toolpath][support-pattern-service]")
+{
+    const ScopedPatternProbe activation;
+    SupportedPrint supported;
+    const ScopedFailingPattern failing(0, &supported.print);
+    Orchestrator &host = Orchestrator::instance();
+    (void) host.consume_plugin_messages();
+
+    CHECK_THROWS_AS(run_toolpaths(supported.print), CanceledException);
+    const std::vector<Orchestrator::PluginMessage> messages = host.consume_plugin_messages();
+
+    REQUIRE(failure_records.size() == 1);
+    const FailureRecord &record = failure_records.front();
+    CHECK(record.reached_end);
+    CHECK(record.result == 0);
+    CHECK(record.paths == 0);
+    CHECK(record.again_result == 0);
+    CHECK(record.resolve_after == INFILL_PATTERN_RUNTIME_ID_INVALID);
+    CHECK_FALSE(host.is_plugin_cancelled());
+    CHECK(count_messages(messages, Orchestrator::PluginMessageLevel::Error, "") == 0);
 }
 
 TEST_CASE("Support toolpath dispatch without active providers does nothing", "[plugins][support-toolpath]")
