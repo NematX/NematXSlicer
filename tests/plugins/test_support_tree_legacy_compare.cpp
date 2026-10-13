@@ -1,4 +1,5 @@
 #include "support_grid_test_helpers.hpp"
+#include "support_tree_test_helpers.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Support/TreeSupport.hpp"
 #include <algorithm>
@@ -38,28 +39,8 @@ constexpr double islands_ratio_max = 2.;
 // Support inside the object: the clearance keeps it out, so only rounding can remain.
 constexpr double inside_max_mm2 = 0.01;
 
-// Three simple objects without raft: an overhanging slab above the bed, a T whose bar overhangs both sides of its stem, and a
-// shelf whose overhang lands partly on a lower lobe of the object, where branches stand on the object.
-TriangleMesh comparison_mesh(int model_id)
-{
-    if (model_id == 0) return SG::slab();
-    if (model_id == 1) {
-        TriangleMesh stem = make_cube(4., 4., 6.);
-        stem.translate(6., 2., 0.);
-        TriangleMesh bar = make_cube(16., 4., 2.);
-        bar.translate(0., 2., 6.);
-        stem.merge(bar);
-        return stem;
-    }
-    TriangleMesh post = make_cube(4., 8., 8.);
-    TriangleMesh shelf = make_cube(20., 8., 1.);
-    shelf.translate(0., 0., 8.);
-    TriangleMesh lobe = make_cube(6., 8., 3.);
-    lobe.translate(10., 0., 0.);
-    post.merge(shelf);
-    post.merge(lobe);
-    return post;
-}
+// The three comparison objects (slab, T, shelf) are built by the shared helper, as the baseline dump uses them too.
+using Slic3r::Test::SupportTree::comparison_mesh;
 
 // The legacy tree generation breaks on the tree style for every model except the slab with interface layers: an assertion
 // at TreeSupport.cpp:3090 on the T and the shelf, and no message on the slab without interface layers.
