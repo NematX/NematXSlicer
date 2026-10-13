@@ -22,7 +22,6 @@
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
-#include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportInterfaces.hpp"
@@ -77,12 +76,12 @@ struct Run {
     std::vector<Layer> layers;
     Common::SupportStyle style;
     Common::ContactDistanceType distance_type;
-    int32_t threshold, enforce_layers, interface_layers, bottom_interface_layers, raft_layers;
+    int32_t threshold, enforce_layers, interface_layers, bottom_interface_layers;
     bool synchronize, bottom_interface_enabled;
     // Build-plate-only support: support may stand only on the bed, so contacts and columns are cut by the area the object covers below.
     bool buildplate_only;
     c_float_or_percent layer_height, interface_layer_height;
-    double angle, closing_radius, spacing, raft_first_layer_expansion, brim_width, brim_width_interior;
+    double angle, closing_radius, spacing;
 };
 struct Grid {
     const Run &run;
@@ -105,8 +104,6 @@ void append_polygons(Polys &dst, const ExPolygonCollection &expolygons);
 Polys to_polygons(storage_handle *storage, const ExPolygonCollection &expolygons);
 // Rotate every polygon around the origin, like the native polygons_rotate().
 void rotate(Polys &polys, double angle);
-// Reverse the point order of every polygon, like the native polygons_reverse().
-void reverse(Polys &polys);
 // Bounding box of every point, like the native get_extents(Polygons); empty polys give an empty box.
 c_bounding_box extents(const Polys &polys);
 // Order points by x, then y, like the native Point operator<.
@@ -123,14 +120,10 @@ void intermediate_layers(const Run &run, Common::GeneratedSupport &out);
 void trim_by_object(const Run &run, Common::GeneratorLayers &layers);
 // Fill intermediate slabs from projected columns and remove portions inside contacts.
 void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out);
-// Expand column feet in several steps while avoiding object and brim areas.
-void expand_feet(const Run &run, Common::GeneratedSupport &out);
 // Rasterize polygons into a zero-bordered grayscale image using AGG's winding fill.
 std::vector<unsigned char> rasterize(int size_x, int size_y, double pixel, c_point origin, const Polys &polys);
 // Chain raster boundary edges into scaled contours, optionally closing single-pixel holes.
 Polys contours(const Grid &grid, coord_t offset, bool fill_holes);
-// Whether the object has a brim under its first layer, the native PrintObject::has_brim().
-bool has_brim(const Run &run);
 } // namespace
 
 // Run geometric phases on a sliced object with demand; the result owns every slab and the object receives no layers or extrusions here.
@@ -150,7 +143,9 @@ void generate_support(const plugin_run_context *context, const Print &print, con
             if (bottom->bottom_print_z() <= top->bottom_z && top->print_z <= bottom->print_z)
                 top->polygons = polygons(clipper_diff(run.clipper(top->polygons), run.clipper(bottom->polygons)));
     Common::carve_interfaces(params, run.style == Common::SupportStyle::Snug, out);
-    expand_feet(run, out);
+    // The foot of the support is widened, then the reserved brim area is cut out of the slabs of the first layer, as in every family.
+    Common::expand_first_layer_foot(run.object, run.layers, params, out);
+    Common::remove_first_layer_brim(run.object, run.layers, params, out);
 }
 
 namespace {
@@ -170,7 +165,6 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
     // Index -1 asks whether the option as a whole is enabled, like the native is_enabled().
     bottom_interface_enabled = config_option_is_enabled(bottom_interfaces.handle(), -1) != 0;
     bottom_interface_layers = bottom_interfaces.get_int();
-    raft_layers = config.get("raft_layers").get_int();
     synchronize = config.get("support_material_synchronize_layers").get_bool();
     buildplate_only = config.get("support_material_buildplate_only").get_bool();
     layer_height = config.get("support_material_layer_height").get_float_or_percent();
@@ -178,9 +172,6 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
     angle = config.get("support_material_angle").get_float();
     closing_radius = config.get("support_material_closing_radius").get_float();
     spacing = config.get("support_material_spacing").get_float();
-    raft_first_layer_expansion = config.get("raft_first_layer_expansion").get_float();
-    brim_width = config.get("brim_width").get_float();
-    brim_width_interior = config.get("brim_width_interior").get_float();
 }
 
 Polys polygons(ClipperOperand &&result)
@@ -208,12 +199,6 @@ void rotate(Polys &polys, double angle)
 {
     for (uint32_t idx = 0; idx < polys.size(); ++idx)
         multipoint_rotate_origin(polygon_as_multipoint(polygons_at(polys.mutable_handle(), idx)), angle);
-}
-
-void reverse(Polys &polys)
-{
-    for (uint32_t idx = 0; idx < polys.size(); ++idx)
-        multipoint_reverse(polygon_as_multipoint(polygons_at(polys.mutable_handle(), idx)));
 }
 
 c_bounding_box extents(const Polys &polys)
@@ -446,56 +431,6 @@ void base_layers(const Run &run, const std::vector<Polys> &areas, Common::Genera
     trim_by_object(run, out.base);
 }
 
-// Enlarge the first base slab by the configured foot expansion without crossing the first object slice; subtract the configured brim from all bed-contacting slabs.
-void expand_feet(const Run &run, Common::GeneratedSupport &out)
-{
-    const Common::SupportParams &p = run.p;
-    const ClipperContext &clipper = run.clipper;
-    const coord_t first = scale_to_layer_coord(p.first_layer_height);
-    Polys interface(run.storage);
-    for (Common::GeneratorLayers *layers : {&out.top, &out.interfaces})
-        for (const Common::GeneratorLayer *layer : *layers)
-            if (layer->bottom_print_z() == 0)
-                interface.append_move_from(polygons(clipper_offset(clipper(layer->polygons), float(scale_d(EPSILON)), join_type, 0.)));
-    if (!out.base.empty() && out.base.front()->bottom_print_z() == 0) {
-        Polys &foot = out.base.front()->polygons;
-        const Polys trimming = polygons(clipper_offset(clipper(run.layers[0].slices()), double(p.gap_xy), join_type, 0.));
-        const double expansion = std::max(0., scale_d(run.raft_first_layer_expansion) - scale_d(EPSILON));
-        if (expansion > SCALED_EPSILON) {
-            const int steps = std::max(5, int(std::ceil(expansion / p.first_flow.width)));
-            for (int i = 0; i < steps; ++i)
-                foot = polygons(clipper_diff(clipper_offset(clipper(foot), float(expansion / steps)), clipper(trimming)));
-        } else foot = polygons(clipper_diff(clipper(foot), clipper(trimming)));
-        foot = polygons(clipper_diff(clipper(foot), clipper(interface)));
-        foot.ensure_valid(p.resolution);
-    }
-    if (has_brim(run)) {
-        Polys brim(run.storage);
-        const double distance = scale_d(run.brim_width);
-        const double round_tolerance = float(scale_d(0.1));
-        for (const ExPolygon slice : run.layers[0].slices()) {
-            if (run.brim_width > 0 && run.brim_width_interior > 0) brim.append_move_from(polygons(clipper_offset(clipper(slice), distance)));
-            else {
-                if (run.brim_width > 0)
-                    brim.append_move_from(polygons(clipper_offset(clipper(slice.contour()), distance, CLIPPER_JOIN_ROUND, round_tolerance)));
-                else brim.push_back(slice.contour());
-                Polys holes(run.storage);
-                for (const Polygon hole : slice.holes()) holes.push_back(hole);
-                if (run.brim_width_interior > 0) {
-                    reverse(holes);
-                    holes = polygons(clipper_offset(clipper(holes), -distance, CLIPPER_JOIN_ROUND, round_tolerance));
-                    reverse(holes);
-                }
-                brim.append_move_from(holes);
-            }
-        }
-        brim = polygons(clipper_union(clipper(brim)));
-        for (Common::GeneratorLayers *layers : {&out.top, &out.base, &out.interfaces})
-            for (Common::GeneratorLayer *layer : *layers)
-                if (layer->print_z <= first) layer->polygons = polygons(clipper_diff(clipper(layer->polygons), clipper(brim)));
-    }
-}
-
 // Map scaled polygon coordinates to grayscale pixels; holes follow polygon winding and the returned vector owns the complete raster.
 std::vector<unsigned char> rasterize(int size_x, int size_y, double pixel, c_point origin, const Polys &polys)
 {
@@ -707,13 +642,6 @@ Polys Grid::extract(coord_t offset, bool fill_holes) const
     }
     if (angle != 0) rotate(result, angle);
     return result;
-}
-
-bool has_brim(const Run &run)
-{
-    for (uint32_t idx = 0; idx < run.object.volume_count(); ++idx)
-        if (run.object.volume(idx).type() == RAW_VOLUME_TYPE_BRIM_PATCH) return true;
-    return run.brim_width > 0 && run.brim_width_interior > 0 && run.raft_layers <= 0;
 }
 
 } // namespace

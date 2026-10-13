@@ -5,7 +5,7 @@
    floors under the branches that stand on the model, the span between the extremes cut by the branch planner
    (TreeZPlanner.hpp), the object print Z values snapped into the slab bounds, the branches drawn in every slab (circles for
    tree, smoothed meshes for organic, TreeBranchMesh.hpp), the object outline removed, and the dense interfaces carved under the contacts and above the floors
-   (Common/SupportInterfaces.hpp). Without interface layers the contacts keep only the branches drawn in them.
+   (Common/SupportInterfaces.hpp), the first base slab widened on the bed, and the reserved brim area of the object removed from the first layer slabs. Without interface layers the contacts keep only the branches drawn in them.
    generate_tree_slabs() builds the same slabs from trees routed beforehand. Organic trees are smoothed first
    (TreeSmoothing.hpp), and their branches become branch slabs, tree branches sparse base slabs. Nothing is published here:
    the family publishes the slabs. */
@@ -31,7 +31,9 @@ void generate_tree_support(const plugin_run_context *context, const Print &print
                            slic3r_api::Support::Common::GeneratedSupport &out);
 
 // Fill out with the slabs of the given routed trees of one object, the contacts already in out.top. The same rules as
-// generate_tree_support(), without the routing; organic trees are smoothed in place before the slabs are built.
+// generate_tree_support(), without the routing; organic trees are smoothed in place before the slabs are built. As in the grid,
+// the first base slab is widened by raft_first_layer_expansion when it starts on the bed (Common::expand_first_layer_foot()), then the
+// reserved brim area of the object is removed from the slabs of the first layer (Common::remove_first_layer_brim()), which can empty them.
 void generate_tree_slabs(const plugin_run_context *context, const Print &print, const PrintObject &object, std::vector<RoutedTree> &trees,
                          bool organic, slic3r_api::Support::Common::GeneratedSupport &out);
 

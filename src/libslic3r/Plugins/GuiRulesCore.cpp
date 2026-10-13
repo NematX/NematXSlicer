@@ -90,6 +90,12 @@ const GuiCondition have_support = any_of({
     true_("support_material"),
     non_zero("raft_layers")
 });
+// A support foot exists: the support option, a raft, or enforced support layers (which build support without the option).
+const GuiCondition has_support_foot = any_of({
+    true_("support_material"),
+    non_zero("raft_layers"),
+    non_zero("support_material_enforce_layers")
+});
 const GuiCondition have_brim = any_of({
     non_zero("brim_width"),
     non_zero("brim_width_interior")
@@ -401,6 +407,9 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
     add_rule({ "support_material_synchronize_layers" }, all_of({ have_support, any_of({
         int_equals("support_material_style", int(SupportMaterialStyle::smsGrid)),
         int_equals("support_material_style", int(SupportMaterialStyle::smsSnug)) }) }));
+
+    // The first layer of every support style and of the raft: its density and the expansion of its foot.
+    add_rule({ "raft_first_layer_density", "raft_first_layer_expansion" }, has_support_foot);
 
     // raft
     add_rule({ "raft_contact_distance" }, all_of({

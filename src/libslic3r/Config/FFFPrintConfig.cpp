@@ -5262,7 +5262,7 @@ void init_fff_params(PrintConfigDef &definition)
 
     def = definition.add("raft_first_layer_density", coPercent, ptFFF);
     def->label = L("First layer density");
-    def->full_label = L("Raft first layer density");
+    def->full_label = L("Raft and support first layer density");
     def->category = OptionCategory::support;
     def->invalidates_step = STEP_SUPPORT;
     def->tooltip = L("Density of the first raft or support layer.");
@@ -5274,10 +5274,10 @@ void init_fff_params(PrintConfigDef &definition)
 
     def = definition.add("raft_first_layer_expansion", coFloat, ptFFF);
     def->label = L("First layer expansion");
-    def->full_label = L("Raft first layer expansion");
+    def->full_label = L("Raft and support first layer expansion");
     def->category = OptionCategory::support;
     def->invalidates_step = STEP_SUPPORT;
-    def->tooltip = L("Expansion of the first raft or support layer to improve adhesion to print bed.");
+    def->tooltip = L("Expansion of the first raft layer or of the foot of the support (grid, snug, tree and organic styles) to improve adhesion to the print bed. The expanded foot does not cross the object.");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comExpert | comPrusa;

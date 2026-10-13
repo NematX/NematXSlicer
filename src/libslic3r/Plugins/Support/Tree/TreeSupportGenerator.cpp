@@ -54,7 +54,11 @@
       at the middle of the contact, with the tip stretches that cross it, and the rebuilt contacts are trimmed by the bridge
       footprints again, from their own top; then clear_under_floors() removes the floor footprints from the base slabs and these
       contacts;
-   7. carve_interfaces() splits the dense interfaces out, and the base slabs take their branch type. */
+   7. carve_interfaces() splits the dense interfaces out; expand_first_layer_foot() then widens the first base slab when it
+      starts on the bed (the first tree base slab, or the first organic branch slab, whose flange follows it; tips on the bed
+      without a base slab are not widened) by raft_first_layer_expansion, and remove_first_layer_brim() cuts the reserved brim
+      area of the object out of the top, base and interface slabs of the first layer (a slab can end empty); the base slabs
+      take their branch type. */
 
 namespace Slic3r::TreeFamily {
 namespace Common = slic3r_api::Support::Common;
@@ -248,6 +252,8 @@ void generate_tree_slabs(const plugin_run_context *context, const Print &print, 
     }
     clear_under_floors(object, drawn_slabs, out.bottom);
     Common::carve_interfaces(params, false, out);
+    Common::expand_first_layer_foot(object_view, layers, params, out);
+    Common::remove_first_layer_brim(object_view, layers, params, out);
     for (Common::GeneratorLayer *slab : out.base)
         slab->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
 }

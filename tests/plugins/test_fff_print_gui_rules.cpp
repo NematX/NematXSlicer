@@ -307,6 +307,10 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
 
     const bool raft_soluble = config.opt_enum<SupportZDistanceType>("raft_contact_distance_type") == zdNone;
     set("raft_contact_distance", raft && !raft_soluble);
+    // The first layer foot and density apply to every support: the option, a raft or enforced layers.
+    const bool support_foot = supp || raft || i("support_material_enforce_layers") > 0;
+    set("raft_first_layer_density", support_foot);
+    set("raft_first_layer_expansion", support_foot);
     set("raft_expansion", raft);
     set("first_layer_acceleration_over_raft", raft);
     set("first_layer_speed_over_raft", raft);
@@ -565,6 +569,20 @@ TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rule
     for (const char *key : base_fill_keys)
         CHECK(raft_enabled.at(key));
     CHECK(raft_enabled.at("support_material_layer_height"));
+
+    // The first layer settings apply when support, a raft or enforced layers exist, and only then.
+    struct FootCase { bool support; int raft; int enforce; bool expected; };
+    for (const FootCase &foot_case : { FootCase{ false, 0, 0, false }, FootCase{ true, 0, 0, true }, FootCase{ false, 1, 0, true },
+                                       FootCase{ false, 0, 3, true } }) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.option<ConfigOptionBool>("support_material")->value = foot_case.support;
+        config.option<ConfigOptionInt>("raft_layers")->value = foot_case.raft;
+        config.option<ConfigOptionInt>("support_material_enforce_layers")->value = foot_case.enforce;
+        const EnabledMap enabled = rule_enabled(orchestrator, config);
+        INFO("support " << foot_case.support << " raft " << foot_case.raft << " enforce " << foot_case.enforce);
+        CHECK(enabled.at("raft_first_layer_expansion") == foot_case.expected);
+        CHECK(enabled.at("raft_first_layer_density") == foot_case.expected);
+    }
 }
 
 // Compare owned tower activation maps across enable/sequential/vase/parallel/tool combinations, requiring parallel-independent eligibility; no GUI code is loaded and assertion/configuration failures remain visible.
