@@ -68,6 +68,7 @@ const raw_used_config_key k_used_config_keys[] = {
     {"overhangs_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"perimeter_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"solid_infill_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"support_material_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"thin_walls_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"top_solid_infill_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"travel_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
@@ -584,7 +585,7 @@ struct AccelerationPartitionKey
 using AccelerationPartitions = std::map<AccelerationPartitionKey, RegionalProcessPartition>;
 using RegionalSettingsPartitions = std::map<RegionalSourceKey, RegionalSettingsPartition>;
 
-// Resolve role acceleration, then apply first-layer and machine limits.
+// Resolve role acceleration, including support-relative skirt/brim acceleration.
 double role_acceleration(const ExtrusionSettingsContext &context,
                          raw_extrusion_role role);
 
@@ -652,6 +653,17 @@ private:
     mutable AccelerationPartitions m_partitions;
 };
 
+/*
+Resolve a role's acceleration in mm/s² from the borrowed region, object and
+print settings. `context` supplies the default, first-layer and machine-limit
+values, while `role` selects the feature; skirt/brim percentages use support
+acceleration from `support_material_acceleration`, itself resolved from
+`default_acceleration`, and zero brim acceleration inherits that support value.
+First-layer and enabled extrusion machine limits cap the result. It returns
+zero when the default is unresolved and otherwise a nonnegative acceleration;
+it does not mutate or own configuration, and configuration lookup failures
+propagate.
+*/
 double role_acceleration(const ExtrusionSettingsContext &context,
                          raw_extrusion_role role)
 {
@@ -667,11 +679,13 @@ double role_acceleration(const ExtrusionSettingsContext &context,
     const double external = effective_value(region, "external_perimeter_acceleration", perimeter);
     const double solid = effective_value(region, "solid_infill_acceleration", acceleration);
     const double bridge = effective_value(region, "bridge_acceleration", acceleration);
+    const double support = effective_value(
+        context.object_config, "support_material_acceleration", acceleration);
 
     // Select the most specific role override while retaining the family
     // fallback for disabled or zero options.
     if (RAW_EXTRUSION_ROLE_IS_SKIRT(role))
-        acceleration = effective_value(context.object_config, "brim_acceleration", acceleration);
+        acceleration = effective_value(context.object_config, "brim_acceleration", support);
     else if (role == RAW_EXTRUSION_ROLE_GAP_FILL)
         acceleration = effective_value(region, "gap_fill_acceleration", perimeter);
     else if (role == RAW_EXTRUSION_ROLE_THIN_WALL)
