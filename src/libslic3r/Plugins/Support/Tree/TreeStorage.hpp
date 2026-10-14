@@ -1,9 +1,9 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* Native access to the plugin polygon collections of the tree family.
 
-   The tree family keeps its slabs in the plugin storage of the support, as the grid does, but routes and draws them with the
-   native polygon operations of libslic3r. A StoredPolygonCollection keeps native Polygons in its storage, so these helpers
-   read and write those Polygons directly, and the plugin API sees the same polygons afterwards:
+   Temporary bridge: only the slab drawing of TreeSupportGenerator.cpp and two test fixtures still use it, and this file is to be
+   deleted once they no longer do. A StoredPolygonCollection keeps native Polygons in its storage, so these helpers read and write
+   those Polygons directly, and the plugin API sees the same polygons afterwards:
 
        native_polygons(slab.polygons) = union_(native_polygons(slab.polygons)); */
 #ifndef plugins_support_tree_storage_hpp_

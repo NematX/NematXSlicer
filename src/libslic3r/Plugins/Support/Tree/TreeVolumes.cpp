@@ -67,21 +67,10 @@ struct MoveSteps {
     float last;
 };
 
-// Runs work once, with a scratch storage that is destroyed when work returns. Everything allocated from that storage must be
-// destroyed, or moved to another storage, before work returns. An exception thrown by work propagates to the caller.
-void with_scratch_storage(const std::function<void(storage_handle *)> &work);
 // A copy of the rings of a collection, allocated in the given storage.
 StoredPolygonCollection copy_of(storage_handle *storage, const PolygonCollection &source);
 // Cuts a maximum move into steps. A very short last step is avoided by stretching the other steps instead.
 MoveSteps split_move(const float max_move, const float move_step);
-
-void with_scratch_storage(const std::function<void(storage_handle *)> &work)
-{
-    slic3r_parallel_for_storage(0, 1, const_cast<std::function<void(storage_handle *)> *>(&work),
-        [](uint32_t, storage_handle *scratch_storage, void *user_data) {
-            (*static_cast<const std::function<void(storage_handle *)> *>(user_data))(scratch_storage);
-        });
-}
 
 StoredPolygonCollection copy_of(storage_handle *storage, const PolygonCollection &source)
 {

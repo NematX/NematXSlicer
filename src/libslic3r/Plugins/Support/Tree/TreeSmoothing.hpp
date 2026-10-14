@@ -14,6 +14,10 @@
 #include "libslic3r/Polygon.hpp"
 #include "TreeRouting.hpp"
 
+namespace Slic3r {
+class PrintObject;
+}
+
 namespace Slic3r::TreeFamily {
 
 // Relaxes the XY positions of the free nodes of the trees of one object in place and returns the number of iterations that ran.

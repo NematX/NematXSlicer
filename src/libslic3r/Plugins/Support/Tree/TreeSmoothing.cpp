@@ -146,7 +146,7 @@ std::vector<Sphere> make_spheres(const std::vector<RoutedTree> &trees, const std
             Sphere sphere;
             sphere.layer = node.layer;
             sphere.radius = unscaled(node.radius);
-            sphere.position = unscale_p(node.position);
+            sphere.position = Vec2d(unscaled(node.position.x), unscaled(node.position.y));
             sphere.below = below[idx] == no_node ? no_node : offset + below[idx];
             for (const size_t upper : node.carries)
                 sphere.above.push_back(offset + upper);
@@ -281,7 +281,11 @@ void write_back(const std::vector<Sphere> &spheres, std::vector<RoutedTree> &tre
     for (RoutedTree &tree : trees)
         for (TreeNode &node : tree.nodes) {
             if (!spheres[id].locked)
-                node.position = Point::new_scale(spheres[id].position);
+                {
+                    // The sphere is in millimeters and native; the node holds an API point.
+                    const Point scaled = Point::new_scale(spheres[id].position);
+                    node.position = c_point{ scaled.x(), scaled.y() };
+                }
             ++id;
         }
 }

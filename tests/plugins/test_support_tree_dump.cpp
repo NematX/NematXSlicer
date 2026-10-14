@@ -67,7 +67,7 @@ const std::vector<DumpCase> &dump_cases();
 // Builds a fresh print for every case and records it in one thread (slicing included); the dump of all the cases.
 Dump make_dump();
 // Records one case on a sliced print: settings, volumes, then routing and slabs when the case asks for them.
-void dump_one(Dump &dump, const DumpCase &current, const Print &print);
+void dump_one(Dump &dump, const DumpCase &current, Print &print);
 // Records every field of TreeSettings and the maximum moves of the layers as text.
 void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings &settings);
 // Records the TreeVolumes areas of a fixed list of keys as canonical rings.
@@ -98,6 +98,11 @@ const std::vector<DumpCase> &dump_cases()
         {"tbridge-tree", 1, "tree", 3, {}, true},
         {"shelf-tree", 2, "tree", 3, {}, true},
         {"shelf-organic", 2, "organic", 3, {}, true},
+        // The same objects with a sparse base without sheath: the tips are sampled along supportbase lines (the default base, sheathed, is rectilinear).
+        {"slab-tree-sparse", 0, "tree", 3, {{"support_material_with_sheath", "0"}}, true},
+        {"tbridge-tree-sparse", 1, "tree", 3, {{"support_material_with_sheath", "0"}}, true},
+        {"shelf-tree-sparse", 2, "tree", 3, {{"support_material_with_sheath", "0"}}, true},
+        {"shelf-organic-sparse", 2, "organic", 3, {{"support_material_with_sheath", "0"}}, true},
         {"volumes-scene", 3, "tree", 3, {{"support_material_xy_spacing", "3"}}, false},
         {"volumes-scene-buildplate", 3, "tree", 3, {{"support_material_xy_spacing", "3"}, {"support_material_buildplate_only", "1"}}, false},
     };
@@ -127,7 +132,7 @@ Dump make_dump()
     return dump;
 }
 
-void dump_one(Dump &dump, const DumpCase &current, const Print &print)
+void dump_one(Dump &dump, const DumpCase &current, Print &print)
 {
     const std::string prefix = current.name;
     const PrintObject &object = print.object(0);
@@ -234,7 +239,7 @@ void dump_routing(Dump &dump, const std::string &base, const std::vector<TF::Rou
             for (const size_t carried : node.carries)
                 carries += std::to_string(carried) + " ";
             record.lines.push_back("node " + std::to_string(n) + " layer=" + std::to_string(node.layer) + " print_z=" + ST::number(node.print_z) +
-                " x=" + std::to_string((long long) node.position.x()) + " y=" + std::to_string((long long) node.position.y()) +
+                " x=" + std::to_string((long long) node.position.x) + " y=" + std::to_string((long long) node.position.y) +
                 " radius=" + std::to_string((long long) node.radius) + " to_buildplate=" + (node.to_buildplate ? "1" : "0") +
                 " to_model_gracious=" + (node.to_model_gracious ? "1" : "0") + " lost=" + (node.lost ? "1" : "0") +
                 " verylost=" + (node.verylost ? "1" : "0") + " carries=" + carries);

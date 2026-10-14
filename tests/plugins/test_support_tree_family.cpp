@@ -41,23 +41,16 @@ constexpr double tolerance_mm = 0.01;
 struct TreeSlabs {
     PluginStorage storage;
     Common::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
-    TreeSlabs(const Print &print, bool organic)
+    TreeSlabs(Print &print, bool organic)
     {
-        TF::generate_tree_support(nullptr, print, print.object(0), organic, support);
+        const Slic3r::Test::SupportTree::SupportPatternContext patterns(print, reinterpret_cast<storage_handle *>(&storage));
+        TF::generate_tree_support(patterns.context(), print, print.object(0), organic, support);
     }
 };
 
-// The routed trees of the first object of a sliced print, with the storage that owns the contacts they support.
-struct Routed {
-    PluginStorage storage;
-    Common::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
-    const Common::SupportParams params;
-    const TF::TreeSettings settings;
-    std::vector<TF::RoutedTree> trees;
-    explicit Routed(const Print &print)
-        : params(SG::params(print, print.object(0))), settings(Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params)),
-          trees(TF::route_trees(print, print.object(0), params, settings, support)) {}
-};
+using Routed = Slic3r::Test::SupportTree::Routed;
+using Slic3r::Test::SupportTree::to_c_point;
+using Slic3r::Test::SupportTree::to_point;
 
 // Distance in millimeters from a point to the region of the polygons: zero inside, else to the nearest outline.
 double distance_to_region_mm(const Point &point, const Polygons &polygons)
@@ -323,11 +316,11 @@ TEST_CASE("A diagonal branch with build plate only takes thinner slabs for a sma
         double largest_travel_mm = 0.;
         for (const TF::RoutedTree &tree : routed.trees) {
             if (tree.nodes.empty()) continue;
-            largest_travel_mm = std::max(largest_travel_mm, unscaled((tree.nodes.front().position - tree.nodes.back().position).cast<double>().norm()));
+            largest_travel_mm = std::max(largest_travel_mm, unscaled((to_point(tree.nodes.front().position) - to_point(tree.nodes.back().position)).cast<double>().norm()));
             for (const TF::TreeNode &lower : tree.nodes)
                 for (const size_t upper_idx : lower.carries) {
                     const TF::TreeNode &upper = tree.nodes[upper_idx];
-                    const double shift_mm = unscaled((upper.position - lower.position).cast<double>().norm());
+                    const double shift_mm = unscaled((to_point(upper.position) - to_point(lower.position)).cast<double>().norm());
                     const double height_mm = upper.print_z - lower.print_z;
                     if (height_mm > 0. && shift_mm >= 0.5 * height_mm) {
                         inclined_bottom = std::min(inclined_bottom, lower.print_z);
@@ -445,7 +438,7 @@ TEST_CASE("Tree contacts without interface layers publish the branches under the
     for (const TF::RoutedTree &tree : routed.trees)
         for (const TF::TreeNode &node : tree.nodes)
             if (node.carries.empty() && node.layer + 1 < object.layer_count())
-                tips.push_back(node.position);
+                tips.push_back(to_point(node.position));
     REQUIRE_FALSE(tips.empty());
     Polygons contact_area;
     std::vector<coord_t> contact_zs;
@@ -521,7 +514,7 @@ TEST_CASE("Tips below a thin contact are published at its Z", "[plugins][support
         for (const TF::TreeNode &node : tree.nodes)
             if (node.carries.empty() && node.layer + 1 < object.layer_count()) {
                 ++tips;
-                CHECK(distance_to_region_mm(node.position, published) <= tolerance_mm);
+                CHECK(distance_to_region_mm(to_point(node.position), published) <= tolerance_mm);
             }
     REQUIRE(tips > 0);
 }
@@ -673,7 +666,7 @@ TEST_CASE("Tree tips keep their circle at the routing XY distance", "[plugins][s
                 if (middle < bottom || middle > top)
                     continue;
                 ++drawn;
-                CHECK(distance_to_region_mm(node.position, SG::native(slab->polygons)) <= tolerance_mm);
+                CHECK(distance_to_region_mm(to_point(node.position), SG::native(slab->polygons)) <= tolerance_mm);
             }
             CHECK(drawn > 0);
         }
@@ -712,12 +705,12 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     TF::TreeNode upper;
     upper.layer = root_layer + 1;
     upper.print_z = object.layer(root_layer + 1).unscaled_print_z();
-    upper.position = centre;
+    upper.position = to_c_point(centre);
     upper.radius = settings.branch_radius;
     TF::TreeNode root;
     root.layer = root_layer;
     root.print_z = object.layer(root_layer).unscaled_print_z();
-    root.position = centre;
+    root.position = to_c_point(centre);
     root.radius = settings.branch_radius;
     root.carries = { 0 };
     PluginStorage storage;
@@ -969,12 +962,12 @@ TEST_CASE("Tree floors keep the gap and the contact footprint free of branch sur
     TF::TreeNode upper;
     upper.layer = root_layer + 1;
     upper.print_z = object.layer(root_layer + 1).unscaled_print_z();
-    upper.position = centre;
+    upper.position = to_c_point(centre);
     upper.radius = settings.branch_radius;
     TF::TreeNode root;
     root.layer = root_layer;
     root.print_z = object.layer(root_layer).unscaled_print_z();
-    root.position = centre;
+    root.position = to_c_point(centre);
     root.radius = settings.branch_radius;
     root.carries = { 0 };
     PluginStorage storage;
@@ -1022,12 +1015,12 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
         TF::TreeNode upper;
         upper.layer = tip_layer;
         upper.print_z = object.layer(tip_layer).unscaled_print_z();
-        upper.position = centre;
+        upper.position = to_c_point(centre);
         upper.radius = settings.branch_radius;
         TF::TreeNode foot;
         foot.layer = foot_layer;
         foot.print_z = object.layer(foot_layer).unscaled_print_z();
-        foot.position = centre;
+        foot.position = to_c_point(centre);
         foot.radius = settings.branch_radius;
         foot.carries = { 0 };
         TF::RoutedTree pillar;
@@ -1035,7 +1028,7 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
             TF::TreeNode node;
             node.layer = layer;
             node.print_z = object.layer(layer).unscaled_print_z();
-            node.position = Point::new_scale(30., 30.);
+            node.position = to_c_point(Point::new_scale(30., 30.));
             node.radius = settings.branch_radius;
             if (layer < tip_layer)
                 node.carries = { pillar.nodes.size() - 1 };
@@ -1256,7 +1249,7 @@ TF::RoutedTree chain_tree(const PrintObject &object, const std::vector<ChainPoin
         TF::TreeNode node;
         node.layer = points[idx].layer;
         node.print_z = object.layer(node.layer).unscaled_print_z();
-        node.position = Point::new_scale(points[idx].x_mm, points[idx].y_mm);
+        node.position = to_c_point(Point::new_scale(points[idx].x_mm, points[idx].y_mm));
         node.radius = scale_to_layer_coord(0.4);
         if (idx > 0)
             node.carries = { idx - 1 };
@@ -1267,7 +1260,7 @@ TF::RoutedTree chain_tree(const PrintObject &object, const std::vector<ChainPoin
 // A node in millimeters: its XY position and its print Z.
 Vec3d node_mm(const TF::TreeNode &node)
 {
-    return Vec3d(unscaled(node.position.x()), unscaled(node.position.y()), node.print_z);
+    return Vec3d(unscaled(node.position.x), unscaled(node.position.y), node.print_z);
 }
 // The sharpest turning angle of a tree in degrees: at each node with one node below and one above, the angle between the
 // segment from the node below and the segment to the node above.
@@ -1339,11 +1332,11 @@ TEST_CASE("Organic smoothing moves the nodes of a bent branch and keeps them out
         for (size_t idx = 0; idx < smoothed[tree_id].nodes.size(); ++idx) {
             const TF::TreeNode &raw = routed.trees[tree_id].nodes[idx];
             const TF::TreeNode &node = smoothed[tree_id].nodes[idx];
-            if (node.position != raw.position) {
+            if (to_point(node.position) != to_point(raw.position)) {
                 ++moved;
-                largest_move_mm = std::max(largest_move_mm, unscaled((node.position - raw.position).cast<double>().norm()));
+                largest_move_mm = std::max(largest_move_mm, unscaled((to_point(node.position) - to_point(raw.position)).cast<double>().norm()));
             }
-            const double clearance_mm = distance_to_region_mm(node.position, keep_out[node.layer]);
+            const double clearance_mm = distance_to_region_mm(to_point(node.position), keep_out[node.layer]);
             const bool free = !node.carries.empty() && (below[idx] != TF::no_node || node.layer == 0);
             CAPTURE(tree_id, idx, node.layer, clearance_mm);
             CHECK(clearance_mm > 0.);
@@ -1370,14 +1363,14 @@ TEST_CASE("Organic relaxation smooths a collision-free bent branch until its ben
     std::vector<TF::RoutedTree> trees{ bent_branch(object) };
     // Guard: the fixture starts clear of the outline, so the branch is collision-free.
     for (const TF::TreeNode &node : trees.front().nodes)
-        REQUIRE(distance_to_region_mm(node.position, keep_out[node.layer]) > unscaled(node.radius));
+        REQUIRE(distance_to_region_mm(to_point(node.position), keep_out[node.layer]) > unscaled(node.radius));
     const std::vector<TF::TreeNode> raw = trees.front().nodes;
     const double bend_before = sharpest_bend_deg(trees.front());
     const size_t iterations = TF::smooth_organic_branches(object, keep_out, trees, [] {});
     const double bend_after = sharpest_bend_deg(trees.front());
     size_t moved = 0;
     for (size_t idx = 0; idx < raw.size(); ++idx)
-        moved += trees.front().nodes[idx].position != raw[idx].position ? 1 : 0;
+        moved += to_point(trees.front().nodes[idx].position) != to_point(raw[idx].position) ? 1 : 0;
     CAPTURE(iterations, bend_before, bend_after, moved);
     CHECK(moved == 3);
     CHECK(bend_after <= 0.5 * bend_before);
@@ -1404,7 +1397,7 @@ TEST_CASE("Organic relaxation stops once the nodes settle and never runs past it
     SECTION("a node that keeps moving runs to the cap") {
         std::vector<TF::RoutedTree> trees{ stray_node_branch(object) };
         const size_t iterations = TF::smooth_organic_branches(object, keep_out, trees, [] {});
-        const double x_mm = unscaled(trees.front().nodes[1].position.x());
+        const double x_mm = unscaled(trees.front().nodes[1].position.x);
         CAPTURE(iterations, x_mm);
         CHECK(iterations == 100);
         CHECK(std::abs(x_mm - 5.) <= tolerance_mm);
@@ -1426,7 +1419,7 @@ TEST_CASE("Organic relaxation leaves the trees unchanged when the cancel callbac
     REQUIRE_THROWS_AS(TF::smooth_organic_branches(object, keep_out, trees, [] { throw std::runtime_error("cancelled"); }),
         std::runtime_error);
     for (size_t idx = 0; idx < raw.size(); ++idx)
-        CHECK(trees.front().nodes[idx].position == raw[idx].position);
+        CHECK(to_point(trees.front().nodes[idx].position) == to_point(raw[idx].position));
 }
 
 // The branch meshes of the organic style fill the branches that the circles of the tree style fill. Their volume stays within a
@@ -1562,12 +1555,12 @@ TEST_CASE("Branch meshes slice where their tilted end caps reach beyond the pole
     TF::TreeNode upper;
     upper.layer = 6;
     upper.print_z = 1.2;
-    upper.position = Point::new_scale(0.28, 0.);
+    upper.position = to_c_point(Point::new_scale(0.28, 0.));
     upper.radius = scale_to_layer_coord(0.4);
     TF::TreeNode lower;
     lower.layer = 5;
     lower.print_z = 1.0;
-    lower.position = Point::new_scale(0., 0.);
+    lower.position = to_c_point(Point::new_scale(0., 0.));
     lower.radius = scale_to_layer_coord(0.4);
     lower.carries = { 0 };
     TF::RoutedTree tree;
@@ -1780,7 +1773,7 @@ TEST_CASE("Tree floors keep the bridge footprint out of the bridge thread band",
         TF::TreeNode node;
         node.layer = layer;
         node.print_z = object.layer(layer).unscaled_print_z();
-        node.position = position;
+        node.position = to_c_point(position);
         node.radius = settings.branch_radius;
         if (!branch.nodes.empty())
             node.carries = { branch.nodes.size() - 1 };

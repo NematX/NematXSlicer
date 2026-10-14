@@ -20,7 +20,9 @@
    6. point_in_polygons: where a point lies relative to a set of rings (the border counts as inside);
    7. nearest_on_lines: the closest point of a set of line segments;
    8. spatial_order: the order the native AABB tree gives to its input;
-   9. Clipper wrappers on storage-owned results.
+   9. Clipper wrappers on storage-owned results;
+   10. with_scratch_storage: a storage that lives for the duration of one computation;
+   11. make_circle and move_inside_if_outside.
 
    Clipper results (rings, expolygons) are not ordered like the native ones, and their rings start at other points: compare them
    as regions, never with operator==.
@@ -39,6 +41,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <optional>
 #include <utility>
@@ -370,6 +373,30 @@ slic3r_api::StoredPolygonCollection clip_polygons_with_subject_bbox(storage_hand
 // clip), like diff_clipped().
 slic3r_api::StoredPolygonCollection diff_clipped(storage_handle *storage, const slic3r_api::PolygonCollection &subject,
                                                  const slic3r_api::PolygonCollection &clip);
+
+/* ============================== 10. scratch storage ============================== */
+
+// Runs work once, with a scratch storage that is destroyed when work returns, so that the temporary collections of a computation
+// do not stay in the run storage. Everything allocated from that storage must be destroyed, or moved to another storage
+// (StoredPolygonCollection::move_from), before work returns. An exception thrown by work propagates to the caller.
+void with_scratch_storage(const std::function<void(storage_handle *)> &work);
+
+/* ============================== 11. circles and move inside ============================== */
+
+// The points of a regular polygon centred on the origin, like the native make_circle(): `error` is the largest distance between a side
+// and the true circle (scaled units); it is turned into a number of sides before any point is made. The points go counter-clockwise,
+// starting at angle 0; their coordinates are truncated towards zero, so for a fractional radius the first point is (trunc(radius), 0),
+// not exactly (radius, 0). Needs radius > 0 and 0 < error < 2 * radius.
+std::vector<c_point> make_circle(double radius, double error);
+
+// The point itself when it lies inside the rings (point_in_polygons(), border inside), else the closest point of the border of the rings
+// (the foot of the point on an edge, or a vertex), like the native move_inside_if_outside() with a distance of 0 and no limit.
+// The foot is cut to integers, so it approximates the border and may lie slightly outside the rings. Coordinates and their differences
+// must stay below about 2^30 scaled units (1000 mm): the squared distances are int64. With no candidate (no ring of 2 points or more),
+// `from` is returned unchanged. The first ring and the first edge win an exact distance tie, as natively; the rings of a Clipper
+// output are not in the order of the native one, so on a tie between two rings at different points the result may differ from the
+// native one (none occurs on the tree dump scenes; see the tests "move_inside_if_outside ...").
+c_point move_inside_if_outside(const slic3r_api::PolygonCollection &polygons, c_point from);
 
 } // namespace Slic3r::TreeFamily
 

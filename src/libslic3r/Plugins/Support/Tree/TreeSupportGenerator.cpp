@@ -88,6 +88,9 @@ struct RootRest {
     coord_t radius = 0;
 };
 
+// The node positions are API points (c_point) since the routing moved to the API; this file still draws with native points.
+Point native_point(c_point point) { return Point(point.x, point.y); }
+
 // Indices of the nodes that no node carries: the lowest nodes of the branches, where they stop.
 std::vector<size_t> root_nodes(const RoutedTree &tree);
 // Where a root that stands on the model comes to rest: the object layer below it that takes its unsupported part, or none
@@ -192,7 +195,7 @@ void generate_tree_support(const plugin_run_context *context, const Print &print
     const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&object));
     const Common::SupportParams params(print_view, object_view);
     const TreeSettings settings(object_view, print_view, params);
-    std::vector<RoutedTree> trees = route_trees(print, object, params, settings, out);
+    std::vector<RoutedTree> trees = route_trees(print_view, object_view, params, settings, out, context);
     generate_tree_slabs(context, print, object, trees, organic, out);
 }
 
@@ -298,8 +301,8 @@ RootRest root_rest(const PrintObject &object, const TreeNode &root, const std::v
     const double stop_area = std::max(0.2 * M_PI * sqr(double(root.radius)), 0.5 * M_PI * sqr(double(settings.branch_radius)));
     const LayerIndex lowest = root.verylost ? 0 :
         std::max<LayerIndex>(0, LayerIndex(root.layer) - LayerIndex(5. * double(root.radius) / double(settings.layer_height)));
-    Polygons unsupported{ branch_circle(root.position.cast<double>(), root.radius) };
-    RootRest rest{ root.layer, -1, 0, root.position, root.radius };
+    Polygons unsupported{ branch_circle(native_point(root.position).cast<double>(), root.radius) };
+    RootRest rest{ root.layer, -1, 0, native_point(root.position), root.radius };
     for (LayerIndex layer = LayerIndex(root.layer) - 1; layer >= lowest; --layer) {
         unsupported = diff(unsupported, keep_out[size_t(layer)]);
         if (area(unsupported) < stop_area) {
@@ -320,7 +323,7 @@ std::vector<RootRest> root_rests(const PrintObject &object, const std::vector<Ro
         for (const size_t idx : root_nodes(tree)) {
             const TreeNode &root = tree.nodes[idx];
             if (root.layer == 0)
-                rests.push_back(RootRest{ 0, -1, 0, root.position, root.radius });
+                rests.push_back(RootRest{ 0, -1, 0, native_point(root.position), root.radius });
             else if (!root.to_buildplate)
                 rests.push_back(root_rest(object, root, keep_out, settings));
         }
@@ -338,11 +341,11 @@ std::vector<Segment> branch_segments(const PrintObject &object, const std::vecto
         for (const TreeNode &node : tree.nodes) {
             const coord_t z = object.layer(node.layer).scaled_print_z();
             if (node.carries.empty() && node.layer + 1 < layer_count)
-                segments.push_back(Segment{ z, object.layer(node.layer + 1).scaled_print_z(), node.position, node.position,
+                segments.push_back(Segment{ z, object.layer(node.layer + 1).scaled_print_z(), native_point(node.position), native_point(node.position),
                     node.radius, node.radius, node.layer + 1 });
             for (const size_t upper : node.carries) {
                 const TreeNode &above = tree.nodes[upper];
-                segments.push_back(Segment{ z, object.layer(above.layer).scaled_print_z(), node.position, above.position,
+                segments.push_back(Segment{ z, object.layer(above.layer).scaled_print_z(), native_point(node.position), native_point(above.position),
                     node.radius, above.radius, above.layer });
             }
         }
@@ -808,7 +811,7 @@ Polygons tip_circles(const std::vector<RoutedTree> &trees, const PrintObject &ob
             if (!node.carries.empty() || node.layer + 1 >= object.layer_count())
                 continue;
             if (object.layer(node.layer).scaled_print_z() <= middle_z && object.layer(node.layer + 1).scaled_print_z() >= middle_z)
-                circles.push_back(branch_circle(node.position.cast<double>(), node.radius));
+                circles.push_back(branch_circle(native_point(node.position).cast<double>(), node.radius));
         }
     return circles;
 }

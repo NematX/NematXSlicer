@@ -4,6 +4,8 @@
 #include <cassert>
 #include <cmath>
 
+#include "libslic3r/Api/plugin/c/slic3r_utils.h"
+
 /* Implementation of the geometry helpers of the tree support family (see TreeGeometry.hpp).
 
    Most helpers read the rings of a polygon collection through multipoint_const_view, a pointer and a count over the points of a
@@ -14,6 +16,8 @@
 namespace Slic3r::TreeFamily {
 
 namespace {
+// The points of a regular polygon of num_segments sides centred on the origin.
+std::vector<c_point> make_circle_num_segments(double radius, size_t num_segments);
 // Where a point lies relative to one ring: 0 outside, 1 inside, -1 on the border (the test of ClipperLib::PointInPolygon).
 int ring_crossing(const multipoint_const_view &ring, c_point point);
 // The squared distance from a point to the segment a-b; the closest point of the segment is written to `closest`.
@@ -210,7 +214,101 @@ slic3r_api::StoredPolygonCollection diff_clipped(storage_handle *storage, const 
     return slic3r_api::clipper_diff(clipper(subject), trimmed_clip).to_polygon_collection();
 }
 
+// A job of one index: the host builds the scratch storage, runs the job on this thread (or a worker) and destroys the storage.
+void with_scratch_storage(const std::function<void(storage_handle *)> &work)
+{
+    slic3r_parallel_for_storage(0, 1, const_cast<std::function<void(storage_handle *)> *>(&work),
+        [](uint32_t, storage_handle *scratch_storage, void *user_data) {
+            (*static_cast<const std::function<void(storage_handle *)> *>(user_data))(scratch_storage);
+        });
+}
+
+// The sides are counted from the angle one side must span for the sagitta (radius - radius * cos(angle / 2)) to stay under `error`;
+// that count is computed in doubles before the points are made. Needs radius > 0 and 0 < error < 2 * radius (acos of a value in
+// [-1, 1)); the native function has the same domain.
+std::vector<c_point> make_circle(double radius, double error)
+{
+    const double angle = 2. * acos(1. - error / radius);
+    const size_t num_segments = size_t(ceil(2. * PI / angle));
+    return make_circle_num_segments(radius, num_segments);
+}
+
+// For each ring in order, for each edge a-b in the order of the ring (the edge that closes the ring comes first), the closest point of the
+// edge to `from` is looked for: the foot of `from` when its projection falls inside the edge, the vertex a when it falls before the
+// start of the edge and the previous edge's projection fell beyond its end (a reflex corner seen from outside, the case "> ."), nothing
+// otherwise. A candidate replaces the best one only when its distance is strictly smaller, so the first ring and the first edge win an
+// exact tie. Same algorithm as the native move_inside() with a distance of 0 and no distance limit. When no ring gives a candidate
+// (no ring of 2 points or more), `from` is returned unchanged.
+// The products of the squared distances are int64: coordinates (and differences) must stay below about 2^30 scaled units (1000 mm).
+// The foot is cut towards zero to integers, so it only approximates the border and may lie slightly outside the rings.
+c_point move_inside_if_outside(const slic3r_api::PolygonCollection &polygons, c_point from)
+{
+    if (point_in_polygons(polygons, from))
+        return from;
+    c_point best_point = from;
+    double best_distance2 = std::numeric_limits<double>::max();
+    for (uint32_t ring_idx = 0; ring_idx < polygons.size(); ++ring_idx) {
+        const multipoint_const_view ring = polygons.at(ring_idx).view();
+        if (ring.size < 2)
+            continue;
+        c_point p1 = ring.array[ring.size - 1];
+        // Whether `from` projects beyond the end of the closing edge (the one before the first edge), compared with squared lengths to avoid dividing.
+        const c_point closing_edge = p1 - ring.array[ring.size - 2];
+        bool projected_beyond_prev_edge = dot(closing_edge, from - ring.array[ring.size - 2]) >= squared_norm(closing_edge);
+        for (uint32_t point_idx = 0; point_idx < ring.size; ++point_idx) {
+            const c_point p2 = ring.array[point_idx];
+            const c_point a = p1;
+            const c_point ab = p2 - a;
+            const int64_t ab_length2 = squared_norm(ab);
+            if (ab_length2 <= 0) {
+                // Two equal adjacent points: skip only one of them.
+                p1 = p2;
+                continue;
+            }
+            const int64_t dot_prod = dot(ab, from - a);
+            if (dot_prod <= 0) {
+                // `from` projects before the edge.
+                if (projected_beyond_prev_edge) {
+                    projected_beyond_prev_edge = false;
+                    const int64_t distance2 = squared_norm(a - from);
+                    if (distance2 < best_distance2) {
+                        best_distance2 = distance2;
+                        best_point = a;
+                    }
+                }
+            } else if (dot_prod >= ab_length2) {
+                // `from` projects beyond the edge.
+                projected_beyond_prev_edge = true;
+            } else {
+                // `from` projects inside the edge: the foot point, cut towards zero like the native cast.
+                projected_beyond_prev_edge = false;
+                const c_point foot = a + truncated_point(to_vec2d(ab) * (double(dot_prod) / double(ab_length2)));
+                const int64_t distance2 = squared_norm(from - foot);
+                if (distance2 < best_distance2) {
+                    best_distance2 = distance2;
+                    best_point = foot;
+                }
+            }
+            p1 = p2;
+        }
+    }
+    return best_point;
+}
 namespace {
+// Point i is at the angle 2 pi i / num_segments; the coordinates are cut towards zero like the native make_circle_num_segments(), so
+// the first point is (trunc(radius), 0) and not exactly (radius, 0) for a fractional radius.
+std::vector<c_point> make_circle_num_segments(double radius, size_t num_segments)
+{
+    std::vector<c_point> out;
+    out.reserve(num_segments);
+    const double angle_inc = 2. * PI / num_segments;
+    for (size_t i = 0; i < num_segments; ++i) {
+        const double angle = angle_inc * i;
+        out.push_back(c_point{ coord_t(cos(angle) * radius), coord_t(sin(angle) * radius) });
+    }
+    return out;
+}
+
 int ring_crossing(const multipoint_const_view &ring, c_point point)
 {
     // See "The Point in Polygon Problem for Arbitrary Polygons" by Hormann & Agathos. The result flips each time the ray going

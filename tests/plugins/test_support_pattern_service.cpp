@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <mutex>
@@ -14,13 +15,16 @@
 
 #include "plugin_test_helpers.hpp"
 #include "probe_pattern_plugin.hpp"
+#include "support_pattern_test_context.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
+#include "libslic3r/Api/plugin/cpp/PatternService.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Fill/FillBase.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Plugins/Infill/PatternPluginHelpers.hpp"
 #include "libslic3r/Print.hpp"
@@ -540,4 +544,296 @@ TEST_CASE("STEP_SUPPORT payload keeps its 1.1 members first and compiles as C", 
                                   const surface_handle *, const expolygon_collection_handle *, const raw_infill_pattern_params *,
                                   extrusion_entity_handle *) -> int32_t { return int32_t(id) + 1; };
     CHECK(test_support_pattern_callbacks_c(&payload) == 8 * 1000 + 7);
+}
+
+
+/* ===================== slic3r_api::PatternService (the wrapper of the tip sampler) ===================== */
+namespace {
+// The legacy recipe of the tree tips: the support flow, one branch distance between the lines.
+struct TipFill {
+    Flow flow = Flow::new_from_width(0.44f, 0.4f, 0.2f, 1.f);
+    coord_t branch_distance = scale_i(2.);
+    // The connection the legacy filler is given: the legacy tip filler used the default (connected).
+    InfillConnection connection = icConnected;
+    float angle = 0.f;
+    uint32_t layer_id = 0;
+};
+
+// c_flow of a native flow, as the host converts it.
+c_flow to_c_flow(const Flow &flow)
+{
+    c_flow out = {};
+    out.width = flow.scaled_width();
+    out.spacing = flow.scaled_spacing();
+    out.height = flow.scaled_height();
+    out.nozzle_diameter = scale_i(flow.nozzle_diameter());
+    out.is_bridge = flow.bridge() ? 1 : 0;
+    out.spacing_ratio = flow.spacing_ratio();
+    out.mm3_per_mm = flow.mm3_per_mm();
+    return out;
+}
+
+// What the legacy generate_support_infill_lines() did for one expolygon: Fill::new_from_type, the density of the branch distance,
+// dont_adjust, the angle and the layer; a failed fill (InfillFailedException) gave no line.
+std::vector<std::vector<Point>> legacy_lines(InfillPattern pattern, const ExPolygon &area, const TipFill &tip)
+{
+    std::unique_ptr<Fill> filler(Fill::new_from_type(pattern));
+    PrintRegionConfig region_config;
+    FillParams fill_params;
+    filler->layer_id = tip.layer_id;
+    filler->angle = tip.angle;
+    fill_params.density = float(scale_d(tip.flow.spacing()) / (scale_d(tip.flow.spacing()) + float(tip.branch_distance)));
+    fill_params.dont_adjust = true;
+    fill_params.connection = tip.connection;
+    fill_params.config = &region_config;
+    filler->init_spacing(tip.flow.spacing(), fill_params);
+    Surface surface(stPosInternal | stDensSparse, area);
+    std::vector<std::vector<Point>> lines;
+    try {
+        for (const Polyline &polyline : filler->fill_surface(&surface, fill_params))
+            lines.emplace_back(polyline.points.begin(), polyline.points.end());
+    } catch (InfillFailedException &) {
+    }
+    return lines;
+}
+
+// The lines of the wrapper for the same fill.
+std::vector<std::vector<Point>> wrapper_lines(const slic3r_api::PatternService &patterns, storage_handle *storage, const char *pattern_id,
+                                              const ExPolygon &area, const TipFill &tip)
+{
+    slic3r_api::PatternService::Fill fill;
+    fill.flow = to_c_flow(tip.flow);
+    fill.spacing = tip.flow.spacing();
+    fill.density = float(scale_d(tip.flow.spacing()) / (scale_d(tip.flow.spacing()) + float(tip.branch_distance)));
+    fill.angle = tip.angle;
+    fill.layer_id = tip.layer_id;
+    const raw_infill_pattern_params recipe = slic3r_api::PatternService::recipe(patterns.resolve(pattern_id), fill);
+    std::vector<std::vector<Point>> lines;
+    for (const std::vector<c_point> &line : patterns.fill_lines(storage, slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&area)), recipe)) {
+        lines.emplace_back();
+        for (const c_point &point : line)
+            lines.back().emplace_back(point.x, point.y);
+    }
+    return lines;
+}
+
+// Whether the two sets of pieces are the same pieces, in any order and direction, each point within tolerance scaled units (the plugin
+// and the native honeycomb round their float arithmetic differently, by a few units, more once the pattern is rotated).
+bool same_pieces(const std::vector<std::vector<Point>> &a, const std::vector<std::vector<Point>> &b, coord_t tolerance)
+{
+    if (a.size() != b.size())
+        return false;
+    std::vector<bool> used(b.size(), false);
+    for (const std::vector<Point> &piece : a) {
+        bool found = false;
+        for (size_t idx = 0; idx < b.size() && !found; ++idx) {
+            if (used[idx] || b[idx].size() != piece.size())
+                continue;
+            for (const bool reversed : {false, true}) {
+                bool same = true;
+                for (size_t k = 0; k < piece.size() && same; ++k) {
+                    const Point &other = b[idx][reversed ? piece.size() - 1 - k : k];
+                    same = std::abs(piece[k].x() - other.x()) <= tolerance && std::abs(piece[k].y() - other.y()) <= tolerance;
+                }
+                if (same) {
+                    used[idx] = found = true;
+                    break;
+                }
+            }
+        }
+        if (!found)
+            return false;
+    }
+    return true;
+}
+double length_mm(const std::vector<std::vector<Point>> &lines)
+{
+    double total = 0.;
+    for (const std::vector<Point> &line : lines)
+        for (size_t idx = 1; idx < line.size(); ++idx)
+            total += unscaled((line[idx] - line[idx - 1]).cast<double>().norm());
+    return total;
+}
+
+// Shapes of the tips: a square, an L, a square with a hole, a rectangle that is not aligned with the axes.
+std::vector<std::pair<std::string, ExPolygon>> tip_shapes()
+{
+    std::vector<std::pair<std::string, ExPolygon>> shapes;
+    shapes.emplace_back("square", test_square());
+    ExPolygon l_shape(Polygon({Point(0, 0), Point(scale_i(14.), 0), Point(scale_i(14.), scale_i(5.)), Point(scale_i(5.), scale_i(5.)),
+                               Point(scale_i(5.), scale_i(12.)), Point(0, scale_i(12.))}));
+    shapes.emplace_back("l_shape", l_shape);
+    ExPolygon holed = test_square();
+    holed.holes.push_back(Polygon({Point(-scale_i(3.), -scale_i(3.)), Point(-scale_i(3.), scale_i(3.)), Point(scale_i(3.), scale_i(3.)), Point(scale_i(3.), -scale_i(3.))}));
+    shapes.emplace_back("holed_square", holed);
+    ExPolygon rotated(Polygon({Point(0, 0), Point(scale_i(16.), scale_i(9.)), Point(scale_i(14.), scale_i(13.)), Point(-scale_i(2.), scale_i(4.))}));
+    shapes.emplace_back("rotated_rectangle", rotated);
+    return shapes;
+}
+
+// The patterns that the base of a tree support can use.
+const char *const tip_patterns[] = {"rectilinear", "supportbase", "honeycomb"};
+InfillPattern native_pattern(const std::string &id)
+{
+    return id == "rectilinear" ? ipRectilinear : id == "supportbase" ? ipSupportBase : ipHoneycomb;
+}
+}
+
+TEST_CASE("PatternService fills like the legacy Fill with the recipe of the tree tips", "[plugins][support-pattern-service]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const Test::SupportTree::SupportPatternContext fixture(print, handle);
+    const slic3r_api::PatternService patterns(fixture.payload());
+    size_t exact = 0, honeycomb_fills = 0;
+    double connected_length = 0., plugin_length = 0., unconnected_length = 0.;
+    size_t connected_pieces = 0, plugin_pieces = 0;
+    for (const char *pattern : tip_patterns)
+        for (const std::pair<std::string, ExPolygon> &shape : tip_shapes())
+            for (const float angle : {0.f, 0.7f})
+                for (const uint32_t layer_id : {0u, 1u, 7u}) {
+                    TipFill tip;
+                    tip.angle = angle;
+                    tip.layer_id = layer_id;
+                    CAPTURE(pattern, shape.first, angle, layer_id);
+                    const std::vector<std::vector<Point>> expected = legacy_lines(native_pattern(pattern), shape.second, tip);
+                    const std::vector<std::vector<Point>> actual = wrapper_lines(patterns, handle, pattern, shape.second, tip);
+                    REQUIRE_FALSE(actual.empty());
+                    // The lines stay inside the part (the invariant the legacy debug assert checked).
+                    BoundingBox box = get_extents(shape.second);
+                    box.offset(SCALED_EPSILON);
+                    for (const std::vector<Point> &line : actual)
+                        for (const Point &point : line)
+                            CHECK(box.contains(point));
+                    if (std::string(pattern) != "honeycomb") {
+                        // Rectilinear and supportbase give exactly the points of the legacy Fill.
+                        CHECK(actual == expected);
+                        exact += actual == expected ? 1 : 0;
+                        continue;
+                    }
+                    // The honeycomb plugin does not connect its clipped pieces (the accepted honeycomb gap): it gives the pieces of the
+                    // native honeycomb that is not connected, in another order and direction.
+                    ++honeycomb_fills;
+                    TipFill unconnected_tip = tip;
+                    unconnected_tip.connection = icNotConnected;
+                    const std::vector<std::vector<Point>> unconnected = legacy_lines(ipHoneycomb, shape.second, unconnected_tip);
+                    CHECK(same_pieces(actual, unconnected, 30));
+                    CHECK(actual.size() == unconnected.size());
+                    CHECK(length_mm(actual) == Approx(length_mm(unconnected)).epsilon(1e-6));
+                    // The connected lines, which the legacy tips sampled, join pieces along the border: fewer, longer lines.
+                    CHECK(expected.size() <= unconnected.size());
+                    connected_length += length_mm(expected);
+                    plugin_length += length_mm(actual);
+                    unconnected_length += length_mm(unconnected);
+                    connected_pieces += expected.size();
+                    plugin_pieces += actual.size();
+                }
+    CHECK(exact == 48);
+    WARN("honeycomb gap over " << honeycomb_fills << " fills: legacy connected " << connected_pieces << " lines " << connected_length << " mm, plugin "
+         << plugin_pieces << " lines " << plugin_length << " mm (native unconnected " << unconnected_length << " mm)");
+    CHECK(fixture.errors().empty());
+    CHECK(fixture.calls("rectilinear") > 0);
+    CHECK(fixture.calls("supportbase") > 0);
+    CHECK(fixture.calls("honeycomb") > 0);
+}
+TEST_CASE("PatternService on degenerate parts gives what the legacy Fill gave", "[plugins][support-pattern-service]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const Test::SupportTree::SupportPatternContext fixture(print, handle);
+    const slic3r_api::PatternService patterns(fixture.payload());
+    // Parts that a contact can leave after the offsets: smaller than a line, thinner than a line, a sliver. (A union never returns a ring
+    // without area, so the tip sampler never receives one.)
+    std::vector<std::pair<std::string, ExPolygon>> parts;
+    auto square = [](double size_mm) { const coord_t half = scale_i(size_mm / 2.); return ExPolygon(Polygon({Point(-half, -half), Point(half, -half), Point(half, half), Point(-half, half)})); };
+    parts.emplace_back("0.1 mm square", square(0.1));
+    parts.emplace_back("0.5 mm square", square(0.5));
+    parts.emplace_back("1 mm square", square(1.));
+    parts.emplace_back("thin 0.05 x 10 mm", ExPolygon(Polygon({Point(0, 0), Point(scale_i(10.), 0), Point(scale_i(10.), scale_i(0.05)), Point(0, scale_i(0.05))})));
+    parts.emplace_back("thin 0.3 x 10 mm", ExPolygon(Polygon({Point(0, 0), Point(scale_i(10.), 0), Point(scale_i(10.), scale_i(0.3)), Point(0, scale_i(0.3))})));
+    parts.emplace_back("sliver triangle", ExPolygon(Polygon({Point(0, 0), Point(scale_i(10.), 0), Point(scale_i(10.), scale_i(0.02))})));
+    // All three patterns give exactly what the legacy Fill gave (rectilinear and supportbase: the same points; honeycomb: nothing on
+    // these parts, as the legacy one). An unexpected exception of the native filler fails the test; legacy_lines() only treats the
+    // InfillFailedException that the legacy code ignored.
+    for (const char *pattern : tip_patterns)
+        for (const std::pair<std::string, ExPolygon> &part : parts) {
+            const TipFill tip;
+            CAPTURE(pattern, part.first);
+            const std::vector<std::vector<Point>> expected = legacy_lines(native_pattern(pattern), part.second, tip);
+            const std::vector<std::vector<Point>> actual = wrapper_lines(patterns, handle, pattern, part.second, tip);
+            CHECK(actual == expected);
+        }
+    // A pattern error would stop the step: none may be recorded on any of these parts.
+    CHECK(fixture.errors().empty());
+}
+TEST_CASE("PatternService reports a failed call as no line and needs the callbacks", "[plugins][support-pattern-service]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const Test::SupportTree::SupportPatternContext fixture(print, handle);
+    const slic3r_api::PatternService patterns(fixture.payload());
+    const ExPolygon square = test_square();
+    const slic3r_api::ExPolygon view(reinterpret_cast<const expolygon_handle *>(&square));
+    slic3r_api::PatternService::Fill fill;
+    fill.flow = to_c_flow(TipFill().flow);
+    fill.spacing = TipFill().flow.spacing();
+    fill.density = 0.25f;
+    // An id that no pattern has, and a pattern that needs the STEP_INFILL initialization pass.
+    CHECK(patterns.fill_lines(handle, view, slic3r_api::PatternService::recipe(infill_pattern_runtime_id(100000), fill)).empty());
+    CHECK(patterns.fill_lines(handle, view, slic3r_api::PatternService::recipe(patterns.resolve("lightning"), fill)).empty());
+    CHECK_FALSE(patterns.fill_lines(handle, view, slic3r_api::PatternService::recipe(patterns.resolve("rectilinear"), fill)).empty());
+
+    // A payload without callbacks (a host older than ABI 1.2) or no payload (not the support step) is refused.
+    run_ctx_generate_support old_payload = {};
+    CHECK_THROWS_AS(slic3r_api::PatternService(&old_payload), std::runtime_error);
+    CHECK_THROWS_AS(slic3r_api::PatternService(nullptr), std::runtime_error);
+}
+
+TEST_CASE("PatternService is shared by the threads of a family and gives the serial lines", "[plugins][support-pattern-service]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const Test::SupportTree::SupportPatternContext fixture(print, handle);
+    const slic3r_api::PatternService patterns(fixture.payload());
+    const std::vector<std::pair<std::string, ExPolygon>> shapes = tip_shapes();
+    std::vector<std::vector<std::vector<Point>>> serial;
+    for (size_t job = 0; job < 24; ++job) {
+        TipFill tip;
+        tip.layer_id = uint32_t(job);
+        serial.push_back(wrapper_lines(patterns, handle, tip_patterns[job % 3], shapes[job % shapes.size()].second, tip));
+    }
+    struct Jobs {
+        const slic3r_api::PatternService *patterns;
+        const std::vector<std::pair<std::string, ExPolygon>> *shapes;
+        std::vector<std::vector<std::vector<Point>>> *results;
+    } jobs{ &patterns, &shapes, nullptr };
+    std::vector<std::vector<std::vector<Point>>> parallel(serial.size());
+    jobs.results = &parallel;
+    slic3r_parallel_for_storage(0, uint32_t(parallel.size()), &jobs, [](uint32_t job, storage_handle *scratch, void *user_data) {
+        const Jobs &jobs = *static_cast<const Jobs *>(user_data);
+        TipFill tip;
+        tip.layer_id = job;
+        (*jobs.results)[job] = wrapper_lines(*jobs.patterns, scratch, tip_patterns[job % 3], (*jobs.shapes)[job % jobs.shapes->size()].second, tip);
+    });
+    for (size_t job = 0; job < serial.size(); ++job) {
+        CAPTURE(job);
+        CHECK(parallel[job] == serial[job]);
+    }
+    CHECK(fixture.errors().empty());
 }

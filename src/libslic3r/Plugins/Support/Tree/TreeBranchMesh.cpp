@@ -112,7 +112,7 @@ std::vector<Vec3d> path_ring_normals(const RoutedTree &tree, const std::vector<s
 
 Vec3d node_centre(const TreeNode &node)
 {
-    return Vec3d(unscaled(node.position.x()), unscaled(node.position.y()), node.print_z);
+    return Vec3d(unscaled(node.position.x), unscaled(node.position.y), node.print_z);
 }
 
 // The tube joins the rings of the nodes in path order. The first node gets a bottom half sphere and the last a top half sphere;

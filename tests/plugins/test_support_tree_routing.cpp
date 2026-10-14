@@ -8,6 +8,11 @@
 #include <cmath>
 #include <limits>
 
+#include <tbb/global_control.h>
+#include <tbb/task_arena.h>
+
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
+
 /* Tree-family routing tests. The native routing copy is checked on properties of its routed branches, not on the legacy
    output: the tips sit under the top interface stack, every branch reaches the build plate or rests on the object, no node
    comes closer to the object than the XY distance, and each branch move stays within the maximum move of its layers.
@@ -21,17 +26,8 @@ namespace {
 // Tolerance for the properties checked on routed nodes, in millimeters.
 constexpr double check_tolerance_mm = 0.05;
 
-// The routed trees of the first object of a sliced print, with the storage that owns the contacts they support.
-struct Routed {
-    PluginStorage storage;
-    slic3r_api::Support::Common::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
-    const slic3r_api::Support::Common::SupportParams params;
-    const TF::TreeSettings settings;
-    std::vector<TF::RoutedTree> trees;
-    explicit Routed(const Print &print)
-        : params(SG::params(print, print.object(0))), settings(Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params)),
-          trees(TF::route_trees(print, print.object(0), params, settings, support)) {}
-};
+using Routed = Slic3r::Test::SupportTree::Routed;
+using Slic3r::Test::SupportTree::to_point;
 
 // Distance in millimeters from a point to the closed outlines of the polygons.
 double distance_to_outline_mm(const Point &point, const Polygons &polygons)
@@ -129,10 +125,10 @@ TEST_CASE("Tree nodes keep their XY distance to the object", "[plugins][support-
     for (const TF::RoutedTree &tree : routed.trees)
         for (const TF::TreeNode &node : tree.nodes) {
             const Polygons outline = layer_outline(object, node.layer);
-            CAPTURE(node.layer, node.print_z, unscaled(node.position.x()), unscaled(node.position.y()));
-            const double distance_mm = distance_to_outline_mm(node.position, outline);
+            CAPTURE(node.layer, node.print_z, unscaled(node.position.x), unscaled(node.position.y));
+            const double distance_mm = distance_to_outline_mm(to_point(node.position), outline);
             closest_mm = std::min(closest_mm, distance_mm);
-            CHECK_FALSE(contains(outline, node.position));
+            CHECK_FALSE(contains(outline, to_point(node.position)));
             CHECK(distance_mm >= xy_distance_mm - check_tolerance_mm);
         }
     CAPTURE(xy_distance_mm, closest_mm);
@@ -164,7 +160,7 @@ TEST_CASE("Tree branch moves follow the real height of each layer", "[plugins][s
                 REQUIRE(upper.layer == lower.layer + 1);
                 const double height_mm = object.layer(upper.layer).unscaled_height();
                 const double allowed_mm = std::tan(settings.angle) * height_mm + unscaled(double(std::max<coord_t>(0, lower.radius - upper.radius)));
-                const double move_mm = unscaled((lower.position - upper.position).cast<double>().norm());
+                const double move_mm = unscaled((to_point(lower.position) - to_point(upper.position)).cast<double>().norm());
                 CAPTURE(upper.layer, height_mm, move_mm, allowed_mm);
                 CHECK(move_mm <= allowed_mm + check_tolerance_mm);
                 largest_ratio = std::max(largest_ratio, move_mm / (std::tan(settings.angle) * height_mm));
@@ -215,7 +211,7 @@ TEST_CASE("A small max branch overhang lowers the branch angle", "[plugins][supp
             for (size_t upper_idx : lower.carries) {
                 const TF::TreeNode &upper = tree.nodes[upper_idx];
                 const double height_mm = object.layer(upper.layer).unscaled_height();
-                const double move_mm = unscaled((lower.position - upper.position).cast<double>().norm());
+                const double move_mm = unscaled((to_point(lower.position) - to_point(upper.position)).cast<double>().norm());
                 CHECK(move_mm <= std::tan(settings.angle) * height_mm + unscaled(double(std::max<coord_t>(0, lower.radius - upper.radius))) + check_tolerance_mm);
             }
 }
@@ -243,8 +239,8 @@ TEST_CASE("Build plate only branches reach the bed around the object", "[plugins
             CHECK(bottom.to_buildplate);
             coord_t min_x = std::numeric_limits<coord_t>::max(), max_x = std::numeric_limits<coord_t>::min();
             for (const TF::TreeNode &node : tree.nodes) {
-                min_x = std::min(min_x, node.position.x());
-                max_x = std::max(max_x, node.position.x());
+                min_x = std::min(min_x, node.position.x);
+                max_x = std::max(max_x, node.position.x);
             }
             diagonal = diagonal || unscaled(double(max_x - min_x)) >= 1.;
         }
@@ -358,7 +354,7 @@ TEST_CASE("Tips keep the demand that a merged top contact absorbs next to a brid
     REQUIRE_FALSE(routed.trees.empty());
     bool tips_on_shelf = false;
     for (const TF::RoutedTree &tree : routed.trees)
-        tips_on_shelf = tips_on_shelf || contains(shelf_area, tree.nodes.front().position);
+        tips_on_shelf = tips_on_shelf || contains(shelf_area, to_point(tree.nodes.front().position));
     CHECK(tips_on_shelf);
 }
 
@@ -390,8 +386,8 @@ TEST_CASE("Tips use the reduced XY distance next to the object and the full dist
         const TF::LayerIndex tip = TF::LayerIndex(tree.nodes.front().layer);
         for (const TF::TreeNode &node : tree.nodes) {
             const TF::LayerIndex layer = TF::LayerIndex(node.layer);
-            const double distance_mm = distance_to_outline_mm(node.position, layer_outline(object, node.layer));
-            CAPTURE(layer, unscaled(node.position.x()), unscaled(node.position.y()), distance_mm);
+            const double distance_mm = distance_to_outline_mm(to_point(node.position), layer_outline(object, node.layer));
+            CAPTURE(layer, unscaled(node.position.x), unscaled(node.position.y), distance_mm);
             if (layer + 2 >= tip) {
                 CHECK(distance_mm >= xy_min_mm - check_tolerance_mm);
                 closest_tip_mm = std::min(closest_tip_mm, distance_mm);
@@ -401,4 +397,135 @@ TEST_CASE("Tips use the reduced XY distance next to the object and the full dist
         }
     }
     CHECK(closest_tip_mm < xy_mm - 0.1);
+}
+
+
+// The tips are the points of the lines of the base pattern of the support, generated by the pattern plugin through the callbacks of the
+// support step: supportbase for a sparse base without sheath, rectilinear for a sheathed one (the default of the tests).
+// The slab of the default case has the 6 tips of the reference dump (support-tree-dump, slab-tree).
+TEST_CASE("Tips are sampled with the rectilinear and the supportbase patterns", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool sparse = GENERATE(false, true);
+    CAPTURE(sparse);
+    DynamicPrintConfig config = SG::config("tree", false, 3);
+    if (sparse)
+        config.set_deserialize_strict({{"support_material_with_sheath", "0"}});
+    // One thread, as the dump does: the tip counts below do not depend on the interleaving of the jobs (the first point inserted by
+    // TipPlacer wins a duplicate).
+    tbb::global_control limit(tbb::global_control::max_allowed_parallelism, 1);
+    tbb::task_arena arena(1);
+    arena.execute([&] {
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    SG::prefix(print);
+    const Routed routed(print);
+    const std::string used = sparse ? "supportbase" : "rectilinear";
+    const std::string other = sparse ? "rectilinear" : "supportbase";
+    REQUIRE(routed.params.base_pattern_id == used);
+    // The pattern of the base was called, and only that one; no pattern reported an error.
+    CHECK(routed.patterns.calls(used) > 0);
+    CHECK(routed.patterns.calls(other) == 0);
+    CHECK(routed.patterns.errors().empty());
+    REQUIRE_FALSE(routed.trees.empty());
+    size_t tips = 0;
+    for (const TF::RoutedTree &tree : routed.trees)
+        tips += tree.nodes.empty() ? 0 : 1;
+    CAPTURE(tips, routed.trees.size());
+    // Each tree has at least one tip, which is its first node, on the tip layer.
+    const size_t tip_layer = routed.trees.front().nodes.front().layer;
+    size_t tips_on_tip_layer = 0;
+    for (const TF::RoutedTree &tree : routed.trees)
+        for (const TF::TreeNode &node : tree.nodes)
+            tips_on_tip_layer += node.layer == tip_layer && node.carries.empty() ? 1 : 0;
+    CAPTURE(tips_on_tip_layer);
+    CHECK(tips_on_tip_layer >= 2);
+    if (!sparse)
+        CHECK(tips_on_tip_layer == 6);
+    });
+}
+
+// The honeycomb plugin does not connect its clipped pieces (the honeycomb gap accepted on 2026-10-08). This case characterizes the tips and contacts of a honeycomb base on the slab: the
+// tips exist, lie next to the overhang they support, on one layer, and the contacts are kept.
+TEST_CASE("Tips of a honeycomb base lie under the overhang", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = SG::config("tree", false, 3);
+    config.set_deserialize_strict({{"support_material_pattern", "honeycomb"}});
+    // One thread, as the dump does: the tip counts below do not depend on the interleaving of the jobs (the first point inserted by
+    // TipPlacer wins a duplicate).
+    tbb::global_control limit(tbb::global_control::max_allowed_parallelism, 1);
+    tbb::task_arena arena(1);
+    arena.execute([&] {
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Routed routed(print);
+    REQUIRE(routed.params.base_pattern_id == "honeycomb");
+    CHECK(routed.patterns.calls("honeycomb") > 0);
+    CHECK(routed.patterns.errors().empty());
+    REQUIRE_FALSE(routed.trees.empty());
+    REQUIRE_FALSE(routed.support.top.empty());
+    // The overhang of the slab: the demand of its islands, with the margin the tips may be grown into.
+    ExPolygons demand;
+    for (size_t layer = 0; layer < object.layer_count(); ++layer)
+        for (const LayerSliceIsland &island : object.layer(layer).islands())
+            append(demand, island.support_demand());
+    const BoundingBox box = get_extents(demand).inflated(scale_i(1.));
+    const size_t tip_layer = routed.trees.front().nodes.front().layer;
+    size_t tips = 0;
+    for (const TF::RoutedTree &tree : routed.trees)
+        for (const TF::TreeNode &node : tree.nodes)
+            if (node.carries.empty() && node.layer == tip_layer) {
+                ++tips;
+                CHECK(box.contains(to_point(node.position)));
+            }
+    CAPTURE(tips);
+    // The plugin does not connect its honeycomb pieces, so it places more tips than the chained legacy lines would (accepted gap).
+    CHECK(tips == 15);
+    // The contacts that remain are the parts that a tip reaches.
+    for (const slic3r_api::Support::Common::GeneratorLayer *contact : routed.support.top)
+        CHECK_FALSE(contact->polygons.empty());
+    });
+}
+
+// A pattern call that cancels the step is the last one: the job checks the cancellation after each call, before the next part or the contour
+// fallback, and no job starts afterwards. One thread, so that no other job is inside a fill when the flag is raised.
+TEST_CASE("Tip sampling stops after the pattern call that cancels the step", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    tbb::global_control limit(tbb::global_control::max_allowed_parallelism, 1);
+    tbb::task_arena arena(1);
+    arena.execute([] {
+        Print print;
+        Model model;
+        Test::init_print({Slic3r::Test::SupportTree::comparison_mesh(1)}, print, model, SG::config("tree", false, 3));
+        SG::prefix(print);
+        const auto route = [&](size_t cancel_after) {
+            PluginStorage storage;
+            storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+            slic3r_api::Support::Common::GeneratedSupport support(handle);
+            const slic3r_api::Support::Common::SupportParams params = SG::params(print, print.object(0));
+            const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params);
+            Slic3r::Test::SupportTree::SupportPatternContext patterns(print, handle);
+            patterns.cancel_after_calls(cancel_after);
+            bool cancelled = false;
+            try {
+                TF::route_trees(SG::print_view(print), SG::object_view(print.object(0)), params, settings, support, patterns.context());
+            } catch (const slic3r_api::PluginCancelled &) {
+                cancelled = true;
+            }
+            return std::make_pair(cancelled, patterns.total_calls());
+        };
+        const std::pair<bool, size_t> complete = route(0);
+        CHECK_FALSE(complete.first);
+        // The T has an overhang on each side, so it needs several fills, so that stopping after the first one means something.
+        REQUIRE(complete.second > 1);
+        const std::pair<bool, size_t> stopped = route(1);
+        CHECK(stopped.first);
+        CHECK(stopped.second == 1);
+    });
 }

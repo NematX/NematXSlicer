@@ -7,6 +7,11 @@
    the polygon the branch centre may occupy on its layer. Elements of the layer above that rest on an element are
    listed in its parents, so the branches form a forest that is read back when the nodes are placed.
 
+   The influence area of an element is a StoredPolygonCollection allocated in the run storage of the support. The elements
+   are the local data of route_trees(): their collections are freed when route_trees() returns (the destructor of each
+   element frees its handle), before the returned trees are used; the trees hold no handle. The positions of the states are
+   API points (c_point, scaled units); the positions of the nodes of the routed trees are copied from them.
+
    Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    Original CuraEngine copyright:
    Copyright (c) 2021 Ultimaker B.V.
@@ -21,8 +26,7 @@
 
 #include <boost/container/small_vector.hpp>
 
-#include "libslic3r/Point.hpp"
-#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 #include "TreeSettings.hpp"
 #include "TreeVolumes.hpp"
 
@@ -38,7 +42,8 @@ enum class LineStatus
     TO_BP_SAFE
 };
 
-using LineInformation = std::vector<std::pair<Point, LineStatus>>;
+// The points of a line (the API point type) and the avoidance each one is valid in.
+using LineInformation = std::vector<std::pair<c_point, LineStatus>>;
 using LineInformations = std::vector<LineInformation>;
 
 // The number of vertices in each circle.
@@ -129,12 +134,12 @@ struct SupportElementState : public SupportElementStateBits
     /*!
      * \brief The position this support elements wants to support on layer=target_height
      */
-    Point       target_position;
+    c_point     target_position{ 0, 0 };
 
     /*!
      * \brief The next position this support elements wants to reach. NOTE: This is mainly a suggestion regarding direction inside the influence area.
      */
-    Point       next_position;
+    c_point     next_position{ 0, 0 };
 
     /*!
      * \brief The next height this support elements wants to reach
@@ -155,9 +160,12 @@ struct SupportElementState : public SupportElementStateBits
      * \brief The resulting center point around which a circle will be drawn later.
      * Will be set by setPointsOnAreas
      */
-    Point result_on_layer { std::numeric_limits<coord_t>::max(), std::numeric_limits<coord_t>::max() };
-    bool  result_on_layer_is_set() const { return this->result_on_layer != Point{ std::numeric_limits<coord_t>::max(), std::numeric_limits<coord_t>::max() }; }
-    void  result_on_layer_reset() { this->result_on_layer = Point{ std::numeric_limits<coord_t>::max(), std::numeric_limits<coord_t>::max() }; }
+    c_point result_on_layer { std::numeric_limits<coord_t>::max(), std::numeric_limits<coord_t>::max() };
+    // Whether result_on_layer holds a position, i.e. is not the {max, max} sentinel.
+    bool    result_on_layer_is_set() const
+        { return this->result_on_layer.x != std::numeric_limits<coord_t>::max() || this->result_on_layer.y != std::numeric_limits<coord_t>::max(); }
+    // Restores the {max, max} sentinel: the position is no longer set.
+    void    result_on_layer_reset() { this->result_on_layer = c_point{ std::numeric_limits<coord_t>::max(), std::numeric_limits<coord_t>::max() }; }
     /*!
      * \brief The amount of extra radius we got from merging branches that could have reached the buildplate, but merged with ones that can not.
      */
@@ -235,8 +243,13 @@ struct SupportElement
         std::vector<int32_t>;
 #endif // NDEBUG
 
-    SupportElement(const SupportElementState &state, Polygons &&influence_area) : state(state), influence_area(std::move(influence_area)) {}
-    SupportElement(const SupportElementState &state, ParentIndices &&parents, Polygons &&influence_area) :
+    // An element without parents (a tip). The influence area is moved in: the element owns its handle from now on. It must have been
+    // allocated in the run storage, because the element outlives every scratch storage.
+    SupportElement(const SupportElementState &state, slic3r_api::StoredPolygonCollection &&influence_area) :
+        state(state), influence_area(std::move(influence_area)) {}
+    // An element resting on the elements of the layer above listed in parents (the result of a layer step or of a merge); the
+    // influence area is moved in as above.
+    SupportElement(const SupportElementState &state, ParentIndices &&parents, slic3r_api::StoredPolygonCollection &&influence_area) :
         state(state), parents(std::move(parents)), influence_area(std::move(influence_area)) {}
 
     SupportElementState         state;
@@ -247,10 +260,12 @@ struct SupportElement
     ParentIndices               parents;
 
     /*!
-     * \brief The resulting influence area.
-     * Will only be set in the results of createLayerPathing, and will be nullptr inside!
+     * \brief The influence area: always set for a kept element.
+     * It is allocated in the run storage, because the element outlives every scratch storage. The element owns the handle and its
+     * destructor frees it, so the storage must outlive the element. The copy is deleted; a move transfers the handle, and a
+     * moved-from element holds no handle (the routing tests it with has_rings()).
      */
-    Polygons                    influence_area;
+    slic3r_api::StoredPolygonCollection influence_area;
 
     /*!
      * \brief The tip source that inserted this element as a tip, or the largest size_t for every other element.

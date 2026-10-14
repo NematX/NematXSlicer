@@ -11,7 +11,7 @@
    above that it carries (carries), so the branches can be read from the tips down.
 
        Common::GeneratedSupport support(storage);
-       const std::vector<RoutedTree> trees = route_trees(print, object, params, settings, support);
+       const std::vector<RoutedTree> trees = route_trees(print, object, params, settings, support, context);
        for (const TreeNode &node : trees.front().nodes) ... */
 #ifndef plugins_support_tree_routing_hpp_
 #define plugins_support_tree_routing_hpp_
@@ -20,16 +20,19 @@
 #include <limits>
 #include <vector>
 
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Point.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_def.h"
+#include "libslic3r/Api/plugin/c/slic3r_geometry.h"
+#include "libslic3r/Api/plugin/c/slic3r_plugin_run_context.h"
 #include "libslic3r/Plugins/Support/Common/SupportLayers.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "TreeSettings.hpp"
 
-namespace Slic3r {
-
+namespace slic3r_api {
+class Object;
 class Print;
-class PrintObject;
+}
+
+namespace Slic3r {
 
 namespace TreeFamily {
 
@@ -39,7 +42,7 @@ struct TreeNode {
     size_t layer = 0;
     double print_z = 0;
     // Centre of the branch on its layer, and the radius it is drawn with (scaled).
-    Point position;
+    c_point position{ 0, 0 };
     coord_t radius = 0;
     // The branch reaches the build plate from this node, or rests on the model.
     bool to_buildplate = false;
@@ -60,9 +63,12 @@ struct RoutedTree {
 // Marks a link to no node: the node below a trunk bottom, or a node that no other node carries.
 inline constexpr size_t no_node = std::numeric_limits<size_t>::max();
 
-// Route the tree branches of one object. The top contacts are added to support.top; the returned trees support them.
-std::vector<RoutedTree> route_trees(const Print &print, const PrintObject &object, const slic3r_api::Support::Common::SupportParams &params,
-                                    const TreeSettings &settings, slic3r_api::Support::Common::GeneratedSupport &support);
+// Route the tree branches of one object. The top contacts are added to support.top; the returned trees support them. The context
+// is the one of the support step the family runs in: it gives the cancellation checks and, through its payload, the pattern callbacks
+// that sample the tips. route_trees throws std::runtime_error only once a tip must be sampled: a context without the callbacks is fine
+// for an object that has no tip source.
+std::vector<RoutedTree> route_trees(const slic3r_api::Print &print, const slic3r_api::Object &object, const slic3r_api::Support::Common::SupportParams &params,
+                                    const TreeSettings &settings, slic3r_api::Support::Common::GeneratedSupport &support, const plugin_run_context *context);
 
 // The index of the node below each node of the tree, or no_node. Each node is carried by at most one node below it.
 std::vector<size_t> nodes_below(const RoutedTree &tree);

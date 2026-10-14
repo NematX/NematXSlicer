@@ -20,15 +20,16 @@
    A reference file is read with parse_dump(), which checks every line it extracts, and with duplicate_keys(): a malformed or
    ambiguous reference must stop the comparison, not be compared partially.
 
-   Not here yet: a fixture that builds a run_ctx_generate_support with the pattern callbacks from a test-owned service. Its
-   first consumer will be the tests of the tip sampler, so it is written with them (no code without a caller); until then the
-   generators run with a null context, as the other tree tests do.
+   The routing and the tip sampler need a STEP_SUPPORT context with the pattern callbacks: SupportPatternContext
+   (support_pattern_test_context.hpp) builds one from a test-owned service, and Routed owns one. The generators of the slabs
+   (generate_tree_slabs) still run with a null context, as the other tree tests do.
 
    canonical_ring() below is not the one of clipper_offset_test_helpers.hpp: that one starts the ring at its first smallest point
    only, while this one breaks ties between equal points by the points that follow, so that the form is unique for any ring. */
 #ifndef support_tree_test_helpers_hpp_
 #define support_tree_test_helpers_hpp_
 #include "support_grid_test_helpers.hpp"
+#include "support_pattern_test_context.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeRouting.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSettings.hpp"
@@ -48,6 +49,10 @@
 
 namespace Slic3r::Test::SupportTree {
 namespace TF = Slic3r::TreeFamily;
+
+// The positions of the routed nodes are API points; the checks that compare them with native geometry convert them.
+inline Point to_point(c_point point) { return Point(point.x, point.y); }
+inline c_point to_c_point(const Point &point) { return c_point{ point.x(), point.y() }; }
 
 // Three simple objects without raft: an overhanging slab above the bed, a T whose bar overhangs both sides of its stem, and a
 // shelf whose overhang lands partly on a lower lobe of the object, where branches stand on the object. Model 3 is the slab on a
@@ -80,17 +85,21 @@ inline TF::TreeSettings tree_settings(const Print &print, const PrintObject &obj
     return TF::TreeSettings(SupportGrid::object_view(object), SupportGrid::print_view(print), params);
 }
 
-// The routed trees of the first object of a sliced print, with the storage that owns the contacts they support. The storage is
-// declared first so that it outlives the contacts that live in it.
+// The routed trees of the first object of a sliced print, with the storage that owns the contacts they support and the STEP_SUPPORT
+// context (pattern callbacks included) the tips are sampled with. The storage is declared first so that it outlives the contacts
+// that live in it.
 struct Routed {
     PluginStorage storage;
     slic3r_api::Support::Common::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
     const slic3r_api::Support::Common::SupportParams params;
     const TF::TreeSettings settings;
+    SupportPatternContext patterns;
     std::vector<TF::RoutedTree> trees;
-    explicit Routed(const Print &print)
+    explicit Routed(Print &print)
         : params(SupportGrid::params(print, print.object(0))), settings(Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params)),
-          trees(TF::route_trees(print, print.object(0), params, settings, support)) {}
+          patterns(print, reinterpret_cast<storage_handle *>(&storage)),
+          trees(TF::route_trees(SupportGrid::print_view(print), SupportGrid::object_view(print.object(0)), params, settings, support,
+                                patterns.context())) {}
 };
 
 /* ============================ rings and records ============================ */

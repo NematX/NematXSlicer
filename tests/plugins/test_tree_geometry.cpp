@@ -1202,3 +1202,246 @@ TEST_CASE("nearest_on_lines on an exact tie", "[plugins][tree-geometry]")
     WARN("tie at the centre of a square: helper line " << mine->line_index << " point (" << mine->point.x() << ", " << mine->point.y() << "), native line " << native_index
          << " point (" << native_point.x() << ", " << native_point.y() << ")");
 }
+
+namespace {
+// Verbatim copy of the native move_inside_if_outside() and move_inside() (Support/TreeSupport.cpp, static there), the reference of the
+// tests below.
+unsigned int native_move_inside(const Polygons &polygons, Point &from, int distance, int64_t maxDist2)
+{
+    Point  ret = from;
+    double bestDist2 = std::numeric_limits<double>::max();
+    auto   bestPoly = static_cast<unsigned int>(-1);
+    bool   is_already_on_correct_side_of_boundary = false; // whether [from] is already on the right side of the boundary
+    for (unsigned int poly_idx = 0; poly_idx < polygons.size(); ++ poly_idx) {
+        const Polygon &poly = polygons[poly_idx];
+        if (poly.size() < 2)
+            continue;
+        Point p0 = poly[poly.size() - 2];
+        Point p1 = poly.back();
+        // because we compare with vSize2 here (no division by zero), we also need to compare by vSize2 inside the loop
+        // to avoid integer rounding edge cases
+        bool projected_p_beyond_prev_segment = (p1 - p0).cast<int64_t>().dot((from - p0).cast<int64_t>()) >= (p1 - p0).cast<int64_t>().squaredNorm();
+        for (const Point& p2 : poly) {
+            // X = A + Normal(B-A) * (((B-A) dot (P-A)) / VSize(B-A));
+            //   = A +       (B-A) *  ((B-A) dot (P-A)) / VSize2(B-A);
+            // X = P projected on AB
+            const Point& a = p1;
+            const Point& b = p2;
+            const Point& p = from;
+            auto ab = (b - a).cast<int64_t>();
+            auto ap = (p - a).cast<int64_t>();
+            int64_t ab_length2 = ab.squaredNorm();
+            if (ab_length2 <= 0) { //A = B, i.e. the input polygon had two adjacent points on top of each other.
+                p1 = p2; //Skip only one of the points.
+                continue;
+            }
+            int64_t dot_prod = ab.dot(ap);
+            if (dot_prod <= 0) { // x is projected to before ab
+                if (projected_p_beyond_prev_segment) {
+                    //  case which looks like:   > .
+                    projected_p_beyond_prev_segment = false;
+                    Point& x = p1;
+
+                    auto dist2 = (x - p).cast<int64_t>().squaredNorm();
+                    if (dist2 < bestDist2) {
+                        bestDist2 = dist2;
+                        bestPoly = poly_idx;
+                        if (distance == 0)
+                            ret = x;
+                        else {
+                            Vec2d  abd   = ab.cast<double>();
+                            Vec2d  p1p2  = (p1 - p0).cast<double>();
+                            double lab   = abd.norm();
+                            double lp1p2 = p1p2.norm();
+                            // inward direction irrespective of sign of [distance]
+                            auto inward_dir = perp(abd * (scale_d(10.0) / lab) + p1p2 * (scale_d(10.0) / lp1p2));
+                            // MM2INT(10.0) to retain precision for the eventual normalization
+                            ret = x + (inward_dir * (distance / inward_dir.norm())).cast<coord_t>();
+                            is_already_on_correct_side_of_boundary = inward_dir.dot((p - x).cast<double>()) * distance >= 0;
+                        }
+                    }
+                } else {
+                    projected_p_beyond_prev_segment = false;
+                    p0 = p1;
+                    p1 = p2;
+                    continue;
+                }
+            } else if (dot_prod >= ab_length2) {
+                // x is projected to beyond ab
+                projected_p_beyond_prev_segment = true;
+                p0 = p1;
+                p1 = p2;
+                continue;
+            } else {
+                // x is projected to a point properly on the line segment (not onto a vertex). The case which looks like | .
+                projected_p_beyond_prev_segment = false;
+                Point x = a + (ab.cast<double>() * (double(dot_prod) / double(ab_length2))).cast<coord_t>();
+                auto dist2 = (p - x).cast<int64_t>().squaredNorm();
+                if (dist2 < bestDist2) {
+                    bestDist2 = dist2;
+                    bestPoly = poly_idx;
+                    if (distance == 0)
+                        ret = x;
+                    else {
+                        Vec2d abd = ab.cast<double>();
+                        Vec2d inward_dir = perp(abd * (distance / abd.norm())); // inward or outward depending on the sign of [distance]
+                        ret = x + inward_dir.cast<coord_t>();
+                        is_already_on_correct_side_of_boundary = inward_dir.dot((p - x).cast<double>()) >= 0;
+                    }
+                }
+            }
+            p0 = p1;
+            p1 = p2;
+        }
+    }
+    // when the best point is already inside and we're moving inside, or when the best point is already outside and we're moving outside
+    if (is_already_on_correct_side_of_boundary) {
+        if (bestDist2 < distance * distance)
+            from = ret;
+        else {
+            // from = from; // original point stays unaltered. It is already inside by enough distance
+        }
+        return bestPoly;
+    } else if (bestDist2 < maxDist2) {
+        from = ret;
+        return bestPoly;
+    }
+    return -1;
+}
+
+Point native_move_inside_if_outside(const Polygons &polygons, Point from, int distance = 0, int64_t maxDist2 = std::numeric_limits<int64_t>::max())
+{
+    if (! contains(polygons, from))
+        native_move_inside(polygons, from, distance, maxDist2);
+    return from;
+}
+}
+
+TEST_CASE("make_circle matches the native one", "[plugins][tree-geometry]")
+{
+    size_t compared = 0;
+    for (const double radius : { 10000., 5000., 123456., 1000000., 77777.7 })
+        for (const double error : { 25., 1., 100., 25.5 }) {
+            const Polygon native = make_circle(radius, error);
+            const std::vector<c_point> mine = TF::make_circle(radius, error);
+            REQUIRE(mine.size() == native.points.size());
+            for (size_t i = 0; i < mine.size(); ++i) {
+                CHECK(mine[i].x == native.points[i].x());
+                CHECK(mine[i].y == native.points[i].y());
+                ++compared;
+            }
+        }
+    CHECK(compared > 400);
+    // The tip circle of the routing: 0.01 mm radius, 25 scaled units of error.
+    CHECK(TF::make_circle(scale_d(0.01), 25.).size() == 45);
+}
+
+TEST_CASE("move_inside_if_outside matches the native function", "[plugins][tree-geometry]")
+{
+    std::mt19937 rng(11);
+    size_t moved = 0, inside = 0;
+    auto compare = [&](const Polygons &polygons, const Point &point) {
+        const Point native = native_move_inside_if_outside(polygons, point);
+        const c_point mine = TF::move_inside_if_outside(view_of(polygons), c_of(point));
+        CHECK(mine.x == native.x());
+        CHECK(mine.y == native.y());
+        if (native == point)
+            ++inside;
+        else
+            ++moved;
+    };
+    for (int iteration = 0; iteration < 40; ++iteration) {
+        Polygons scene = random_scene(rng);
+        const BoundingBox box = get_extents(scene);
+        for (int i = 0; i < 200; ++i)
+            compare(scene, random_point(rng, box, 2.));
+        // The rings in another order, and with their start points rotated: the same algorithm sees the same input as the native one.
+        std::shuffle(scene.begin(), scene.end(), rng);
+        for (Polygon &ring : scene)
+            std::rotate(ring.points.begin(), ring.points.begin() + ring.points.size() / 2, ring.points.end());
+        for (int i = 0; i < 100; ++i)
+            compare(scene, random_point(rng, box, 2.));
+        // The vertices themselves and the points a hair outside of them.
+        for (const Polygon &ring : scene)
+            for (const Point &vertex : ring.points) {
+                compare(scene, vertex);
+                compare(scene, vertex + Point(1, 1));
+                compare(scene, vertex - Point(1, 1));
+            }
+    }
+    CHECK(moved > 3000);
+    CHECK(inside > 300);
+
+    SECTION("no ring, a ring under 2 points, equal adjacent points")
+    {
+        const Polygons none;
+        compare(none, P(5, 5));
+        CHECK(TF::move_inside_if_outside(view_of(none), CP(5, 5)).x == P(5, 5).x());
+        // An empty ring and a ring of one point (built in place: the Polygon constructors refuse it).
+        Polygons short_rings(2);
+        short_rings[1].points.push_back(P(0, 0));
+        compare(short_rings, P(5, 5));
+        // Two equal adjacent points: native code skips only one of them.
+        const Polygons doubled{ Polygon({ P(0, 0), P(100, 0), P(100, 0), P(100, 100), P(0, 100), P(0, 100) }) };
+        for (const Point &point : { P(150, 50), P(50, 150), P(-50, -50), P(150, 150), P(50, -10) })
+            compare(doubled, point);
+    }
+    SECTION("a point inside stays where it is, a point outside goes to the border")
+    {
+        const Polygons square{ Polygon({ P(0, 0), P(100, 0), P(100, 100), P(0, 100) }) };
+        CHECK(TF::move_inside_if_outside(view_of(square), CP(50, 50)).x == P(50, 50).x());
+        const c_point moved_point = TF::move_inside_if_outside(view_of(square), CP(150, 50));
+        CHECK(moved_point.x == P(100, 50).x());
+        CHECK(moved_point.y == P(100, 50).y());
+        // Beyond a corner the closest point is the vertex.
+        const c_point corner = TF::move_inside_if_outside(view_of(square), CP(130, 130));
+        CHECK(corner.x == P(100, 100).x());
+        CHECK(corner.y == P(100, 100).y());
+    }
+}
+
+// The rule on an exact tie: the candidate replaces the best point only when it is strictly closer, so the first ring (then the first edge)
+// wins. The rings of a Clipper output are not in the order of the native one: two rings at the same distance from the point, at different
+// points, give a result that depends on that order.
+TEST_CASE("move_inside_if_outside keeps the first ring on an exact tie", "[plugins][tree-geometry]")
+{
+    const Polygon left({ P(0, 0), P(10000, 0), P(10000, 10000), P(0, 10000) });
+    const Polygon right({ P(20000, 0), P(30000, 0), P(30000, 10000), P(20000, 10000) });
+    // (15 mm, 5 mm) is 5 mm from the right side of the left square and 5 mm from the left side of the right square.
+    const Point query = P(15000, 5000);
+    const Polygons left_first{ left, right };
+    const Polygons right_first{ right, left };
+    const c_point first = TF::move_inside_if_outside(view_of(left_first), c_of(query));
+    const c_point second = TF::move_inside_if_outside(view_of(right_first), c_of(query));
+    CHECK(first.x == P(10000, 5000).x());
+    CHECK(first.y == P(10000, 5000).y());
+    CHECK(second.x == P(20000, 5000).x());
+    CHECK(second.y == P(20000, 5000).y());
+    // The native function has the same rule: it agrees with the helper on both orders.
+    CHECK(native_move_inside_if_outside(left_first, query) == point_of(first));
+    CHECK(native_move_inside_if_outside(right_first, query) == point_of(second));
+}
+// The scratch storage lives for the work only: a result leaves it by being moved to another storage, an exception leaves the work.
+TEST_CASE("tree geometry with_scratch_storage runs the work once and lets a moved result leave", "[plugins][tree-geometry]")
+{
+    PluginStorage run_storage;
+    slic3r_api::StoredPolygonCollection kept(reinterpret_cast<storage_handle *>(&run_storage));
+    int runs = 0;
+    const coord_t side = scale_i(5.);
+    const Polygon native_square({ Point(0, 0), Point(side, 0), Point(side, side), Point(0, side) });
+    TF::with_scratch_storage([&](storage_handle *scratch) {
+        ++runs;
+        slic3r_api::StoredPolygon ring(scratch);
+        for (const Point &point : native_square.points)
+            ring.push_back(c_point{ point.x(), point.y() });
+        slic3r_api::StoredPolygonCollection rings(scratch);
+        rings.push_back(ring);
+        slic3r_api::StoredPolygonCollection united = TF::polygons_union(scratch, rings);
+        kept.move_from(united);
+    });
+    CHECK(runs == 1);
+    REQUIRE(kept.size() == 1);
+    CHECK(TF::polygons_area(kept) == native_square.area());
+
+    CHECK_THROWS_AS(TF::with_scratch_storage([](storage_handle *) { throw std::runtime_error("work failed"); }), std::runtime_error);
+}
