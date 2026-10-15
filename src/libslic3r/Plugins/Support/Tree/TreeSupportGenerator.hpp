@@ -18,24 +18,26 @@
 #include "libslic3r/Plugins/Support/Common/SupportLayers.hpp"
 #include "TreeRouting.hpp"
 
-namespace Slic3r {
-
+namespace slic3r_api {
+class Object;
 class Print;
-class PrintObject;
+}
+
+namespace Slic3r {
 
 namespace TreeFamily {
 
 // Fill out with the slabs of the tree support of one object; organic selects branch slabs instead of base slabs. A null
 // context never cancels.
-void generate_tree_support(const plugin_run_context *context, const Print &print, const PrintObject &object, bool organic,
+void generate_tree_support(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object, bool organic,
                            slic3r_api::Support::Common::GeneratedSupport &out);
 
 // Fill out with the slabs of the given routed trees of one object, the contacts already in out.top. The same rules as
 // generate_tree_support(), without the routing; organic trees are smoothed in place before the slabs are built. As in the grid,
 // the first base slab is widened by raft_first_layer_expansion when it starts on the bed (Common::expand_first_layer_foot()), then the
 // reserved brim area of the object is removed from the slabs of the first layer (Common::remove_first_layer_brim()), which can empty them.
-void generate_tree_slabs(const plugin_run_context *context, const Print &print, const PrintObject &object, std::vector<RoutedTree> &trees,
-                         bool organic, slic3r_api::Support::Common::GeneratedSupport &out);
+void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
+                         std::vector<RoutedTree> &trees, bool organic, slic3r_api::Support::Common::GeneratedSupport &out);
 
 // Snaps the bounds of the slabs onto the object print Z values within the layer merge tolerance of them, merges the support
 // bounds that lie within the tolerance of each other, and merges the slabs that collapse; the rules are explained at the

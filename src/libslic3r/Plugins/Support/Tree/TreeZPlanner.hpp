@@ -23,7 +23,7 @@
 
 #include <vector>
 
-#include "libslic3r/libslic3r.h"
+#include "libslic3r/Api/plugin/c/slic3r_def.h"
 
 namespace Slic3r::TreeFamily {
 

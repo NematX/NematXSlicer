@@ -547,7 +547,6 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Tree/TreeSettings.hpp
 	Plugins/Support/Tree/TreeSmoothing.cpp
 	Plugins/Support/Tree/TreeSmoothing.hpp
-	Plugins/Support/Tree/TreeStorage.hpp
 	Plugins/Support/Tree/TreeSupportGenerator.cpp
 	Plugins/Support/Tree/TreeSupportGenerator.hpp
 	Plugins/Support/Tree/TreeVolumes.cpp

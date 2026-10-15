@@ -9,7 +9,6 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 #include <string_view>
 #include <unordered_map>
 

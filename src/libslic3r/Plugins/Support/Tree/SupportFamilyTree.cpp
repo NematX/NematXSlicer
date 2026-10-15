@@ -29,7 +29,7 @@ const raw_used_config_key k_tree_keys[] = {
     {"support_tree_tip_diameter", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"support_tree_top_rate", RAW_CO_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
 };
-}
+} // namespace
 
 // Construct the provider once; the orchestrator retains its registration but does not own the static instance.
 SupportFamilyTree &SupportFamilyTree::instance(orchestrator_handle *orchestrator)
@@ -71,8 +71,7 @@ void SupportFamilyTree::run_impl(const plugin_run_context *context) const
     if (config.get("raft_layers").get_int() > 0 && context->report_warning)
         context->report_warning(context->host_context, "Tree and organic support are generated without a raft; raft layers are not implemented by this family.");
     Common::GeneratedSupport support(context->plugin_storage);
-    Slic3r::TreeFamily::generate_tree_support(context, *reinterpret_cast<const Slic3r::Print *>(payload->print),
-        *reinterpret_cast<const Slic3r::PrintObject *>(payload->object), style == Common::SupportStyle::Organic, support);
+    Slic3r::TreeFamily::generate_tree_support(context, Print(payload->print), object, style == Common::SupportStyle::Organic, support);
     Common::publish(context, object, support, m_orchestrator);
     progress().finish_run();
 }
@@ -82,4 +81,4 @@ void register_support_family_tree_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(orchestrator, SupportFamilyTree::instance(orchestrator).c_instance());
 }
-}
+} // namespace slic3r_api::Support::Tree

@@ -44,14 +44,6 @@ c_bounding_box bounding_box_inflated(const c_bounding_box &box, coord_t delta)
     return c_bounding_box{ c_point{ box.min.x - delta, box.min.y - delta }, c_point{ box.max.x + delta, box.max.y + delta } };
 }
 
-// Compares the four sides; an empty box (min > max) contains nothing and is contained by nothing, so its sides are not compared.
-bool bounding_box_contains(const c_bounding_box &box, const c_bounding_box &other)
-{
-    if (!slic3r_api::bounding_box_valid(box) || !slic3r_api::bounding_box_valid(other))
-        return false;
-    return other.min.x >= box.min.x && other.max.x <= box.max.x && other.min.y >= box.min.y && other.max.y <= box.max.y;
-}
-
 // Adds up the signed area of each ring, as given by the host.
 double polygons_area(const slic3r_api::PolygonCollection &polygons)
 {

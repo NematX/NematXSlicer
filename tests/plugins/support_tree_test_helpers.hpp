@@ -1,8 +1,8 @@
 /* Shared helpers of the tree-family tests: the fixtures that route and generate the trees of a sliced object, the meshes of the
    legacy comparison, and the tools of the baseline dump (test_support_tree_dump.cpp).
 
-   The baseline dump records what the tree family computes from native types, so that the migration to the plugin API can be
-   compared with it. A dump is a list of records, each with a key, free text lines compared as text, and rings compared as areas:
+   The baseline dump recorded what the tree family computed from native types, so that the plugin API implementation can
+   be compared with it. A dump is a list of records, each with a key, free text lines compared as text, and rings compared as areas:
 
        @ <key>
        = <text line>
@@ -53,6 +53,57 @@ namespace TF = Slic3r::TreeFamily;
 // The positions of the routed nodes are API points; the checks that compare them with native geometry convert them.
 inline Point to_point(c_point point) { return Point(point.x, point.y); }
 inline c_point to_c_point(const Point &point) { return c_point{ point.x(), point.y() }; }
+
+// One API ring as a native polygon (the points are copied through the view).
+inline Polygon to_native_ring(const slic3r_api::Polygon &ring)
+{
+    const multipoint_const_view points = ring.view();
+    Polygon polygon;
+    polygon.points.reserve(points.size);
+    for (uint32_t point_idx = 0; point_idx < points.size; ++point_idx)
+        polygon.points.emplace_back(points.array[point_idx].x, points.array[point_idx].y);
+    return polygon;
+}
+
+// The rings of an API polygon collection as native polygons (ring order kept); the checks that compare slabs with native geometry
+// (Clipper, areas, distances) read them this way.
+inline Polygons to_native(const slic3r_api::PolygonCollection &polygons)
+{
+    Polygons native;
+    native.reserve(polygons.size());
+    for (uint32_t ring_idx = 0; ring_idx < polygons.size(); ++ring_idx)
+        native.push_back(to_native_ring(polygons.at(ring_idx)));
+    return native;
+}
+
+// The expolygons of an API collection as native expolygons: the contour and the holes are copied through the views.
+inline ExPolygons to_native(const slic3r_api::ExPolygonCollection &expolygons)
+{
+    ExPolygons native;
+
+    native.reserve(expolygons.size());
+    for (uint32_t idx = 0; idx < expolygons.size(); ++idx) {
+        const slic3r_api::ExPolygon view = expolygons.at(idx);
+        ExPolygon expolygon;
+        expolygon.contour = to_native_ring(view.contour());
+        for (uint32_t hole_idx = 0; hole_idx < view.hole_size(); ++hole_idx)
+            expolygon.holes.push_back(to_native_ring(view.hole(hole_idx)));
+        native.push_back(std::move(expolygon));
+    }
+    return native;
+}
+
+// Replaces the rings of a stored collection by native polygons (a slab filled by hand for a test).
+inline void assign_native(slic3r_api::StoredPolygonCollection &collection, const Polygons &polygons)
+{
+    collection.clear();
+    for (const Polygon &polygon : polygons) {
+        slic3r_api::StoredPolygon ring(collection.storage());
+        for (const Point &point : polygon.points)
+            ring.push_back(c_point{ point.x(), point.y() });
+        collection.push_back_move(std::move(ring));
+    }
+}
 
 // Three simple objects without raft: an overhanging slab above the bed, a T whose bar overhangs both sides of its stem, and a
 // shelf whose overhang lands partly on a lower lobe of the object, where branches stand on the object. Model 3 is the slab on a

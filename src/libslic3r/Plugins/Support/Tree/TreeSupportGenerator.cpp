@@ -5,7 +5,6 @@
 #include <cassert>
 #include <cmath>
 #include <cstdint>
-#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <limits>
@@ -14,24 +13,18 @@
 
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
-#include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
-#include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/Layer.hpp"
-#include "libslic3r/Point.hpp"
-#include "libslic3r/Polygon.hpp"
-#include "libslic3r/Print.hpp"
-#include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportInterfaces.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "TreeBranchMesh.hpp"
 #include "TreeElements.hpp"
+#include "TreeGeometry.hpp"
 #include "TreeRouting.hpp"
 #include "TreeSettings.hpp"
 #include "TreeSmoothing.hpp"
-#include "TreeStorage.hpp"
 #include "TreeZPlanner.hpp"
 
 /* Implementation of the tree support slabs (see TreeSupportGenerator.hpp).
@@ -58,21 +51,35 @@
       starts on the bed (the first tree base slab, or the first organic branch slab, whose flange follows it; tips on the bed
       without a base slab are not widened) by raft_first_layer_expansion, and remove_first_layer_brim() cuts the reserved brim
       area of the object out of the top, base and interface slabs of the first layer (a slab can end empty); the base slabs
-      take their branch type. */
+      take their branch type.
+
+   Everything is written on the plugin API: the object and the print are views, the areas are polygon collections of the plugin
+   storage. The slabs, which the family publishes, live in the run storage (the polygons of Common::GeneratorLayer). Every
+   temporary area (the keep-out outlines, the branch sections, the intermediate results of the Clipper operations) lives in one
+   scratch storage that exists for the whole of generate_tree_slabs() and is destroyed when it returns; a result that a slab keeps
+   is moved into the polygons of the slab (move_from / append_move_from). A collection of the scratch storage must therefore never be
+   kept after generate_tree_slabs() returns. */
 
 namespace Slic3r::TreeFamily {
 namespace Common = slic3r_api::Support::Common;
+using slic3r_api::PolygonCollection;
+using slic3r_api::StoredPolygonCollection;
 
 namespace {
 // The tool ordering takes two distinct print Z values that lie within 4 * SCALED_EPSILON of each other for one layer and asserts on them.
 constexpr coord_t layer_merge_tolerance = 4 * SCALED_EPSILON;
+
+// One area per object layer or per Z, in the scratch storage.
+using PolygonList = std::vector<StoredPolygonCollection>;
+// The layer views of the object, indexed by layer id.
+using LayerList = std::vector<slic3r_api::Layer>;
 
 // A stretch of a branch between two Z levels, with the centre and radius of the branch at each end (scaled).
 // top_layer is the object layer whose span the stretch covers, the layer that its overhang belongs to. A stem is the vertical
 // part under a root that rests on the object or the bed; both styles draw the stems as circles.
 struct Segment {
     coord_t bottom_z = 0, top_z = 0;
-    Point bottom_centre, top_centre;
+    c_point bottom_centre{ 0, 0 }, top_centre{ 0, 0 };
     coord_t bottom_radius = 0, top_radius = 0;
     size_t top_layer = 0;
     bool stem = false;
@@ -84,69 +91,72 @@ struct RootRest {
     size_t top_layer = 0;
     LayerIndex landing = -1;
     coord_t bottom_z = 0;
-    Point centre;
+    c_point centre{ 0, 0 };
     coord_t radius = 0;
 };
 
-// The node positions are API points (c_point) since the routing moved to the API; this file still draws with native points.
-Point native_point(c_point point) { return Point(point.x, point.y); }
-
+// The object layer views, in the order of the layer ids.
+LayerList object_layers(const slic3r_api::Object &object);
+// The object outline of every layer grown by the XY distance, in the scratch storage; the slabs keep clear of it.
+PolygonList keep_out_outlines(const LayerList &layers, storage_handle *scratch, coord_t gap_xy);
 // Indices of the nodes that no node carries: the lowest nodes of the branches, where they stop.
 std::vector<size_t> root_nodes(const RoutedTree &tree);
 // Where a root that stands on the model comes to rest: the object layer below it that takes its unsupported part, or none
 // when the walk reaches the bed or its limit.
-RootRest root_rest(const PrintObject &object, const TreeNode &root, const std::vector<Polygons> &keep_out, const TreeSettings &settings);
+RootRest root_rest(const LayerList &layers, const TreeNode &root, const PolygonList &keep_out, const TreeSettings &settings,
+                   storage_handle *scratch);
+// The polygon of a branch cross-section, appended to circles: a circle around the centre, with the resolution the legacy tree draws it
+// with. The ring is built in storage and moved into the collection.
+void add_branch_circle(StoredPolygonCollection &circles, storage_handle *storage, const Vec2d &centre, double radius);
 // The rests of the roots of every tree: the bed roots of the first layer, and the roots that stand on the model.
-std::vector<RootRest> root_rests(const PrintObject &object, const std::vector<RoutedTree> &trees, const std::vector<Polygons> &keep_out,
-                                 const TreeSettings &settings);
+std::vector<RootRest> root_rests(const LayerList &layers, const std::vector<RoutedTree> &trees, const PolygonList &keep_out,
+                                 const TreeSettings &settings, storage_handle *scratch);
 // The stretches of every tree: between linked nodes, from a tip up to the layer above it, and the stem of every root.
-std::vector<Segment> branch_segments(const PrintObject &object, const std::vector<RoutedTree> &trees, const std::vector<RootRest> &rests);
+std::vector<Segment> branch_segments(const LayerList &layers, const std::vector<RoutedTree> &trees, const std::vector<RootRest> &rests);
 // The overhang rate of every object layer: the largest horizontal outline overhang per unit of height among the stretches that
 // enter it, where the overhang is the centre shift plus the radius growth upwards.
-std::vector<OverhangLayer> overhang_layers(const PrintObject &object, const std::vector<Segment> &segments);
+std::vector<OverhangLayer> overhang_layers(const LayerList &layers, const std::vector<Segment> &segments);
 // The overhang rate of every object layer of an organic print, measured on the sections that its branches draw.
-std::vector<OverhangLayer> section_overhang_layers(const PrintObject &object, const std::vector<RoutedTree> &trees,
-                                                   const std::vector<Segment> &segments, const std::function<void()> &throw_on_cancel);
-// The branch sections at the given Z values, before the object is removed: the circles of the stems and of the tree branches,
-// or for organic trees the branch meshes; the parts of each section are united.
-std::vector<Polygons> branch_sections(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
-                                      const std::vector<coord_t> &zs, const std::function<void()> &throw_on_cancel);
+std::vector<OverhangLayer> section_overhang_layers(const LayerList &layers, const std::vector<RoutedTree> &trees,
+                                                   const std::vector<Segment> &segments, storage_handle *scratch,
+                                                   const plugin_run_context *context);
+// The branch sections at the given Z values, before the object is removed, in the scratch storage: the circles of the stems and of
+// the tree branches, or for organic trees the branch meshes; the parts of each section are united.
+PolygonList branch_sections(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
+                            const std::vector<coord_t> &zs, storage_handle *scratch, const plugin_run_context *context);
+// The circles of the stretches that cross the Z middle of a slab, at the centre and radius interpolated there, appended to circles;
+// stems_only keeps the stems alone, as the organic branches are drawn as meshes.
+void add_branch_circles(StoredPolygonCollection &circles, storage_handle *storage, const std::vector<Segment> &segments, coord_t middle_z,
+                        bool stems_only);
 // The outline overhang of a section over the section below it, in scaled units; an empty section below gives none.
-double section_overhang(const Polygons &upper, const Polygons &lower);
+double section_overhang(const PolygonCollection &upper, const PolygonCollection &lower);
 // Whether a point lies inside an odd number of the polygons of a section, so that the holes of the section are outside of it.
-bool inside_section(const Polygons &section, const Point &point);
+bool inside_section(const PolygonCollection &section, c_point point);
 // The distance in scaled units from a point to the nearest edge of the polygons.
-double distance_to_outline(const Polygons &polygons, const Point &point);
-// The object outline of every layer grown by the XY distance; the slabs keep clear of it.
-std::vector<Polygons> keep_out_outlines(const PrintObject &object, coord_t gap_xy);
-// The polygon of a branch cross-section: a circle around the centre, with the resolution the legacy tree draws it with.
-Polygon branch_circle(Vec2d centre, double radius);
-// The circles of the stretches that cross the Z middle of a slab, at the centre and radius interpolated there; stems_only keeps
-// the stems alone, as the organic branches are drawn as meshes.
-Polygons branch_circles(const std::vector<Segment> &segments, coord_t middle_z, bool stems_only);
+double distance_to_outline(const PolygonCollection &polygons, c_point point);
 // Creates the bottom contacts of the roots that rest on the object: one contact per object layer, on the part of its top surfaces
 // that the root circles cover.
-void add_floors(const std::vector<slic3r_api::Layer> &layers, const std::vector<RootRest> &rests, const std::vector<Polygons> &keep_out,
-                const Common::SupportParams &params, const slic3r_api::Config &config, Common::GeneratedSupport &out);
+void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, const PolygonList &keep_out, const Common::SupportParams &params,
+                const slic3r_api::Config &config, storage_handle *scratch, Common::GeneratedSupport &out);
 // Places the slabs of every interval between extremes; the middle of each interval is planned from the branch overhangs. Returns the
 // middle slabs, the ones that carry branches; the dense interface slabs are not among them.
-std::vector<Common::GeneratorLayer *> place_slabs(const std::vector<slic3r_api::Layer> &layers, const Common::SupportParams &params,
-                                                  const TreeSettings &settings, const std::vector<OverhangLayer> &overhang,
-                                                  const slic3r_api::Config &config, Common::GeneratedSupport &out);
+std::vector<Common::GeneratorLayer *> place_slabs(const LayerList &layers, const Common::SupportParams &params, const TreeSettings &settings,
+                                                  const std::vector<OverhangLayer> &overhang, const slic3r_api::Config &config,
+                                                  Common::GeneratedSupport &out);
 // Cuts the middle slabs where the sections drawn at their middles overhang more than the limit, as far as the minimum height allows.
 void refine_branch_slabs(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, const TreeSettings &settings,
-                         std::vector<Common::GeneratorLayer *> &branch_slabs, const std::function<void()> &throw_on_cancel,
-                         Common::GeneratedSupport &out);
+                         std::vector<Common::GeneratorLayer *> &branch_slabs, storage_handle *scratch,
+                         const plugin_run_context *context, Common::GeneratedSupport &out);
+// The Z at which the branches of a slab are drawn: the middle of its span.
+coord_t slab_middle_z(const Common::GeneratorLayer &slab);
 // The Z where a middle slab is cut in two: the grid point nearest its middle from below, when both parts reach the minimum height;
 // the bottom of the slab when it cannot be cut.
 coord_t cut_height(const Common::GeneratorLayer &slab, coord_t grid, coord_t min_height);
 // Cuts a middle slab at the given Z: the lower part becomes a new middle slab listed before it, and the slab keeps the upper part.
 void cut_branch_slab(Common::GeneratedSupport &out, Common::GeneratorLayer &slab, coord_t cut,
                      std::vector<Common::GeneratorLayer *> &branch_slabs);
-// The Z at which the branches of a slab are drawn: the middle of its span.
-coord_t slab_middle_z(const Common::GeneratorLayer &slab);
 // The print Z of every object layer of every object of the print, sorted and without duplicates.
-std::vector<coord_t> object_print_zs(const Print &print);
+std::vector<coord_t> object_print_zs(const slic3r_api::Print &print);
 // The object print Z within the layer merge tolerance of z, or z itself when none lies that close.
 coord_t aligned_z(const std::vector<coord_t> &object_zs, coord_t z);
 // The listed slabs of the support: the top and bottom contacts and the base slabs, which publication prints.
@@ -161,104 +171,103 @@ void merge_collapsed_slabs(Common::GeneratedSupport &out);
 Common::GeneratorLayer *collapse_neighbor(const Common::GeneratorLayers &listed, const Common::GeneratorLayer &collapsed);
 // Starts the stem of every root that rests on a floor at the top of that floor.
 void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<RootRest> &rests);
-// Removes the footprint of every floor from the branch slabs (the base slabs and the tip contacts) that lie below the top of the
-// floor and above the object under it.
-void clear_under_floors(const PrintObject &object, const Common::GeneratorLayers &slabs, const Common::GeneratorLayers &floors);
 // Removes from the slab the outline of every object layer that the slab overlaps, grown by the XY distance.
-void trim_slab(Common::GeneratorLayer &slab, const PrintObject &object, const std::vector<Polygons> &keep_out);
+void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const PolygonList &keep_out, storage_handle *scratch);
 // Removes from each slab the footprint of the object bridges whose threads hang over it, grown by the XY gap, so that no support is
 // printed where a bridge thread is extruded. The object layers that the slab's Z span crosses are already removed by trim_slab(),
 // so the bridges are searched in the layers that begin at or above the slab top. A slab that ends under the bridge threads keeps
 // its footprint: it supports them.
-void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const std::vector<slic3r_api::Layer> &layers,
-                            const slic3r_api::Config &print_config, const Common::SupportParams &params, storage_handle *storage);
+void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const LayerList &layers, const slic3r_api::Config &print_config,
+                            const Common::SupportParams &params, storage_handle *scratch);
 // Adds to every base slab the branches that cross it, then trims each slab against the object. Tree branches are circles;
 // organic branches are the sections of their meshes, with the stems as circles.
-void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
-                   const std::vector<Polygons> &keep_out, const PrintObject &object, const std::function<void()> &throw_on_cancel,
+void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
+                   const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
                    Common::GeneratedSupport &out);
 // Without interface layers a top contact holds only the branches drawn at its middle and the tip stretches that cross it, and it
 // takes the branch type of the base slabs; its footprint is not kept.
-void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
-                       const std::vector<Polygons> &keep_out, const PrintObject &object, const std::function<void()> &throw_on_cancel,
+void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
+                       const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
                        Common::GeneratedSupport &out);
-// The circles of the tip stretches that cross a Z. A tip stretch runs from its tip up to the object layer above it, as in the tree
-// style; an organic tip is only a half sphere on its own node, which can stop below that Z.
-Polygons tip_circles(const std::vector<RoutedTree> &trees, const PrintObject &object, coord_t middle_z);
+// The circles of the tip stretches that cross a Z, appended to circles. A tip stretch runs from its tip up to the object layer above
+// it, as in the tree style; an organic tip is only a half sphere on its own node, which can stop below that Z.
+void add_tip_circles(StoredPolygonCollection &circles, storage_handle *storage, const std::vector<RoutedTree> &trees, const LayerList &layers,
+                     coord_t middle_z);
+// Removes the footprint of every floor from the branch slabs (the base slabs and the tip contacts) that lie below the top of the
+// floor and above the object under it.
+void clear_under_floors(const LayerList &layers, const Common::GeneratorLayers &slabs, const Common::GeneratorLayers &floors,
+                        storage_handle *scratch);
 } // namespace
 
 // Route the branches of one object, then build its slabs from the routed trees.
-void generate_tree_support(const plugin_run_context *context, const Print &print, const PrintObject &object, bool organic,
+void generate_tree_support(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object, bool organic,
                            Common::GeneratedSupport &out)
 {
-    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
-    const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&object));
-    const Common::SupportParams params(print_view, object_view);
-    const TreeSettings settings(object_view, print_view, params);
-    std::vector<RoutedTree> trees = route_trees(print_view, object_view, params, settings, out, context);
+    const Common::SupportParams params(print, object);
+    const TreeSettings settings(object, print, params);
+    std::vector<RoutedTree> trees = route_trees(print, object, params, settings, out, context);
     generate_tree_slabs(context, print, object, trees, organic, out);
 }
 
 // Build the slabs of the given routed trees in the order of the file header; organic trees are smoothed in place first.
-void generate_tree_slabs(const plugin_run_context *context, const Print &print, const PrintObject &object, std::vector<RoutedTree> &trees,
-                         bool organic, Common::GeneratedSupport &out)
+void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
+                         std::vector<RoutedTree> &trees, bool organic, Common::GeneratedSupport &out)
 {
-    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
-    const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&object));
-    const Common::SupportParams params(print_view, object_view);
-    const TreeSettings settings(object_view, print_view, params);
-    std::vector<slic3r_api::Layer> layers;
-    for (uint32_t id = 0; id < object_view.layer_count(); ++id)
-        layers.push_back(object_view.layer(id));
-    const slic3r_api::Config config = object_view.config();
-    const std::vector<Polygons> keep_out = keep_out_outlines(object, settings.xy_min_distance);
+    const Common::SupportParams params(print, object);
+    const TreeSettings settings(object, print, params);
+    const LayerList layers = object_layers(object);
+    const slic3r_api::Config config = object.config();
+    const slic3r_api::Config print_config = print.config();
     const std::function<void()> throw_on_cancel = [context] { slic3r_api::throw_if_cancelled(context); };
-    if (organic)
-        smooth_organic_branches(object, keep_out, trees, throw_on_cancel);
-    std::vector<RootRest> rests = root_rests(object, trees, keep_out, settings);
-    add_floors(layers, rests, keep_out, params, config, out);
-    raise_stems_onto_floors(out, rests);
-    const std::vector<Segment> segments = branch_segments(object, trees, rests);
-    const std::vector<OverhangLayer> overhang = organic ? section_overhang_layers(object, trees, segments, throw_on_cancel)
-                                                        : overhang_layers(object, segments);
-    std::vector<Common::GeneratorLayer *> branch_slabs = place_slabs(layers, params, settings, overhang, config, out);
-    if (organic)
-        refine_branch_slabs(segments, trees, settings, branch_slabs, throw_on_cancel, out);
-    align_slab_bounds(object_print_zs(print), out);
-    for (Common::GeneratorLayer *contact : out.top)
-        trim_slab(*contact, object, keep_out);
-    for (Common::GeneratorLayer *contact : out.bottom)
-        trim_slab(*contact, object, keep_out);
-    // The top contacts and the floors lose the bridge footprint before publication, for themselves. Trimming the contacts before the
-    // projection keeps the projected areas aligned with the grid, which trims its contacts before carving the interfaces; the later
-    // trim of the base slabs also keeps the slabs of the thread band free of the footprint.
     // Without interface layers the contacts are rebuilt below from the branches, and trimmed again there.
     const bool without_interfaces = config.get("support_material_interface_layers").get_int() <= 0;
-    const slic3r_api::Config print_config = print_view.config();
-    const auto trim_bridges = [&](const Common::GeneratorLayers &slabs) {
-        trim_bridge_footprints(slabs, layers, print_config, params, out.storage);
-    };
-    if (!without_interfaces)
-        trim_bridges(out.top);
-    trim_bridges(out.bottom);
-    Common::project_interface_contacts(params, out);
-    slic3r_api::throw_if_cancelled(context);
-    draw_branches(segments, trees, organic, keep_out, object, throw_on_cancel, out);
-    // The branches drawn in the base and branch slabs are trimmed too: a slab can reach into the thread band when the bridge is
-    // thicker than a layer (thin support layers, high bridge flow ratio). The interfaces are carved out of these slabs afterwards.
-    trim_bridges(out.base);
-    Common::GeneratorLayers drawn_slabs = out.base;
-    if (without_interfaces) {
-        draw_tip_contacts(segments, trees, organic, keep_out, object, throw_on_cancel, out);
-        trim_bridges(out.top);
-        drawn_slabs.insert(drawn_slabs.end(), out.top.begin(), out.top.end());
-    }
-    clear_under_floors(object, drawn_slabs, out.bottom);
-    Common::carve_interfaces(params, false, out);
-    Common::expand_first_layer_foot(object_view, layers, params, out);
-    Common::remove_first_layer_brim(object_view, layers, params, out);
-    for (Common::GeneratorLayer *slab : out.base)
-        slab->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
+    // Every temporary area of the job lives in this storage, which is destroyed when the job returns.
+    with_scratch_storage([&](storage_handle *scratch) {
+        const PolygonList keep_out = keep_out_outlines(layers, scratch, settings.xy_min_distance);
+        if (organic)
+            smooth_organic_branches(object, keep_out, trees, throw_on_cancel);
+        std::vector<RootRest> rests = root_rests(layers, trees, keep_out, settings, scratch);
+        add_floors(layers, rests, keep_out, params, config, scratch, out);
+        raise_stems_onto_floors(out, rests);
+        const std::vector<Segment> segments = branch_segments(layers, trees, rests);
+        const std::vector<OverhangLayer> overhang = organic ? section_overhang_layers(layers, trees, segments, scratch, context)
+                                                            : overhang_layers(layers, segments);
+        std::vector<Common::GeneratorLayer *> branch_slabs = place_slabs(layers, params, settings, overhang, config, out);
+        if (organic)
+            refine_branch_slabs(segments, trees, settings, branch_slabs, scratch, context, out);
+        align_slab_bounds(object_print_zs(print), out);
+        for (Common::GeneratorLayer *contact : out.top)
+            trim_slab(*contact, layers, keep_out, scratch);
+        for (Common::GeneratorLayer *contact : out.bottom)
+            trim_slab(*contact, layers, keep_out, scratch);
+        // The top contacts and the floors lose the bridge footprint before publication, for themselves. Trimming the contacts before the
+        // projection keeps the projected areas aligned with the grid, which trims its contacts before carving the interfaces; the later
+        // trim of the base slabs also keeps the slabs of the thread band free of the footprint.
+        const std::function<void(const Common::GeneratorLayers &)> trim_bridges = [&](const Common::GeneratorLayers &slabs) {
+            trim_bridge_footprints(slabs, layers, print_config, params, scratch);
+        };
+        if (!without_interfaces)
+            trim_bridges(out.top);
+        trim_bridges(out.bottom);
+        Common::project_interface_contacts(params, out);
+        slic3r_api::throw_if_cancelled(context);
+        draw_branches(segments, trees, organic, layers, keep_out, scratch, context, out);
+        // The branches drawn in the base and branch slabs are trimmed too: a slab can reach into the thread band when the bridge is
+        // thicker than a layer (thin support layers, high bridge flow ratio). The interfaces are carved out of these slabs afterwards.
+        trim_bridges(out.base);
+        Common::GeneratorLayers drawn_slabs = out.base;
+        if (without_interfaces) {
+            draw_tip_contacts(segments, trees, organic, layers, keep_out, scratch, context, out);
+            trim_bridges(out.top);
+            drawn_slabs.insert(drawn_slabs.end(), out.top.begin(), out.top.end());
+        }
+        clear_under_floors(layers, drawn_slabs, out.bottom, scratch);
+        Common::carve_interfaces(params, false, out);
+        Common::expand_first_layer_foot(object, layers, params, out);
+        Common::remove_first_layer_brim(object, layers, params, out);
+        for (Common::GeneratorLayer *slab : out.base)
+            slab->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
+    });
 }
 
 // Snaps every bound of the slabs onto the object print Z within the layer merge tolerance of it. The snap is a pure function of
@@ -280,6 +289,25 @@ void align_slab_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedS
 }
 
 namespace {
+LayerList object_layers(const slic3r_api::Object &object)
+{
+    LayerList layers;
+    layers.reserve(object.layer_count());
+    for (uint32_t id = 0; id < object.layer_count(); ++id)
+        layers.push_back(object.layer(id));
+    return layers;
+}
+
+// Each outline is the rings of the slices of the layer offset with round joins, as the legacy tree grows them.
+PolygonList keep_out_outlines(const LayerList &layers, storage_handle *scratch, coord_t gap_xy)
+{
+    PolygonList outlines;
+    outlines.reserve(layers.size());
+    for (const slic3r_api::Layer &layer : layers)
+        outlines.push_back(polygons_offset(scratch, layer.slices(), double(gap_xy), CLIPPER_JOIN_ROUND));
+    return outlines;
+}
+
 std::vector<size_t> root_nodes(const RoutedTree &tree)
 {
     std::vector<bool> carried(tree.nodes.size(), false);
@@ -296,36 +324,50 @@ std::vector<size_t> root_nodes(const RoutedTree &tree)
 // The legacy stop rules bound the walk: it ends when the unsupported part is smaller than the larger of a fifth of the root
 // area and half the branch area, and it goes down at most five root radii in layers. A root that hangs in the air goes down to the bed.
 // Without a stop, the stem ends at the lowest layer that the walk reached, and it stays in the air.
-RootRest root_rest(const PrintObject &object, const TreeNode &root, const std::vector<Polygons> &keep_out, const TreeSettings &settings)
+RootRest root_rest(const LayerList &layers, const TreeNode &root, const PolygonList &keep_out, const TreeSettings &settings,
+                   storage_handle *scratch)
 {
-    const double stop_area = std::max(0.2 * M_PI * sqr(double(root.radius)), 0.5 * M_PI * sqr(double(settings.branch_radius)));
+    const double stop_area = std::max(0.2 * PI * sqr(double(root.radius)), 0.5 * PI * sqr(double(settings.branch_radius)));
     const LayerIndex lowest = root.verylost ? 0 :
         std::max<LayerIndex>(0, LayerIndex(root.layer) - LayerIndex(5. * double(root.radius) / double(settings.layer_height)));
-    Polygons unsupported{ branch_circle(native_point(root.position).cast<double>(), root.radius) };
-    RootRest rest{ root.layer, -1, 0, native_point(root.position), root.radius };
+    StoredPolygonCollection unsupported(scratch);
+    add_branch_circle(unsupported, scratch, to_vec2d(root.position), double(root.radius));
+    RootRest rest{ root.layer, -1, 0, root.position, root.radius };
     for (LayerIndex layer = LayerIndex(root.layer) - 1; layer >= lowest; --layer) {
-        unsupported = diff(unsupported, keep_out[size_t(layer)]);
-        if (area(unsupported) < stop_area) {
+        unsupported.move_from(polygons_diff(scratch, unsupported, keep_out[size_t(layer)]));
+        if (polygons_area(unsupported) < stop_area) {
             rest.landing = layer;
-            rest.bottom_z = object.layer(size_t(layer)).scaled_print_z();
+            rest.bottom_z = layers[size_t(layer)].print_z();
             return rest;
         }
     }
-    rest.bottom_z = lowest > 0 ? object.layer(size_t(lowest)).scaled_bottom_z() : 0;
+    rest.bottom_z = lowest > 0 ? layers[size_t(lowest)].bottom_z() : 0;
     return rest;
 }
 
-std::vector<RootRest> root_rests(const PrintObject &object, const std::vector<RoutedTree> &trees, const std::vector<Polygons> &keep_out,
-                                 const TreeSettings &settings)
+// The ring is made around the origin by make_circle(), then moved to the centre rounded to the nearest unit.
+void add_branch_circle(StoredPolygonCollection &circles, storage_handle *storage, const Vec2d &centre, double radius)
+{
+    const c_point offset{ coord_t(std::llround(centre.x())), coord_t(std::llround(centre.y())) };
+    std::vector<c_point> points = make_circle(radius, SUPPORT_TREE_CIRCLE_RESOLUTION);
+    for (c_point &point : points)
+        point = point + offset;
+    slic3r_api::StoredPolygon ring(storage);
+    ring.insert_array(0, points.data(), uint32_t(points.size()));
+    circles.push_back_move(std::move(ring));
+}
+
+std::vector<RootRest> root_rests(const LayerList &layers, const std::vector<RoutedTree> &trees, const PolygonList &keep_out,
+                                 const TreeSettings &settings, storage_handle *scratch)
 {
     std::vector<RootRest> rests;
     for (const RoutedTree &tree : trees)
         for (const size_t idx : root_nodes(tree)) {
             const TreeNode &root = tree.nodes[idx];
             if (root.layer == 0)
-                rests.push_back(RootRest{ 0, -1, 0, native_point(root.position), root.radius });
+                rests.push_back(RootRest{ 0, -1, 0, root.position, root.radius });
             else if (!root.to_buildplate)
-                rests.push_back(root_rest(object, root, keep_out, settings));
+                rests.push_back(root_rest(layers, root, keep_out, settings, scratch));
         }
     return rests;
 }
@@ -333,142 +375,96 @@ std::vector<RootRest> root_rests(const PrintObject &object, const std::vector<Ro
 // A tip has no node above it, so its stretch to the layer above only gives the branch its top. A root stands on the bed when it is on
 // the first layer, otherwise its stem runs down to the top of its floor or to the layer where it rests (root_rest). The stretches
 // of a root that lies inside its floor are cut away by clear_under_floors() once drawn.
-std::vector<Segment> branch_segments(const PrintObject &object, const std::vector<RoutedTree> &trees, const std::vector<RootRest> &rests)
+std::vector<Segment> branch_segments(const LayerList &layers, const std::vector<RoutedTree> &trees, const std::vector<RootRest> &rests)
 {
-    const size_t layer_count = object.layer_count();
+    const size_t layer_count = layers.size();
     std::vector<Segment> segments;
     for (const RoutedTree &tree : trees) {
         for (const TreeNode &node : tree.nodes) {
-            const coord_t z = object.layer(node.layer).scaled_print_z();
+            const coord_t z = layers[node.layer].print_z();
             if (node.carries.empty() && node.layer + 1 < layer_count)
-                segments.push_back(Segment{ z, object.layer(node.layer + 1).scaled_print_z(), native_point(node.position), native_point(node.position),
-                    node.radius, node.radius, node.layer + 1 });
+                segments.push_back(Segment{ z, layers[node.layer + 1].print_z(), node.position, node.position, node.radius, node.radius,
+                    node.layer + 1 });
             for (const size_t upper : node.carries) {
                 const TreeNode &above = tree.nodes[upper];
-                segments.push_back(Segment{ z, object.layer(above.layer).scaled_print_z(), native_point(node.position), native_point(above.position),
-                    node.radius, above.radius, above.layer });
+                segments.push_back(Segment{ z, layers[above.layer].print_z(), node.position, above.position, node.radius, above.radius,
+                    above.layer });
             }
         }
     }
     for (const RootRest &rest : rests) {
-        const coord_t top_z = object.layer(rest.top_layer).scaled_print_z();
+        const coord_t top_z = layers[rest.top_layer].print_z();
         if (rest.bottom_z < top_z)
             segments.push_back(Segment{ rest.bottom_z, top_z, rest.centre, rest.centre, rest.radius, rest.radius, rest.top_layer, true });
     }
     return segments;
 }
 
-std::vector<OverhangLayer> overhang_layers(const PrintObject &object, const std::vector<Segment> &segments)
+std::vector<OverhangLayer> overhang_layers(const LayerList &layers, const std::vector<Segment> &segments)
 {
-    std::vector<OverhangLayer> layers(object.layer_count());
-    for (size_t id = 0; id < layers.size(); ++id) {
-        layers[id].bottom_z = object.layer(id).scaled_bottom_z();
-        layers[id].top_z = object.layer(id).scaled_print_z();
+    std::vector<OverhangLayer> overhang(layers.size());
+    for (size_t id = 0; id < overhang.size(); ++id) {
+        overhang[id].bottom_z = layers[id].bottom_z();
+        overhang[id].top_z = layers[id].print_z();
     }
     for (const Segment &segment : segments) {
-        const double shift = (segment.top_centre - segment.bottom_centre).cast<double>().norm();
-        const double overhang = std::max(0., shift + double(segment.top_radius) - double(segment.bottom_radius));
-        double &rate = layers[segment.top_layer].rate;
-        rate = std::max(rate, overhang / double(segment.top_z - segment.bottom_z));
+        const double shift = to_vec2d(segment.top_centre - segment.bottom_centre).norm();
+        const double rise = std::max(0., shift + double(segment.top_radius) - double(segment.bottom_radius));
+        double &rate = overhang[segment.top_layer].rate;
+        rate = std::max(rate, rise / double(segment.top_z - segment.bottom_z));
     }
-    return layers;
+    return overhang;
 }
 
 // The overhang rate of every object layer, from the sections at the layer top over the sections at its bottom. It starts the
 // planning only: the branches are drawn at the middle of each slab, where a tilted branch can widen inside one layer, so
 // refine_branch_slabs() checks the drawn sections.
-std::vector<OverhangLayer> section_overhang_layers(const PrintObject &object, const std::vector<RoutedTree> &trees,
-                                                   const std::vector<Segment> &segments, const std::function<void()> &throw_on_cancel)
+std::vector<OverhangLayer> section_overhang_layers(const LayerList &layers, const std::vector<RoutedTree> &trees,
+                                                   const std::vector<Segment> &segments, storage_handle *scratch,
+                                                   const plugin_run_context *context)
 {
-    std::vector<OverhangLayer> layers(object.layer_count());
+    std::vector<OverhangLayer> overhang(layers.size());
     std::vector<coord_t> zs;
-    for (size_t id = 0; id < layers.size(); ++id) {
-        layers[id].bottom_z = object.layer(id).scaled_bottom_z();
-        layers[id].top_z = object.layer(id).scaled_print_z();
-        zs.push_back(layers[id].bottom_z);
-        zs.push_back(layers[id].top_z);
+    for (size_t id = 0; id < overhang.size(); ++id) {
+        overhang[id].bottom_z = layers[id].bottom_z();
+        overhang[id].top_z = layers[id].print_z();
+        zs.push_back(overhang[id].bottom_z);
+        zs.push_back(overhang[id].top_z);
     }
     std::sort(zs.begin(), zs.end());
     zs.erase(std::unique(zs.begin(), zs.end()), zs.end());
-    const std::vector<Polygons> sections = branch_sections(segments, trees, true, zs, throw_on_cancel);
-    for (OverhangLayer &layer : layers) {
-        const Polygons &top = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.top_z) - zs.begin())];
-        const Polygons &bottom = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.bottom_z) - zs.begin())];
+    const PolygonList sections = branch_sections(segments, trees, true, zs, scratch, context);
+    for (OverhangLayer &layer : overhang) {
+        const StoredPolygonCollection &top = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.top_z) - zs.begin())];
+        const StoredPolygonCollection &bottom = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.bottom_z) - zs.begin())];
         layer.rate = section_overhang(top, bottom) / double(layer.top_z - layer.bottom_z);
     }
-    return layers;
+    return overhang;
 }
 
-std::vector<Polygons> branch_sections(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
-                                      const std::vector<coord_t> &zs, const std::function<void()> &throw_on_cancel)
+PolygonList branch_sections(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
+                            const std::vector<coord_t> &zs, storage_handle *scratch, const plugin_run_context *context)
 {
-    std::vector<Polygons> sections = organic ? slice_branch_meshes(trees, zs, throw_on_cancel) : std::vector<Polygons>(zs.size());
+    PolygonList sections;
+    if (organic) {
+        sections = slice_branch_meshes(scratch, trees, zs, context);
+    } else {
+        sections.reserve(zs.size());
+        for (size_t idx = 0; idx < zs.size(); ++idx)
+            sections.emplace_back(scratch);
+    }
     for (size_t idx = 0; idx < zs.size(); ++idx) {
-        Polygons &section = sections[idx];
-        const Polygons circles = branch_circles(segments, zs[idx], organic);
-        section.insert(section.end(), circles.begin(), circles.end());
+        StoredPolygonCollection &section = sections[idx];
+        add_branch_circles(section, scratch, segments, zs[idx], organic);
         if (!section.empty())
-            section = union_(section);
+            section.move_from(polygons_union(scratch, section));
     }
     return sections;
 }
 
-// A point of the upper section that lies outside the lower one overhangs by its distance to the lower outline. A section with
-// nothing below it is not measured: it starts on a branch or a stem that is printed below.
-double section_overhang(const Polygons &upper, const Polygons &lower)
+void add_branch_circles(StoredPolygonCollection &circles, storage_handle *storage, const std::vector<Segment> &segments, coord_t middle_z,
+                        bool stems_only)
 {
-    if (lower.empty())
-        return 0.;
-    double largest = 0.;
-    for (const Polygon &polygon : upper)
-        for (const Point &point : polygon.points)
-            if (!inside_section(lower, point))
-                largest = std::max(largest, distance_to_outline(lower, point));
-    return largest;
-}
-
-bool inside_section(const Polygons &section, const Point &point)
-{
-    size_t containing = 0;
-    for (const Polygon &polygon : section)
-        containing += polygon.contains(point) ? 1 : 0;
-    return containing % 2 == 1;
-}
-
-double distance_to_outline(const Polygons &polygons, const Point &point)
-{
-    double best = std::numeric_limits<double>::max();
-    for (const Polygon &polygon : polygons)
-        for (size_t idx = 0; idx < polygon.size(); ++idx) {
-            const Vec2d a = polygon.points[idx].cast<double>();
-            const Vec2d ab = polygon.points[(idx + 1) % polygon.size()].cast<double>() - a;
-            const Vec2d ap = point.cast<double>() - a;
-            const double len2 = ab.squaredNorm();
-            const double t = len2 > 0. ? std::clamp(ap.dot(ab) / len2, 0., 1.) : 0.;
-            best = std::min(best, (ap - ab * t).norm());
-        }
-    return best;
-}
-
-std::vector<Polygons> keep_out_outlines(const PrintObject &object, coord_t gap_xy)
-{
-    std::vector<Polygons> outlines;
-    outlines.reserve(object.layer_count());
-    for (size_t id = 0; id < object.layer_count(); ++id)
-        outlines.push_back(to_polygons(offset_ex(object.layer(id).lslices(), float(gap_xy), ClipperLib::jtRound)));
-    return outlines;
-}
-
-Polygon branch_circle(Vec2d centre, double radius)
-{
-    Polygon circle = make_circle(radius, SUPPORT_TREE_CIRCLE_RESOLUTION);
-    circle.translate(Point(coord_t(std::llround(centre.x())), coord_t(std::llround(centre.y()))));
-    return circle;
-}
-
-Polygons branch_circles(const std::vector<Segment> &segments, coord_t middle_z, bool stems_only)
-{
-    Polygons circles;
     for (const Segment &segment : segments) {
         if (stems_only && !segment.stem)
             continue;
@@ -478,39 +474,80 @@ Polygons branch_circles(const std::vector<Segment> &segments, coord_t middle_z, 
         const double radius = double(segment.bottom_radius) + double(segment.top_radius - segment.bottom_radius) * t;
         if (radius <= SUPPORT_TREE_CIRCLE_RESOLUTION)
             continue;
-        const Vec2d centre = segment.bottom_centre.cast<double>() + (segment.top_centre - segment.bottom_centre).cast<double>() * t;
-        circles.push_back(branch_circle(centre, radius));
+        const Vec2d centre = to_vec2d(segment.bottom_centre) + to_vec2d(segment.top_centre - segment.bottom_centre) * t;
+        add_branch_circle(circles, storage, centre, radius);
     }
-    return circles;
 }
 
-void add_floors(const std::vector<slic3r_api::Layer> &layers, const std::vector<RootRest> &rests, const std::vector<Polygons> &keep_out,
-                const Common::SupportParams &params, const slic3r_api::Config &config, Common::GeneratedSupport &out)
+// A point of the upper section that lies outside the lower one overhangs by its distance to the lower outline. A section with
+// nothing below it is not measured: it starts on a branch or a stem that is printed below.
+double section_overhang(const PolygonCollection &upper, const PolygonCollection &lower)
 {
-    std::vector<Polygons> resting(keep_out.size());
+    if (lower.empty())
+        return 0.;
+    double largest = 0.;
+    for (uint32_t ring_idx = 0; ring_idx < upper.size(); ++ring_idx) {
+        const multipoint_const_view ring = upper.at(ring_idx).view();
+        for (uint32_t point_idx = 0; point_idx < ring.size; ++point_idx)
+            if (!inside_section(lower, ring.array[point_idx]))
+                largest = std::max(largest, distance_to_outline(lower, ring.array[point_idx]));
+    }
+    return largest;
+}
+
+// Each ring answers with the contains() of the host (border inside), and the answers are counted, so a point in a hole is outside.
+bool inside_section(const PolygonCollection &section, c_point point)
+{
+    size_t containing = 0;
+    for (uint32_t ring_idx = 0; ring_idx < section.size(); ++ring_idx)
+        containing += section.at(ring_idx).contains(point) ? 1 : 0;
+    return containing % 2 == 1;
+}
+
+double distance_to_outline(const PolygonCollection &polygons, c_point point)
+{
+    double best = std::numeric_limits<double>::max();
+    for (uint32_t ring_idx = 0; ring_idx < polygons.size(); ++ring_idx) {
+        const multipoint_const_view ring = polygons.at(ring_idx).view();
+        for (uint32_t idx = 0; idx < ring.size; ++idx) {
+            const Vec2d a = to_vec2d(ring.array[idx]);
+            const Vec2d ab = to_vec2d(ring.array[(idx + 1) % ring.size]) - a;
+            const Vec2d ap = to_vec2d(point) - a;
+            const double len2 = ab.squaredNorm();
+            const double t = len2 > 0. ? std::clamp(ap.dot(ab) / len2, 0., 1.) : 0.;
+            best = std::min(best, (ap - ab * t).norm());
+        }
+    }
+    return best;
+}
+
+void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, const PolygonList &keep_out, const Common::SupportParams &params,
+                const slic3r_api::Config &config, storage_handle *scratch, Common::GeneratedSupport &out)
+{
+    PolygonList resting;
+    resting.reserve(keep_out.size());
+    for (size_t id = 0; id < keep_out.size(); ++id)
+        resting.emplace_back(scratch);
     for (const RootRest &rest : rests)
         if (rest.landing >= 0)
-            resting[size_t(rest.landing)].push_back(branch_circle(rest.centre.cast<double>(), rest.radius));
+            add_branch_circle(resting[size_t(rest.landing)], scratch, to_vec2d(rest.centre), double(rest.radius));
     const Common::ContactDistanceType distance_type = Common::contact_distance_type(config);
     for (size_t id = 0; id + 1 < resting.size(); ++id) {
         if (resting[id].empty())
             continue;
         // The top surfaces of layer id: its outline grown by the XY distance, minus the same outline of the layer above.
-        const Polygons placeable = diff(keep_out[id], keep_out[id + 1]);
-        const Polygons touching = intersection(union_(resting[id]), placeable);
+        const StoredPolygonCollection placeable = polygons_diff(scratch, keep_out[id], keep_out[id + 1]);
+        const StoredPolygonCollection covered = polygons_union(scratch, resting[id]);
+        const StoredPolygonCollection touching = polygons_intersection(scratch, covered, placeable);
         if (touching.empty())
             continue;
-        slic3r_api::StoredPolygonCollection touching_view(out.storage);
-        native_polygons(touching_view) = touching;
-        slic3r_api::StoredPolygonCollection top_view(out.storage);
-        native_polygons(top_view) = placeable;
-        Common::add_bottom_contact(layers, params, distance_type, id, touching_view, top_view, out);
+        Common::add_bottom_contact(layers, params, distance_type, id, touching, placeable, out);
     }
 }
 
-std::vector<Common::GeneratorLayer *> place_slabs(const std::vector<slic3r_api::Layer> &layers, const Common::SupportParams &params,
-                                                  const TreeSettings &settings, const std::vector<OverhangLayer> &overhang,
-                                                  const slic3r_api::Config &config, Common::GeneratedSupport &out)
+std::vector<Common::GeneratorLayer *> place_slabs(const LayerList &layers, const Common::SupportParams &params, const TreeSettings &settings,
+                                                  const std::vector<OverhangLayer> &overhang, const slic3r_api::Config &config,
+                                                  Common::GeneratedSupport &out)
 {
     const int32_t interfaces = std::max(0, config.get("support_material_interface_layers").get_int());
     const slic3r_api::ConfigOption bottom_option = config.get("support_material_bottom_interface_layers");
@@ -525,7 +562,7 @@ std::vector<Common::GeneratorLayer *> place_slabs(const std::vector<slic3r_api::
     spacing.bottom_interface_layers = bottom_enabled ? std::max(0, bottom_option.get_int()) : interfaces;
     spacing.soluble = params.soluble;
     std::vector<Common::GeneratorLayer *> branch_slabs;
-    const auto split_middle = [&](coord_t from, coord_t to) {
+    const Common::MiddleSplitter split_middle = [&](coord_t from, coord_t to) {
         coord_t bottom = from;
         for (const coord_t top : plan_branch_slabs(from, to, overhang, settings.max_overhang, settings.min_slab_height,
                  settings.max_slab_height, settings.z_step)) {
@@ -536,6 +573,43 @@ std::vector<Common::GeneratorLayer *> place_slabs(const std::vector<slic3r_api::
     };
     Common::place_intermediate_slabs(spacing, layers, out, split_middle);
     return branch_slabs;
+}
+
+// Each round draws the sections at the slab middles, which are the sections that get printed. An offending pair cuts its upper slab,
+// or else its lower one, and a round that cuts nothing ends the refinement. A pair that no cut can help stays, without assertion.
+void refine_branch_slabs(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, const TreeSettings &settings,
+                         std::vector<Common::GeneratorLayer *> &branch_slabs, storage_handle *scratch,
+                         const plugin_run_context *context, Common::GeneratedSupport &out)
+{
+    const coord_t grid = planning_grid(settings.z_step);
+    for (;;) {
+        std::vector<coord_t> middles;
+        middles.reserve(out.base.size());
+        for (const Common::GeneratorLayer *slab : out.base)
+            middles.push_back(slab_middle_z(*slab));
+        const PolygonList sections = branch_sections(segments, trees, true, middles, scratch, context);
+        std::vector<std::pair<Common::GeneratorLayer *, coord_t>> cuts;
+        for (size_t idx = 1; idx < out.base.size(); ++idx) {
+            if (section_overhang(sections[idx], sections[idx - 1]) <= settings.max_overhang)
+                continue;
+            for (Common::GeneratorLayer *slab : { out.base[idx], out.base[idx - 1] }) {
+                if (std::find(branch_slabs.begin(), branch_slabs.end(), slab) == branch_slabs.end())
+                    continue;
+                const coord_t cut = cut_height(*slab, grid, settings.min_slab_height);
+                if (cut == slab->print_z - slab->height)
+                    continue;
+                const bool listed = std::any_of(cuts.begin(), cuts.end(),
+                    [slab](const std::pair<Common::GeneratorLayer *, coord_t> &entry) { return entry.first == slab; });
+                if (!listed)
+                    cuts.emplace_back(slab, cut);
+                break;
+            }
+        }
+        if (cuts.empty())
+            return;
+        for (const std::pair<Common::GeneratorLayer *, coord_t> &entry : cuts)
+            cut_branch_slab(out, *entry.first, entry.second, branch_slabs);
+    }
 }
 
 coord_t slab_middle_z(const Common::GeneratorLayer &slab)
@@ -567,49 +641,14 @@ void cut_branch_slab(Common::GeneratedSupport &out, Common::GeneratorLayer &slab
     branch_slabs.push_back(&lower);
 }
 
-// Each round draws the sections at the slab middles, which are the sections that get printed. An offending pair cuts its upper slab,
-// or else its lower one, and a round that cuts nothing ends the refinement. A pair that no cut can help stays, without assertion.
-void refine_branch_slabs(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, const TreeSettings &settings,
-                         std::vector<Common::GeneratorLayer *> &branch_slabs, const std::function<void()> &throw_on_cancel,
-                         Common::GeneratedSupport &out)
-{
-    const coord_t grid = planning_grid(settings.z_step);
-    for (;;) {
-        std::vector<coord_t> middles;
-        middles.reserve(out.base.size());
-        for (const Common::GeneratorLayer *slab : out.base)
-            middles.push_back(slab_middle_z(*slab));
-        const std::vector<Polygons> sections = branch_sections(segments, trees, true, middles, throw_on_cancel);
-        std::vector<std::pair<Common::GeneratorLayer *, coord_t>> cuts;
-        for (size_t idx = 1; idx < out.base.size(); ++idx) {
-            if (section_overhang(sections[idx], sections[idx - 1]) <= settings.max_overhang)
-                continue;
-            for (Common::GeneratorLayer *slab : { out.base[idx], out.base[idx - 1] }) {
-                if (std::find(branch_slabs.begin(), branch_slabs.end(), slab) == branch_slabs.end())
-                    continue;
-                const coord_t cut = cut_height(*slab, grid, settings.min_slab_height);
-                if (cut == slab->print_z - slab->height)
-                    continue;
-                const bool listed = std::any_of(cuts.begin(), cuts.end(),
-                    [slab](const std::pair<Common::GeneratorLayer *, coord_t> &entry) { return entry.first == slab; });
-                if (!listed)
-                    cuts.emplace_back(slab, cut);
-                break;
-            }
-        }
-        if (cuts.empty())
-            return;
-        for (const std::pair<Common::GeneratorLayer *, coord_t> &entry : cuts)
-            cut_branch_slab(out, *entry.first, entry.second, branch_slabs);
-    }
-}
-
-std::vector<coord_t> object_print_zs(const Print &print)
+std::vector<coord_t> object_print_zs(const slic3r_api::Print &print)
 {
     std::vector<coord_t> zs;
-    for (const PrintObject &object : print.objects())
-        for (size_t id = 0; id < object.layer_count(); ++id)
-            zs.push_back(object.layer(id).scaled_print_z());
+    for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
+        const slic3r_api::Object other = print.object(object_idx);
+        for (uint32_t id = 0; id < other.layer_count(); ++id)
+            zs.push_back(other.layer(id).print_z());
+    }
     std::sort(zs.begin(), zs.end());
     zs.erase(std::unique(zs.begin(), zs.end()), zs.end());
     return zs;
@@ -618,7 +657,7 @@ std::vector<coord_t> object_print_zs(const Print &print)
 // A bound within the tolerance of an object print Z takes that Z, so the distance stays at the limit that the ordering checks.
 coord_t aligned_z(const std::vector<coord_t> &object_zs, coord_t z)
 {
-    const auto upper = std::lower_bound(object_zs.begin(), object_zs.end(), z);
+    const std::vector<coord_t>::const_iterator upper = std::lower_bound(object_zs.begin(), object_zs.end(), z);
     if (upper != object_zs.end() && *upper - z <= layer_merge_tolerance)
         return *upper;
     if (upper != object_zs.begin() && z - *std::prev(upper) <= layer_merge_tolerance)
@@ -644,7 +683,7 @@ void merge_close_bounds(const std::vector<coord_t> &object_zs, Common::Generated
             kept = bounds[idx];
         targets[idx] = kept;
     }
-    const auto target = [&bounds, &targets](coord_t z) {
+    const std::function<coord_t(coord_t)> target = [&bounds, &targets](coord_t z) {
         return targets[size_t(std::lower_bound(bounds.begin(), bounds.end(), z) - bounds.begin())];
     };
     for (Common::GeneratorLayer *slab : listed) {
@@ -715,105 +754,98 @@ void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<Ro
                 rest.bottom_z = floor->print_z;
 }
 
-void clear_under_floors(const PrintObject &object, const Common::GeneratorLayers &slabs, const Common::GeneratorLayers &floors)
+void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const PolygonList &keep_out, storage_handle *scratch)
 {
-    for (const Common::GeneratorLayer *floor : floors) {
-        const coord_t object_top = object.layer(floor->object_below).scaled_print_z();
-        const Polygons &footprint = native_polygons(floor->polygons);
-        for (Common::GeneratorLayer *slab : slabs)
-            if (slab->print_z > object_top && slab->print_z <= floor->print_z)
-                native_polygons(slab->polygons) = diff(native_polygons(slab->polygons), footprint);
-    }
-}
-
-void trim_slab(Common::GeneratorLayer &slab, const PrintObject &object, const std::vector<Polygons> &keep_out)
-{
-    Polygons &area = native_polygons(slab.polygons);
-    if (area.empty())
+    if (slab.polygons.empty())
         return;
-    Polygons outline;
-    for (size_t id = 0; id < keep_out.size(); ++id) {
-        const Layer &layer = object.layer(id);
-        if (layer.scaled_bottom_z() < slab.print_z && layer.scaled_print_z() > slab.bottom_z)
-            outline.insert(outline.end(), keep_out[id].begin(), keep_out[id].end());
-    }
+    StoredPolygonCollection outline(scratch);
+    for (size_t id = 0; id < keep_out.size(); ++id)
+        if (layers[id].bottom_z() < slab.print_z && layers[id].print_z() > slab.bottom_z)
+            outline.append_copy_from(keep_out[id]);
     if (!outline.empty())
-        area = diff(area, outline);
+        slab.polygons.move_from(polygons_diff(scratch, slab.polygons, outline));
 }
 
 // Edits the polygons of each slab in place. For every slab with polygons, Common::bridge_footprint() builds a temporary collection
-// in the storage (owned by this function) with the raw offsets of the bridge areas, grown by gap_xy and starting at the object layers
-// that begin at or above the slab top (from_z = slab->print_z). The offsets are normalized, united, and subtracted from the slab.
+// in the scratch storage with the raw offsets of the bridge areas, grown by gap_xy and starting at the object layers that begin at
+// or above the slab top (from_z = slab->print_z). The offsets are normalized, united, and subtracted from the slab.
 // A slab without polygons, and a slab that no bridge reaches, are left unchanged. Errors of the helper (unknown bridge type) propagate.
-void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const std::vector<slic3r_api::Layer> &layers,
-                            const slic3r_api::Config &print_config, const Common::SupportParams &params, storage_handle *storage)
+void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const LayerList &layers, const slic3r_api::Config &print_config,
+                            const Common::SupportParams &params, storage_handle *scratch)
 {
     for (Common::GeneratorLayer *slab : slabs) {
-        Polygons &area = native_polygons(slab->polygons);
-        if (area.empty())
+        if (slab->polygons.empty())
             continue;
-        slic3r_api::StoredExPolygonCollection footprint = Common::bridge_footprint(storage, layers, print_config, params, slab->print_z, *slab);
+        slic3r_api::StoredExPolygonCollection footprint = Common::bridge_footprint(scratch, layers, print_config, params, slab->print_z, *slab);
         if (footprint.empty())
             continue;
         footprint.ensure_valid(params.resolution);
-        area = diff(area, to_polygons(union_ex(native_expolygons(footprint))));
+        const slic3r_api::StoredExPolygonCollection united = expolygons_union(scratch, footprint);
+        slab->polygons.move_from(polygons_diff(scratch, slab->polygons, united));
     }
 }
 
-void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
-                   const std::vector<Polygons> &keep_out, const PrintObject &object, const std::function<void()> &throw_on_cancel,
+void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
+                   const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
                    Common::GeneratedSupport &out)
 {
     std::vector<coord_t> middles;
     middles.reserve(out.base.size());
     for (const Common::GeneratorLayer *slab : out.base)
         middles.push_back(slab_middle_z(*slab));
-    const std::vector<Polygons> sections = branch_sections(segments, trees, organic, middles, throw_on_cancel);
+    PolygonList sections = branch_sections(segments, trees, organic, middles, scratch, context);
     for (size_t idx = 0; idx < out.base.size(); ++idx) {
         Common::GeneratorLayer *slab = out.base[idx];
-        Polygons &area = native_polygons(slab->polygons);
-        area.insert(area.end(), sections[idx].begin(), sections[idx].end());
-        if (!area.empty())
-            area = union_(area);
-        trim_slab(*slab, object, keep_out);
+        slab->polygons.append_move_from(sections[idx]);
+        if (!slab->polygons.empty())
+            slab->polygons.move_from(polygons_union(scratch, slab->polygons));
+        trim_slab(*slab, layers, keep_out, scratch);
     }
 }
 
 // Each contact is drawn at its middle, like the base slabs, and the tip stretches that cross the middle are added to it. So a tip
 // at or below the middle reaches it, although an organic tip ends in a half sphere on its own node that can stop short of it.
-void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
-                       const std::vector<Polygons> &keep_out, const PrintObject &object, const std::function<void()> &throw_on_cancel,
+void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
+                       const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
                        Common::GeneratedSupport &out)
 {
     std::vector<coord_t> middles;
     middles.reserve(out.top.size());
     for (const Common::GeneratorLayer *contact : out.top)
         middles.push_back(slab_middle_z(*contact));
-    const std::vector<Polygons> sections = branch_sections(segments, trees, organic, middles, throw_on_cancel);
+    PolygonList sections = branch_sections(segments, trees, organic, middles, scratch, context);
     for (size_t idx = 0; idx < out.top.size(); ++idx) {
         Common::GeneratorLayer *contact = out.top[idx];
-        Polygons &area = native_polygons(contact->polygons);
-        area = sections[idx];
-        const Polygons tips = tip_circles(trees, object, middles[idx]);
-        area.insert(area.end(), tips.begin(), tips.end());
-        if (!area.empty())
-            area = union_(area);
-        trim_slab(*contact, object, keep_out);
+        contact->polygons.move_from(sections[idx]);
+        add_tip_circles(contact->polygons, scratch, trees, layers, middles[idx]);
+        if (!contact->polygons.empty())
+            contact->polygons.move_from(polygons_union(scratch, contact->polygons));
+        trim_slab(*contact, layers, keep_out, scratch);
         contact->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
     }
 }
 
-Polygons tip_circles(const std::vector<RoutedTree> &trees, const PrintObject &object, coord_t middle_z)
+void add_tip_circles(StoredPolygonCollection &circles, storage_handle *storage, const std::vector<RoutedTree> &trees, const LayerList &layers,
+                     coord_t middle_z)
 {
-    Polygons circles;
     for (const RoutedTree &tree : trees)
         for (const TreeNode &node : tree.nodes) {
-            if (!node.carries.empty() || node.layer + 1 >= object.layer_count())
+            if (!node.carries.empty() || node.layer + 1 >= layers.size())
                 continue;
-            if (object.layer(node.layer).scaled_print_z() <= middle_z && object.layer(node.layer + 1).scaled_print_z() >= middle_z)
-                circles.push_back(branch_circle(native_point(node.position).cast<double>(), node.radius));
+            if (layers[node.layer].print_z() <= middle_z && layers[node.layer + 1].print_z() >= middle_z)
+                add_branch_circle(circles, storage, to_vec2d(node.position), double(node.radius));
         }
-    return circles;
+}
+
+void clear_under_floors(const LayerList &layers, const Common::GeneratorLayers &slabs, const Common::GeneratorLayers &floors,
+                        storage_handle *scratch)
+{
+    for (const Common::GeneratorLayer *floor : floors) {
+        const coord_t object_top = layers[floor->object_below].print_z();
+        for (Common::GeneratorLayer *slab : slabs)
+            if (slab->print_z > object_top && slab->print_z <= floor->print_z)
+                slab->polygons.move_from(polygons_diff(scratch, slab->polygons, floor->polygons));
+    }
 }
 } // namespace
 } // namespace Slic3r::TreeFamily

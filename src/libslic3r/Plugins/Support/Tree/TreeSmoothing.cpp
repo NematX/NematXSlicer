@@ -6,19 +6,13 @@
 #include <cmath>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <utility>
 #include <vector>
 
-#include <oneapi/tbb/parallel_for.h>
-
-#include "libslic3r/AABBTreeIndirect.hpp"
-#include "libslic3r/AABBTreeLines.hpp"
-#include "libslic3r/Layer.hpp"
-#include "libslic3r/Line.hpp"
-#include "libslic3r/Point.hpp"
-#include "libslic3r/PointUtils.hpp"
-#include "libslic3r/Polygon.hpp"
-#include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_utils.h"
+#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Api/plugin/cpp/LineDistancer.hpp"
 
 /* Implementation of the organic branch smoothing (see TreeSmoothing.hpp).
 
@@ -27,13 +21,15 @@
    1. make_spheres() creates one sphere per node, with the links of its tree;
    2. set_layer_spans() limits the layers that each sphere can reach, from the bottom of the branch below it up to the
       lowest tip above it, and from its own radius;
-   3. layer_collisions() indexes the outline of every layer as lines, in millimeters;
+   3. layer_collisions() indexes the outline of every layer as lines, in scaled units (the units of the stored outlines);
    4. relax() repeats, for every free sphere, a push out of the outline and a pull toward the links. The push measures the
       overlap at the start of the iteration, before the pull of that iteration moves the sphere, so the last pull is not
       measured and a free sphere can end slightly inside the outline (see settled_displacement). The tips and the roots that
       rest on the model are locked and never move. The relaxation stops when no free sphere overlapped in an iteration and no
       node moved more than settled_displacement in it, or after max_iterations iterations;
    5. write_back() stores the positions of the free spheres in the nodes; the other nodes keep their positions.
+   The spheres work in millimeters; the outline queries scale the sphere position to the units of the lines and unscale the
+   answer. The relaxation of an iteration runs on chunks of spheres, one chunk being one job of slic3r_parallel_for.
    The constants are the legacy ones, except settled_displacement; the layer heights are the real heights of the object layers. */
 
 namespace Slic3r::TreeFamily {
@@ -53,11 +49,14 @@ constexpr size_t max_iterations = 100;
 // measured against the outline, so the circle of a free sphere can reach up to this distance into the keep-out (the legacy stop
 // has the same gap). The drawing trims the slabs against the keep-out afterwards.
 constexpr double settled_displacement = 0.01;
+// Number of spheres moved by one job of the relaxation. The relaxation time was measured flat from 1 to 64 spheres per job (5000
+// spheres, 16 threads) and only degrades above that, when there are fewer jobs than threads; 16 is a middle value, with no gain claimed.
+constexpr size_t spheres_per_job = 16;
 
-// The outline of one layer as lines in millimeters, indexed for the nearest-line queries.
+// The outline of one layer as lines in scaled units, and an index over the same lines that finds the lines near a point.
 struct LayerCollision {
-    std::vector<Linef> lines;
-    AABBTreeIndirect::Tree<2, double> tree;
+    std::vector<LineSegment> lines;
+    slic3r_api::LineDistancer index;
 };
 
 // A node as a sphere of the relaxation: its layer, its radius and position in millimeters, the spheres it is linked to
@@ -78,17 +77,26 @@ struct Sphere {
 };
 
 // The print Z of every layer of the object, in millimeters.
-std::vector<double> layer_print_zs(const PrintObject &object);
+std::vector<double> layer_print_zs(const slic3r_api::Object &object);
 // One sphere per node of every tree, the nodes of a tree following the nodes of the tree before it.
 std::vector<Sphere> make_spheres(const std::vector<RoutedTree> &trees, const std::vector<double> &print_z);
 // The Z span and the layers of every sphere, see the file header.
 void set_layer_spans(std::vector<Sphere> &spheres, const std::vector<double> &print_z);
-// The outline of every layer, as lines indexed by an AABB tree.
-std::vector<LayerCollision> layer_collisions(const std::vector<Polygons> &keep_out);
+// The outline of every layer, as lines with a spatial index.
+std::vector<LayerCollision> layer_collisions(const std::vector<slic3r_api::StoredPolygonCollection> &keep_out);
+// What the jobs of one iteration share: the spheres they move, the outlines they read and the count of overlapping spheres.
+struct RelaxPass {
+    std::vector<Sphere> *spheres;
+    const std::vector<double> *print_z;
+    const std::vector<LayerCollision> *collisions;
+    std::atomic<size_t> *num_overlapping;
+};
 // Runs the iterations of the relaxation, at most max_iterations, and stops once no free sphere overlapped in an iteration and no
 // node moved more than settled_displacement in it. Returns the number of iterations that ran.
 size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions,
              const std::function<void()> &throw_on_cancel);
+// The job of slic3r_parallel_for: pushes and pulls the free spheres of chunk number `job` (spheres_per_job spheres from job * spheres_per_job).
+void relax_chunk(uint32_t job, void *user_data);
 // Pushes the sphere away from the closest outline point of the layers it reaches; returns true when it overlapped by more than EPSILON.
 bool push_out_of_outline(Sphere &sphere, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions);
 // Moves the sphere half of the way toward the radius-weighted mean of its links, by at most max_nudge_smoothing.
@@ -99,8 +107,8 @@ void write_back(const std::vector<Sphere> &spheres, std::vector<RoutedTree> &tre
 
 // Relaxes the free nodes of the trees and returns the number of iterations that ran. The spheres are built from the trees,
 // relaxed, and only then written back, so an exception from throw_on_cancel leaves the trees unchanged.
-size_t smooth_organic_branches(const PrintObject &object, const std::vector<Polygons> &keep_out, std::vector<RoutedTree> &trees,
-                               const std::function<void()> &throw_on_cancel)
+size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
+                               std::vector<RoutedTree> &trees, const std::function<void()> &throw_on_cancel)
 {
     const std::vector<double> print_z = layer_print_zs(object);
     std::vector<Sphere> spheres = make_spheres(trees, print_z);
@@ -113,7 +121,7 @@ size_t smooth_organic_branches(const PrintObject &object, const std::vector<Poly
 
 // Builds a sphere reaching only its own layer, runs the shared push and returns its center; layer indexes print_z and keep_out.
 Vec2d push_sphere_out_of_outline(size_t layer, double radius, const Vec2d &position, const std::vector<double> &print_z,
-                                 const std::vector<Polygons> &keep_out)
+                                 const std::vector<slic3r_api::StoredPolygonCollection> &keep_out)
 {
     Sphere sphere;
     sphere.layer = layer;
@@ -126,12 +134,12 @@ Vec2d push_sphere_out_of_outline(size_t layer, double radius, const Vec2d &posit
 }
 
 namespace {
-std::vector<double> layer_print_zs(const PrintObject &object)
+std::vector<double> layer_print_zs(const slic3r_api::Object &object)
 {
     std::vector<double> print_z;
     print_z.reserve(object.layer_count());
-    for (size_t id = 0; id < object.layer_count(); ++id)
-        print_z.push_back(object.layer(id).unscaled_print_z());
+    for (uint32_t id = 0; id < object.layer_count(); ++id)
+        print_z.push_back(unscaled(object.layer(id).print_z()));
     return print_z;
 }
 
@@ -146,7 +154,7 @@ std::vector<Sphere> make_spheres(const std::vector<RoutedTree> &trees, const std
             Sphere sphere;
             sphere.layer = node.layer;
             sphere.radius = unscaled(node.radius);
-            sphere.position = Vec2d(unscaled(node.position.x), unscaled(node.position.y));
+            sphere.position = unscale_p(node.position);
             sphere.below = below[idx] == no_node ? no_node : offset + below[idx];
             for (const size_t upper : node.carries)
                 sphere.above.push_back(offset + upper);
@@ -185,14 +193,16 @@ void set_layer_spans(std::vector<Sphere> &spheres, const std::vector<double> &pr
     }
 }
 
-std::vector<LayerCollision> layer_collisions(const std::vector<Polygons> &keep_out)
+// The index is built before the relaxation starts, so that its const queries can run from several threads.
+std::vector<LayerCollision> layer_collisions(const std::vector<slic3r_api::StoredPolygonCollection> &keep_out)
 {
     std::vector<LayerCollision> collisions(keep_out.size());
     for (size_t layer = 0; layer < keep_out.size(); ++layer) {
         LayerCollision &collision = collisions[layer];
-        for (const Line &line : to_lines(keep_out[layer]))
-            collision.lines.push_back({ unscale_p(line.a), unscale_p(line.b) });
-        collision.tree = AABBTreeLines::build_aabb_tree_over_indexed_lines(collision.lines);
+        collision.lines = to_lines(keep_out[layer]);
+        for (const LineSegment &line : collision.lines)
+            collision.index.append_segment(line.a, line.b);
+        collision.index.build_index();
     }
     return collisions;
 }
@@ -200,7 +210,7 @@ std::vector<LayerCollision> layer_collisions(const std::vector<Polygons> &keep_o
 // Each sphere's push and pull read only its own position, the outlines and the previous positions of its links, so the spheres
 // of an iteration are moved in parallel. The iterations go on while a free sphere overlaps the outline or a node moves more than
 // settled_displacement in an iteration, and stop after max_iterations. The largest move is gathered serially after the parallel
-// pass.
+// pass. The parallel pass has one job per chunk of spheres_per_job spheres, without API scratch storage (a job creates none; each nearest_on_lines query still allocates its candidate vector).
 size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions,
              const std::function<void()> &throw_on_cancel)
 {
@@ -208,14 +218,8 @@ size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, c
         for (Sphere &sphere : spheres)
             sphere.prev_position = sphere.position;
         std::atomic<size_t> num_overlapping{ 0 };
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, spheres.size()), [&](const tbb::blocked_range<size_t> &range) {
-            for (size_t id = range.begin(); id < range.end(); ++id)
-                if (!spheres[id].locked) {
-                    if (push_out_of_outline(spheres[id], print_z, collisions))
-                        ++num_overlapping;
-                    pull_toward_links(spheres[id], spheres);
-                }
-        });
+        RelaxPass pass{ &spheres, &print_z, &collisions, &num_overlapping };
+        slic3r_parallel_for(0, uint32_t((spheres.size() + spheres_per_job - 1) / spheres_per_job), &pass, &relax_chunk);
         throw_on_cancel();
         double largest_move = 0.;
         for (const Sphere &sphere : spheres)
@@ -224,6 +228,19 @@ size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, c
             return iteration + 1;
     }
     return max_iterations;
+}
+
+void relax_chunk(uint32_t job, void *user_data)
+{
+    const RelaxPass &pass = *static_cast<const RelaxPass *>(user_data);
+    std::vector<Sphere> &spheres = *pass.spheres;
+    const size_t end = std::min(spheres.size(), (size_t(job) + 1) * spheres_per_job);
+    for (size_t id = size_t(job) * spheres_per_job; id < end; ++id)
+        if (!spheres[id].locked) {
+            if (push_out_of_outline(spheres[id], *pass.print_z, *pass.collisions))
+                ++*pass.num_overlapping;
+            pull_toward_links(spheres[id], spheres);
+        }
 }
 
 bool push_out_of_outline(Sphere &sphere, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions)
@@ -235,14 +252,17 @@ bool push_out_of_outline(Sphere &sphere, const std::vector<double> &print_z, con
         const LayerCollision &collision = collisions[layer];
         if (r2 <= 0. || collision.lines.empty())
             continue;
-        size_t hit_idx = 0;
-        Vec2d hit_point;
-        const double squared_distance = AABBTreeLines::squared_distance_to_indexed_lines(collision.lines, collision.tree, sphere.position, hit_idx, hit_point, r2);
-        if (squared_distance >= 0.) {
-            const double depth = std::sqrt(r2) - std::sqrt(squared_distance);
+        // The lines are in scaled units: the query point and the limit are scaled, the distance and the hit point are unscaled.
+        // Measured (5000 spheres, median of 5): this search is slower than the native AABB tree only in multithreaded Debug, where the
+        // checked iterators of MSVC take a global lock (12.4 s against 2.5 s on 16 threads); in Release it is faster than native on 1 and
+        // 16 threads (92.6 against 134 ms, 18.7 against 24.8 ms). A reusable candidate buffer, a nearest-only LineDistancer search and a
+        // fast rejection were measured and rejected: none of them helped in Release or in single-thread Debug enough to justify API code.
+        const std::optional<LineHit> hit = nearest_on_lines(collision.index, collision.lines, sphere.position * UNSCALING_FACTOR, r2 * sqr(UNSCALING_FACTOR));
+        if (hit) {
+            const double depth = std::sqrt(r2) - unscaled(std::sqrt(hit->squared_distance));
             if (depth > sphere.last_collision_depth) {
                 sphere.last_collision_depth = depth;
-                sphere.last_collision = hit_point;
+                sphere.last_collision = hit->point * SCALING_FACTOR;
             }
         }
     }
@@ -281,11 +301,7 @@ void write_back(const std::vector<Sphere> &spheres, std::vector<RoutedTree> &tre
     for (RoutedTree &tree : trees)
         for (TreeNode &node : tree.nodes) {
             if (!spheres[id].locked)
-                {
-                    // The sphere is in millimeters and native; the node holds an API point.
-                    const Point scaled = Point::new_scale(spheres[id].position);
-                    node.position = c_point{ scaled.x(), scaled.y() };
-                }
+                node.position = scaled_point(spheres[id].position);
             ++id;
         }
 }

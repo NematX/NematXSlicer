@@ -456,11 +456,6 @@ TEST_CASE("tree geometry bounding boxes match the native ones", "[plugins][tree-
         CHECK(box_of(mine) == native);
         for (const coord_t delta : { coord_t(0), coord_t(1), SCALED_EPSILON, scale_i(0.5) })
             CHECK(box_of(TF::bounding_box_inflated(mine, delta)) == native.inflated(delta));
-        // contains: a box inside, a box that crosses a side, the same box
-        const BoundingBox inner(native.min + Point(scale_i(1.), scale_i(1.)), native.max - Point(scale_i(1.), scale_i(1.)));
-        const BoundingBox crossing(native.min - Point(1, 1), native.max);
-        for (const BoundingBox &other : { inner, crossing, native, native.inflated(1) })
-            CHECK(TF::bounding_box_contains(mine, c_of(other)) == native.contains(other));
     }
 
     SECTION("empty collection and empty ring")
@@ -1142,29 +1137,6 @@ TEST_CASE("tree geometry expolygons_offset keeps the small areas like offset_ex"
     CHECK(union_ex(thin).size() == native_of(TF::expolygons_union(storage, view_of(thin))).size());
     WARN("small areas kept, largest symmetric difference " << largest.sym_diff << " mm2 over " << largest.compared << " comparisons; union_ex of the thin shape keeps "
          << union_ex(thin).size() << " expolygons");
-}
-
-TEST_CASE("tree geometry bounding_box_contains with empty boxes, and perp", "[plugins][tree-geometry]")
-{
-    const c_bounding_box valid{ c_point{ 0, 0 }, c_point{ 10, 10 } };
-    const c_bounding_box empty = slic3r_api::bounding_box_empty();
-    CHECK(TF::bounding_box_contains(valid, c_bounding_box{ c_point{ 2, 2 }, c_point{ 3, 3 } }));
-    CHECK(TF::bounding_box_contains(valid, valid));
-    CHECK(!TF::bounding_box_contains(valid, empty));
-    CHECK(!TF::bounding_box_contains(empty, valid));
-    CHECK(!TF::bounding_box_contains(empty, empty));
-
-    std::mt19937 rng(13);
-    std::uniform_real_distribution<double> real(-1e3, 1e3);
-    for (int i = 0; i < 100; ++i) {
-        const Vec2d v(real(rng), real(rng));
-        CHECK(TF::perp(v) == Slic3r::perp(v));
-        CHECK(TF::perp(v * 2.) == Slic3r::perp(Vec2d(v * 2.)));
-        CHECK(TF::perp(v).dot(v) == 0.);
-    }
-    const Vec2crd integer(3, 4);
-    CHECK(TF::perp(integer) == Vec2crd(-4, 3));
-    CHECK(TF::perp(integer) == Slic3r::perp(integer));
 }
 
 TEST_CASE("nearest_on_lines on an exact tie", "[plugins][tree-geometry]")

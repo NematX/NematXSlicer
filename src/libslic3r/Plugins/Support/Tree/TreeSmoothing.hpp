@@ -11,11 +11,12 @@
 #include <functional>
 #include <vector>
 
-#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
+#include "TreeGeometry.hpp"
 #include "TreeRouting.hpp"
 
-namespace Slic3r {
-class PrintObject;
+namespace slic3r_api {
+class Object;
 }
 
 namespace Slic3r::TreeFamily {
@@ -25,13 +26,13 @@ namespace Slic3r::TreeFamily {
 // layer of the object, keep_out must hold at least one outline per object layer, grown by the XY distance, and the links of a
 // tree must index nodes of that same tree. throw_on_cancel is called after every iteration of the relaxation; when it throws,
 // the exception leaves this function before anything is written back, so the trees keep their input positions.
-size_t smooth_organic_branches(const PrintObject &object, const std::vector<Polygons> &keep_out, std::vector<RoutedTree> &trees,
-                               const std::function<void()> &throw_on_cancel);
+size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
+                               std::vector<RoutedTree> &trees, const std::function<void()> &throw_on_cancel);
 
 // Pushes a sphere that reaches only its own layer and returns its new center; the inputs are not changed.
-// Positions and radius in mm, print_z the Z of each layer in mm, keep_out the scaled outline of each, layer must index both.
+// Positions and radius in mm, print_z the Z of each layer in mm, keep_out the outline of each in scaled units, layer must index both.
 Vec2d push_sphere_out_of_outline(size_t layer, double radius, const Vec2d &position, const std::vector<double> &print_z,
-                                 const std::vector<Polygons> &keep_out);
+                                 const std::vector<slic3r_api::StoredPolygonCollection> &keep_out);
 
 } // namespace Slic3r::TreeFamily
 

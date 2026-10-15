@@ -16,7 +16,6 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 #include <mutex>
 #include <numeric>
 #include <optional>
-#include <string>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -866,13 +865,13 @@ static Lines generate_support_infill_lines(storage_handle *scratch, const TipPla
  * The result is simplified (0.015 mm) after the offsets, and every step reuses the collision trimmed to the box of the area.
  *
  * \param storage[in] The storage that owns the result and the temporary collections.
- * \param me[in] Polygons object that has to be offset.
+ * \param me[in] PolygonCollection view of the polygons that have to be offset.
  * \param distance[in] The distance by which me should be offset. Expects values >=0; 0 only unites (and subtracts the collision when last_step_offset_without_check is 0).
  * \param collision[in] The area representing obstacles.
  * \param safe_step_size[in] The largest distance offset in one step before the collision is subtracted. Must be >0 when distance is >0 (a step size of 0 divides by zero); a negative value is an error and gives the unchecked result.
  * \param last_step_offset_without_check[in] The maximum of the remainder that is offset in one piece, without a collision check after it (the area is subtracted once at the end when this is 0, or when the remainder is larger than it). Expects values >=0; 0 means every part of the distance is checked. Example: distance 10 mm, step 3 mm, threshold 2 mm gives three checked steps and 1 mm unchecked.
  * \param min_amount_offset[in] How many steps have to be done at least. As this uses round offset this increases the amount of vertices, which may be required if Polygons get very small.
- * \return The resulting Polygons object.
+ * \return The offset polygons, as a StoredPolygonCollection owned by storage.
  */
 [[nodiscard]] static StoredPolygonCollection safe_offset_inc(storage_handle *storage, const PolygonCollection &me, coord_t distance, const PolygonCollection &collision, coord_t safe_step_size, coord_t last_step_offset_without_check, size_t min_amount_offset)
 {
@@ -937,11 +936,11 @@ static Lines generate_support_infill_lines(storage_handle *scratch, const TipPla
 }
 
 /*!
- * \brief Unions two Polygons. Ensures that if the input is non empty that the output also will be non empty.
+ * \brief Unions two polygon collections. Ensures that if the input is non empty that the output also will be non empty.
  * \param storage[in] The storage that owns the result and the temporary collections.
- * \param first[in] The first Polygon.
- * \param second[in] The second Polygon.
- * \return The union of both Polygons
+ * \param first[in] The first PolygonCollection view.
+ * \param second[in] The second PolygonCollection view.
+ * \return The union of both collections, as a StoredPolygonCollection owned by storage.
  */
 [[nodiscard]] static StoredPolygonCollection safe_union(storage_handle *storage, const PolygonCollection &first, const PolygonCollection &second)
 {

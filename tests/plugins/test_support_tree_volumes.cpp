@@ -4,7 +4,6 @@
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeGeometry.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSettings.hpp"
-#include "libslic3r/Plugins/Support/Tree/TreeStorage.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeVolumes.hpp"
 
 #include <algorithm>
@@ -213,7 +212,7 @@ size_t compare_blocker_slices(const Print &print, storage_handle *run_storage, b
         REQUIRE(slices.size() == native.size());
         for (size_t layer_idx = 0; layer_idx < slices.size(); ++ layer_idx) {
             const slic3r_api::StoredPolygonCollection rings = TF::to_polygons(run_storage, slices[layer_idx]);
-            append(api[layer_idx], TF::native_polygons(rings));
+            append(api[layer_idx], ST::to_native(rings.readonly()));
         }
     }
     for (size_t layer_idx = 0; layer_idx < native.size(); ++ layer_idx) {
@@ -307,7 +306,7 @@ TEST_CASE("Overlapping support blockers are united like the native ones", "[plug
     const slic3r_api::StoredPolygonCollection only_first = blocker_collision(run_storage, { first }, layer);
     // The collision of the merged mesh and the one of the two volumes differ by rounding along the contour: perimeter x resolution.
     const double resolution = scale_d(SG::print_view(print).config().get("resolution").get_float());
-    const double bound = mm2(total_length(TF::native_polygons(one_volume)) * resolution);
+    const double bound = mm2(total_length(ST::to_native(one_volume.readonly())) * resolution);
     const slic3r_api::StoredPolygonCollection extra = TF::polygons_diff(run_storage, two_volumes, one_volume);
     const slic3r_api::StoredPolygonCollection missing = TF::polygons_diff(run_storage, one_volume, two_volumes);
     CHECK(mm2(TF::polygons_area(extra)) <= bound);
