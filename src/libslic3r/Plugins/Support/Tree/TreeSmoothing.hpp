@@ -8,10 +8,10 @@
 #ifndef plugins_support_tree_smoothing_hpp_
 #define plugins_support_tree_smoothing_hpp_
 
-#include <functional>
 #include <vector>
 
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "TreeGeometry.hpp"
 #include "TreeRouting.hpp"
 
@@ -24,10 +24,10 @@ namespace Slic3r::TreeFamily {
 // Relaxes the XY positions of the free nodes of the trees of one object in place and returns the number of iterations that ran.
 // Tips and roots that rest on the model are locked; every node keeps its layer and its links. The layer of each node must be a
 // layer of the object, keep_out must hold at least one outline per object layer, grown by the XY distance, and the links of a
-// tree must index nodes of that same tree. throw_on_cancel is called after every iteration of the relaxation; when it throws,
-// the exception leaves this function before anything is written back, so the trees keep their input positions.
+// tree must index nodes of that same tree. The context is checked after every iteration of the relaxation (nullptr never cancels);
+// a cancellation throws PluginCancelled out of this function before anything is written back, so the trees keep their input positions.
 size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
-                               std::vector<RoutedTree> &trees, const std::function<void()> &throw_on_cancel);
+                               std::vector<RoutedTree> &trees, const plugin_run_context *context);
 
 // Pushes a sphere that reaches only its own layer and returns its new center; the inputs are not changed.
 // Positions and radius in mm, print_z the Z of each layer in mm, keep_out the outline of each in scaled units, layer must index both.

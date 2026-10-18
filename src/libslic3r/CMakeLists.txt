@@ -495,6 +495,8 @@ set(SLIC3R_SOURCES
 	Plugins/Surface/TopSurfaceExpansion.hpp
 	Plugins/Support/Common/ClipperResults.cpp
 	Plugins/Support/Common/ClipperResults.hpp
+	Plugins/Support/Common/ExtrusionLines.hpp
+	Plugins/Support/Common/PatternService.hpp
 	Plugins/Support/Common/PerimeterFill.cpp
 	Plugins/Support/Common/PerimeterFill.hpp
 	Plugins/Support/Common/SupportInterfaces.cpp

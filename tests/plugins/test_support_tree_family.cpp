@@ -1357,7 +1357,7 @@ TEST_CASE("Organic smoothing moves the nodes of a bent branch and keeps them out
     PluginStorage storage;
     const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
     std::vector<TF::RoutedTree> smoothed = routed.trees;
-    TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, smoothed, [] {});
+    TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, smoothed, nullptr);
     size_t moved = 0;
     double largest_move_mm = 0.;
     for (size_t tree_id = 0; tree_id < smoothed.size(); ++tree_id) {
@@ -1401,7 +1401,7 @@ TEST_CASE("Organic relaxation smooths a collision-free bent branch until its ben
         REQUIRE(distance_to_region_mm(to_point(node.position), keep_out[node.layer]) > unscaled(node.radius));
     const std::vector<TF::TreeNode> raw = trees.front().nodes;
     const double bend_before = sharpest_bend_deg(trees.front());
-    const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, [] {});
+    const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
     const double bend_after = sharpest_bend_deg(trees.front());
     size_t moved = 0;
     for (size_t idx = 0; idx < raw.size(); ++idx)
@@ -1427,13 +1427,13 @@ TEST_CASE("Organic relaxation stops once the nodes settle and never runs past it
     // The count is exact: the relaxation is deterministic, so a change of the threshold or of the rule moves it.
     SECTION("a bend that settles stops after its exact count") {
         std::vector<TF::RoutedTree> trees{ bent_branch(object) };
-        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, [] {});
+        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
         CAPTURE(iterations);
         CHECK(iterations == 33);
     }
     SECTION("a node that keeps moving runs to the cap") {
         std::vector<TF::RoutedTree> trees{ stray_node_branch(object) };
-        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, [] {});
+        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
         const double x_mm = unscaled(trees.front().nodes[1].position.x);
         CAPTURE(iterations, x_mm);
         CHECK(iterations == 100);
@@ -1441,8 +1441,8 @@ TEST_CASE("Organic relaxation stops once the nodes settle and never runs past it
     }
 }
 
-// An exception from the cancel callback ends the relaxation before anything is written back, so the trees keep their positions.
-TEST_CASE("Organic relaxation leaves the trees unchanged when the cancel callback throws", "[plugins][support-tree-organic][smoothing]")
+// A cancellation of the context ends the relaxation before anything is written back, so the trees keep their positions.
+TEST_CASE("Organic relaxation leaves the trees unchanged when the context is cancelled", "[plugins][support-tree-organic][smoothing]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
@@ -1455,8 +1455,13 @@ TEST_CASE("Organic relaxation leaves the trees unchanged when the cancel callbac
     const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
     std::vector<TF::RoutedTree> trees{ bent_branch(object) };
     const std::vector<TF::TreeNode> raw = trees.front().nodes;
-    REQUIRE_THROWS_AS(TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, [] { throw std::runtime_error("cancelled"); }),
-        std::runtime_error);
+    // The context cancels at its second check, after the second iteration: one full pass ran and nothing was written back.
+    int calls = 0;
+    plugin_run_context context = {};
+    context.host_context = reinterpret_cast<plugin_host_context *>(&calls);
+    context.is_cancelled = [](plugin_host_context *host_context) { return ++*reinterpret_cast<int *>(host_context) >= 2 ? 1 : 0; };
+    REQUIRE_THROWS_AS(TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, &context), slic3r_api::PluginCancelled);
+    CHECK(calls == 2);
     for (size_t idx = 0; idx < raw.size(); ++idx)
         CHECK(to_point(trees.front().nodes[idx].position) == to_point(raw[idx].position));
 }
@@ -2607,7 +2612,7 @@ TEST_CASE("Organic smoothing relaxation benchmark", "[.][smoothing-benchmark]")
             trees.push_back(chain_tree(object, { { x, 0., 20 }, { x, 0., 16 }, { x, 0., 12 }, { x + 4., 0., 8 }, { x + 8., 0., 4 } }));
         }
         const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, [] {});
+        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
         times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
         std::printf("SMOOTH-BENCH threads=%zu run=%d spheres=5000 iterations=%zu total_ms=%.1f\n", threads, run, iterations, times.back());
         CHECK(iterations > 0);

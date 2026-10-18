@@ -11,6 +11,7 @@
 #include <exception>
 #include <mutex>
 #include <random>
+#include <stdexcept>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -23,6 +24,9 @@
 #include <boost/make_shared.hpp>
 #include <boost/shared_ptr.hpp>
 
+#include <oneapi/tbb/parallel_for.h>
+#include <oneapi/tbb/task_group.h>
+
 /* TreeVolumes tests. TreeVolumes caches the collision, avoidance, placeable and wall restriction areas that the tree routing reads.
    precalculate() fills the caches for the keys (radius, layer) a tree normally requests; any other key is computed when it is first
    requested, by whichever thread asks, while other threads read and fill the same caches. The tests check what that lazy path
@@ -31,6 +35,7 @@
    - the placeable areas of radius 0 are placeable areas also when nothing was precalculated;
    - a reference returned by a getter stays valid and unchanged when its cache grows to a later layer;
    - many threads requesting keys that are not precalculated all get the reference areas (stress test);
+   - a lazy computation checks the cancellation of the context given to the constructor and throws PluginCancelled, also from a cancelled TBB group, without publishing a partial area;
    - the support blockers: one box, a curved blocker (cylinder) and two overlapping boxes are sliced like the native ones, within the
      resolution of the slicing, and enter the collision.
    After precalculate(), a lazy computation logs an error line "Had to calculate ...". The tests capture the log to assert that a
@@ -106,8 +111,8 @@ struct Scene {
     }
     const PrintObject &object() const { return print.object(0); }
     storage_handle *storage_handle_ptr() { return reinterpret_cast<storage_handle *>(&storage); }
-    // New volumes over the first object, owning their areas in the storage of the scene.
-    Volumes volumes() { return Volumes(SG::object_view(object()), SG::print_view(print), settings, storage_handle_ptr(), [] {}); }
+    // New volumes over the first object, owning their areas in the storage of the scene; the context (nullptr never cancels) is the one they check.
+    Volumes volumes(const plugin_run_context *context = nullptr) { return Volumes(SG::object_view(object()), SG::print_view(print), settings, storage_handle_ptr(), context); }
 };
 
 // One area that TreeVolumes can give: its kind and the arguments of the getter.
@@ -127,7 +132,7 @@ const slic3r_api::StoredPolygonCollection &fetch(const Volumes &volumes, const R
     switch (request.kind) {
     case Kind::Collision: return volumes.getCollision(request.radius, request.layer, request.min_xy_dist);
     case Kind::Avoidance: return volumes.getAvoidance(request.radius, request.layer, request.type, request.to_model, request.min_xy_dist);
-    case Kind::Placeable: return volumes.getPlaceableAreas(request.radius, request.layer, [] {});
+    case Kind::Placeable: return volumes.getPlaceableAreas(request.radius, request.layer);
     case Kind::Wall:      return volumes.getWallRestriction(request.radius, request.layer, request.min_xy_dist);
     }
     return volumes.getCollision(request.radius, request.layer, request.min_xy_dist);
@@ -241,7 +246,7 @@ slic3r_api::StoredPolygonCollection blocker_collision(storage_handle *run_storag
     Model model;
     make_blocker_print(print, model, blockers);
     const TF::TreeSettings settings = ST::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
-    Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, run_storage, [] {});
+    Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, run_storage, nullptr);
     slic3r_api::StoredPolygonCollection copy(run_storage);
     copy.copy_from(volumes.getCollision(0, layer, true));
     return copy;
@@ -321,21 +326,21 @@ TEST_CASE("Cold radius 0 placeable areas are placeable areas and not collisions"
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Scene scene;
     Volumes reference = scene.volumes();
-    reference.precalculate(reference_layers, [] {});
+    reference.precalculate(reference_layers);
     // A layer where the placeable areas exist and differ from the collision, so that mixing them up shows.
     TF::LayerIndex layer = -1;
     for (TF::LayerIndex idx = 2; idx <= reference_layers && layer < 0; ++ idx) {
-        const slic3r_api::StoredPolygonCollection &placeable = reference.getPlaceableAreas(0, idx, [] {});
+        const slic3r_api::StoredPolygonCollection &placeable = reference.getPlaceableAreas(0, idx);
         if (placeable.size() > 0 && ! same(placeable, reference.getCollision(0, idx, true)))
             layer = idx;
     }
     REQUIRE(layer >= 0);
-    const Rings expected  = rings(reference.getPlaceableAreas(0, layer, [] {}));
+    const Rings expected  = rings(reference.getPlaceableAreas(0, layer));
     const Rings collision = rings(reference.getCollision(0, layer, true));
 
     Volumes cold = scene.volumes();
-    const Rings first  = rings(cold.getPlaceableAreas(0, layer, [] {}));
-    const Rings second = rings(cold.getPlaceableAreas(0, layer, [] {}));
+    const Rings first  = rings(cold.getPlaceableAreas(0, layer));
+    const Rings second = rings(cold.getPlaceableAreas(0, layer));
     CHECK_FALSE(first == collision);
     CHECK(first == expected);
     CHECK(second == expected);
@@ -349,7 +354,7 @@ TEST_CASE("Radius 0 placeable areas without resting on the model return the coll
     Scene scene(true);
     REQUIRE_FALSE(scene.settings.support_rests_on_model);
     Volumes volumes = scene.volumes();
-    const Rings placeable = rings(volumes.getPlaceableAreas(0, lazy_layer, [] {}));
+    const Rings placeable = rings(volumes.getPlaceableAreas(0, lazy_layer));
     Volumes other = scene.volumes();
     CHECK(placeable == rings(other.getCollision(0, lazy_layer, true)));
 }
@@ -403,7 +408,7 @@ TEST_CASE("The avoidance of a branch that cannot move is its collision", "[plugi
             const slic3r_api::StoredPolygonCollection &collision = volumes.getCollision(0, lazy_layer, true);
             // To the model, the places where a branch can stand are free.
             const slic3r_api::StoredPolygonCollection expected = to_model ?
-                TF::polygons_diff(scene.storage_handle_ptr(), collision, volumes.getPlaceableAreas(0, lazy_layer, [] {})) :
+                TF::polygons_diff(scene.storage_handle_ptr(), collision, volumes.getPlaceableAreas(0, lazy_layer)) :
                 TF::polygons_union(scene.storage_handle_ptr(), collision);
             if (type == Volumes::AvoidanceType::Fast)
                 CHECK(same(avoidance, expected));
@@ -436,8 +441,8 @@ TEST_CASE("Precalculation without holefree collision keys completes", "[plugins]
     REQUIRE(settings.increase_radius_until_radius == settings.branch_radius);
 
     PluginStorage storage;
-    Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, reinterpret_cast<storage_handle *>(&storage), [] {});
-    volumes.precalculate(reference_layers, [] {});
+    Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, reinterpret_cast<storage_handle *>(&storage), nullptr);
+    volumes.precalculate(reference_layers);
     CHECK(volumes.getCollision(settings.branch_radius, 1, true).size() > 0);
 }
 
@@ -464,7 +469,7 @@ TEST_CASE("Areas computed on demand equal the precalculated areas", "[plugins][s
 
     const LogCapture capture;
     Volumes reference = scene.volumes();
-    reference.precalculate(reference_layers, [] {});
+    reference.precalculate(reference_layers);
     for (const Request &request : requests) {
         CAPTURE(describe(request));
         const size_t lazy_before = capture.count("Had to calculate");
@@ -472,7 +477,7 @@ TEST_CASE("Areas computed on demand equal the precalculated areas", "[plugins][s
         REQUIRE(capture.count("Had to calculate") == lazy_before);
 
         Volumes volumes = scene.volumes();
-        volumes.precalculate(precalculated_layers, [] {});
+        volumes.precalculate(precalculated_layers);
         const std::string message = lazy_message(volumes, request);
         const size_t before = capture.count(message);
         const Rings actual = rings(fetch(volumes, request));
@@ -482,7 +487,218 @@ TEST_CASE("Areas computed on demand equal the precalculated areas", "[plugins][s
     }
 }
 
-// The routing asks for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
+// The cancellation state of a fake host: it counts the is_cancelled calls and reports a cancellation from the call number cancel_from
+// (0: never) on, or at once when forced. The counter is atomic as the computations run on several threads. When group is set, the
+// call number group_from also cancels that TBB group (as a failing sibling task would); the call then reports a host cancellation
+// only when group_reports_cancel is set.
+struct CancelHost {
+    std::atomic<int>  calls{ 0 };
+    std::atomic<int>  cancel_from{ 0 };
+    std::atomic<bool> forced{ false };
+    tbb::task_group_context *group = nullptr;
+    int               group_from = 0;
+    bool              group_reports_cancel = false;
+
+    plugin_run_context context()
+    {
+        plugin_run_context out = {};
+        out.host_context = reinterpret_cast<plugin_host_context *>(this);
+        out.is_cancelled = [](plugin_host_context *host_context) {
+            CancelHost &host = *reinterpret_cast<CancelHost *>(host_context);
+            const int call = ++ host.calls;
+            if (host.group != nullptr && call >= host.group_from) {
+                host.group->cancel_group_execution();
+                return host.group_reports_cancel ? 1 : 0;
+            }
+            return (host.forced || (host.cancel_from > 0 && call >= host.cancel_from)) ? 1 : 0;
+        };
+        return out;
+    }
+};
+
+// Requests for every kind of area on a layer that precalculate() does not compute. The Slow and FastSafe avoidances, which need the
+// holefree collisions, are asked for the radius of a tip, as only the radii below the increase radius have holefree collisions.
+std::vector<Request> lazy_requests(const TF::TreeSettings &settings)
+{
+    const coord_t tip = settings.min_radius, branch = settings.branch_radius;
+    std::vector<Request> requests{
+        Request{ Kind::Collision, branch, lazy_layer },
+        Request{ Kind::Wall,      branch, lazy_layer },
+        Request{ Kind::Placeable, branch, lazy_layer },
+        Request{ Kind::Avoidance, branch, lazy_layer, true, Volumes::AvoidanceType::Fast, false },
+        Request{ Kind::Avoidance, branch, lazy_layer, true, Volumes::AvoidanceType::Fast, true } };
+    for (Volumes::AvoidanceType type : { Volumes::AvoidanceType::Slow, Volumes::AvoidanceType::FastSafe })
+        for (bool to_model : { false, true })
+            requests.push_back(Request{ Kind::Avoidance, tip, lazy_layer, true, type, to_model });
+    return requests;
+}
+
+// The lazy computations check the context given to the constructor: a request for an area that precalculate() did not compute
+// throws PluginCancelled once the host cancels, whatever the call at which it does. A computation cut at any point publishes no
+// partial area: once the host stops cancelling, the same request returns the area of the reference.
+TEST_CASE("A cancelled context interrupts the lazy computation of an area", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene;
+    const std::vector<Request> requests = lazy_requests(scene.settings);
+
+    Volumes reference = scene.volumes();
+    reference.precalculate(reference_layers);
+
+    for (const Request &request : requests) {
+        CAPTURE(describe(request));
+        const Rings expected = rings(fetch(reference, request));
+
+        // Without cancellation, the request makes some number of checks.
+        CancelHost counter;
+        const plugin_run_context counting_context = counter.context();
+        {
+            Volumes volumes = scene.volumes(&counting_context);
+            volumes.precalculate(precalculated_layers);
+            counter.calls = 0;
+            CHECK(rings(fetch(volumes, request)) == expected);
+        }
+        const int total = counter.calls;
+        REQUIRE(total > 1);
+
+        // The host cancels from the k-th check on: the first checks always interrupt the request, a later one may find the request
+        // done (the checks run on several threads, so their order varies): the request is cancelled exactly when the host had cancelled
+        // by the time it ended (calls >= cancel_from). Either way no partial area is kept.
+        for (const int from : { 1, 2, total / 4, total / 2, total - 1, total }) {
+            CAPTURE(from, total);
+            CancelHost host;
+            const plugin_run_context context = host.context();
+            Volumes volumes = scene.volumes(&context);
+            volumes.precalculate(precalculated_layers);
+            host.calls = 0;
+            host.cancel_from = std::max(from, 1);
+            bool cancelled = false;
+            try {
+                fetch(volumes, request);
+            } catch (const slic3r_api::PluginCancelled &) {
+                cancelled = true;
+            }
+            if (from <= 2)
+                CHECK(cancelled);
+            CHECK(cancelled == (host.calls.load() >= host.cancel_from.load()));
+            host.cancel_from = 0;
+            CHECK(rings(fetch(volumes, request)) == expected);
+        }
+    }
+}
+
+// What a call ends with: no exception, the cancellation of the plugin, the error of a cancelled TBB group, or something else.
+enum class Outcome { Returned, PluginCancelled, GroupCancelled, Other };
+template<class Fn> Outcome outcome_of(Fn &&fn)
+{
+    try {
+        fn();
+    } catch (const slic3r_api::PluginCancelled &) {
+        return Outcome::PluginCancelled;
+    } catch (const std::runtime_error &) {
+        return Outcome::GroupCancelled;
+    } catch (...) {
+        return Outcome::Other;
+    }
+    return Outcome::Returned;
+}
+
+// When the TBB group that runs a call is cancelled, TBB skips the parallel loops nested in the call without any exception. A getter
+// whose computation is skipped must throw instead of reading its cache again, which misses again, forever (the stack overflows). The
+// group is cancelled on purpose from inside a one-index parallel_for, on one thread, and the missing areas are requested there. In the
+// first variant the host reports the cancellation too (PluginCancelled); in the second only the group is cancelled, as when another
+// task of the group failed (the call must still end, with the error of the group). Outside the group the same volumes still work.
+TEST_CASE("A TBB group that is cancelled interrupts the lazy computation of an area", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene;
+    const std::vector<Request> requests = lazy_requests(scene.settings);
+
+    Volumes reference = scene.volumes();
+    reference.precalculate(reference_layers);
+
+    for (const bool host_cancelled : { true, false }) {
+        CAPTURE(host_cancelled);
+        CancelHost host;
+        const plugin_run_context context = host.context();
+        Volumes volumes = scene.volumes(&context);
+        volumes.precalculate(precalculated_layers);
+
+        std::vector<Outcome> outcomes(requests.size(), Outcome::Returned);
+        tbb::task_group_context group;
+        tbb::parallel_for(0, 1, [&](int) {
+            group.cancel_group_execution();
+            host.forced = host_cancelled;
+            for (size_t idx = 0; idx < requests.size(); ++ idx)
+                outcomes[idx] = outcome_of([&] { fetch(volumes, requests[idx]); });
+        }, group);
+        host.forced = false;
+
+        for (size_t idx = 0; idx < requests.size(); ++ idx) {
+            CAPTURE(describe(requests[idx]));
+            CHECK(outcomes[idx] == (host_cancelled ? Outcome::PluginCancelled : Outcome::GroupCancelled));
+            // Nothing partial was published: outside the cancelled group the area is the one of the reference.
+            CHECK(rings(fetch(volumes, requests[idx])) == rings(fetch(reference, requests[idx])));
+        }
+    }
+}
+
+// The group may also be cancelled in the middle of a computation, by the k-th check of the host (a sibling task failing at any point):
+// the loops already running are cut short, the later ones are skipped, and the request ends, either complete (the cancellation came
+// after its last check) or by an exception, without hanging, crashing or publishing a partial area. A host that also reports the
+// cancellation ends it with PluginCancelled; one that does not, with the error of the group. Outside the group the area is the one
+// of the reference.
+TEST_CASE("A TBB group that is cancelled during a lazy computation leaves no partial area", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene;
+    const std::vector<Request> requests = lazy_requests(scene.settings);
+
+    Volumes reference = scene.volumes();
+    reference.precalculate(reference_layers);
+
+    for (const Request &request : requests) {
+        CAPTURE(describe(request));
+        const Rings expected = rings(fetch(reference, request));
+
+        // Without cancellation, the request makes some number of checks.
+        CancelHost counter;
+        const plugin_run_context counting_context = counter.context();
+        {
+            Volumes volumes = scene.volumes(&counting_context);
+            volumes.precalculate(precalculated_layers);
+            counter.calls = 0;
+            CHECK(rings(fetch(volumes, request)) == expected);
+        }
+        const int total = counter.calls;
+        REQUIRE(total > 1);
+
+        for (const bool host_reports : { true, false })
+            for (const int from : { 1, 2, total / 4, total / 2, total - 1, total }) {
+                CAPTURE(host_reports, from, total);
+                tbb::task_group_context group;
+                CancelHost host;
+                const plugin_run_context context = host.context();
+                Volumes volumes = scene.volumes(&context);
+                volumes.precalculate(precalculated_layers);
+                host.calls = 0;
+                host.group = &group;
+                host.group_from = std::max(from, 1);
+                host.group_reports_cancel = host_reports;
+                Outcome outcome = Outcome::Returned;
+                tbb::parallel_for(0, 1, [&](int) { outcome = outcome_of([&] { fetch(volumes, request); }); }, group);
+                // The first checks always fall inside the computation, so it cannot have returned.
+                if (from <= 2)
+                    CHECK(outcome == (host_reports ? Outcome::PluginCancelled : Outcome::GroupCancelled));
+                else
+                    CHECK(outcome != Outcome::Other);
+                if (! host_reports)
+                    CHECK(outcome != Outcome::PluginCancelled);
+                host.group = nullptr;
+                CHECK(rings(fetch(volumes, request)) == expected);
+            }
+    }
+}// The routing asks for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
 // radii that precalculate() computes: every radius of the base must be covered, or the routing computes it on demand from its
 // parallel loops. The XY spacing of the scene is large, so the minimum XY bucket of the base is not the regular one.
 TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY distance", "[plugins][support-tree-routing][tree-volumes]")
@@ -492,7 +708,7 @@ TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY di
     const LogCapture capture;
     constexpr TF::LayerIndex top_layer = 10;
     Volumes volumes = scene.volumes();
-    volumes.precalculate(top_layer, [] {});
+    volumes.precalculate(top_layer);
     size_t widened_layers = 0;
     for (TF::LayerIndex layer = 1; layer <= top_layer; ++ layer) {
         const coord_t radius = scene.settings.recommendedMinRadius(layer);
@@ -535,7 +751,7 @@ TEST_CASE("Concurrent requests for areas that are not precalculated agree with t
 
     const LogCapture capture;
     Volumes reference = scene.volumes();
-    reference.precalculate(reference_layers, [] {});
+    reference.precalculate(reference_layers);
     std::vector<Rings> expected;
     for (const Request &request : requests)
         expected.push_back(rings(fetch(reference, request)));
@@ -543,7 +759,7 @@ TEST_CASE("Concurrent requests for areas that are not precalculated agree with t
     int completed = 0;
     for (int iteration = 0; iteration < iterations; ++ iteration) {
         Volumes volumes = scene.volumes();
-        volumes.precalculate(precalculated_layers, [] {});
+        volumes.precalculate(precalculated_layers);
         std::atomic<int>  ready{ 0 };
         std::atomic<bool> go{ false };
         std::mutex        failures_mutex;

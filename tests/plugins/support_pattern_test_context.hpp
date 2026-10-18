@@ -1,5 +1,5 @@
 /* A STEP_SUPPORT run context for the code that samples the infill patterns from a support family (the tip sampler of the tree
-   family, slic3r_api::PatternService), without running the support step.
+   family, slic3r_api::Support::Common::PatternService), without running the support step.
 
    The host builds the pattern callbacks of run_ctx_generate_support (ABI 1.2) in StepGenerateSupport.cpp over a lazy
    InfillPatternService. This fixture builds the same payload over a service that the test owns, as test_support_common.cpp does for

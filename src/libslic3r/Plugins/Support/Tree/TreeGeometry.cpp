@@ -215,6 +215,15 @@ void with_scratch_storage(const std::function<void(storage_handle *)> &work)
         });
 }
 
+// Allocates the result in storage and moves the content of source into it, so that source stays valid and empty in its own storage.
+// The result lives as long as storage. An allocation failure propagates to the caller.
+slic3r_api::StoredPolygonCollection moved_to_storage(storage_handle *storage, slic3r_api::StoredPolygonCollection &source)
+{
+    slic3r_api::StoredPolygonCollection out(storage);
+    out.move_from(source);
+    return out;
+}
+
 // The sides are counted from the angle one side must span for the sagitta (radius - radius * cos(angle / 2)) to stay under `error`;
 // that count is computed in doubles before the points are made. Needs radius > 0 and 0 < error < 2 * radius (acos of a value in
 // [-1, 1)); the native function has the same domain.

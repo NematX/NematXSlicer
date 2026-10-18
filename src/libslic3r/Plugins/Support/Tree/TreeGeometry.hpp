@@ -21,14 +21,14 @@
    7. nearest_on_lines: the closest point of a set of line segments;
    8. spatial_order: the order the native AABB tree gives to its input;
    9. Clipper wrappers on storage-owned results;
-   10. with_scratch_storage: a storage that lives for the duration of one computation;
+   10. with_scratch_storage: a storage that lives for the duration of one computation, and the move of a collection to another storage;
    11. make_circle and move_inside_if_outside.
 
    Clipper results (rings, expolygons) are not ordered like the native ones, and their rings start at other points: compare them
    as regions, never with operator==.
 
    Storage: a function that returns a collection takes the storage_handle that will own it. The inputs are read-only views (a
-   Stored* lvalue converts to its view), and the result must not outlive the storage.
+   Stored* lvalue converts to its view), except the source of moved_to_storage(), and the result must not outlive the storage.
 
        StoredPolygonCollection free_area = diff_clipped(storage, increased_area, collision);
        StoredExPolygonCollection islands = expolygons_union(storage, free_area);
@@ -371,6 +371,11 @@ slic3r_api::StoredPolygonCollection diff_clipped(storage_handle *storage, const 
 // do not stay in the run storage. Everything allocated from that storage must be destroyed, or moved to another storage
 // (StoredPolygonCollection::move_from), before work returns. An exception thrown by work propagates to the caller.
 void with_scratch_storage(const std::function<void(storage_handle *)> &work);
+
+// A new collection of storage that takes the rings of source, which belongs to another storage (typically a scratch one). Unlike
+// the other functions here, it modifies its input: source is moved from and stays in its own storage, valid and empty. The result is
+// owned by storage and lives as long as it; an allocation failure propagates. A copy is source.readonly().clone(storage).
+slic3r_api::StoredPolygonCollection moved_to_storage(storage_handle *storage, slic3r_api::StoredPolygonCollection &source);
 
 /* ============================== 11. circles and move inside ============================== */
 

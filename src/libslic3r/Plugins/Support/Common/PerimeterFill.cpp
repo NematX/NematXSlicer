@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "ClipperResults.hpp"
+#include "ExtrusionLines.hpp"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 
@@ -33,8 +34,6 @@ void append_path(storage_handle *storage, MutableExtrusionEntity parent, const s
 // Points of a polygon starting at its first point and closed by repeating it (Polygon::split_at_index(0)),
 // oriented counter-clockwise for a contour and clockwise for a hole.
 std::vector<c_point> closed_loop_points(const Polygon &polygon, bool counter_clockwise);
-// Collect, in printing order, the polylines of every leaf of an extrusion tree.
-void collect_leaf_polylines(const ExtrusionEntity &entity, std::vector<std::vector<c_point>> &out);
 
 // Fill one perimeter area: its loops, then the inner pattern on its inset.
 void fill_area(storage_handle *storage, const ExPolygon &area, raw_surface_type surface_type,
@@ -73,14 +72,6 @@ std::vector<c_point> closed_loop_points(const Polygon &polygon, bool counter_clo
         std::reverse(points.begin(), points.end());
     points.push_back(points.front());
     return points;
-}
-
-void collect_leaf_polylines(const ExtrusionEntity &entity, std::vector<std::vector<c_point>> &out)
-{
-    if (entity.has_polyline())
-        out.push_back(entity.points());
-    for (uint32_t idx = 0; idx < entity.child_count(); ++idx)
-        collect_leaf_polylines(entity.child(idx), out);
 }
 
 void fill_area(storage_handle *storage, const ExPolygon &area, raw_surface_type surface_type,

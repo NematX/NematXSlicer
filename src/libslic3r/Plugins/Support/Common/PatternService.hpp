@@ -2,8 +2,8 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-#ifndef slic3r_Api_plugin_cpp_PatternService_hpp_
-#define slic3r_Api_plugin_cpp_PatternService_hpp_
+#ifndef plugins_support_common_pattern_service_hpp_
+#define plugins_support_common_pattern_service_hpp_
 
 #include <cstdint>
 #include <stdexcept>
@@ -14,8 +14,9 @@
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
+#include "libslic3r/Plugins/Support/Common/ExtrusionLines.hpp"
 
-namespace slic3r_api {
+namespace slic3r_api::Support::Common {
 
 /*
 Sampling the INFILL_PATTERN plugins from STEP_SUPPORT
@@ -26,7 +27,7 @@ tips of a tree, calls the pattern callbacks of run_ctx_generate_support (ABI 1.2
 The raw callbacks need a recipe (raw_infill_pattern_params), a surface, an output
 entity and the flattening of the result. PatternService does these four steps:
 
-    const slic3r_api::PatternService patterns(plugin_ctx_as_generate_support(context));
+    const slic3r_api::Support::Common::PatternService patterns(plugin_ctx_as_generate_support(context));
     const infill_pattern_runtime_id id = patterns.resolve("rectilinear");
     PatternService::Fill fill;
     fill.flow = params.base_flow;
@@ -49,7 +50,6 @@ Concurrency: the callbacks may be called from several threads at once; PatternSe
 holds no state beyond the payload pointer, so one instance can be shared by the
 worker threads of a family. The payload must outlive the instance.
 
-C++ only: no C function is added.
 */
 class PatternService
 {
@@ -69,8 +69,9 @@ public:
         uint32_t layer_id = 0;
     };
 
-    // The payload received by the family. Throws std::runtime_error when it is null or has no pattern callback (a host older
-    // than slic3r_step_support.h 1.2 leaves them NULL).
+    // The payload received by the family. Throws std::runtime_error when it is null (plugin_ctx_as_generate_support returns NULL in
+    // the context of another step) or has no pattern callback. A plugin that requires slic3r_step_support.h 1.2 is not loaded by an
+    // older host, whose payload has no such fields, so the callback checks reject a payload built by hand (the tests).
     explicit PatternService(const run_ctx_generate_support *payload) : m_payload(payload)
     {
         if (payload == nullptr || payload->resolve_pattern_id == nullptr || payload->generate_pattern == nullptr)
@@ -130,20 +131,9 @@ public:
     }
 
 private:
-    // Appends the polyline of every entity of the tree that carries one, in pre-order: the polyline of an entity, then its children in order.
-    // This is a copy of the helper in the anonymous namespace of Plugins/Support/Common/PerimeterFill.cpp, because Api/plugin/cpp must not
-    // depend on Plugins/Support.
-    static void collect_leaf_polylines(const ExtrusionEntity &entity, std::vector<std::vector<c_point>> &lines)
-    {
-        if (entity.has_polyline())
-            lines.push_back(entity.points());
-        for (uint32_t idx = 0; idx < entity.child_count(); ++idx)
-            collect_leaf_polylines(entity.child(idx), lines);
-    }
-
     const run_ctx_generate_support *m_payload;
 };
 
-} // namespace slic3r_api
+} // namespace slic3r_api::Support::Common
 
-#endif // slic3r_Api_plugin_cpp_PatternService_hpp_
+#endif // plugins_support_common_pattern_service_hpp_

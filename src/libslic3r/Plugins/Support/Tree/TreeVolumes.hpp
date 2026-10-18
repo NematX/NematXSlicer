@@ -14,8 +14,16 @@
    request up to its top layer, so the router normally only reads the caches. A key that precalculate() did not cover is
    computed by the getter that misses it (see Concurrency).
 
-       TreeVolumes volumes(object, print, settings, run_storage, throw_on_cancel);
-       volumes.precalculate(max_layer, throw_on_cancel);
+   Cancellation: the constructor takes the plugin_run_context of the step (nullptr never cancels) and keeps it. Every computation,
+   the ones of precalculate() and the lazy ones of the getters, calls slic3r_api::throw_if_cancelled() on it after each layer, so a
+   cancelled step throws PluginCancelled from the call that is running. A computation that runs in a TBB group cancelled by another
+   exception has its nested parallel loops skipped or cut short, and the exceptions of their tasks dropped; it detects the group with
+   tbb::is_current_task_group_canceling() before it publishes or reads its result, and throws a std::runtime_error (TBB keeps the first
+   exception of the group). Nothing partial is published when the host cancels (PluginCancelled); when the group is cancelled by another
+   error, the step fails and these volumes are not reused. The context must outlive the TreeVolumes.
+
+       TreeVolumes volumes(object, print, settings, run_storage, context);
+       volumes.precalculate(max_layer);
        const StoredPolygonCollection &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist);
 
    Storage: the areas are StoredPolygonCollection values owned by the run storage given to the constructor, which must outlive the
@@ -52,6 +60,8 @@
 #include <vector>
 
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
+#include "TreeGeometry.hpp"
 #include "TreeSettings.hpp"
 
 namespace Slic3r {
@@ -68,10 +78,11 @@ class TreeVolumes
 public:
     TreeVolumes() = default;
     // Reads the object once, in run_storage: it slices the support blockers and simplifies the outline of every layer. No area is
-    // computed until precalculate(). The areas are owned by run_storage, which must outlive this object; throw_on_cancel is called
-    // between the blocker volumes (the slicing of one volume is not cancellable).
+    // computed until precalculate(). The areas are owned by run_storage, which must outlive this object. The context, which must
+    // outlive it too, is checked before and after the slicing of each blocker volume and between its cleaned layers (the slicing of one mesh is not cancellable)
+    // and by every later computation.
     TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
-                const std::function<void()> &throw_on_cancel);
+                const plugin_run_context *context);
     TreeVolumes(TreeVolumes&&) = default;
     TreeVolumes& operator=(TreeVolumes&&) = default;
 
@@ -92,7 +103,7 @@ public:
      * Knowledge about the branch angles and the radii of the tips limits the keys to the ones that may actually be used.
      * Requests for other keys still work from any thread, but they are computed on demand and are slower.
      */
-    void precalculate(const coord_t max_layer, std::function<void()> throw_on_cancel);
+    void precalculate(const coord_t max_layer);
 
     /*!
      * \brief Provides the areas that a node of the given radius must not enter on this layer, because they collide with the model.
@@ -120,7 +131,7 @@ public:
      * \param radius The radius of the node of interest
      * \param layer_idx The layer of interest
      */
-    const slic3r_api::StoredPolygonCollection& getPlaceableAreas(coord_t radius, LayerIndex layer_idx, std::function<void()> throw_on_cancel) const;
+    const slic3r_api::StoredPolygonCollection& getPlaceableAreas(coord_t radius, LayerIndex layer_idx) const;
 
     /*!
      * \brief Provides the abstract walls that a branch must not pass when it moves between two layers.
@@ -209,14 +220,14 @@ private:
             std::vector<Entry> entries;
             entries.reserve(in.size());
             for (Entry &d : in)
-                entries.emplace_back(d.first, to_run_storage(d.second));
+                entries.emplace_back(d.first, moved_to_storage(m_run_storage, d.second));
             publish(entries);
         }
         void insert(std::vector<slic3r_api::StoredPolygonCollection> &&in, coord_t first_layer_idx, coord_t radius) {
             std::vector<Entry> entries;
             entries.reserve(in.size());
             for (slic3r_api::StoredPolygonCollection &d : in)
-                entries.emplace_back(RadiusLayerPair(radius, first_layer_idx ++), to_run_storage(d));
+                entries.emplace_back(RadiusLayerPair(radius, first_layer_idx ++), moved_to_storage(m_run_storage, d));
             publish(entries);
         }
         void insert(LayerPolygonCache &&in, coord_t radius) {
@@ -224,7 +235,7 @@ private:
             entries.reserve(in.size());
             LayerIndex i = in.begin();
             for (slic3r_api::StoredPolygonCollection &d : in.polygons_mutable())
-                entries.emplace_back(RadiusLayerPair(radius, i ++), to_run_storage(d));
+                entries.emplace_back(RadiusLayerPair(radius, i ++), moved_to_storage(m_run_storage, d));
             publish(entries);
         }
         // Return the area of a key when it was already computed, nothing otherwise.
@@ -249,12 +260,6 @@ private:
         }
 
     private:
-        // Moves the content of a collection of a scratch storage into a new collection of the run storage.
-        slic3r_api::StoredPolygonCollection to_run_storage(slic3r_api::StoredPolygonCollection &scratch) const {
-            slic3r_api::StoredPolygonCollection out(m_run_storage);
-            out.move_from(scratch);
-            return out;
-        }
         // Inserts the entries under the lock. try_emplace leaves the entry alone when its key is taken: the area that lost is
         // freed with the vector of the caller, after the lock is released.
         void publish(std::vector<Entry> &entries) {
@@ -286,23 +291,27 @@ private:
      * can call them from any thread once precalculate() has returned (see Concurrency above); what a cache already holds for a
      * key is kept, and is equal to the new area.
      */
-    void calculateCollision(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel);
-    void calculateCollision(const coord_t radius, const LayerIndex max_layer_idx, std::function<void()> throw_on_cancel);
+    void calculateCollision(const std::vector<RadiusLayerPair> &keys);
+    void calculateCollision(const coord_t radius, const LayerIndex max_layer_idx);
     // Collisions that additionally keep out the holes too small for a branch of the radius until which it always widens.
-    void calculateCollisionHolefree(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel);
-    void calculateCollisionHolefree(RadiusLayerPair key) { calculateCollisionHolefree(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }, []{}); }
+    void calculateCollisionHolefree(const std::vector<RadiusLayerPair> &keys);
+    void calculateCollisionHolefree(RadiusLayerPair key) { calculateCollisionHolefree(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }); }
     // Avoidances are propagated upwards from the collisions, with the maximum move of each layer.
-    void calculateAvoidance(const std::vector<RadiusLayerPair> &keys, bool to_build_plate, bool to_model, std::function<void()> throw_on_cancel);
+    void calculateAvoidance(const std::vector<RadiusLayerPair> &keys, bool to_build_plate, bool to_model);
     void calculateAvoidance(RadiusLayerPair key, bool to_build_plate, bool to_model) {
-        calculateAvoidance(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }, to_build_plate, to_model, []{});
+        calculateAvoidance(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }, to_build_plate, to_model);
     }
     // Placeable areas of every key, each up to the layer of its key.
-    void calculatePlaceables(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel);
+    void calculatePlaceables(const std::vector<RadiusLayerPair> &keys);
     // Placeable areas of one radius on layers 0 to max_required_layer, from the ones of radius 0; layer 0 stays empty.
-    void calculatePlaceables(const coord_t radius, const LayerIndex max_required_layer, std::function<void()> throw_on_cancel);
+    void calculatePlaceables(const coord_t radius, const LayerIndex max_required_layer);
     // Wall restrictions are the collision of one layer intersected with the collision of the layer below.
-    void calculateWallRestrictions(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel);
-    void calculateWallRestrictions(RadiusLayerPair key) { calculateWallRestrictions(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }, []{}); }
+    void calculateWallRestrictions(const std::vector<RadiusLayerPair> &keys);
+    void calculateWallRestrictions(RadiusLayerPair key) { calculateWallRestrictions(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }); }
+
+    // Throws PluginCancelled when the context is cancelled, and std::runtime_error when the enclosing TBB group is cancelled; called
+    // after each computation, before its result is published or read again.
+    void throw_if_interrupted() const;
 
     // Return the collision of a radius and layer, computed on demand when precalculate() did not cover it.
     const slic3r_api::StoredPolygonCollection& getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const;
@@ -331,6 +340,8 @@ private:
         return const_cast<TreeVolumes*>(this)->avoidance_cache(type, to_model);
     }
 
+    // The context of the step, checked by every computation; not owned, nullptr never cancels.
+    const plugin_run_context *m_context = nullptr;
     // Per layer maximum move of the branch centres (scaled), fast and slow, with a small margin against rounding.
     std::vector<coord_t> m_max_move;
     std::vector<coord_t> m_max_move_slow;

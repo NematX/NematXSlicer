@@ -94,7 +94,7 @@ struct RelaxPass {
 // Runs the iterations of the relaxation, at most max_iterations, and stops once no free sphere overlapped in an iteration and no
 // node moved more than settled_displacement in it. Returns the number of iterations that ran.
 size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions,
-             const std::function<void()> &throw_on_cancel);
+             const plugin_run_context *context);
 // The job of slic3r_parallel_for: pushes and pulls the free spheres of chunk number `job` (spheres_per_job spheres from job * spheres_per_job).
 void relax_chunk(uint32_t job, void *user_data);
 // Pushes the sphere away from the closest outline point of the layers it reaches; returns true when it overlapped by more than EPSILON.
@@ -106,15 +106,15 @@ void write_back(const std::vector<Sphere> &spheres, std::vector<RoutedTree> &tre
 } // namespace
 
 // Relaxes the free nodes of the trees and returns the number of iterations that ran. The spheres are built from the trees,
-// relaxed, and only then written back, so an exception from throw_on_cancel leaves the trees unchanged.
+// relaxed, and only then written back, so a cancellation of the context leaves the trees unchanged.
 size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
-                               std::vector<RoutedTree> &trees, const std::function<void()> &throw_on_cancel)
+                               std::vector<RoutedTree> &trees, const plugin_run_context *context)
 {
     const std::vector<double> print_z = layer_print_zs(object);
     std::vector<Sphere> spheres = make_spheres(trees, print_z);
     set_layer_spans(spheres, print_z);
     const std::vector<LayerCollision> collisions = layer_collisions(keep_out);
-    const size_t iterations = relax(spheres, print_z, collisions, throw_on_cancel);
+    const size_t iterations = relax(spheres, print_z, collisions, context);
     write_back(spheres, trees);
     return iterations;
 }
@@ -212,7 +212,7 @@ std::vector<LayerCollision> layer_collisions(const std::vector<slic3r_api::Store
 // settled_displacement in an iteration, and stop after max_iterations. The largest move is gathered serially after the parallel
 // pass. The parallel pass has one job per chunk of spheres_per_job spheres, without API scratch storage (a job creates none; each nearest_on_lines query still allocates its candidate vector).
 size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions,
-             const std::function<void()> &throw_on_cancel)
+             const plugin_run_context *context)
 {
     for (size_t iteration = 0; iteration < max_iterations; ++iteration) {
         for (Sphere &sphere : spheres)
@@ -220,7 +220,7 @@ size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, c
         std::atomic<size_t> num_overlapping{ 0 };
         RelaxPass pass{ &spheres, &print_z, &collisions, &num_overlapping };
         slic3r_parallel_for(0, uint32_t((spheres.size() + spheres_per_job - 1) / spheres_per_job), &pass, &relax_chunk);
-        throw_on_cancel();
+        slic3r_api::throw_if_cancelled(context);
         double largest_move = 0.;
         for (const Sphere &sphere : spheres)
             largest_move = std::max(largest_move, (sphere.position - sphere.prev_position).norm());

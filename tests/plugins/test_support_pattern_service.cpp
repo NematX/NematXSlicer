@@ -19,7 +19,6 @@
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
-#include "libslic3r/Api/plugin/cpp/PatternService.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -27,6 +26,7 @@
 #include "libslic3r/Fill/FillBase.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Plugins/Infill/PatternPluginHelpers.hpp"
+#include "libslic3r/Plugins/Support/Common/PatternService.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Steps/StepGenerateSupport.hpp"
@@ -56,6 +56,7 @@ extern "C" int test_support_pattern_callbacks_c(const run_ctx_generate_support *
 namespace {
 using namespace Slic3r;
 using namespace Slic3r::Test::ProbePatternPlugin;
+namespace Common = slic3r_api::Support::Common;
 
 // Side of the square the probe fills, in mm; it is centered on the origin.
 constexpr double square_size_mm = 20.;
@@ -547,7 +548,7 @@ TEST_CASE("STEP_SUPPORT payload keeps its 1.1 members first and compiles as C", 
 }
 
 
-/* ===================== slic3r_api::PatternService (the wrapper of the tip sampler) ===================== */
+/* ===================== Common::PatternService (the wrapper of the tip sampler) ===================== */
 namespace {
 // The legacy recipe of the tree tips: the support flow, one branch distance between the lines.
 struct TipFill {
@@ -598,16 +599,16 @@ std::vector<std::vector<Point>> legacy_lines(InfillPattern pattern, const ExPoly
 }
 
 // The lines of the wrapper for the same fill.
-std::vector<std::vector<Point>> wrapper_lines(const slic3r_api::PatternService &patterns, storage_handle *storage, const char *pattern_id,
+std::vector<std::vector<Point>> wrapper_lines(const Common::PatternService &patterns, storage_handle *storage, const char *pattern_id,
                                               const ExPolygon &area, const TipFill &tip)
 {
-    slic3r_api::PatternService::Fill fill;
+    Common::PatternService::Fill fill;
     fill.flow = to_c_flow(tip.flow);
     fill.spacing = tip.flow.spacing();
     fill.density = float(scale_d(tip.flow.spacing()) / (scale_d(tip.flow.spacing()) + float(tip.branch_distance)));
     fill.angle = tip.angle;
     fill.layer_id = tip.layer_id;
-    const raw_infill_pattern_params recipe = slic3r_api::PatternService::recipe(patterns.resolve(pattern_id), fill);
+    const raw_infill_pattern_params recipe = Common::PatternService::recipe(patterns.resolve(pattern_id), fill);
     std::vector<std::vector<Point>> lines;
     for (const std::vector<c_point> &line : patterns.fill_lines(storage, slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&area)), recipe)) {
         lines.emplace_back();
@@ -688,7 +689,7 @@ TEST_CASE("PatternService fills like the legacy Fill with the recipe of the tree
     PluginStorage storage;
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const Test::SupportTree::SupportPatternContext fixture(print, handle);
-    const slic3r_api::PatternService patterns(fixture.payload());
+    const Common::PatternService patterns(fixture.payload());
     size_t exact = 0, honeycomb_fills = 0;
     double connected_length = 0., plugin_length = 0., unconnected_length = 0.;
     size_t connected_pieces = 0, plugin_pieces = 0;
@@ -749,7 +750,7 @@ TEST_CASE("PatternService on degenerate parts gives what the legacy Fill gave", 
     PluginStorage storage;
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const Test::SupportTree::SupportPatternContext fixture(print, handle);
-    const slic3r_api::PatternService patterns(fixture.payload());
+    const Common::PatternService patterns(fixture.payload());
     // Parts that a contact can leave after the offsets: smaller than a line, thinner than a line, a sliver. (A union never returns a ring
     // without area, so the tip sampler never receives one.)
     std::vector<std::pair<std::string, ExPolygon>> parts;
@@ -783,22 +784,23 @@ TEST_CASE("PatternService reports a failed call as no line and needs the callbac
     PluginStorage storage;
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const Test::SupportTree::SupportPatternContext fixture(print, handle);
-    const slic3r_api::PatternService patterns(fixture.payload());
+    const Common::PatternService patterns(fixture.payload());
     const ExPolygon square = test_square();
     const slic3r_api::ExPolygon view(reinterpret_cast<const expolygon_handle *>(&square));
-    slic3r_api::PatternService::Fill fill;
+    Common::PatternService::Fill fill;
     fill.flow = to_c_flow(TipFill().flow);
     fill.spacing = TipFill().flow.spacing();
     fill.density = 0.25f;
     // An id that no pattern has, and a pattern that needs the STEP_INFILL initialization pass.
-    CHECK(patterns.fill_lines(handle, view, slic3r_api::PatternService::recipe(infill_pattern_runtime_id(100000), fill)).empty());
-    CHECK(patterns.fill_lines(handle, view, slic3r_api::PatternService::recipe(patterns.resolve("lightning"), fill)).empty());
-    CHECK_FALSE(patterns.fill_lines(handle, view, slic3r_api::PatternService::recipe(patterns.resolve("rectilinear"), fill)).empty());
+    CHECK(patterns.fill_lines(handle, view, Common::PatternService::recipe(infill_pattern_runtime_id(100000), fill)).empty());
+    CHECK(patterns.fill_lines(handle, view, Common::PatternService::recipe(patterns.resolve("lightning"), fill)).empty());
+    CHECK_FALSE(patterns.fill_lines(handle, view, Common::PatternService::recipe(patterns.resolve("rectilinear"), fill)).empty());
 
-    // A payload without callbacks (a host older than ABI 1.2) or no payload (not the support step) is refused.
+    // A payload without callbacks (built by hand: a host older than ABI 1.2 does not load a plugin that requires it) or no payload
+    // (not the support step) is refused.
     run_ctx_generate_support old_payload = {};
-    CHECK_THROWS_AS(slic3r_api::PatternService(&old_payload), std::runtime_error);
-    CHECK_THROWS_AS(slic3r_api::PatternService(nullptr), std::runtime_error);
+    CHECK_THROWS_AS(Common::PatternService(&old_payload), std::runtime_error);
+    CHECK_THROWS_AS(Common::PatternService(nullptr), std::runtime_error);
 }
 
 TEST_CASE("PatternService is shared by the threads of a family and gives the serial lines", "[plugins][support-pattern-service]")
@@ -810,7 +812,7 @@ TEST_CASE("PatternService is shared by the threads of a family and gives the ser
     PluginStorage storage;
     storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
     const Test::SupportTree::SupportPatternContext fixture(print, handle);
-    const slic3r_api::PatternService patterns(fixture.payload());
+    const Common::PatternService patterns(fixture.payload());
     const std::vector<std::pair<std::string, ExPolygon>> shapes = tip_shapes();
     std::vector<std::vector<std::vector<Point>>> serial;
     for (size_t job = 0; job < 24; ++job) {
@@ -819,7 +821,7 @@ TEST_CASE("PatternService is shared by the threads of a family and gives the ser
         serial.push_back(wrapper_lines(patterns, handle, tip_patterns[job % 3], shapes[job % shapes.size()].second, tip));
     }
     struct Jobs {
-        const slic3r_api::PatternService *patterns;
+        const Common::PatternService *patterns;
         const std::vector<std::pair<std::string, ExPolygon>> *shapes;
         std::vector<std::vector<std::vector<Point>>> *results;
     } jobs{ &patterns, &shapes, nullptr };

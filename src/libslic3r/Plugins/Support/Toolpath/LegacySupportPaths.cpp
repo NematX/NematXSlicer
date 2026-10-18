@@ -17,6 +17,7 @@
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
+#include "libslic3r/Plugins/Support/Common/ExtrusionLines.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
@@ -100,8 +101,6 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
 void fuse_parts(LayerParts &parts);
 // The attributes of paths with this role and flow: width, height and mm3 per mm.
 EPropertyAttributes flow_attributes(raw_extrusion_role role, const c_flow &flow);
-// Collect the points of every polyline-bearing leaf of an extrusion tree.
-void leaf_lines(const ExtrusionEntity &entity, PointLists &out);
 // Whether any of the polylines crosses the area.
 bool crosses(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area);
 // Convert point lists to a storage-owned polyline collection, and back.
@@ -246,14 +245,6 @@ EPropertyAttributes flow_attributes(raw_extrusion_role role, const c_flow &flow)
     EPropertyAttributes attributes;
     attributes.extrusion_role(int32_t(role)).mm3_per_mm(flow.mm3_per_mm).width(float(unscaled(flow.width))).height(float(unscaled(flow.height)));
     return attributes;
-}
-
-void leaf_lines(const ExtrusionEntity &entity, PointLists &out)
-{
-    if (entity.has_polyline())
-        out.push_back(entity.points());
-    for (uint32_t index = 0; index < entity.child_count(); ++index)
-        leaf_lines(entity.child(index), out);
 }
 
 bool crosses(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area)
@@ -657,7 +648,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     for (uint32_t index = 0; index < out.readonly().child_count(); ++index) {
         MutableExtrusionEntity entity = out.child_mutable(index);
         PointLists lines;
-        leaf_lines(entity.readonly(), lines);
+        Common::collect_leaf_polylines(entity.readonly(), lines);
         layer_region_island_handle *region = nullptr;
         for (uint32_t island_index = 0; island_index < layer_count_island(layer); ++island_index) {
             layer_island_handle *island = layer_get_island_mutable(layer, island_index);

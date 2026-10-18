@@ -191,8 +191,8 @@ void dump_volumes(Dump &dump, const std::string &prefix, const Print &print, con
     const TF::LayerIndex layers = TF::LayerIndex(object.layer_count());
     // The storage owns the areas of the volumes, so it is declared first and destroyed last.
     PluginStorage storage;
-    Volumes volumes(SG::object_view(object), SG::print_view(print), settings, reinterpret_cast<storage_handle *>(&storage), [] {});
-    volumes.precalculate(layers - 1, [] {});
+    Volumes volumes(SG::object_view(object), SG::print_view(print), settings, reinterpret_cast<storage_handle *>(&storage), nullptr);
+    volumes.precalculate(layers - 1);
     const std::set<coord_t> radii{settings.getRadius(0), settings.branch_radius, settings.bp_radius};
     const std::vector<std::pair<Volumes::AvoidanceType, const char *>> types{
         {Volumes::AvoidanceType::Slow, "slow"}, {Volumes::AvoidanceType::FastSafe, "fastsafe"}, {Volumes::AvoidanceType::Fast, "fast"}};
@@ -218,7 +218,7 @@ void dump_volumes(Dump &dump, const std::string &prefix, const Print &print, con
     // The placeable areas have no XY distance variant: radius 0 (the top surfaces of the object) and the tip radius.
     for (const coord_t radius : {coord_t(0), settings.getRadius(0)})
         for (TF::LayerIndex layer = 1; layer < layers; ++layer)
-            add("placeable/r" + std::to_string((long long) radius) + "/L" + std::to_string(layer), volumes.getPlaceableAreas(radius, layer, [] {}));
+            add("placeable/r" + std::to_string((long long) radius) + "/L" + std::to_string(layer), volumes.getPlaceableAreas(radius, layer));
 }
 
 void dump_routing(Dump &dump, const std::string &base, const std::vector<TF::RoutedTree> &trees)

@@ -218,14 +218,13 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
     const LayerList layers = object_layers(object);
     const slic3r_api::Config config = object.config();
     const slic3r_api::Config print_config = print.config();
-    const std::function<void()> throw_on_cancel = [context] { slic3r_api::throw_if_cancelled(context); };
     // Without interface layers the contacts are rebuilt below from the branches, and trimmed again there.
     const bool without_interfaces = config.get("support_material_interface_layers").get_int() <= 0;
     // Every temporary area of the job lives in this storage, which is destroyed when the job returns.
     with_scratch_storage([&](storage_handle *scratch) {
         const PolygonList keep_out = keep_out_outlines(layers, scratch, settings.xy_min_distance);
         if (organic)
-            smooth_organic_branches(object, keep_out, trees, throw_on_cancel);
+            smooth_organic_branches(object, keep_out, trees, context);
         std::vector<RootRest> rests = root_rests(layers, trees, keep_out, settings, scratch);
         add_floors(layers, rests, keep_out, params, config, scratch, out);
         raise_stems_onto_floors(out, rests);
