@@ -18,22 +18,32 @@
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
-/* This test compares generated plugin selector descriptions and selection results with expected text rows.
-   A provider is a registered plugin. An exclusive selector is a setting that chooses one provider
-   for a step or group; its enum lists the available choices.
+/*
+This test compares generated plugin selector descriptions and selection results with expected text rows.
+A provider is a registered plugin. An exclusive selector is a setting that chooses one provider
+for a step or group; its enum lists the available choices.
 
-   The test reads startup provider ids, settings and UI layout fragments, excluding providers
-   from the Python packages listed by python_package_provider(). ActivationGuard restores
-   saved activation flags. SLIC3R_SELECTOR_SNAPSHOT names an optional output file for C++ rows.
-   Call graph:
-     TEST_CASE
-       append_group -> escaped
-       append_registered -> python_package_provider, escaped
-       append_scenarios
-         finalized_members -> python_package_provider
-         append_group
-         append_selection -> python_package_provider
-   Group descriptions contain pointers into their own strings; copies refresh those pointers. */
+The test reads startup provider ids, settings and UI layout fragments, excluding providers
+from the Python packages listed by python_package_provider(). ActivationGuard restores
+saved activation flags. SLIC3R_SELECTOR_SNAPSHOT names an optional output file for C++ rows.
+Group descriptions contain pointers into their own strings; copies refresh those pointers.
+
+Operation notes:
+- append_group :  escaped
+- append_registered :  python_package_provider, escaped
+- finalized_members :  python_package_provider
+- append_selection :  python_package_provider
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- host.register_step()
+        |-- Steps::make_exclusive_step_group()
+        |-- append_group()
+        |-- host.registered_plugins()
+        |-- append_registered()
+        `-- append_selection()
+*/
 
 namespace {
 using namespace Slic3r;
@@ -381,8 +391,8 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
             }
         }
         // Exclude selectors left below the generation threshold after removing Python choices.
-        // G-code and firmware need one choice; other selectors need two. Keep existing selectors without Python choices.
-        const size_t threshold = key == "step_gcode_plugin" || key == "gcode_firmware_plugin" ? 1 : 2;
+        // Exporter and firmware selectors need one choice; others need two. Keep existing selectors without Python choices.
+        const size_t threshold = key == "gcode_exporter_plugin" || key == "gcode_firmware_plugin" ? 1 : 2;
         if (removed_python && native_count < threshold) excluded_keys.insert(key);
     }
     for (const std::string &key : excluded_keys) keys.erase(key);
@@ -402,7 +412,7 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
         STEP_PRE_INFILL, STEP_INFILL_GROUP, STEP_INFILL, STEP_POST_INFILL, STEP_SUPPORT_DEMAND, STEP_SUPPORT, STEP_SUPPORT_TOOLPATH,
         STEP_FINALIZE_SLICING, STEP_CHECK_CONFLICT, STEP_ORDERING, STEP_WIPETOWER,
         STEP_SUPPORT_SPOT, STEP_LAYER_EXTRUSION_EDIT, STEP_LAYER_STICHING, STEP_EXTRUSION_EDIT,
-        STEP_EXTRUSION_SIMPLIFICATION, STEP_GCODE, INFILL_PATTERN, INFILL_SURFACE_RECIPE_MODIFIER, BRIDGE_DETECTOR,
+        STEP_EXTRUSION_SIMPLIFICATION, STEP_GCODE, GCODE_EXPORT, INFILL_PATTERN, INFILL_SURFACE_RECIPE_MODIFIER, BRIDGE_DETECTOR,
         PERIMETER_GENERATION_MODULE, SEAM_PLACER, GCODE_FIRMWARE, GCODE_THUMBNAIL, GCODE_READER, WIPE_TOWER_WIPE,
         dynamic_step, slicing_step_t(5000)
     };
@@ -413,7 +423,8 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
     }
     const std::pair<slicing_step_t, const char *> real_groups[] = {
         {SEAM_PLACER, "seam_placer_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
-        {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {STEP_ORDERING, "ordering.extrusion_tree"},
+        {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {GCODE_EXPORT, "gcode_exporter_plugin"},
+        {STEP_ORDERING, "ordering.extrusion_tree"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_sparse"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_bottom_contact"}, {STEP_SUPPORT_TOOLPATH, "support_toolpath_top_contact"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_bottom_interface"}, {STEP_SUPPORT_TOOLPATH, "support_toolpath_top_interface"}
@@ -488,6 +499,7 @@ const char *const k_expected[] = {
     "def|exclusive_group_10250_seam_placer_plugin_plugin|label=Seam placement|tooltip=Selects the service used to choose the starting point of closed extrusion loops.|type=9|container=5|preset=1|category=2|invalidates=1500|mode=22|gui=0|plugin_ids=1|technology=1|default=seam_placer.cost|values=seam_placer.cost,seam_placer.aligned,seam_placer.contiguous,seam_placer.fixed,seam_placer.random,slic3r.test.seam_placer.regional",
     "def|exclusive_group_300_test_exclusive_selector_pruning_plugin|label=test.exclusive.selector_pruning|tooltip=|type=9|container=1|preset=1|category=2|invalidates=300|mode=22|gui=0|plugin_ids=1|technology=1|default=slic3r.test.exclusive_pruning.valid|values=slic3r.test.exclusive_pruning.valid",
     "def|exclusive_group_700_perimeter_post_process_extra_perimeters_on_overhangs_plugin|label=Extra overhang perimeter strategy|tooltip=Choose the algorithm used to add extra perimeter anchors under overhangs.|type=9|container=1|preset=1|category=1|invalidates=700|mode=22|gui=0|plugin_ids=1|technology=1|default=perimeter.post_process.extra_perimeters_on_overhangs|values=perimeter.post_process.extra_perimeters_on_overhangs,perimeter.post_process.extra_perimeter_overhang_wave",
+    "def|gcode_exporter_plugin|label=G-code exporter|tooltip=Selects the plugin that exports G-code.|type=9|container=1|preset=7|category=11|invalidates=0|mode=22|gui=0|plugin_ids=1|technology=1|default=gcode.exporter.simple|values=gcode.exporter.simple,test.gcode.exporter.probe,test.gcode.exporter.raw_query",
     "def|gcode_firmware_plugin|label=G-code firmware|tooltip=Selects the firmware session used by PrintingPlan output writers.|type=9|container=1|preset=7|category=11|invalidates=2000|mode=22|gui=0|plugin_ids=1|technology=1|default=gcode.firmware.marlin2|values=gcode.firmware.marlin2,gcode.firmware.marlin1,gcode.firmware.prusa,gcode.firmware.reprap,gcode.firmware.sprinter,gcode.firmware.klipper",
     "def|step_gcode_plugin|label=G-code plugin|tooltip=Selects how STEP_GCODE creates the output artifact.|type=9|container=1|preset=7|category=11|invalidates=2000|mode=22|gui=0|plugin_ids=1|technology=1|default=gcode.printing_plan_file_writer|values=gcode.printing_plan_file_writer",
     "def|step_layer_height_plugin|label=Layer height plugin|tooltip=Choose which active plugin owns this exclusive slicing step.|type=9|container=1|preset=1|category=2|invalidates=100|mode=22|gui=0|plugin_ids=1|technology=1|default=standard_layer_height_generator|values=standard_layer_height_generator,flat_area_layer_height",
@@ -514,6 +526,9 @@ const char *const k_expected[] = {
     "group|10350|synthetic|snapshot_group|key=exclusive_group_10350_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=7|category=11|invalidates=2000|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_10350_snapshot_group_plugin\\nend_line\\n",
     "group|10400|synthetic|snapshot_group|key=exclusive_group_10400_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=7|category=11|invalidates=2000|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_10400_snapshot_group_plugin\\nend_line\\n",
     "group|10450|synthetic|snapshot_group|key=exclusive_group_10450_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=1|category=11|invalidates=10450|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_10450_snapshot_group_plugin\\nend_line\\n",
+    "group|10500|real|gcode_exporter_plugin|key=exclusive_group_10500_gcode_exporter_plugin_plugin|label=G-code exporter|tooltip=Selects the plugin that exports G-code.|type=8|container=1|preset=7|category=11|invalidates=0|mode=22|gui=7|plugin_ids=1|technology=1|default=gcode.exporter.simple|values=gcode.exporter.simple|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:G-code exporter\\nsetting:exclusive_group_10500_gcode_exporter_plugin_plugin\\nend_line\\n",
+    "group|10500|runtime|gcode_exporter_plugin|key=gcode_exporter_plugin|label=G-code exporter|tooltip=Selects the plugin that exports G-code.|type=8|container=1|preset=7|category=11|invalidates=0|mode=22|gui=7|plugin_ids=1|technology=1|default=gcode.exporter.simple|values=gcode.exporter.simple,test.gcode.exporter.probe,test.gcode.exporter.pruned,test.gcode.exporter.raw_query|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:G-code exporter\\nsetting:gcode_exporter_plugin\\nend_line\\n",
+    "group|10500|synthetic|snapshot_group|key=exclusive_group_10500_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=7|category=11|invalidates=0|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_10500_snapshot_group_plugin\\nend_line\\n",
     "group|1100|synthetic|snapshot_group|key=exclusive_group_1100_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=1|category=3|invalidates=1100|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_1100_snapshot_group_plugin\\nend_line\\n",
     "group|1200|synthetic|snapshot_group|key=exclusive_group_1200_snapshot_group_plugin|label=snapshot_group|tooltip=|type=8|container=1|preset=1|category=7|invalidates=1200|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:snapshot_group\\nsetting:exclusive_group_1200_snapshot_group_plugin\\nend_line\\n",
     "group|1350|real|support_toolpath_bottom_interface|key=exclusive_group_1350_support_toolpath_bottom_interface_plugin|label=support_toolpath_bottom_interface|tooltip=Choose which active plugin owns this exclusive plugin group. Automatic selection uses the first matching active preference, otherwise the active group default.|type=8|container=3|preset=1|category=7|invalidates=1350|mode=22|gui=7|plugin_ids=1|technology=1|default=auto|values=auto,support.toolpath.legacy_bottom|ui=page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_bottom_interface_plugin\\nend_line\\n",
@@ -594,6 +609,7 @@ const char *const k_expected[] = {
     "table|1000|key=step_infill_plugin|label=Infill plugin|tooltip=Choose which active plugin owns this exclusive slicing step.|type=8|container=1|preset=1|category=3|invalidates=1000|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:Infill step plugin\\nsetting:step_infill_plugin\\nend_line\\n",
     "table|100|key=step_layer_height_plugin|label=Layer height plugin|tooltip=Choose which active plugin owns this exclusive slicing step.|type=8|container=1|preset=1|category=2|invalidates=100|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:Layer height step plugin\\nsetting:step_layer_height_plugin\\nend_line\\n",
     "table|10300|key=gcode_firmware_plugin|label=G-code firmware|tooltip=Choose which active plugin owns this exclusive slicing step.|type=8|container=1|preset=7|category=11|invalidates=2000|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:G-code firmware\\nsetting:gcode_firmware_plugin\\nend_line\\n",
+    "table|10500|key=gcode_exporter_plugin|label=G-code exporter|tooltip=Choose which active plugin owns this exclusive slicing step.|type=8|container=1|preset=7|category=11|invalidates=0|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:G-code exporter\\nsetting:gcode_exporter_plugin\\nend_line\\n",
     "table|1600|key=step_wipetower_plugin|label=Wipe tower plugin|tooltip=Choose which active plugin owns this exclusive slicing step.|type=8|container=1|preset=1|category=11|invalidates=1600|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:Wipe tower step plugin\\nsetting:step_wipetower_plugin\\nend_line\\n",
     "table|1700|key=step_layer_stiching_plugin|label=Layer stitching plugin|tooltip=Choose which active plugin owns this exclusive slicing step.|type=8|container=1|preset=1|category=11|invalidates=1700|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:Layer stitching step plugin\\nsetting:step_layer_stiching_plugin\\nend_line\\n",
     "table|2000|key=step_gcode_plugin|label=G-code plugin|tooltip=Choose which active plugin owns this exclusive slicing step.|type=8|container=1|preset=7|category=11|invalidates=2000|mode=22|gui=7|plugin_ids=1|technology=1|default=|values=|ui=page:Notes\\ngroup:Exclusive step plugins\\nline:G-code step plugin\\nsetting:step_gcode_plugin\\nend_line\\n",
@@ -610,6 +626,7 @@ const char *const k_expected[] = {
     "ui|exclusive_group_300_max_overhang_threshold_plugin|print.ui|max_overhang_threshold|priority=1|page:Slicing\\ngroup:Modifying slices\\nline:Overhangs cut\\nsetting:overhangs_max_slope\\nsetting:overhangs_bridge_threshold\\nsetting:overhangs_bridge_upper_layers\\nend_line\\n",
     "ui|exclusive_group_300_overhang_slope_fill_plugin|print.ui|overhang_slope_fill|priority=1|page:Slicing\\ngroup:Modifying slices\\nline:Overhangs fill\\nsetting:overhangs_fill_slope\\nsetting:overhangs_fill_bridge_threshold\\nend_line\\n",
     "ui|exclusive_group_700_perimeter_post_process_extra_perimeters_on_overhangs_plugin|print.ui|perimeter.post_process.extra_perimeters_on_overhangs|priority=1|page:Perimeters & Shell\\ngroup:Quality\\nline:Extra perimeters\\nsetting:insert$aftersetting$extra_perimeters_on_overhangs:exclusive_group_700_perimeter_post_process_extra_perimeters_on_overhangs_plugin\\nend_line\\n",
+    "ui|gcode_exporter_plugin|printer_fff.ui|gcode_exporter_plugin|priority=1|page:General:printer\\ngroup:Firmware\\n\\tsetting:insert$aftersetting$gcode_firmware_plugin:gcode_exporter_plugin\\n",
     "ui|gcode_firmware_plugin|printer_fff.ui|gcode_firmware_plugin|priority=1|page:General:printer\\ngroup:Firmware\\n\\tsetting:insert$aftersetting$step_gcode_plugin:gcode_firmware_plugin\\n",
     "ui|step_gcode_plugin|printer_fff.ui|step_gcode_plugin|priority=0|page:General:printer\\ngroup:Firmware\\n\\tsetting:insert$beforesetting$gcode_flavor:step_gcode_plugin\\n",
     "ui|step_layer_height_plugin|print.ui|step_layer_height_plugin|priority=0|page:Notes\\ngroup:Exclusive step plugins\\nline:Layer height step plugin\\nsetting:step_layer_height_plugin\\nend_line\\n",

@@ -33,35 +33,47 @@
 #include "Plugin.hpp"
 #include "StepSelectorTraits.hpp"
 
-/* This header exposes plugin registration, selection settings and job execution.
-   The host is the slicer application. Orchestrator is its process-wide manager
-   of plugins, components that perform jobs at processing stages called steps.
+/*
+This header exposes plugin registration, selection settings and job execution.
+The host is the slicer application. Orchestrator is its process-wide manager
+of plugins, components that perform jobs at processing stages called steps.
 
-   Use instance(), plugin_registration_scope() and register_plugin() to introduce
-   instances under an installed package directory. PluginRegistrationScope ends
-   that association when destroyed. Registration does not enable an instance.
+Use instance(), plugin_registration_scope() and register_plugin() to introduce
+instances under an installed package directory. PluginRegistrationScope ends
+that association when destroyed. Registration does not enable an instance.
 
-   An exclusive group holds alternative plugins for one step. Its selector is
-   a setting naming a member. ExclusiveGroupDefinition combines text and package
-   identity with StepSelectorTraits, its placement and selection rules. Register
-   descriptions, enable members, then elect_exclusive_group_definitions() and
-   create_selector_print_config() retain descriptions and create settings.
-   finalize_selector_option() filters choices without replacing their text.
-   exclusive_group_definition_or_default() reads the retained description;
-   its untranslated flag requires verbatim display without catalogue lookup.
+An exclusive group holds alternative plugins for one step. Its selector is
+a setting naming a member. ExclusiveGroupDefinition combines text and package
+identity with StepSelectorTraits, its placement and selection rules. Register
+descriptions, enable members, then elect_exclusive_group_definitions() and
+create_selector_print_config() retain descriptions and create settings.
+finalize_selector_option() filters choices without replacing their text.
+exclusive_group_definition_or_default() reads the retained description;
+its untranslated flag requires verbatim display without catalogue lookup.
 
-   initialize_plugins() reads initialization result codes before execute_plugin()
-   prepares and runs callable jobs. Contexts passed to plugin functions borrow
-   application data for those calls only. Package reports and execution diagnostics
-   distinguish non-fatal warnings from failures.
+initialize_plugins() reads initialization result codes before execute_plugin()
+prepares and runs callable jobs. Contexts passed to plugin functions borrow
+application data for those calls only. Package reports and execution diagnostics
+distinguish non-fatal warnings from failures.
 
-   For concurrent prints, create one RunContext per execution. It owns the progress
-   counters and stop state. Hold the RunScope returned by enter_run(context, &print)
-   until the execution's worker threads have finished. Destroying the scope restores
-   the previous thread association. It does not free plugin allocations.
+For concurrent prints, create one RunContext per execution. It owns the progress
+counters and stop state. Hold the RunScope returned by enter_run(context, &print)
+until the execution's worker threads have finished. Destroying the scope restores
+the previous thread association. It does not free plugin allocations.
 
-   PluginStorage remains shared. Print asks clear(print, storage) to release its
-   cached data when replaying from a saved pipeline boundary or during destruction. */
+PluginStorage remains shared. Print asks clear(print, storage) to release its
+cached data when replaying from a saved pipeline boundary or during destruction.
+
+For file export, the host first asks the selected exporter whether it accepts
+the configuration and firmware. That QUERY returns compatibility information
+without writing output. EXPORT then uses a completed G-code reference and an
+export-specific configuration. The reference belongs to the print; it is not
+the destination file and must remain unchanged by the exporter.
+
+The export entry points connect that two-operation contract to plugin execution.
+They are separate from plugin registration and ordinary geometry processing:
+choosing a file format is not a request to recompute sliced geometry.
+*/
 
 namespace Slic3r {
 
@@ -109,9 +121,15 @@ struct plugin_host_context
     // Borrow the Print's RunContext, or the thread's context when no Print is supplied.
     // Copies keep the same pointer. Its owner must keep it alive until all callbacks return.
     void *run_context = nullptr;
+    // Borrowed invocation-local output for one payload; report_error writes here instead of queueing a GUI message.
+    std::string *reported_error = nullptr;
 };
 
 namespace Slic3r {
+
+// Identity of the built-in exporter and the printer-profile key that selects an exporter.
+inline constexpr const char *k_default_gcode_exporter_id = "gcode.exporter.simple";
+inline constexpr const char *k_gcode_exporter_option_key = "gcode_exporter_plugin";
 
 struct GenericFacetsAnnotationDefinition
 {
@@ -308,6 +326,17 @@ public:
         slicing_step_t id = STEP_NONE;
         std::string name;
         slicing_step_t invalidates_step = STEP_ANY;
+    };
+
+    struct GCodeExporterSelection
+    {
+        std::string plugin_id;
+        std::string extension;
+
+        // Tell whether a typed suffix (with its dot, any case) is this exporter's extension or a text alias of the built-in exporter.
+        bool accepts_extension(const std::string &suffix) const;
+        // Return a unique path in the system temporary directory, `prefix` + random part + the exporter extension; nothing is created.
+        std::string temporary_path(const std::string &prefix) const;
     };
 
     struct PluginUiFragment
@@ -556,13 +585,13 @@ public:
     option_def_error_code create_selector_print_config(const raw_config_option_def &def,
         const SelectorIdentity &identity, bool auto_enabled);
 
-    // Execute the normal setup/setup_run/run lifecycle for one plugin. The
-    // payload array remains owned by the caller for the duration of this call.
+    // Execute setup/setup_run/run for caller-owned payloads; reported_error is call-local and requires at most one payload.
     raw_plugin_execution_status execute_plugin(Plugin &plugin,
                                                Print *print,
                                                const raw_plugin_run_payload *payloads,
                                                uint32_t run_count,
-                                               bool cancel_on_error = true);
+                                               bool cancel_on_error = true,
+                                               std::string *reported_error = nullptr);
 
     // Start and complete one installed package load. Loaders add precise
     // issues as they encounter them; successful registrations are associated
@@ -627,6 +656,17 @@ public:
                              const std::string &path_template,
                              GCodeProcessorResult *result,
                              ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+
+    // Resolve and query the exporter chosen by a borrowed configuration copy, returning its ID and extension or throwing.
+    GCodeExporterSelection select_gcode_exporter(const DynamicPrintConfig &config);
+    // Export a borrowed reference to a destination and atomically publish it; failures preserve both inputs and throw.
+    std::string export_print(Print &print,
+                             const DynamicPrintConfig &config,
+                             const std::string &reference_path,
+                             const std::string &destination_path,
+                             const GCodeExporterSelection &selection);
+    // Generate and reread a private reference beside the requested destination, export its finalized path, and remove the reference.
+    std::string export_gcode_cli(Print &print, const std::string &requested_output_path);
 
     Orchestrator(const Orchestrator&) = delete;
     Orchestrator& operator=(const Orchestrator&) = delete;

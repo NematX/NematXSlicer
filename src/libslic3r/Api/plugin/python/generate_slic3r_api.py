@@ -64,7 +64,8 @@ HEADER_ORDER = [
     "slic3r_volume.h",
 ]
 
-PYTHON_EXCLUDED_HEADERS = set()
+# The exporter service is exposed through the C++ plugin SDK, not the Python provider API.
+PYTHON_EXCLUDED_HEADERS = {"slic3r_step_gcode_export.h"}
 
 
 TYPE_ALIASES = {

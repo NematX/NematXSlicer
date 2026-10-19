@@ -714,6 +714,7 @@ void orchestrator_plugin_report_warning(plugin_host_context *host_context, const
     }
 }
 
+// Mark the call failed, optionally copy its diagnostic to caller-owned storage, and otherwise queue the GUI message.
 void orchestrator_plugin_report_error(plugin_host_context *host_context, const char *message)
 {
     if (host_context != nullptr && host_context->execution_error != nullptr)
@@ -734,7 +735,11 @@ void orchestrator_plugin_report_error(plugin_host_context *host_context, const c
                                     "<unknown>";
         BOOST_LOG_TRIVIAL(error) << "Plugin error from " << plugin_id << ": " << (message != nullptr ? message : "");
 
-        if (host_context != nullptr && host_context->orchestrator != nullptr) {
+        if (host_context != nullptr && host_context->reported_error != nullptr)
+            *host_context->reported_error = message != nullptr ? message : "";
+
+        if (host_context != nullptr && host_context->orchestrator != nullptr &&
+            host_context->reported_error == nullptr) {
             host_context->orchestrator->add_plugin_message(Slic3r::Orchestrator::PluginMessageLevel::Error,
                                                            host_context->plugin,
                                                            host_context->step,

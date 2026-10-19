@@ -19,12 +19,25 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* Print owns effective configuration, sliced objects and pipeline state. Its
-   placement checks borrow model instances and use config-derived square tower
-   envelopes; instance-tower offsets follow model translation, not rotation.
-   Tool ordering supports preview ticks and legacy export. Statistics store
-   measured totals including the wipe-tower share for sidebar and placeholders.
-   Validation includes print-level setting requirements on selected providers. */
+/*
+Print represents one FFF slicing job. It owns the applied configuration, sliced
+objects and processing state. Applying a model updates that state and marks
+affected results for recomputation; the pipeline then produces geometry, a
+printing plan and the G-code used by the preview. Exporting a file consumes
+those results rather than transferring ownership of the sliced objects.
+
+The model describes source geometry and placements. PrintObject holds the
+corresponding sliced data; the printing plan places generated extrusion paths
+in print order. Placement checks and measured statistics serve different parts
+of that lifecycle and must not be confused with generated geometry.
+
+Print owns effective configuration, sliced objects and pipeline state. Its
+placement checks borrow model instances and use config-derived square tower
+envelopes; instance-tower offsets follow model translation, not rotation.
+Tool ordering supports preview ticks and legacy export. Statistics store
+measured totals including the wipe-tower share for sidebar and placeholders.
+Validation includes print-level setting requirements on selected providers.
+*/
 #ifndef slic3r_Print_hpp_
 #define slic3r_Print_hpp_
 
@@ -314,6 +327,9 @@ public:
     void reset_auxiliary_object();
 
     std::string                 output_filename(const std::string &filename_base = std::string()) const override;
+    // Format FFF output placeholders with the G-code exporter extension rather than the binary preference.
+    std::string                 output_filename(const std::string &filename_base,
+                                                 const std::string &default_extension) const override;
 
     // Intern a complete snapshot. Concurrent registrations/readers are allowed;
     // apply() and clear() must run with workers stopped. Does not activate it.

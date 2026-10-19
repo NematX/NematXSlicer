@@ -58,12 +58,22 @@ time and cannot recover that context.
 
 File format decisions still belong to the selected plugin, so external writers
 can replace the built-in implementation without changing the pipeline runner.
+
+Representative direct calls (branches are not a timeline):
+
+    run_step()
+        |-- validate_pre()
+        |-- create_firmware_session()
+        |-- Detail::prepare_guarded_plugin_host_context()
+        |-- plugin->setup()
+        |-- plugin->setup_run()
+        `-- plugin->run()
 */
 
 namespace Slic3r::Steps::StepGenerateGcode {
 
-// Copy application text, catalogue names and output/printer selection rules into the borrowed host; all three selectors recompute G-code.
-// Writer line text is separate from its stage-table label; output and firmware show singleton selectors.
+// Copy producer, firmware and thumbnail selection rules into the borrowed host; thumbnails are encoded only during export.
+// Firmware and declared writer groups show their selectors even with one provider.
 // Encoders read singleton ids strictly, keep their stable key and independent settings, and use Notes when placement is empty.
 // Print data and provider ownership are unchanged; conflicts assert, and allocation errors propagate.
 void register_selector_traits(Orchestrator &orchestrator);
@@ -102,6 +112,27 @@ void register_selector_traits(Orchestrator &orchestrator)
     const int32_t firmware_group_registered = orchestrator.register_builtin_exclusive_group(GCODE_FIRMWARE, std::move(firmware));
     assert(firmware_group_registered == 1);
     (void)firmware_group_registered;
+    StepSelectorTraits exporter;
+    exporter.category = RAW_OPTION_CATEGORY_OUTPUT;
+    exporter.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+    exporter.invalidates_step = STEP_NONE;
+    exporter.show_with_one_provider = true;
+    exporter.read_with_one_provider = true;
+    exporter.strict_selection = true;
+    exporter.value_when_absent = "gcode.exporter.simple";
+    const int32_t exporter_registered = orchestrator.register_builtin_step_selector(GCODE_EXPORT, exporter);
+    assert(exporter_registered == 1);
+    (void)exporter_registered;
+    Orchestrator::ExclusiveGroupDefinition export_group;
+    export_group.traits = std::move(exporter);
+    export_group.traits.exclusive_group = "gcode_exporter_plugin";
+    export_group.traits.option_key = "gcode_exporter_plugin";
+    export_group.label = "G-code exporter";
+    export_group.tooltip = "Selects the plugin that exports G-code.";
+    export_group.translation_domain = "Slic3r";
+    const int32_t export_group_registered = orchestrator.register_builtin_exclusive_group(GCODE_EXPORT, std::move(export_group));
+    assert(export_group_registered == 1);
+    (void)export_group_registered;
     StepSelectorTraits thumbnail;
     thumbnail.category = RAW_OPTION_CATEGORY_OUTPUT;
     thumbnail.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;

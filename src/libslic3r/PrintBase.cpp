@@ -186,6 +186,30 @@ std::string PrintBase::output_filepath(const std::string &path, const std::strin
     return path;
 }
 
+// Pass the borrowed base name to the legacy virtual and return its owned result; the base ignores the requested suffix and propagates formatter failures.
+std::string PrintBase::output_filename(const std::string &filename_base,
+                                       const std::string &) const
+{
+    return this->output_filename(filename_base);
+}
+
+// Resolve borrowed UTF-8 input paths and a requested suffix through PrintBase formatting; return an owned path, append only to suffixless files, and propagate filesystem or formatter failures.
+std::string PrintBase::output_filepath(const std::string &path,
+                                       const std::string &filename_base,
+                                       const std::string &default_extension) const
+{
+    if (path.empty())
+        return (boost::filesystem::path(m_model.propose_export_file_name_and_path()).parent_path() /
+                this->output_filename(filename_base, default_extension)).make_preferred().string();
+
+    boost::filesystem::path filepath(path);
+    if (boost::filesystem::is_directory(filepath))
+        return (filepath / this->output_filename(filename_base, default_extension)).make_preferred().string();
+    if (filepath.extension().empty())
+        filepath += default_extension;
+    return filepath.make_preferred().string();
+}
+
 void PrintBase::status_update_warnings(int step, PrintStateBase::WarningLevel /* warning_level */, const std::string &message, const PrintObjectBase* print_object)
 {
     SlicingStatus status = print_object ? SlicingStatus(*print_object, step) : SlicingStatus(*this, step);

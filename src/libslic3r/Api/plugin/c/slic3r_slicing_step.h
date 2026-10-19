@@ -129,7 +129,10 @@ enum slicing_step_values
     GCODE_READER                   = 10400,
 
     /* Non-exclusive wipe services driven in phases by STEP_WIPETOWER. */
-    WIPE_TOWER_WIPE                = 10450
+    WIPE_TOWER_WIPE                = 10450,
+
+    /* Selects a G-code file exporter after the reference has been generated. */
+    GCODE_EXPORT                   = 10500
 
 }
 #ifdef __cplusplus

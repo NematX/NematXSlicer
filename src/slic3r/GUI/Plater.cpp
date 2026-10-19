@@ -20,11 +20,31 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* Plater owns model/config UI state and schedules background processing. Tower
-   move events encode the owner index+1 in Z (zero for global); instance XY values
-   are offsets from ModelInstance translation, shared by every owner instance.
-   The sliced-info panel formats measured whole-print/per-tool totals and times,
-   including object/wipe-tower filament-length and material-cost shares. */
+/*
+Plater connects model editing, slicing and export to the main GUI controls.
+It owns the editable scene and its UI configuration, schedules work through
+BackgroundSlicingProcess, and applies returned progress and preview results.
+The worker owns execution; the canvas and sidebar display its results rather
+than generating a second set of slicing geometry.
+
+An export action chooses how already-generated commands are delivered. Keep
+that action distinct from starting or invalidating slicing, so cancelling a
+destination dialog does not discard a usable preview or the user's scene.
+
+Plater owns model/config UI state and schedules background processing. Tower
+move events encode the owner index+1 in Z (zero for global); instance XY values
+are offsets from ModelInstance translation, shared by every owner instance.
+The sliced-info panel formats measured whole-print/per-tool totals and times,
+including object/wipe-tower filament-length and material-cost shares.
+
+Representative direct calls (branches are not a timeline):
+
+    Plater::priv::export_gcode()
+        |-- update_background_process()
+        |-- background_process.schedule_export()
+        |-- background_process.schedule_upload()
+        `-- this->restart_background_process()
+*/
 #include "Plater.hpp"
 #include "libslic3r/Exception.hpp"
 
@@ -7220,64 +7240,20 @@ void Plater::apply_cut_object_to_model(size_t obj_idx, const ModelObjectPtrs& ne
 
 
 
-static wxString check_binary_vs_ascii_gcode_extension(PrinterTechnology pt, const std::string& ext, bool binary_output)
+// Compare the borrowed suffix with the selected provider's extension; return no message for accepted aliases or a localized mismatch diagnostic.
+static wxString check_gcode_exporter_extension(
+    const Orchestrator::GCodeExporterSelection &selection,
+    const std::string &extension)
 {
-    wxString err_out;
-    if (pt == ptFFF) {
-        const bool binary_extension = (ext == ".bgcode" || ext == ".bgc");
-        const bool ascii_extension = (ext == ".gcode" || ext == ".g" || ext == ".gco");
-        if (binary_output && ascii_extension) {
-            // TRN The placeholder %1% is the file extension the user has selected.
-            err_out = format_wxstr(_L("Cannot save binary G-code with %1% extension.\n\n"
-                "Use a different extension or disable <a href=%2%>binary G-code export</a> "
-                "in Printer Settings."), ext, "binary_gcode;printer");
-        }
-        if (!binary_output && binary_extension) {
-            // TRN The placeholder %1% is the file extension the user has selected.
-            err_out = format_wxstr(_L("Cannot save ASCII G-code with %1% extension.\n\n"
-                "Use a different extension or enable <a href=%2%>binary G-code export</a> "
-                "in Printer Settings."), ext, "binary_gcode;printer");
-        }
-    }
-    return err_out;
+    if (extension.empty() || selection.accepts_extension(extension))
+        return wxString();
+    return format_wxstr(_L("The selected G-code exporter supports %1% files, not %2%."),
+                        selection.extension, extension);
 }
 
 
 
-// This function should be deleted when binary G-codes become more common. The dialog is there to make the
-// transition period easier for the users, because bgcode files are not recognized by older firmwares
-// without any error message.
-static void alert_when_exporting_binary_gcode(bool binary_output, const std::string& printer_notes)
-{
-    if (binary_output
-     && (boost::algorithm::contains(printer_notes, "PRINTER_MODEL_XL")
-      || boost::algorithm::contains(printer_notes, "PRINTER_MODEL_MINI")
-      || boost::algorithm::contains(printer_notes, "PRINTER_MODEL_MK4")
-      || boost::algorithm::contains(printer_notes, "PRINTER_MODEL_MK3.9")))
-    {
-        AppConfig* app_config = get_app_config();
-        wxWindow* parent = wxGetApp().mainframe;
-        const std::string option_key = "dont_warn_about_firmware_version_when_exporting_binary_gcode";
-
-        if (app_config->get(option_key) != "1") {
-            const wxString url = "https://prusa.io/binary-gcode";
-            HtmlCapableRichMessageDialog dialog(parent,
-                format_wxstr(_L("You are exporting binary G-code for a Prusa printer. "
-                                "Binary G-code enables significantly faster uploads. "
-                                "Ensure that your printer is running firmware version 5.1.0 or newer, as older versions do not support binary G-codes.\n\n"
-                                "To learn more about binary G-code, visit <a href=%1%>%1%</a>."),
-                             url),
-                _L("Warning"), wxOK,
-                [&url](const std::string&) { wxGetApp().open_browser_with_warning_dialog(url); });
-            dialog.ShowCheckBox(_L("Don't show again"));
-            if (dialog.ShowModal() == wxID_OK && dialog.IsCheckBoxChecked())
-                app_config->set(option_key, "1");
-        }
-    }
-}
-
-
-
+// Validate the FFF exporter before opening the file dialog, then dispatch export or SLA output; show failures in the GUI and retain user-owned paths.
 void Plater::export_gcode(bool prefer_removable)
 {
     if (p->model.objects().empty())
@@ -7313,13 +7289,21 @@ void Plater::export_gcode(bool prefer_removable)
     // If possible, remove accents from accented latin characters.
     // This function is useful for generating file names to be processed by legacy firmwares.
     fs::path default_output_file;
+    Orchestrator::GCodeExporterSelection exporter_selection;
     try {
         // Update the background processing, so that the placeholder parser will get the correct values for the ouput file template.
         // Also if there is something wrong with the current configuration, a pop-up dialog will be shown and the export will not be performed.
         unsigned int state = this->p->update_restart_background_process(false, false);
         if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
             return;
-        default_output_file = this->p->background_process.output_filepath_for_project(into_path(get_project_filename(".3mf")));
+        const fs::path project_path = into_path(get_project_filename(".3mf"));
+        if (printer_technology() == ptFFF) {
+            exporter_selection = Orchestrator::instance().select_gcode_exporter(fff_print().full_print_config());
+            default_output_file = this->p->background_process.output_filepath_for_project(
+                project_path, exporter_selection.extension);
+        } else {
+            default_output_file = this->p->background_process.output_filepath_for_project(project_path);
+        }
     } catch (const Slic3r::PlaceholderParserError &ex) {
         // Show the error with monospaced font.
         show_error(this, ex.what(), true);
@@ -7354,7 +7338,7 @@ void Plater::export_gcode(bool prefer_removable)
         if (dlg.ShowModal() == wxID_OK) {
             output_path = into_path(dlg.GetPath());
 
-            auto check_for_error = [this](const boost::filesystem::path& path, wxString& err_out) -> bool {
+            auto check_for_error = [this, &exporter_selection](const boost::filesystem::path& path, wxString& err_out) -> bool {
                 const std::string filename = path.filename().string();
                 const std::string ext      = boost::algorithm::to_lower_copy(path.extension().string());
                 if (has_illegal_filename_characters(filename)) {
@@ -7363,9 +7347,7 @@ void Plater::export_gcode(bool prefer_removable)
                     return true;
                 }
                 if (this->printer_technology() == ptFFF) {
-                    bool supports_binary = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_bool("binary_gcode");
-                    bool uses_binary = wxGetApp().app_config->get_bool("use_binary_gcode_when_supported");
-                    err_out = check_binary_vs_ascii_gcode_extension(printer_technology(), ext, supports_binary && uses_binary);
+					err_out = check_gcode_exporter_extension(exporter_selection, ext);
                 }
                 return !err_out.IsEmpty();
             };
@@ -7374,11 +7356,8 @@ void Plater::export_gcode(bool prefer_removable)
             if (check_for_error(output_path, error_str)) {
                 ErrorDialog(this, error_str, [this](const std::string& key) -> void { sidebar().jump_to_option(key); }).ShowModal();
                 output_path.clear();
-            } else if (printer_technology() == ptFFF) {
-                bool supports_binary = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_bool("binary_gcode");
-                bool uses_binary     = wxGetApp().app_config->get_bool("use_binary_gcode_when_supported");
-                alert_when_exporting_binary_gcode(supports_binary && uses_binary,
-                                                  wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_notes"));
+			} else if (printer_technology() == ptFFF && output_path.extension().empty()) {
+				output_path += exporter_selection.extension;
             }
         }
     }
@@ -8129,6 +8108,7 @@ void Plater::reslice_SLA_until_step(SLAPrintObjectStep step, const ModelObject &
     this->reslice_until_step_inner(SLAPrintObjectStep(step), object, postpone_error_messages);
 }
 
+// Resolve and validate the FFF exporter before opening the upload dialog, then queue its finalized path; SLA keeps its existing flow and errors remain visible.
 void Plater::send_gcode()
 {
     // if physical_printer is selected, send gcode for this printer
@@ -8142,13 +8122,21 @@ void Plater::send_gcode()
 
     // Obtain default output path
     fs::path default_output_file;
+    Orchestrator::GCodeExporterSelection exporter_selection;
     try {
         // Update the background processing, so that the placeholder parser will get the correct values for the ouput file template.
         // Also if there is something wrong with the current configuration, a pop-up dialog will be shown and the export will not be performed.
         unsigned int state = this->p->update_restart_background_process(false, false);
         if (state & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
             return;
-        default_output_file = this->p->background_process.output_filepath_for_project(into_path(get_project_filename(".3mf")));
+        const fs::path project_path = into_path(get_project_filename(".3mf"));
+        if (printer_technology() == ptFFF) {
+            exporter_selection = Orchestrator::instance().select_gcode_exporter(fff_print().full_print_config());
+            default_output_file = this->p->background_process.output_filepath_for_project(
+                project_path, exporter_selection.extension);
+        } else {
+            default_output_file = this->p->background_process.output_filepath_for_project(project_path);
+        }
     } catch (const Slic3r::PlaceholderParserError& ex) {
         // Show the error with monospaced font.
         show_error(this, ex.what(), true);
@@ -8183,21 +8171,16 @@ void Plater::send_gcode()
 
         if (printer_technology() == ptFFF) {
             const std::string ext = boost::algorithm::to_lower_copy(dlg.filename().extension().string());
-            const bool        binary_output = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_bool("binary_gcode") &&
-                                       wxGetApp().app_config->get_bool("use_binary_gcode_when_supported");
-            const wxString error_str = check_binary_vs_ascii_gcode_extension(printer_technology(), ext, binary_output);
+            const wxString error_str = check_gcode_exporter_extension(exporter_selection, ext);
             if (! error_str.IsEmpty()) {
                 ErrorDialog(this, error_str, std::function<void(const std::string&)>([](const std::string& key) -> void { wxGetApp().sidebar().jump_to_option(key); })).ShowModal();
                 return;
             }
-
-            bool supports_binary = wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_bool("binary_gcode");
-            bool uses_binary = wxGetApp().app_config->get_bool("use_binary_gcode_when_supported");
-            alert_when_exporting_binary_gcode(supports_binary && uses_binary,
-                wxGetApp().preset_bundle->printers.get_edited_preset().config.opt_string("printer_notes"));
         }
 
         upload_job.upload_data.upload_path = dlg.filename();
+        if (printer_technology() == ptFFF && upload_job.upload_data.upload_path.extension().empty())
+            upload_job.upload_data.upload_path += exporter_selection.extension;
         upload_job.upload_data.post_action = dlg.post_action();
         upload_job.upload_data.group       = dlg.group();
         upload_job.upload_data.storage     = dlg.storage();

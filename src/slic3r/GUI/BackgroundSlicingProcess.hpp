@@ -27,6 +27,20 @@
 #include "libslic3r/PrintBase.hpp"
 
 #include "slic3r/Utils/PrintHost.hpp"
+
+/*
+Coordinate background processing between the GUI and the slicing worker.
+
+The GUI supplies the model, configuration and requested action. The worker
+performs slicing or export and posts status/completion events; GUI callbacks
+update the preview and controls on the UI thread. Stopping joins or suspends
+the worker before data needed by its current operation is replaced.
+
+File export and print-host upload share generated print results, but have
+different final owners. An upload must first finish a private file, then hand
+that file to the upload queue. GUI rendering or input requests must be serviced
+on the UI thread without holding the print-state lock while waiting.
+*/
 namespace boost { namespace filesystem { class path; } }
 
 namespace Slic3r {
@@ -128,7 +142,10 @@ public:
 	const SLAPrint* 	sla_print() const { return m_sla_print; }
     // Take the project path (if provided), extract the name of the project, run it through the macro processor and save it next to the project file.
     // If the project_path is empty, just run output_filepath().
-	std::string 		output_filepath_for_project(const boost::filesystem::path &project_path);
+    std::string 		output_filepath_for_project(const boost::filesystem::path &project_path);
+    // Resolve automatic or project-based FFF output paths with a borrowed exporter suffix; SLA uses the existing overload.
+    std::string output_filepath_for_project(const boost::filesystem::path &project_path,
+                                            const std::string &default_extension);
 
 	// Start the background processing. Returns false if the background processing was already running.
 	bool start();
@@ -278,7 +295,9 @@ private:
     bool                invalidate_all_steps();
     // If the background processing stop was requested, throw CanceledException.
     void                throw_if_canceled() const { if (m_print->canceled()) throw CanceledException(); }
+	// Export the borrowed FFF reference, run scripts once, and copy to the requested path; throw on export, script, or copy errors.
 	void				finalize_gcode();
+    // Export the borrowed FFF reference, run scripts once, and queue the owned upload path; throw on export or script errors.
     void                prepare_upload();
     // To be executed at the background thread.
 	ThumbnailsList		render_thumbnails(const ThumbnailsParams &params);

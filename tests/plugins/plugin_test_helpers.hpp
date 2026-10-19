@@ -5,14 +5,21 @@
 #include <string>
 #include <utility>
 
-/* Shared provider startup finalizes option definitions once; before that freeze it records
-   rejection results for nature values 16 and 0x100, and acceptance results for 5 and 10.
-   Call ensure_plugin_test_runtime_initialized() before using the shared runtime.
-   Then plugin_test_startup_sets() returns the provider ids, activation flags, selector keys
-   and layout fragment ids copied at startup, unaffected by later tests.
-   A provider is a registered plugin; a selector is a setting that chooses a provider.
-   A layout fragment describes part of the settings UI.
-   Example: const auto &sets = Slic3r::Test::Plugins::plugin_test_startup_sets(); */
+/*
+Tests share one initialized plugin runtime so option definitions and provider
+registration are not rebuilt independently by every case. Obtain the startup
+snapshot after initialization, then compare its copied ids and selector/layout
+descriptions with expected values. Later test registration cannot change that copy.
+
+Shared provider startup finalizes option definitions once; before that freeze it records
+rejection results for nature values 16 and 0x100, and acceptance results for 5 and 10.
+Call ensure_plugin_test_runtime_initialized() before using the shared runtime.
+Then plugin_test_startup_sets() returns the provider ids, activation flags, selector keys
+and layout fragment ids copied at startup, unaffected by later tests.
+A provider is a registered plugin; a selector is a setting that chooses a provider.
+A layout fragment describes part of the settings UI.
+Example: const auto &sets = Slic3r::Test::Plugins::plugin_test_startup_sets();
+*/
 
 struct orchestrator_handle;
 namespace Slic3r { struct PluginPackageLoadReport; }
@@ -44,6 +51,8 @@ extern int plugin_test_roundtrip_nature_result;
 void register_regional_seam_test_provider(orchestrator_handle *orchestrator);
 /* Implemented by the G-code Reader tests and registered before initialization. */
 void register_gcode_reader_test_providers(orchestrator_handle *orchestrator);
+// Register exporter execution and malformed-QUERY providers before option finalization.
+void register_gcode_exporter_test_providers(orchestrator_handle *orchestrator);
 // Register the shared-storage allocation probe before option finalization.
 void register_plugin_storage_test_provider(orchestrator_handle *orchestrator);
 // Register external-package selector cases before shared startup finalizes settings.

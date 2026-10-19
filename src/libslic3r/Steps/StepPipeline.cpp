@@ -406,7 +406,7 @@ std::string option_key_for_plugin_group(const Orchestrator &orchestrator,
     return generated_plugin_exclusive_group_option_key(orchestrator, step, group_id);
 }
 
-// Compare the numeric identity with the built-in list; services are recognized but are not added to execution order.
+// Return whether the supplied ID is a recognized built-in step or service; GCODE_EXPORT is known but outside execution order, and unknown IDs return false without mutation.
 bool is_known_builtin_step(slicing_step_t step)
 {
     switch (step) {
@@ -446,6 +446,7 @@ bool is_known_builtin_step(slicing_step_t step)
     case GCODE_THUMBNAIL:
     case GCODE_READER:
     case WIPE_TOWER_WIPE:
+    case GCODE_EXPORT:
         return true;
     default:
         return false;
@@ -474,12 +475,12 @@ std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std:
 }
 
 /*
-Populate the returned group with owned display strings, borrowed raw-option pointers, and its UI
-fragment; copied strings become group-owned buffers, while the raw option definition borrows those
-buffers. Mark the selector enum for inactive-ID pruning during finalization. That finalization
-replaces the enum table, which ConfigOptionEnumGeneric only borrows, so no selector-bearing config
-may exist before finalize_plugin_option_defs(); this function creates metadata only. Allocation
-failures propagate and no option-definition validation occurs here.
+Populate one exclusive group with owned display strings, borrowed raw-option pointers, and a UI
+fragment; the raw definition borrows strings stored by the group. Mark plugin IDs for pruning during
+finalization and keep GCODE_EXPORT's selector at STEP_NONE because it changes only output format.
+The group must outlive registration, while option finalization replaces borrowed enum storage only
+before selector-bearing configs are created. Allocation failures propagate; no option definition is
+registered here.
 */
 StepExclusiveGroup make_exclusive_group(slicing_step_t step,
                                         const std::string &group_id,
@@ -642,6 +643,7 @@ std::string plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
     return option_key_for_plugin_group(orchestrator, step, group_id);
 }
 
+// Rebuild option-definition pointers into this group's owned strings and enum arrays, retaining the fixed PNG or simple-exporter defaults; no storage is transferred and allocation failures propagate.
 void StepExclusiveGroup::refresh_storage_pointers()
 {
     if (!option_key_storage.empty())
@@ -708,11 +710,13 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
         {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
         {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
         {STEP_GCODE,          {"step_gcode_plugin",          "G-code plugin",          "G-code step plugin"}},
-        {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}}
+        {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}},
+        {GCODE_EXPORT,        {"gcode_exporter_plugin",      "G-code exporter",        "G-code exporter"}}
     };
     return s_groups;
 }
 
+// Build owned group snapshots with borrowed provider pointers, retaining the G-code exporter selector with one provider; empty groups are omitted and allocation failures propagate.
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator)
 {
     std::vector<StepExclusivePluginGroup> out;
@@ -776,6 +780,11 @@ Plugin *selected_plugin_from_group(const Orchestrator &orchestrator, const StepE
 {
     if (plugins.empty())
         return nullptr;
+    if (config == nullptr && group.traits.strict_selection && group.traits.value_when_absent) {
+        for (Plugin *plugin : plugins)
+            if (plugin->get_id() == *group.traits.value_when_absent) return plugin;
+        return nullptr;
+    }
     if (config == nullptr)
         return default_provider_from_group(plugins);
 
@@ -894,6 +903,10 @@ Plugin *selected_or_active_plugin_for_step(Orchestrator &orchestrator,
     return plugins.empty() ? nullptr : plugins.front();
 }
 
+// Collect the active providers of `exclusive_group` on `step` (borrowed) and select one with the borrowed config. A built-in
+// selector (the entry of get_exclusive_steps() with the same step and group ID, such as the G-code firmware or exporter)
+// takes priority and reads its own option key; any other group reads the key derived from its step and ID. Return null
+// when the group has no active provider or the group rules reject the configured ID; nothing is mutated.
 Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator,
                                           slicing_step_t step,
                                           const std::string &exclusive_group,

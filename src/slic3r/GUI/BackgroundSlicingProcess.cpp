@@ -55,6 +55,36 @@
 #include "slic3r/StackWalker.h"
 #endif
 
+/*
+Coordinate background processing between the GUI and the slicing worker.
+
+The GUI supplies the model, configuration and requested action. The worker
+performs slicing or export and posts status/completion events; GUI callbacks
+update the preview and controls on the UI thread. Stopping joins or suspends
+the worker before data needed by its current operation is replaced.
+
+File export and print-host upload share generated print results, but have
+different final owners. An upload must first finish a private file, then hand
+that file to the upload queue. GUI rendering or input requests must be serviced
+on the UI thread without holding the print-state lock while waiting.
+
+Representative direct calls (branches are not a timeline):
+
+    BackgroundSlicingProcess::process_fff()
+        |-- m_print->process()
+        |-- wxQueueEvent()
+        |-- export_gcode()
+        |-- finalize_gcode()
+        `-- prepare_upload()
+
+    BackgroundSlicingProcess::prepare_upload()
+        |-- select_gcode_exporter()
+        |-- export_print()
+        |-- run_post_process_scripts()
+        |-- m_sla_print->export_print()
+        `-- enqueue()
+*/
+
 namespace Slic3r {
 
 bool SlicingProcessCompletedEvent::critical_error() const
@@ -163,6 +193,21 @@ std::string BackgroundSlicingProcess::output_filepath_for_project(const boost::f
     if (project_path.empty())
         return m_print->output_filepath("");
     return m_print->output_filepath(project_path.parent_path().string(), project_path.stem().string());
+}
+
+// Resolve borrowed project and suffix strings through PrintBase; return an owned FFF path, preserve SLA resolution, and propagate placeholder or filesystem failures.
+std::string BackgroundSlicingProcess::output_filepath_for_project(
+    const boost::filesystem::path &project_path,
+    const std::string &default_extension)
+{
+    assert(m_print != nullptr);
+    if (m_print != m_fff_print)
+        return this->output_filepath_for_project(project_path);
+    if (project_path.empty())
+        return m_print->output_filepath(std::string(), std::string(), default_extension);
+    return m_print->output_filepath(project_path.parent_path().string(),
+                                    project_path.stem().string(),
+                                    default_extension);
 }
 
 // This function may one day be merged into the Print, but historically the print was separated
@@ -729,44 +774,64 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 	return m_step_state.invalidate_all([this](){ this->stop_internal(); });
 }
 
-// G-code is generated in m_temp_output_path.
-// Optionally run a post-processing script on a copy of m_temp_output_path.
-// Copy the final G-code to target location (possibly a SD card, if it is a removable media, then verify that the file was written without an error).
+// Export the generated reference with the exporter chosen in the printer profile into a private file, run the post-processing
+// scripts once on that exported file (never on the reference), then copy it to the user destination. Selection and export read a
+// configuration copy taken under the print state mutex. The private files are removed on every path; export, script and copy
+// failures propagate.
 void BackgroundSlicingProcess::finalize_gcode()
 {
 	m_print->set_status(95, _u8L("Running post-processing scripts"));
 
-	// Perform the final post-processing of the export path by applying the print statistics over the file name.
-	std::string export_path = m_fff_print->print_statistics().finalize_output_path(m_export_path);
-	std::string output_path = m_temp_output_path;
+	DynamicPrintConfig config;
+	{
+		std::scoped_lock<std::mutex> lock(m_fff_print->state_mutex());
+		config = m_fff_print->full_print_config();
+	}
+	const Orchestrator::GCodeExporterSelection selection =
+		Orchestrator::instance().select_gcode_exporter(config);
+	boost::filesystem::path requested_path(m_export_path);
+	if (requested_path.extension().empty())
+		requested_path += selection.extension;
+	std::string export_path = m_fff_print->print_statistics().finalize_output_path(requested_path.string());
+	const std::string exported_path = Orchestrator::instance().export_print(
+		*m_fff_print, config, m_temp_output_path, selection.temporary_path(".slic3r-export-"), selection);
+	std::string output_path = exported_path;
 	// Both output_path and export_path ar in-out parameters.
-	// If post processed, output_path will differ from m_temp_output_path as run_post_process_scripts() will make a copy of the G-code to not
-	// collide with the G-code viewer memory mapping of the unprocessed G-code. G-code viewer maps unprocessed G-code, because m_gcode_result 
-	// is calculated for the unprocessed G-code and it references lines in the memory mapped G-code file by line numbers.
+	// The exported file is a separate copy that the G-code viewer never maps (the viewer maps the reference, m_temp_output_path,
+	// and m_gcode_result refers to lines of that file), so scripts may rewrite it in place. If post processed, output_path will
+	// still differ from exported_path as run_post_process_scripts() works on a ".pp" copy that is removed afterwards.
 	// export_path may be changed by the post-processing script as well if the post processing script decides so, see GH #6042.
-	DynamicPrintConfig conf_for_script = m_fff_print->full_print_config();
+	DynamicPrintConfig conf_for_script = config;
 	conf_for_script.apply(m_fff_print->physical_printer_config()); // add physical printer options for use in the script.
-	bool post_processed = run_post_process_scripts(output_path, true, "File", export_path, conf_for_script);
-	auto remove_post_processed_temp_file = [post_processed, &output_path]() {
-		if (post_processed)
+	auto remove_export_temp_files = [&output_path, &exported_path]() {
+		if (output_path != exported_path) {
 			try {
-				boost::filesystem::remove(output_path);
+				boost::filesystem::remove(boost::filesystem::path(output_path));
 			} catch (const std::exception &ex) {
-				BOOST_LOG_TRIVIAL(error) << "Failed to remove temp file " << output_path << ": " << ex.what();
+				BOOST_LOG_TRIVIAL(error) << "Failed to remove post-processed temporary file " << output_path << ": " << ex.what();
 			}
+		}
+		try {
+			boost::filesystem::remove(boost::filesystem::path(exported_path));
+		} catch (const std::exception &ex) {
+			BOOST_LOG_TRIVIAL(error) << "Failed to remove temporary exported file " << exported_path << ": " << ex.what();
+		}
 	};
 
 	//FIXME localize the messages
 	std::string error_message;
 	int copy_ret_val = CopyFileResult::SUCCESS;
-	try
-	{
-		copy_ret_val = copy_file(output_path, export_path, error_message, m_export_path_on_removable_media);
-		remove_post_processed_temp_file();
+	try {
+		run_post_process_scripts(output_path, true, "File", export_path, conf_for_script);
+	} catch (...) {
+		remove_export_temp_files();
+		throw;
 	}
-	catch (...)
-	{
-		remove_post_processed_temp_file();
+	try {
+		copy_ret_val = copy_file(output_path, export_path, error_message, m_export_path_on_removable_media);
+		remove_export_temp_files();
+	} catch (...) {
+		remove_export_temp_files();
 		throw Slic3r::ExportError(_u8L("Unknown error occured during exporting G-code."));
 	}
 	switch (copy_ret_val) {
@@ -795,7 +860,8 @@ void BackgroundSlicingProcess::finalize_gcode()
 	m_print->set_status(100, GUI::format(_L("G-code file exported to %1%"), export_path));
 }
 
-// A print host upload job has been scheduled, enqueue it to the printhost job queue
+// Export the generated reference with the profile's exporter into a private upload file, run the post-processing scripts once
+// on it, and queue the upload; the file is removed if a script fails. SLA writes its raster file instead.
 void BackgroundSlicingProcess::prepare_upload()
 {
 	// Generate a unique temp path to which the gcode/zip file is copied/exported
@@ -804,16 +870,36 @@ void BackgroundSlicingProcess::prepare_upload()
 
 	if (m_print == m_fff_print) {
 		m_print->set_status(90, _u8L("Running post-processing scripts"));
-		std::string error_message;
-		if (copy_file(m_temp_output_path, source_path.string(), error_message) != SUCCESS)
-			throw Slic3r::RuntimeError("Copying of the temporary G-code to the output G-code failed");
-		m_upload_job.upload_data.upload_path = m_fff_print->print_statistics().finalize_output_path(m_upload_job.upload_data.upload_path.string());
-        // Make a copy of the source path, as run_post_process_scripts() is allowed to change it when making a copy of the source file
-        // (not here, but when the final target is a file). 
-        std::string source_path_str = source_path.string();
-        std::string output_name_str = m_upload_job.upload_data.upload_path.string();
-		if (run_post_process_scripts(source_path_str, false, m_upload_job.printhost->get_name(), output_name_str, m_fff_print->full_print_config()))
-			m_upload_job.upload_data.upload_path = output_name_str;
+		DynamicPrintConfig config;
+		{
+			std::scoped_lock<std::mutex> lock(m_fff_print->state_mutex());
+			config = m_fff_print->full_print_config();
+		}
+		const Orchestrator::GCodeExporterSelection selection =
+			Orchestrator::instance().select_gcode_exporter(config);
+		// The temporary path must end with the exporter extension, otherwise the random part would be taken for a suffix.
+		const std::string exported_path = Orchestrator::instance().export_print(
+			*m_fff_print, config, m_temp_output_path, selection.temporary_path("." SLIC3R_APP_KEY ".upload."), selection);
+		source_path = boost::filesystem::path(exported_path);
+		try {
+			if (m_upload_job.upload_data.upload_path.extension().empty())
+				m_upload_job.upload_data.upload_path += selection.extension;
+			m_upload_job.upload_data.upload_path = boost::filesystem::path(
+				m_fff_print->print_statistics().finalize_output_path(
+					m_upload_job.upload_data.upload_path.string()));
+			// The post-processor may change the mutable upload name while the source path remains the exported file.
+			std::string source_path_str = source_path.string();
+			std::string output_name_str = m_upload_job.upload_data.upload_path.string();
+			if (run_post_process_scripts(source_path_str, false, m_upload_job.printhost->get_name(),
+										 output_name_str, config)) {
+				source_path = boost::filesystem::path(source_path_str);
+				m_upload_job.upload_data.upload_path = boost::filesystem::path(output_name_str);
+			}
+		} catch (...) {
+			boost::system::error_code cleanup_error;
+			boost::filesystem::remove(source_path, cleanup_error);
+			throw;
+		}
     } else if (m_print == m_sla_print) {
 		m_upload_job.upload_data.upload_path = m_sla_print->print_statistics().finalize_output_path(m_upload_job.upload_data.upload_path.string());
         Vec2ds sizes = current_print()->full_print_config().option<ConfigOptionPoints>("thumbnails")->get_values();

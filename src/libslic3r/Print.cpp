@@ -68,6 +68,7 @@ Representative direct calls (branches are not a timeline):
 #include <string>
 #include <unordered_set>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -1863,11 +1864,19 @@ bool Print::has_global_wipe_tower() const {
     return true;
 }
 
-// Generate a recommended G-code output file name based on the format template, default extension, and template parameters
-// (timestamps, object placeholders derived from the model, current placeholder prameters and print statistics.
-// Use the final print statistics if available, or just keep the print statistics placeholders if not available yet (before G-code is finalized).
-std::string Print::output_filename(const std::string &filename_base) const 
-{ 
+// Format the borrowed base name with the legacy `.gcode` suffix; return an owned filename and propagate placeholder-format errors.
+std::string Print::output_filename(const std::string &filename_base) const
+{
+    return this->output_filename(filename_base, ".gcode");
+}
+
+// Format the FFF output template with print statistics (or their placeholders) and the borrowed exporter extension,
+// then replace a literal G-code-family suffix written in the template by that extension, unless it is a text alias
+// (.g, .gco) of the .gcode extension, which stays as written. Return an owned filename; Print state is unchanged and
+// placeholder-format errors propagate.
+std::string Print::output_filename(const std::string &filename_base,
+                                   const std::string &default_extension) const
+{
     // Set the placeholders for the data know first after the G-code export is finished.
     // These values will be just propagated into the output file name.
     DynamicConfig config = this->finished() ? this->print_statistics().config() : this->print_statistics().placeholders();
@@ -1875,16 +1884,21 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("extruders_count", new ConfigOptionInt((int)m_config.nozzle_diameter.size()));
     config.set_key_value("num_milling", new ConfigOptionInt((int)m_config.milling_diameter.size()));
     config.set_key_value("milling_count", new ConfigOptionInt((int)m_config.milling_diameter.size()));
-    config.set_key_value("default_output_extension", new ConfigOptionString(".gcode"));
+    config.set_key_value("default_output_extension", new ConfigOptionString(default_extension));
+    std::string filename = this->PrintBase::output_filename(
+        m_config.output_filename_format.value, default_extension, filename_base, &config);
 
-    // Handle output_filename_format. There is a hack related to binary G-codes: gcode / bgcode substitution.
-    std::string output_filename_format = m_config.output_filename_format.value;
-    if (m_config.binary_gcode && boost::iends_with(output_filename_format, ".gcode"))
-        output_filename_format.insert(output_filename_format.end()-5, 'b');
-    if (! m_config.binary_gcode && boost::iends_with(output_filename_format, ".bgcode"))
-        output_filename_format.erase(output_filename_format.end()-6);
-
-    return this->PrintBase::output_filename(output_filename_format, ".gcode", filename_base, &config);
+    // A suffix written literally in the template (.gcode, or an old .bgcode) names the file, not the format:
+    // replace any G-code-family suffix that the exporter would refuse. The text aliases .g and .gco stay when the
+    // extension is .gcode, because the built-in exporter accepts them.
+    boost::filesystem::path filepath(filename);
+    const std::string suffix = filepath.extension().string();
+    const bool text_alias = default_extension == ".gcode" && (boost::iequals(suffix, ".g") || boost::iequals(suffix, ".gco"));
+    if (!boost::iequals(suffix, default_extension) && !text_alias &&
+        (boost::iequals(suffix, ".gcode") || boost::iequals(suffix, ".bgcode") ||
+         boost::iequals(suffix, ".bgc") || boost::iequals(suffix, ".g") || boost::iequals(suffix, ".gco")))
+        filename = filepath.replace_extension(default_extension).string();
+    return filename;
 }
 
 // Sort the PrintObjects by their increasing Z, likely useful for avoiding colisions on Deltas during sequential prints.

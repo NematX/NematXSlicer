@@ -64,6 +64,7 @@ add_executable(${_TEST_NAME}_tests
     test_rectilinear_sawtooth.cpp
     test_rectilinear_with_perimeter.cpp
     test_gcode_default_firmware_session.cpp
+    test_gcode_exporter.cpp
     test_gcode_custom_gcode_per_print_z.cpp
     test_gcode_feature_gcode.cpp
     test_gcode_firmware_dialects.cpp

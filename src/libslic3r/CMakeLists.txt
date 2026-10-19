@@ -130,6 +130,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/c/steps/slic3r_step_extrusion_simplification.h
 	Api/plugin/c/steps/slic3r_step_finalize_slicing.h
 	Api/plugin/c/steps/slic3r_step_gcode.h
+	Api/plugin/c/steps/slic3r_step_gcode_export.h
 	Api/plugin/c/steps/slic3r_step_gcode_firmware.h
 	Api/plugin/c/steps/slic3r_step_gcode_reader.h
 	Api/plugin/c/steps/slic3r_step_gcode_thumbnail.h
@@ -174,6 +175,8 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/properties/ExtrusionProperties.hpp
 	Api/plugin/cpp/properties/PrintingExtrusionScopeProperty.hpp
 	Api/plugin/cpp/gcode/EncodableState.hpp
+	Api/plugin/cpp/gcode/GCodeExporterPlugin.cpp
+	Api/plugin/cpp/gcode/GCodeExporterPlugin.hpp
 	Api/plugin/cpp/gcode/DefaultExtruder.cpp
 	Api/plugin/cpp/gcode/DefaultExtruder.hpp
 	Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.cpp
@@ -234,6 +237,8 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/Views.hpp
 	Plugins/BridgeDetector.cpp
 	Plugins/BridgeDetector.hpp
+	Plugins/GCode/Exporter/DefaultGCodeExporter.cpp
+	Plugins/GCode/Exporter/DefaultGCodeExporter.hpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.cpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp
 	Plugins/GCode/Firmware/KlipperGCodeFirmware.cpp

@@ -11,6 +11,7 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <exception>
 #include <functional>
@@ -19,11 +20,12 @@
 #include <mutex>
 #include <set>
 #include <sstream>
-#include <string>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <utility>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
 
@@ -32,11 +34,13 @@
 #include "libslic3r/Api/plugin/c/slic3r_gcode_script.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_export.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
+#include "libslic3r/FilesystemTransaction.hpp"
 #include "libslic3r/GCode.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Plugins/BridgeDetector.hpp"
@@ -44,6 +48,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
+#include "libslic3r/Steps/StepReadGeneratedGcode.hpp"
 #include "libslic3r/SurfaceCollection.hpp"
 #include "libslic3r/Thread.hpp"
 #include "libslic3r/UiLayoutMerger.hpp"
@@ -87,6 +92,16 @@ a service, a directly callable job, with borrowed data valid for that call.
 Per-call preparations and executions may run in parallel.
 Invalidation means recomputing affected results; service steps resolve to
 the processing stages that produce those results.
+
+For file export, the host first asks the selected exporter whether it accepts
+the configuration and firmware. That QUERY returns compatibility information
+without writing output. EXPORT then uses a completed G-code reference and an
+export-specific configuration. The reference belongs to the print; it is not
+the destination file and must remain unchanged by the exporter.
+
+The export entry points connect that two-operation contract to plugin execution.
+They are separate from plugin registration and ordinary geometry processing:
+choosing a file format is not a request to recompute sliced geometry.
 
 Operation notes:
 - elect_exclusive_group_definitions
@@ -148,8 +163,29 @@ static bool config_option_def_compatible(const ConfigOptionDef &existing, const 
 // Copy validated raw metadata and deserialize its default into a native definition.
 static void populate_config_option_def_from_raw(ConfigOptionDef &out, const raw_config_option_def *def, const std::string &translation_domain);
 
-// Resolve a borrowed plugin to its executable invalidation producer, returning STEP_NONE for unsupported steps.
+// Resolve the pipeline step whose results a plugin's options invalidate; services that only change delivery, such as
+// GCODE_EXPORT, and unsupported steps give STEP_NONE.
 static slicing_step_t plan_owner_step(const Plugin &plugin);
+// Throw the user-facing refusal when a typed destination suffix is not accepted by the selected exporter.
+static void require_exporter_extension(const Orchestrator::GCodeExporterSelection &selection,
+                                       const std::string &suffix);
+
+namespace {
+
+struct GCodeExportQueryCapture
+{
+    uint32_t result_count = 0;
+    raw_gcode_export_query_status status = RAW_GCODE_EXPORT_QUERY_UNSET;
+    std::string extension;
+    std::string message;
+    std::exception_ptr callback_exception;
+};
+
+// Validate one borrowed callback answer and copy its text into call-owned state; record validation or allocation exceptions for the caller without throwing across the C callback.
+void capture_gcode_export_query(void *callback_context,
+                                const raw_gcode_export_query_result *result);
+
+} // namespace
 
 static bool graph_coordinate_equal(double lhs, double rhs);
 static bool graph_enforced_values_equal(const GraphSettings &lhs, const GraphSettings &rhs);
@@ -653,16 +689,24 @@ static slicing_step_t plan_owner_step(const Plugin &plugin)
     case GCODE_THUMBNAIL:
     case GCODE_READER:
         return STEP_GCODE;
+    case GCODE_EXPORT:
+        return STEP_NONE;
     default:
         return Steps::execution_index(step) < Steps::execution_order().size() ?
             step : STEP_NONE;
     }
 }
 
+// Resolve a plugin option's invalidation step; GCODE_EXPORT options keep STEP_NONE while other services follow their owning producer.
 static raw_config_option_def config_option_def_with_resolved_invalidation(const raw_config_option_def &def,
                                                                           const Plugin *plugin)
 {
     raw_config_option_def resolved = def;
+
+    if (plugin != nullptr && plugin->get_step() == GCODE_EXPORT) {
+        resolved.invalidates_step = STEP_NONE;
+        return resolved;
+    }
 
     // A service plugin runs inside its owning pipeline producer. Resolve the
     // default there so config changes never schedule a non-executable service.
@@ -673,6 +717,57 @@ static raw_config_option_def config_option_def_with_resolved_invalidation(const 
 
     return resolved;
 }
+
+namespace {
+
+// Copy one borrowed QUERY answer into call-owned strings; reject short prefixes, repeated or malformed answers by saving an exception for the caller.
+void capture_gcode_export_query(void *callback_context,
+                                const raw_gcode_export_query_result *result)
+{
+    if (callback_context == nullptr)
+        return;
+
+    GCodeExportQueryCapture &capture = *static_cast<GCodeExportQueryCapture *>(callback_context);
+    try {
+        if (capture.result_count != 0)
+            throw std::invalid_argument("G-code exporter QUERY returned more than one result.");
+        capture.result_count = 1;
+        if (result == nullptr)
+            throw std::invalid_argument("G-code exporter QUERY returned a null result.");
+
+        const size_t minimum_size = offsetof(raw_gcode_export_query_result, message) +
+            sizeof(result->message);
+        if (result->struct_size < minimum_size)
+            throw std::invalid_argument("G-code exporter QUERY result is smaller than the version 1.0 prefix.");
+
+        if (result->status == RAW_GCODE_EXPORT_QUERY_COMPATIBLE) {
+            if (result->extension == nullptr)
+                throw std::invalid_argument("G-code exporter QUERY returned a null extension.");
+            capture.extension = result->extension;
+            if (capture.extension.empty() || capture.extension.front() != '.' ||
+                capture.extension.find('/') != std::string::npos ||
+                capture.extension.find('\\') != std::string::npos)
+                throw std::invalid_argument("G-code exporter QUERY returned an invalid extension.");
+            capture.status = result->status;
+            if (result->message != nullptr)
+                capture.message = result->message;
+            return;
+        }
+        if (result->status == RAW_GCODE_EXPORT_QUERY_INCOMPATIBLE) {
+            if (result->message == nullptr)
+                throw std::invalid_argument("G-code exporter QUERY incompatibility has no message.");
+            capture.status = result->status;
+            capture.message = result->message;
+            return;
+        }
+        throw std::invalid_argument("G-code exporter QUERY returned an unknown status.");
+    } catch (...) {
+        if (!capture.callback_exception)
+            capture.callback_exception = std::current_exception();
+    }
+}
+
+} // namespace
 
 static bool validate_used_config_key_definition(const Plugin &,
                                                 const Plugin::UsedConfigKey &used_key,
@@ -2013,17 +2108,19 @@ bool Orchestrator::clear_plugin_participants(Print &print, const slicing_step_t 
     return all_clear_succeeded;
 }
 
-// Run one plugin with the same two-phase barrier used by object-oriented
-// slicing steps. Each worker receives a private host/run context while the
-// caller-owned payload address remains identical in both per-run phases.
+// Run setup, setup_run, and run for caller-owned payloads; return status, write at most one call-local diagnostic, and retain no context or payload ownership.
 raw_plugin_execution_status Orchestrator::execute_plugin(
     Plugin &plugin,
     Print *print,
     const raw_plugin_run_payload *payloads,
     uint32_t run_count,
-    bool cancel_on_error)
+    bool cancel_on_error,
+    std::string *reported_error)
 {
-    if (!this->owns_plugin(&plugin) || (run_count != 0 && payloads == nullptr))
+    if (reported_error != nullptr)
+        reported_error->clear();
+    if (!this->owns_plugin(&plugin) || (run_count != 0 && payloads == nullptr) ||
+        (reported_error != nullptr && run_count > 1))
         return RAW_PLUGIN_EXECUTION_INVALID_ARGUMENT;
     if (plugin.has_clear() && print == nullptr)
         return RAW_PLUGIN_EXECUTION_INVALID_ARGUMENT;
@@ -2038,6 +2135,7 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
     host_context.object_count = run_count;
     host_context.execution_error = &execution_error;
     host_context.cancel_on_error = cancel_on_error;
+    host_context.reported_error = reported_error;
     plugin_run_context run_context = this->prepare_plugin_run_context(
         plugin.get_step(), &plugin, &host_context);
 
@@ -2517,10 +2615,14 @@ void Orchestrator::finalize_selector_option(ConfigOptionDef &definition, const S
         (identity.kind == SelectorIdentityKind::PluginGroup && identity.group.empty()) ||
         (identity.kind != SelectorIdentityKind::WholeStep && identity.kind != SelectorIdentityKind::PluginGroup))
         throw std::invalid_argument("Invalid selector identity");
+    const StepSelectorTraits *traits = step_selector(identity.step, identity.group);
+    const std::optional<std::string> fixed_default = traits != nullptr && traits->strict_selection ?
+        traits->value_when_absent : std::nullopt;
     PluginEnumValues values = option_def_enum_values(definition);
     values.erase(std::remove_if(values.begin(), values.end(),
-        [this, auto_enabled](const std::pair<std::string, std::string> &entry) {
+        [this, auto_enabled, &fixed_default](const std::pair<std::string, std::string> &entry) {
             if (entry.first == SLIC3R_SELECTOR_AUTO_VALUE && auto_enabled) return false;
+            if (fixed_default && entry.first == *fixed_default) return false;
             const Plugin *plugin = get_plugin(entry.first);
             return plugin == nullptr || !is_plugin_active(plugin);
         }), values.end());
@@ -2530,7 +2632,12 @@ void Orchestrator::finalize_selector_option(ConfigOptionDef &definition, const S
         if (plugin_enum_has_value(values, plugin->get_id())) candidates.push_back(plugin);
     }
     const Plugin *preferred = Steps::default_provider_from_group(candidates);
-    const std::string desired = auto_enabled ? SLIC3R_SELECTOR_AUTO_VALUE : preferred != nullptr ? preferred->get_id() : std::string();
+    if (fixed_default && !plugin_enum_has_value(values, *fixed_default)) {
+        const Plugin *plugin = get_plugin(*fixed_default);
+        values.emplace_back(*fixed_default, plugin != nullptr ? plugin->get_name() : *fixed_default);
+    }
+    const std::string desired = auto_enabled ? SLIC3R_SELECTOR_AUTO_VALUE : fixed_default ? *fixed_default :
+        preferred != nullptr ? preferred->get_id() : std::string();
     definition.set_enum_as_closed_for_scripted_enum(values);
     std::unique_ptr<ConfigOption> value(definition.create_empty_option());
     if (!desired.empty() && !value->deserialize(desired))
@@ -3185,6 +3292,220 @@ std::string Orchestrator::export_gcode(Print &print,
     return path;
 }
 
+// Tell whether the borrowed suffix is the exporter's own extension, or `.g`/`.gco` for the built-in text exporter.
+bool Orchestrator::GCodeExporterSelection::accepts_extension(const std::string &suffix) const
+{
+    if (boost::iequals(suffix, extension))
+        return true;
+    return plugin_id == k_default_gcode_exporter_id && extension == ".gcode" &&
+           (boost::iequals(suffix, ".g") || boost::iequals(suffix, ".gco"));
+}
+
+// Build the path from the system temporary directory so that the exporter extension, which export_print() checks, is the
+// real suffix even when the prefix contains dots. Only the name is reserved by randomness; no file is created.
+std::string Orchestrator::GCodeExporterSelection::temporary_path(const std::string &prefix) const
+{
+    return (boost::filesystem::temp_directory_path() /
+            boost::filesystem::unique_path(prefix + "%%%%-%%%%-%%%%-%%%%" + extension)).string();
+}
+
+// Throw the user-facing refusal for a typed suffix that the selected exporter cannot write.
+static void require_exporter_extension(const Orchestrator::GCodeExporterSelection &selection,
+                                       const std::string &suffix)
+{
+    if (!selection.accepts_extension(suffix))
+        throw RuntimeError("The G-code exporter '" + selection.plugin_id +
+                           "' does not support the destination extension '" + suffix + "'.");
+}
+
+// Resolve the exporter named by the borrowed configuration, strictly: a missing key means the built-in exporter, and an
+// unknown, inactive or differently resolved ID throws with its own message. Then run QUERY, which executes on the calling
+// thread and must not clear the global cancellation flag. Return owned ID and extension; no file is created.
+Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const DynamicPrintConfig &config)
+{
+    const ConfigOption *selector = config.option(k_gcode_exporter_option_key);
+    const std::string plugin_id = selector == nullptr ? k_default_gcode_exporter_id : selector->serialize();
+    Plugin *plugin = this->get_plugin(plugin_id);
+    if (plugin == nullptr || plugin->get_step() != GCODE_EXPORT ||
+        plugin->get_exclusive_group() != k_gcode_exporter_option_key)
+        throw RuntimeError("The configured G-code exporter '" + plugin_id + "' is not registered.");
+    if (!this->is_plugin_active(plugin))
+        throw RuntimeError("The configured G-code exporter '" + plugin_id + "' is inactive.");
+    // The same strict resolution is used by orchestrator_select_plugin() and Print::validate().
+    if (Steps::selected_active_plugin_from_group(*this, GCODE_EXPORT, k_gcode_exporter_option_key, &config) != plugin)
+        throw RuntimeError("The configured G-code exporter '" + plugin_id + "' cannot be selected.");
+
+    Plugin *firmware = Steps::selected_active_plugin_from_group(
+        *this, GCODE_FIRMWARE, "gcode_firmware_plugin", &config);
+    if (firmware == nullptr)
+        throw RuntimeError("No active G-code firmware provider is selected.");
+
+    GCodeExportQueryCapture capture;
+    run_ctx_gcode_export context = {};
+    context.operation = RAW_GCODE_EXPORT_OPERATION_QUERY;
+    context.config = ApiHost::to_config_handle(&config);
+    context.firmware_plugin_id = firmware->get_id().c_str();
+    context.query_callback_context = &capture;
+    context.emit_query_result = capture_gcode_export_query;
+    raw_plugin_run_payload payload = {};
+    payload.data = &context;
+
+    std::string reported_error;
+    const raw_plugin_execution_status status =
+        this->execute_plugin(*plugin, nullptr, &payload, 1, false, &reported_error);
+    if (capture.callback_exception)
+        std::rethrow_exception(capture.callback_exception);
+    if (status != RAW_PLUGIN_EXECUTION_SUCCESS) {
+        if (!reported_error.empty())
+            throw RuntimeError(reported_error);
+        throw RuntimeError(status == RAW_PLUGIN_EXECUTION_CANCELLED ?
+            "G-code exporter QUERY was cancelled." : "G-code exporter QUERY failed.");
+    }
+    if (capture.result_count != 1)
+        throw RuntimeError("G-code exporter QUERY did not return a result.");
+    if (capture.status == RAW_GCODE_EXPORT_QUERY_INCOMPATIBLE)
+        throw RuntimeError(capture.message);
+    if (capture.status != RAW_GCODE_EXPORT_QUERY_COMPATIBLE)
+        throw RuntimeError("G-code exporter QUERY returned an unknown status.");
+
+    GCodeExporterSelection selection;
+    selection.plugin_id = plugin_id;
+    selection.extension = std::move(capture.extension);
+    return selection;
+}
+
+// Re-run the selection on the borrowed configuration copy and require it to match `selection`, check the borrowed UTF-8
+// paths, then export into a unique sibling temporary and publish it atomically. A suffixless destination gets the
+// exporter extension; a typed suffix must be accepted. Cancellation comes from the Print or the global plugin flag.
+// Any failure removes only the temporary, leaves the reference and the previous destination untouched, and throws.
+std::string Orchestrator::export_print(Print &print,
+                                       const DynamicPrintConfig &config,
+                                       const std::string &reference_path,
+                                       const std::string &destination_path,
+                                       const GCodeExporterSelection &selection)
+{
+    const GCodeExporterSelection current_selection = this->select_gcode_exporter(config);
+    if (selection.plugin_id != current_selection.plugin_id ||
+        selection.extension != current_selection.extension)
+        throw RuntimeError("The configured G-code exporter changed before export.");
+    if (reference_path.empty() || destination_path.empty())
+        throw RuntimeError("G-code export requires non-empty reference and destination paths.");
+
+    const boost::filesystem::path reference(reference_path);
+    boost::filesystem::path destination(destination_path);
+    boost::system::error_code filesystem_error;
+    if (!boost::filesystem::is_regular_file(reference, filesystem_error) || filesystem_error)
+        throw RuntimeError("G-code reference file is missing or is not a regular file: '" + reference_path + "'.");
+
+    if (destination.extension().empty())
+        destination += current_selection.extension;
+    else
+        require_exporter_extension(current_selection, destination.extension().string());
+    const boost::filesystem::path destination_parent = destination.parent_path().empty() ?
+        boost::filesystem::current_path() : destination.parent_path();
+    filesystem_error.clear();
+    if (!boost::filesystem::is_directory(destination_parent, filesystem_error) || filesystem_error)
+        throw RuntimeError("G-code export destination directory does not exist: '" +
+                           destination_parent.string() + "'.");
+
+    if (boost::filesystem::exists(destination)) {
+        if (boost::filesystem::is_directory(destination))
+            throw RuntimeError("G-code export destination is not a file path: '" + destination.string() + "'.");
+
+        filesystem_error.clear();
+        if (boost::filesystem::equivalent(reference, destination, filesystem_error))
+            throw RuntimeError("The G-code export destination must differ from its reference.");
+        if (filesystem_error)
+            throw RuntimeError("Could not inspect G-code export paths: " + filesystem_error.message());
+    }
+
+    const std::string unique_suffix = boost::filesystem::unique_path("%%%%-%%%%-%%%%-%%%%").string();
+    const boost::filesystem::path temporary = destination.parent_path() /
+        boost::filesystem::path(destination.stem().string() + ".export-" + unique_suffix +
+                                current_selection.extension);
+    if (boost::filesystem::exists(temporary))
+        throw RuntimeError("Could not reserve a unique G-code export temporary path.");
+
+    try {
+        Plugin *plugin = this->get_plugin(current_selection.plugin_id);
+        if (plugin == nullptr || !this->is_plugin_active(plugin) || plugin->get_step() != GCODE_EXPORT)
+            throw RuntimeError("The configured G-code exporter became unavailable before export.");
+
+        // These strings own the paths that the payload borrows until the plugin run returns.
+        const std::string reference_path_utf8 = reference.string();
+        const std::string temporary_path_utf8 = temporary.string();
+        run_ctx_gcode_export context = {};
+        context.operation = RAW_GCODE_EXPORT_OPERATION_EXPORT;
+        context.config = ApiHost::to_config_handle(&config);
+        context.print = reinterpret_cast<const print_handle *>(&print);
+        context.reference_path = reference_path_utf8.c_str();
+        context.output_path = temporary_path_utf8.c_str();
+        raw_plugin_run_payload payload = {};
+        payload.data = &context;
+
+        std::string reported_error;
+        const raw_plugin_execution_status status =
+            this->execute_plugin(*plugin, &print, &payload, 1, false, &reported_error);
+        if (status != RAW_PLUGIN_EXECUTION_SUCCESS) {
+            if (!reported_error.empty())
+                throw RuntimeError(reported_error);
+            throw RuntimeError(status == RAW_PLUGIN_EXECUTION_CANCELLED ?
+                "G-code export was cancelled." : "G-code exporter failed.");
+        }
+        if (!boost::filesystem::is_regular_file(temporary, filesystem_error) || filesystem_error)
+            throw RuntimeError("G-code exporter did not create a regular output file.");
+
+        FilesystemTransaction transaction;
+        transaction.add_replacement(temporary, destination);
+        const FilesystemTransactionResult result = transaction.commit();
+        for (const FilesystemTransactionFailure &warning : result.cleanup_warnings)
+            BOOST_LOG_TRIVIAL(warning) << "G-code export cleanup warning: "
+                                       << format_filesystem_transaction_failure(warning);
+        if (result.status != FilesystemTransactionStatus::Committed)
+            throw RuntimeError("Could not publish the G-code export: " +
+                               format_filesystem_transaction_error(result));
+    } catch (...) {
+        boost::system::error_code cleanup_error;
+        boost::filesystem::remove(temporary, cleanup_error);
+        throw;
+    }
+    return destination.string();
+}
+
+// Select the exporter and refuse an incompatible typed suffix before any work, then generate and reread a private
+// reference beside the requested destination, export it to the statistics-finalized path, and always remove the
+// reference. The caller keeps the post-processing scripts. Failures throw.
+std::string Orchestrator::export_gcode_cli(Print &print, const std::string &requested_output_path)
+{
+    const DynamicPrintConfig &config = print.full_print_config();
+    const GCodeExporterSelection selection = this->select_gcode_exporter(config);
+    const std::string requested_path = print.output_filepath(
+        requested_output_path, std::string(), selection.extension);
+    const boost::filesystem::path requested_file(requested_path);
+    require_exporter_extension(selection, requested_file.extension().string());
+    const boost::filesystem::path reference_directory = requested_file.parent_path().empty() ?
+        boost::filesystem::current_path() : requested_file.parent_path();
+    const boost::filesystem::path reference = reference_directory /
+        boost::filesystem::unique_path(".slic3r-cli-reference-%%%%-%%%%-%%%%.gcode");
+    try {
+        const std::string reference_path = this->export_gcode(print, reference.string(), nullptr, nullptr);
+        Steps::StepReadGeneratedGcode::read_statistics(*this, print);
+        const std::string finalized_path = print.print_statistics().finalize_output_path(requested_path);
+        const std::string exported_path = this->export_print(
+            print, config, reference_path, finalized_path, selection);
+        boost::system::error_code cleanup_error;
+        boost::filesystem::remove(reference, cleanup_error);
+        if (cleanup_error)
+            throw RuntimeError("Could not remove private G-code reference '" +
+                               reference.string() + "': " + cleanup_error.message());
+        return exported_path;
+    } catch (...) {
+        boost::system::error_code cleanup_error;
+        boost::filesystem::remove(reference, cleanup_error);
+        throw;
+    }
+}
+// Initialize active plugins and then validate their read-side configuration contracts.
 void Orchestrator::initialize_plugins() {
     for (const std::unique_ptr<Plugin> &plugin_ptr : m_registered_plugins) {
         if (this->is_plugin_active(plugin_ptr.get())) {
@@ -3216,6 +3537,15 @@ void Orchestrator::initialize_plugins() {
             m_initializing_plugin_failure.clear();
         }
     }
+
+    // The exporter selector is a host feature: it stays on the printer page, after the firmware selector, even when
+    // the built-in exporter is inactive. Registering it twice is harmless because identical content is ignored.
+    this->add_ui_fragment("printer_fff.ui",
+                          k_gcode_exporter_option_key,
+                          "page:General:printer\n"
+                          "group:Firmware\n"
+                          "\tsetting:insert$aftersetting$gcode_firmware_plugin:gcode_exporter_plugin\n",
+                          1);
 
     for (const std::unique_ptr<Plugin> &plugin_ptr : m_registered_plugins) {
         if (!this->is_plugin_active(plugin_ptr.get()))

@@ -17,6 +17,30 @@
 
 #include <optional>
 
+/*
+Apply a source model and configuration to an existing FFF Print.
+
+This module matches source objects and regions to the copies used for slicing,
+updates their settings and placements, and invalidates results whose inputs
+changed. Reusing unaffected results is separate from rebuilding invalid ones:
+apply prepares the Print for the pipeline rather than running every slicing step.
+
+The model supplied by the caller remains the source of editing state. Print
+owns its applied copies and generated results. Matching identities and comparing
+settings decide which copies can be reused and which processing suffix must run.
+
+Representative direct calls (branches are not a timeline):
+
+    Print::apply()
+        |-- print_config_diffs()
+        |-- full_print_config_diffs()
+        |-- this->invalidate_state_by_config_options()
+        |-- model_volume_list_copy_configs()
+        |-- generate_print_object_regions()
+        |-- this->rebuild_active_print_regions()
+        `-- Steps::StepPipeline::clear_checkpoint_outputs()
+*/
+
 namespace Slic3r {
 
 // Add or remove support modifier ModelVolumes from model_object_dst to match the ModelVolumes of model_object_new
@@ -1006,6 +1030,7 @@ static std::shared_ptr<PrintObjectRegions> generate_print_object_regions(
     return print_object_regions;
 }
 
+// Apply a borrowed model and an owned full config, update print state and invalidate affected outputs; return the strongest change status and propagate cleanup or validation failures.
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1118,7 +1143,13 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     size_t num_extruders = m_config.nozzle_diameter.size();
     bool   num_extruders_changed = false;
     if (! full_config_diff.empty()) {
-        update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_GCODE)));
+        const bool full_config_invalidates_gcode = std::any_of(
+            full_config_diff.begin(), full_config_diff.end(), [](const t_config_option_key &key) {
+                const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+                return definition == nullptr || definition->invalidates_step != STEP_NONE;
+            });
+        if (full_config_invalidates_gcode)
+            update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_GCODE)));
         m_placeholder_parser.clear_config();
         // Set the profile aliases for the PrintBase::output_filename()
 		m_placeholder_parser.set("print_preset",              new_full_config.option("print_settings_id")->clone());

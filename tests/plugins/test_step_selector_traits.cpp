@@ -16,21 +16,33 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
-/* These tests check declarations that describe plugin selectors, settings that choose registered plugins.
-   StepSelectorTraits.hpp defines these declarations. A declaration for an entire step supplies defaults
-   to named groups; a declaration for an exact group replaces every field.
-   Call graph:
-     TEST_CASE (declaration checks)
-       Orchestrator::register_builtin_step_selector
-       Orchestrator::step_selector
-       Steps::plugin_exclusive_group_definition
-       Steps::make_exclusive_step_group
-     TEST_CASE (selection checks)
-       check_seam_selection -> check_selection
-   Description checks read the plugin manager without registering settings. Selection checks
-   initialize the shared runtime and restore activation flags afterward. Test providers that do no work
-   register after startup and remain inactive outside their selection checks. The generated-selector snapshot
-   checks the serialized definitions and layout strings separately. */
+/*
+These tests check declarations that describe plugin selectors, settings that choose registered plugins.
+StepSelectorTraits.hpp defines these declarations. A declaration for an entire step supplies defaults
+to named groups; a declaration for an exact group replaces every field.
+Description checks read the plugin manager without registering settings. Selection checks
+initialize the shared runtime and restore activation flags afterward. Test providers that do no work
+register after startup and remain inactive outside their selection checks. The generated-selector snapshot
+checks the serialized definitions and layout strings separately.
+
+Operation notes:
+- TEST_CASE (declaration checks)
+- Orchestrator::register_builtin_step_selector
+- Steps::plugin_exclusive_group_definition
+- Steps::make_exclusive_step_group
+- TEST_CASE (selection checks)
+- check_seam_selection :  check_selection
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- Orchestrator::instance()
+        |-- Steps::plugin_exclusive_group_option_key()
+        |-- PrintConfigDef::instance()
+        |-- host.registered_plugins()
+        `-- check_seam_selection()
+*/
 
 namespace {
 using namespace Slic3r;
@@ -689,7 +701,7 @@ TEST_CASE("Thumbnail selection errors name the inactive stored encoder",
                       "Invalid GCODE_THUMBNAIL provider selection");
 }
 
-// Check explicit lookup with an invalid Print view; reading its settings would assert in Debug.
+// Check explicit lookup with invalid Print and configuration views; reading either would assert in Debug.
 TEST_CASE("Explicit thumbnail lookup does not access Print configuration",
           "[plugins][thumbnail][selector-traits]")
 {
@@ -840,7 +852,7 @@ TEST_CASE("Selector traits record effective seam and service metadata", "[plugin
 }
 
 // Build test-owned choice lists from reversed member ids and check separate keys and labels for a group and an entire stage.
-// Shared startup owns plugins and writer activation is restored. Application settings and expected snapshot data are unchanged.
+// Shared startup owns plugins and exporter activation is restored. Application settings and expected snapshot data are unchanged.
 TEST_CASE("Selector dropdown preferences preserve native ordering and historical group layout identities",
           "[plugins][step-pipeline][selector-group-priority][selector-traits]")
 {
@@ -907,10 +919,11 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         {STEP_WIPETOWER, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_WIPETOWER, false},
         {STEP_LAYER_STICHING, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_LAYER_STICHING, false},
         {STEP_GCODE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true},
+        {GCODE_EXPORT, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_NONE, true},
         {GCODE_FIRMWARE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true}
     };
     const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &identities = Steps::get_exclusive_steps();
-    REQUIRE(identities.size() == 9);
+    REQUIRE(identities.size() == 10);
     for (const Expected &entry : expected) {
         INFO(int(entry.step));
         const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator identity = identities.find(entry.step);
@@ -936,7 +949,7 @@ TEST_CASE("Whole-step selector traits come from their owner module",
     }
 }
 
-// Check that firmware, thumbnail and reader declarations make selector changes require G-code generation to run again.
+// Check that firmware and reader choices replay G-code, while thumbnail and exporter choices affect only export.
 TEST_CASE("G-code service selector invalidation comes from the owner modules",
           "[plugins][step-pipeline][selector-traits][gcode]")
 {
@@ -945,15 +958,17 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
     Plugin provider(probe.c_instance(), "Slic3r", "");
     const std::pair<slicing_step_t, const char *> services[] = {
         {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
-        {GCODE_READER, "reader_invalidation_probe"}
+        {GCODE_READER, "reader_invalidation_probe"}, {GCODE_EXPORT, "gcode_exporter_plugin"}
     };
     for (const std::pair<slicing_step_t, const char *> &service : services) {
         INFO(int(service.first));
+        const slicing_step_t invalidation = service.first == GCODE_EXPORT ?
+            STEP_NONE : STEP_GCODE;
         const StepSelectorTraits *declared = host.step_selector(service.first, "");
         REQUIRE(declared != nullptr);
         CHECK(host.step_selector_is_builtin(service.first, ""));
         REQUIRE(declared->invalidates_step.has_value());
-        CHECK(*declared->invalidates_step == STEP_GCODE);
+        CHECK(*declared->invalidates_step == invalidation);
         CHECK(declared->category == RAW_OPTION_CATEGORY_OUTPUT);
         CHECK(declared->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
         const char *const groups[] = {service.second, "service_invalidation_probe"};
@@ -962,11 +977,11 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
             const StepSelectorTraits *resolved = host.step_selector(service.first, group_id);
             REQUIRE(resolved != nullptr);
             REQUIRE(resolved->invalidates_step.has_value());
-            CHECK(*resolved->invalidates_step == STEP_GCODE);
+            CHECK(*resolved->invalidates_step == invalidation);
             const Steps::StepExclusiveGroup group = Steps::plugin_exclusive_group_definition(
                 host, service.first, group_id, provider);
             REQUIRE(group.traits.invalidates_step.has_value());
-            CHECK(*group.traits.invalidates_step == STEP_GCODE);
+            CHECK(*group.traits.invalidates_step == invalidation);
             CHECK(group.option_def.invalidates_step == *declared->invalidates_step);
             CHECK(group.option_def.category == declared->category);
             CHECK(group.option_def.option_preset_type == declared->option_preset_type);
@@ -1029,6 +1044,7 @@ TEST_CASE("Thumbnail selector traits are declared by the G-code module",
     CHECK(other.traits.read_with_one_provider);
     CHECK_FALSE(other.traits.provider_settings_rules);
 }
+
 
 // Check that GUI rules do not depend on the thumbnail selector and invalid choices select no encoder, even with one active.
 // Use the registered selector's choices and restore activation flags after the checks.
