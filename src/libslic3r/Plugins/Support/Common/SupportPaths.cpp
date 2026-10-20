@@ -52,11 +52,15 @@ raw_infill_pattern_params base_fill_recipe(const run_ctx_support_toolpath &paylo
 }
 
 // Each area is filled by the recipe pattern alone, or inside a perimeter loop with the 0.2 inset ratio of the native flange.
-void fill_base_areas(const run_ctx_support_toolpath &payload, storage_handle *storage, MutableExtrusionEntity out,
+// Borrowed context, payload and recipe outlive the synchronous fill; storage owns temporaries and out receives paths.
+// Stopping exits through silent PluginCancelled (the cause has its message, the step names it, or the runner rethrows
+// the print cancellation); ordinary refusals
+// throw std::runtime_error.
+void fill_base_areas(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, MutableExtrusionEntity out,
                      const ExPolygonCollection &areas, const layer_handle *layer, const raw_infill_pattern_params &recipe,
                      bool perimeter)
 {
-    const InnerFill inner = pattern_service_fill(payload, recipe.pattern_id, recipe, layer, nullptr, nullptr, layer_get_region(layer, 0));
+    const InnerFill inner = pattern_service_fill(context, payload, recipe.pattern_id, recipe, layer, nullptr, nullptr, layer_get_region(layer, 0));
     const raw_surface_type surface_type = raw_surface_type(RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE);
     for (const ExPolygon area : areas) {
         if (perimeter) {

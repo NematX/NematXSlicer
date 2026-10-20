@@ -98,14 +98,14 @@ struct SeamFoot {
 };
 
 // Generate the paths of each object island of one support layer and publish them into the island's base-tool region.
-void process_layer(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params, layer_handle *layer);
+void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params, layer_handle *layer);
 // Append the paths of one region island's branch surfaces to out: the first-layer flange, or the paths of its fused islands.
-void append_region_paths(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params,
+void append_region_paths(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params,
                          const layer_handle *layer, const layer_region_island_handle *region, MutableExtrusionEntity out);
 // The branch surfaces of one region island, with the support and branch bits set, as one collection.
 StoredExPolygonCollection branch_surfaces(storage_handle *storage, const layer_region_island_handle *region);
 // The first-layer flange of the surfaces: the base flange recipe of LegacySupportPaths over their closing, appended to out.
-void append_flange(const run_ctx_support_toolpath &payload, storage_handle *storage, const layer_handle *layer,
+void append_flange(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const layer_handle *layer,
                    const StoredExPolygonCollection &surfaces, const BranchParams &params, MutableExtrusionEntity out);
 // Append island methods in closed-piece order, replacing the first thin-island piece or appending when no piece survives.
 void append_island_paths(storage_handle *storage, const StoredExPolygonCollection &fused, const StoredExPolygonCollection &closed,
@@ -142,7 +142,7 @@ void extend_with_anchor(const CandidateRing &ring, const SeamFoot &foot, double 
 // The points of a polyline cut by distance at its end, through the host polyline clipping.
 Points clip_end(storage_handle *storage, const Points &points, double distance);
 // Publish the paths of one object island into the support bucket of its base-tool region island.
-void publish_paths(layer_handle *layer, uint32_t island_index, MutableExtrusionEntity paths, int32_t tool);
+void publish_paths(const plugin_run_context *context, layer_handle *layer, uint32_t island_index, MutableExtrusionEntity paths, int32_t tool);
 
 BranchParams::BranchParams(const Print &print, const Object &object) : geometry(print, object)
 {
@@ -153,18 +153,24 @@ BranchParams::BranchParams(const Print &print, const Object &object) : geometry(
     double_wall_area = 0.25 * scale_d(diameter) * scale_d(diameter) * PI;
 }
 
-void process_layer(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params, layer_handle *layer)
+// Borrow inputs and context for synchronous generation, moving temporary paths into layer-owned regions. Stopping
+// propagates silent PluginCancelled (the cause has its message, the step names it, or the runner rethrows the print
+// cancellation); ordinary refusals throw std::runtime_error.
+void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params, layer_handle *layer)
 {
     for (uint32_t island_index = 0; island_index < layer_count_island(layer); ++island_index) {
         const layer_island_handle *island = layer_get_island(layer, island_index);
         StoredExtrusionEntity paths(storage);
         for (uint32_t region_index = 0; region_index < layer_island_count_region_island(island); ++region_index)
-            append_region_paths(payload, storage, object, params, layer, layer_island_get_region_island(island, region_index), paths.mutable_view());
-        publish_paths(layer, island_index, paths.mutable_view(), params.base_tool);
+            append_region_paths(context, payload, storage, object, params, layer, layer_island_get_region_island(island, region_index), paths.mutable_view());
+        publish_paths(context, layer, island_index, paths.mutable_view(), params.base_tool);
     }
 }
 
-void append_region_paths(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params,
+// Borrow the region and run inputs, appending storage-owned branch paths to out; empty surfaces add nothing.
+// Stopping propagates silent PluginCancelled (the cause has its message, the step names it, or the runner rethrows the
+// print cancellation); ordinary pattern refusals throw std::runtime_error.
+void append_region_paths(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params,
                          const layer_handle *layer, const layer_region_island_handle *region, MutableExtrusionEntity out)
 {
     const StoredExPolygonCollection surfaces = branch_surfaces(storage, region);
@@ -172,7 +178,7 @@ void append_region_paths(const run_ctx_support_toolpath &payload, storage_handle
     const coord_t z = layer_get_print_z(layer), height = layer_get_height(layer);
     // A layer whose bottom is at the bed prints the base flange instead of the sheaths, as the legacy first layer does.
     if (z - height <= 0) {
-        append_flange(payload, storage, layer, surfaces, params, out);
+        append_flange(context, payload, storage, layer, surfaces, params, out);
         return;
     }
     const c_flow flow = object.support_flow(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, params.geometry.layer_height, unscaled(height));
@@ -199,7 +205,10 @@ StoredExPolygonCollection branch_surfaces(storage_handle *storage, const layer_r
     return result;
 }
 
-void append_flange(const run_ctx_support_toolpath &payload, storage_handle *storage, const layer_handle *layer,
+// Close borrowed surfaces and append their perimeter-wrapped fill to out; storage owns temporary geometry and the
+// borrowed context outlives the fill. Stopping propagates silent PluginCancelled (the cause has its message, the step
+// names it, or the runner rethrows the print cancellation); ordinary pattern refusals throw std::runtime_error.
+void append_flange(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const layer_handle *layer,
                    const StoredExPolygonCollection &surfaces, const BranchParams &params, MutableExtrusionEntity out)
 {
     const ClipperContext clipper(storage);
@@ -209,7 +218,7 @@ void append_flange(const run_ctx_support_toolpath &payload, storage_handle *stor
                                                                       params.geometry.first_flow, params.geometry.first_flow_mm.spacing,
                                                                       float(params.geometry.raft_first_layer_density),
                                                                       Common::radians(float(params.base_angle_degrees + 90.)), 0.);
-    Common::fill_base_areas(payload, storage, out, fused, layer, recipe, true);
+    Common::fill_base_areas(context, payload, storage, out, fused, layer, recipe, true);
 }
 
 // Classify valid disjoint fused islands using flow width, then move owned entities into out in closed-piece order. A piece
@@ -494,15 +503,21 @@ Points clip_end(storage_handle *storage, const Points &points, double distance)
     return line.points();
 }
 
-void publish_paths(layer_handle *layer, uint32_t island_index, MutableExtrusionEntity paths, int32_t tool)
+// Move children from borrowed paths to the layer-owned support bucket; empty paths add nothing. A refused destination
+// exits through silent PluginCancelled when stopping (the cause has its message, the step names it, or the runner
+// rethrows the print cancellation), otherwise
+// std::runtime_error; insertion failures throw std::runtime_error.
+void publish_paths(const plugin_run_context *context, layer_handle *layer, uint32_t island_index, MutableExtrusionEntity paths, int32_t tool)
 {
     if (paths.readonly().child_count() == 0)
         return;
     layer_island_handle *island = layer_get_island_mutable(layer, island_index);
     layer_region_island_handle *region = layer_island_get_or_create_region_island(island, nullptr, 0, tool > 0 ? tool - 1 : EXTRUDER_ID_UNKNOWN);
     extrusion_entity_handle *destination = layer_region_island_get_mutable_extrusion(region, RAW_EXTRUSION_ROLE_SUPPORT);
-    if (!destination)
+    if (!destination) {
+        throw_if_cancelled(context);
         throw std::runtime_error("Cannot access support extrusion destination");
+    }
     for (uint32_t index = 0; index < paths.readonly().child_count(); ++index) {
         MutableExtrusionEntity entity = paths.child_mutable(index);
         if (extrusion_insert_child_move(destination, extrusion_child_count(destination), entity.mutable_handle()) == EXTRUSION_INDEX_INVALID)
@@ -515,6 +530,8 @@ void publish_paths(layer_handle *layer, uint32_t island_index, MutableExtrusionE
 // Walk the callback object's support layers, publishing the first-layer flange and then classified island sheaths,
 // centrelines or deposits into their base-tool support buckets. Per-call parameters isolate concurrent objects;
 // missing payload, cancellation, geometry, pattern-service and publication errors propagate to the caller.
+// The borrowed context outlives all synchronous fills; stopping propagates silent PluginCancelled (the cause has its
+// message, the step names it, or the runner rethrows the print cancellation), while ordinary refusals propagate std::runtime_error.
 void generate_branch_paths(const plugin_run_context *context)
 {
     const run_ctx_support_toolpath *payload = plugin_ctx_as_support_toolpath(context);
@@ -530,7 +547,7 @@ void generate_branch_paths(const plugin_run_context *context)
         layer_handle *layer = object_get_auxiliary_layer(payload->object, layer_index);
         if (!plugin_property_has(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT))
             continue;
-        process_layer(*payload, context->plugin_storage, object, params, layer);
+        process_layer(context, *payload, context->plugin_storage, object, params, layer);
     }
 }
 

@@ -33,8 +33,10 @@ bool merged_into_base(bool merge, bool base_takes_contact, bool z_has_base, bool
 StoredPolygonCollection resolve_overlap(const StoredPolygonCollection &surfaces, const StoredPolygonCollection &covering);
 }
 // Publish the slabs as auxiliary layers, grouped by print Z and thickness, with one region-island per extruder and clipped fill surfaces; a branch slab becomes a branch surface of the base extruder, and one interface id per print Z and the thinnest group published first keep the native numbering and order.
-// The slabs and their storage stay owned by the caller and are only read. A rejected API write throws std::runtime_error
-// and leaves the layers already published in place. context is not used yet.
+// The slabs and storage stay owned by the caller. Rejected writes leave published layers in place and throw silent
+// PluginCancelled when stopping (the cause has its message, the step names it, or the runner rethrows the print
+// cancellation), otherwise std::runtime_error. context is the calling plugin's borrowed run context, used only after
+// a host callback failure to exit through PluginCancelled when stopping; nullptr is accepted and disables this check.
 void publish(const plugin_run_context *context, const Object &object, GeneratedSupport &support, orchestrator_handle *orchestrator);
 } // namespace slic3r_api::Support::Common
 #endif

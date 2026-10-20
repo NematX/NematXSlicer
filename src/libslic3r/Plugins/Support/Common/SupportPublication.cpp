@@ -29,6 +29,9 @@
 
 namespace slic3r_api::Support::Common {
 // Group non-empty slabs by integer Z and thickness and publish their union before locking islands; equal-Z insertion precedes existing layers with unique creation ids, and rejected API writes throw.
+// Inputs and context are borrowed; the object owns published layers. Rejected writes exit through silent
+// PluginCancelled when stopping (the cause has its message, the step names it, or the runner rethrows the print
+// cancellation), otherwise std::runtime_error.
 void publish(const plugin_run_context *context, const Object &object, GeneratedSupport &support, orchestrator_handle *orchestrator)
 {
     storage_handle *storage = support.storage;
@@ -91,10 +94,16 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
             if (all.empty()) continue;
             const coord_t height = sorted[begin]->height;
             layer_handle *layer = object_add_auxiliary_layer(object_ptr, height, z, z - height / 2);
-            if (!layer) throw std::runtime_error("Cannot create support layer");
+            if (!layer) {
+                throw_if_cancelled(context);
+                throw std::runtime_error("Cannot create support layer");
+            }
             LayerSupportProperty *property = static_cast<LayerSupportProperty *>(plugin_property_get_or_add_data_mutable(
                 orchestrator, layer_get_properties_mutable(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT));
-            if (!property) throw std::runtime_error("Cannot mark support layer");
+            if (!property) {
+                throw_if_cancelled(context);
+                throw std::runtime_error("Cannot mark support layer");
+            }
             property->interface_id = this_id;
             property->reserved = 0;
             installed_ids[z] = this_id;
@@ -169,8 +178,10 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
                         for (const ExPolygon expolygon : expolygons) stored.append(expolygon, type);
                     if (stored.empty()) continue;
                     layer_region_island_handle *region = layer_island_get_or_create_region_island(island, nullptr, 0, extruder);
-                    if (!region || !layer_region_island_set_fill_surfaces(region, stored.mutable_handle()))
+                    if (!region || !layer_region_island_set_fill_surfaces(region, stored.mutable_handle())) {
+                        throw_if_cancelled(context);
                         throw std::runtime_error("Cannot publish support surfaces");
+                    }
                 }
             }
         }

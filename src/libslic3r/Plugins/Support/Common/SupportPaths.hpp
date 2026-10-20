@@ -9,8 +9,9 @@
    area is first wrapped in a perimeter loop and the pattern fills its inset, as the native FillWithPerimeter does
    (see PerimeterFill.hpp).
 
+       // context is the borrowed plugin_run_context * received by the calling plugin's run callback.
        const raw_infill_pattern_params recipe = base_fill_recipe(*payload, "rectilinear", role, flow, spacing, density, angle, 0.);
-       fill_base_areas(*payload, storage, out, areas, layer, recipe, true); */
+       fill_base_areas(context, *payload, storage, out, areas, layer, recipe, true); */
 #ifndef plugins_support_common_paths_hpp_
 #define plugins_support_common_paths_hpp_
 
@@ -35,8 +36,11 @@ raw_infill_pattern_params base_fill_recipe(const run_ctx_support_toolpath &paylo
                                            float angle, double z);
 
 // Fill the areas with the recipe and append the paths to out. With perimeter, each area gets a perimeter loop and its
-// inset is filled with the recipe pattern; otherwise the pattern fills each area alone.
-void fill_base_areas(const run_ctx_support_toolpath &payload, storage_handle *storage, MutableExtrusionEntity out,
+// inset is filled with the recipe pattern; otherwise the pattern fills each area alone. Stopping exits through silent
+// PluginCancelled (the cause has its message, the step names it, or the runner rethrows the print cancellation);
+// ordinary refusals throw std::runtime_error. context is the calling plugin's borrowed run context, used only after
+// a host callback failure to exit through PluginCancelled when stopping; nullptr is accepted and disables this check.
+void fill_base_areas(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, MutableExtrusionEntity out,
                      const ExPolygonCollection &areas, const layer_handle *layer, const raw_infill_pattern_params &recipe,
                      bool perimeter);
 

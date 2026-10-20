@@ -513,7 +513,8 @@ void compare_perimeter_fill(PatternServiceFixture &fixture, const ExPolygon &sur
     slic3r_api::StoredExtrusionEntity out(storage_value);
     const slic3r_api::ExPolygon area(reinterpret_cast<const expolygon_handle *>(&surface));
     Common::fill_with_perimeter(storage_value, slic3r_api::Surface(area, raw_surface_type(stPosInternal | stDensSparse)),
-                                settings, Common::pattern_service_fill(fixture.payload, recipe.pattern_id, recipe, nullptr, nullptr, nullptr, nullptr),
+                                // Direct service calls have no run context; nullptr makes the cancellation check false.
+                                settings, Common::pattern_service_fill(nullptr, fixture.payload, recipe.pattern_id, recipe, nullptr, nullptr, nullptr, nullptr),
                                 out.mutable_view());
     const ExtrusionEntity &api_out = *reinterpret_cast<const ExtrusionEntity *>(out.handle());
     REQUIRE(api_out.child_count() == native_roots.size());
@@ -1051,7 +1052,8 @@ TEST_CASE("Smooth support contact fill equals the native FillSmooth", "[plugins]
         recipe.extrusion_role = RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
         recipe.surface_type = raw_surface_type(RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_DENS_SOLID);
         recipe.infill_flags = C_INFILL_FLAG_DONT_ADJUST | C_INFILL_FLAG_CAN_ANGLE_CROSS;
-        const Common::InnerFill inner = Common::pattern_service_fill(print_case.payload, recipe.pattern_id, recipe, nullptr, nullptr,
+        // No plugin run owns this direct service call; a null context is never stopping.
+        const Common::InnerFill inner = Common::pattern_service_fill(nullptr, print_case.payload, recipe.pattern_id, recipe, nullptr, nullptr,
                                                                      nullptr, reinterpret_cast<const layer_region_handle *>(&region));
         PluginStorage storage;
         storage_handle *storage_value = reinterpret_cast<storage_handle *>(&storage);

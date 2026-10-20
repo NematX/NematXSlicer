@@ -31,9 +31,10 @@
    only the polylines of its output are kept, as the native class keeps only
    the polylines of the inner Fill.
 
+       // context is the borrowed plugin_run_context * received by the calling plugin's run callback.
        const PerimeterFillSettings settings{spacing, 0.2f, role, flow};
        fill_with_perimeter(storage, surface, settings,
-                           pattern_service_fill(*payload, rectilinear_id, recipe, layer, island, region, primary),
+                           pattern_service_fill(context, *payload, rectilinear_id, recipe, layer, island, region, primary),
                            output);
 
    The native class also applies the "fill exactly" flow correction and the
@@ -75,7 +76,9 @@ using InnerFill = std::function<void(const surface_handle *surface, MutableExtru
 /*
 Fill surface (its expolygon and type) with a perimeter and the inner pattern,
 and append one root entity to out when anything was generated. Temporary
-geometry lives in storage and is released before returning.
+geometry lives in storage and is released before returning. A stopping pattern propagates silent PluginCancelled
+(the cause already has its message, the step error names it, or the runner rethrows the print cancellation);
+an ordinary service refusal throws std::runtime_error.
 */
 void fill_with_perimeter(storage_handle *storage, const Surface &surface, const PerimeterFillSettings &settings,
                          const InnerFill &inner_fill, MutableExtrusionEntity out);
@@ -86,10 +89,14 @@ service of a STEP_SUPPORT_TOOLPATH payload, with recipe params. layer, island
 and region_island describe where the surface is printed and are passed to the
 pattern as context. primary_region supplies the print settings the pattern
 reads: smooth and ensuring return nothing when it is null. The payload and
-params must outlive the returned callback. A call the service refuses (unknown
-id, pattern needing STEP_INFILL initialization) throws std::runtime_error.
+params and context must outlive the returned callback, which must run before the plugin callback returns.
+context is the calling plugin's borrowed run context, used only after a host callback failure to exit through
+PluginCancelled when the run is stopping. nullptr is accepted and disables this check.
+A stopping run exits through silent PluginCancelled (the cause already has its message, the step error names it,
+or the runner rethrows the print cancellation).
+An ordinary refusal (unknown id, pattern needing STEP_INFILL initialization) throws std::runtime_error.
 */
-InnerFill pattern_service_fill(const run_ctx_support_toolpath &payload, infill_pattern_runtime_id pattern_id,
+InnerFill pattern_service_fill(const plugin_run_context *context, const run_ctx_support_toolpath &payload, infill_pattern_runtime_id pattern_id,
                                const raw_infill_pattern_params &params, const layer_handle *layer,
                                const layer_island_handle *island, const layer_region_island_handle *region_island,
                                const layer_region_handle *primary_region);

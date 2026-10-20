@@ -126,7 +126,7 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
 // Gather the lower support footprints whose top lies between the bottom and the current slab, sorted by Z.
 std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_handle *object, coord_t z, coord_t bottom, bool bottom_contact);
 // Generate one role across a support layer and assign its paths to the islands they cross.
-void process_layer(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer);
+void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer);
 
 PathParams::PathParams(const Print &print, const Object &object, const object_handle *handle) : geometry(print, object)
 {
@@ -551,7 +551,11 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_ha
     return result;
 }
 
-void process_layer(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer)
+// Generate and move this role's paths into layer-owned islands using borrowed inputs and storage-owned temporaries.
+// The context outlives the synchronous fill. Stopping exits through silent PluginCancelled (the cause has its message,
+// the step names it, or the runner rethrows the print cancellation); ordinary assignment, destination and pattern
+// refusals throw std::runtime_error.
+void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer)
 {
     const Common::SupportParams &geometry = params.geometry;
     const coord_t z = layer_get_print_z(layer), height = layer_get_height(layer), bottom = z - height;
@@ -639,7 +643,7 @@ void process_layer(const run_ctx_support_toolpath &payload, storage_handle *stor
             clipper_union_with_safety_offset(clipper(pass.polygons)).to_expolygon_collection();
         fused.ensure_valid(geometry.resolution);
         StoredExtrusionEntity paths(storage);
-        Common::fill_base_areas(payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
+        Common::fill_base_areas(context, payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
         // A bottom contact also overlaps sparse and interface slabs, so it collects them for modulation.
         const bool bottom_contact_pass = role == SurfaceRole::Bottom && &pass == &passes.front();
         Internal::modulate(storage, paths.mutable_view(), z, overlaps(storage, payload.object, z, bottom, bottom_contact_pass), geometry.resolution);
@@ -662,9 +666,15 @@ void process_layer(const run_ctx_support_toolpath &payload, storage_handle *stor
             region = layer_island_get_or_create_region_island(island, nullptr, 0, tool > 0 ? tool - 1 : EXTRUDER_ID_UNKNOWN);
             break;
         }
-        if (!region) throw std::runtime_error("Cannot assign support path to an island");
+        if (!region) {
+            throw_if_cancelled(context);
+            throw std::runtime_error("Cannot assign support path to an island");
+        }
         extrusion_entity_handle *destination = layer_region_island_get_mutable_extrusion(region, bucket);
-        if (!destination) throw std::runtime_error("Cannot access support extrusion destination");
+        if (!destination) {
+            throw_if_cancelled(context);
+            throw std::runtime_error("Cannot access support extrusion destination");
+        }
         if (extrusion_insert_child_move(destination, extrusion_child_count(destination), entity.mutable_handle()) == EXTRUSION_INDEX_INVALID)
             throw std::runtime_error("Cannot publish support extrusion");
     }
@@ -693,6 +703,9 @@ std::string Internal::surface_pattern(bool as_base, bool contact, bool bridge, b
 }
 
 // Walk the callback object's marked layers through the C API and append this role's paths; per-call parameters isolate concurrent objects, and invalid payloads fail visibly.
+// Borrow context only during this call; layers own published paths. Stopping propagates silent PluginCancelled
+// (the cause has its message, the step names it, or the runner rethrows the print cancellation); ordinary refusals
+// propagate std::runtime_error.
 void generate_paths(const plugin_run_context *context, SurfaceRole role)
 {
     const run_ctx_support_toolpath *payload = plugin_ctx_as_support_toolpath(context);
@@ -705,7 +718,7 @@ void generate_paths(const plugin_run_context *context, SurfaceRole role)
         throw_if_cancelled(context);
         layer_handle *layer = object_get_auxiliary_layer(payload->object, layer_index);
         if (!plugin_property_has(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT)) continue;
-        process_layer(*payload, context->plugin_storage, object, params, role, layer);
+        process_layer(context, *payload, context->plugin_storage, object, params, role, layer);
     }
 }
 } // namespace slic3r_api::Support::Toolpath

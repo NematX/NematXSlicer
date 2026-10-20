@@ -9,6 +9,7 @@
 
 #include "ClipperResults.hpp"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 
 /* Implementation of the perimeter-wrapped fill (see PerimeterFill.hpp).
 
@@ -119,6 +120,10 @@ void fill_area(storage_handle *storage, const ExPolygon &area, raw_surface_type 
 
 } // namespace
 
+// Append storage-owned perimeter and inset paths to out; borrowed inputs stay valid throughout the call. A stopping
+// pattern exits through silent PluginCancelled (the cause already has a message, the step error names it, or the
+// runner rethrows the print cancellation);
+// an ordinary service refusal propagates std::runtime_error.
 void fill_with_perimeter(storage_handle *storage, const Surface &surface, const PerimeterFillSettings &settings,
                          const InnerFill &inner_fill, MutableExtrusionEntity out)
 {
@@ -159,17 +164,23 @@ void fill_with_perimeter(storage_handle *storage, const Surface &surface, const 
         out.append_child_move(root.mutable_view());
 }
 
-InnerFill pattern_service_fill(const run_ctx_support_toolpath &payload, infill_pattern_runtime_id pattern_id,
+// Capture borrowed payload, recipe and context for a callback used within this run; fill its supplied output through
+// the pattern service. A stopping run exits through silent PluginCancelled: the cause already has its message, the
+// step error names it, or the runner rethrows the print cancellation. An ordinary refusal throws std::runtime_error
+// without changing its diagnostic.
+InnerFill pattern_service_fill(const plugin_run_context *context, const run_ctx_support_toolpath &payload, infill_pattern_runtime_id pattern_id,
                                const raw_infill_pattern_params &params, const layer_handle *layer,
                                const layer_island_handle *island, const layer_region_island_handle *region_island,
                                const layer_region_handle *primary_region)
 {
-    return [&payload, pattern_id, &params, layer, island, region_island, primary_region](const surface_handle *surface,
+    return [context, &payload, pattern_id, &params, layer, island, region_island, primary_region](const surface_handle *surface,
                                                                                          MutableExtrusionEntity output) {
         if (payload.generate_pattern == nullptr ||
             payload.generate_pattern(&payload, pattern_id, layer, island, region_island, primary_region, surface, nullptr,
-                                     &params, output.mutable_handle()) == 0)
+                                     &params, output.mutable_handle()) == 0) {
+            throw_if_cancelled(context);
             throw std::runtime_error("The support pattern service could not fill a perimeter-wrapped area.");
+        }
     };
 }
 

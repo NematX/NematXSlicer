@@ -1,4 +1,5 @@
 #include "support_grid_test_helpers.hpp"
+#include "probe_pattern_plugin.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
@@ -9,6 +10,7 @@
    The slicing prefix leaves support editable, then the normal dispatcher fills
    the typed surfaces. Leaf checks resolve inherited flow attributes, so both
    native paths and generic API wrappers are tested in their published form.
+   A failing pattern checks that a legacy algorithm preserves its sole error message.
    Two cases drive the internal helpers directly: synthetic slabs for height
    modulation and plain arguments for the filler pattern choice. */
 
@@ -16,6 +18,28 @@ using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
 namespace ToolpathInternal = slic3r_api::Support::Toolpath::Internal;
 namespace {
+// Scope the active providers like the infill pattern tests, restoring the saved plugin pointers afterward.
+class ScopedActivePlugins
+{
+public:
+    // Save the process-owned providers before the caller changes activation; allocation failure leaves activation intact.
+    explicit ScopedActivePlugins() : m_host(Orchestrator::instance())
+    {
+        for (Plugin *plugin : m_host.active_plugins())
+            m_previous.push_back(plugin);
+    }
+    // Restore activation without transferring ownership of the process-lifetime plugin instances.
+    ~ScopedActivePlugins()
+    {
+        m_host.clear_active_plugins();
+        for (Plugin *plugin : m_previous)
+            m_host.set_plugin_active(plugin, true);
+    }
+private:
+    Orchestrator &m_host;
+    std::vector<Plugin *> m_previous;
+};
+
 struct PathCounts { size_t base = 0, interface = 0, loops = 0, bridges = 0; double first_width = 0; };
 // Check leaf role, positive flow and bucket placement and count loops and bridge flows.
 void check_paths(const ExtrusionEntity &entity, ExtrusionRole bucket, PathCounts &counts, bool first, const ExtrusionAttributes *attributes = nullptr);
@@ -182,6 +206,81 @@ TEST_CASE("Native sparse first layer uses the support flange flow", "[plugins][s
     CHECK(counts.base > 0);
     CHECK(counts.loops > 0);
     CHECK(counts.first_width == Approx(0.7));
+}
+
+// Run the real legacy sparse flange through pattern_service_fill; the pattern's error must remain the sole diagnostic.
+TEST_CASE("Legacy support pattern failure preserves only the pattern error", "[plugins][support-toolpath-legacy]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    namespace Probe = Test::ProbePatternPlugin;
+    Orchestrator &host = Orchestrator::instance();
+    // Restore probe activation and failure controls even when a required assertion aborts the test.
+    struct ResetProbe {
+        Orchestrator &host;
+        bool active;
+        // Clear all shared probe controls before preparation; no probe run is active at test entry or exit.
+        explicit ResetProbe(Orchestrator &orchestrator) : host(orchestrator), active(host.is_plugin_active(Probe::probe_pattern_id))
+        {
+            reset();
+        }
+        // Reset counters and failure, cancellation and rendezvous controls only while no probe run is active.
+        void reset()
+        {
+            Probe::pattern_setup_count = 0;
+            Probe::pattern_active_runs = 0;
+            Probe::pattern_max_active_runs = 0;
+            Probe::pattern_rendezvous = false;
+            Probe::pattern_fail_setup = false;
+            Probe::pattern_fail_run = 0;
+            Probe::pattern_wrote_before_failure = false;
+            Probe::pattern_cancel_print = nullptr;
+            Probe::rendezvous_timed_out = false;
+            host.reset_plugin_cancel();
+            (void) host.consume_plugin_messages();
+        }
+        // Release the test's failure mode and stop request without retaining any print-owned data.
+        ~ResetProbe()
+        {
+            reset();
+            host.set_plugin_active(Probe::probe_pattern_id, active);
+        }
+    };
+    ResetProbe reset{host};
+    DynamicPrintConfig config = SG::config();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, config);
+    SG::prefix(print);
+    SG::family(print);
+    // The configured rectilinear flange resolves to the sole active pattern, with a fallback warning, not an error.
+    const ScopedActivePlugins active;
+    host.clear_active_plugins();
+    for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath",
+                           "support.toolpath.legacy_bottom", "support.toolpath.legacy_top", Probe::probe_pattern_id})
+        REQUIRE(host.set_plugin_active(id, true));
+    Probe::pattern_fail_run = 1;
+    (void) host.consume_plugin_messages();
+    std::string failure;
+    try {
+        SG::toolpaths(print);
+    } catch (const std::exception &error) {
+        failure = error.what();
+    }
+    const std::vector<Orchestrator::PluginMessage> messages = host.consume_plugin_messages();
+    CAPTURE(failure);
+    CHECK(Probe::pattern_wrote_before_failure);
+    CHECK(failure.find("STEP_SUPPORT_TOOLPATH stopped during ") != std::string::npos);
+    CHECK(failure.find("of plugin 'support.toolpath.legacy_sparse' after plugin 'test.pattern.probe' reported an error.") != std::string::npos);
+    size_t errors = 0;
+    for (const Orchestrator::PluginMessage &message : messages) {
+        INFO(message.plugin_id << ": " << message.message);
+        CHECK(message.message.find("could not fill a perimeter-wrapped area") == std::string::npos);
+        if (message.level != Orchestrator::PluginMessageLevel::Error) continue;
+        ++errors;
+        CHECK(message.plugin_id == Probe::probe_pattern_id);
+        CHECK(message.message == "probe pattern run failure");
+    }
+    CHECK(errors == 1);
 }
 
 // Collect the leaves of a plugin-API extrusion tree in traversal order.
