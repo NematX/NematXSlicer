@@ -13,7 +13,7 @@ slic3r_orchestrator.h = 3.5
 slic3r_slicing_step.h = 2.2
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
-steps/slic3r_step_gcode_export.h = 1.0
+steps/slic3r_step_gcode_export.h = 2.1
 ```
 
 The slicer version records the build environment, not compatibility. It remains

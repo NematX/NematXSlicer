@@ -46,6 +46,8 @@ set(SLIC3R_SOURCES
     Algorithm/RegionExpansion.cpp
 	AnyPtr.hpp
 	Api/host/ApiHostUtils.hpp
+	Api/host/GCodeExportMetadata.cpp
+	Api/host/GCodeExportMetadata.hpp
 	Api/host/GCodeReaderResultBuilder.cpp
 	Api/host/GCodeReaderResultBuilder.hpp
 	Api/host/GCodeReaderService.cpp
@@ -177,6 +179,9 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/gcode/EncodableState.hpp
 	Api/plugin/cpp/gcode/GCodeExporterPlugin.cpp
 	Api/plugin/cpp/gcode/GCodeExporterPlugin.hpp
+	Api/plugin/cpp/gcode/GCodeExportMetadataViews.hpp
+	Api/plugin/cpp/gcode/GCodeTextEnvelope.cpp
+	Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp
 	Api/plugin/cpp/gcode/DefaultExtruder.cpp
 	Api/plugin/cpp/gcode/DefaultExtruder.hpp
 	Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.cpp
@@ -588,6 +593,8 @@ set(SLIC3R_SOURCES
 	Plugins/WipeTower/WipeTowerManager.hpp
 	Printing/PrintingPlan.cpp
 	Printing/PrintingPlan.hpp
+	Printing/PrintingPlanFacts.cpp
+	Printing/PrintingPlanFacts.hpp
 	Steps/StepDetectSupportSpots.cpp
 	Steps/StepDetectSupportSpots.hpp
 	Steps/StepSkirtBrim.cpp

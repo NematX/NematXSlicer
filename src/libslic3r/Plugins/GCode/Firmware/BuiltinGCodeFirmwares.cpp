@@ -31,16 +31,6 @@ encoding.
 
 The normal execution flow is:
 
-    register_builtin_gcode_firmware_plugins()
-    |-- define the available dialects and their priorities
-    |-- register one BuiltinGCodeFirmwarePlugin per dialect
-    `-- expose one shared firmware selector in the printer UI
-
-    BuiltinGCodeFirmwarePlugin::run_impl()
-    |-- read the selected G-code script processor, if present
-    |-- call the definition's session factory
-    `-- transfer the new GCodeFirmwareSession to the host context
-
 All dialects share the common configuration keys. A dialect may add extra
 keys, such as Klipper's `tool_name`. Only the owner selected by
 `registers_ui` publishes the shared UI fragment, preventing duplicate
@@ -52,6 +42,32 @@ processor state cannot leak between exports. The session is owned by the host
 after `run_impl()` returns and is consumed by the selected STEP_GCODE output
 writer. This adapter does not itself traverse the PrintingPlan or emit final
 G-code.
+
+Operation notes:
+- register_builtin_gcode_firmware_plugins()
+- define the available dialects and their priorities
+- register one BuiltinGCodeFirmwarePlugin per dialect
+- expose one shared firmware selector in the printer UI
+- read the selected G-code script processor, if present
+- call the definition's session factory
+- transfer the new GCodeFirmwareSession to the host context
+
+Representative direct calls (branches are not a timeline):
+
+    register_builtin_gcode_firmware_plugins()
+        |-- register_marlin2_gcode_firmware_plugin()
+        |-- register_marlin1_gcode_firmware_plugin()
+        |-- register_prusa_gcode_firmware_plugin()
+        |-- register_reprap_gcode_firmware_plugin()
+        |-- register_sprinter_gcode_firmware_plugin()
+        `-- register_klipper_gcode_firmware_plugin()
+
+    BuiltinGCodeFirmwarePlugin::run_impl()
+        |-- plugin_ctx_as_gcode_firmware()
+        |-- m_definition.factory()
+        |-- default_session.set_reader_state_id()
+        |-- default_session.set_gcode_reader_context()
+        `-- make_gcode_firmware_instance()
 */
 
 namespace slic3r_api { namespace GCodeGeneration { namespace Firmware {
@@ -113,16 +129,6 @@ const raw_used_config_key k_common_used_config_keys[] = {
     {"nozzle_diameter", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"retract_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"single_extruder_multi_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnail_background", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnail_background_color", RAW_CO_STRING, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnail_color_mode", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnails", RAW_CO_VECTOR_POINT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnails_color", RAW_CO_STRING, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnails_end_file", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnails_format", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnails_tag_format", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnails_with_bed", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"thumbnails_with_support", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"travel_speed", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"use_firmware_retraction", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"use_relative_e_distances", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -289,8 +295,6 @@ void BuiltinGCodeFirmwarePlugin::run_impl(const plugin_run_context *run_ctx) con
     DefaultGCodeFirmwareSession &default_session =
         static_cast<DefaultGCodeFirmwareSession &>(*session);
     default_session.set_reader_state_id(m_reader_state_id);
-    default_session.set_thumbnail_services(
-        m_orchestrator, context->thumbnail_renderer);
     default_session.set_gcode_reader_context(m_orchestrator, context->print);
     context->instance = make_gcode_firmware_instance(std::move(session));
 }

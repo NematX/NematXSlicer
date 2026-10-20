@@ -10,6 +10,26 @@
 
 #include "test_data.hpp"
 
+/*
+Exercise a model's path from construction to a printable FFF job. The scenario
+adds a cube and its placement, applies configuration, arranges the object and
+runs slicing before exporting through the host. Geometry is checked against the
+original mesh, and the exported temporary path must contain a non-empty file.
+
+The scenario owns Model, Print and the expected mesh. It removes the output
+after checking it; no persistent project or user configuration is required.
+
+Representative direct calls (branches are not a timeline):
+
+    SCENARIO()
+        |-- Slic3r::make_cube()
+        |-- model.add_object()
+        |-- model_object->add_volume()
+        |-- print.apply()
+        |-- print.process()
+        `-- export_gcode()
+*/
+
 using namespace Slic3r;
 using namespace Slic3r::Test;
 
@@ -56,7 +76,7 @@ SCENARIO("Model construction", "[Model]") {
 				print.apply(model, config);
 				print.process();
 				boost::filesystem::path temp = boost::filesystem::unique_path();
-                Orchestrator::instance().export_gcode(print, temp.string(), nullptr, nullptr);
+                Orchestrator::instance().export_gcode(print, temp.string(), nullptr);
                 REQUIRE(boost::filesystem::exists(temp));
 				REQUIRE(boost::filesystem::is_regular_file(temp));
 				REQUIRE(boost::filesystem::file_size(temp) > 0);

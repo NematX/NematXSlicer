@@ -684,20 +684,24 @@ TEST_CASE("Thumbnail selection errors name the inactive stored encoder",
     print.apply(model, config);
     const slic3r_api::OrchestratorView view(reinterpret_cast<orchestrator_handle *>(&host));
     const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr),
+    const ConfigBase *base_config = &config;
+    const slic3r_api::Config config_view(reinterpret_cast<const config_handle *>(base_config));
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr),
                       "GCODE_THUMBNAIL provider 'JPG' is not active");
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr, "missing.encoder"),
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr, "missing.encoder"),
                       "Unknown GCODE_THUMBNAIL provider: missing.encoder");
     for (const Plugin *plugin : host.registered_plugins()) {
         if (plugin->get_step() == GCODE_THUMBNAIL) continue;
-        CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr, plugin->get_id()),
+        CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr, plugin->get_id()),
                           "Unknown GCODE_THUMBNAIL provider: " + plugin->get_id());
         break;
     }
+    config.set_deserialize_strict("thumbnails_format", "PNG");
+    CHECK(print.full_print_config().opt_serialize("thumbnails_format") == "JPG");
+    CHECK_NOTHROW(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr));
     config.optptr("thumbnails_format")->set_int(1000000);
     REQUIRE(config.option("thumbnails_format")->serialize().empty());
-    print.apply(model, config);
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr),
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr),
                       "Invalid GCODE_THUMBNAIL provider selection");
 }
 
@@ -708,7 +712,8 @@ TEST_CASE("Explicit thumbnail lookup does not access Print configuration",
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const slic3r_api::OrchestratorView host(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     const slic3r_api::Print unavailable_print;
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(host, unavailable_print, nullptr, "missing.encoder"),
+    const slic3r_api::Config unavailable_config;
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(host, unavailable_print, unavailable_config, nullptr, "missing.encoder"),
                       "Unknown GCODE_THUMBNAIL provider: missing.encoder");
 }
 
@@ -845,7 +850,7 @@ TEST_CASE("Selector traits record effective seam and service metadata", "[plugin
         const Steps::StepExclusiveGroup group = Steps::plugin_exclusive_group_definition(
             host, service.first, service.second, provider);
         REQUIRE(group.traits.invalidates_step.has_value());
-        CHECK(*group.traits.invalidates_step == STEP_GCODE);
+        CHECK(*group.traits.invalidates_step == (service.first == GCODE_THUMBNAIL ? STEP_NONE : STEP_GCODE));
         CHECK(*group.traits.invalidates_step == group.option_def.invalidates_step);
         CHECK(group.traits.container_type == group.option_def.container_type);
     }
@@ -962,7 +967,7 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
     };
     for (const std::pair<slicing_step_t, const char *> &service : services) {
         INFO(int(service.first));
-        const slicing_step_t invalidation = service.first == GCODE_EXPORT ?
+        const slicing_step_t invalidation = service.first == GCODE_THUMBNAIL || service.first == GCODE_EXPORT ?
             STEP_NONE : STEP_GCODE;
         const StepSelectorTraits *declared = host.step_selector(service.first, "");
         REQUIRE(declared != nullptr);
@@ -1018,7 +1023,7 @@ TEST_CASE("Thumbnail selector traits are declared by the G-code module",
     CHECK(encoder->category == RAW_OPTION_CATEGORY_OUTPUT);
     CHECK(encoder->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
     REQUIRE(encoder->invalidates_step.has_value());
-    CHECK(*encoder->invalidates_step == STEP_GCODE);
+    CHECK(*encoder->invalidates_step == STEP_NONE);
     CHECK(encoder->ui_target_file == "print.ui");
     CHECK(encoder->ui_page.empty());
     CHECK(encoder->ui_group.empty());

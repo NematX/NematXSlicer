@@ -1,4 +1,22 @@
-// Checkpoint tests exercise rollback and cleanup barriers before source owners are reused.
+/*
+Check which pipeline results survive an invalidation and which must be rebuilt.
+A checkpoint is a saved processing boundary. Fixtures run to selected boundaries,
+change inputs or stop a plugin, then observe replay and cleanup through controlled
+providers. Assertions distinguish completion from partial or cancelled work so
+old owners cannot be reused while callbacks still depend on their data.
+
+Checkpoint tests exercise rollback and cleanup barriers before source owners are reused.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::init_print()
+        |-- Steps::StepPipeline::run_slice()
+        |-- Steps::StepPipeline::run_gcode()
+        |-- apply_option()
+        |-- prepare_lifecycle_probe()
+        `-- print.apply()
+*/
 #include <catch2/catch.hpp>
 
 #include <algorithm>
@@ -1569,6 +1587,11 @@ TEST_CASE("G-code clear resets every published statistic",
     statistics.color_extruderid_to_used_filament.emplace_back(0, 42.0);
     statistics.color_extruderid_to_used_weight.emplace_back(0, 3.0);
     statistics._layer_area_stats.emplace_back(1, 4.0f);
+    statistics.total_toolchanges = 3;
+    statistics.object_layer_count = 5;
+    statistics.total_layer_count = 6;
+    statistics.has_support = true;
+    statistics.statistics_available = true;
     statistics.is_computing_gcode = true;
     print.set_gcode_reader_source_path("old.gcode");
 
@@ -1579,6 +1602,11 @@ TEST_CASE("G-code clear resets every published statistic",
     CHECK(statistics.color_extruderid_to_used_filament.empty());
     CHECK(statistics.color_extruderid_to_used_weight.empty());
     CHECK(statistics._layer_area_stats.empty());
+    CHECK(statistics.total_toolchanges == 0);
+    CHECK(statistics.object_layer_count == 0);
+    CHECK(statistics.total_layer_count == 0);
+    CHECK_FALSE(statistics.has_support);
+    CHECK_FALSE(statistics.statistics_available.load());
     CHECK_FALSE(statistics.is_computing_gcode.load());
     CHECK(print.gcode_reader_source_path().empty());
 }

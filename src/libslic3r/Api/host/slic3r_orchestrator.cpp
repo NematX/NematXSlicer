@@ -62,7 +62,8 @@ Representative direct calls (branches are not a timeline):
     orchestrator_execute_plugin()
         |-- to_orchestrator()
         |-- host_orchestrator->owns_plugin()
-        `-- host_orchestrator->execute_plugin()
+        |-- host_orchestrator->execute_plugin()
+        `-- Slic3r::c_api_executions_cancel_on_error()
 */
 
 extern "C" {
@@ -466,6 +467,7 @@ slicing_step_t orchestrator_plugin_step(const orchestrator_plugin_handle *plugin
     return host_plugin == nullptr ? STEP_NONE : host_plugin->get_step();
 }
 
+// Validate borrowed host and provider handles, run borrowed payloads with the worker's stop policy, and return status; exceptions become PLUGIN_ERROR.
 raw_plugin_execution_status orchestrator_execute_plugin(
     orchestrator_handle *orch,
     const orchestrator_plugin_handle *plugin,
@@ -482,7 +484,8 @@ raw_plugin_execution_status orchestrator_execute_plugin(
 
         Slic3r::Print *host_print = reinterpret_cast<Slic3r::Print *>(
             const_cast<print_handle *>(print));
-        return host_orchestrator->execute_plugin(*host_plugin, host_print, payloads, run_count);
+        return host_orchestrator->execute_plugin(*host_plugin, host_print, payloads, run_count,
+                                                 Slic3r::c_api_executions_cancel_on_error());
     } catch (...) {
         return RAW_PLUGIN_EXECUTION_PLUGIN_ERROR;
     }

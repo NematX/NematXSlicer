@@ -34,6 +34,18 @@ to the existing GCodeThumbnails::compress_thumbnail() function. A session asks
 the host for one RGBA8 image, normalizes strided/top-origin input to the legacy
 ThumbnailData layout, compresses it, and creates the complete textual block.
 The writer receives opaque bytes and therefore contains no format branches.
+
+Representative direct calls (branches are not a timeline):
+
+    BuiltinThumbnailPluginBase::run_impl()
+        |-- plugin_ctx_as_gcode_thumbnail()
+        `-- make_gcode_thumbnail_encoder_instance()
+
+    BuiltinThumbnailEncoderSession::encode()
+        |-- validate_gcode_thumbnail_render_request()
+        |-- m_renderer.render()
+        |-- frame_image()
+        `-- copy_image()
 */
 
 namespace slic3r_api { namespace GCodeGeneration { namespace Thumbnail {
@@ -83,7 +95,7 @@ void register_enum_setting(orchestrator_handle *orchestrator,
     definition.printer_technology = RAW_PT_FFF;
     definition.category = RAW_OPTION_CATEGORY_FIRMWARE;
     definition.gui_type = RAW_GUI_TYPE_SELECT_CLOSE;
-    definition.invalidates_step = STEP_GCODE;
+    definition.invalidates_step = STEP_NONE;
     definition.label = label;
     definition.tooltip = tooltip;
     definition.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
@@ -107,7 +119,7 @@ void register_shared_settings(orchestrator_handle *orchestrator)
     definition.printer_technology = RAW_PT_FFF;
     definition.category = RAW_OPTION_CATEGORY_FIRMWARE;
     definition.gui_type = RAW_GUI_TYPE_COLOR;
-    definition.invalidates_step = STEP_GCODE;
+    definition.invalidates_step = STEP_NONE;
     definition.label = "Thumbnail background color";
     definition.tooltip = "Color used when the thumbnail background is solid.";
     definition.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;

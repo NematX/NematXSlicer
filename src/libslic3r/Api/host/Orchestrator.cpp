@@ -4,6 +4,7 @@
 ///|/
 
 #include "Orchestrator.hpp"
+#include "GCodeExportMetadata.hpp"
 #include "GCodeReaderService.hpp"
 #include "GCodeThumbnailRenderer.hpp"
 
@@ -686,9 +687,10 @@ static slicing_step_t plan_owner_step(const Plugin &plugin)
     case WIPE_TOWER_WIPE:
         return STEP_WIPETOWER;
     case GCODE_FIRMWARE:
-    case GCODE_THUMBNAIL:
     case GCODE_READER:
         return STEP_GCODE;
+    // Delivery services run when a file is written, not while the G-code reference is generated.
+    case GCODE_THUMBNAIL:
     case GCODE_EXPORT:
         return STEP_NONE;
     default:
@@ -697,13 +699,13 @@ static slicing_step_t plan_owner_step(const Plugin &plugin)
     }
 }
 
-// Resolve a plugin option's invalidation step; GCODE_EXPORT options keep STEP_NONE while other services follow their owning producer.
+// Resolve a plugin option's invalidation step; GCODE_EXPORT and GCODE_THUMBNAIL options keep STEP_NONE while other services follow their owning producer.
 static raw_config_option_def config_option_def_with_resolved_invalidation(const raw_config_option_def &def,
                                                                           const Plugin *plugin)
 {
     raw_config_option_def resolved = def;
 
-    if (plugin != nullptr && plugin->get_step() == GCODE_EXPORT) {
+    if (plugin != nullptr && (plugin->get_step() == GCODE_EXPORT || plugin->get_step() == GCODE_THUMBNAIL)) {
         resolved.invalidates_step = STEP_NONE;
         return resolved;
     }
@@ -2108,6 +2110,36 @@ bool Orchestrator::clear_plugin_participants(Print &print, const slicing_step_t 
     return all_clear_succeeded;
 }
 
+namespace {
+
+// Per-thread answer of c_api_executions_cancel_on_error(); true outside of any plugin run.
+thread_local bool t_c_api_cancel_on_error = true;
+
+// Scope only the stop-flag policy for nested C API calls on this worker; messages still reach the log and GUI queue.
+class CApiErrorPolicyGuard
+{
+public:
+    // Save the worker's policy and install the supplied value without changing the global stop flag or owning host state.
+    explicit CApiErrorPolicyGuard(bool cancel_on_error) : m_previous(t_c_api_cancel_on_error)
+    {
+        t_c_api_cancel_on_error = cancel_on_error;
+    }
+    // Restore this worker's saved policy without changing the global stop flag; destruction cannot fail.
+    ~CApiErrorPolicyGuard() { t_c_api_cancel_on_error = m_previous; }
+    // Keep restoration tied to the original scope rather than a copy.
+    CApiErrorPolicyGuard(const CApiErrorPolicyGuard &) = delete;
+    // Keep the saved policy unchanged for the lifetime of its scope.
+    CApiErrorPolicyGuard &operator=(const CApiErrorPolicyGuard &) = delete;
+
+private:
+    bool m_previous;
+};
+
+} // namespace
+
+// Read this worker's nested-call stop-flag policy without modifying host state or transferring ownership; cannot fail.
+bool c_api_executions_cancel_on_error() { return t_c_api_cancel_on_error; }
+
 // Run setup, setup_run, and run for caller-owned payloads; return status, write at most one call-local diagnostic, and retain no context or payload ownership.
 raw_plugin_execution_status Orchestrator::execute_plugin(
     Plugin &plugin,
@@ -2139,7 +2171,10 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
     plugin_run_context run_context = this->prepare_plugin_run_context(
         plugin.get_step(), &plugin, &host_context);
 
-    plugin.setup(run_context, run_count);
+    {
+        const CApiErrorPolicyGuard error_policy(cancel_on_error);
+        plugin.setup(run_context, run_count);
+    }
     if (execution_error.load(std::memory_order_relaxed))
         return RAW_PLUGIN_EXECUTION_PLUGIN_ERROR;
     if (this->is_plugin_cancelled(print) ||
@@ -2156,6 +2191,8 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
                 context_copy.is_cancelled(context_copy.host_context))
                 return;
             context_copy.data = payloads[idx].data;
+            // This is the thread that runs the plugin, which may not be the caller's.
+            const CApiErrorPolicyGuard error_policy(host_context.cancel_on_error);
             plugin.setup_run(context_copy);
         });
 
@@ -2175,6 +2212,7 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
                 context_copy.is_cancelled(context_copy.host_context))
                 return;
             context_copy.data = payloads[idx].data;
+            const CApiErrorPolicyGuard error_policy(host_context.cancel_on_error);
             plugin.run(context_copy);
         });
 
@@ -3269,17 +3307,14 @@ void Orchestrator::slice(Print &print) {
 
 std::string Orchestrator::export_gcode(Print &print,
                                        const std::string &path_template,
-                                       GCodeProcessorResult *result,
-                                       ThumbnailsGeneratorCallback thumbnail_cb)
+                                       GCodeProcessorResult *result)
 {
     // output everything to a G-code file
     // The following call may die if the output_filename_format template substitution fails.
     const std::string path = print.output_filepath(path_template);
     // Re-export through the worker path: the UI cancellation callback would wait for this very thread.
     print.request_replay_from_worker(Steps::Checkpoint::Plan);
-    GCodeThumbnailRenderer thumbnail_renderer(print, std::move(thumbnail_cb));
-    const std::string reader_plugin_id = Steps::StepPipeline::run_gcode(
-        *this, print, path, thumbnail_renderer.c_renderer(), result);
+    const std::string reader_plugin_id = Steps::StepPipeline::run_gcode(*this, print, path, result);
 
     if (result != nullptr) {
         result->reader_plugin_id = reader_plugin_id;
@@ -3374,15 +3409,13 @@ Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const D
     return selection;
 }
 
-// Re-run the selection on the borrowed configuration copy and require it to match `selection`, check the borrowed UTF-8
-// paths, then export into a unique sibling temporary and publish it atomically. A suffixless destination gets the
-// exporter extension; a typed suffix must be accepted. Cancellation comes from the Print or the global plugin flag.
-// Any failure removes only the temporary, leaves the reference and the previous destination untouched, and throws.
+// Re-run selection on the borrowed configuration copy, own its filtered metadata, sliced widths and, when the Print has available statistics, their formatted lines through the synchronous callback, validate UTF-8 paths, then atomically publish a unique sibling temporary; failures preserve the reference and destination and throw.
 std::string Orchestrator::export_print(Print &print,
                                        const DynamicPrintConfig &config,
                                        const std::string &reference_path,
                                        const std::string &destination_path,
-                                       const GCodeExporterSelection &selection)
+                                       const GCodeExporterSelection &selection,
+                                       ThumbnailsGeneratorCallback thumbnail_cb)
 {
     const GCodeExporterSelection current_selection = this->select_gcode_exporter(config);
     if (selection.plugin_id != current_selection.plugin_id ||
@@ -3434,16 +3467,54 @@ std::string Orchestrator::export_print(Print &print,
         // These strings own the paths that the payload borrows until the plugin run returns.
         const std::string reference_path_utf8 = reference.string();
         const std::string temporary_path_utf8 = temporary.string();
+        std::vector<std::pair<std::string, std::string>> configuration_entries;
+        encode_gcode_export_configuration(config, configuration_entries);
+        const std::vector<std::pair<std::string, std::string>> extrusion_width_entries =
+            encode_gcode_export_extrusion_widths(print);
+        const std::vector<std::pair<std::string, std::string>> statistics_entries =
+            encode_gcode_export_statistics(print, config);
+
+        // The configuration and width entry vectors own these strings; do not modify them after taking their c_str() pointers.
+        std::vector<raw_gcode_export_entry> configuration_views;
+        configuration_views.reserve(configuration_entries.size());
+        std::vector<raw_gcode_export_entry> extrusion_width_views;
+        extrusion_width_views.reserve(extrusion_width_entries.size());
+        std::vector<raw_gcode_export_entry> statistics_views;
+        statistics_views.reserve(statistics_entries.size());
+        for (const std::pair<std::string, std::string> &entry : configuration_entries) {
+            configuration_views.push_back({entry.first.c_str(), entry.second.c_str()});
+        }
+        for (const std::pair<std::string, std::string> &entry : extrusion_width_entries) {
+            extrusion_width_views.push_back({entry.first.c_str(), entry.second.c_str()});
+        }
+        for (const std::pair<std::string, std::string> &entry : statistics_entries) {
+            statistics_views.push_back({entry.first.c_str(), entry.second.c_str()});
+        }
+        raw_gcode_export_metadata metadata = {};
+        metadata.struct_size = uint32_t(sizeof(metadata));
+        metadata.configuration.items = configuration_views.empty() ? nullptr : configuration_views.data();
+        metadata.configuration.count = configuration_views.size();
+        metadata.extrusion_widths.items = extrusion_width_views.empty() ? nullptr : extrusion_width_views.data();
+        metadata.extrusion_widths.count = extrusion_width_views.size();
+        metadata.statistics.items = statistics_views.empty() ? nullptr : statistics_views.data();
+        metadata.statistics.count = statistics_views.size();
+
         run_ctx_gcode_export context = {};
         context.operation = RAW_GCODE_EXPORT_OPERATION_EXPORT;
+        // The renderer lives until the plugin returns. It asks the GUI for each image in turn, without
+        // holding any Print state lock, and returns SKIPPED when no callback exists.
+        const GCodeThumbnailRenderer thumbnail_renderer(print, std::move(thumbnail_cb));
         context.config = ApiHost::to_config_handle(&config);
+        context.thumbnail_renderer = thumbnail_renderer.c_renderer();
         context.print = reinterpret_cast<const print_handle *>(&print);
         context.reference_path = reference_path_utf8.c_str();
         context.output_path = temporary_path_utf8.c_str();
+        context.metadata = &metadata;
         raw_plugin_run_payload payload = {};
         payload.data = &context;
 
         std::string reported_error;
+        // cancel_on_error is false: the thumbnail encoders that the exporter starts do not raise the global stop flag.
         const raw_plugin_execution_status status =
             this->execute_plugin(*plugin, &print, &payload, 1, false, &reported_error);
         if (status != RAW_PLUGIN_EXECUTION_SUCCESS) {
@@ -3472,9 +3543,9 @@ std::string Orchestrator::export_print(Print &print,
     return destination.string();
 }
 
-// Select the exporter and refuse an incompatible typed suffix before any work, then generate and reread a private
-// reference beside the requested destination, export it to the statistics-finalized path, and always remove the
-// reference. The caller keeps the post-processing scripts. Failures throw.
+// Select the exporter and refuse an incompatible typed suffix before any work, then generate a private reference
+// beside the requested destination (STEP_GCODE rereads it into the print statistics), export it to the
+// statistics-finalized path, and always remove the reference. The caller keeps the post-processing scripts. Failures throw.
 std::string Orchestrator::export_gcode_cli(Print &print, const std::string &requested_output_path)
 {
     const DynamicPrintConfig &config = print.full_print_config();
@@ -3488,8 +3559,9 @@ std::string Orchestrator::export_gcode_cli(Print &print, const std::string &requ
     const boost::filesystem::path reference = reference_directory /
         boost::filesystem::unique_path(".slic3r-cli-reference-%%%%-%%%%-%%%%.gcode");
     try {
-        const std::string reference_path = this->export_gcode(print, reference.string(), nullptr, nullptr);
-        Steps::StepReadGeneratedGcode::read_statistics(*this, print);
+        // The local viewer result is discarded: asking for it makes STEP_GCODE reread the reference and fill the statistics.
+        GCodeProcessorResult statistics_result;
+        const std::string reference_path = this->export_gcode(print, reference.string(), &statistics_result);
         const std::string finalized_path = print.print_statistics().finalize_output_path(requested_path);
         const std::string exported_path = this->export_print(
             print, config, reference_path, finalized_path, selection);

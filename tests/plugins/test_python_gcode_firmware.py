@@ -1,4 +1,21 @@
-"""Behavior tests for the Python GCODE_FIRMWARE provider and consumer adapters."""
+"""Test Python providers and consumers of the GCODE_FIRMWARE service.
+
+Controlled C-facing contexts invoke Python session callbacks, inspect their
+UTF-8 output and diagnostics, and check that buffers remain valid for the promised
+callback interval. Consumer tests verify copied results and malformed responses.
+Fixtures own session instances and keep callback storage alive until the call
+finishes; no complete slicing job is needed to check this binary boundary.
+
+Representative direct calls (branches are not a timeline):
+
+    test_complete_callback_order_and_embedded_nul_text()
+        |-- self.complete_session()
+        |-- self.firmware.make_gcode_firmware_instance()
+        |-- self.firmware.GCodeFirmwareView()
+        |-- view.reader_plugin_id()
+        |-- view.begin_print()
+        `-- self.datatree.Print()
+"""
 
 import ctypes
 import gc
@@ -244,6 +261,11 @@ class PythonGCodeFirmwareTests(unittest.TestCase):
             "reader_service",
             dict(self.generated.RunCtxGcodeFirmware._fields_),
         )
+
+    def test_firmware_context_no_longer_carries_the_thumbnail_renderer(self):
+        """Thumbnails are rendered by the exporter, so the firmware context has no renderer."""
+        self.assertNotIn("thumbnail_renderer", dict(self.generated.RunCtxGcodeFirmware._fields_))
+        self.assertFalse(hasattr(self.firmware.GCodeFirmwareContext, "thumbnail_renderer"))
 
     def test_reader_service_rejects_selection_and_completion_errors(self):
         generated = self.generated

@@ -1,11 +1,23 @@
-/* The production wipe service is exercised through borrowed phase payloads and
-   through the whole export pipeline. Compact owned plans isolate visit boundaries,
-   volume fallbacks, rounded-flow rows and speeds; sliced prints check tool commands,
-   platter positions and tower Z offsets without replacing downstream plugins.
-   Reader-derived statistics are checked against role/tool volumes and an
-   explicit post-export CLI read, preserving source-layer areas and metadata.
-   Overlapping model parts exercise typed surfaces and closed overhang fragments;
-   materialized Travel connectors into synthetic towers need machine travel speed. */
+/*
+The production wipe service is exercised through borrowed phase payloads and
+through the whole export pipeline. Compact owned plans isolate visit boundaries,
+volume fallbacks, rounded-flow rows and speeds; sliced prints check tool commands,
+platter positions and tower Z offsets without replacing downstream plugins.
+Reader-derived statistics are checked against role/tool volumes and an
+explicit post-export CLI read, preserving source-layer areas and metadata.
+Overlapping model parts exercise typed surfaces and closed overhang fragments;
+materialized Travel connectors into synthetic towers need machine travel speed.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- configure_print()
+        |-- host.prepare_plugin_host_context()
+        |-- host.prepare_plugin_run_context()
+        |-- run_service()
+        `-- check_leaf()
+*/
 #include <catch2/catch.hpp>
 #include <algorithm>
 #include <atomic>
@@ -2575,6 +2587,8 @@ TEST_CASE("Reader statistics fill preserves source areas and export metadata",
     stats.initial_extruder_id = 1;
     stats.total_toolchanges = 4;
     stats.printing_extruders = {0, 1};
+    stats.object_layer_count = 7;
+    stats.total_layer_count = 9;
     stats.is_computing_gcode = true;
     stats.estimated_print_time[1] = 123.0;
     const double expected_mass = 10.0 * area0 * 1.1 * 0.001 + 20.0 * area1 * 1.3 * 0.001;
@@ -2598,6 +2612,9 @@ TEST_CASE("Reader statistics fill preserves source areas and export metadata",
         CHECK(stats.initial_extruder_id == 1);
         CHECK(stats.total_toolchanges == 4);
         CHECK(stats.printing_extruders == std::vector<extruder_index_t>{0, 1});
+        CHECK(stats.object_layer_count == 7);
+        CHECK(stats.total_layer_count == 9);
+        CHECK(stats.statistics_available.load());
         CHECK(stats.is_computing_gcode.load());
     }
     result.print_statistics.volumes_per_role_per_extruder.clear();
@@ -2615,7 +2632,7 @@ TEST_CASE("Reader statistics fill preserves source areas and export metadata",
 
 // Export a sliced single-tool print or a two-tool tower print through production
 // plugins. Reconcile reader volumes independently, then export without a viewer
-// result and explicitly reread before measured filename finalization, as the CLI does.
+// result (statistics unavailable) and export again with a local result, as the CLI does.
 TEST_CASE("Export statistics include the tower share for preview and explicit CLI reads",
           "[plugins][gcode][wipe-tower][print-statistics][integration]")
 {
@@ -2698,9 +2715,12 @@ TEST_CASE("Export statistics include the tower share for preview and explicit CL
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, cli_path, nullptr));
     CHECK(print.print_statistics().estimated_print_time.empty());
     CHECK(print.print_statistics().total_used_filament == 0.0);
+    CHECK_FALSE(print.print_statistics().statistics_available);
     CHECK(boost::filesystem::exists(print.gcode_reader_source_path()));
     CHECK(print.gcode_reader_plugin_id() == result.reader_plugin_id);
-    REQUIRE_NOTHROW(Steps::StepReadGeneratedGcode::read_statistics(Orchestrator::instance(), print));
+    GCodeProcessorResult local_result;
+    REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, cli_path, &local_result));
+    CHECK(stats.statistics_available);
     CHECK(stats.total_extruded_volume == Approx(expected_volume));
     CHECK(stats.total_used_filament == Approx(expected_length));
     CHECK(stats.total_weight == Approx(expected_mass));

@@ -14,7 +14,6 @@
 #include <utility>
 
 #include <boost/nowide/fstream.hpp>
-#include <boost/log/trivial.hpp>
 
 #include "libslic3r/Api/host/GCodeReaderService.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -23,6 +22,11 @@
 #include "libslic3r/Utils.hpp"
 
 /*
+After command generation, the host can request a Reader pass for a preview and
+statistics. This module opens the writer's readable reference, streams chunks
+through the selected Reader, and turns its events into the viewer result and
+Print totals. It reads commands, not the sliced layers that produced them.
+
 Generated G-code reading and statistics implementation
 =======================================
 
@@ -35,6 +39,13 @@ each logical tool's configured diameter, density and price per kg. The tower
 share uses the WipeTower role and does not require object labels. Source paths
 and their firmware-selected reader IDs remain owned by Print after export.
 Changing the reader selector requires STEP_GCODE to run again and recreate the source file.
+
+Representative direct calls (branches are not a timeline):
+
+    run()
+        |-- print.gcode_reader_source_path()
+        |-- stream.read()
+        `-- reader.read_for_viewer()
 */
 
 namespace Slic3r::Steps::StepReadGeneratedGcode {
@@ -61,6 +72,8 @@ void run(Orchestrator &orchestrator,
          std::string_view reader_plugin_id,
          GCodeProcessorResult &result)
 {
+    // Lower the flag before anything can fail: a reread that does not complete leaves the statistics unavailable.
+    print.print_statistics().statistics_available = false;
     const std::string source_path = print.gcode_reader_source_path();
     if (source_path.empty())
         throw std::runtime_error("The G-code writer did not publish a Reader source path.");
@@ -94,11 +107,14 @@ void run(Orchestrator &orchestrator,
 
 // Borrow a generated reader result and its matching print config; convert each
 // logical tool's volume with configured filament properties and set only time,
-// filament totals and tower shares. Preserve source areas and export metadata;
-// positive diameters are required and allocation/formatting failures propagate.
+// filament totals, tower shares and the support flag. Preserve source areas and the
+// plan facts; positive diameters are required and allocation/formatting failures propagate.
+// The availability flag is lowered first and raised only after every value is set,
+// so a failure leaves the statistics marked unavailable.
 void fill_print_statistics(const GCodeProcessorResult &result, const PrintConfig &config,
                            PrintStatistics &stats)
 {
+    stats.statistics_available = false;
     const uint8_t normal = static_cast<uint8_t>(PrintEstimatedStatistics::ETimeMode::Normal);
     const float time = result.print_statistics.modes[normal].time;
     stats.estimated_print_time.clear();
@@ -136,31 +152,11 @@ void fill_print_statistics(const GCodeProcessorResult &result, const PrintConfig
             }
         }
     }
-}
-
-// Borrow a completed Print whose source and selected reader are still published;
-// read a local owned viewer result and fill its time/material totals. Keep the
-// source file and other statistics intact. Cancellation propagates; other read
-// failures produce a non-critical warning rather than failing the exported artifact.
-void read_statistics(Orchestrator &orchestrator, Print &print)
-{
-    std::string warning;
-    try {
-        GCodeProcessorResult result;
-        run(orchestrator, print, print.gcode_reader_plugin_id(), result);
-        fill_print_statistics(result, print.config(), print.print_statistics());
-        return;
-    } catch (const CanceledException &) {
-        throw;
-    } catch (const std::exception &error) {
-        warning = "G-code statistics are unavailable because the generated text could not be read: " +
-                  std::string(error.what());
-    } catch (...) {
-        warning = "G-code statistics are unavailable because the generated text reader failed unexpectedly.";
-    }
-    BOOST_LOG_TRIVIAL(warning) << warning;
-    Print::StatusMonitor status(print);
-    status.active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL, warning);
+    // A role is listed in used_filaments_per_role only when the Reader saw material extruded with it.
+    stats.has_support =
+        result.print_statistics.used_filaments_per_role.count(GCodeExtrusionRole::SupportMaterial) != 0 ||
+        result.print_statistics.used_filaments_per_role.count(GCodeExtrusionRole::SupportMaterialInterface) != 0;
+    stats.statistics_available = true;
 }
 
 } // namespace Slic3r::Steps::StepReadGeneratedGcode

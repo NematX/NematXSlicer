@@ -22,12 +22,44 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* The legacy generator writes ordered layer paths, tracks writer state and supplies
-   script placeholders. Each export owns a WipeTower2 for global-tower paths;
-   generated layers borrow it only during that export. Filament placeholders and
-   totals use writer measurements, with no separate tower-consumption addition.
-   First-layer placeholders merge current config-only tower envelopes at export. */
+/*
+GCode is the legacy FFF command generator. It traverses sliced layers in print
+order, prepares travel/tool changes and extrusion moves, and writes them through
+its machine writer. Script placeholders expose model, configuration and measured
+execution values at the points where user G-code is expanded.
+
+The source Print supplies borrowed geometry and settings for one export. GCode
+owns its writer state, temporary ordering/output data and placeholder values.
+Do not confuse that temporary export state with the layers owned by Print or
+with the independently implemented plugin-based printing-plan writer.
+
+The legacy generator writes ordered layer paths, tracks writer state and supplies
+script placeholders. Each export owns a WipeTower2 for global-tower paths;
+generated layers borrow it only during that export. Filament placeholders and
+totals use writer measurements, with no separate tower-consumption addition.
+First-layer placeholders merge current config-only tower envelopes at export.
+
+Intel redesigned some TBB interface considerably when merging TBB with their oneAPI set of libraries, see GH #7332.
+We are using quite an old TBB 2017 U7. Before we update our build servers, let's use the old API, which is deprecated in up to date TBB.
+
+Representative direct calls (branches are not a timeline):
+
+    GCodeGenerator::do_export()
+        |-- DoExport::validate_custom_gcode()
+        |-- this->_do_export()
+        |-- m_processor->finalize()
+        |-- DoExport::update_print_estimated_stats()
+        `-- rename_file()
+
+    GCodeGenerator::_do_export()
+        |-- encode_full_config()
+        |-- DoExport::init_gcode_processor()
+        |-- this->process_layers()
+        |-- collect_layers_to_print()
+        `-- DoExport::update_print_stats_and_format_filament_stats()
+*/
 #include "GCode.hpp"
+#include "Api/host/GCodeExportMetadata.hpp"
 #include "Api/host/Orchestrator.hpp"
 #include "Api/host/GCodeThumbnailRenderer.hpp"
 #include "Api/plugin/cpp/gcode/GCodeThumbnailViews.hpp"
@@ -99,8 +131,7 @@
 #include "Thread.hpp"
 #include "Utils.hpp"
 
-// Intel redesigned some TBB interface considerably when merging TBB with their oneAPI set of libraries, see GH #7332.
-// We are using quite an old TBB 2017 U7. Before we update our build servers, let's use the old API, which is deprecated in up to date TBB.
+
 #if ! defined(TBB_VERSION_MAJOR)
     #include <oneapi/tbb/version.h>
 #endif
@@ -2189,7 +2220,8 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
         const slic3r_api::Config config_view = print_view.config();
         thumbnail_blocks = slic3r_api::encode_gcode_thumbnails(
             slic3r_api::OrchestratorView(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance())),
-            print_view, renderer.c_renderer(), slic3r_api::default_gcode_thumbnail_requests(config_view));
+            print_view, config_view, renderer.c_renderer(),
+            slic3r_api::default_gcode_thumbnail_requests(config_view));
         file.write(thumbnail_blocks[RAW_GCODE_THUMBNAIL_FILE_PREFIX]);
     }
 
@@ -5542,6 +5574,7 @@ void GCodeGenerator::apply_print_configs(const Print &print)
     m_current_perimeter_extrusion_width = Flow::extrusion_width("perimeter_extrusion_width", m_config, m_writer.tool()?m_writer.tool()->id():0);
 }
 
+// Serialize the filtered full-print entries into borrowed destination text; existing text is retained and string allocation failures propagate.
 void GCodeGenerator::append_full_config(const Print& print, std::string &str)
 {
     std::vector<std::pair<std::string, std::string>> config;
@@ -5551,31 +5584,10 @@ void GCodeGenerator::append_full_config(const Print& print, std::string &str)
     }
 }
 
+// Delegate serialization to the shared filter using Print's full configuration; append to config without clearing and propagate allocation failures.
 void GCodeGenerator::encode_full_config(const Print& print, std::vector<std::pair<std::string, std::string>>& config)
 {
-    const DynamicPrintConfig &cfg = print.full_print_config();
-    // Sorted list of config keys, which shall not be stored into the G-code. Initializer list.
-    const std::vector<std::string_view> banned_keys { 
-        "compatible_printers"sv,
-        "compatible_prints"sv,
-        //FIXME The print host keys should not be exported to full_print_config anymore. The following keys may likely be removed.
-        "print_host"sv,
-        "printhost_apikey"sv,
-        "printhost_cafile"sv,
-        "printhost_client_cert"sv,
-        "printhost_client_cert_password"sv,
-        "printhost_port"sv,
-    };
-    assert(std::is_sorted(banned_keys.begin(), banned_keys.end()));
-    auto is_banned = [&banned_keys](const std::string &key) {
-        return std::binary_search(banned_keys.begin(), banned_keys.end(), key);
-    };
-    config.reserve(config.size() + cfg.keys().size());
-    for (const std::string& key : cfg.keys()) {
-        if (!is_banned(key) && (cfg.option(key)->is_enabled() || !cfg.get_option_def(key)->is_optional))
-            config.emplace_back(key, cfg.opt_serialize(key));
-    }
-    config.shrink_to_fit();
+    encode_gcode_export_configuration(print.full_print_config(), config);
 }
 
 void GCodeGenerator::set_extruders(const std::vector<extruder_index_t>& extruder_ids)

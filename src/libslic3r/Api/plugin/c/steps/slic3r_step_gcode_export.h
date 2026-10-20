@@ -5,8 +5,8 @@
 #ifndef slic3r_step_gcode_export_h_
 #define slic3r_step_gcode_export_h_
 
-#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MINOR 0u
+#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MAJOR 2u
+#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MINOR 2u
 
 #include <stddef.h>
 #include <stdint.h>
@@ -29,7 +29,24 @@ the detailed rules for optional fields, result publication and input requests.
 extern "C" {
 #endif
 
-typedef struct raw_gcode_export_metadata raw_gcode_export_metadata;
+typedef struct raw_gcode_export_entry {
+    const char *key;
+    const char *value;
+} raw_gcode_export_entry;
+
+typedef struct raw_gcode_export_list {
+    const raw_gcode_export_entry *items;
+    size_t count;
+} raw_gcode_export_list;
+
+/* Read-only export metadata borrowed until the synchronous EXPORT callback returns. */
+typedef struct raw_gcode_export_metadata {
+    uint32_t struct_size;
+    raw_gcode_export_list configuration;
+    raw_gcode_export_list extrusion_widths;
+    /* ABI 2.2: measured print statistics, empty when they are unavailable. */
+    raw_gcode_export_list statistics;
+} raw_gcode_export_metadata;
 
 /* Choose whether a run checks exporter compatibility or writes an exported file. */
 typedef enum raw_gcode_export_operation {
@@ -88,8 +105,35 @@ The exporter may read reference_path but must not modify, rename or remove it.
 output_path names a unique temporary path supplied by the host; the exporter
 creates and closes the file but does not publish or remove it. The host publishes
 the final destination only after successful execution and removes partial output
-after failure. thumbnail_renderer and metadata are optional borrowed inputs and
-are null when unavailable. The metadata type is opaque in version 1.0.
+after failure.
+
+The reference holds G-code only. The exporter writes the file header, notes,
+extrusion-width comments, a copy of the reference, the statistics, the filtered
+configuration, and trailing thumbnails in the format's order. In EXPORT, thumbnail_renderer is
+never null: it is the host bridge to the graphical renderer, and a render request
+returns SKIPPED when no graphical renderer exists (command line). Rendering is
+synchronous and sequential; the host holds no print state lock while it waits for
+the graphical interface. A render cancelled with the Print, or that fails,
+reports an error with its message and fails the export. In QUERY it is null.
+
+In ABI 2.1, metadata is non-null in EXPORT and null in QUERY. Its size must cover
+the prefix through extrusion_widths; larger structures are accepted. Each list
+has null items only when count is zero. Entry strings are non-null, null-terminated
+UTF-8 owned by the host for the callback; the plugin neither modifies nor frees
+them. A pair of empty strings separates extrusion-width regions. Configuration
+values are filtered before they are written to the file; plugins still receive
+the full configuration through config and the configuration API, so this filter
+does not limit plugin access to settings. The ABI 2.0 promise that metadata is
+always null is superseded: a 2.0 manifest is accepted and receives the same
+non-null metadata in EXPORT.
+
+ABI 2.2 adds the statistics list after extrusion_widths. Each entry is a label and a
+value formatted by the host (for example "filament used [mm]" and "12.34, 0.00"), in the
+order in which a text file lists them. The list is empty when the host has no measured
+statistics for this export, for example when the G-code was generated without reading
+it back; it is never empty otherwise, because several entries are unconditional. An
+exporter therefore tests statistics.count == 0 and writes no statistics line in that case.
+A structure whose size stops before the statistics field (ABI 2.1) means no statistics.
 
 The exporter checks is_cancelled during long work and stops when cancellation is
 requested. I/O failure or cancellation fails the export; the host preserves the

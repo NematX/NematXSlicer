@@ -360,6 +360,7 @@ void Print::clear() {
     // Plans borrow islands and layers; release them before their owners.
     this->reset_printing_plan();
     this->reset_gcode_reader_source_path();
+    m_print_statistics.statistics_available = false;
     this->reset_step_execution_plan_all_unguarded();
     m_pipeline_state.clear();
     m_running_step.store(STEP_NONE, std::memory_order_release);
@@ -510,6 +511,11 @@ bool Print::mark_step_for_execution_unguarded(slicing_step_t step)
 {
     if (step == STEP_NONE)
         return false;
+    // Every invalidation of STEP_GCODE by the step plan (config change, replay, full reset) goes through here;
+    // the measured statistics describe the old G-code and are no longer usable. Print::clear() and
+    // PrintStatistics::clear() also lower the availability flag.
+    if (step == STEP_GCODE)
+        m_print_statistics.statistics_available = false;
     PipelineStepState &state = m_pipeline_state[step];
     const bool affected = state.done || running_step() == step;
     const bool warnings_changed = std::any_of(state.warnings.begin(), state.warnings.end(),

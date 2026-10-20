@@ -35,9 +35,16 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Printing/PrintingPlanFacts.hpp"
 #include "libslic3r/PrintObject.hpp"
 
 /*
+Interpret configured G-code scripts on behalf of firmware sessions. Preparation
+builds the script-visible settings; processing expands the template against
+those settings and proposed machine outputs. Only a fully successful expansion
+may update the caller's machine state, so a bad script cannot publish half of
+its requested changes.
+
 Host G-code script processor implementation
 ===========================================
 
@@ -48,6 +55,21 @@ published back only after the complete script succeeds.
 
 Export-wide globals are set once in the constructor, machine options remain
 read-write, and execution options are read-only values filled by the firmware.
+
+Representative direct calls (branches are not a timeline):
+
+    GCodeScriptProcessor::Impl::prepare()
+        |-- create_machine_options()
+        |-- create_execution_options()
+        |-- create_specific_options()
+        `-- merge_producer_config()
+
+    GCodeScriptProcessor::Impl::process()
+        |-- resolve_object_names()
+        |-- m_parser.process()
+        |-- validate_outputs()
+        |-- infer_position_from_gcode()
+        `-- publish_outputs()
 */
 
 namespace Slic3r {
@@ -72,24 +94,8 @@ std::array<std::optional<double>, 3> position_after_gcode(
 bool is_machine_option_key(const std::string &key);
 // Return true when any finalized plan extrusion belongs to a wipe tower; a missing plan holds none.
 bool plan_has_wipe_tower(const Printing::PrintingPlan *plan);
-// Hold layer and tool facts extracted from the finalized plan without retaining plan ownership.
-struct PlanFacts
-{
-    // First concrete tool in plan order: the tool GCodePreamble selects before start_gcode.
-    extruder_index_t initial_tool = 0;
-    // Changes between consecutive concrete tool visits, in plan order.
-    int32_t toolchanges = 0;
-    // PrintingLayerGroup count, which is the range of layer_num.
-    int32_t layer_count = 0;
-    // Highest layer print Z of the plan, 0 without layers.
-    coord_t max_print_z = 0;
-    // One flag per tool slot, set when a tool visit of the plan uses that tool.
-    std::vector<unsigned char> used_tools;
-};
-// Read a possibly null finalized plan, count layers and concrete tool changes, and return one usage flag per supplied tool slot; callers provide at least 255 slots because PlaceholderParser returns element 0 for an index beyond a vector, which would make is_extruder_used[n] falsely report tool n used whenever tool 0 is used, and an out-of-range plan tool throws.
-PlanFacts summarize_plan(const Printing::PrintingPlan *plan, size_t tool_slots);
-// Count borrowed Print object extrusion Z values with the legacy total_layer_count formula, including complete-object instances but excluding support layers; the returned scalar does not mutate or retain the Print.
-int32_t object_layer_count(const Print &print);
+// Return one usage flag per tool slot for the used tools of a plan; callers provide at least 255 slots because PlaceholderParser returns element 0 for an index beyond a vector, which would make is_extruder_used[n] falsely report tool n used whenever tool 0 is used, and an out-of-range plan tool throws.
+std::vector<unsigned char> used_tool_flags(const Printing::PlanFacts &facts, size_t tool_slots);
 // Publish dimensions derived from a borrowed Print into parser-owned options, using zero vectors when there are no object instances, the bed shape is undefined, or the first-layer envelope is empty; a non-empty degenerate first-layer envelope keeps its true bounds, and option allocation or parser failures propagate without changing the Print.
 void set_dimension_globals(PlaceholderParser &parser, const Print &print);
 // Convert borrowed colour settings and publish parser-owned integer vectors, using zero for invalid colours or an empty colour vector; an index beyond a shorter vector reuses its first colour, extruder_count controls non-empty vector sizes, and option failures propagate.
@@ -196,58 +202,13 @@ bool plan_has_wipe_tower(const Printing::PrintingPlan *plan)
     return false;
 }
 
-// Read a possibly null finalized plan, count layers and concrete tool changes, and return one usage flag per supplied tool slot; callers provide at least 255 slots because PlaceholderParser returns element 0 for an index beyond a vector, which would make is_extruder_used[n] falsely report tool n used whenever tool 0 is used, and an out-of-range plan tool throws.
-PlanFacts summarize_plan(const Printing::PrintingPlan *plan, size_t tool_slots)
+// Expand the sorted used tools into one 0/1 flag per tool slot, so a script indexes is_extruder_used by tool number. Expects tool_slots larger than every used tool (callers pass at least 255, see the declaration); a larger tool throws std::out_of_range. The facts are not modified.
+std::vector<unsigned char> used_tool_flags(const Printing::PlanFacts &facts, size_t tool_slots)
 {
-    PlanFacts facts;
-    facts.used_tools.assign(tool_slots, 0);
-    if (plan == nullptr)
-        return facts;
-
-    std::optional<extruder_index_t> previous_tool;
-    for (const Printing::PrintingGroup &group : plan->groups)
-        for (const Printing::PrintingLayerGroup &layer : group.layers) {
-            ++facts.layer_count;
-            facts.max_print_z = std::max(facts.max_print_z, layer.print_z);
-            for (const Printing::PrintingToolGroup &tool : layer.tool_groups) {
-                if (tool.extruder_id == EXTRUDER_ID_UNKNOWN)
-                    continue;
-                facts.used_tools.at(tool.extruder_id) = 1;
-                if (!previous_tool)
-                    facts.initial_tool = tool.extruder_id;
-                else if (*previous_tool != tool.extruder_id)
-                    ++facts.toolchanges;
-                previous_tool = tool.extruder_id;
-            }
-        }
-    return facts;
-}
-
-// Count borrowed Print object extrusion Z values with the legacy total_layer_count formula, including complete-object instances but excluding support layers; the returned scalar does not mutate or retain the Print.
-int32_t object_layer_count(const Print &print)
-{
-    int32_t count = 0;
-    if (print.config().complete_objects.value) {
-        for (const PrintObject &object : print.objects()) {
-            std::vector<coord_t> z_values;
-            for (const Layer &layer : object.layers())
-                if (layer.has_extrusions())
-                    z_values.push_back(layer.scaled_print_z());
-            std::sort(z_values.begin(), z_values.end());
-            const std::vector<coord_t>::iterator unique_end =
-                std::unique(z_values.begin(), z_values.end());
-            count += int32_t(object.instances().size() * (unique_end - z_values.begin()));
-        }
-        return count;
-    }
-
-    std::vector<coord_t> z_values;
-    for (const PrintObject &object : print.objects())
-        for (const Layer &layer : object.layers())
-            if (layer.has_extrusions())
-                z_values.push_back(layer.scaled_print_z());
-    std::sort(z_values.begin(), z_values.end());
-    return int32_t(std::unique(z_values.begin(), z_values.end()) - z_values.begin());
+    std::vector<unsigned char> flags(tool_slots, 0);
+    for (extruder_index_t tool : facts.used_tools)
+        flags.at(tool) = 1;
+    return flags;
 }
 
 // Publish dimensions derived from a borrowed Print into parser-owned options, using zero vectors when there are no object instances, the bed shape is undefined, or the first-layer envelope is empty; a non-empty degenerate first-layer envelope keeps its true bounds, and option allocation or parser failures propagate without changing the Print.
@@ -421,8 +382,7 @@ GCodeScriptProcessor::Impl::Impl(const Print &print,
         print.config().single_extruder_multi_material_priming.value);
 
     // Set export constants after the final plan is available; dimensions come from the sliced Print and remain fixed for every script.
-    const PlanFacts plan_facts = summarize_plan(
-        print.printing_plan(), std::max(size_t(255), print.config().nozzle_diameter.size()));
+    const Printing::PlanFacts plan_facts = Printing::summarize_plan(print.printing_plan());
     m_max_layer_z = unscaled(plan_facts.max_print_z);
     m_parser.set("initial_tool", int(plan_facts.initial_tool));
     m_parser.set("initial_extruder", int(plan_facts.initial_tool));
@@ -430,9 +390,10 @@ GCodeScriptProcessor::Impl::Impl(const Print &print,
                  print.config().filament_type.get_at(size_t(plan_facts.initial_tool)));
     m_parser.set("total_toolchanges", int(plan_facts.toolchanges));
     m_parser.set("all_layer_count", int(plan_facts.layer_count));
-    m_parser.set("total_layer_count", int(object_layer_count(print)));
+    m_parser.set("total_layer_count", int(Printing::object_layer_count(print)));
     m_parser.set("max_layer_z", m_max_layer_z);
-    m_parser.set("is_extruder_used", new ConfigOptionBools(plan_facts.used_tools));
+    m_parser.set("is_extruder_used", new ConfigOptionBools(used_tool_flags(
+        plan_facts, std::max(size_t(255), print.config().nozzle_diameter.size()))));
     m_parser.set("num_extruders", int(print.config().nozzle_diameter.size()));
     set_dimension_globals(m_parser, print);
     set_colour_globals(m_parser, print.config(), m_extruder_count);

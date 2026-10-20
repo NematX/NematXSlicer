@@ -108,7 +108,17 @@ struct PrintStatistics
     std::map<extruder_index_t, double> filament_stats; // extruder id -> volume in mm3
     std::vector<std::pair<coord_t, float>> _layer_area_stats; // print_z to area
 
+    // Z-distinct layers of the objects only (the "objects layers count" of the exported statistics).
+    int                             object_layer_count;
+    // Every PrintingLayerGroup of the PrintingPlan, auxiliary layers included (the "total layers count" of the exported statistics).
+    int                             total_layer_count;
+    // True when the Reader saw a positive filament volume extruded with a support or support interface role.
+    bool                            has_support;
+
     std::atomic_bool is_computing_gcode;
+    // True only after the Reader result of the current G-code has been fully converted into the measured totals above.
+    // It is the sole signal that the measured values are usable; zero totals never mean "unavailable".
+    std::atomic_bool statistics_available;
 
     // Copy measured print statistics, including tower shares, into a placeholder config.
     DynamicConfig           config() const;
@@ -138,7 +148,11 @@ struct PrintStatistics
         color_extruderid_to_used_filament.clear();
         color_extruderid_to_used_weight.clear();
         _layer_area_stats.clear();
+        object_layer_count     = 0;
+        total_layer_count      = 0;
+        has_support            = false;
         is_computing_gcode = false;
+        statistics_available = false;
     }
 
     static const std::string FilamentUsedG;

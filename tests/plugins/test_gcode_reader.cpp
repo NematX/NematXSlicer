@@ -41,10 +41,10 @@
 #include "libslic3r/Plugins/GCode/Reader/RepRapGCodeReaderState.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
-/* Tests for normalized G-code Reader events, built-in command handling,
-   host viewer conversion, and legacy GCodeProcessor results. */
-
 /*
+Tests for normalized G-code Reader events, built-in command handling,
+host viewer conversion, and legacy GCodeProcessor results.
+
 G-code reader event tests
 =========================
 
@@ -55,7 +55,19 @@ real run payload and capture the same callbacks that the host implements.
 Viewer material tests use Print settings to distinguish single-extruder
 multi-material (SEMM) shared retraction debt from independent tool debts,
 and compare role/tool volumes with the existing length and mass totals.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- ensure_plugin_test_runtime_initialized()
+        |-- Orchestrator::instance()
+        |-- initial_state()
+        |-- print.config()
+        |-- config.nozzle_diameter.set()
+        `-- execute_reader()
 */
+
+
 
 namespace {
 
@@ -101,6 +113,34 @@ private:
     const char *m_id;
     int32_t m_priority;
     bool m_fail_probe;
+};
+
+// Reader that never matches a probe and whose read always throws, to exercise a failing reread of generated G-code.
+class FailingReadTestReader final : public slic3r_api::GCodeReaderPluginBase
+{
+public:
+    // Bind the test reader to the process-wide orchestrator used by plugin tests.
+    explicit FailingReadTestReader(orchestrator_handle *orchestrator) : GCodeReaderPluginBase(orchestrator) {}
+
+private:
+    // Return the stable test reader identity.
+    const char *id_impl() const noexcept override { return "gcode.reader.test.failing_read"; }
+    // Label the test reader.
+    const char *name_impl() const noexcept override { return "gcode.reader.test.failing_read"; }
+    // Describe the test reader.
+    const char *description_impl() const noexcept override
+    { return "Fails every read, so that tests can exercise a failing reread."; }
+    // Use no dependencies so the reader is isolated.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Rank below the built-in readers so that detection never selects it.
+    int32_t priority_impl() const noexcept override { return 1000; }
+    // Never claim a G-code prefix.
+    uint32_t probe_impl(std::string_view) const override { return 0u; }
+    // Fail the read after it started.
+    void read_impl(const plugin_run_context &, const run_ctx_gcode_reader &, slic3r_api::GCodeStateTracker &) const override
+    {
+        throw std::runtime_error("Deliberate Reader read failure.");
+    }
 };
 
 // Exercise both supported extension styles of the common dispatcher. G91 is
@@ -3891,6 +3931,7 @@ void register_gcode_reader_test_providers(orchestrator_handle *orchestrator)
     static ProbeTestReader lexical_second(orchestrator, "gcode.reader.test.b", 10, false);
     static ProbeTestReader lower_priority(orchestrator, "gcode.reader.test.lower_priority", 20, false);
     static ProbeTestReader failing_probe(orchestrator, "gcode.reader.test.failing_probe", 0, true);
+    static FailingReadTestReader failing_read(orchestrator);
     static CommonHandlerOverrideReader common_handlers(orchestrator);
     static RepRapHandlerOverrideReader reprap_handlers(orchestrator);
     static MarlinHandlerOverrideReader marlin_handlers(orchestrator);
@@ -3901,6 +3942,7 @@ void register_gcode_reader_test_providers(orchestrator_handle *orchestrator)
     orchestrator_register_plugin(orchestrator, lexical_first.c_instance());
     orchestrator_register_plugin(orchestrator, lower_priority.c_instance());
     orchestrator_register_plugin(orchestrator, failing_probe.c_instance());
+    orchestrator_register_plugin(orchestrator, failing_read.c_instance());
     orchestrator_register_plugin(orchestrator, common_handlers.c_instance());
     orchestrator_register_plugin(orchestrator, reprap_handlers.c_instance());
     orchestrator_register_plugin(orchestrator, marlin_handlers.c_instance());

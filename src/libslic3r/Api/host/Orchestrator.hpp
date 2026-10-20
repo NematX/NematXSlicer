@@ -98,6 +98,12 @@ namespace ApiClipper { class ClipperShapes; }
 // the translation unit containing C exports used only by external plugins.
 void link_config_definition_api() noexcept;
 
+// Tell whether a plugin started through the C API by the plugin running on this thread raises the global stop flag
+// when it fails. Orchestrator::execute_plugin() sets the answer to its cancel_on_error argument for the thread that runs
+// the plugin. Only the stop flag is concerned: messages still go to the log and to the GUI message queue. Threads that the
+// plugin starts itself, including parallel helpers, keep the default true.
+bool c_api_executions_cancel_on_error();
+
 } // namespace Slic3r
 
 // Host-side state passed back to callbacks through the opaque C ABI handle.
@@ -651,21 +657,23 @@ public:
     // Export the already-sliced print through the G-code side of the step
     // pipeline. The path_template is resolved with Print::output_filepath()
     // before STEP_GCODE runs, so the selected G-code plugin receives the exact
-    // file path it must create.
+    // file path it must create. The file is the G-code reference: it holds no
+    // header, notes or thumbnails, which export_print() adds. No image is rendered here.
     std::string export_gcode(Print &print_to_export,
                              const std::string &path_template,
-                             GCodeProcessorResult *result,
-                             ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+                             GCodeProcessorResult *result);
 
     // Resolve and query the exporter chosen by a borrowed configuration copy, returning its ID and extension or throwing.
     GCodeExporterSelection select_gcode_exporter(const DynamicPrintConfig &config);
-    // Export a borrowed reference to a destination and atomically publish it; failures preserve both inputs and throw.
+    // Export a borrowed reference with configuration, sliced-width and (when available) statistics metadata, then atomically publish the destination or throw. The reference is never reread here.
+    // thumbnail_cb renders the images the exporter asks for (empty: none, as on the command line).
     std::string export_print(Print &print,
                              const DynamicPrintConfig &config,
                              const std::string &reference_path,
                              const std::string &destination_path,
-                             const GCodeExporterSelection &selection);
-    // Generate and reread a private reference beside the requested destination, export its finalized path, and remove the reference.
+                             const GCodeExporterSelection &selection,
+                             ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    // Generate a private reference beside the requested destination (STEP_GCODE rereads it for the statistics), export its finalized path, and remove the reference.
     std::string export_gcode_cli(Print &print, const std::string &requested_output_path);
 
     Orchestrator(const Orchestrator&) = delete;

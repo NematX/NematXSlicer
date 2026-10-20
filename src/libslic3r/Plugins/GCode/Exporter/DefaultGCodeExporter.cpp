@@ -5,37 +5,52 @@
 
 #include "DefaultGCodeExporter.hpp"
 
-#include <array>
-#include <fstream>
+#include <algorithm>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 
-#include <boost/nowide/fstream.hpp>
-
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeExporterPlugin.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 
 /*
 Built-in G-code text exporter
 =============================
 
-The provider advertises the text extension and copies the generated reference
-to the host-supplied temporary path. It does not add metadata, invoke scripts,
-or publish the user's destination; the host handles publication after close.
+The provider advertises the text extension and writes the host-supplied
+temporary path: thumbnails, generated producer line, notes and extrusion widths
+before the reference; the statistics (when the host measured them), the filtered configuration and end thumbnails follow it.
+Thumbnails are encoded before the file is opened, so a render failure creates
+nothing. It does not invoke scripts or publish the destination; the host handles
+publication after close.
 
 Representative direct calls (branches are not a timeline):
 
     DefaultGCodeExporter::export_impl()
-        |-- input.read()
-        |-- output.write()
-        |-- output.flush()
-        `-- output.close()
+        |-- build_gcode_text_envelope()
+        `-- write_gcode_text_file()
 */
 
 namespace slic3r_api { namespace GCodeGeneration { namespace Exporter {
 namespace {
 
 const char *const k_no_dependencies[] = { nullptr };
+
+// Settings of the envelope: the notes and every setting of the default thumbnail requests.
+const raw_used_config_key k_used_keys[] = {
+    {"notes", RAW_CO_STRING, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnail_background", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnail_background_color", RAW_CO_STRING, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnail_color_mode", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnails", RAW_CO_VECTOR_POINT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnails_color", RAW_CO_STRING, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnails_end_file", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnails_format", RAW_CO_ENUM, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnails_tag_format", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnails_with_bed", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"thumbnails_with_support", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
+};
 
 class DefaultGCodeExporter final : public GCodeExporterPluginBase
 {
@@ -47,11 +62,20 @@ private:
     // Return the stable built-in exporter identity.
     const char *id_impl() const noexcept override { return "gcode.exporter.simple"; }
 
-    // Describe the byte-preserving text exporter in user-facing lists.
+    // Describe the text exporter in user-facing lists.
     const char *name_impl() const noexcept override { return "Simple G-code exporter"; }
 
-    // State that this provider copies the generated G-code reference unchanged.
-    const char *description_impl() const noexcept override { return "Copies the generated G-code reference unchanged."; }
+    // Return the stable user-facing description without reading run state or allocating; the static text remains valid for the process lifetime.
+    const char *description_impl() const noexcept override
+    { return "Writes a versioned header, notes, and extrusion-width comments around the reference, with statistics (when available) and filtered configuration before any end thumbnail."; }
+
+    // Declare the settings read by the envelope; the host checks that they exist.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
+    {
+        if (keys != nullptr)
+            std::copy(std::begin(k_used_keys), std::end(k_used_keys), keys);
+        return int32_t(std::size(k_used_keys));
+    }
 
     // Supply no plugin dependencies for this self-contained exporter.
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
@@ -62,7 +86,7 @@ private:
     // Accept every firmware configuration and advertise the text-file suffix.
     GCodeExportQuery query_impl(const Config &, std::string_view) const override;
 
-    // Copy the reference in bounded blocks and stop on read, write, flush, close, or cancellation failure.
+    // Format the host-provided ABI 2.2 metadata with the configuration copy, then write it around the reference; borrowed inputs are retained only for the call and render, I/O, or cancellation failures throw.
     void export_impl(const plugin_run_context &run_context,
                      const Print &print,
                      const Config &config,
@@ -83,7 +107,7 @@ GCodeExportQuery DefaultGCodeExporter::query_impl(const Config &, std::string_vi
     return query;
 }
 
-// Read the borrowed UTF-8 reference in bounded blocks and close the borrowed temporary output; retain neither path and throw on open, read, write, flush, close, or cancellation failure.
+// Format thumbnails, notes, widths and ABI 2.2 metadata before opening output, then copy the reference and ordered trailer; borrowed inputs are not retained and cancellation, encoding, or I/O failures throw.
 void DefaultGCodeExporter::export_impl(const plugin_run_context &run_context,
                                        const Print &print,
                                        const Config &config,
@@ -92,43 +116,13 @@ void DefaultGCodeExporter::export_impl(const plugin_run_context &run_context,
                                        GCodeThumbnailRendererView thumbnail_renderer,
                                        const raw_gcode_export_metadata *metadata) const
 {
-    (void)print;
-    (void)config;
-    (void)thumbnail_renderer;
-    (void)metadata;
     throw_if_cancelled(&run_context);
 
-    const std::string reference_path(reference_path_utf8);
-    const std::string output_path(temporary_output_path_utf8);
-    boost::nowide::ifstream input(reference_path.c_str(), std::ios::in | std::ios::binary);
-    if (!input)
-        throw std::runtime_error("Cannot open G-code reference file '" + reference_path + "'.");
-    boost::nowide::ofstream output(output_path.c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
-    if (!output)
-        throw std::runtime_error("Cannot open temporary G-code output file '" + output_path + "'.");
-
-    std::array<char, 64 * 1024> buffer;
-    while (true) {
-        throw_if_cancelled(&run_context);
-        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
-        const std::streamsize count = input.gcount();
-        if (count > 0) {
-            output.write(buffer.data(), count);
-            if (!output)
-                throw std::runtime_error("Failed while writing the temporary G-code output file.");
-        }
-        if (input.bad() || (input.fail() && !input.eof()))
-            throw std::runtime_error("Failed while reading the G-code reference file.");
-        if (input.eof())
-            break;
-    }
-
-    output.flush();
-    if (!output)
-        throw std::runtime_error("Failed while flushing the temporary G-code output file.");
-    output.close();
-    if (!output)
-        throw std::runtime_error("Failed while closing the temporary G-code output file.");
+    const GCodeTextEnvelope envelope = build_gcode_text_envelope(
+        OrchestratorView(m_orchestrator), print, config, thumbnail_renderer.handle(),
+        default_gcode_thumbnail_requests(config), metadata);
+    throw_if_cancelled(&run_context);
+    write_gcode_text_file(run_context, reference_path_utf8, temporary_output_path_utf8, envelope);
 }
 
 }}} // namespace slic3r_api::GCodeGeneration::Exporter

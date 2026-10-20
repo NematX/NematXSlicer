@@ -1647,7 +1647,7 @@ void Sidebar::update_sliced_info_sizer()
                 p->sliced_info->SetTextAndShow(siEstimatedTime, info_text, new_label);
             }
 
-            p->sliced_info->SetTextAndShow(siWTNumbetOfToolchanges, ps.total_toolchanges > 0 ? wxString::Format("%.d", ps.total_toolchanges) : "N/A");
+            p->sliced_info->SetTextAndShow(siWTNumbetOfToolchanges, ps.statistics_available ? wxString::Format("%d", ps.total_toolchanges) : "N/A");
 
             // Hide non-FFF sliced info parameters
             p->sliced_info->SetTextAndShow(siMateril_unit, "N/A");

@@ -27,6 +27,15 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_thumbnail.h"
 
 /*
+The renderer view asks the host for pixels; an encoder session consumes those
+pixels and returns the selected format's bytes. The provider adapter implements
+the C callbacks for a C++ encoder, while the consumer view invokes an acquired
+session. These are separate roles even when they participate in the same export.
+
+Acquire the encoder, send a render/encode request, consume or copy its result,
+then release the session. Do not save a returned byte pointer for another call:
+the session may replace the buffer. The renderer's pixels stay host-owned.
+
 G-code thumbnail C++ adapters
 =============================
 
@@ -98,6 +107,8 @@ public:
     {}
 
     bool valid() const { return m_renderer != nullptr; }
+    // Return the borrowed C renderer (null when unavailable) for services that take the C pointer.
+    const raw_gcode_thumbnail_renderer *handle() const { return m_renderer; }
 
     GCodeThumbnailRenderResult render(const raw_gcode_thumbnail_render_request &request) const
     {
@@ -291,12 +302,14 @@ struct GCodeThumbnailRequest {
 };
 
 // Own one service session. The orchestrator, Print and renderer must outlive it.
-// Calls are serial; copy encoded bytes before another call. No copy or move may
-// leave a borrowed view pointing at another owner's instance record.
+// The provider is the explicit provider_id, or the one that `config` selects: the caller
+// passes the configuration copy it exports with, never the Print's own. Encoders read no
+// setting; everything they need is in the render request. Calls are serial; copy encoded
+// bytes before another call. No copy or move may leave a borrowed view pointing at another
+// owner's instance record.
 class GCodeThumbnailEncoder {
 public:
-    // Acquire a session from the explicit encoder id, or the print's setting if empty; reject invalid choices before execution.
-    GCodeThumbnailEncoder(const OrchestratorView &, const Print &,
+    GCodeThumbnailEncoder(const OrchestratorView &, const Print &, const Config &config,
                           const raw_gcode_thumbnail_renderer *, const std::string &provider_id = {});
     ~GCodeThumbnailEncoder();
     GCodeThumbnailEncoder(const GCodeThumbnailEncoder &) = delete;
@@ -314,9 +327,10 @@ std::vector<GCodeThumbnailRequest> default_gcode_thumbnail_requests(const Config
 // Acquire service instances through the public orchestrator and copy output
 // into three owned blocks indexed by placement. Failure aborts the caller;
 // optional absent renderers skip images, required images fail explicitly.
+// Encoders are selected with `config`, the caller's configuration copy.
 std::array<std::string, 3> encode_gcode_thumbnails(
-    const OrchestratorView &, const Print &, const raw_gcode_thumbnail_renderer *,
-    const std::vector<GCodeThumbnailRequest> &requests);
+    const OrchestratorView &, const Print &, const Config &config,
+    const raw_gcode_thumbnail_renderer *, const std::vector<GCodeThumbnailRequest> &requests);
 
 // Header-only definitions keep external consumers on the public C ABI.
 namespace detail {
@@ -395,12 +409,12 @@ inline std::vector<GCodeThumbnailRequest> default_gcode_thumbnail_requests(const
 
 // The plugin manager, print and renderer must outlive this session; rejected choices throw std::invalid_argument.
 inline GCodeThumbnailEncoder::GCodeThumbnailEncoder(const OrchestratorView &orchestrator,
-    const Print &print, const raw_gcode_thumbnail_renderer *renderer, const std::string &provider_id)
+    const Print &print, const Config &config, const raw_gcode_thumbnail_renderer *renderer,
+    const std::string &provider_id)
 {
     std::string requested_id = provider_id;
     PluginView plugin;
     if (provider_id.empty()) {
-        const Config config = print.config();
         if (config.has("thumbnails_format"))
             requested_id = config.get("thumbnails_format").serialize();
         plugin = orchestrator.select_plugin(config.handle(), GCODE_THUMBNAIL, "thumbnail_encoder_plugin");
@@ -433,7 +447,7 @@ inline void GCodeThumbnailEncoder::close() noexcept
     m_instance = {};
 }
 inline std::array<std::string, 3> encode_gcode_thumbnails(const OrchestratorView &orchestrator,
-    const Print &print, const raw_gcode_thumbnail_renderer *renderer,
+    const Print &print, const Config &config, const raw_gcode_thumbnail_renderer *renderer,
     const std::vector<GCodeThumbnailRequest> &requests)
 {
     std::array<std::string, 3> blocks;
@@ -443,7 +457,7 @@ inline std::array<std::string, 3> encode_gcode_thumbnails(const OrchestratorView
         if (int(request.placement) < 0 || int(request.placement) > 2)
             throw std::invalid_argument("Invalid thumbnail placement.");
         std::unique_ptr<GCodeThumbnailEncoder> &encoder = encoders[request.provider_id];
-        if (!encoder) encoder.reset(new GCodeThumbnailEncoder(orchestrator, print, renderer, request.provider_id));
+        if (!encoder) encoder.reset(new GCodeThumbnailEncoder(orchestrator, print, config, renderer, request.provider_id));
         const GCodeThumbnailEncodedBlock block = encoder->view().encode(request.render);
         if (block.status == RAW_GCODE_THUMBNAIL_STATUS_SKIPPED) {
             if (request.required) throw std::runtime_error("A required thumbnail has no renderer.");

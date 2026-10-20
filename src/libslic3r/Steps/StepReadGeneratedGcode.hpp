@@ -30,8 +30,9 @@ text representation in Print. This phase streams that text through the Reader
 selected by the firmware and builds the legacy GCodeProcessorResult expected
 by GCodeViewer.
 Measured role/tool volumes are converted to print totals and the wipe-tower
-share. The CLI explicitly requests a local reread after export; exports without
-a requested viewer result do not trigger reading in the pipeline.
+share, the support flag and the availability flag are set too. Every caller that wants
+statistics (the GUI, the CLI) asks STEP_GCODE for a viewer result; exports without a
+requested viewer result do not trigger reading in the pipeline.
 
 The caller decides whether a Reader failure is fatal. run() reports failures as
 exceptions and never removes or modifies the producer-owned source file.
@@ -40,18 +41,15 @@ At host startup, register_selector_traits(orchestrator) declares the reader's
 settings metadata. StepSelectorTraits.hpp defines that metadata; the reading
 entry points below supply the requested preview or print statistics.
 */
-// Build a viewer result from the published source using the specified reader.
+// Build a viewer result from the published source using the specified reader; first marks the print statistics unavailable, so a failed reread leaves them so.
 void run(Orchestrator &orchestrator,
          Print &print,
          std::string_view reader_plugin_id,
          GCodeProcessorResult &result);
 
-// Set measured time/material totals and tower shares, preserving other print statistics.
+// Set measured time/material totals, tower shares and the support flag, then mark the statistics available; other statistics are preserved.
 void fill_print_statistics(const GCodeProcessorResult &result, const PrintConfig &config,
                            PrintStatistics &stats);
-
-// Reread a completed export for CLI statistics, warning on failure without replacing the output.
-void read_statistics(Orchestrator &orchestrator, Print &print);
 
 } // namespace Steps::StepReadGeneratedGcode
 } // namespace Slic3r

@@ -221,7 +221,8 @@ void BackgroundSlicingProcess::process_fff()
 	// Passing the timestamp 
 	evt.SetInt((int)(m_fff_print->step_state_with_timestamp(STEP_FINALIZE_SLICING).timestamp));
 	wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, evt.Clone());
-	Orchestrator::instance().export_gcode(*m_fff_print, m_temp_output_path, m_gcode_result, [this](const ThumbnailsParams& params) { return this->render_thumbnails(params); });
+	// The preview needs only the G-code reference: thumbnails are rendered by the export, when a file is written.
+	Orchestrator::instance().export_gcode(*m_fff_print, m_temp_output_path, m_gcode_result);
 	if (this->set_step_started(bspsGCodeFinalize)) {
 	    if (! m_export_path.empty()) {
 			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, new wxCommandEvent(m_event_export_began_id));
@@ -774,7 +775,8 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 	return m_step_state.invalidate_all([this](){ this->stop_internal(); });
 }
 
-// Export the generated reference with the exporter chosen in the printer profile into a private file, run the post-processing
+// Export the generated reference with the exporter chosen in the printer profile into a private file (the exporter writes the
+// header, notes and thumbnails, rendered here through render_thumbnails), run the post-processing
 // scripts once on that exported file (never on the reference), then copy it to the user destination. Selection and export read a
 // configuration copy taken under the print state mutex. The private files are removed on every path; export, script and copy
 // failures propagate.
@@ -794,7 +796,8 @@ void BackgroundSlicingProcess::finalize_gcode()
 		requested_path += selection.extension;
 	std::string export_path = m_fff_print->print_statistics().finalize_output_path(requested_path.string());
 	const std::string exported_path = Orchestrator::instance().export_print(
-		*m_fff_print, config, m_temp_output_path, selection.temporary_path(".slic3r-export-"), selection);
+		*m_fff_print, config, m_temp_output_path, selection.temporary_path(".slic3r-export-"), selection,
+		[this](const ThumbnailsParams &params) { return this->render_thumbnails(params); });
 	std::string output_path = exported_path;
 	// Both output_path and export_path ar in-out parameters.
 	// The exported file is a separate copy that the G-code viewer never maps (the viewer maps the reference, m_temp_output_path,
@@ -860,7 +863,7 @@ void BackgroundSlicingProcess::finalize_gcode()
 	m_print->set_status(100, GUI::format(_L("G-code file exported to %1%"), export_path));
 }
 
-// Export the generated reference with the profile's exporter into a private upload file, run the post-processing scripts once
+// Export the generated reference with the profile's exporter (thumbnails rendered through render_thumbnails) into a private upload file, run the post-processing scripts once
 // on it, and queue the upload; the file is removed if a script fails. SLA writes its raster file instead.
 void BackgroundSlicingProcess::prepare_upload()
 {
@@ -879,7 +882,8 @@ void BackgroundSlicingProcess::prepare_upload()
 			Orchestrator::instance().select_gcode_exporter(config);
 		// The temporary path must end with the exporter extension, otherwise the random part would be taken for a suffix.
 		const std::string exported_path = Orchestrator::instance().export_print(
-			*m_fff_print, config, m_temp_output_path, selection.temporary_path("." SLIC3R_APP_KEY ".upload."), selection);
+			*m_fff_print, config, m_temp_output_path, selection.temporary_path("." SLIC3R_APP_KEY ".upload."), selection,
+			[this](const ThumbnailsParams &params) { return this->render_thumbnails(params); });
 		source_path = boost::filesystem::path(exported_path);
 		try {
 			if (m_upload_job.upload_data.upload_path.extension().empty())

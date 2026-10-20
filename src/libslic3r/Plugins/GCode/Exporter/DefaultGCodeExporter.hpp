@@ -8,12 +8,18 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 
 /*
-Built-in text G-code exporter registration
-==========================================
+Built-in text G-code exporter
+=============================
 
 The registration function installs one process-lived provider that advertises
-the `.gcode` suffix and copies the generated G-code reference into the host's
-temporary output file.
+the `.gcode` suffix. Its output is the text envelope (thumbnails, producer
+line, notes), then the G-code reference copied unchanged, then the trailing
+thumbnails. The file part of that recipe is write_gcode_text_file() in GCodeTextEnvelope.hpp.
+
+The complete text recipe also includes the host's available statistics and the
+filtered configuration after the reference, before any trailing thumbnails.
+The registration entry point installs the provider; the shared text-envelope
+helper implements this layout rather than duplicating it in each file exporter.
 */
 
 namespace slic3r_api { namespace GCodeGeneration { namespace Exporter {

@@ -4,7 +4,6 @@
 ///|/
 #include "GCodePreamble.hpp"
 #include "DefaultGCodeFirmwareSession.hpp"
-#include "GCodeThumbnailViews.hpp"
 #include "GCodeLineParser.hpp"
 #include "MachineEnvelope.hpp"
 #include <algorithm>
@@ -16,17 +15,40 @@
 #include <stdexcept>
 #include <vector>
 
-/* Startup composition and shared script interpreter.
-   All public geometry stays in the plan. This helper emits initialization and
-   existing event trees, and updates the owning session after encoding commands.
-   Automatic bed, chamber, and tool heating is supplied by the
-   extrusion_edit.startup_temperature.default plugin after start_gcode; this
-   helper keeps only startup mode, tool selection, and first-layer fan state.
-   Thumbnail text may be retained for end_print, but no source view survives begin.
-   A custom G-code E move changes the retraction state only when its own line
-   declares it: a negative E move retracts with the comment "; retraction" and a
-   positive E move restores with "; unretraction", ignoring case and surrounding
-   spaces. Every other E move is raw. */
+/*
+GCodePreamble handles startup and configured script text for a firmware session.
+The session supplies its machine states; this helper reads the Print, settings
+and plan during begin(), emits startup commands and existing event trees, and
+uses the shared script processor for template expansion. It does not create or
+retain printable geometry. Keep the session and its borrowed states alive for
+the helper's whole use, and use one session serially.
+
+Startup composition and shared script interpreter.
+All public geometry stays in the plan. This helper emits initialization and
+existing event trees, and updates the owning session after encoding commands.
+Automatic bed, chamber, and tool heating is supplied by the
+extrusion_edit.startup_temperature.default plugin after start_gcode; this
+helper keeps only startup mode, tool selection, and first-layer fan state.
+No source view survives begin.
+A custom G-code E move changes the retraction state only when its own line
+declares it: a negative E move retracts with the comment "; retraction" and a
+positive E move restores with "; unretraction", ignoring case and surrounding
+spaces. Every other E move is raw.
+
+Representative direct calls (branches are not a timeline):
+
+    GCodePreamble::begin()
+        |-- m_session.write_pre_start()
+        |-- m_session.write_post_start()
+        `-- m_session.write_event()
+
+    GCodePreamble::process_script()
+        |-- m_session.m_scripts.prepare()
+        |-- m_session.complete_script_context()
+        |-- context.process()
+        |-- apply()
+        `-- synchronize_after_external_gcode()
+*/
 namespace slic3r_api { namespace GCodeGeneration {
 namespace {
 // Parse an exact command token, excluding comments and numeric suffixes.
@@ -261,18 +283,14 @@ private:
 };
 
 
-// Scan the first concrete plan visit, compose thumbnails and start events, and clear borrowed state on both success and failure; unresolved or out-of-range tools are rejected.
-std::string GCodePreamble::begin(
-    const Print &print,
-    const ConstPrintingPlan &plan,
-    const std::array<std::string, 3> &thumbnail_blocks)
+// Scan the first concrete plan visit, compose the startup modes and start events, and clear borrowed state on both success and failure; unresolved or out-of-range tools are rejected. File header text is not written here: the exporter owns it.
+std::string GCodePreamble::begin(const Print &print, const ConstPrintingPlan &plan)
 {
     const Config config = print.config();
     m_config = &config;
     m_in_preamble = true;
     m_start_written = false;
     m_initial_tool = EXTRUDER_ID_UNKNOWN;
-    m_trailing_thumbnails.clear();
     try {
         for (uint32_t gi = 0; gi < plan.group_count() && m_initial_tool == EXTRUDER_ID_UNKNOWN; ++gi) {
             const ConstPrintingGroup group = plan.group(gi);
@@ -292,11 +310,7 @@ std::string GCodePreamble::begin(
         const ConstPrintingScopeEvents events = plan.events();
         const size_t starts = events.has_before() ? start_script_count(events.before()) : 0;
         if (starts > 1) throw std::invalid_argument("The preamble contains multiple start scripts.");
-        std::string output = thumbnail_blocks[RAW_GCODE_THUMBNAIL_FILE_PREFIX];
-        output += m_session.write_pre_thumbnail(print, plan);
-        output += thumbnail_blocks[RAW_GCODE_THUMBNAIL_BEFORE_START_GCODE];
-        m_trailing_thumbnails = thumbnail_blocks[RAW_GCODE_THUMBNAIL_FILE_SUFFIX];
-        output += m_session.write_post_thumbnail(print, plan);
+        std::string output;
         if (starts == 0) {
             output += m_session.write_pre_start({});
             output += m_session.write_post_start();
@@ -305,14 +319,6 @@ std::string GCodePreamble::begin(
         m_config = nullptr; m_in_preamble = false;
         return output;
     } catch (...) { m_config = nullptr; m_in_preamble = false; throw; }
-}
-
-// Move the deferred text out so repeated cleanup cannot duplicate thumbnails.
-std::string GCodePreamble::finish()
-{
-    std::string result;
-    result.swap(m_trailing_thumbnails);
-    return result;
 }
 
 // Analyze resolved commands, then emit only missing mode categories. The

@@ -18,9 +18,7 @@
 #include "libslic3r/Api/host/GCodeReaderService.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
-#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_thumbnail.h"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFirmwareViews.hpp"
-#include "libslic3r/Api/plugin/cpp/gcode/GCodeThumbnailViews.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -29,6 +27,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Printing/PrintingPlanFacts.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 
@@ -136,7 +135,7 @@ void register_selector_traits(Orchestrator &orchestrator)
     StepSelectorTraits thumbnail;
     thumbnail.category = RAW_OPTION_CATEGORY_OUTPUT;
     thumbnail.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
-    thumbnail.invalidates_step = STEP_GCODE;
+    thumbnail.invalidates_step = STEP_NONE;
     thumbnail.read_with_one_provider = true;
     thumbnail.provider_settings_rules = false;
     thumbnail.ui_target_file = "print.ui";
@@ -403,14 +402,17 @@ private:
 
 // Select the GCODE_FIRMWARE provider from the print configuration and ask it
 // to create a session for this export.
-// Supply the Print, script processor and thumbnail renderer as borrowed inputs.
+// Supply the Print and script processor as borrowed inputs.
 // Store the returned instance in owner, which is responsible for destroying it,
 // and validate its C interface before the STEP_GCODE writer uses it.
 void create_firmware_session(Orchestrator &orchestrator,
                              Print &print,
                              const raw_gcode_script_processor *script_processor,
-                             const raw_gcode_thumbnail_renderer *renderer,
                              FirmwareInstanceOwner &owner);
+
+// Store the plan-derived print facts (tool changes, initial and used tools with their filament types, layer counts) in the
+// Print statistics. Expects the finalized PrintingPlan of the Print; leaves every measured value untouched.
+void publish_plan_facts(Print &print);
 
 ReaderSourcePathReceiver::ReaderSourcePathReceiver(Print &print) : m_print(print) {}
 
@@ -967,7 +969,6 @@ const raw_gcode_firmware_instance *FirmwareInstanceOwner::instance() const
 void create_firmware_session(Orchestrator &orchestrator,
                              Print &print,
                              const raw_gcode_script_processor *script_processor,
-                             const raw_gcode_thumbnail_renderer *renderer,
                              FirmwareInstanceOwner &owner)
 {
     Plugin *firmware_plugin = selected_or_active_plugin_for_step(
@@ -984,7 +985,6 @@ void create_firmware_session(Orchestrator &orchestrator,
     run_ctx_gcode_firmware payload = {};
     payload.print = reinterpret_cast<const print_handle *>(&print);
     payload.script_processor = script_processor;
-    payload.thumbnail_renderer = renderer;
     run_context.data = &payload;
 
     firmware_plugin->setup(run_context, 1);
@@ -1002,6 +1002,29 @@ void create_firmware_session(Orchestrator &orchestrator,
     // callback without invoking firmware code.
     const slic3r_api::GCodeFirmwareView validated(owner.instance());
     (void)validated;
+}
+
+// The facts come from the plan, not from the text, so they exist even when no Reader result is requested. The used tools
+// are sorted by index; their filament types are sorted alphabetically and joined by "," without removing duplicates, as
+// the {printing_filament_types} file name variable has always been.
+void publish_plan_facts(Print &print)
+{
+    const Printing::PlanFacts facts = Printing::summarize_plan(print.printing_plan());
+    const PrintConfig &config = print.config();
+    PrintStatistics &statistics = print.print_statistics();
+    statistics.total_toolchanges = facts.toolchanges;
+    statistics.initial_extruder_id = facts.initial_tool;
+    statistics.initial_filament_type = config.filament_type.get_at(size_t(facts.initial_tool));
+    statistics.printing_extruders = facts.used_tools;
+    std::vector<std::string> filament_types;
+    for (extruder_index_t tool : facts.used_tools)
+        filament_types.push_back(config.filament_type.get_at(size_t(tool)));
+    std::sort(filament_types.begin(), filament_types.end());
+    statistics.printing_filament_types.clear();
+    for (size_t index = 0; index < filament_types.size(); ++index)
+        statistics.printing_filament_types += (index == 0 ? "" : ",") + filament_types[index];
+    statistics.object_layer_count = Printing::object_layer_count(print);
+    statistics.total_layer_count = facts.layer_count;
 }
 
 } // namespace
@@ -1120,8 +1143,7 @@ bool validate_post(const Print &, std::string *)
     return true;
 }
 
-std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path,
-                     const raw_gcode_thumbnail_renderer *thumbnail_renderer)
+std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path)
 {
     if (path.empty())
         throw RuntimeError("G-code generation plugin needs a non-empty output path.");
@@ -1148,8 +1170,7 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     GCodeScriptProcessor scripts(print, orchestrator);
     GCodeReaderService readers(orchestrator, &print);
     FirmwareInstanceOwner firmware;
-    create_firmware_session(orchestrator, print, scripts.c_processor(), thumbnail_renderer,
-                            firmware);
+    create_firmware_session(orchestrator, print, scripts.c_processor(), firmware);
     const slic3r_api::GCodeFirmwareView firmware_view(firmware.instance());
     const std::string reader_plugin_id = readers.validated_reader_id(
         firmware_view.reader_plugin_id());
@@ -1174,6 +1195,7 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup_run");
     plugin->run(run_context);
     Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "run");
+    publish_plan_facts(print);
     return reader_plugin_id;
 }
 

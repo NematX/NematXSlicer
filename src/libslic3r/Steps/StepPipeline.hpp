@@ -6,11 +6,22 @@
 #ifndef steps_steppipeline_hpp_
 #define steps_steppipeline_hpp_
 
-/* Pipeline execution and selection metadata. Exclusive groups select one
-   provider independently of other groups on the same step. Active setting
-   requirements use that group selection to check declared option support.
-   Whole-step identities hold keys and display text; StepSelectorTraits.hpp defines the settings
-   and UI placement rules declared by each step module. */
+/*
+StepPipeline prepares and runs the FFF processing stages for a Print. A checkpoint
+is a saved boundary from which invalidated work can be recomputed; it is not a
+copy of the entire application. Run slicing before the plan/G-code suffix unless
+the caller already has a valid result at the required boundary.
+
+Plugin selection decides which implementation performs a stage. Export requests
+are separate actions on a ready command reference and are not implicitly queued
+by every invalidation or replay of geometry processing.
+
+Pipeline execution and selection metadata. Exclusive groups select one
+provider independently of other groups on the same step. Active setting
+requirements use that group selection to check declared option support.
+Whole-step identities hold keys and display text; StepSelectorTraits.hpp defines the settings
+and UI placement rules declared by each step module.
+*/
 
 #include "libslic3r/Api/plugin/c/slic3r_gcode_thumbnail.h"
 #include "libslic3r/Api/host/StepSelectorTraits.hpp"
@@ -235,7 +246,6 @@ public:
     // G-code writer consumes the ordered PrintingPlan, then runs every
     // post-ordering step, STEP_GCODE, and the host-only preview reader phase.
     static std::string run_gcode(Orchestrator &orchestrator, Print &print, const std::string &path,
-        const raw_gcode_thumbnail_renderer *thumbnail_renderer = nullptr,
         GCodeProcessorResult *result = nullptr);
 
     // Compatibility wrapper for code that still wants the whole migrated

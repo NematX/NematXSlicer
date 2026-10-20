@@ -14,7 +14,6 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFirmwareViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeReaderService.hpp"
-#include "libslic3r/Api/plugin/cpp/gcode/GCodeThumbnailViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFormatter.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeScriptProcessorViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultExtruder.hpp"
@@ -79,8 +78,6 @@ public:
 
     // Initialize export state and declare only real catalog instances for cancellation.
     std::string begin_print(const Print &print, const ConstPrintingPlan &plan) override;
-    // Renderer and orchestrator are borrowed until firmware destruction.
-    void set_thumbnail_services(orchestrator_handle *, const raw_gcode_thumbnail_renderer *);
     // Build the plugin-side Reader client used to interpret custom G-code.
     // Both handles remain host-owned and must outlive this firmware session.
     void set_gcode_reader_context(orchestrator_handle *orchestrator,
@@ -116,11 +113,7 @@ protected:
         bool is_synthetic = false;
     };
 
-    // Called once per export; derived firmwares may mix providers and placements.
-    virtual std::vector<GCodeThumbnailRequest> thumbnail_requests(const Print &, const ConstPrintingPlan &);
     // Startup policy hooks. Encoders retain dialect-specific command syntax.
-    virtual std::string write_pre_thumbnail(const Print &, const ConstPrintingPlan &);
-    virtual std::string write_post_thumbnail(const Print &, const ConstPrintingPlan &);
     virtual std::string write_pre_start(const std::string &resolved_script);
     virtual std::string write_post_start();
     // Describes one movement after geometry and extrusion have been converted
@@ -263,8 +256,6 @@ protected:
     virtual std::string encode_object_end(const ObjectLabel &object) const;
 
 private:
-    orchestrator_handle *m_thumbnail_orchestrator = nullptr;
-    const raw_gcode_thumbnail_renderer *m_thumbnail_renderer = nullptr;
     std::unique_ptr<GCodeReaderService> m_gcode_reader_service;
     friend class GCodePreamble;
     std::unique_ptr<GCodePreamble> m_preamble;

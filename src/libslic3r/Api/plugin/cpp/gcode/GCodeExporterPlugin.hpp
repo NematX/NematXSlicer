@@ -35,9 +35,10 @@ firmware identity without writing a file. It runs on the calling thread, often
 the GUI thread, so it must be fast and free of side effects. export_impl() reads
 the generated reference and creates the host's temporary output. Settings are read from the
 borrowed configuration copy given to both methods, never from the Print, whose own
-configuration may already differ. The paths, Print, configuration, renderer
-and opaque metadata are borrowed only for their call; implementations do not
-retain them. PluginBase contains exceptions at the C boundary.
+configuration may already differ. The paths, Print, configuration, renderer and
+ABI 2.1 metadata are borrowed only for their call; implementations do not retain
+them. The metadata view checks its size prefix and exposes read-only entries.
+PluginBase contains exceptions at the C boundary.
 */
 class GCodeExporterPluginBase : public PluginBase
 {
@@ -49,7 +50,7 @@ protected:
     virtual GCodeExportQuery query_impl(const Config &config,
                                         std::string_view firmware_plugin_id) const = 0;
 
-    // Read the borrowed Print, configuration copy, reference and views for one run and write only the supplied output path; check cancellation and throw on failure.
+    // Read borrowed run data and ABI 2.1 metadata, write only the supplied output path, and throw on invalid metadata, cancellation, or I/O failure.
     virtual void export_impl(const plugin_run_context &run_context,
                              const Print &print,
                              const Config &config,

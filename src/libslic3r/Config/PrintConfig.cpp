@@ -50,29 +50,46 @@
 #include "SLA/SupportTree.hpp"
 #include "Utils.hpp"
 
-/* Print configuration loading, normalization and preset conversion for preset
-   importers and the slicing configuration stores declared in PrintConfig.hpp.
-   Definition setup supplies option metadata, enum names and default values;
-   output-statistics definitions describe measured filename placeholders.
-   Wipe-tower filament is a length in mm, not an extruded volume.
-   Loading first converts serialized source names and values, then stores typed
-   options. Normalization adjusts the resulting option set separately so it can
-   also process dynamic object overrides without requiring a complete preset.
-   Dynamic object overrides contain only a subset of printer settings:
-   normalization can clamp a tower tool's upper bound only when nozzle data is present.
+/*
+Define the common print options and prepare values loaded from configuration.
+Definitions hold names, types, defaults and displayed metadata; configuration
+stores hold the actual selected values. Historical name/value conversion runs
+on serialized input before typed storage, while normalization adjusts the typed
+result for the print technology and the available option subset.
 
-   Legacy map loading keeps source names until each conversion branch runs.
-   The caller owns the map; historical setting names and values are converted
-   within these branches as needed, not necessarily both in every branch.
-   Enum lookup tables retain the serialized names used by configuration options.
+Print configuration loading, normalization and preset conversion for preset
+importers and the slicing configuration stores declared in PrintConfig.hpp.
+Definition setup supplies option metadata, enum names and default values;
+output-statistics definitions describe measured filename placeholders.
+Wipe-tower filament is a length in mm, not an extruded volume.
+Loading first converts serialized source names and values, then stores typed
+options. Normalization adjusts the resulting option set separately so it can
+also process dynamic object overrides without requiring a complete preset.
+Dynamic object overrides contain only a subset of printer settings:
+normalization can clamp a tower tool's upper bound only when nozzle data is present.
 
-   Main entry points and their separate responsibilities:
-     PrintConfigDef::PrintConfigDef - initialize option definitions and metadata.
-     PrintConfigDef::handle_legacy_map - convert the caller's serialized map.
-       Handle_legacy_tools::_handle_legacy - apply historical name/value rules
-         while the original source name is still available for each branch.
-     DynamicPrintConfig::normalize_fdm - adjust owned dynamic options for FDM
-       constraints, using nozzle data only when the option subset supplies it.
+Legacy map loading keeps source names until each conversion branch runs.
+The caller owns the map; historical setting names and values are converted
+within these branches as needed, not necessarily both in every branch.
+Enum lookup tables retain the serialized names used by configuration options.
+
+Main entry points and their separate responsibilities:
+  PrintConfigDef::PrintConfigDef - initialize option definitions and metadata.
+  PrintConfigDef::handle_legacy_map - convert the caller's serialized map.
+    Handle_legacy_tools::_handle_legacy - apply historical name/value rules
+      while the original source name is still available for each branch.
+  DynamicPrintConfig::normalize_fdm - adjust owned dynamic options for FDM
+    constraints, using nozzle data only when the option subset supplies it.
+
+Representative direct calls (branches are not a timeline):
+
+    PrintConfigDef::handle_legacy_map()
+        `-- Handle_legacy_tools::_handle_legacy()
+
+    DynamicPrintConfig::normalize_fdm()
+        |-- this->has()
+        |-- opt->set()
+        `-- opt_n->set()
 */
 
 namespace Slic3r {
@@ -299,13 +316,15 @@ void PrintConfigDef::init_common_params()
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionString(""));
 
+    // The thumbnail settings are read by the exporter when it writes a file, never while the G-code is generated:
+    // they use STEP_NONE so that changing them does not replay STEP_GCODE.
     def = this->add("thumbnails", coPoints);
     def->label = L("Thumbnails size");
     def->tooltip = L("Picture sizes to be stored into a .gcode / .bgcode and .sl1 / .sl1s files, in the following format: \"XxY/EXT, XxY/EXT, ...\"\n"
                      "Currently supported extensions are PNG, QOI and JPG.");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::firmware;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_NONE;
     def->mode = comExpert | comPrusa;
     def->min = 0;
     def->max = 2048;
@@ -316,7 +335,7 @@ void PrintConfigDef::init_common_params()
     def->full_label = L("Thumbnail color");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::filament;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_NONE;
     def->tooltip = L("This is the color that will be enforced on objects in the thumbnails.");
     def->gui_type = ConfigOptionDef::GUIType::color;
     def->mode = comExpert | comSuSi;
@@ -327,14 +346,14 @@ void PrintConfigDef::init_common_params()
     def->tooltip = L("Use a uniform color, extruder colors, or filament colors for thumbnails.");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::firmware;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_NONE;
     def->mode = comExpert | comSuSi;
     def->set_enum<ThumbnailColorMode>({"uniform", "extruder", "filament"});
     def->set_default_value(new ConfigOptionEnum<ThumbnailColorMode>(ThumbnailColorMode::Filament));
 
     def = this->add("thumbnails_end_file", coBool);
     def->label = L("Print at the end");
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_NONE;
     def->tooltip = L("Print the thumbnail code at the end of the gcode file instead of the front."
         "\nBe careful! Most firmwares expect it at the front, so be sure that your firmware support it.");
     def->mode = comExpert | comSuSi;
@@ -345,7 +364,7 @@ void PrintConfigDef::init_common_params()
     def->tooltip = L("Show the bed texture on the thumbnail picture.");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::firmware;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_NONE;
     def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionBool(true));
 
@@ -355,7 +374,7 @@ void PrintConfigDef::init_common_params()
         "\n Some firmware need it to know how to decode the thumbnail, some others don't support it.");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::firmware;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_NONE;
     def->mode    = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -364,6 +383,7 @@ void PrintConfigDef::init_common_params()
     def->tooltip = L("Show the supports (and pads) on the thumbnail picture.");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::firmware;
+    def->invalidates_step = STEP_NONE;
     def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionBool(false));
 

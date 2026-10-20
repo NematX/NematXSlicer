@@ -17,8 +17,8 @@ G-code exporter provider adapter
 
 This file validates one synchronous GCODE_EXPORT payload and dispatches its
 operation to the derived C++ provider. QUERY strings stay owned by a local
-GCodeExportQuery until the host callback copies them. EXPORT views refer to the
-host's Print and paths only for the duration of the provider call.
+GCodeExportQuery until the host callback copies them. EXPORT views and metadata
+refer to host storage only for the duration of the provider call.
 
 Representative direct calls (branches are not a timeline):
 
@@ -31,7 +31,7 @@ Representative direct calls (branches are not a timeline):
 
 namespace slic3r_api {
 
-// Validate one borrowed run context, copy QUERY text during its callback or dispatch EXPORT views, and throw on invalid fields while retaining no caller-owned data.
+// Validate borrowed run data, copy QUERY text during its callback, or dispatch EXPORT views with non-null metadata; invalid fields and provider failures throw without retaining caller storage.
 void GCodeExporterPluginBase::run_impl(const plugin_run_context *run_context) const
 {
     throw_if_cancelled(run_context);
@@ -63,6 +63,7 @@ void GCodeExporterPluginBase::run_impl(const plugin_run_context *run_context) co
         context->config == nullptr ||
         context->reference_path == nullptr || context->reference_path[0] == '\0' ||
         context->output_path == nullptr || context->output_path[0] == '\0' ||
+        context->thumbnail_renderer == nullptr || context->metadata == nullptr ||
         context->firmware_plugin_id != nullptr ||
         context->query_callback_context != nullptr || context->emit_query_result != nullptr)
         throw std::invalid_argument("G-code exporter EXPORT received invalid operation fields.");

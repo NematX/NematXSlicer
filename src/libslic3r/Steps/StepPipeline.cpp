@@ -1085,14 +1085,13 @@ void run_post_slicing(Orchestrator &orchestrator, Print &print, const std::strin
     });
 }
 
-// Borrow the host/Print and optional renderer/result destinations, executing
+// Borrow the host/Print and optional result destinations, executing
 // marked steps through until. Export publishes the source/reader pair and only
 // reads when a viewer result is requested, filling measured statistics on success.
 // No borrowed pointers are retained; pipeline failures/cancellation propagate,
 // while optional preview-read failures remain non-critical warnings.
 void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::string &path,
                          slicing_step_t until = STEP_GCODE,
-                         const raw_gcode_thumbnail_renderer *thumbnail_renderer = nullptr,
                          std::string *reader_plugin_id = nullptr,
                          GCodeProcessorResult *gcode_result = nullptr)
 {
@@ -1254,7 +1253,7 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
         begin_step(print, STEP_GCODE, L("Generating G-code"));
         StepGenerateGcode::prepare(print);
         const std::string selected_reader = StepGenerateGcode::run_step(
-            orchestrator, print, path, thumbnail_renderer);
+            orchestrator, print, path);
         // The writer published the source; associate its already-selected
         // reader so an explicit CLI reread needs no new firmware session.
         print.set_gcode_reader_source_path(print.gcode_reader_source_path(), selected_reader);
@@ -1358,7 +1357,6 @@ void StepPipeline::run_slice(Orchestrator &orchestrator, Print &print)
 
 std::string StepPipeline::run_gcode(Orchestrator &orchestrator, Print &print,
                              const std::string &path,
-                             const raw_gcode_thumbnail_renderer *thumbnail_renderer,
                              GCodeProcessorResult *result)
 {
 #ifdef _DEBUG
@@ -1377,8 +1375,7 @@ std::string StepPipeline::run_gcode(Orchestrator &orchestrator, Print &print,
     print.prepare_checkpoint_resume();
     initialize_pipeline_progress(orchestrator, print, checkpoint_resume_step(Checkpoint::Slicing));
     std::string reader_plugin_id;
-    run_remaining_steps(orchestrator, print, path, STEP_GCODE, thumbnail_renderer,
-                        &reader_plugin_id, result);
+    run_remaining_steps(orchestrator, print, path, STEP_GCODE, &reader_plugin_id, result);
     return reader_plugin_id;
 }
 
