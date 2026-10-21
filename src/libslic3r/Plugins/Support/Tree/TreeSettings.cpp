@@ -51,7 +51,8 @@ coord_t maximum_move(const double angle, const coord_t layer_height)
 }
 
 // Every option is read through the Config views of the object and of the print, as SupportParams does; the flows come from the
-// host (support_flow, region_flow_mm), which computes them like the legacy Flow functions.
+// host (support_flow, region_flow_mm), which computes them like the legacy Flow functions. The views are borrowed; the constructor
+// stores derived values and per-layer moves, and allocation failures propagate to the caller.
 TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::Print &print, const slic3r_api::Support::Common::SupportParams &params)
 {
     const slic3r_api::Config print_config = print.config();
@@ -103,7 +104,9 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
 
     // The overhang cap uses the support extrusion width for percentages and the minimum layer height of the support.
     const double angle_limit = std::clamp<double>(config.get("support_tree_angle").get_float() * PI / 180., 0., 0.5 * PI - EPSILON);
-    const double angle_slow_limit = std::clamp<double>(config.get("support_tree_angle_slow").get_float() * PI / 180., 0., angle_limit - EPSILON);
+    // The plugin bounds the slow angle to [0, max(0, angle_limit - EPSILON)]: EPSILON keeps it below the branch angle,
+    // and the upper bound falls to zero when the branch angle is below EPSILON, including zero.
+    const double angle_slow_limit = std::clamp<double>(config.get("support_tree_angle_slow").get_float() * PI / 180., 0., std::max(0., angle_limit - EPSILON));
     const double support_width_mm = object.support_flow_mm(support_role, layer_height_mm).width;
     const c_float_or_percent max_overhang_setting = config.get("support_tree_max_overhang").get_float_or_percent();
     const double max_overhang_mm = max_overhang_setting.percent ? max_overhang_setting.value * support_width_mm / 100. : max_overhang_setting.value;

@@ -20,7 +20,9 @@
    - maximum moves: the native settings hold one move for the nominal layer height; the plugin holds one per real layer height. They
      are compared on the layers whose height is the nominal one, and every layer is compared with tan(angle) * its own height.
    - the branch angle: the plugin caps it by support_tree_max_overhang; the cases set it high enough for the cap to be inactive.
-   The slab heights (min, max and dense) exist only in the plugin: they are compared with the rule written from the configuration. */
+   The slab heights (min, max and dense) exist only in the plugin: they are compared with the rule written from the configuration.
+   Zero and sub-EPSILON branch angles are checked only on the plugin: its slow angle stays nonnegative, while the native slow-angle
+   clamp has reversed bounds for these angles. The slow angle is local to construction, so its zero value is checked through every move. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -157,4 +159,26 @@ TEST_CASE("Tree settings equal the native tree support settings", "[plugins][sup
     };
     for (const SettingsCase &item : cases)
         check_case(item);
+}
+
+// Builds owned prints at zero and sub-EPSILON branch angles and checks all slow moves are zero; setup failures propagate to Catch.
+TEST_CASE("Tree settings keep slow moves zero at zero and tiny branch angles", "[plugins][support-tree-settings]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const std::string &angle_degrees : {std::string("0"), std::string("0.001")}) {
+        INFO("branch angle in degrees " << angle_degrees);
+        DynamicPrintConfig config = SG::config("tree", false, 3);
+        config.set_deserialize_strict({{"support_tree_angle", angle_degrees}, {"support_tree_angle_slow", "25"}});
+        Print print;
+        Model model;
+        Test::init_print({SG::slab(true)}, print, model, config);
+        SG::prefix(print);
+        const PrintObject &object = print.object(0);
+        const TF::TreeSettings settings = ST::tree_settings(print, object, SG::params(print, object));
+        CHECK(settings.angle == Approx(std::stod(angle_degrees) * PI / 180.));
+        REQUIRE(object.layer_count() > 0);
+        REQUIRE(settings.max_move_slow.size() == object.layer_count());
+        for (const coord_t move : settings.max_move_slow)
+            CHECK(move == 0);
+    }
 }
