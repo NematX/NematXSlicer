@@ -34,7 +34,8 @@
    compare each one with the native code on the same inputs.
 
    - SupportParams runs on the configurations of the legacy-comparison harness
-     (support_grid_test_helpers.hpp) and a few variants, after slicing.
+      (support_grid_test_helpers.hpp) and a few variants, after slicing; the mixed-nozzle
+      bounds test derives settings-based values before slicing, without layer contributions to min_height.
    - The enum helpers run on every value of the native enum lists.
    - The smooth contact fill runs on a sliced print with non-default ironing settings and is
      compared with the native FillSmooth on the same surfaces.
@@ -143,7 +144,7 @@ NativeGridParams::NativeGridParams(const PrintObject &object)
     maximum = check_z_step(maximum, z_step);
     if (max_support_height == 0) max_support_height = maximum;
     max_support_height = check_z_step(max_support_height, z_step);
-    layer_height = std::clamp(check_z_step(config.layer_height.value, z_step), minimum, maximum);
+    layer_height = std::min(maximum, std::max(minimum, check_z_step(config.layer_height.value, z_step)));
     if (!soluble) {
         gap_above = check_z_step(config.support_material_contact_distance.get_effective_value(interface_nozzle), z_step);
         gap_below = check_z_step(config.support_material_bottom_contact_distance.get_effective_value(interface_nozzle), z_step);
@@ -641,6 +642,41 @@ TEST_CASE("Support params equal the native grid support parameters", "[plugins][
         CHECK(params.interface_angle_increment == object_config.support_material_interface_angle_increment.value);
         CHECK(params.raft_first_layer_density == Approx(object_config.raft_first_layer_density.get_effective_value(1.)).epsilon(1e-12));
         CHECK(params.style == (std::string(test.style) == "grid" ? Common::SupportStyle::Grid : Common::SupportStyle::Snug));
+    }
+}
+
+// Build parameters for locally owned two-tool prints without generating layers; construction failures or differences from native bounds fail the test.
+TEST_CASE("Support params apply native layer height order with mixed nozzles", "[plugins][support-common]")
+{
+    for (const bool inverted : {false, true}) {
+        CAPTURE(inverted);
+        DynamicPrintConfig config = SG::config("grid", false, 3, false);
+        config.set_deserialize_strict("nozzle_diameter", "0.8,0.2");
+        config.set_deserialize_strict("min_layer_height", inverted ? "50%,25%" : "12.5%,25%");
+        config.set_deserialize_strict("max_layer_height", "75%,75%");
+        config.set_deserialize_strict("layer_height", "0.2");
+        config.set_deserialize_strict("first_layer_height", "0.4");
+        config.set_deserialize_strict("z_step", "0.01");
+        config.set_deserialize_strict("support_material_extruder", "1");
+        config.set_deserialize_strict("support_material_interface_extruder", "2");
+        Print print;
+        Model model;
+        ModelObject *model_object = model.add_object();
+        model_object->add_volume(SG::slab());
+        model_object->add_instance();
+        model_object->ensure_on_bed();
+        print.auto_assign_extruders(model_object);
+        print.apply(model, config);
+        // Native layer-profile generation requires ordered bounds, but parameter derivation accepts either order.
+        const PrintObject &object = print.object(0);
+        const SlicingParameters &native = object.slicing_parameters();
+        REQUIRE(native.min_layer_height == Approx(inverted ? 0.4 : 0.1));
+        REQUIRE(native.max_layer_height == Approx(0.15));
+        REQUIRE((native.min_layer_height > native.max_layer_height) == inverted);
+        const Common::SupportParams params = SG::params(print, object);
+        CHECK(params.layer_height == native.layer_height);
+        CHECK(params.layer_height == native.max_layer_height);
+        CHECK(params.layer_height == Approx(0.15));
     }
 }
 

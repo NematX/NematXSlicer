@@ -34,7 +34,7 @@ namespace slic3r_api::Support::Common {
 
 struct SupportParams
 {
-    // Read the settings of a sliced object; its layers give the minimum layer height.
+    // Derive settings-based values even before slicing; min_height also needs the object's layers to account for their heights.
     SupportParams(const Print &print, const Object &object);
 
     // ---- Geometry (native Slicing.cpp derivation) ----

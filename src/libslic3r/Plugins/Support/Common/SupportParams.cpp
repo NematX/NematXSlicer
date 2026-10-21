@@ -85,6 +85,7 @@ float deg2rad_float(float degrees)
 
 } // namespace
 
+// Read borrowed print/object views to derive owned settings and flows; valid handles are required, unavailable host flows give zero flows, and other C++ failures propagate.
 SupportParams::SupportParams(const Print &print, const Object &object)
 {
     const Config print_config = print.config();
@@ -140,7 +141,8 @@ SupportParams::SupportParams(const Print &print, const Object &object)
     maximum = check_z_step_mm(maximum, z_step);
     if (max_support_height == 0) max_support_height = maximum;
     max_support_height = check_z_step_mm(max_support_height, z_step);
-    layer_height = std::clamp(check_z_step_mm(object_layer_height, z_step), minimum, maximum);
+    // Mixed nozzles can invert the bounds; applying the minimum then the maximum matches native slicing parameters.
+    layer_height = std::min(maximum, std::max(minimum, check_z_step_mm(object_layer_height, z_step)));
 
     // Vertical gaps: soluble support touches the object.
     if (!soluble) {
