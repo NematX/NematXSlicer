@@ -60,6 +60,8 @@ struct DumpCase {
     int interfaces;
     std::vector<std::pair<std::string, std::string>> overrides;
     bool routing;
+    // Empty for nominal layers; otherwise the object's Z/height pairs passed to production slicing.
+    std::vector<coordf_t> profile;
 };
 
 // The cases of the baseline, in recording order.
@@ -91,6 +93,7 @@ Dump parse_valid(const std::string &text);
 // A square ring from (x, y) of the given side, counterclockwise, in canonical form.
 ST::Ring square(long long x, long long y, long long side);
 
+// Returns the process-owned case table, including one real-height shelf profile; initial allocation failures propagate.
 const std::vector<DumpCase> &dump_cases()
 {
     static const std::vector<DumpCase> cases{
@@ -105,10 +108,13 @@ const std::vector<DumpCase> &dump_cases()
         {"shelf-organic-sparse", 2, "organic", 3, {{"support_material_with_sheath", "0"}}, true},
         {"volumes-scene", 3, "tree", 3, {{"support_material_xy_spacing", "3"}}, false},
         {"volumes-scene-buildplate", 3, "tree", 3, {{"support_material_xy_spacing", "3"}, {"support_material_buildplate_only", "1"}}, false},
+        {"shelf-tree-variable", 2, "tree", 3, {}, true, {0., 0.2, 1., 0.2, 1.01, 0.05, 4., 0.05, 4.01, 0.3, 9., 0.3}},
     };
     return cases;
 }
 
+// Builds independent owned prints with each case's configuration and optional real-height profile; dump owns the resulting records.
+// Slicing, routing and allocation failures propagate, and the single-thread arena makes the two recordings comparable.
 Dump make_dump()
 {
     Dump dump;
@@ -124,7 +130,10 @@ Dump make_dump()
         arena.execute([&] {
             Print print;
             Model model;
-            Test::init_print({ST::comparison_mesh(current.model_id)}, print, model, config);
+            if (current.profile.empty())
+                Test::init_print({ST::comparison_mesh(current.model_id)}, print, model, config);
+            else
+                SG::init_print_with_profile(print, model, ST::comparison_mesh(current.model_id), current.profile, config);
             SG::prefix(print);
             dump_one(dump, current, print);
         });
@@ -132,6 +141,8 @@ Dump make_dump()
     return dump;
 }
 
+// Records borrowed print settings, cached volumes and generated trees/slabs into dump-owned records; temporary routing storage
+// owns the polygons until serialization, and generation or allocation failures propagate to Catch.
 void dump_one(Dump &dump, const DumpCase &current, Print &print)
 {
     const std::string prefix = current.name;
@@ -145,6 +156,17 @@ void dump_one(Dump &dump, const DumpCase &current, Print &print)
     // The trees are routed once, recorded, then the slabs are generated from these same trees: the organic smoothing moves their
     // nodes in place, so the second record is the state the planner and the drawing work on.
     ST::Routed routed(print);
+    if (!current.profile.empty()) {
+        // Branches in both real-height bands keep this case sensitive to window changes along the routed object.
+        size_t thin_nodes = 0, thick_nodes = 0;
+        for (const TF::RoutedTree &tree : routed.trees)
+            for (const TF::TreeNode &node : tree.nodes) {
+                thin_nodes += object.layer(node.layer).scaled_height() == scale_to_layer_coord(0.05);
+                thick_nodes += object.layer(node.layer).scaled_height() == scale_to_layer_coord(0.3);
+            }
+        REQUIRE(thin_nodes > 0);
+        REQUIRE(thick_nodes > 0);
+    }
     dump_routing(dump, prefix + "/routing", routed.trees);
     dump_slabs(dump, prefix + "/routed_contacts", routed.support);
     const bool organic = std::string(current.style) == "organic";
@@ -153,6 +175,7 @@ void dump_one(Dump &dump, const DumpCase &current, Print &print)
     dump_slabs(dump, prefix, routed.support);
 }
 
+// Appends owned text for scalar settings and per-layer vectors to dump under prefix; settings are borrowed and allocation failures propagate.
 void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings &s)
 {
     Record &record = dump.add(prefix + "/settings");
@@ -160,14 +183,12 @@ void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings
         field("layer_height", (long long) s.layer_height), field("resolution", (long long) s.resolution),
         field("min_feature_size", (long long) s.min_feature_size), field("support_line_width", (long long) s.support_line_width),
         field("branch_radius", (long long) s.branch_radius), field("min_radius", (long long) s.min_radius),
-        field("tip_layers", s.tip_layers), field("branch_radius_increase_per_layer", s.branch_radius_increase_per_layer),
-        field("bp_radius_increase_per_layer", s.bp_radius_increase_per_layer), field("bp_radius", (long long) s.bp_radius),
-        field("layer_start_bp_radius", s.layer_start_bp_radius), field("increase_radius_until_radius", (long long) s.increase_radius_until_radius),
-        field("increase_radius_until_layer", s.increase_radius_until_layer), field("min_dtt_to_model", s.min_dtt_to_model),
+        field("bp_radius", (long long) s.bp_radius), field("increase_radius_until_radius", (long long) s.increase_radius_until_radius),
+        field("min_height_to_model", (long long) s.min_height_to_model),
         field("max_to_model_radius_increase", (long long) s.max_to_model_radius_increase),
         field("support_rests_on_model", s.support_rests_on_model), field("xy_distance", (long long) s.xy_distance),
-        field("xy_min_distance", (long long) s.xy_min_distance), field("z_distance_top_layers", s.z_distance_top_layers),
-        field("z_distance_bottom_layers", s.z_distance_bottom_layers), field("branch_distance", (long long) s.branch_distance),
+        field("z_distance_both_sides", s.z_distance_both_sides),
+        field("xy_min_distance", (long long) s.xy_min_distance), field("branch_distance", (long long) s.branch_distance),
         field("top_rate", s.top_rate), field("angle", s.angle), field("max_overhang", (long long) s.max_overhang),
         field("min_slab_height", (long long) s.min_slab_height), field("max_slab_height", (long long) s.max_slab_height),
         field("dense_slab_height", (long long) s.dense_slab_height), field("z_step", (long long) s.z_step)};
@@ -178,6 +199,33 @@ void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings
         slow += std::to_string((long long) move) + " ";
     record.lines.push_back("max_move=" + moves);
     record.lines.push_back("max_move_slow=" + slow);
+    // The radius gains per layer step, as doubles with 17 significant digits so that a change of the law shows in the dump.
+    std::string tip_gains, cone_gains;
+    for (const double gain : s.tip_gain)
+        tip_gains += field("", gain).substr(1) + " ";
+    for (const double gain : s.cone_gain)
+        cone_gains += field("", gain).substr(1) + " ";
+    record.lines.push_back("tip_gain=" + tip_gains);
+    record.lines.push_back("cone_gain=" + cone_gains);
+    // The foot of the branches near the bed: the widening allowed per step and the radius to reach on each layer.
+    std::string bp_gains, foot_targets;
+    for (const double gain : s.bp_gain)
+        bp_gains += field("", gain).substr(1) + " ";
+    for (const double target : s.foot_target)
+        foot_targets += field("", target).substr(1) + " ";
+    record.lines.push_back("bp_gain=" + bp_gains);
+    record.lines.push_back("foot_target=" + foot_targets);
+    std::string tops;
+    for (const coord_t print_z : s.layer_print_z)
+        tops += std::to_string((long long) print_z) + " ";
+    record.lines.push_back("layer_print_z=" + tops);
+    std::string top, bottom;
+    for (const uint32_t count : s.z_distance_top_layers)
+        top += std::to_string(count) + " ";
+    for (const uint32_t count : s.z_distance_bottom_layers)
+        bottom += std::to_string(count) + " ";
+    record.lines.push_back("z_distance_top_layers=" + top);
+    record.lines.push_back("z_distance_bottom_layers=" + bottom);
 }
 
 // Radii: the tip, the branch and the widened foot. Every layer of the object is asked, after a precalculation up to the top layer,
@@ -193,7 +241,7 @@ void dump_volumes(Dump &dump, const std::string &prefix, const Print &print, con
     PluginStorage storage;
     Volumes volumes(SG::object_view(object), SG::print_view(print), settings, reinterpret_cast<storage_handle *>(&storage), nullptr);
     volumes.precalculate(layers - 1);
-    const std::set<coord_t> radii{settings.getRadius(0), settings.branch_radius, settings.bp_radius};
+    const std::set<coord_t> radii{settings.min_radius, settings.branch_radius, settings.bp_radius};
     const std::vector<std::pair<Volumes::AvoidanceType, const char *>> types{
         {Volumes::AvoidanceType::Slow, "slow"}, {Volumes::AvoidanceType::FastSafe, "fastsafe"}, {Volumes::AvoidanceType::Fast, "fast"}};
     auto add = [&](const std::string &key, const slic3r_api::StoredPolygonCollection &polygons) {
@@ -216,7 +264,7 @@ void dump_volumes(Dump &dump, const std::string &prefix, const Print &print, con
         }
     }
     // The placeable areas have no XY distance variant: radius 0 (the top surfaces of the object) and the tip radius.
-    for (const coord_t radius : {coord_t(0), settings.getRadius(0)})
+    for (const coord_t radius : {coord_t(0), settings.min_radius})
         for (TF::LayerIndex layer = 1; layer < layers; ++layer)
             add("placeable/r" + std::to_string((long long) radius) + "/L" + std::to_string(layer), volumes.getPlaceableAreas(radius, layer));
 }

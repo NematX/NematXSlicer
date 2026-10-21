@@ -81,6 +81,8 @@ MoveSteps split_move(const float max_move, const float move_step)
 }
 } // namespace
 
+// Copies settings and caches simplified real-layer outlines in run_storage; views are borrowed during construction. Cancellation
+// and allocation failures propagate; the supplied storage and the context, when non-null, must outlive the resulting volumes.
 TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
                          const plugin_run_context *context) :
     m_context(context),
@@ -89,9 +91,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
     m_current_min_xy_dist_delta(settings.xy_distance - settings.xy_min_distance),
     m_support_rests_on_model(settings.support_rests_on_model),
     m_increase_until_radius(settings.increase_radius_until_radius),
-    m_radius_0(settings.getRadius(0)),
-    m_z_distance_bottom_layers(int(settings.z_distance_bottom_layers)),
-    m_z_distance_top_layers(int(settings.z_distance_top_layers)),
+    m_radius_0(settings.min_radius),
     m_settings(settings),
     m_collision_cache(run_storage),
     m_collision_cache_holefree(run_storage),
@@ -163,28 +163,19 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
 }
 
 // Computes the caches for the keys (ceiled radius, layer) that a tree whose top layer is max_layer can request: each radius is
-// computed from the lowest layer up to the highest layer where it can occur. It also sets the members that the getters read without
-// a lock (m_precalculated, m_ignorable_radii), so it must complete before the getters are called concurrently. The areas stay in the
+// computed from the lowest layer up to the highest layer where it can occur. The radii come from the path without pause of a
+// tip on max_layer (TreeSettings::path_gain() on the real layer heights); a branch that pauses its growth or catches up may
+// request other keys, which are then computed on demand; so does a foot widening that stops between the radii of two layers. The
+// keys of the foot target near the bed (TreeSettings::foot_target with and without the XY delta) are added as well.
+// m_ignorable_radii stays empty: no radius of the ceilRadius() scale is excluded. The function also sets the members that the getters read without
+// a lock (m_precalculated), so it must complete before the getters are called concurrently. The areas stay in the
 // caches, which own them: the getters return references to them. A cancellation of the context (PluginCancelled) propagates to the caller;
 // the keys published before it stay, and a key that was not computed is computed by the getter that asks for it.
+// Precondition: max_layer is a valid object layer.
 void TreeVolumes::precalculate(const coord_t max_layer)
 {
     m_precalculated = true;
     const TreeSettings &config = m_settings;
-
-    // Radii that a tip can have while it grows from the radius at distance to top 0 to the branch radius. The radii that no tip
-    // can reach are skipped by ceilRadius(), as they will not be requested.
-    {
-        std::vector<coord_t> possible_tip_radiis;
-        for (size_t distance_to_top = 0; distance_to_top <= config.tip_layers; ++ distance_to_top) {
-            possible_tip_radiis.emplace_back(ceilRadius(config.getRadius(distance_to_top)));
-            possible_tip_radiis.emplace_back(ceilRadius(config.getRadius(distance_to_top) + m_current_min_xy_dist_delta));
-        }
-        sort_remove_duplicates(possible_tip_radiis);
-        for (coord_t radius_eval = m_radius_0; radius_eval <= config.branch_radius; radius_eval = ceilRadius(radius_eval + 1))
-            if (! std::binary_search(possible_tip_radiis.begin(), possible_tip_radiis.end(), radius_eval))
-                m_ignorable_radii.emplace_back(radius_eval);
-    }
 
     slic3r_api::throw_if_cancelled(m_context);
 
@@ -203,11 +194,14 @@ void TreeVolumes::precalculate(const coord_t max_layer)
             else
                 assert(it->second >= current_layer);
         };
-        update_radius_until_layer(ceilRadius(config.getRadius(distance_to_top, 0) + m_current_min_xy_dist_delta));
-        update_radius_until_layer(ceilRadius(config.getRadius(distance_to_top, 0)));
-        update_radius_until_layer(ceilRadius(config.recommendedMinRadius(current_layer) + m_current_min_xy_dist_delta));
-        // The wider base of a branch near the build plate, as the routing asks for it with the minimum XY distance (no delta).
-        update_radius_until_layer(ceilRadius(config.recommendedMinRadius(current_layer)));
+        const coord_t path_radius = coord_t(config.min_radius + config.path_gain(current_layer, distance_to_top));
+        update_radius_until_layer(ceilRadius(path_radius + m_current_min_xy_dist_delta));
+        update_radius_until_layer(ceilRadius(path_radius));
+        if (config.foot_target[current_layer] > double(config.branch_radius)) {
+            // The wider base of a branch near the build plate, with and without the XY delta (the routing asks for both variants).
+            update_radius_until_layer(ceilRadius(coord_t(config.foot_target[current_layer]) + m_current_min_xy_dist_delta));
+            update_radius_until_layer(ceilRadius(coord_t(config.foot_target[current_layer])));
+        }
     }
 
     slic3r_api::throw_if_cancelled(m_context);
@@ -262,7 +256,8 @@ void TreeVolumes::calculateCollision(const std::vector<RadiusLayerPair> &keys)
 
 // Computes the collision of one radius on layers 0 to max_layer_idx: the outline grown by the radius and the XY distance, then
 // merged over the Z gaps. The placeable areas of radius 0 come from the same outlines. The whole range is computed whatever the
-// cache holds, and the result is inserted without replacing what another thread inserted meanwhile.
+// cache holds, and the result is inserted without replacing what another thread inserted meanwhile. max_layer_idx must name an
+// object layer; cache storage owns published polygons, and cancellation or allocation failures propagate to the caller.
 void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_layer_idx)
 {
     // The layers are computed by parallel loops. Each chunk of a loop works in a scratch storage of its own, so that the chunks do not wait
@@ -271,8 +266,9 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
     with_scratch_storage([&](storage_handle *result_storage) {
         const std::vector<StoredPolygonCollection> &outlines = m_layer_outlines;
         const coord_t xy_distance = m_current_min_xy_dist;
-        const int z_distance_bottom_layers = m_z_distance_bottom_layers;
-        const int z_distance_top_layers = m_z_distance_top_layers;
+        const std::vector<uint32_t> &bottom_windows = m_settings.z_distance_bottom_layers;
+        const std::vector<uint32_t> &top_windows = m_settings.z_distance_top_layers;
+        assert(max_layer_idx >= 0 && max_layer_idx < LayerIndex(top_windows.size()) && max_layer_idx < LayerIndex(bottom_windows.size()));
 
         // Layer range for which the collisions will be calculated.
         LayerPolygonCache data;
@@ -285,9 +281,11 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
 
         // 1) Offset the outlines of the layers that the sums below use.
         LayerPolygonCache collision_areas_offsetted;
+        const LayerIndex max_bottom = LayerIndex(*std::max_element(bottom_windows.begin() + data.begin(), bottom_windows.begin() + data.end()));
+        const LayerIndex max_top = LayerIndex(*std::max_element(top_windows.begin() + data.begin(), top_windows.begin() + data.end()));
         collision_areas_offsetted.allocate(result_storage,
-            std::max<LayerIndex>(0, data.begin() - z_distance_bottom_layers),
-            std::min<LayerIndex>(LayerIndex(outlines.size()), data.end() + z_distance_top_layers));
+            std::max<LayerIndex>(0, data.begin() - max_bottom),
+            std::min<LayerIndex>(LayerIndex(outlines.size()), data.end() + max_top));
         // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
         // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
         tbb::parallel_for(tbb::blocked_range<LayerIndex>(collision_areas_offsetted.begin(), collision_areas_offsetted.end()),
@@ -309,15 +307,19 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
 
         // 2) Sum the outlines over the Z gaps of each layer. The outlines above are offset by a distance that shrinks with the
         // layer distance, so that a branch may come as close to the layers above as the xy distance of the overhang requires.
-        // The Z gaps are counts of nominal layers, rounded as the legacy does (TreeSettings.hpp).
+        // Each real-Z window includes layers closer than the gap, within Z rounding tolerance;
+        // the native XY ramp uses n = top[L], virtual layers included, as its denominator.
         // FIXME(perf): same as the loop above (default partitioner, no measured gain from slic3r_parallel_for).
         tbb::parallel_for(tbb::blocked_range<LayerIndex>(data.begin(), data.end()),
-            [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, radius, xy_distance, z_distance_bottom_layers, z_distance_top_layers,
+            [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, radius, xy_distance, &bottom_windows, &top_windows,
                 min_resolution = m_min_resolution, &data, this]
             (const tbb::blocked_range<LayerIndex>& range) {
                 with_scratch_storage([&](storage_handle *storage) {
                     for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
                         StoredPolygonCollection collisions(storage);
+                        assert(layer_idx >= 0 && layer_idx < LayerIndex(top_windows.size()) && layer_idx < LayerIndex(bottom_windows.size()));
+                        const int z_distance_bottom_layers = int(bottom_windows[layer_idx]);
+                        const int z_distance_top_layers = int(top_windows[layer_idx]);
                         for (int i = - z_distance_bottom_layers; i <= 0; ++ i)
                             if (int j = layer_idx + i; collision_areas_offsetted.has(j))
                                 collisions.append_copy_from(collision_areas_offsetted[j]);
@@ -343,13 +345,16 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
         // 3) The placeable areas: the top surface of the layer below, minus the collision of this layer, inset by the XY distance.
         if (calculate_placable) {
             // FIXME(perf): same as the loop above (default partitioner, no measured gain from slic3r_parallel_for).
-            tbb::parallel_for(tbb::blocked_range<LayerIndex>(std::max(z_distance_bottom_layers + 1, data.begin()), data.end()),
+            tbb::parallel_for(tbb::blocked_range<LayerIndex>(data.begin(), data.end()),
                 [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, min_resolution = m_min_resolution,
-                    z_distance_bottom_layers, xy_distance, &data_placeable, this]
+                    &bottom_windows, xy_distance, &data_placeable, this]
                 (const tbb::blocked_range<LayerIndex>& range) {
                     with_scratch_storage([&](storage_handle *storage) {
                         for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
-                            const LayerIndex layer_idx_below = layer_idx - z_distance_bottom_layers - 1;
+                            assert(layer_idx >= 0 && layer_idx < LayerIndex(bottom_windows.size()));
+                            const LayerIndex layer_idx_below = layer_idx - LayerIndex(bottom_windows[layer_idx]) - 1;
+                            if (layer_idx_below < 0)
+                                continue;
                             const StoredPolygonCollection &current = collision_areas_offsetted[layer_idx];
                             const StoredPolygonCollection &below   = outlines[layer_idx_below];
                             // Inflate the surface to sit on by the separation distance to increase chance of a support being placed on a sloped surface.

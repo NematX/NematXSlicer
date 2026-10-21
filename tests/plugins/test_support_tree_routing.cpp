@@ -182,6 +182,111 @@ TEST_CASE("Tree branch moves follow the real height of each layer", "[plugins][s
     REQUIRE(object.layer(thick).unscaled_height() > 2. * object.layer(thin).unscaled_height());
     CHECK(settings.maximum_move_distance(TF::LayerIndex(thin)) < settings.maximum_move_distance(TF::LayerIndex(thick)) / 2);
 }
+
+// Between two consecutive routed nodes of a branch above the foot, whose tip has ended, the radius grows by tan(diameter angle) times
+// the real height between the two layers. The profile has a thin band (0.05) and thick ones (0.3) on the branch paths, above the
+// layers where the foot widens the branches (foot_target above the branch radius). Forks and merges are skipped: their radius is the larger one of the
+// merged branches. A law counted in layers of the nominal height would grow by the same amount in every layer.
+TEST_CASE("Tree branch radius grows with the real height between layers", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = SG::config("organic");
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}});
+    TriangleMesh post = make_cube(2., 10., 10.);
+    TriangleMesh roof = make_cube(8., 10., 1.);
+    roof.translate(0., 0., 10.);
+    post.merge(roof);
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(post), std::vector<coordf_t>{0., 0.3, 7., 0.3, 7.01, 0.05, 8.5, 0.05, 8.51, 0.3, 11., 0.3}, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
+    const double slope = std::tan(config.opt_float("support_tree_branch_diameter_angle") * M_PI / 180.);
+    // The first layer above the foot: where the foot target is back to the branch radius.
+    TF::LayerIndex foot_end = 0;
+    while (size_t(foot_end) < settings.foot_target.size() && settings.foot_target[foot_end] > double(settings.branch_radius))
+        ++ foot_end;
+    const Routed routed(print);
+    REQUIRE_FALSE(routed.trees.empty());
+    size_t thin_pairs = 0, thick_pairs = 0;
+    for (const TF::RoutedTree &tree : routed.trees)
+        for (const TF::TreeNode &lower : tree.nodes) {
+            // A plain continuation: one node above, on the next layer, above the foot, and a radius that grows.
+            if (lower.carries.size() != 1 || TF::LayerIndex(lower.layer) < foot_end + 2)
+                continue;
+            const TF::TreeNode &upper = tree.nodes[lower.carries.front()];
+            if (upper.layer != lower.layer + 1 || upper.radius < settings.branch_radius || lower.radius <= upper.radius)
+                continue;
+            const double height_mm = object.layer(upper.layer).unscaled_height();
+            const double growth = double(lower.radius - upper.radius) / (upper.print_z - lower.print_z) / 1e6;
+            CHECK_FALSE((lower.lost || lower.verylost || upper.lost || upper.verylost));
+            CAPTURE(lower.layer, height_mm, lower.radius, upper.radius, growth, slope);
+            CHECK(growth == Approx(slope).margin(0.002));
+            thin_pairs += height_mm < 0.1;
+            thick_pairs += height_mm > 0.25;
+        }
+    CAPTURE(thin_pairs, thick_pairs);
+    CHECK(thin_pairs >= 5);
+    CHECK(thick_pairs >= 5);
+}
+
+// A roof overhangs a wide platform, and its post stands on the platform edge, so the only landing for the branches is the platform
+// top, a gap below the roof. With thin 0.05 layers around the gap, even a short branch spans many layers: the layer count
+// alone (ceil(1 mm / 0.2) = 5) would let a branch of 0.7 mm rest on the platform, but the minimum height to the model is 1 mm of
+// real Z, so it must not. A branch of 1.3 mm (control) rests on the platform.
+TEST_CASE("The minimum height to the model follows the real Z of thin layers", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double gap_mm = GENERATE(0.9, 1.5);
+    CAPTURE(gap_mm);
+    DynamicPrintConfig config = SG::config("organic", false, 0);
+    config.set_deserialize_strict({{"support_material_buildplate_only", "0"}});
+    TriangleMesh platform = make_cube(20., 10., 4.);
+    TriangleMesh post = make_cube(2., 10., gap_mm);
+    post.translate(18., 0., 4.);
+    TriangleMesh roof = make_cube(12., 10., 1.);
+    roof.translate(8., 0., 4. + float(gap_mm));
+    platform.merge(post);
+    platform.merge(roof);
+    const double top = 5. + gap_mm;
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(platform), std::vector<coordf_t>{0., 0.2, 3.4, 0.2, 3.5, 0.05, top - 0.5, 0.05, top - 0.4, 0.2, top, 0.2}, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Routed routed(print);
+    // The top layer of the platform: the last layer whose slice plane (the middle of the layer) cuts the platform.
+    constexpr double platform_height_mm = 4.;
+    size_t platform_layer = 0;
+    for (size_t layer = 0; layer < object.layer_count(); ++ layer)
+        if (object.layer(layer).unscaled_print_z() - 0.5 * object.layer(layer).unscaled_height() < platform_height_mm)
+            platform_layer = layer;
+    const double platform_top_mm = object.layer(platform_layer).unscaled_print_z();
+    const double eps_mm = unscaled(double(scale_to_layer_coord(EPSILON)));
+    // The tips are one contact distance (0.2 mm) under the roof, so the branches span gap - 0.2 mm down to the platform: 0.7 mm
+    // (gap 0.9) or 1.3 mm (gap 1.5).
+    // The elements that cannot rest on the model are dropped: the short case routes no branch, as none can reach the bed.
+    size_t on_model = 0;
+    for (const TF::RoutedTree &tree : routed.trees) {
+        const TF::TreeNode &bottom = tree.nodes.back();
+        // A root rests on the platform: its last node lies above the platform top and at most the bottom gap above it. The routed root
+        // may stay inside that gap, under the floor: clear_under_floors() removes the floor footprint from the slab polygons, not the
+        // routed nodes, so the node may lie up to platform_top + gap_below and the branch then rests on its floor.
+        CAPTURE(bottom.print_z, platform_top_mm, routed.params.gap_below);
+        CHECK(bottom.print_z > platform_top_mm);
+        CHECK(bottom.print_z <= platform_top_mm + routed.params.gap_below + eps_mm);
+        on_model += ! bottom.to_buildplate;
+    }
+    CAPTURE(routed.trees.size(), on_model);
+    if (gap_mm < 1.) {
+        CHECK(routed.trees.empty());
+        CHECK(on_model == 0);
+    } else {
+        REQUIRE_FALSE(routed.trees.empty());
+        CHECK(on_model == routed.trees.size());
+    }
+}
 // A small support_tree_max_overhang caps the branch angle at atan(max overhang / minimum layer height), where the minimum
 // layer height is the thinnest of the configured minimums and of the sliced layers. With the branch angle at 80 degrees, an
 // overhang of 0.05 mm must set the angle to that cap.
@@ -528,4 +633,53 @@ TEST_CASE("Tip sampling stops after the pattern call that cancels the step", "[p
         CHECK(stopped.first);
         CHECK(stopped.second == 1);
     });
+}
+
+// The branches of a tall overhang, far from the object once past the post: the tips keep the tip radius, the drawn radius never
+// decreases going down (the foot and the merges only add), and the roots on the bed are widened by the foot up to foot_target[0]
+// (the radius of the bed). The routing may stop a foot short of the target where the next cache radius is not free; the roots are
+// asserted never above the target and the widest one at the target (within 2 scaled units), since the branches stand in free space.
+TEST_CASE("Tree branches widen at the bed to the foot target without ever losing radius", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = SG::config("organic");
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}});
+    TriangleMesh post = make_cube(4., 8., 8.);
+    TriangleMesh roof = make_cube(12., 8., 1.);
+    roof.translate(0., 0., 8.);
+    post.merge(roof);
+    Print print;
+    Model model;
+    Test::init_print({post}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
+    const Routed routed(print);
+    REQUIRE_FALSE(routed.trees.empty());
+    REQUIRE(settings.foot_target[0] == double(settings.bp_radius));
+    double widest_root = 0.;
+    size_t roots = 0, tips = 0, links = 0;
+    for (const TF::RoutedTree &tree : routed.trees) {
+        for (const TF::TreeNode &lower : tree.nodes) {
+            if (lower.carries.empty()) {
+                CHECK(lower.radius == settings.min_radius);
+                ++ tips;
+            }
+            for (const size_t upper_idx : lower.carries) {
+                CAPTURE(lower.layer, lower.radius, tree.nodes[upper_idx].radius);
+                CHECK(lower.radius >= tree.nodes[upper_idx].radius);
+                ++ links;
+            }
+        }
+        const TF::TreeNode &bottom = tree.nodes.back();
+        REQUIRE(bottom.layer == 0);
+        ++ roots;
+        CAPTURE(bottom.radius, settings.foot_target[0]);
+        CHECK(double(bottom.radius) <= settings.foot_target[0] + 2.);
+        widest_root = std::max(widest_root, double(bottom.radius));
+    }
+    CAPTURE(roots, tips, links, widest_root);
+    CHECK(tips > 0);
+    CHECK(links > 0);
+    CHECK(widest_root >= settings.foot_target[0] - 2.);
 }

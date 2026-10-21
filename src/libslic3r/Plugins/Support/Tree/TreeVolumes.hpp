@@ -4,7 +4,8 @@
    A tree branch is a disc of some radius centred on a node placed on an object layer. TreeVolumes answers, for a
    radius and a layer, which 2D areas the node must not enter:
    - getCollision: the object and its support blockers grown by the radius and the XY distance, with the Z gaps
-     above and below the layer;
+     above and below the layer. Each real-Z window includes layers closer than its gap, within Z rounding tolerance,
+     and keeps the native XY ramp above the layer;
    - getAvoidance: the places from which a node cannot descend to the build plate (or to the model) within the
      maximum move of each layer. It is built upwards from the collision of the layers below, one layer at a time;
    - getPlaceableAreas: the top surfaces where a branch of this radius fits and may stand on the model;
@@ -32,7 +33,7 @@
 
    Concurrency: once the constructor and precalculate() have returned, the getters are called from many threads at once, and any
    of them may have to compute a missing key. The constructor and precalculate() must complete before the first concurrent getter:
-   precalculate() writes members that the getters read without a lock (m_precalculated, m_ignorable_radii). Destroying a TreeVolumes
+   precalculate() writes members that the getters read without a lock (m_precalculated). Destroying a TreeVolumes
    needs exclusive access as well.
    - Each cache guards its maps with a short lock, taken only for a lookup or an insertion. No lock is held while an area is
      computed or while waiting for TBB tasks, as the computations run parallel_for and call other getters.
@@ -107,7 +108,7 @@ public:
     /*!
      * \brief Provides the areas that a node of the given radius must not enter on this layer, because they collide with the model.
      * \param radius The radius of the node of interest
-     * \param layer_idx The layer of interest
+     * \param layer_idx An object layer index, from zero through object layer count minus one.
      * \param min_xy_dist Is the minimum xy distance used.
      */
     const slic3r_api::StoredPolygonCollection& getCollision(const coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
@@ -116,7 +117,7 @@ public:
      * \brief Provides the areas that a node of the given radius must avoid on this layer to still reach the build plate,
      * or the model when to_model is set.
      * \param radius The radius of the node of interest
-     * \param layer_idx The layer of interest
+     * \param layer_idx An object layer index, from zero through object layer count minus one.
      * \param type The avoidance speed and hole handling
      * \param to_model Does the avoidance allow good connections with the model.
      * \param min_xy_dist is the minimum xy distance used.
@@ -128,14 +129,14 @@ public:
      * Radius 0 gives the top surfaces of the object, which are computed together with the collision of radius 0.
      * Without resting on the model there is no such area, and the collision is returned for radius 0.
      * \param radius The radius of the node of interest
-     * \param layer_idx The layer of interest
+     * \param layer_idx An object layer index, from zero through object layer count minus one.
      */
     const slic3r_api::StoredPolygonCollection& getPlaceableAreas(coord_t radius, LayerIndex layer_idx) const;
 
     /*!
      * \brief Provides the abstract walls that a branch must not pass when it moves between two layers.
      * \param radius The radius of the node of interest.
-     * \param layer_idx The layer of interest.
+     * \param layer_idx An object layer index, from zero through object layer count minus one.
      * \param min_xy_dist is the minimum xy distance used.
      */
     const slic3r_api::StoredPolygonCollection& getWallRestriction(coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
@@ -281,6 +282,7 @@ private:
      * key is kept, and is equal to the new area.
      */
     void calculateCollision(const std::vector<RadiusLayerPair> &keys);
+    // Populate collisions through max_layer_idx using each layer's real-Z gap windows and their native XY ramp.
     void calculateCollision(const coord_t radius, const LayerIndex max_layer_idx);
     // Collisions that additionally keep out the holes too small for a branch of the radius until which it always widens.
     void calculateCollisionHolefree(const std::vector<RadiusLayerPair> &keys);
@@ -304,6 +306,8 @@ private:
 
     // Return the collision of a radius and layer, computed on demand when precalculate() did not cover it.
     const slic3r_api::StoredPolygonCollection& getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const;
+    // Rounds a radius up to the scale of cached radii (from min_radius, then fine steps, then exponential). The list of ignorable
+    // radii is empty, so every step of the scale is a possible result.
     coord_t ceilRadius(const coord_t radius) const;
 
     RadiusLayerPolygonCache& avoidance_cache(const AvoidanceType type, const bool to_model) {
@@ -343,17 +347,15 @@ private:
     bool m_support_rests_on_model;
     // Radius from which the radius of a branch is always increased, even if the avoidance does not allow it.
     coord_t m_increase_until_radius;
-    // Smallest radius a branch can have, at distance to top 0.
+    // Smallest radius a branch can have: the radius of a tip (min_radius), the first step of the ceilRadius() scale.
     coord_t m_radius_0;
     // Object outline of each layer.
     std::vector<slic3r_api::StoredPolygonCollection> m_layer_outlines;
     // Support blockers of each layer, avoided like the object; empty when the object has no blocker.
     std::vector<slic3r_api::StoredExPolygonCollection> m_anti_overhang;
-    // Radii that ceilRadius skips, as no tree tip can request them, sorted.
+    // Radii that ceilRadius skips, sorted. It is empty: with a radius gain that follows the real layer heights and a continuous
+    // catch up, no radius of the scale can be shown to be unreachable.
     std::vector<coord_t> m_ignorable_radii;
-    // Layers count of the Z gaps used by the collisions, from the nominal layer height.
-    int m_z_distance_bottom_layers;
-    int m_z_distance_top_layers;
     // The settings that give the radii of the tips and the branch sizes.
     TreeSettings m_settings;
 

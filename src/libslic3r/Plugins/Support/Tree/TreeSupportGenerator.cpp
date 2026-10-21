@@ -38,15 +38,16 @@
       the organic branches, refine_branch_slabs() then cuts the middle slabs whose drawn sections overhang more than the limit;
    4. align_slab_bounds() snaps every slab bound that lies within the layer merge tolerance of an object print Z onto it,
       merges the support bounds that lie within the tolerance of each other, and merges the slabs that collapse;
-   5. the contacts are trimmed by the object outline; the floors and, with interface layers, the top contacts are then trimmed
-      by the bridge footprints of the object layers above them (trim_bridge_footprints(), from the top of each slab); with two
-      or more interface layers the contact footprints are then projected into the base slabs under them;
-   6. draw_branches() adds the branches that cross each base slab, then trims the slab by the object outline and, from its own
-      top, by the bridge footprints: circles for the tree branches and the root stems, branch meshes for the organic branches
-      (TreeBranchMesh.hpp). Without interface layers, draw_tip_contacts() replaces each contact footprint by the branches drawn
-      at the middle of the contact, with the tip stretches that cross it, and the rebuilt contacts are trimmed by the bridge
-      footprints again, from their own top; then clear_under_floors() removes the floor footprints from the base slabs and these
-      contacts;
+   5. the contacts are trimmed by the object outline within both Z gaps, except against the layer they support or rest on; the
+      floors and, with interface layers, the top contacts are then trimmed by the bridge footprints of the object layers above
+      them (trim_bridge_footprints(), from the top of each slab); with two or more interface layers the contact footprints are
+      then projected into the base slabs under them;
+   6. draw_branches() adds the branches that cross each base slab, then trims the slab by the object outline within both Z gaps
+      and, from its own top, by the bridge footprints: circles for the tree branches and the root stems, branch meshes for the
+      organic branches (TreeBranchMesh.hpp). Without interface layers, draw_tip_contacts() replaces each contact footprint by
+      the branches drawn at the middle of the contact, with the tip stretches that cross it, and trims it by the object outline
+      within both Z gaps, except against its own roof; the rebuilt contacts are trimmed by the bridge footprints again, from their
+      own top; then clear_under_floors() removes the floor footprints from the base slabs and these contacts;
    7. carve_interfaces() splits the dense interfaces out; expand_first_layer_foot() then widens the first base slab when it
       starts on the bed (the first tree base slab, or the first organic branch slab, whose flange follows it; tips on the bed
       without a base slab are not widened) by raft_first_layer_expansion, and remove_first_layer_brim() cuts the reserved brim
@@ -171,24 +172,30 @@ void merge_collapsed_slabs(Common::GeneratedSupport &out);
 Common::GeneratorLayer *collapse_neighbor(const Common::GeneratorLayers &listed, const Common::GeneratorLayer &collapsed);
 // Starts the stem of every root that rests on a floor at the top of that floor.
 void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<RootRest> &rests);
-// Removes from the slab the outline of every object layer that the slab overlaps, grown by the XY distance.
-void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const PolygonList &keep_out, storage_handle *scratch);
+// Removes from the slab the outline of every object layer that lies within its Z span grown by the Z gaps (gap_above over the top,
+// gap_below under the bottom), the outline being grown by the XY distance. A gap not larger than the Z tolerance counts as zero, and
+// a gap larger than it is shortened by that tolerance, as in the routing windows of TreeSettings. The layer the slab supports or
+// rests on (supported_layer, size_t(-1) for none) is kept: the contact placement sets its clearance, and aligning the slab bounds
+// can move them by more than the tolerance.
+void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const PolygonList &keep_out, coord_t gap_above, coord_t gap_below,
+               size_t supported_layer, storage_handle *scratch);
 // Removes from each slab the footprint of the object bridges whose threads hang over it, grown by the XY gap, so that no support is
-// printed where a bridge thread is extruded. The object layers that the slab's Z span crosses are already removed by trim_slab(),
-// so the bridges are searched in the layers that begin at or above the slab top. A slab that ends under the bridge threads keeps
-// its footprint: it supports them.
+// printed where a bridge thread is extruded. The object layers within the slab's Z span grown by both Z gaps are already removed by
+// trim_slab() with the keep_out outline (xy_min_distance), but the bridges are searched from the slab top, not from the gap limit,
+// so that those of the window layers also lose the wider XY gap. A slab that ends under the bridge threads keeps its footprint: it
+// supports them.
 void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const LayerList &layers, const slic3r_api::Config &print_config,
                             const Common::SupportParams &params, storage_handle *scratch);
-// Adds to every base slab the branches that cross it, then trims each slab against the object. Tree branches are circles;
-// organic branches are the sections of their meshes, with the stems as circles.
+// Adds to every base slab the branches that cross it, then trims each slab against the object within both Z gaps. Tree branches are
+// circles; organic branches are the sections of their meshes, with the stems as circles.
 void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
-                   const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
-                   Common::GeneratedSupport &out);
+                   const PolygonList &keep_out, coord_t gap_above, coord_t gap_below, storage_handle *scratch,
+                   const plugin_run_context *context, Common::GeneratedSupport &out);
 // Without interface layers a top contact holds only the branches drawn at its middle and the tip stretches that cross it, and it
-// takes the branch type of the base slabs; its footprint is not kept.
+// takes the branch type of the base slabs; its footprint is not kept. It is trimmed within both Z gaps, except against its own roof.
 void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
-                       const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
-                       Common::GeneratedSupport &out);
+                       const PolygonList &keep_out, coord_t gap_above, coord_t gap_below, storage_handle *scratch,
+                       const plugin_run_context *context, Common::GeneratedSupport &out);
 // The circles of the tip stretches that cross a Z, appended to circles. A tip stretch runs from its tip up to the object layer above
 // it, as in the tree style; an organic tip is only a half sphere on its own node, which can stop below that Z.
 void add_tip_circles(StoredPolygonCollection &circles, storage_handle *storage, const std::vector<RoutedTree> &trees, const LayerList &layers,
@@ -220,6 +227,9 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
     const slic3r_api::Config print_config = print.config();
     // Without interface layers the contacts are rebuilt below from the branches, and trimmed again there.
     const bool without_interfaces = config.get("support_material_interface_layers").get_int() <= 0;
+    // The Z gaps between the support and the object, with which the drawn branches are trimmed.
+    const coord_t gap_above = scale_to_layer_coord(params.gap_above);
+    const coord_t gap_below = scale_to_layer_coord(params.gap_below);
     // Every temporary area of the job lives in this storage, which is destroyed when the job returns.
     with_scratch_storage([&](storage_handle *scratch) {
         const PolygonList keep_out = keep_out_outlines(layers, scratch, settings.xy_min_distance);
@@ -235,10 +245,13 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
         if (organic)
             refine_branch_slabs(segments, trees, settings, branch_slabs, scratch, context, out);
         align_slab_bounds(object_print_zs(print), out);
+        // A top contact lies gap_above under the object layer it supports, and a floor lies gap_below over the object layer it rests
+        // on, but the other object layers near it (the neighbouring steps of a slope) must stay a full gap away too: only the layer
+        // it supports or rests on is kept.
         for (Common::GeneratorLayer *contact : out.top)
-            trim_slab(*contact, layers, keep_out, scratch);
+            trim_slab(*contact, layers, keep_out, gap_above, gap_below, contact->object_above, scratch);
         for (Common::GeneratorLayer *contact : out.bottom)
-            trim_slab(*contact, layers, keep_out, scratch);
+            trim_slab(*contact, layers, keep_out, gap_above, gap_below, contact->object_below, scratch);
         // The top contacts and the floors lose the bridge footprint before publication, for themselves. Trimming the contacts before the
         // projection keeps the projected areas aligned with the grid, which trims its contacts before carving the interfaces; the later
         // trim of the base slabs also keeps the slabs of the thread band free of the footprint.
@@ -250,13 +263,15 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
         trim_bridges(out.bottom);
         Common::project_interface_contacts(params, out);
         slic3r_api::throw_if_cancelled(context);
-        draw_branches(segments, trees, organic, layers, keep_out, scratch, context, out);
+        draw_branches(segments, trees, organic, layers, keep_out, gap_above, gap_below, scratch, context, out);
         // The branches drawn in the base and branch slabs are trimmed too: a slab can reach into the thread band when the bridge is
         // thicker than a layer (thin support layers, high bridge flow ratio). The interfaces are carved out of these slabs afterwards.
+        // The bridge search starts at the slab top, not at the gap limit, so the bridges of the layers inside the gap window are
+        // removed too, with the XY gap gap_xy, which is wider than the keep_out outline (xy_min_distance) that trim_slab() removes.
         trim_bridges(out.base);
         Common::GeneratorLayers drawn_slabs = out.base;
         if (without_interfaces) {
-            draw_tip_contacts(segments, trees, organic, layers, keep_out, scratch, context, out);
+            draw_tip_contacts(segments, trees, organic, layers, keep_out, gap_above, gap_below, scratch, context, out);
             trim_bridges(out.top);
             drawn_slabs.insert(drawn_slabs.end(), out.top.begin(), out.top.end());
         }
@@ -321,14 +336,13 @@ std::vector<size_t> root_nodes(const RoutedTree &tree)
 }
 
 // The legacy stop rules bound the walk: it ends when the unsupported part is smaller than the larger of a fifth of the root
-// area and half the branch area, and it goes down at most five root radii in layers. A root that hangs in the air goes down to the bed.
+// area and half the branch area, and it goes down at most five root radii in real Z. A root that hangs in the air goes down to the bed.
 // Without a stop, the stem ends at the lowest layer that the walk reached, and it stays in the air.
 RootRest root_rest(const LayerList &layers, const TreeNode &root, const PolygonList &keep_out, const TreeSettings &settings,
                    storage_handle *scratch)
 {
     const double stop_area = std::max(0.2 * PI * sqr(double(root.radius)), 0.5 * PI * sqr(double(settings.branch_radius)));
-    const LayerIndex lowest = root.verylost ? 0 :
-        std::max<LayerIndex>(0, LayerIndex(root.layer) - LayerIndex(5. * double(root.radius) / double(settings.layer_height)));
+    const LayerIndex lowest = root.verylost ? 0 : settings.lowest_layer_within(LayerIndex(root.layer), coord_t(5. * double(root.radius)));
     StoredPolygonCollection unsupported(scratch);
     add_branch_circle(unsupported, scratch, to_vec2d(root.position), double(root.radius));
     RootRest rest{ root.layer, -1, 0, root.position, root.radius };
@@ -758,14 +772,23 @@ void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<Ro
                 rest.bottom_z = floor->print_z;
 }
 
-void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const PolygonList &keep_out, storage_handle *scratch)
+void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const PolygonList &keep_out, coord_t gap_above, coord_t gap_below,
+               size_t supported_layer, storage_handle *scratch)
 {
     if (slab.polygons.empty())
         return;
+    // A clearance within the Z tolerance of the gap is accepted, so the gap is shortened by the tolerance; a gap not above it is zero.
+    const coord_t eps = scale_to_layer_coord(EPSILON);
+    const coord_t above = gap_above > eps ? gap_above - eps : 0;
+    const coord_t below = gap_below > eps ? gap_below - eps : 0;
     StoredPolygonCollection outline(scratch);
-    for (size_t id = 0; id < keep_out.size(); ++id)
-        if (layers[id].bottom_z() < slab.print_z && layers[id].print_z() > slab.bottom_z)
+    for (size_t id = 0; id < keep_out.size(); ++id) {
+        // The layers are sorted by Z: none of the following ones can reach the slab.
+        if (layers[id].bottom_z() >= slab.print_z + above)
+            break;
+        if (id != supported_layer && layers[id].print_z() > slab.bottom_z - below)
             outline.append_copy_from(keep_out[id]);
+    }
     if (!outline.empty())
         slab.polygons.move_from(polygons_diff(scratch, slab.polygons, outline));
 }
@@ -790,8 +813,8 @@ void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const LayerLis
 }
 
 void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
-                   const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
-                   Common::GeneratedSupport &out)
+                   const PolygonList &keep_out, coord_t gap_above, coord_t gap_below, storage_handle *scratch,
+                   const plugin_run_context *context, Common::GeneratedSupport &out)
 {
     std::vector<coord_t> middles;
     middles.reserve(out.base.size());
@@ -803,15 +826,16 @@ void draw_branches(const std::vector<Segment> &segments, const std::vector<Route
         slab->polygons.append_move_from(sections[idx]);
         if (!slab->polygons.empty())
             slab->polygons.move_from(polygons_union(scratch, slab->polygons));
-        trim_slab(*slab, layers, keep_out, scratch);
+        // A branch is drawn at the slab middle over the whole slab thickness, so the object must stay a full Z gap away on both sides.
+        trim_slab(*slab, layers, keep_out, gap_above, gap_below, size_t(-1), scratch);
     }
 }
 
 // Each contact is drawn at its middle, like the base slabs, and the tip stretches that cross the middle are added to it. So a tip
 // at or below the middle reaches it, although an organic tip ends in a half sphere on its own node that can stop short of it.
 void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
-                       const PolygonList &keep_out, storage_handle *scratch, const plugin_run_context *context,
-                       Common::GeneratedSupport &out)
+                       const PolygonList &keep_out, coord_t gap_above, coord_t gap_below, storage_handle *scratch,
+                       const plugin_run_context *context, Common::GeneratedSupport &out)
 {
     std::vector<coord_t> middles;
     middles.reserve(out.top.size());
@@ -824,7 +848,8 @@ void draw_tip_contacts(const std::vector<Segment> &segments, const std::vector<R
         add_tip_circles(contact->polygons, scratch, trees, layers, middles[idx]);
         if (!contact->polygons.empty())
             contact->polygons.move_from(polygons_union(scratch, contact->polygons));
-        trim_slab(*contact, layers, keep_out, scratch);
+        // The roof of the contact is kept: its clearance is set by the contact placement. The neighbouring roofs of a slope are not.
+        trim_slab(*contact, layers, keep_out, gap_above, gap_below, contact->object_above, scratch);
         contact->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
     }
 }

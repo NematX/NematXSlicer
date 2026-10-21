@@ -19,6 +19,8 @@
 #ifndef plugins_support_tree_elements_hpp_
 #define plugins_support_tree_elements_hpp_
 
+#include <algorithm>
+#include <cassert>
 #include <cstdint>
 #include <deque>
 #include <limits>
@@ -149,9 +151,13 @@ struct SupportElementState : public SupportElementStateBits
     LayerIndex  layer_idx;
 
     /*!
-     * \brief The Effective distance to top of this element regarding radius increases and collision calculations.
+     * \brief The radius gain (scaled, above min_radius, without the foot) that the branch has acquired for its radius increases and
+     * collision calculations. It grows by TreeSettings::advance() each time a layer step increases the radius, and by the catch-up of
+     * the routing (bounded by the path gain of one step less); it stays when the radius is not increased. The drawn radius
+     * (support_element_radius()) follows the path gain without pause, capped at the tip total gain, during the tip, then the
+     * acquired gain.
      */
-    uint32_t    effective_radius_height;
+    double      radius_gain;
 
     /*!
      * \brief The amount of layers this element is below the topmost layer of this branch.
@@ -174,9 +180,11 @@ struct SupportElementState : public SupportElementStateBits
     coord_t     increased_to_model_radius; // how much to model we increased only relevant for merging
 
     /*!
-     * \brief Counter about the times the elephant foot was increased. Can be fractions for merge reasons.
+     * \brief The foot widening (scaled length) that the branch has acquired near the build plate, on top of radius_gain. It
+     * is part of both the collision and the drawn radius. It only grows by foot_step_gain() (and is set by a merge so that the
+     * drawn radius never decreases).
      */
-    double      elephant_foot_increases;
+    double      foot_gain;
 
     /*!
      * \brief The element tries to not move until this dtt is reached, is set to 0 if the element had to move.
@@ -203,25 +211,27 @@ struct SupportElementState : public SupportElementStateBits
 };
 
 /*!
- * \brief Get the Distance to top regarding the real radius this part will have. This is different from distance_to_top, which is can be used to calculate the top most layer of the branch.
- * \param elem[in] The SupportElement one wants to know the effectiveDTT
- * \return The Effective DTT.
+ * \brief The radius (scaled) of a branch with the given radius gain and foot gain: min_radius + gain + foot_gain. This is the
+ * single conversion to coord_t of the radii of the elements and of the routed nodes (collision and drawn radius);
+ * TreeVolumes::precalculate() converts the radii it simulates itself.
+ * \param gain[in] The radius gain above min_radius (scaled, without the foot).
+ * \param foot_gain[in] The foot widening (see SupportElementState::foot_gain).
  */
-[[nodiscard]] inline size_t getEffectiveDTT(const TreeSettings &settings, const SupportElementState &elem)
+[[nodiscard]] inline coord_t radius_from_gain(const TreeSettings &settings, const double gain, const double foot_gain)
 {
-    return elem.effective_radius_height < settings.increase_radius_until_layer ?
-        (elem.distance_to_top < settings.increase_radius_until_layer ? elem.distance_to_top : settings.increase_radius_until_layer) :
-        elem.effective_radius_height;
+    return coord_t(settings.min_radius + gain + foot_gain);
 }
 
 /*!
- * \brief Get the Radius, that this element will have.
- * \param elem[in] The Element.
+ * \brief Get the Radius, that this element will have: the one that is drawn. During the tip it follows the path without pause
+ * (the collision may have paused), afterwards it is the acquired gain.
+ * \param elem[in] The Element, on layer elem.layer_idx, whose tip is on layer elem.layer_idx + elem.distance_to_top.
  * \return The radius the element has.
  */
 [[nodiscard]] inline coord_t support_element_radius(const TreeSettings &settings, const SupportElementState &elem)
 {
-    return settings.getRadius(getEffectiveDTT(settings, elem), elem.elephant_foot_increases);
+    const double path = std::min(settings.path_gain(elem.layer_idx, elem.distance_to_top), settings.tip_total_gain);
+    return radius_from_gain(settings, std::max(elem.radius_gain, path), elem.foot_gain);
 }
 
 /*!
@@ -231,7 +241,110 @@ struct SupportElementState : public SupportElementStateBits
  */
 [[nodiscard]] inline coord_t support_element_collision_radius(const TreeSettings &settings, const SupportElementState &elem)
 {
-    return settings.getRadius(elem.effective_radius_height, elem.elephant_foot_increases);
+    return radius_from_gain(settings, elem.radius_gain, elem.foot_gain);
+}
+
+/*!
+ * \brief The foot widening that a branch adds on the step from layer upper_layer to upper_layer - 1, resting on the bed.
+ *
+ * The step budget of the foot is settings.bp_gain[upper_layer]: the foot adds what the normal growth of the step (the drawn
+ * radius difference between grown and parent) leaves of it, never more than what is missing to settings.foot_target[upper_layer
+ * - 1], and never a negative amount. The foot only grows for a branch that goes to the build plate, whose drawn radius has
+ * reached branch_radius, on a layer where the foot is active (foot_target > branch_radius). The routing step
+ * (increase_single_area()) calls this function; the foot gives no lateral speed.
+ * \param parent[in] The element on upper_layer.
+ * \param grown[in] The element on upper_layer - 1 after its normal growth (and catch-up), with the foot of the parent.
+ * \param upper_layer[in] The upper layer of the step, an object layer above layer 0.
+ * \return The foot widening to add (scaled), 0 when the foot does not grow.
+ */
+[[nodiscard]] inline double foot_step_gain(const TreeSettings &settings, const SupportElementState &parent, const SupportElementState &grown, const LayerIndex upper_layer)
+{
+    assert(upper_layer > 0 && size_t(upper_layer) < settings.foot_target.size());
+    const coord_t drawn = support_element_radius(settings, grown);
+    const double  target = settings.foot_target[upper_layer - 1];
+    if (! grown.to_buildplate || target <= double(settings.branch_radius) || drawn < settings.branch_radius)
+        return 0.;
+    const double step_growth = double(drawn - support_element_radius(settings, parent));
+    return std::min(std::max(0., settings.bp_gain[upper_layer] - step_growth), std::max(0., target - double(drawn)));
+}
+
+/*!
+ * \brief The gain a branch gets from the catch-up of the radius: the largest gain whose collision radius stays within the ceiled
+ * radius found by the cache search and within the drawn radius, bounded by the path gain of one step less.
+ *
+ * The gain never decreases. The foot acquired so far is part of both radii, so it is removed from the reachable radius.
+ * \param gain[in] The current gain (scaled, above min_radius, without the foot).
+ * \param ceil_radius[in] The largest cache radius found valid (scaled).
+ * \param drawn_radius[in] The drawn radius of the element (scaled, foot included).
+ * \param min_radius[in] The tip radius (scaled).
+ * \param foot_gain[in] The foot widening acquired so far (scaled).
+ * \param path_bound[in] The path gain of one step less than the distance to the tip.
+ */
+[[nodiscard]] inline double catch_up_gain(
+    const double gain, const coord_t ceil_radius, const coord_t drawn_radius, const coord_t min_radius, const double foot_gain, const double path_bound)
+{
+    const double reachable_gain = double(std::min(ceil_radius, drawn_radius)) - double(min_radius) - foot_gain;
+    return std::max(gain, std::min(reachable_gain, path_bound));
+}
+
+/*!
+ * \brief True when merging two elements must be refused because the collision radius of the merged state needs a higher cache step
+ * (ceilRadius()) than both elements: their areas were validated with their own collision radii only.
+ *
+ * The three radii are the ceiled collision radii, all taken with the same XY variant (use_min_xy_dist) of the merge.
+ */
+[[nodiscard]] inline bool merge_crosses_cache_step(const coord_t merged_ceil_radius, const coord_t first_ceil_radius, const coord_t second_ceil_radius)
+{
+    return merged_ceil_radius > std::max(first_ceil_radius, second_ceil_radius);
+}
+
+/*!
+ * \brief Combines the states of two elements that merge into one, on layer layer_idx (both elements are on that layer).
+ *
+ * The radius gain and the distance to top are the larger ones. The foot is what the merged gain and path do not give of the
+ * largest drawn radius of the two elements, so the drawn radius never decreases through a merge. to_buildplate and
+ * to_model_gracious are conjunctions: the merged branch may lose its access to the bed. last_area_increase takes the smaller type
+ * and speed and the or / and of the flags, as the best out of both elements. The caller sets increased_to_model_radius.
+ */
+[[nodiscard]] inline SupportElementState merge_support_element_states(
+    const SupportElementState &first, const SupportElementState &second, const c_point &next_position, const coord_t layer_idx,
+    const TreeSettings &config)
+{
+    SupportElementState out;
+    out.next_position   = next_position;
+    out.layer_idx       = layer_idx;
+    out.use_min_xy_dist = first.use_min_xy_dist || second.use_min_xy_dist;
+    out.dont_move_until = std::max(first.dont_move_until, second.dont_move_until);
+    out.can_use_safe_radius = first.can_use_safe_radius || second.can_use_safe_radius;
+    out.skip_ovalisation = false;
+    if (first.target_height > second.target_height) {
+        out.target_height   = first.target_height;
+        out.target_position = first.target_position;
+    } else {
+        out.target_height   = second.target_height;
+        out.target_position = second.target_position;
+    }
+    out.radius_gain = std::max(first.radius_gain, second.radius_gain);
+    out.distance_to_top = std::max(first.distance_to_top, second.distance_to_top);
+
+    out.to_buildplate = first.to_buildplate && second.to_buildplate;
+    out.to_model_gracious = first.to_model_gracious && second.to_model_gracious; // valid as we do not merge non-gracious with gracious
+
+    // The foot carries the missing part in whole scaled units: the merged drawn radius is then at least the larger one of the parents.
+    out.foot_gain = 0;
+    const coord_t parents_drawn = std::max(support_element_radius(config, first), support_element_radius(config, second));
+    out.foot_gain = double(std::max<coord_t>(0, parents_drawn - support_element_radius(config, out)));
+
+    // set last settings to the best out of both parents. If this is wrong, it will only cause a small performance penalty instead of weird behavior.
+    out.last_area_increase = {
+        std::min(first.last_area_increase.type, second.last_area_increase.type),
+        std::min(first.last_area_increase.increase_speed, second.last_area_increase.increase_speed),
+        first.last_area_increase.increase_radius || second.last_area_increase.increase_radius,
+        first.last_area_increase.no_error || second.last_area_increase.no_error,
+        first.last_area_increase.use_min_distance && second.last_area_increase.use_min_distance,
+        first.last_area_increase.move || second.last_area_increase.move };
+
+    return out;
 }
 
 struct SupportElement

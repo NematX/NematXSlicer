@@ -3,6 +3,7 @@
 #include "support_tree_test_helpers.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "libslic3r/Plugins/Support/Tree/TreeElements.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeGeometry.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSettings.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeVolumes.hpp"
@@ -38,7 +39,9 @@
    - many threads requesting keys that are not precalculated all get the reference areas (stress test);
    - a lazy computation checks the cancellation of the context given to the constructor and throws PluginCancelled, also from a cancelled TBB group, without publishing a partial area;
    - the support blockers: one box, a curved blocker (cylinder) and two overlapping boxes are sliced like the native ones, within the
-     resolution of the slicing, and enter the collision.
+      resolution of the slicing, and enter the collision;
+   - physical Z gaps include only closer object layers (within Z rounding tolerance), and model-root surfaces use the last layer
+     at or below the bottom-gap boundary. A one-layer ledge makes these choices observable independently of branch routing.
    After precalculate(), a lazy computation logs an error line "Had to calculate ...". The tests capture the log to assert that a
    request really took the lazy path, so that they do not silently test the caches only. */
 
@@ -50,6 +53,179 @@ namespace TF = Slic3r::TreeFamily;
 
 namespace {
 using Volumes = TF::TreeVolumes;
+
+// Builds a sliced post with one thin ledge in the selected height band, then checks a probe point under the ledge only.
+// Prints and polygon storage are local owners; slicing and allocation failures propagate to Catch.
+void check_physical_gap_ledge(bool variable, double band_z, const char *uniform_gap = "0.25");
+
+// Check a positive-XY collision ramp below a single-layer ledge, either in a thin band or next to the object's top.
+void check_collision_ramp(bool virtual_top);
+
+// Slices an owned post twice to place a one-layer ledge at a real slice Z, then checks a point under the ledge only against all collision and placeable
+// windows. variable selects a thin/thick profile, band_z selects its band and uniform_gap supplies the uniform-case clearance in mm;
+// slicing and allocation failures propagate to Catch.
+void check_physical_gap_ledge(bool variable, double band_z, const char *uniform_gap)
+{
+    DynamicPrintConfig config = SG::config("tree", false, 3);
+    config.set_deserialize_strict({{"support_material_xy_spacing", "0"},
+        {"support_material_contact_distance", variable ? "0.2" : uniform_gap},
+        {"support_material_bottom_contact_distance", variable ? "0.2" : uniform_gap}});
+    const std::vector<coordf_t> profile = variable ?
+        std::vector<coordf_t>{0., 0.05, 2., 0.05, 2.01, 0.3, 6., 0.3} : std::vector<coordf_t>{};
+    Print seed;
+    Model seed_model;
+    if (variable)
+        SG::init_print_with_profile(seed, seed_model, make_cube(2., 2., 6.), profile, config);
+    else
+        Test::init_print({make_cube(2., 2., 6.)}, seed, seed_model, config);
+    SG::prefix(seed);
+    size_t j = 0;
+    while (j < seed.object(0).layer_count() && seed.object(0).layer(j).unscaled_print_z() < band_z)
+        ++j;
+    REQUIRE(j + 5 < seed.object(0).layer_count());
+    TriangleMesh mesh = make_cube(2., 2., 6.);
+    TriangleMesh ledge = make_cube(4., 2., 0.01);
+    ledge.translate(0., 0., seed.object(0).layer(j).slice_z - 0.005);
+    mesh.merge(ledge);
+    Print print;
+    Model model;
+    if (variable)
+        SG::init_print_with_profile(print, model, std::move(mesh), profile, config);
+    else
+        Test::init_print({mesh}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    REQUIRE(object.layer_count() == seed.object(0).layer_count());
+    const BoundingBox bounds = get_extents(object.layer(j).lslices());
+    const Point probe(bounds.max.x() - scale_i(0.5), (bounds.min.y() + bounds.max.y()) / 2);
+    const slic3r_api::Support::Common::SupportParams params = SG::params(print, object);
+    const TF::TreeSettings settings = ST::tree_settings(print, object, params);
+    REQUIRE(settings.support_rests_on_model);
+    PluginStorage storage;
+    Volumes volumes(SG::object_view(object), SG::print_view(print), settings, SG::handle(storage), nullptr);
+    size_t above_hits = 0, below_hits = 0, placeable_hits = 0;
+    for (size_t layer = 0; layer < object.layer_count(); ++layer) {
+        CAPTURE(variable, band_z, j, layer);
+        // Only the ledge layer contains this point; the post is two millimetres narrower.
+        bool object_contains = false;
+        for (const ExPolygon &polygon : object.layer(layer).lslices())
+            object_contains = object_contains || polygon.contains(probe);
+        REQUIRE(object_contains == (layer == j));
+        bool collision_contains = false;
+        for (const Polygon &polygon : SG::native(volumes.getCollision(0, TF::LayerIndex(layer), true)))
+            if (polygon.contains(probe))
+                collision_contains = !collision_contains;
+        const coord_t eps = scale_to_layer_coord(EPSILON);
+        const bool expected = layer == j || (j > layer ?
+            object.layer(j).scaled_bottom_z() + eps < object.layer(layer).scaled_print_z() + scale_to_layer_coord(params.gap_above) :
+            object.layer(j).scaled_print_z() > object.layer(layer).scaled_bottom_z() - scale_to_layer_coord(params.gap_below) + eps);
+        CHECK(collision_contains == expected);
+        above_hits += expected && j > layer;
+        below_hits += expected && j < layer;
+        // The last surface at or below the physical bottom-gap boundary is the only possible model-root surface.
+        int surface = -1;
+        for (size_t below = 0; below < layer; ++below)
+            if (object.layer(below).scaled_print_z() <= object.layer(layer).scaled_bottom_z() - scale_to_layer_coord(params.gap_below) + eps)
+                surface = int(below);
+        bool placeable_contains = false;
+        for (const Polygon &polygon : SG::native(volumes.getPlaceableAreas(0, TF::LayerIndex(layer))))
+            if (polygon.contains(probe))
+                placeable_contains = !placeable_contains;
+        CHECK(placeable_contains == (surface == int(j)));
+        placeable_hits += placeable_contains;
+    }
+    REQUIRE(above_hits > 0);
+    REQUIRE(below_hits > 0);
+    REQUIRE(placeable_hits > 0);
+    if (!variable) {
+        // At h=0.2, gaps 0.08, 0.25 and 0.5 include respectively one, two and three neighbours on either side.
+        const uint32_t count = std::string(uniform_gap) == "0.08" ? 1u : std::string(uniform_gap) == "0.5" ? 3u : 2u;
+        for (size_t layer = 0; layer < object.layer_count(); ++layer) {
+            CHECK(settings.z_distance_top_layers[layer] == count);
+            CHECK(settings.z_distance_bottom_layers[layer] == std::min<size_t>(count, layer));
+        }
+        CHECK(above_hits == count);
+        CHECK(below_hits == count);
+        if (std::string(uniform_gap) == "0.08")
+            CHECK(std::round(params.gap_above / 0.2) == 0.);
+        if (std::string(uniform_gap) == "0.5")
+            CHECK(std::round(params.gap_above / 0.2) == 3.);
+    } else if (band_z < 2.) {
+        // In the 0.05 band, gap=0.2 includes clearances 0, 0.05, 0.10, 0.15, but not 0.20.
+        CHECK(settings.z_distance_top_layers[j] == 4);
+        CHECK(settings.z_distance_bottom_layers[j] == 4);
+    } else {
+        // In the 0.3 band, only clearance zero is below gap=0.2.
+        CHECK(settings.z_distance_top_layers[j] == 1);
+        CHECK(settings.z_distance_bottom_layers[j] == 1);
+    }
+}
+
+// Slices locally owned posts to put a ledge at one real slice Z, then probes between the correct ramp and a one-layer ramp.
+// virtual_top selects uniform layers with a virtual extension; storage owns both comparison caches and failures reach Catch.
+void check_collision_ramp(bool virtual_top)
+{
+    DynamicPrintConfig config = SG::config("tree", false, 3);
+    config.set_deserialize_strict({{"support_material_xy_spacing", "0.4"},
+        {"support_material_contact_distance", virtual_top ? "0.6" : "0.2"},
+        {"support_material_bottom_contact_distance", virtual_top ? "0.6" : "0.2"}});
+    const std::vector<coordf_t> profile{0., 0.05, 2., 0.05, 2.01, 0.3, 6., 0.3};
+    Print seed;
+    Model seed_model;
+    if (virtual_top)
+        Test::init_print({make_cube(2., 2., 6.)}, seed, seed_model, config);
+    else
+        SG::init_print_with_profile(seed, seed_model, make_cube(2., 2., 6.), profile, config);
+    SG::prefix(seed);
+    size_t j = virtual_top ? seed.object(0).layer_count() - 1 : 1;
+    while (!virtual_top && seed.object(0).layer(j).unscaled_print_z() < 1.)
+        ++j;
+    TriangleMesh mesh = make_cube(2., 2., 6.);
+    TriangleMesh ledge = make_cube(4., 2., 0.01);
+    ledge.translate(0., 0., seed.object(0).layer(j).slice_z - 0.005);
+    mesh.merge(ledge);
+    Print print;
+    Model model;
+    if (virtual_top)
+        Test::init_print({mesh}, print, model, config);
+    else
+        SG::init_print_with_profile(print, model, std::move(mesh), profile, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    REQUIRE(object.layer_count() == seed.object(0).layer_count());
+    const TF::TreeSettings settings = ST::tree_settings(print, object, SG::params(print, object));
+    const TF::LayerIndex layer = TF::LayerIndex(j - 1);
+    REQUIRE(settings.z_distance_top_layers[layer] == (virtual_top ? 3u : 4u));
+    if (virtual_top) {
+        // 0.6 on 0.2 layers is the smallest simple gap whose near-top collision boundary differs when virtual layers are ignored.
+        CHECK(settings.z_distance_top_layers[j] == 3);
+        CHECK(settings.z_distance_top_layers[j - 2] == 3);
+        CHECK(settings.z_distance_bottom_layers[j] == 3);
+    }
+    const coord_t radius = settings.min_radius;
+    const coord_t xy = settings.xy_min_distance;
+    REQUIRE(radius > 0);
+    REQUIRE(xy > 0);
+    const BoundingBox bounds = get_extents(object.layer(j).lslices());
+    // At i=1, n=4 reaches 3xy/4 and n=3 reaches 2xy/3; n=1 reaches only xy/2. The radius shifts all boundaries equally.
+    const coord_t extra = virtual_top ? 7 * xy / 12 : 5 * xy / 8;
+    const Point probe(bounds.max.x() + radius + extra, (bounds.min.y() + bounds.max.y()) / 2);
+    PluginStorage storage;
+    Volumes volumes(SG::object_view(object), SG::print_view(print), settings, SG::handle(storage), nullptr);
+    bool correct_contains = false;
+    for (const Polygon &polygon : SG::native(volumes.getCollision(radius, layer, true)))
+        if (polygon.contains(probe))
+            correct_contains = !correct_contains;
+    CHECK(correct_contains);
+    TF::TreeSettings truncated = settings;
+    truncated.z_distance_top_layers[layer] = 1;
+    Volumes one_layer(SG::object_view(object), SG::print_view(print), truncated, SG::handle(storage), nullptr);
+    bool truncated_contains = false;
+    for (const Polygon &polygon : SG::native(one_layer.getCollision(radius, layer, true)))
+        if (polygon.contains(probe))
+            truncated_contains = !truncated_contains;
+    CHECK_FALSE(truncated_contains);
+}
 
 // Layers that precalculate() computes for the volumes under test, the layer at which they are requested (not precalculated), and the
 // layers that precalculate() computes for the reference, which answers from its caches.
@@ -172,6 +348,26 @@ using Rings = std::vector<ST::Ring>;
 Rings rings(const slic3r_api::StoredPolygonCollection &area) { return ST::rings_of_view(area); }
 bool same(const slic3r_api::StoredPolygonCollection &a, const slic3r_api::StoredPolygonCollection &b) { return rings(a) == rings(b); }
 bool same(const slic3r_api::StoredPolygonCollection &a, const Rings &b) { return rings(a) == b; }
+}
+
+// Exercises one-layer ledges in thin and thick real-Z bands and in the conservative fractional-gap uniform case.
+TEST_CASE("Tree collision and placeable windows respect physical Z gaps", "[plugins][support-tree-volumes][support-tree-physical-gap]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_physical_gap_ledge(true, 1.);
+    check_physical_gap_ledge(true, 4.);
+    check_physical_gap_ledge(false, 2.);
+    check_collision_ramp(false);
+    check_collision_ramp(true);
+}
+
+// Uniform windows and one-layer ledge collisions remain physical for gaps below half a layer and above a whole layer.
+TEST_CASE("Tree windows include physical neighbours for small and large Z gaps", "[plugins][support-tree-volumes][support-tree-gap-sizes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *gap = GENERATE("0.08", "0.5");
+    CAPTURE(gap);
+    check_physical_gap_ledge(false, 2., gap);
 }
 
 // The support blockers of the object are avoided like the object. The volumes slice them with the helper shared with the demand
@@ -699,7 +895,7 @@ TEST_CASE("A TBB group that is cancelled during a lazy computation leaves no par
             }
     }
 }// The routing asks for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
-// radii that precalculate() computes: every radius of the base must be covered, or the routing computes it on demand from its
+// radii that precalculate() computes: the foot target of every layer must be covered, or the routing computes it on demand from its
 // parallel loops. The XY spacing of the scene is large, so the minimum XY bucket of the base is not the regular one.
 TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY distance", "[plugins][support-tree-routing][tree-volumes]")
 {
@@ -711,9 +907,9 @@ TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY di
     volumes.precalculate(top_layer);
     size_t widened_layers = 0;
     for (TF::LayerIndex layer = 1; layer <= top_layer; ++ layer) {
-        const coord_t radius = scene.settings.recommendedMinRadius(layer);
-        if (radius <= 0)
+        if (scene.settings.foot_target[layer] <= double(scene.settings.branch_radius))
             continue;
+        const coord_t radius = coord_t(scene.settings.foot_target[layer]);
         ++ widened_layers;
         CAPTURE(layer, radius);
         const size_t lazy_before = capture.count("Had to calculate");
@@ -721,9 +917,44 @@ TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY di
         volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false, true);
         volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, true, true);
         CHECK(capture.count("Had to calculate") == lazy_before);
+        if (widened_layers == 1) {
+            // The regular XY variant of the same foot layer is covered as well.
+            volumes.getCollision(radius, layer, false);
+            volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false, false);
+            CHECK(capture.count("Had to calculate") == lazy_before);
+        }
     }
     // The scene has a base to cover on the layers considered.
     CHECK(widened_layers > 0);
+}
+// A merge is refused when the merged collision radius needs a higher cache step than both branches, with the cache step of the XY
+// variant of the merge (ceilRadius() differs between the minimum and the regular XY distance).
+TEST_CASE("Tree merge is refused only when the merged radius crosses a higher cache step", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene;
+    const Volumes volumes = scene.volumes();
+    for (const bool use_min_xy_dist : { true, false }) {
+        CAPTURE(use_min_xy_dist);
+        const coord_t low = scene.settings.branch_radius;
+        const coord_t low_ceil = volumes.ceilRadius(low, use_min_xy_dist);
+        // The first radius, in steps of 0.01 mm, that needs a higher cache step than the branch radius.
+        coord_t high = low;
+        while (volumes.ceilRadius(high, use_min_xy_dist) == low_ceil)
+            high += scale_i(0.01);
+        const coord_t high_ceil = volumes.ceilRadius(high, use_min_xy_dist);
+        REQUIRE(high_ceil > low_ceil);
+        // Within one step: a slightly larger merged radius in the same step is accepted.
+        CHECK_FALSE(TF::merge_crosses_cache_step(volumes.ceilRadius(high - scale_i(0.01), use_min_xy_dist), low_ceil, low_ceil));
+        CHECK_FALSE(TF::merge_crosses_cache_step(low_ceil, low_ceil, low_ceil));
+        // A higher step than both parents: refused.
+        CHECK(TF::merge_crosses_cache_step(high_ceil, low_ceil, low_ceil));
+        // One parent already in the higher step: accepted, from either side.
+        CHECK_FALSE(TF::merge_crosses_cache_step(high_ceil, low_ceil, high_ceil));
+        CHECK_FALSE(TF::merge_crosses_cache_step(high_ceil, high_ceil, low_ceil));
+        // A smaller merged step is accepted too.
+        CHECK_FALSE(TF::merge_crosses_cache_step(low_ceil, high_ceil, high_ceil));
+    }
 }
 // Many threads request keys that are not precalculated at once, in their own order. Whatever the interleaving of the lazy
 // computations, every thread must get the reference areas and no computation may fail. The interleavings come from the timing of

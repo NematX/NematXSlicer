@@ -731,6 +731,79 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     }
 }
 
+// A root over free air that nothing ever supports goes down five root radii of real Z, whatever the layer heights. In a 0.05 mm
+// band that is many more layers than the nominal 0.2 mm height gives: with a root radius of 0.4 mm (the branch radius) the depth is
+// 2 mm, which is 40 layers of 0.05 mm (10 nominal layers). The root keeps its full area (it never meets the object, and its area
+// is above the stop area), so its stem ends at the lowest layer whose top is within 2 mm of the root layer top; that layer is
+// computed here from the real Z of the layers (about 5.5 - 2 = 3.5 mm, in the thin band), and must differ from the nominal
+// reconstruction (10 layers down, which are only 0.5 mm of thin layers: about 5.0 mm). The stem is observed in the base slabs:
+// the lowest slab that draws it has its middle between the stem bottom and one maximum slab height above.
+TEST_CASE("Tree roots in thin layers go down five root radii of real Z", "[plugins][support-tree-family][floors]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // Only a far column gives the object layers; the root stands in free air away from it.
+    TriangleMesh column = make_cube(2., 10., 7.);
+    DynamicPrintConfig config = SG::config("tree", false, 0);
+    config.set_deserialize_strict({{"support_tree_branch_diameter", "0.8"}, {"support_tree_tip_diameter", "0.4"}});
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(column), std::vector<coordf_t>{0., 0.2, 2.9, 0.2, 3., 0.05, 6., 0.05, 6.1, 0.2, 7., 0.2}, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
+    // The root layer is the last thin layer under z = 5.5 mm, 2.5 mm of thin layers above the start of the band.
+    size_t root_layer = 0;
+    for (size_t id = 0; id < object.layer_count(); ++id)
+        if (object.layer(id).unscaled_height() < 0.1 && object.layer(id).unscaled_print_z() < 5.5)
+            root_layer = id;
+    REQUIRE(root_layer > 40);
+    const coord_t radius = settings.branch_radius, depth = coord_t(5. * double(radius));
+    // The real depth: the lowest layer whose top is within the depth below the root layer top, counted from the real Z.
+    size_t expected = root_layer;
+    while (expected > 0 && object.layer(root_layer).scaled_print_z() - object.layer(expected - 1).scaled_print_z() <= depth)
+        --expected;
+    // The nominal reconstruction counts the nominal layer heights instead.
+    const size_t nominal = root_layer - size_t(5. * double(radius) / double(settings.layer_height));
+    CAPTURE(root_layer, expected, nominal);
+    REQUIRE(expected + 20 < nominal);
+    REQUIRE(expected > 0);
+    const BoundingBox extents = get_extents(object.layer(0).lslices());
+    TF::TreeNode upper;
+    upper.layer = root_layer + 1;
+    upper.print_z = object.layer(root_layer + 1).unscaled_print_z();
+    upper.position = to_c_point(Point(extents.min.x() - scale_i(10.), extents.center().y()));
+    upper.radius = radius;
+    TF::TreeNode root = upper;
+    root.layer = root_layer;
+    root.print_z = object.layer(root_layer).unscaled_print_z();
+    root.carries = { 0 };
+    PluginStorage storage;
+    Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
+    // The top contact over the tip gives the base slabs below it, as the routing would: the stem is drawn in those slabs.
+    const coord_t contact_top = object.layer(root_layer + 1).scaled_print_z();
+    Common::GeneratorLayer &contact = Common::add_layer(support, Common::LayerType::TopContact, contact_top,
+        contact_top - scale_to_layer_coord(0.1), scale_to_layer_coord(0.1));
+    support.top = { &contact };
+    Polygon tip_circle = make_circle(double(radius), 1000.);
+    tip_circle.translate(to_point(upper.position));
+    assign_native(contact.polygons, Polygons{ tip_circle });
+    std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support);
+    REQUIRE_FALSE(support.base.empty());
+    // The lowest slab that draws the stem: its middle lies within the stem, so the slab below it has its middle under the stem
+    // bottom. The slabs are at most the maximum slab height thick.
+    const coord_t stem_bottom = object.layer(expected).scaled_bottom_z(), nominal_bottom = object.layer(nominal).scaled_bottom_z();
+    coord_t lowest_drawn = std::numeric_limits<coord_t>::max();
+    for (const Common::GeneratorLayer *slab : support.base)
+        if (distance_to_region_mm(to_point(upper.position), to_native(slab->polygons)) <= tolerance_mm)
+            lowest_drawn = std::min(lowest_drawn, slab->bottom_z + (slab->print_z - slab->bottom_z) / 2);
+    REQUIRE(lowest_drawn != std::numeric_limits<coord_t>::max());
+    CAPTURE(stem_bottom, nominal_bottom, lowest_drawn, settings.max_slab_height);
+    CHECK(lowest_drawn >= stem_bottom);
+    CHECK(lowest_drawn <= stem_bottom + settings.max_slab_height);
+    CHECK(lowest_drawn < nominal_bottom);
+}
+
 // A slab bound within the layer merge tolerance of a layer of another object takes that layer's Z: the tool ordering asserts on
 // distinct print Z values that close, so no support Z may lie that close to an object layer Z without being equal to it.
 TEST_CASE("Tree slab bounds join the print Z of the object layers of another object", "[plugins][support-tree-family][slabs]")
@@ -2052,6 +2125,176 @@ TEST_CASE("Print validation accepts tree and organic supports with a variable la
     CHECK(result.second.empty());
 }
 
+namespace {
+// The Z gaps of one clearance scenario, as the support_material_contact_distance (above the support) and
+// support_material_bottom_contact_distance (under it) settings, and whether the object has a variable layer height profile.
+struct GapScenario {
+    const char *above, *below;
+    bool variable_layers;
+    // Whether the object holds a floor in this scenario: a gap thinner than the layers leaves no bottom contact.
+    bool floors;
+};
+
+// The short band of 0.05 mm layers of the variable profile, in mm: it holds the low roof of the shelf mesh (2.0 to 2.4 mm), so the
+// gap window of its top contact falls on thin layers, and ends on the 0.05 to 0.3 mm transition.
+constexpr double thin_band_start_mm = 1.7, thin_band_end_mm = 2.3;
+
+// Slices the mesh with the given style, interface layer count and gaps, routes the trees and generates the final slabs. Every
+// non-empty slab is then compared with every object layer: a layer that overlaps the slab in XY must lie above or below it, at
+// least the gap on that side away (a gap not larger than the Z tolerance counts as zero, a larger one is shortened by it; for the
+// layer a top contact supports or a floor rests on, the tolerance is the one of the bound snapping), and never within its range.
+// The roles the configuration produces must hold slabs (the floors only if scenario.floors), the stacked base slabs must not
+// leave a hole in the branches, and without interface layers the top contacts must have been rebuilt from the branches.
+// require_bands asks for slabs in both the thin band and above it; with a variable profile, a top contact or a floor must also
+// have its gap window on the thin band. Slicing and allocation failures propagate to Catch.
+void check_final_slab_clearance(TriangleMesh mesh, const char *style, int interfaces, const GapScenario &scenario, bool require_bands)
+{
+    DynamicPrintConfig config = SG::config(style, false, interfaces);
+    config.set_deserialize_strict({{"support_material_synchronize_layers", "0"},
+        {"support_material_contact_distance", scenario.above}, {"support_material_bottom_contact_distance", scenario.below}});
+    Print print;
+    Model model;
+    if (scenario.variable_layers)
+        SG::init_print_with_profile(print, model, std::move(mesh),
+            {0., 0.2, 1.7, 0.2, 1.71, 0.05, 2.3, 0.05, 2.31, 0.3, 9., 0.3}, config);
+    else
+        Test::init_print({mesh}, print, model, config);
+    REQUIRE(print.validate().first == PrintBase::PrintValidationError::pveNone);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Common::SupportParams params = SG::params(print, object);
+    const coord_t gap_above = scale_to_layer_coord(params.gap_above), gap_below = scale_to_layer_coord(params.gap_below);
+    const coord_t eps = scale_to_layer_coord(EPSILON);
+    // The bound snapping of align_slab_bounds() can move a contact bound by up to this much from its object layer.
+    const coord_t snap_tolerance = 4 * SCALED_EPSILON;
+    const coord_t thin_start = scale_to_layer_coord(thin_band_start_mm), thin_end = scale_to_layer_coord(thin_band_end_mm);
+    Routed routed(print);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support);
+    const std::vector<std::pair<const char *, const Common::GeneratorLayers *>> roles{
+        {"base", &routed.support.base}, {"interfaces", &routed.support.interfaces}, {"top", &routed.support.top}, {"bottom", &routed.support.bottom}};
+    constexpr double overlap_tolerance_mm2 = 1e-6;
+    size_t checked = 0, thin_band = 0, thick_band = 0, thin_windows = 0, violations = 0;
+    std::string non_empty_counts;
+    for (const std::pair<const char *, const Common::GeneratorLayers *> &role : roles) {
+        const size_t non_empty = size_t(std::count_if(role.second->begin(), role.second->end(),
+            [](const Common::GeneratorLayer *slab) { return !slab->polygons.empty(); }));
+        non_empty_counts += std::string(role.first) + "=" + std::to_string(non_empty) + " ";
+        // Every role that the configuration produces must be present, or the check below would pass on nothing.
+        const std::string name = role.first;
+        if ((name != "interfaces" || interfaces > 0) && (name != "bottom" || scenario.floors)) {
+            INFO("role " << role.first);
+            CHECK(non_empty > 0);
+        }
+    }
+    INFO("non-empty slabs per role: " << non_empty_counts);
+    if (interfaces == 0)
+        for (const Common::GeneratorLayer *contact : routed.support.top)
+            CHECK(contact->type != Common::LayerType::TopContact);
+    CHECK(branch_gaps(base_slabs(routed.support)) == 0);
+    const coord_t near_window = std::max(gap_above, gap_below) + scale_to_layer_coord(0.4);
+    double minimum_clearance_mm = std::numeric_limits<double>::infinity();
+    for (const std::pair<const char *, const Common::GeneratorLayers *> &role : roles) {
+        const std::string name = role.first;
+        for (size_t index = 0; index < role.second->size(); ++index) {
+            const Common::GeneratorLayer &slab = *(*role.second)[index];
+            ++checked;
+            if (slab.polygons.empty())
+                continue;
+            thin_band += slab.bottom_z < thin_end && slab.print_z > thin_start;
+            thick_band += slab.print_z > thin_end;
+            // The Z window kept free by the gap: over a top contact, under a floor.
+            if (name == "top")
+                thin_windows += slab.print_z < thin_end && slab.print_z + gap_above > thin_start;
+            else if (name == "bottom")
+                thin_windows += slab.bottom_z - gap_below < thin_end && slab.bottom_z > thin_start;
+            for (size_t j = 0; j < object.layer_count(); ++j) {
+                const Layer &layer = object.layer(j);
+                const bool above = layer.scaled_bottom_z() >= slab.print_z;
+                const bool below = layer.scaled_print_z() <= slab.bottom_z;
+                const coord_t clearance = above ? layer.scaled_bottom_z() - slab.print_z : below ? slab.bottom_z - layer.scaled_print_z() :
+                    std::max(slab.bottom_z, layer.scaled_bottom_z()) - std::min(slab.print_z, layer.scaled_print_z());
+                // Intersecting polygons is the costly part: the layers far beyond the gaps cannot violate them and are skipped.
+                if (clearance > near_window)
+                    continue;
+                const double overlap_mm2 = unscaled(unscaled(area(intersection_ex(SG::native(slab.polygons), layer.lslices()))));
+                if (overlap_mm2 <= overlap_tolerance_mm2)
+                    continue;
+                minimum_clearance_mm = std::min(minimum_clearance_mm, unscaled(clearance));
+                // The layer a top contact supports or a floor rests on has its clearance set by the contact placement and the bound snap.
+                const bool supported = (name == "top" && j == slab.object_above) || (name == "bottom" && j == slab.object_below);
+                const coord_t tolerance = supported ? snap_tolerance : eps;
+                // Above and below are directional; layers intersecting the slab's own Z are not excluded, since trim_slab must clear them too.
+                const bool forbidden = (!above && !below) || (above && clearance < gap_above - tolerance) || (below && clearance < gap_below - tolerance);
+                if (forbidden) {
+                    ++violations;
+                    std::printf("CLEARANCE FAILURE style=%s interfaces=%d gaps=%s/%s role=%s slab=%zu z=[%.9f,%.9f] object_layer=%zu z=[%.9f,%.9f] overlap_mm2=%.12g clearance_mm=%.9f\n",
+                        style, interfaces, scenario.above, scenario.below, role.first, index, unscaled(slab.bottom_z), unscaled(slab.print_z), j,
+                        layer.unscaled_print_z() - layer.unscaled_height(), layer.unscaled_print_z(), overlap_mm2, unscaled(clearance));
+                }
+            }
+        }
+    }
+    INFO("slabs=" << checked << " thin_band=" << thin_band << " thick_band=" << thick_band << " thin_windows=" << thin_windows
+        << " minimum_clearance_mm=" << minimum_clearance_mm << " violations=" << violations);
+    REQUIRE(checked > 0);
+    if (require_bands) {
+        REQUIRE(thin_band > 0);
+        REQUIRE(thick_band > 0);
+    }
+    if (scenario.variable_layers)
+        REQUIRE(thin_windows > 0);
+    REQUIRE(std::isfinite(minimum_clearance_mm));
+    REQUIRE(violations == 0);
+}
+
+// The base, interface, contact and floor slabs of a shelf, a low roof and a lobe respect a small, a large, an asymmetric and a
+// variable-layer-height gap. The shelf roof at 8 mm lies in the thick band; the low roof at 2 mm lies in the thin band of the
+// variable profile, with the gap window of its contact; the lower lobe of the shelf provides a model surface for the floors. One
+// test case per style, so that they can run apart.
+void check_shelf_clearance(const char *style)
+{
+    const GapScenario scenario = GENERATE(GapScenario{ "0.08", "0.08", false, false }, GapScenario{ "0.5", "0.5", false, true },
+        GapScenario{ "0.5", "0.15", false, true }, GapScenario{ "0.15", "0.15", true, true });
+    CAPTURE(style, scenario.above, scenario.below, scenario.variable_layers);
+    TriangleMesh mesh = Slic3r::Test::SupportTree::comparison_mesh(2);
+    TriangleMesh low_roof = make_cube(12., 8., 0.4);
+    low_roof.translate(0., 0., 2.);
+    mesh.merge(low_roof);
+    check_final_slab_clearance(std::move(mesh), style, 3, scenario, true);
+}
+} // namespace
+
+TEST_CASE("Final tree slabs respect small large asymmetric and variable physical Z gaps", "[plugins][support-tree-family][support-tree-slab-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_shelf_clearance("tree");
+}
+
+TEST_CASE("Final organic slabs respect small large asymmetric and variable physical Z gaps", "[plugins][support-tree-family][support-tree-slab-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_shelf_clearance("organic");
+}
+
+// Without interface layers the top contacts are rebuilt from the branches drawn at their middle and the tip stretches that cross
+// them. Under a sloped overhang (a staircase whose roofs fall on consecutive layers) the tip stretch of a neighbouring roof then
+// reaches the next contact, which must stay a full gap away from it.
+TEST_CASE("Rebuilt tip contacts of a sloped overhang respect the physical Z gaps", "[plugins][support-tree-family][support-tree-slab-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    const GapScenario scenario = GENERATE(GapScenario{ "0.5", "0.5", false, false }, GapScenario{ "0.5", "0.15", false, false });
+    CAPTURE(style, scenario.above, scenario.below);
+    TriangleMesh mesh = make_cube(3., 4., 0.4);
+    mesh.translate(0., 0., 1.);
+    for (int step = 1; step < 6; ++step) {
+        TriangleMesh block = make_cube(3. + 0.5 * step, 4., 0.4);
+        block.translate(0., 0., 1. + 0.2 * step);
+        mesh.merge(block);
+    }
+    check_final_slab_clearance(std::move(mesh), style, 0, scenario, false);
+}
+
 // A tree or organic support under an object with thin and thick layer bands is generated and exported on the real layer heights.
 TEST_CASE("Tree and organic supports are generated and exported on a variable layer height", "[plugins][support-tree-family][variable-layer-height][gcode]")
 {
@@ -2620,4 +2863,47 @@ TEST_CASE("Organic smoothing relaxation benchmark", "[.][smoothing-benchmark]")
     }
     std::sort(times.begin(), times.end());
     std::printf("SMOOTH-BENCH-SUMMARY threads=%zu runs=%d min_ms=%.1f median_ms=%.1f\n", threads, runs, times.front(), times[times.size() / 2]);
+}
+
+// Hidden benchmark of the tree routing, the tool to measure a change of the merge cadence of create_layer_pathing (the merges are on
+// every layer). It times, separately (ms, 5 runs each), the construction of Routed (parameters, settings, pattern context and
+// route_trees()) and generate_tree_slabs(), on the three comparison objects (see comparison_mesh), for the tree and organic styles
+// with three interface layers, with every available thread. It prints one line per fixture and style: the node count, then the min
+// and the median of each step. No timing is asserted. The merge order depends on the TBB thread count, so compare two builds on the
+// same machine only. Build Release and run it from build/tests/plugins with: .\Release\plugins_tests.exe "[tree-routing-benchmark]"
+TEST_CASE("Tree routing and slab generation benchmark", "[.][tree-routing-benchmark]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    constexpr int runs = 5;
+    const auto median = [](std::vector<double> &times) {
+        std::sort(times.begin(), times.end());
+        return times[times.size() / 2];
+    };
+    for (const int model_id : {0, 1, 2})
+        for (const char *style : {"tree", "organic"}) {
+            Print print;
+            Model model;
+            Test::init_print({Slic3r::Test::SupportTree::comparison_mesh(model_id)}, print, model, SG::config(style, false, 3, false));
+            SG::prefix(print);
+            const bool organic = std::string(style) == "organic";
+            std::vector<double> route_times, slab_times;
+            size_t nodes = 0;
+            for (int run = 0; run < runs; ++run) {
+                const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+                Routed routed(print);
+                const std::chrono::steady_clock::time_point routed_at = std::chrono::steady_clock::now();
+                TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.trees, organic, routed.support);
+                const std::chrono::steady_clock::time_point done = std::chrono::steady_clock::now();
+                route_times.push_back(std::chrono::duration<double, std::milli>(routed_at - start).count());
+                slab_times.push_back(std::chrono::duration<double, std::milli>(done - routed_at).count());
+                nodes = 0;
+                for (const TF::RoutedTree &tree : routed.trees)
+                    nodes += tree.nodes.size();
+            }
+            const double route_min = *std::min_element(route_times.begin(), route_times.end());
+            const double slab_min = *std::min_element(slab_times.begin(), slab_times.end());
+            std::printf("ROUTING-BENCH model=%d style=%s nodes=%zu route_min_ms=%.1f route_median_ms=%.1f slabs_min_ms=%.1f slabs_median_ms=%.1f\n",
+                        model_id, style, nodes, route_min, median(route_times), slab_min, median(slab_times));
+            CHECK(nodes > 0);
+        }
 }

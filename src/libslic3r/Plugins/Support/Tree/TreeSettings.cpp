@@ -20,7 +20,17 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 
    The constructor runs once per object. It reads the object and print configurations for the branch angles, radii and
    distances, and the support parameters for the Z gaps, the minimum layer height and the support extrusion width.
-   Then it computes the maximum move of every object layer from the effective branch angle and the real layer height.
+   Then it computes the maximum move from each real layer height and the collision windows from the real layer Z.
+   A window includes object layers closer than the gap, allowing EPSILON for Z rounding; its top extends virtually
+   at the last layer height so the collision's XY ramp has its full physical extent near the top of the object.
+   It also stores the real top of every object layer (layer_print_z), which reaches_min_height_to_model and
+   lowest_layer_within read to measure the minimum height to the model and the root search depth in real Z.
+   The radius gain of a branch per layer step (tip_gain, cone_gain) comes from the real height of the upper layer of the
+   step. advance() applies one step to a gain; path_gain() gives the gain of a branch that grew at every step since its tip
+   in O(1), from prefix sums of the tip gains and from the layer where each possible tip ends.
+   The foot near the build plate has its own per-layer data: bp_gain[L], the widening allowed on the step whose upper layer is
+   L, and foot_target[L], the radius a branch resting on the bed should have on layer L: branch_radius plus the remainder of
+   (bp_radius - branch_radius) after the bp_gain of layers 1..L (the foot cone anchored at layer 0), never below branch_radius.
 */
 
 namespace Slic3r::TreeFamily {
@@ -43,7 +53,8 @@ coord_t maximum_move(const double angle, const coord_t layer_height)
 
 // Every option is read through the Config views of the object and of the print, as SupportParams does; the flows come from the
 // host (support_flow, region_flow_mm), which computes them like the legacy Flow functions. The views are borrowed; the constructor
-// stores derived values and per-layer moves, and allocation failures propagate to the caller.
+// stores derived values, real-Z collision windows, per-layer moves and the real layer tops (layer_print_z, read by
+// reaches_min_height_to_model and lowest_layer_within), and allocation failures propagate to the caller.
 TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::Print &print, const slic3r_api::Support::Common::SupportParams &params)
 {
     const slic3r_api::Config print_config = print.config();
@@ -68,8 +79,11 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
         xy_min_distance = std::max(xy_min_distance, scale_i(0.1));
         xy_distance = std::max(xy_distance, xy_min_distance);
     }
-    z_distance_top_layers = size_t(std::round(params.gap_above / layer_height_mm));
-    z_distance_bottom_layers = size_t(std::round(params.gap_below / layer_height_mm));
+    const coord_t gap_above = scale_to_layer_coord(params.gap_above);
+    const coord_t gap_below = scale_to_layer_coord(params.gap_below);
+    const coord_t eps = scale_to_layer_coord(EPSILON);
+    // A gap within the Z rounding tolerance is zero, so true means both neighbouring layers are in the windows.
+    z_distance_both_sides = gap_above > eps && gap_below > eps;
 
     branch_distance = scale_i(config.get("support_tree_branch_distance").get_float());
     // A percent option: the value itself (15 for 15%), which get_float() would divide by 100.
@@ -78,19 +92,12 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     branch_radius = branch_diameter / 2;
     min_radius = std::clamp(scale_i(config.get("support_tree_tip_diameter").get_float()), coord_t(0), branch_diameter) / 2;
     const double diameter_angle = std::clamp<double>(config.get("support_tree_branch_diameter_angle").get_float() * PI / 180., 0., 0.5 * PI - EPSILON);
-    branch_radius_increase_per_layer = std::tan(diameter_angle) * layer_height;
-    // Ensure lines always stack nicely even if layer height is large.
-    tip_layers = size_t(std::max<coord_t>(1, std::max((branch_radius - min_radius) / (support_line_width / 3), branch_radius / layer_height)));
+    cone_slope = std::tan(diameter_angle);
+    tip_total_gain = double(branch_radius - min_radius);
     increase_radius_until_radius = branch_radius;
-    increase_radius_until_layer = tip_layers;
 
     bp_radius = scale_i(bp_diameter_mm) / 2;
-    // Increase by half a line overlap, but not faster than 40 degrees angle (0 degrees means zero increase in radius).
-    bp_radius_increase_per_layer = std::min(std::tan(0.7) * layer_height, 0.5 * support_line_width);
-    layer_start_bp_radius = LayerIndex((bp_radius - branch_radius) / bp_radius_increase_per_layer);
-    // The number of layers that reach the minimum height to the model, rounded up.
-    const coord_t min_height_to_model = scale_i(min_height_to_model_mm);
-    min_dtt_to_model = size_t((min_height_to_model + layer_height - 1) / layer_height);
+    min_height_to_model = scale_i(min_height_to_model_mm);
     max_to_model_radius_increase = scale_i(max_diameter_increase_by_merges_mm) / 2;
 
     // The overhang cap uses the support extrusion width for percentages and the minimum layer height of the support.
@@ -113,25 +120,113 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
         slic3r_api::Support::Common::slab_step(config.get("support_material_interface_layer_height").get_float_or_percent(), params.interface_flow_mm.nozzle_diameter, params.max_support_height),
         min_slab_height, z_step);
 
+    // Monotone window ends visit each real layer once. Above the object, equal-height virtual layers keep the XY ramp complete.
+    uint32_t top_end = 0, bottom_begin = 0;
     for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++ layer_idx) {
         const coord_t height = object.layer(layer_idx).height();
+        layer_print_z.push_back(object.layer(layer_idx).print_z());
         max_move.push_back(maximum_move(angle, height));
         max_move_slow.push_back(maximum_move(angle_slow, height));
+        const coord_t top_limit = object.layer(layer_idx).print_z() + gap_above - eps;
+        top_end = std::max(top_end, layer_idx + 1);
+        while (top_end < object.layer_count() && object.layer(top_end).bottom_z() < top_limit)
+            ++top_end;
+        uint32_t top_count = top_end - layer_idx - 1;
+        const coord_t virtual_span = top_limit - object.layer(object.layer_count() - 1).print_z();
+        if (virtual_span > 0) {
+            const coord_t last_height = object.layer(object.layer_count() - 1).height();
+            top_count += uint32_t((virtual_span + last_height - 1) / last_height);
+        }
+        z_distance_top_layers.push_back(top_count);
+        const coord_t bottom_limit = object.layer(layer_idx).bottom_z() - gap_below + eps;
+        while (bottom_begin < layer_idx && object.layer(bottom_begin).print_z() <= bottom_limit)
+            ++bottom_begin;
+        z_distance_bottom_layers.push_back(layer_idx - bottom_begin);
+    }
+
+    // The radius gains of the steps, indexed by the upper layer of the step. Lines always stack nicely: a layer deposits at most a
+    // third of a line width of radius, and the tip is a cone of height branch_radius.
+    const size_t layer_count = layer_print_z.size();
+    tip_gain.reserve(layer_count);
+    cone_gain.reserve(layer_count);
+    bp_gain.reserve(layer_count);
+    foot_target.reserve(layer_count);
+    tip_gain_prefix.assign(1, 0.);
+    // Foot: increase by half a line overlap per layer, but not faster than 40 degrees angle. The cone is anchored on the top of
+    // layer 0 (the height of layer 0 does not enter): bp_radius there, and the radius decreases by bp_gain going up.
+    double foot_left = std::max(0., double(bp_radius - branch_radius));
+    const double foot_slope = std::tan(0.7);
+    for (size_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx) {
+        const double height = double(layer_print_z[layer_idx] - (layer_idx > 0 ? layer_print_z[layer_idx - 1] : 0));
+        tip_gain.push_back(branch_radius > 0 ? std::min(double(support_line_width) / 3., height * tip_total_gain / double(branch_radius)) : 0.);
+        cone_gain.push_back(cone_slope * height);
+        tip_gain_prefix.push_back(tip_gain_prefix.back() + tip_gain.back());
+        bp_gain.push_back(layer_idx > 0 ? std::min(foot_slope * height, 0.5 * double(support_line_width)) : 0.);
+        foot_left = std::max(0., foot_left - bp_gain.back());
+        foot_target.push_back(double(branch_radius) + foot_left);
+    }
+    // The layer at which the tip of each tip layer T ends: the largest E < T such that the tip gains of the steps E + 1 .. T reach
+    // tip_total_gain (within 1 unit). These sums decrease when E grows, so a binary search finds E.
+    const double tip_end_threshold = tip_total_gain - 1.;
+    tip_end_layer.assign(layer_count, -1);
+    for (LayerIndex tip_layer = 0; tip_layer < LayerIndex(layer_count); ++ tip_layer) {
+        if (tip_end_threshold <= 0.) {
+            tip_end_layer[tip_layer] = tip_layer;
+            continue;
+        }
+        LayerIndex low = 0, high = tip_layer - 1;
+        while (low <= high) {
+            const LayerIndex mid = (low + high) / 2;
+            if (tip_gain_prefix[tip_layer + 1] - tip_gain_prefix[mid + 1] >= tip_end_threshold) {
+                tip_end_layer[tip_layer] = mid;
+                low = mid + 1;
+            } else
+                high = mid - 1;
+        }
     }
 }
-coord_t TreeSettings::getRadius(size_t distance_to_top, const double elephant_foot_increases) const
+
+// The tip is on layer layer_idx + distance_to_top; eps keeps an exact distance whose Z were rounded one unit short.
+bool TreeSettings::reaches_min_height_to_model(LayerIndex layer_idx, size_t distance_to_top) const
 {
-    return (distance_to_top <= tip_layers ? min_radius + (branch_radius - min_radius) * distance_to_top / tip_layers : // tip
-                   branch_radius + // base
-                   (distance_to_top - tip_layers) * branch_radius_increase_per_layer)
-           + // gradual increase
-           elephant_foot_increases * (std::max(bp_radius_increase_per_layer - branch_radius_increase_per_layer, 0.0));
+    const size_t tip = size_t(layer_idx) + distance_to_top;
+    assert(tip < layer_print_z.size());
+    return layer_print_z[tip] - layer_print_z[layer_idx] + scale_to_layer_coord(EPSILON) >= min_height_to_model;
 }
 
-coord_t TreeSettings::recommendedMinRadius(LayerIndex layer_idx) const
+// The layer tops increase with the index, so the walk goes down until the distance exceeds depth.
+LayerIndex TreeSettings::lowest_layer_within(LayerIndex layer_idx, coord_t depth) const
 {
-    double num_layers_widened = layer_start_bp_radius - layer_idx;
-    return num_layers_widened > 0 ? branch_radius + num_layers_widened * bp_radius_increase_per_layer : 0;
+    const coord_t limit = layer_print_z[layer_idx] - depth - scale_to_layer_coord(EPSILON);
+    LayerIndex lowest = layer_idx;
+    while (lowest > 0 && layer_print_z[lowest - 1] >= limit)
+        --lowest;
+    return lowest;
+}
+
+// A tip within 1 unit of the end counts as ended, the same convention as the tip end layers of the constructor.
+double TreeSettings::advance(const double gain, const LayerIndex upper_layer) const
+{
+    assert(upper_layer > 0 && size_t(upper_layer) < tip_gain.size());
+    if (gain >= tip_total_gain - 1.)
+        return std::max(gain, tip_total_gain) + cone_gain[upper_layer];
+    const double grown = gain + tip_gain[upper_layer];
+    return grown >= tip_total_gain - 1. ? tip_total_gain : grown;
+}
+
+// Above the tip end layer the gain is a sum of tip gains; from it down, the tip total plus the cone over the height between the
+// end layer and layer_idx (the sum of the cone gains of the steps in between).
+double TreeSettings::path_gain(const LayerIndex layer_idx, const size_t distance_to_top) const
+{
+    assert(layer_idx >= 0);
+    if (distance_to_top == 0)
+        return 0.;
+    const size_t tip_layer = size_t(layer_idx) + distance_to_top;
+    assert(tip_layer < layer_print_z.size());
+    const LayerIndex end_layer = tip_end_layer[tip_layer];
+    if (layer_idx > end_layer)
+        return tip_gain_prefix[tip_layer + 1] - tip_gain_prefix[layer_idx + 1];
+    return tip_total_gain + cone_slope * double(layer_print_z[end_layer] - layer_print_z[layer_idx]);
 }
 
 } // namespace Slic3r::TreeFamily
