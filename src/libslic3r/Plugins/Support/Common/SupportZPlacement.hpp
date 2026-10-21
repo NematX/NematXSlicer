@@ -49,6 +49,9 @@
 
 namespace slic3r_api::Support::Common {
 
+// Convert a slab setting in mm or percent of the nozzle to scaled layer coordinates, capped by max_height_mm; zero selects the maximum and negative effective values resolve to 0.
+coord_t slab_step(const c_float_or_percent &setting, double nozzle_mm, double max_height_mm);
+
 // Thicknesses and dense counts that split the space between two extremes; lengths are scaled coordinates.
 struct SlabSpacing {
     // First layer height, thinnest printable slab, and the machine Z step that slab boundaries snap to.

@@ -43,6 +43,14 @@ size_t ceil_steps(coord_t distance, coord_t step);
 coord_t round_up_to_grid(coord_t value, coord_t grid);
 } // namespace
 
+// Resolve the borrowed setting in mm (percent of nozzle_mm), clamp nonzero values to [0, max_height_mm], then scale to the layer grid.
+// Zero selects the maximum; finite inputs and a nonnegative maximum are expected. No state changes, ownership transfers or allocations occur.
+coord_t slab_step(const c_float_or_percent &setting, double nozzle_mm, double max_height_mm)
+{
+    return scale_to_layer_coord(setting.value == 0 ? max_height_mm :
+        std::min(max_height_mm, std::max(0., c_float_or_percent_get_effective_value(&setting, nozzle_mm))));
+}
+
 // Create the contact of object layer id under that layer, in the Z of the native rules: a soluble contact fills the object layer
 // just below, a non-soluble one lies the gap above the object, is dropped below the first layer and snaps onto it within the
 // minimum height. With a filament distance, a layer with bridges also gets a bridge contact at the bridge height.

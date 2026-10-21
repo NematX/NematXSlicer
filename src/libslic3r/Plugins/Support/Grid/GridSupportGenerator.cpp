@@ -355,14 +355,12 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
 }
 
 // Build the grid's slab spacing from its settings and place the intermediate slabs; the middle is spaced uniformly,
-// or synchronized with the object layers.
+// or synchronized with the object layers. The borrowed run supplies nozzle-based heights; out owns the appended slabs and allocation failures propagate.
 void intermediate_layers(const Run &run, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
-    const coord_t base_step = scale_to_layer_coord(run.layer_height.value == 0 ? p.max_support_height :
-        std::min(p.max_support_height, c_float_or_percent_get_effective_value(&run.layer_height, p.base_flow_mm.nozzle_diameter)));
-    const coord_t interface_step = scale_to_layer_coord(run.interface_layer_height.value == 0 ? p.max_support_height :
-        std::min(p.max_support_height, c_float_or_percent_get_effective_value(&run.interface_layer_height, p.interface_flow_mm.nozzle_diameter)));
+    const coord_t base_step = Common::slab_step(run.layer_height, p.base_flow_mm.nozzle_diameter, p.max_support_height);
+    const coord_t interface_step = Common::slab_step(run.interface_layer_height, p.interface_flow_mm.nozzle_diameter, p.max_support_height);
     Common::SlabSpacing spacing;
     spacing.first_z = scale_to_layer_coord(p.first_layer_height);
     spacing.min_height = p.min_height;

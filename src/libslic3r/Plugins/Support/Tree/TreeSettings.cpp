@@ -31,17 +31,8 @@ constexpr double bp_diameter_mm = 7.5;
 constexpr double min_height_to_model_mm = 1.0;
 constexpr double max_diameter_increase_by_merges_mm = 1.0;
 
-// A slab height setting as the grid reads it: 0 means the maximum support height, a percent is of the nozzle, and the maximum caps it.
-double slab_height_mm(const c_float_or_percent &setting, double nozzle, double max_support_height);
 // Maximum move of a branch centre over a layer of the given height, for the branch angle; the cap keeps steep angles inside coord_t.
 coord_t maximum_move(const double angle, const coord_t layer_height);
-
-double slab_height_mm(const c_float_or_percent &setting, double nozzle, double max_support_height)
-{
-    if (setting.value == 0) return max_support_height;
-    const double effective = setting.percent ? nozzle * setting.value / 100. : setting.value;
-    return std::min(max_support_height, effective);
-}
 
 coord_t maximum_move(const double angle, const coord_t layer_height)
 {
@@ -117,9 +108,9 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     max_overhang = scale_i(max_overhang_mm);
     z_step = scale_to_layer_coord(params.z_step);
     min_slab_height = scale_to_layer_coord(params.support_min_height);
-    max_slab_height = scale_to_layer_coord(slab_height_mm(config.get("support_material_layer_height").get_float_or_percent(), params.base_flow_mm.nozzle_diameter, params.max_support_height));
+    max_slab_height = slic3r_api::Support::Common::slab_step(config.get("support_material_layer_height").get_float_or_percent(), params.base_flow_mm.nozzle_diameter, params.max_support_height);
     dense_slab_height = slic3r_api::Support::Common::handed_over_dense_height(
-        scale_to_layer_coord(slab_height_mm(config.get("support_material_interface_layer_height").get_float_or_percent(), params.interface_flow_mm.nozzle_diameter, params.max_support_height)),
+        slic3r_api::Support::Common::slab_step(config.get("support_material_interface_layer_height").get_float_or_percent(), params.interface_flow_mm.nozzle_diameter, params.max_support_height),
         min_slab_height, z_step);
 
     for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++ layer_idx) {

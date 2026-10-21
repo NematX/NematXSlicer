@@ -10,7 +10,8 @@
 /* Z placement of the dense interface slabs, checked on synthetic contacts without slicing a model. Each scene places the
    intermediate slabs between a bottom contact on the first layer and a top contact, or between top contacts, and reads
    the base slabs bottom first. The checks cover the handed-over layout (dense stacks, the middle given to the splitter,
-   the even split of an interval that the stacks cannot fill) and the grid layout as the reference. */
+   the even split of an interval that the stacks cannot fill) and the grid layout as the reference.
+   The resolution of a slab height setting by slab_step is also checked directly. */
 
 using namespace Slic3r;
 namespace SC = slic3r_api::Support::Common;
@@ -81,6 +82,18 @@ size_t slabs_at(const SC::GeneratorLayers &base, coord_t z)
     return count;
 }
 } // namespace
+
+// Resolve absolute and nozzle-relative settings on the layer grid; zero selects the maximum and negative values select zero.
+TEST_CASE("Slab step resolves zero absolute percentage and negative settings", "[plugins][support-placement]")
+{
+    CHECK(SC::slab_step(c_float_or_percent{0., false}, 0.4, 0.3) == scale_to_layer_coord(0.3));
+    CHECK(SC::slab_step(c_float_or_percent{0., true}, 0.4, 0.3) == scale_to_layer_coord(0.3));
+    CHECK(SC::slab_step(c_float_or_percent{0.1, false}, 0.4, 0.3) == scale_to_layer_coord(0.1));
+    CHECK(SC::slab_step(c_float_or_percent{0.5, false}, 0.4, 0.3) == scale_to_layer_coord(0.3));
+    CHECK(SC::slab_step(c_float_or_percent{50., true}, 0.4, 0.3) == scale_to_layer_coord(0.2));
+    CHECK(SC::slab_step(c_float_or_percent{-0.1, false}, 0.4, 0.3) == 0);
+    CHECK(SC::slab_step(c_float_or_percent{-50., true}, 0.4, 0.3) == 0);
+}
 
 // The dense slabs stand right above the bottom contact and right under the top contact, the splitter gets the sparse span between
 // the two stacks, and the top contact keeps its Z while its thickness becomes the dense step.

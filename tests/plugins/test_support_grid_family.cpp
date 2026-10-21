@@ -1,15 +1,282 @@
 #include "support_grid_test_helpers.hpp"
+#include "gcode_test_helpers.hpp"
 #include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 
 /* Grid-family tests inspect geometric output before toolpath generation. A
    slab on a post needs bed-reaching columns; a low platform also needs bottom
    contacts. Surface position bits encode which side of the object is supported.
-   These tests exercise the real STEP_SUPPORT dispatcher and API publication. */
+   These tests exercise the real STEP_SUPPORT dispatcher and API publication.
+   Variable-height cantilevers additionally check temporary slab placement and
+   the published support tops before a complete G-code export. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
+
+// Slice four separate cantilevers with borrowed production helpers, inspect their owned slabs, then process and export them.
+// Roof demand below the first layer is dropped, near it is snapped, and higher roofs retain the configured gap relative to
+// the bottom of their own sliced layer. Generation/export failures propagate after output cleanup.
+TEST_CASE("Grid variable height contacts slabs and export follow each roof", "[plugins][support-grid][variable-layer-height][gcode]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    const bool sync = GENERATE(false, true);
+    CAPTURE(sync);
+    DynamicPrintConfig config = SG::config();
+    config.set_deserialize_strict({{"support_material_synchronize_layers", sync ? "1" : "0"},
+        {"support_material_contact_distance", "0.19"}, {"support_material_bottom_contact_distance", "0.23"},
+        {"support_material_layer_height", "0.3"}, {"support_material_interface_layer_height", "0.3"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"filament_diameter", "1.75,1.75"}});
+    // XY bays isolate footprints for attribution; roof Z spacing avoids contact merges. The last bay has a thin-band shelf.
+    const double roofs[] = {0.25, 0.45, 3., 6.};
+    TriangleMesh mesh;
+    for (size_t bay = 0; bay < 4; ++bay) {
+        TriangleMesh post = make_cube(4., 8., roofs[bay]);
+        post.translate(float(20 * bay), 0.f, 0.f);
+        TriangleMesh roof = make_cube(12., 8., 0.6);
+        roof.translate(float(20 * bay), 0.f, float(roofs[bay]));
+        mesh.merge(post);
+        mesh.merge(roof);
+        if (bay == 3) {
+            TriangleMesh shelf = make_cube(12., 8., 2.4);
+            shelf.translate(float(20 * bay), 0.f, 0.f);
+            mesh.merge(shelf);
+        }
+    }
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(mesh),
+        std::vector<coordf_t>{0., 0.2, 2., 0.2, 2.01, 0.1, 4., 0.1, 4.01, 0.3, 6.6, 0.3}, config);
+    REQUIRE(print.validate().first == PrintBase::PrintValidationError::pveNone);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Common::SupportParams params = SG::params(print, object);
+    REQUIRE(params.distance_type == Common::ContactDistanceType::Plane);
+    REQUIRE(params.gap_above == Approx(0.19));
+    REQUIRE(params.gap_below == Approx(0.23));
+    const SG::Generated generated(print, object);
+    REQUIRE_FALSE(generated.support.top.empty());
+    REQUIRE_FALSE(generated.support.bottom.empty());
+
+    // Wide disconnected slices identify each roof's first sliced layer, independently of mesh/slicing Z rounding.
+    const coord_t origin_x = get_extents(object.layers().front().lslices()).min.x();
+    std::vector<size_t> roof_layers(4, size_t(-1));
+    std::vector<ExPolygons> roof_footprints(4);
+    for (size_t id = 0; id < object.layer_count(); ++id)
+        for (const ExPolygon &slice : object.layer(id).lslices()) {
+            const BoundingBox box = get_extents(slice);
+            if (unscaled(box.size().x()) < 10.) continue;
+            const size_t bay = size_t(std::lround(unscaled(box.min.x() - origin_x) / 20.));
+            REQUIRE(bay < 4);
+            if (roof_layers[bay] == size_t(-1) && (bay != 3 || object.layer(id).unscaled_print_z() > 5.)) {
+                roof_layers[bay] = id;
+                roof_footprints[bay] = {slice};
+            }
+        }
+    for (size_t id : roof_layers) {
+        REQUIRE(id != size_t(-1));
+        size_t demand = 0;
+        for (const LayerSliceIsland &island : object.layer(id).islands()) demand += island.support_demand().size();
+        REQUIRE(demand > 0);
+    }
+    CHECK(object.layer(roof_layers[2]).unscaled_height() == Approx(0.1));
+    CHECK(object.layer(roof_layers[3]).unscaled_height() == Approx(0.3));
+    std::set<size_t> contacted_roofs;
+    bool snapped_first_layer_contact = false;
+    for (const Common::GeneratorLayer *contact : generated.support.top) {
+        REQUIRE(contact->object_above < object.layer_count());
+        const Layer &above = object.layer(contact->object_above);
+        const coord_t expected = above.scaled_bottom_z() - scale_to_layer_coord(params.gap_above);
+        INFO("roof layer " << contact->object_above << " height " << above.unscaled_height()
+             << " bottom " << unscaled(above.scaled_bottom_z()) << " support top " << unscaled(contact->print_z));
+        if (contact->object_above == roof_layers[1]) {
+            CHECK(expected >= scale_to_layer_coord(params.first_layer_height));
+            CHECK(expected < scale_to_layer_coord(params.first_layer_height) + params.min_height);
+            CHECK(contact->print_z == scale_to_layer_coord(params.first_layer_height));
+            snapped_first_layer_contact = contact->print_z == scale_to_layer_coord(params.first_layer_height) &&
+                contact->bottom_z == 0 && contact->height == contact->print_z;
+            CHECK(snapped_first_layer_contact);
+        } else {
+            // Plane distance adds no distinct bridge contact; roof Z spacing avoids merges.
+            CHECK(contact->print_z == expected);
+        }
+        contacted_roofs.insert(contact->object_above);
+    }
+    CHECK(contacted_roofs.count(roof_layers[0]) == 0);
+    CHECK(object.layer(roof_layers[0]).scaled_bottom_z() - scale_to_layer_coord(params.gap_above)
+          < scale_to_layer_coord(params.first_layer_height));
+    for (size_t bay = 1; bay < 4; ++bay) CHECK(contacted_roofs.count(roof_layers[bay]) == 1);
+    for (const Common::GeneratorLayer *contact : generated.support.bottom) {
+        REQUIRE(contact->object_below < object.layer_count());
+        INFO("bottom contact " << unscaled(contact->bottom_z) << " above object top "
+             << object.layer(contact->object_below).unscaled_print_z());
+        CHECK(contact->bottom_z == object.layer(contact->object_below).scaled_print_z() + scale_to_layer_coord(params.gap_below));
+        CHECK(object.layer(contact->object_below).unscaled_print_z() == Approx(2.4));
+        CHECK(unscaled(contact->bottom_z) == Approx(2.63));
+        REQUIRE(contact->object_below + 1 < object.layer_count());
+        CHECK(object.layer(contact->object_below).unscaled_height() == Approx(0.1));
+        CHECK(object.layer(contact->object_below).unscaled_print_z() !=
+              Approx(params.first_layer_height + contact->object_below * 0.2));
+        CHECK(contact->height_block == object.layer(contact->object_below + 1).scaled_height());
+        CHECK(object.layer(contact->object_below + 1).unscaled_height() == Approx(0.1));
+        CHECK(contact->height == object.layer(contact->object_below + 1).scaled_height());
+        CHECK(contact->bridging);
+    }
+
+    // Base slabs tile the intervals between extremes (top-contact bottoms and bottom-contact tops).
+    // Contacts and carved interfaces may overlap those spans in Z, but have separately bounded printable thicknesses.
+    std::set<std::pair<coord_t, coord_t>> spans;
+    bool object_aligned = false, displaced = false;
+    for (const Common::GeneratorLayers *group : {&generated.support.base, &generated.support.top, &generated.support.interfaces, &generated.support.bottom})
+        for (const Common::GeneratorLayer *slab : *group) {
+            CHECK(slab->height >= params.min_height);
+            CHECK(slab->height <= scale_to_layer_coord(params.max_support_height));
+            if (group == &generated.support.base) {
+                const bool inserted = spans.insert({slab->print_z - slab->height, slab->print_z}).second;
+                CHECK(inserted);
+                bool on_object = false;
+                for (const Layer &layer : object.layers()) on_object = on_object || layer.scaled_print_z() == slab->print_z;
+                object_aligned = object_aligned || on_object;
+                displaced = displaced || !on_object;
+                // Away from a contact endpoint, synchronized slabs end on object layers.
+                bool near_contact = false;
+                for (const Common::GeneratorLayer *top : generated.support.top)
+                    near_contact = near_contact || std::abs(slab->print_z - top->print_z) <= scale_to_layer_coord(params.max_support_height);
+                for (const Common::GeneratorLayer *bottom : generated.support.bottom)
+                    near_contact = near_contact || std::abs(slab->print_z - bottom->print_z) <= scale_to_layer_coord(params.max_support_height);
+                if (sync && !near_contact) CHECK(on_object);
+            }
+        }
+    coord_t previous = 0;
+    for (const std::pair<coord_t, coord_t> &span : spans) {
+        CHECK(span.first == previous);
+        previous = span.second;
+    }
+    for (const Common::GeneratorLayers *group : {&generated.support.top, &generated.support.bottom})
+        for (const Common::GeneratorLayer *contact : *group) {
+            const coord_t extreme = contact->extreme_z();
+            bool boundary = extreme == 0;
+            for (const std::pair<coord_t, coord_t> &span : spans)
+                boundary = boundary || span.first == extreme || span.second == extreme;
+            CHECK(boundary);
+        }
+    CHECK(previous == generated.support.top.back()->bottom_z);
+    if (sync) CHECK(object_aligned);
+    else CHECK(displaced);
+
+    const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+    std::string code;
+    try {
+        print.process();
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        code = Test::GCode::read_text_file(path);
+    } catch (...) {
+        Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Test::GCode::remove_output_pair(path);
+    CHECK(code.find(";TYPE:Support material") != std::string::npos);
+    // The pipeline publishes bridge bottom surfaces; toolpaths read their fill surfaces without consuming them.
+    bool published_bottom_bridge = false;
+    for (const Layer &layer : object.auxiliary_layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces())
+                    if (surface.surface_type == (stModSupport | stPosBottom | stDensSolid | stModBridge))
+                        published_bottom_bridge = true;
+    CHECK(published_bottom_bridge);
+    for (size_t bay = 1; bay < 4; ++bay) {
+        double highest = 0.;
+        for (const Layer &layer : object.auxiliary_layers())
+            for (const LayerSliceIsland &island : layer.islands())
+                if (!intersection_ex(ExPolygons{island.get_slice()}, roof_footprints[bay]).empty())
+                    highest = std::max(highest, layer.unscaled_print_z());
+        const double expected = bay == 1 ? params.first_layer_height :
+            unscaled(object.layer(roof_layers[bay]).scaled_bottom_z()) - params.gap_above;
+        CAPTURE(bay, highest, expected);
+        CHECK(highest == Approx(expected).margin(1e-4));
+    }
+}
+
+// Slice a thin cantilever with nozzle-sized bridge threads, compare raw contact placement with generated contacts, and retain
+// the lower contact when its ordinary neighbour is closer than min_height. Test-owned storage keeps the inspected slabs alive;
+// slicing or generation failures propagate and missing bridge geometry fails the assertions.
+TEST_CASE("Grid variable height filament bridge contacts retain or merge their neighbour", "[plugins][support-grid][variable-layer-height][bridge]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    const bool close_contacts = GENERATE(false, true);
+    CAPTURE(close_contacts);
+    DynamicPrintConfig config = SG::config();
+    config.set_deserialize_strict({{"support_material_contact_distance_type", "filament"},
+        {"support_material_contact_distance", "0.19"}, {"support_material_bottom_contact_distance", "0.23"}, {"bridge_type", "nozzle"},
+        {"bridge_flow_ratio", close_contacts ? "4%" : "25%"}});
+    TriangleMesh mesh = make_cube(2., 8., 4.);
+    TriangleMesh roof = make_cube(6., 8., 0.05);
+    roof.translate(0.f, 0.f, 4.f);
+    mesh.merge(roof);
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(mesh),
+        std::vector<coordf_t>{0., 0.2, 3.999, 0.2, 4., 0.05, 4.05, 0.05}, config);
+    REQUIRE(print.validate().first == PrintBase::PrintValidationError::pveNone);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Common::SupportParams params = SG::params(print, object);
+    REQUIRE(params.gap_above == Approx(0.19));
+    REQUIRE(params.gap_below == Approx(0.23));
+    REQUIRE(params.distance_type == Common::ContactDistanceType::Filament);
+    std::vector<slic3r_api::Layer> layers;
+    const slic3r_api::Object view = SG::object_view(object);
+    size_t roof_id = size_t(-1);
+    for (uint32_t id = 0; id < view.layer_count(); ++id) {
+        layers.push_back(view.layer(id));
+        if (object.layer(id).unscaled_height() < 0.1) roof_id = id;
+    }
+    REQUIRE(roof_id != size_t(-1));
+    const slic3r_api::Layer &above = layers[roof_id];
+    REQUIRE(unscaled(above.height()) == Approx(0.05));
+    REQUIRE(above.region_count() == 1);
+    const double bridge_height = Common::bridging_height_avg_mm(SG::print_view(print).config(), above, above.region(0));
+    REQUIRE(bridge_height == Approx(close_contacts ? 0.08 : 0.2).margin(1e-4));
+    REQUIRE(bridge_height != Approx(unscaled(above.height())));
+    const coord_t bridge_z = above.print_z() - scale_to_layer_coord(bridge_height) - scale_to_layer_coord(0.19);
+    const coord_t ordinary_z = above.bottom_z() - scale_to_layer_coord(0.19);
+    PluginStorage storage;
+    Common::GeneratedSupport raw{SG::handle(storage)};
+    const Common::TopContactSlabs contacts = Common::add_top_contacts(layers, SG::print_view(print).config(), params, roof_id, raw);
+    REQUIRE(contacts.contact != nullptr);
+    REQUIRE(contacts.bridge != nullptr);
+    CHECK(contacts.contact->print_z == ordinary_z);
+    CHECK(contacts.bridge->print_z == bridge_z);
+    REQUIRE(bridge_z < ordinary_z);
+    INFO("bridge height " << bridge_height << " bridge contact " << unscaled(bridge_z)
+         << " ordinary contact " << unscaled(ordinary_z) << " minimum " << unscaled(params.min_height));
+    if (close_contacts) REQUIRE(ordinary_z - bridge_z < params.min_height);
+    else REQUIRE(ordinary_z - bridge_z > params.min_height);
+    const SG::Generated generated(print, object);
+    REQUIRE(generated.support.top.size() == (close_contacts ? 1 : 2));
+    CHECK(generated.support.top.front()->print_z == bridge_z);
+    CHECK_FALSE(generated.support.top.front()->polygons.empty());
+    // A probe just inside the bridge-thread band obtains its footprint without including the ordinary roof contact band.
+    Common::GeneratorLayer &probe = Common::add_layer(raw, Common::LayerType::TopContact, bridge_z + scale_to_layer_coord(0.001),
+        bridge_z + scale_to_layer_coord(0.001) - scale_to_layer_coord(0.2), scale_to_layer_coord(0.2));
+    const slic3r_api::StoredExPolygonCollection threads = Common::bridge_footprint(raw.storage, layers,
+        SG::print_view(print).config(), params, probe.print_z, probe);
+    REQUIRE_FALSE(threads.empty());
+    CHECK(area(intersection_ex(SG::native(generated.support.top.front()->polygons), to_polygons(SG::native(threads)))) > 0.);
+    if (close_contacts) {
+        // merge_contacts resets the upper ordinary contact and retains the lower contact under the bridge threads.
+        size_t surviving = 0, reset = 0;
+        for (const Common::GeneratorLayer &slab : generated.support.slabs) {
+            if (slab.object_above == roof_id && slab.type == Common::LayerType::TopContact) ++surviving;
+            if (slab.type == Common::LayerType::Intermediate && slab.print_z == 0 && slab.object_above == size_t(-1)) ++reset;
+        }
+        CHECK(surviving == 1);
+        CHECK(reset == 1);
+    } else CHECK(generated.support.top.back()->print_z == ordinary_z);
+}
 
 // Dispatch sliced slabs with real or cleared demand: every style with nonempty demand is published by its family, and cleared demand publishes nothing.
 TEST_CASE("Support families publish each style with demand and skip empty demand", "[plugins][support-grid]")
