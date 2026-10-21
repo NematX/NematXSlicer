@@ -271,8 +271,9 @@ int32_t ToolChangeWipe::used_config_keys(raw_used_config_key *keys) const noexce
 }
 
 // Borrow a valid phase payload and dispatch it: EDIT changes only tool visits, COLLECT only reports, GENERATE only
-// fills the lent roots. Cancellation, invalid geometry/config, reporting and allocation failures throw without
-// retaining callback pointers.
+// fills the lent roots. A missing COLLECT reporter throws invalid_argument; a reporter refusal (0) ends collection
+// normally so the manager can rethrow the retained cause. Cancellation, invalid geometry/config and allocation
+// failures throw. No callback pointers are retained.
 void ToolChangeWipe::run_impl(const plugin_run_context *run) const
 {
     const run_ctx_wipe_tower_wipe *ctx = plugin_ctx_as_wipe_tower_wipe(run);
@@ -460,7 +461,8 @@ bool measure_eligible_leaves(const Slic3r::ExtrusionEntity &entity, const Slic3r
 // when either filament is soluble. With SEMM and at least one reported change, a last outgoing-only floating request
 // unloads the filament left in the nozzle at the end of the plan, so a tower that stopped lower does not grow to reach
 // it; a print without any change reports nothing and lets the end G-code unload. Unresolved visits are skipped;
-// reporter failures throw.
+// a zero reporter result ends the whole collection, including final unload, without another request or error:
+// these calls supply valid arguments, so the manager holds the allocation exception and rethrows it after COLLECT.
 void collect_requests(const Slic3r::PrintConfig &config, const ConstPrintingPlan &plan,
                       const run_ctx_wipe_tower_wipe &ctx, const plugin_run_context *run)
 {
@@ -497,7 +499,7 @@ void collect_requests(const Slic3r::PrintConfig &config, const ConstPrintingPlan
                         request.purge_volume += ramming_volume(ramming_steps(config, previous));
                     }
                     if (!ctx.report_request(ctx.report_context, &request))
-                        throw std::runtime_error("Cannot report tool-change wipe request.");
+                        return;
                 }
                 previous = tool;
                 previous_end = {g, l, t, visit.extrusion_count()};
@@ -511,7 +513,7 @@ void collect_requests(const Slic3r::PrintConfig &config, const ConstPrintingPlan
         const c_wipe_tower_request request{++id, {}, previous_end, 0, 1,
             ramming_volume(ramming_steps(config, previous)), 1};
         if (!ctx.report_request(ctx.report_context, &request))
-            throw std::runtime_error("Cannot report the final unload request.");
+            return;
     }
 }
 
