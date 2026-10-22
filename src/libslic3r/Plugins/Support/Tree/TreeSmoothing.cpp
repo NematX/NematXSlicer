@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cassert>
 #include <cmath>
 #include <limits>
 #include <numeric>
@@ -22,12 +23,16 @@
    2. set_layer_spans() limits the layers that each sphere can reach, from the bottom of the branch below it up to the
       lowest tip above it, and from its own radius;
    3. layer_collisions() indexes the outline of every layer as lines, in scaled units (the units of the stored outlines);
-   4. relax() repeats, for every free sphere, a push out of the outline and a pull toward the links. The push measures the
+   4. relax() repeats, for every free sphere, a push out of the outline and a pull toward the links. The pull aims at the point
+       of the straight line between the sphere below and the mean of the spheres above that lies at the Z of the sphere, so a
+       straight inclined branch stays straight on unequal layer heights. The push measures the
       overlap at the start of the iteration, before the pull of that iteration moves the sphere, so the last pull is not
       measured and a free sphere can end slightly inside the outline (see settled_displacement). The tips and the roots that
       rest on the model are locked and never move. The relaxation stops when no free sphere overlapped in an iteration and no
       node moved more than settled_displacement in it, or after max_iterations iterations;
-   5. write_back() stores the positions of the free spheres in the nodes; the other nodes keep their positions.
+   5. a final pass pushes every free sphere that still overlaps the outline out of it, once, with the same push as the
+      iterations (no pull follows it); the context is checked after it, before anything is written back;
+   6. write_back() stores the positions of the free spheres in the nodes; the other nodes keep their positions.
    The spheres work in millimeters; the outline queries scale the sphere position to the units of the lines and unscale the
    answer. The relaxation of an iteration runs on chunks of spheres, one chunk being one job of slic3r_parallel_for.
    The constants are the legacy ones, except settled_displacement; the layer heights are the real heights of the object layers. */
@@ -39,7 +44,7 @@ namespace {
 constexpr double collision_extra_gap = 0.1;
 constexpr double max_nudge_collision_avoidance = 0.5;
 constexpr double max_nudge_smoothing = 0.2;
-// Weight of the mean of the links in the pull: half of the way toward it.
+// Weight of the target of the links in the pull: half of the way toward it.
 constexpr double smoothing_factor = 0.5;
 constexpr size_t max_iterations = 100;
 // Stop threshold of the relaxation, in millimeters: an iteration in which no node moves more than this, and no free sphere
@@ -47,7 +52,7 @@ constexpr size_t max_iterations = 100;
 // branch. Known limits of the rule: a long, gently curved branch can stop after one iteration, because each node moves far less
 // than this threshold when its local curvature is small (the rule removes kinks, not gentle arcs); and the last pull is not
 // measured against the outline, so the circle of a free sphere can reach up to this distance into the keep-out (the legacy stop
-// has the same gap). The drawing trims the slabs against the keep-out afterwards.
+// has the same gap); the final pass of smooth_organic_branches() pushes such a sphere out.
 constexpr double settled_displacement = 0.01;
 // Number of spheres moved by one job of the relaxation. The relaxation time was measured flat from 1 to 64 spheres per job (5000
 // spheres, 16 threads) and only degrades above that, when there are fewer jobs than threads; 16 is a middle value, with no gain claimed.
@@ -64,6 +69,8 @@ struct LayerCollision {
 // model are locked and do not move.
 struct Sphere {
     size_t layer = 0;
+    // The print Z of the layer, in scaled integer units (the exact value of the object layer, so Z differences between layers are exact).
+    coord_t z = 0;
     double radius = 0.;
     Vec2d position = Vec2d::Zero();
     Vec2d prev_position = Vec2d::Zero();
@@ -99,14 +106,16 @@ size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, c
 void relax_chunk(uint32_t job, void *user_data);
 // Pushes the sphere away from the closest outline point of the layers it reaches; returns true when it overlapped by more than EPSILON.
 bool push_out_of_outline(Sphere &sphere, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions);
-// Moves the sphere half of the way toward the radius-weighted mean of its links, by at most max_nudge_smoothing.
+// Moves the sphere half of the way toward the point of the straight line between the sphere below and the mean of the spheres
+// above that lies at the Z of the sphere (the midpoint when the layer heights are equal), by at most max_nudge_smoothing.
 void pull_toward_links(Sphere &sphere, const std::vector<Sphere> &spheres);
 // Stores the positions of the free spheres in the nodes of the trees, in the order that make_spheres() used.
 void write_back(const std::vector<Sphere> &spheres, std::vector<RoutedTree> &trees);
 } // namespace
 
 // Relaxes the free nodes of the trees and returns the number of iterations that ran. The spheres are built from the trees,
-// relaxed, and only then written back, so a cancellation of the context leaves the trees unchanged.
+// relaxed, pushed out of the outline once more, and only then written back. The context is checked after every iteration and after
+// the final pass, so a cancellation leaves the trees unchanged.
 size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
                                std::vector<RoutedTree> &trees, const plugin_run_context *context)
 {
@@ -115,6 +124,14 @@ size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vect
     set_layer_spans(spheres, print_z);
     const std::vector<LayerCollision> collisions = layer_collisions(keep_out);
     const size_t iterations = relax(spheres, print_z, collisions, context);
+    // Final pass: the last pull of the relaxation was not measured against the outline, so a free sphere can still overlap it. Push it
+    // out once. TODO: a push is capped (max_nudge_collision_avoidance) and can leave the circle in another part of the outline (a
+    // concave corner, another layer of its window); such a sphere is left as it is. The printed geometry is still trimmed by the
+    // object outline grown by the XY distance (trim_slab).
+    for (Sphere &sphere : spheres)
+        if (! sphere.locked)
+            push_out_of_outline(sphere, print_z, collisions);
+    slic3r_api::throw_if_cancelled(context);
     write_back(spheres, trees);
     return iterations;
 }
@@ -153,6 +170,7 @@ std::vector<Sphere> make_spheres(const std::vector<RoutedTree> &trees, const std
             const TreeNode &node = tree.nodes[idx];
             Sphere sphere;
             sphere.layer = node.layer;
+            sphere.z = scale_to_layer_coord(print_z[node.layer]);
             sphere.radius = unscaled(node.radius);
             sphere.position = unscale_p(node.position);
             sphere.below = below[idx] == no_node ? no_node : offset + below[idx];
@@ -277,18 +295,23 @@ bool push_out_of_outline(Sphere &sphere, const std::vector<double> &print_z, con
 
 void pull_toward_links(Sphere &sphere, const std::vector<Sphere> &spheres)
 {
+    // A free sphere always has spheres above (a node without any is a locked tip), and they all lie on the next layer.
+    assert(!sphere.above.empty());
     Vec2d mean = Vec2d::Zero();
-    double weight = 0.;
     for (const size_t above : sphere.above) {
-        mean += sphere.radius * spheres[above].prev_position;
-        weight += sphere.radius;
+        assert(spheres[above].z == spheres[sphere.above.front()].z);
+        mean += spheres[above].prev_position;
     }
+    mean /= double(sphere.above.size());
     if (sphere.below != no_node) {
-        const double below_weight = weight;
-        mean += below_weight * spheres[sphere.below].prev_position;
-        weight += below_weight;
+        // The target is the point of the line from the sphere below to the mean above that lies at the Z of the sphere. Equal
+        // layer heights give exactly t = 0.5, the midpoint.
+        const Vec2d &below_position = spheres[sphere.below].prev_position;
+        const double dz_below = double(sphere.z - spheres[sphere.below].z);
+        const double dz_above = double(spheres[sphere.above.front()].z - sphere.z);
+        const double t = dz_below / (dz_below + dz_above);
+        mean = below_position + t * (mean - below_position);
     }
-    mean /= weight;
     const Vec2d old_position = sphere.position;
     const Vec2d new_position = (1. - smoothing_factor) * old_position + smoothing_factor * mean;
     const Vec2d shift = new_position - old_position;

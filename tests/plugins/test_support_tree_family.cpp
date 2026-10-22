@@ -1485,6 +1485,73 @@ TEST_CASE("Organic relaxation smooths a collision-free bent branch until its ben
     CHECK(bend_after <= 0.5 * bend_before);
 }
 
+namespace {
+// A straight inclined branch (1.5 mm of X per mm of Z) through the given layers, listed from the tip down to the root, far from any
+// outline. The smoothing aims at the line between the links at the Z of the node, so a branch already on a straight line stays where
+// it is within 1 um, whatever the spacing of its layers. Returns the largest distance in mm between a node and its raw position.
+double straight_branch_drift_mm(const Print &print, const std::vector<size_t> &layers)
+{
+    const PrintObject &object = print.object(0);
+    std::vector<ChainPoint> points;
+    for (const size_t layer : layers)
+        points.push_back({ 1.5 * object.layer(layer).unscaled_print_z(), 0., layer });
+    const std::vector<Polygons> keep_out(object.layer_count(), square_mm(-30., -30., 10.));
+    PluginStorage storage;
+    const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
+    std::vector<TF::RoutedTree> trees{ chain_tree(object, points) };
+    // Guard: every node between the tip and the root is free, with a node above and a node below, so the pull moves it.
+    const std::vector<size_t> below = TF::nodes_below(trees.front());
+    for (size_t idx = 1; idx + 1 < points.size(); ++idx) {
+        REQUIRE(!trees.front().nodes[idx].carries.empty());
+        REQUIRE(below[idx] != TF::no_node);
+    }
+    const std::vector<TF::TreeNode> raw = trees.front().nodes;
+    TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+    double drift_mm = 0.;
+    for (size_t idx = 0; idx < raw.size(); ++idx)
+        drift_mm = std::max(drift_mm, unscaled((to_point(trees.front().nodes[idx].position) - to_point(raw[idx].position)).cast<double>().norm()));
+    return drift_mm;
+}
+} // namespace
+
+// The pull aims at the point of the line between the node below and the node above that lies at the Z of the node, not at their
+// midpoint, so a straight inclined branch stays straight when its layers are unequal: here a 0.05 mm band then a 0.3 mm band, with
+// the free nodes on both sides of the change. On uniform layers the target is the midpoint and the branch stays too.
+TEST_CASE("Organic smoothing keeps a straight inclined branch straight on unequal layer heights", "[plugins][support-tree-organic][smoothing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    SECTION("a 0.05 mm band then a 0.3 mm band") {
+        Print print;
+        Model model;
+        SG::init_print_with_profile(print, model, make_cube(10., 10., 9.), { 0., 0.05, 2., 0.05, 2.01, 0.3, 9., 0.3 }, SG::config("organic", false, 0));
+        SG::prefix(print);
+        const PrintObject &object = print.object(0);
+        size_t band = 0;
+        while (object.layer(band).unscaled_print_z() < 2.)
+            ++band;
+        REQUIRE(band > 6);
+        REQUIRE(band + 3 < object.layer_count());
+        // Tip to root; the free nodes lie at band - 2, band and band + 1. From the root up the four gaps are 0.2, 0.1, 0.3 and
+        // 0.6 mm, so the node at band has 0.1 mm below and 0.3 mm above.
+        const std::vector<size_t> layers{ band + 3, band + 1, band, band - 2, band - 6 };
+        const double gap_a = object.layer(layers[1]).unscaled_print_z() - object.layer(layers[2]).unscaled_print_z();
+        const double gap_b = object.layer(layers[2]).unscaled_print_z() - object.layer(layers[3]).unscaled_print_z();
+        REQUIRE(std::abs(gap_a - gap_b) > 0.05);
+        const double drift_mm = straight_branch_drift_mm(print, layers);
+        CAPTURE(drift_mm);
+        CHECK(drift_mm <= 0.001);
+    }
+    SECTION("uniform layers") {
+        Print print;
+        Model model;
+        Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+        SG::prefix(print);
+        const double drift_mm = straight_branch_drift_mm(print, { 20, 16, 12, 8, 4 });
+        CAPTURE(drift_mm);
+        CHECK(drift_mm <= 0.001);
+    }
+}
+
 // The relaxation stops once a pass moves no node more than 0.01 mm, and never runs more than 100 iterations: a node that keeps
 // moving by the step cap runs to the cap.
 TEST_CASE("Organic relaxation stops once the nodes settle and never runs past its iteration cap", "[plugins][support-tree-organic][smoothing]")
@@ -1540,6 +1607,63 @@ TEST_CASE("Organic relaxation leaves the trees unchanged when the context is can
         CHECK(to_point(trees.front().nodes[idx].position) == to_point(raw[idx].position));
 }
 
+// The last pull of the relaxation is not measured against the outline. The free node of the stray branch walks 0.2 mm per iteration
+// from x = 25 mm to x = 5.0 mm in the 100 iterations of the cap, and its circle (0.4 mm) clears a wall whose face is at x = 4.7 mm by 0.5 mm
+// at the start of the last iteration (no push), then reaches 0.1 mm into it with the last pull. The final pass pushes it out: its
+// clearance is then at least its radius, within the tolerance.
+TEST_CASE("Organic smoothing pushes out a node that the last pull left inside the outline", "[plugins][support-tree-organic][smoothing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<Polygons> keep_out(object.layer_count(), square_mm(2.7, -1., 2.));
+    PluginStorage storage;
+    const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
+    std::vector<TF::RoutedTree> trees{ stray_node_branch(object) };
+    const TF::TreeNode &free_node = trees.front().nodes[1];
+    const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+    const double clearance_mm = distance_to_region_mm(to_point(free_node.position), keep_out[free_node.layer]);
+    CAPTURE(iterations, unscaled(free_node.position.x), clearance_mm);
+    // The cap ended the relaxation, so the last pull was the one that went into the wall.
+    CHECK(iterations == 100);
+    CHECK(clearance_mm >= unscaled(free_node.radius) - tolerance_mm);
+}
+
+// A cancellation at the check that follows the final pass, the last one of the function, ends it before anything is written back.
+TEST_CASE("Organic smoothing leaves the trees unchanged when cancelled after its final pass", "[plugins][support-tree-organic][smoothing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({SG::slab()}, print, model, SG::config("organic", false, 0));
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const std::vector<Polygons> keep_out(object.layer_count(), square_mm(-30., -30., 10.));
+    PluginStorage storage;
+    const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
+    // The relaxation of this branch settles after a known number of iterations, each of them followed by one check.
+    std::vector<TF::RoutedTree> reference{ bent_branch(object) };
+    const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, reference, nullptr);
+    REQUIRE(iterations > 1);
+    std::vector<TF::RoutedTree> trees{ bent_branch(object) };
+    const std::vector<TF::TreeNode> raw = trees.front().nodes;
+    struct Counter { size_t calls = 0, cancel_at = 0; } counter{ 0, iterations + 1 };
+    plugin_run_context context = {};
+    context.host_context = reinterpret_cast<plugin_host_context *>(&counter);
+    context.is_cancelled = [](plugin_host_context *host_context) {
+        Counter &c = *reinterpret_cast<Counter *>(host_context);
+        return ++c.calls >= c.cancel_at ? 1 : 0;
+    };
+    REQUIRE_THROWS_AS(TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, &context), slic3r_api::PluginCancelled);
+    CHECK(counter.calls == iterations + 1);
+    for (size_t idx = 0; idx < raw.size(); ++idx)
+        CHECK(to_point(trees.front().nodes[idx].position) == to_point(raw[idx].position));
+    // The trees of the reference run moved: the check above is not about an unmoved branch.
+    CHECK(to_point(reference.front().nodes[3].position) != to_point(raw[3].position));
+}
 // The branch meshes of the organic style fill the branches that the circles of the tree style fill. Their volume stays within a
 // quarter of the circles: a tilted tube is cut into wider sections than its circles, and the end caps close the tubes. No branch is
 // lost between the slabs, so the branches stay connected from the contact to the bed (branch_gaps()).
