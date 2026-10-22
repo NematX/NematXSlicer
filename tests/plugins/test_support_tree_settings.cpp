@@ -707,6 +707,8 @@ TEST_CASE("Tree catch-up gain respects the radii, the foot and the path bound", 
     CHECK(TF::catch_up_gain(gain, 1000000, 1300000, min_radius, partial_foot, 900000.) == gain);
     // Without a foot the whole radius above the tip is gain.
     CHECK(TF::catch_up_gain(0., 2600000, 1000000, min_radius, 0., 900000.) == 600000.);
+    // A fine cache step of the foot band (1.7 mm, 0.2 mm after 1.5 mm) under the drawn radius stops the catch-up on it: 1700000 - 400000 = 1300000.
+    CHECK(TF::catch_up_gain(0., 1700000, 1800000, min_radius, 0., 1.e9) == 1300000.);
     // The collision radius of the result stays within both radii whenever the gain grows.
     for (const coord_t ceil_radius : {coord_t(900000), coord_t(1100000), coord_t(1500000)}) {
         const double caught = TF::catch_up_gain(0., ceil_radius, 1300000, min_radius, partial_foot, 1.e9);
@@ -749,4 +751,71 @@ TEST_CASE("Tree merge keeps the largest drawn radius of the merged branches", "[
     const TF::SupportElementState footed = foot_state(layer, 25, 0., 300000.);
     const TF::SupportElementState both = TF::merge_support_element_states(paused, footed, position, layer, settings);
     CHECK(TF::support_element_collision_radius(settings, both) > std::max(TF::support_element_collision_radius(settings, paused), TF::support_element_collision_radius(settings, footed)));
+}
+
+// A planned foot widening that the caches refuse is cut at a limit of a cache step: the current step is always filled (same key,
+// no validation), then the limit of each following step that the widening crosses is tried, and the largest valid one is kept. The
+// cache steps here are a synthetic grid (0.25 mm, then 0.1 mm, from 1 mm; the limit of a step is the step itself), and the radius
+// that the validity function receives is the radius of the widening that would be added.
+TEST_CASE("Tree partial foot fills the cache step and the valid steps it crosses", "[plugins][support-tree-settings]")
+{
+    const coord_t first = 1000000;
+    const auto grid = [&](coord_t step) {
+        return [=](coord_t radius) { return radius <= first ? first : first + ((radius - first + step - 1) / step) * step; };
+    };
+    const auto next_ceil = grid(250000), fine_ceil = grid(100000);
+    const auto valid_until = [&](coord_t limit) { return [=](coord_t radius) { return radius <= limit; }; };
+    const auto gain = [](double base, double planned, const auto &ceil, const auto &valid) {
+        return TF::partial_foot_gain(base, planned, [=](double increase) { return coord_t(base + increase); }, ceil, valid);
+    };
+    // A half line width of 0.6 mm: the largest foot widening of one step.
+    const double planned = 300000.;
+
+    // The full widening is valid: it is added whole.
+    CHECK(gain(1300000., planned, next_ceil, valid_until(1750000)) == planned);
+    // The full radius stays in the current cache step: valid, so the widening is added whole.
+    CHECK(gain(1260000., 200000., next_ceil, valid_until(1500000)) == 200000.);
+    // One step crossed: 1.3 mm + 0.5 mm reaches the step 2 mm, refused; the limit 1.75 mm is crossed and valid.
+    CHECK(gain(1300000., 500000., next_ceil, valid_until(1750000)) == Approx(450000.));
+    // The crossed limit is refused too: the foot only fills the current step (1.5 mm).
+    CHECK(gain(1300000., 500000., next_ceil, valid_until(1500000)) == Approx(200000.));
+    // Nothing is valid above the current step and the radius is already at its limit: no widening.
+    CHECK(gain(1500000., 300000., next_ceil, valid_until(1500000)) == 0.);
+
+    // Several steps crossed (steps of 0.1 mm): 1.05 mm + 0.3 mm = 1.35 mm, step limit 1.4 mm; crossed limits 1.2 and 1.3 mm.
+    CHECK(gain(1050000., planned, fine_ceil, valid_until(1300000)) == Approx(250000.));
+    CHECK(gain(1050000., planned, fine_ceil, valid_until(1200000)) == Approx(150000.));
+    CHECK(gain(1050000., planned, fine_ceil, valid_until(1100000)) == Approx(50000.));
+    // The largest valid limit is kept even when a lower one is refused.
+    CHECK(gain(1050000., planned, fine_ceil, [](coord_t radius) { return radius <= 1100000 || radius == 1300000; }) == Approx(250000.));
+
+    // The validity function only sees the radii that the widening gives: with a radius that is not base + increase (a collision
+    // radius that the caller computes differently), the radii checked are the ones of radius_of.
+    std::vector<coord_t> checked;
+    static_cast<void>(TF::partial_foot_gain(1300000., 500000., [](double increase) { return coord_t(1300000. + increase) + 3; }, next_ceil,
+        [&](coord_t radius) { checked.push_back(radius); return false; }));
+    CHECK(checked == std::vector<coord_t>{ 1800003, 1750003 });
+}
+
+// The step of the cache radii in the foot band is half the diameter of the largest nozzle of the support: the extruder of the
+// support material or the one of the support interface.
+TEST_CASE("Tree settings cache step is half the largest support nozzle", "[plugins][support-tree-settings]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto step_of = [](const auto &override_config) {
+        DynamicPrintConfig config = SG::config("tree", false, 3);
+        override_config(config);
+        Print print;
+        Model model;
+        Test::init_print({make_cube(2., 2., 6.)}, print, model, config);
+        SG::prefix(print);
+        return ST::tree_settings(print, print.object(0), SG::params(print, print.object(0))).foot_cache_step;
+    };
+    using Config = DynamicPrintConfig;
+    CHECK(step_of([](Config &) {}) == scale_i(0.2));
+    CHECK(step_of([](Config &c) { c.set_deserialize_strict({{"nozzle_diameter", "0.8"}}); }) == scale_i(0.4));
+    // Two extruders: the larger nozzle of the two decides, whichever of them prints the interface.
+    CHECK(step_of([](Config &c) { c.set_deserialize_strict({{"nozzle_diameter", "0.4,0.8"}, {"support_material_extruder", "1"}, {"support_material_interface_extruder", "2"}}); }) == scale_i(0.4));
+    CHECK(step_of([](Config &c) { c.set_deserialize_strict({{"nozzle_diameter", "0.4,0.8"}, {"support_material_extruder", "2"}, {"support_material_interface_extruder", "1"}}); }) == scale_i(0.4));
+    CHECK(step_of([](Config &c) { c.set_deserialize_strict({{"nozzle_diameter", "0.4,0.8"}, {"support_material_extruder", "1"}, {"support_material_interface_extruder", "1"}}); }) == scale_i(0.2));
 }

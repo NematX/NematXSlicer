@@ -3,6 +3,7 @@
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeRouting.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSettings.hpp"
+#include "libslic3r/Plugins/Support/Tree/TreeVolumes.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -682,4 +683,119 @@ TEST_CASE("Tree branches widen at the bed to the foot target without ever losing
     CHECK(tips > 0);
     CHECK(links > 0);
     CHECK(widest_root >= settings.foot_target[0] - 2.);
+}
+
+namespace {
+// Two tall walls with a slot between them, and a small plate floating in the middle of the slot at the top. The branches of the
+// plate can only go down the slot, so the room for the foot of the root on the bed is the half width of the slot minus the XY
+// distance: the walls take the room the foot needs (a lone wall would let the branches drift away from it). The walls are thick
+// and the plate is small, so the branches of its tips merge into one trunk long before the foot zone. room_mm is the free room
+// for the foot at the bed. Returns the widest root radius (scaled), counts the trees, gives in table_limit the largest radius
+// below the room that the cache steps allow (the limit of the last step of the regular XY variant that is not above the room) and
+// in foot_step the spacing of the cache steps in the foot band.
+double slot_root_radius(const char *xy_spacing, const double room_mm, size_t &tree_count, coord_t &table_limit, coord_t &foot_step)
+{
+    DynamicPrintConfig config = SG::config("organic");
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}, {"support_material_xy_spacing", xy_spacing},
+                                   {"support_tree_branch_diameter", "2"}});
+    // The XY distance is a setting of the print: read it from a small seed object with the same configuration.
+    Print seed;
+    Model seed_model;
+    Test::init_print({make_cube(1., 1., 1.)}, seed, seed_model, config);
+    SG::prefix(seed);
+    const TF::TreeSettings seed_settings = Slic3r::Test::SupportTree::tree_settings(seed, seed.object(0), SG::params(seed, seed.object(0)));
+    const double slot_mm = 2. * (room_mm + unscaled(double(seed_settings.xy_distance)));
+    TriangleMesh wall_a = make_cube(2., 10., 10.);
+    TriangleMesh wall_b = make_cube(2., 10., 10.);
+    wall_b.translate(2. + slot_mm, 0., 0.);
+    TriangleMesh plate = make_cube(1., 1., 1.);
+    plate.translate(2. + slot_mm / 2. - 0.5, 4.5, 8.);
+    wall_a.merge(wall_b);
+    wall_a.merge(plate);
+    Print print;
+    Model model;
+    Test::init_print({wall_a}, print, model, config);
+    SG::prefix(print);
+    const Routed routed(print);
+    REQUIRE(routed.settings.branch_radius == scale_i(1.));
+    REQUIRE(routed.settings.bp_radius == scale_i(3.75));
+    tree_count = routed.trees.size();
+    foot_step = routed.settings.foot_cache_step;
+    // The steps of the cache radii, with the same settings as the routing.
+    PluginStorage storage;
+    const TF::TreeVolumes volumes(SG::object_view(print.object(0)), SG::print_view(print), routed.settings, SG::handle(storage), nullptr);
+    table_limit = 0;
+    for (coord_t radius = 1, limit; (limit = volumes.getRadiusNextCeil(radius, false)) <= scale_i(room_mm); radius = limit + 1)
+        table_limit = limit;
+    double widest = 0.;
+    for (const TF::RoutedTree &tree : routed.trees) {
+        const TF::TreeNode &bottom = tree.nodes.back();
+        REQUIRE(bottom.layer == 0);
+        widest = std::max(widest, double(bottom.radius));
+    }
+    return widest;
+}
+}
+
+// The foot of a mature branch widens up to the room it has, to the resolution of the cache steps of the foot band: the root on the
+// bed ends in the last cache step that fits in the free room of 3.05 mm (above the limit of the step before, up to the limit of that
+// step: the widening of the last layers can stop inside a step that is valid), and never exceeds the room. The table must offer a
+// step from 2.85 mm on in the room (REQUIRE below): the plain scale of the tips does not (its last limit below the room is 2.6 mm
+// without XY delta, 1.11 mm with the delta of the second case).
+TEST_CASE("A branch foot widens to the room it has at the resolution of the cache steps", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *xy_spacing = GENERATE("0", "3");
+    constexpr double room_mm = 3.05;
+    CAPTURE(xy_spacing);
+    size_t tree_count = 0;
+    coord_t table_limit = 0, foot_step = 0;
+    const double widest = slot_root_radius(xy_spacing, room_mm, tree_count, table_limit, foot_step);
+    CAPTURE(tree_count, widest, table_limit, foot_step);
+    REQUIRE(tree_count > 0);
+    REQUIRE(table_limit >= scale_i(2.85));
+    CHECK(widest <= scale_d(room_mm) + 2.);
+    CHECK(widest > double(table_limit - foot_step));
+}
+
+// The routing asks for no hold of the tips in a straight column: the interface stack above them is always placed. On this model
+// every tip that leaves its vertical leaves it at its first step (the node at distance 1 below the tip has another XY), with 3
+// interfaces over the thin and thick bands of the profile. The unsafe tips still try not to move first, as in the native support.
+// The tips that stay on their vertical down to the bed are free to do so and are skipped.
+TEST_CASE("Tips are free to move from their first step", "[plugins][support-tree-routing]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const double band_mm = GENERATE(0.05, 0.3);
+    CAPTURE(band_mm);
+    DynamicPrintConfig config = SG::config("organic", false, 3);
+    config.set_deserialize_strict({{"support_material_buildplate_only", "1"}});
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, narrow_platform_overhang(), std::vector<coordf_t>{0., 0.3, 3.6, 0.3, 3.61, band_mm, 5.2, band_mm, 5.21, 0.3, 7., 0.3}, config);
+    SG::prefix(print);
+    const Routed routed(print);
+    REQUIRE_FALSE(routed.trees.empty());
+    size_t leaving = 0;
+    for (const TF::RoutedTree &tree : routed.trees) {
+        const std::vector<size_t> below = TF::nodes_below(tree);
+        for (size_t tip = 0; tip < tree.nodes.size(); ++ tip) {
+            if (! tree.nodes[tip].carries.empty())
+                continue;
+            // The run of nodes under the tip that keep its XY.
+            size_t still = 0, node = tip;
+            while (below[node] != TF::no_node && tree.nodes[below[node]].position.x == tree.nodes[tip].position.x &&
+                   tree.nodes[below[node]].position.y == tree.nodes[tip].position.y) {
+                node = below[node];
+                ++ still;
+            }
+            // A tip that stays on its vertical down to the root does not leave it.
+            if (below[node] == TF::no_node)
+                continue;
+            CAPTURE(tree.nodes[tip].layer, still);
+            CHECK(still == 0);
+            ++ leaving;
+        }
+    }
+    CAPTURE(leaving);
+    CHECK(leaving >= 3);
 }

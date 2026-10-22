@@ -181,15 +181,10 @@ struct SupportElementState : public SupportElementStateBits
 
     /*!
      * \brief The foot widening (scaled length) that the branch has acquired near the build plate, on top of radius_gain. It
-     * is part of both the collision and the drawn radius. It only grows by foot_step_gain() (and is set by a merge so that the
-     * drawn radius never decreases).
+     * is part of both the collision and the drawn radius. It grows by the part of foot_step_gain() that the cache steps allow
+     * (partial_foot_gain()), and a merge sets it so that the drawn radius never decreases.
      */
     double      foot_gain;
-
-    /*!
-     * \brief The element tries to not move until this dtt is reached, is set to 0 if the element had to move.
-     */
-    uint32_t    dont_move_until;
 
     /*!
      * \brief Settings used to increase the influence area to its current state.
@@ -288,6 +283,41 @@ struct SupportElementState : public SupportElementStateBits
 }
 
 /*!
+ * \brief The part of a planned foot widening that the caches allow: the whole of it when its collision radius is valid, otherwise
+ * the largest part that stops at a physical limit of a cache step.
+ *
+ * The collision radius of a branch only has to be validated when it moves to another cache step (ceilRadius()); inside the
+ * current step it shares the key, and so the areas, of the branch as it is. When the full widening is refused, the foot fills the
+ * current step (no validation needed) and then tries the limit of each following step that the planned widening crosses
+ * (never beyond it), keeping the largest limit that is valid. The limit of a step is the largest radius that rounds to it.
+ * The radius that is validated is always the collision radius the branch gets from the widening (radius_of), not the limit.
+ * \param base_radius[in] The collision radius before the widening (scaled, not rounded to coord_t).
+ * \param planned_gain[in] The widening to add (scaled, > 0).
+ * \param radius_of[in] double -> coord_t: the collision radius of the branch after a foot widening of the given size.
+ * \param next_ceil[in] coord_t -> coord_t: the largest radius that rounds up to the same cache step as its argument
+ *        (TreeVolumes::getRadiusNextCeil() with the XY variant of the step).
+ * \param valid[in] coord_t -> bool: whether a branch of this collision radius can keep an influence area (the caller's check of
+ *        the areas of the cache step of the radius).
+ * \return The widening to add, between 0 and planned_gain.
+ */
+template<typename RadiusOf, typename NextCeil, typename Valid>
+[[nodiscard]] inline double partial_foot_gain(const double base_radius, const double planned_gain, RadiusOf &&radius_of, NextCeil &&next_ceil, Valid &&valid)
+{
+    const coord_t full_radius = radius_of(planned_gain);
+    if (valid(full_radius))
+        return planned_gain;
+    // Fill the current cache step, then try the limits of the steps crossed by the planned widening.
+    coord_t limit = next_ceil(radius_of(0.));
+    double  best  = std::max(0., std::min(planned_gain, double(limit) - base_radius));
+    for (limit = next_ceil(limit + 1); limit < full_radius; limit = next_ceil(limit + 1)) {
+        const double gain = double(limit) - base_radius;
+        if (valid(radius_of(gain)))
+            best = gain;
+    }
+    return best;
+}
+
+/*!
  * \brief True when merging two elements must be refused because the collision radius of the merged state needs a higher cache step
  * (ceilRadius()) than both elements: their areas were validated with their own collision radii only.
  *
@@ -314,7 +344,6 @@ struct SupportElementState : public SupportElementStateBits
     out.next_position   = next_position;
     out.layer_idx       = layer_idx;
     out.use_min_xy_dist = first.use_min_xy_dist || second.use_min_xy_dist;
-    out.dont_move_until = std::max(first.dont_move_until, second.dont_move_until);
     out.can_use_safe_radius = first.can_use_safe_radius || second.can_use_safe_radius;
     out.skip_ovalisation = false;
     if (first.target_height > second.target_height) {

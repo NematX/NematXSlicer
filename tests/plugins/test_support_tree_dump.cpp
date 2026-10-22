@@ -183,7 +183,7 @@ void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings
         field("layer_height", (long long) s.layer_height), field("resolution", (long long) s.resolution),
         field("min_feature_size", (long long) s.min_feature_size), field("support_line_width", (long long) s.support_line_width),
         field("branch_radius", (long long) s.branch_radius), field("min_radius", (long long) s.min_radius),
-        field("bp_radius", (long long) s.bp_radius), field("increase_radius_until_radius", (long long) s.increase_radius_until_radius),
+        field("bp_radius", (long long) s.bp_radius), field("foot_cache_step", (long long) s.foot_cache_step), field("increase_radius_until_radius", (long long) s.increase_radius_until_radius),
         field("min_height_to_model", (long long) s.min_height_to_model),
         field("max_to_model_radius_increase", (long long) s.max_to_model_radius_increase),
         field("support_rests_on_model", s.support_rests_on_model), field("xy_distance", (long long) s.xy_distance),

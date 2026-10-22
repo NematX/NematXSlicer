@@ -95,11 +95,10 @@ struct SupportElementMerging;
 using Lines = std::vector<std::vector<c_point>>;
 
 // A top contact that the tips support: its contact area (kept in the storage of the support), the object layer where its tips
-// start, the number of interface layers that the tips stay vertical under, and the object layer of the contacts it stands for.
+// start, and the object layer of the contacts it stands for.
 struct TipSource {
     StoredPolygonCollection area;
     LayerIndex layer;
-    size_t dont_move_until;
     size_t object_above;
 };
 
@@ -317,8 +316,10 @@ static void store_top_contact(Common::GeneratorLayer &slab, storage_handle *stor
 
 // Lists where the tips of each object layer with top contacts start. The stack of interface slabs hangs under the contact extreme, so the tips
 // start on the highest object layer that does not rise above the bottom of that stack. Without interface layers the stack is
-// the contact extreme itself. The contacts of one object layer (a bridge and the normal contact, which the merge may keep apart,
-// and the demand that the merge adds to a contact) share one source: its area is the union, and it starts from the lowest contact.
+// the contact extreme itself. The tips are free to move from their first step: the interface stack above them is always placed, so they
+// need no straight column (the native support holds a tip only to replace the roof layers it could not place). The contacts of one
+// object layer (a bridge and the normal contact, which the merge may keep apart, and the demand that the merge adds to a contact)
+// share one source: its area is the union, and it starts from the lowest contact.
 static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, const TreeSettings &settings, const slic3r_api::Config &config,
                                           const Common::GeneratedSupport &support)
 {
@@ -345,13 +346,13 @@ static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, cons
             LayerIndex layer = 0;
             for (LayerIndex idx = 0; idx < LayerIndex(object.layer_count()) && object.layer(idx).print_z() <= stack_bottom; ++ idx)
                 layer = idx;
-            sources.push_back(TipSource{ area.readonly().clone(storage), layer, size_t(interfaces), contact->object_above });
+            sources.push_back(TipSource{ area.readonly().clone(storage), layer, contact->object_above });
         }
         // Each connected part of a contact area is a source of its own, so that a part without a placed tip is removed alone.
         for (const TipSource &source : sources) {
             const StoredExPolygonCollection united = expolygons_union(scratch, source.area);
             for (uint32_t idx = 0; idx < united.size(); ++idx)
-                parts.push_back(TipSource{ expolygon_rings(storage, united.at(idx)), source.layer, source.dont_move_until, source.object_above });
+                parts.push_back(TipSource{ expolygon_rings(storage, united.at(idx)), source.layer, source.object_above });
         }
     });
     return parts;
@@ -401,14 +402,12 @@ static void trim_contacts_to_placed_tips(const std::vector<SupportElements> &mov
 class TipPlacer {
 public:
     TipPlacer(const TreeSettings &config, bool min_xy_dist, std::vector<SupportElements> &move_bounds, storage_handle *storage);
-    // Insert every point of the lines as a tip on insert_layer, which stays in place for dont_move_until layers; source is the
-    // index of the tip source that the tips belong to.
-    void add_points_along_lines(const LineInformations &lines, LayerIndex insert_layer, size_t dont_move_until, size_t source);
+    // Insert every point of the lines as a tip on insert_layer; source is the index of the tip source that the tips belong to.
+    void add_points_along_lines(const LineInformations &lines, LayerIndex insert_layer, size_t source);
 
 private:
     // Insert one point as a tip with a small base circle, unless a tip already covers it.
-    void add_point(const std::pair<c_point, LineStatus> &point, LayerIndex insert_layer, size_t dont_move_until, bool skip_ovalisation,
-                   size_t source);
+    void add_point(const std::pair<c_point, LineStatus> &point, LayerIndex insert_layer, bool skip_ovalisation, size_t source);
 
     const TreeSettings &m_config;
     const bool m_min_xy_dist;
@@ -493,7 +492,7 @@ static void place_source_tips(uint32_t source_idx, storage_handle *scratch, cons
         // A pattern error or a cancellation stops the step: no further part; the jobs still to run stop at their next check.
         slic3r_api::throw_if_cancelled(placement->context);
         const LineInformations overhang_lines = convert_lines_to_internal(placement->volumes, placement->config, lines, source.layer);
-        placement->placer.add_points_along_lines(overhang_lines, source.layer, source.dont_move_until, source_idx);
+        placement->placer.add_points_along_lines(overhang_lines, source.layer, source_idx);
     }
 }
 
@@ -558,18 +557,17 @@ static Lines tip_lines(storage_handle *scratch, const TipPlacement &placement, u
     return ensure_maximum_distance_polyline(scratch, outline_lines, placement.connect_length, min_support_points);
 }
 
-void TipPlacer::add_points_along_lines(const LineInformations &lines, LayerIndex insert_layer, size_t dont_move_until, size_t source)
+void TipPlacer::add_points_along_lines(const LineInformations &lines, LayerIndex insert_layer, size_t source)
 {
     for (const LineInformation &line : lines) {
         // A line of many tips simulates a support pattern, so its tips keep their ovalisation disabled to stay a clean line.
         const bool disable_ovalistation = m_config.min_radius < 3 * m_config.support_line_width && line.size() > 5;
         for (const std::pair<c_point, LineStatus> &point_data : line)
-            add_point(point_data, insert_layer, dont_move_until, disable_ovalistation, source);
+            add_point(point_data, insert_layer, disable_ovalistation, source);
     }
 }
 
-void TipPlacer::add_point(const std::pair<c_point, LineStatus> &point, LayerIndex insert_layer, size_t dont_move_until, bool skip_ovalisation,
-                          size_t source)
+void TipPlacer::add_point(const std::pair<c_point, LineStatus> &point, LayerIndex insert_layer, bool skip_ovalisation, size_t source)
 {
     const bool to_bp = point.second == LineStatus::TO_BP || point.second == LineStatus::TO_BP_SAFE;
     const bool gracious = to_bp || point.second == LineStatus::TO_MODEL_GRACIOUS || point.second == LineStatus::TO_MODEL_GRACIOUS_SAFE;
@@ -607,7 +605,6 @@ void TipPlacer::add_point(const std::pair<c_point, LineStatus> &point, LayerInde
     state.to_model_gracious = gracious;
     state.foot_gain = 0;
     state.use_min_xy_dist = m_min_xy_dist;
-    state.dont_move_until = dont_move_until;
     state.can_use_safe_radius = safe_radius;
     state.skip_ovalisation = skip_ovalisation;
     m_move_bounds[insert_layer].emplace_back(state, std::move(circle)).tip_source = source;
@@ -1638,9 +1635,6 @@ static void increase_merging_area(
         // it is normal that we wont be able to find a new area at some point in time if we wont be able to reach layer 0 aka have to connect with the model
         insertSetting({ AvoidanceType::Fast, fast_speed, !increase_radius, !no_error, elem.use_min_xy_dist, move }, true);
     }
-    if (elem.distance_to_top < elem.dont_move_until && elem.can_use_safe_radius) // only do not move when holes would be avoided in every case.
-        // Only do not move when already in a no hole avoidance with the regular xy distance.
-        insertSetting({ AvoidanceType::Slow, 0, increase_radius, no_error, !use_min_radius, !move }, false);
 
     StoredPolygonCollection inc_wo_collision(scratch);
     // Check whether it is faster to calculate the area increased with the fast speed independently from the slow area, or time could be saved by reusing the slow area to calculate the fast one.
@@ -1679,10 +1673,10 @@ static void increase_merging_area(
                   << "Influence area could not be increased! Data about the Influence area: "
                      "Radius: " << radius << " at layer: " << layer_idx - 1 << " NextTarget: " << elem.layer_idx << " Distance to top: " << elem.distance_to_top <<
                      " Foot gain " << elem.foot_gain << " use_min_xy_dist " << elem.use_min_xy_dist << " to buildplate " << elem.to_buildplate <<
-                     " gracious " << elem.to_model_gracious << " safe " << elem.can_use_safe_radius << " until move " << elem.dont_move_until << " \n "
+                     " gracious " << elem.to_model_gracious << " safe " << elem.can_use_safe_radius << " \n "
                      "Parent " << &parent << ": Radius: " << support_element_collision_radius(config, parent.state) << " at layer: " << layer_idx << " NextTarget: " << parent.state.layer_idx <<
                      " Distance to top: " << parent.state.distance_to_top << " Foot gain " << parent.state.foot_gain << "  use_min_xy_dist " << parent.state.use_min_xy_dist <<
-                     " to buildplate " << parent.state.to_buildplate << " gracious " << parent.state.to_model_gracious << " safe " << parent.state.can_use_safe_radius << " until move " << parent.state.dont_move_until;
+                     " to buildplate " << parent.state.to_buildplate << " gracious " << parent.state.to_model_gracious << " safe " << parent.state.can_use_safe_radius;
             BOOST_LOG_TRIVIAL(error) << "Potentially lost branch!"sv;
             if (result)
                 result->lost = true;
@@ -1697,9 +1691,7 @@ static void increase_merging_area(
             add = true;
             // do not merge if the branch should not move or the priority has to be to get farther away from the model.
             bypass_merge = !settings.move || (settings.use_min_distance && config.path_gain(elem.layer_idx, elem.distance_to_top) < config.tip_total_gain);
-            if (settings.move)
-                elem.dont_move_until = 0;
-            else
+            if (! settings.move)
                 elem.result_on_layer = parent.state.result_on_layer;
 
             elem.can_use_safe_radius = settings.type != AvoidanceType::Fast;
@@ -1734,7 +1726,7 @@ static void increase_merging_area(
     } else {
         // If the bottom most point of a branch is set, later functions will assume that the position is valid, and ignore it.
         // But as branches connecting with the model that are to small have to be culled, the bottom most point has to be not set.
-        // A point can be set on the top most tip layer (maybe more if it should not move for a few layers).
+        // A point can be set on the top most tip layer (a step without move puts the parent's point for one step).
         parent.state.result_on_layer_reset();
         parent.state.to_model_gracious = false;
         parent.state.verylost = true;
@@ -1864,11 +1856,15 @@ static void increase_merging_area(
         radius = support_element_collision_radius(config, current_elem);
 
         // The foot of the step: what the step budget bp_gain leaves after the normal growth, up to foot_target. The new collision
-        // radius must be valid like the one of any radius increase.
+        // radius must be valid like the one of any radius increase; when it is not, the foot widens only as far as the cache
+        // steps (fine in the foot band, see TreeVolumes::ceilRadius()) allow.
         const double planned_foot_increase = foot_step_gain(config, parent.state, current_elem, layer_idx);
-        if (planned_foot_increase > 0. &&
-            validWithRadius(radius_from_gain(config, current_elem.radius_gain, current_elem.foot_gain + planned_foot_increase))) {
-            current_elem.foot_gain += planned_foot_increase;
+        if (planned_foot_increase > 0.) {
+            const double foot_increase = partial_foot_gain(
+                double(config.min_radius) + current_elem.radius_gain + current_elem.foot_gain, planned_foot_increase,
+                [&](double increase) { return radius_from_gain(config, current_elem.radius_gain, current_elem.foot_gain + increase); },
+                [&](coord_t r) { return volumes.getRadiusNextCeil(r, settings.use_min_distance); }, validWithRadius);
+            current_elem.foot_gain += foot_increase;
             radius = support_element_collision_radius(config, current_elem);
         }
 

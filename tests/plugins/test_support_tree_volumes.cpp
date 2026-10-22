@@ -894,9 +894,12 @@ TEST_CASE("A TBB group that is cancelled during a lazy computation leaves no par
                 CHECK(rings(fetch(volumes, request)) == expected);
             }
     }
-}// The routing asks for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
-// radii that precalculate() computes: the foot target of every layer must be covered, or the routing computes it on demand from its
-// parallel loops. The XY spacing of the scene is large, so the minimum XY bucket of the base is not the regular one.
+}
+
+// The routing asks for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
+// radii that precalculate() computes: the foot target of every layer where a branch can have it (its drawn radius reaches the branch
+// radius, which the foot needs) must be covered, or the routing computes it on demand from its parallel loops. The XY spacing of the
+// scene is large, so the minimum XY bucket of the base is not the regular one.
 TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY distance", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -907,7 +910,8 @@ TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY di
     volumes.precalculate(top_layer);
     size_t widened_layers = 0;
     for (TF::LayerIndex layer = 1; layer <= top_layer; ++ layer) {
-        if (scene.settings.foot_target[layer] <= double(scene.settings.branch_radius))
+        if (scene.settings.foot_target[layer] <= double(scene.settings.branch_radius) ||
+            scene.settings.min_radius + scene.settings.path_gain(layer, top_layer - layer) < double(scene.settings.branch_radius))
             continue;
         const coord_t radius = coord_t(scene.settings.foot_target[layer]);
         ++ widened_layers;
@@ -955,6 +959,191 @@ TEST_CASE("Tree merge is refused only when the merged radius crosses a higher ca
         // A smaller merged step is accepted too.
         CHECK_FALSE(TF::merge_crosses_cache_step(low_ceil, high_ceil, high_ceil));
     }
+}
+
+namespace {
+// The steps of the table of cache radii from the first one up to max_radius, read through ceilRadius() of the XY variant.
+std::vector<coord_t> cache_steps(const Volumes &volumes, const bool min_xy_dist, const coord_t max_radius)
+{
+    std::vector<coord_t> steps;
+    for (coord_t step = volumes.ceilRadius(1, min_xy_dist); step <= max_radius; step = volumes.ceilRadius(step + 1, min_xy_dist))
+        steps.push_back(step);
+    return steps;
+}
+
+// Settings of the scene with the radius of the foot on the build plate replaced. Only the table of cache radii follows it: the
+// foot targets and the other per-layer values of the settings keep the original foot.
+TF::TreeSettings with_bp_radius(const TF::TreeSettings &settings, const coord_t bp_radius)
+{
+    TF::TreeSettings changed = settings;
+    changed.bp_radius = bp_radius;
+    return changed;
+}
+}
+
+// With the default settings (tip 0.4 mm, branch 1 mm, foot 3.75 mm, 0.4 mm nozzles, no XY delta) the table keeps the scale steps below the
+// step that the branch radius rounds up to (0.4 mm, then 1.5 mm), has a step every 0.2 mm (half a nozzle) from that step to the radius of the
+// foot, then continues with the scale steps above.
+TEST_CASE("Tree cache radii have fine steps between the branch radius step and the foot", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene(false, "0");
+    REQUIRE(scene.settings.min_radius == scale_i(0.4));
+    REQUIRE(scene.settings.branch_radius == scale_i(1.));
+    REQUIRE(scene.settings.bp_radius == scale_i(3.75));
+    REQUIRE(scene.settings.foot_cache_step == scale_i(0.2));
+    REQUIRE(scene.settings.xy_distance == scene.settings.xy_min_distance);
+    const Volumes volumes = scene.volumes();
+    // 1.5 mm + k * 0.2 mm up to 3.7 mm, then the radius of the foot (not aligned), then the scale steps above it.
+    const std::vector<coord_t> expected{ scale_i(0.4), scale_i(1.5), scale_i(1.7), scale_i(1.9), scale_i(2.1), scale_i(2.3), scale_i(2.5), scale_i(2.7),
+        scale_i(2.9), scale_i(3.1), scale_i(3.3), scale_i(3.5), scale_i(3.7), scale_i(3.75), scale_i(3.9), scale_i(5.85), scale_i(8.775) };
+    CHECK(cache_steps(volumes, true, scale_i(9.)) == expected);
+    CHECK(volumes.ceilRadius(0, true) == 0);
+    // Both variants give the same table when the XY delta is zero.
+    CHECK(cache_steps(volumes, false, scale_i(9.)) == expected);
+
+    // Monotone, never below the radius, idempotent; the band steps are 0.2 mm apart.
+    coord_t previous = 0;
+    for (coord_t radius = 1; radius < scale_i(10.); radius += 3571) {
+        const coord_t ceiled = volumes.ceilRadius(radius, true);
+        CAPTURE(radius, ceiled);
+        CHECK(ceiled >= radius);
+        CHECK(ceiled >= previous);
+        CHECK(volumes.ceilRadius(ceiled, true) == ceiled);
+        CHECK(volumes.getRadiusNextCeil(radius, true) == ceiled);
+        if (radius > scale_i(1.5) && radius <= scale_i(3.75))
+            CHECK(ceiled - radius <= scene.settings.foot_cache_step);
+        previous = ceiled;
+    }
+    // One nanometre on each side of the branch radius: the scale step above it (1.5 mm), the band is not entered.
+    const coord_t branch = scene.settings.branch_radius;
+    CHECK(volumes.ceilRadius(branch - 1, true) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(branch, true) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(branch + 1, true) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(scale_i(0.4) + 1, true) == scale_i(1.5));
+    // One nanometre on each side of the start of the band.
+    CHECK(volumes.ceilRadius(scale_i(1.5), true) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(scale_i(1.5) + 1, true) == scale_i(1.7));
+    // The same on each side of the radius of the foot, which is a step of the table.
+    const coord_t foot = scene.settings.bp_radius;
+    CHECK(volumes.ceilRadius(foot - 1, true) == foot);
+    CHECK(volumes.ceilRadius(foot + 1, true) == scale_i(3.9));
+}
+
+// The band of fine steps ends at the radius of the foot + the XY delta even when that is not a multiple of the step above the start
+// of the band, and starts at the scale step that branch_radius + the delta rounds up to (key space: the regular XY variant looks up
+// radius + delta). Without a band (the foot radius not above the branch radius, or the start of the band not below the end) the
+// table is the scale alone.
+TEST_CASE("Tree cache radii end the band at the foot radius and have no band without a foot", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene(false, "3");
+    const coord_t branch = scene.settings.branch_radius;
+    const coord_t delta  = scene.settings.xy_distance - scene.settings.xy_min_distance;
+    REQUIRE(delta > 0);
+    // The scale step that branch_radius + delta rounds up to: the start of the band in key space (the scale is 0.4; 1.5; 2.6; 3.9).
+    const coord_t start = scale_i(3.9);
+    REQUIRE(branch + delta > scale_i(2.6));
+    REQUIRE(branch + delta <= start);
+    const std::vector<coord_t> scale{ scale_i(0.4), scale_i(1.5), scale_i(2.6), scale_i(3.9), scale_i(5.85), scale_i(8.775) };
+    SECTION("unaligned upper bound and start shifted by the delta") {
+        const coord_t foot = scale_i(3.65);
+        const Volumes volumes(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, foot), SG::handle(scene.storage), nullptr);
+        // The band is the same table for both variants: it ends at foot + delta, where the regular variant, which looks up
+        // radius + delta, ends at the foot radius itself.
+        CHECK(volumes.ceilRadius(foot + delta - 1, true) == foot + delta);
+        CHECK(volumes.ceilRadius(foot + delta + 1, true) > foot + delta + scale_i(0.1));
+        // Regular XY variant: the band ends at foot + delta.
+        CHECK(volumes.ceilRadius(foot, false) == foot + delta);
+        CHECK(volumes.ceilRadius(foot + 1, false) > foot + delta + scale_i(0.1));
+        // A branch of the branch radius is below the band in both variants: it keeps the scale step.
+        CHECK(volumes.ceilRadius(branch, false) == start);
+        CHECK(volumes.ceilRadius(branch, true) == scale_i(1.5));
+        // The band starts at the scale step in key space: the steps are foot_cache_step (0.2 mm) apart from there on, in the regular variant too.
+        CHECK(volumes.ceilRadius(start - delta, false) == start);
+        CHECK(volumes.ceilRadius(start - delta + 1, false) == start + scene.settings.foot_cache_step);
+        for (coord_t radius = start - delta + 1; radius <= foot; radius += scale_i(0.01)) {
+            CAPTURE(radius);
+            const coord_t gap = volumes.ceilRadius(radius, false) - (radius + delta);
+            CHECK(gap >= 0);
+            CHECK(gap < scene.settings.foot_cache_step);
+        }
+        // Without XY delta the end of the band is the foot radius: ... 3.5, then 3.65, then the scale steps above it.
+        Scene flat(false, "0");
+        const Volumes flat_volumes(SG::object_view(flat.object()), SG::print_view(flat.print), with_bp_radius(flat.settings, foot), SG::handle(flat.storage), nullptr);
+        CHECK(flat_volumes.ceilRadius(scale_i(3.5), true) == scale_i(3.5));
+        CHECK(flat_volumes.ceilRadius(scale_i(3.5) + 1, true) == foot);
+        CHECK(flat_volumes.ceilRadius(foot, true) == foot);
+        CHECK(flat_volumes.ceilRadius(foot + 1, true) > foot + scale_i(0.1));
+    }
+    SECTION("no band") {
+        // The foot radius not above the branch radius: the scale, whatever the delta.
+        for (const coord_t foot : { branch, branch / 2 }) {
+            const Volumes volumes(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, foot), SG::handle(scene.storage), nullptr);
+            CAPTURE(foot);
+            CHECK(cache_steps(volumes, true, scale_i(9.)) == scale);
+        }
+        // The start of the band not below its end (foot + delta): the scale too; one nanometre more of foot gives a band of one step.
+        const Volumes closed(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, start - delta), SG::handle(scene.storage), nullptr);
+        CHECK(cache_steps(closed, true, scale_i(9.)) == scale);
+        const Volumes opened(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, start - delta + 1), SG::handle(scene.storage), nullptr);
+        CHECK(opened.ceilRadius(start, true) == start);
+        CHECK(opened.ceilRadius(start + 1, true) == start + 1);
+        // Without XY delta: the foot at the start of the band (1.5 mm) or below it.
+        Scene flat(false, "0");
+        for (const coord_t foot : { scale_i(1.5), branch, branch / 2 }) {
+            const Volumes volumes(SG::object_view(flat.object()), SG::print_view(flat.print), with_bp_radius(flat.settings, foot), SG::handle(flat.storage), nullptr);
+            CAPTURE(foot);
+            CHECK(cache_steps(volumes, true, scale_i(9.)) == scale);
+        }
+    }
+}
+// The step of the band follows foot_cache_step: 0.4 mm for the steps of a 0.8 mm nozzle, and no band without a step.
+TEST_CASE("Tree cache radii follow the step of the foot band", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene(false, "0");
+    TF::TreeSettings wide = scene.settings;
+    wide.foot_cache_step = scale_i(0.4);
+    const Volumes wide_volumes(SG::object_view(scene.object()), SG::print_view(scene.print), wide, SG::handle(scene.storage), nullptr);
+    const std::vector<coord_t> expected{ scale_i(0.4), scale_i(1.5), scale_i(1.9), scale_i(2.3), scale_i(2.7), scale_i(3.1), scale_i(3.5),
+        scale_i(3.75), scale_i(3.9), scale_i(5.85), scale_i(8.775) };
+    CHECK(cache_steps(wide_volumes, true, scale_i(9.)) == expected);
+    TF::TreeSettings none = scene.settings;
+    none.foot_cache_step = 0;
+    const Volumes plain(SG::object_view(scene.object()), SG::print_view(scene.print), none, SG::handle(scene.storage), nullptr);
+    CHECK(cache_steps(plain, true, scale_i(9.)) == std::vector<coord_t>{ scale_i(0.4), scale_i(1.5), scale_i(2.6), scale_i(3.9), scale_i(5.85), scale_i(8.775) });
+}
+
+// precalculate() covers every step of the table between the path radius of a layer and the largest radius the layer allows (the path
+// plus the foot excess, foot_target - branch_radius), with and without the XY delta: the radii a catch-up or a partial foot can stop on.
+TEST_CASE("Precalculation covers the fine cache steps a branch can stop on", "[plugins][support-tree-routing][tree-volumes]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene;
+    const LogCapture capture;
+    constexpr TF::LayerIndex top_layer = 10;
+    Volumes volumes = scene.volumes();
+    volumes.precalculate(top_layer);
+    size_t steps_checked = 0;
+    for (TF::LayerIndex layer = 1; layer <= top_layer; ++ layer) {
+        const coord_t path_radius = coord_t(scene.settings.min_radius + scene.settings.path_gain(layer, top_layer - layer));
+        const coord_t foot_excess = scene.settings.foot_target[layer] > double(scene.settings.branch_radius) && path_radius >= scene.settings.branch_radius ?
+            coord_t(scene.settings.foot_target[layer]) - scene.settings.branch_radius : 0;
+        for (const bool min_xy_dist : { true, false }) {
+            // Every radius from the path radius to the bound, one per cache step of the variant.
+            for (coord_t radius = path_radius; radius <= path_radius + foot_excess; radius = volumes.getRadiusNextCeil(radius, min_xy_dist) + 1) {
+                CAPTURE(layer, min_xy_dist, radius);
+                const size_t lazy_before = capture.count("Had to calculate");
+                volumes.getCollision(radius, layer, min_xy_dist);
+                volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false, min_xy_dist);
+                volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, true, min_xy_dist);
+                CHECK(capture.count("Had to calculate") == lazy_before);
+                ++ steps_checked;
+            }
+        }
+    }
+    CHECK(steps_checked > 2 * size_t(top_layer));
 }
 // Many threads request keys that are not precalculated at once, in their own order. Whatever the interleaving of the lazy
 // computations, every thread must get the reference areas and no computation may fail. The interleavings come from the timing of

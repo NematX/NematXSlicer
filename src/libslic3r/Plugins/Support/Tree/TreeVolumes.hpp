@@ -142,8 +142,10 @@ public:
     const slic3r_api::StoredPolygonCollection& getWallRestriction(coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
 
     /*!
-     * \brief Round \p radius upwards to a multiple of SUPPORT_TREE_COLLISION_RESOLUTION or to an exponentially increasing value.
-     * The XY distance delta between min_xy_dist and the regular distance is added when min_xy_dist is not used.
+     * \brief Round \p radius upwards to a step of the table of cached radii (see m_radius_steps).
+     * The XY distance delta between min_xy_dist and the regular distance is added when min_xy_dist is not used: the table is
+     * the one of the radii as the caches see them, so the regular variant looks up radius + delta, and its band of fine steps
+     * runs from the step of branch_radius + delta to bp_radius + delta.
      */
     coord_t ceilRadius(const coord_t radius, const bool min_xy_dist) const {
         assert(radius >= 0);
@@ -306,8 +308,8 @@ private:
 
     // Return the collision of a radius and layer, computed on demand when precalculate() did not cover it.
     const slic3r_api::StoredPolygonCollection& getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const;
-    // Rounds a radius up to the scale of cached radii (from min_radius, then fine steps, then exponential). The list of ignorable
-    // radii is empty, so every step of the scale is a possible result.
+    // Rounds a radius up to the smallest step of the table of cached radii (m_radius_steps) that is not below it; 0 stays 0. Above
+    // the last step of the table the steps keep growing by SUPPORT_TREE_EXPONENTIAL_FACTOR.
     coord_t ceilRadius(const coord_t radius) const;
 
     RadiusLayerPolygonCache& avoidance_cache(const AvoidanceType type, const bool to_model) {
@@ -347,15 +349,17 @@ private:
     bool m_support_rests_on_model;
     // Radius from which the radius of a branch is always increased, even if the avoidance does not allow it.
     coord_t m_increase_until_radius;
-    // Smallest radius a branch can have: the radius of a tip (min_radius), the first step of the ceilRadius() scale.
-    coord_t m_radius_0;
+    // The radii that ceilRadius() rounds to, sorted and built once by the constructor (build_radius_steps()): the scale of the tips
+    // (0.4; 1.5; 2.6 mm with the defaults, then a factor of 1.5), with a step every TreeSettings::foot_cache_step between the scale step
+    // that branch_radius + the XY delta rounds up to and bp_radius + the XY delta. In that band, where the branches widen into
+    // their foot on the build plate, a wider branch is checked at the resolution of foot_cache_step (half the largest support
+    // nozzle). Both ends of the band are in key space (the regular XY variant looks up radius + delta), so its start is shifted by the
+    // delta like its end.
+    std::vector<coord_t> m_radius_steps;
     // Object outline of each layer.
     std::vector<slic3r_api::StoredPolygonCollection> m_layer_outlines;
     // Support blockers of each layer, avoided like the object; empty when the object has no blocker.
     std::vector<slic3r_api::StoredExPolygonCollection> m_anti_overhang;
-    // Radii that ceilRadius skips, sorted. It is empty: with a radius gain that follows the real layer heights and a continuous
-    // catch up, no radius of the scale can be shown to be unreachable.
-    std::vector<coord_t> m_ignorable_radii;
     // The settings that give the radii of the tips and the branch sizes.
     TreeSettings m_settings;
 

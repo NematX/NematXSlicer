@@ -36,6 +36,9 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
      branch which avoids it can still reach the build plate (or the model);
    - the placeable areas: the top surfaces where a branch of that radius fits;
    - the wall restrictions: the walls that a branch must not cross between two consecutive layers.
+   A radius is always rounded by ceilRadius() to a step of a table built by the constructor (build_radius_steps()): the scale of the
+   tips, with a step of TreeSettings::foot_cache_step where the branches widen into their foot on the build plate. The areas are cached
+   per step, so the table sets how finely the routing can check that a wider branch still fits.
 
    A getter that misses a key computes it itself, from any thread: every calculate*() function computes the whole range of its key
    (from layer 0 for the collisions, from layer 1 for the placeable areas, the avoidances and the wall restrictions) without
@@ -79,6 +82,69 @@ MoveSteps split_move(const float max_move, const float move_step)
     }
     return steps;
 }
+
+// The table of the radii that TreeVolumes::ceilRadius() rounds to (sorted, ascending), in key space: the regular XY variant looks
+// up radius + xy_delta, the minimum one looks up the radius itself.
+//
+// It starts from the scale of the tips: min_radius, then steps of equal size up to and including the first step beyond
+// SUPPORT_TREE_EXPONENTIAL_THRESHOLD (0.4; 1.5; 2.6 mm with the defaults, steps of 1.1 mm), then a factor of 1.5 for each
+// following step (3.9; 5.85; 8.775 mm ...). The scale is generated until it passes both band_end and branch_radius + xy_delta.
+//
+// The branches widen into their foot on the build plate between branch_radius and bp_radius. The validity of a foot (and of the
+// cone that leads to it) is checked on the table steps, so the table has a step every foot_step in the band [band_start, band_end].
+// foot_step is TreeSettings::foot_cache_step, half the diameter of the largest support nozzle (0.2 mm for 0.4 mm nozzles).
+// Without a positive foot_step there is no band. The band is delimited by:
+// - band_end = bp_radius + xy_delta: the foot is at most bp_radius and the regular variant adds the delta;
+// - band_start = the scale step that branch_radius + xy_delta rounds up to (1.5 mm with the defaults and no delta). It is
+//   shifted by the delta as the band end is, so that a branch of radius branch_radius never has fine steps in either variant.
+// The table is the scale steps strictly below band_start (the radii below it keep the scale steps, which the merging and the
+// radius growth of the tips are tuned on), then band_start, band_start + foot_step, ... up to band_end inclusive (the last step is
+// band_end even when it is not aligned), then the scale steps strictly above band_end.
+// Without a band (bp_radius <= branch_radius, or band_start >= band_end) the table is the scale.
+std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t branch_radius, const coord_t bp_radius, const coord_t xy_delta, const coord_t foot_step);
+
+std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t branch_radius, const coord_t bp_radius, const coord_t xy_delta, const coord_t foot_step)
+{
+    const coord_t band_end = bp_radius + xy_delta;
+    // The scale is generated a step beyond the band: the lookup continues the factor of 1.5 itself above the table.
+    std::vector<coord_t> scale{ min_radius };
+    const coord_t initial_radius_delta = SUPPORT_TREE_EXPONENTIAL_THRESHOLD - min_radius;
+    coord_t       out = min_radius;
+    if (initial_radius_delta > SUPPORT_TREE_COLLISION_RESOLUTION) {
+        const int num_steps = round_up_divide(initial_radius_delta, SUPPORT_TREE_EXPONENTIAL_THRESHOLD);
+        const int stepsize  = initial_radius_delta / num_steps;
+        // num_steps + 1 steps of the same size, the last one being the start of the factor.
+        for (int step = 0; step <= num_steps; ++ step) {
+            out += stepsize;
+            scale.emplace_back(out);
+        }
+    } else {
+        out += SUPPORT_TREE_COLLISION_RESOLUTION;
+        scale.emplace_back(out);
+    }
+    while (out <= std::max(band_end, branch_radius + xy_delta)) {
+        out = coord_t(out * SUPPORT_TREE_EXPONENTIAL_FACTOR);
+        scale.emplace_back(out);
+    }
+    if (bp_radius <= branch_radius || foot_step <= 0)
+        return scale;
+    // The scale step that branch_radius + xy_delta rounds up to (the scale was generated beyond it).
+    const coord_t band_start = *std::lower_bound(scale.begin(), scale.end(), branch_radius + xy_delta);
+    if (band_start >= band_end)
+        return scale;
+
+    std::vector<coord_t> steps;
+    for (coord_t radius : scale)
+        if (radius < band_start)
+            steps.emplace_back(radius);
+    for (coord_t radius = band_start; radius < band_end; radius += foot_step)
+        steps.emplace_back(radius);
+    steps.emplace_back(band_end);
+    for (coord_t radius : scale)
+        if (radius > band_end)
+            steps.emplace_back(radius);
+    return steps;
+}
 } // namespace
 
 // Copies settings and caches simplified real-layer outlines in run_storage; views are borrowed during construction. Cancellation
@@ -91,7 +157,8 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
     m_current_min_xy_dist_delta(settings.xy_distance - settings.xy_min_distance),
     m_support_rests_on_model(settings.support_rests_on_model),
     m_increase_until_radius(settings.increase_radius_until_radius),
-    m_radius_0(settings.min_radius),
+    m_radius_steps(build_radius_steps(settings.min_radius, settings.branch_radius, settings.bp_radius,
+                                      settings.xy_distance - settings.xy_min_distance, settings.foot_cache_step)),
     m_settings(settings),
     m_collision_cache(run_storage),
     m_collision_cache_holefree(run_storage),
@@ -163,14 +230,15 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
 }
 
 // Computes the caches for the keys (ceiled radius, layer) that a tree whose top layer is max_layer can request: each radius is
-// computed from the lowest layer up to the highest layer where it can occur. The radii come from the path without pause of a
-// tip on max_layer (TreeSettings::path_gain() on the real layer heights); a branch that pauses its growth or catches up may
-// request other keys, which are then computed on demand; so does a foot widening that stops between the radii of two layers. The
-// keys of the foot target near the bed (TreeSettings::foot_target with and without the XY delta) are added as well.
-// m_ignorable_radii stays empty: no radius of the ceilRadius() scale is excluded. The function also sets the members that the getters read without
-// a lock (m_precalculated), so it must complete before the getters are called concurrently. The areas stay in the
-// caches, which own them: the getters return references to them. A cancellation of the context (PluginCancelled) propagates to the caller;
-// the keys published before it stay, and a key that was not computed is computed by the getter that asks for it.
+// computed from the lowest layer up to the highest layer where it can occur. For each layer L, the radii a branch can have there
+// run from the path radius (TreeSettings::path_gain() on the real layer heights: a tip on max_layer that grew at every step) to
+// that radius plus the foot excess (foot_target[L] - branch_radius, 0 away from the bed); every step of the table (ceilRadius())
+// in that range is a key, with and without the XY delta. The range covers the catch-up of a branch and the partial widening of
+// its foot, which stop on table steps. A branch that pauses its growth has a radius below the path radius: those keys, and any
+// other that the range misses, are computed on demand by the getter. The function also sets the members that the getters read
+// without a lock (m_precalculated), so it must complete before the getters are called concurrently. The areas stay in the
+// caches, which own them: the getters return references to them. A cancellation of the context (PluginCancelled) propagates to
+// the caller; the keys published before it stay, and a key that was not computed is computed by the getter that asks for it.
 // Precondition: max_layer is a valid object layer.
 void TreeVolumes::precalculate(const coord_t max_layer)
 {
@@ -195,12 +263,20 @@ void TreeVolumes::precalculate(const coord_t max_layer)
                 assert(it->second >= current_layer);
         };
         const coord_t path_radius = coord_t(config.min_radius + config.path_gain(current_layer, distance_to_top));
-        update_radius_until_layer(ceilRadius(path_radius + m_current_min_xy_dist_delta));
-        update_radius_until_layer(ceilRadius(path_radius));
-        if (config.foot_target[current_layer] > double(config.branch_radius)) {
-            // The wider base of a branch near the build plate, with and without the XY delta (the routing asks for both variants).
-            update_radius_until_layer(ceilRadius(coord_t(config.foot_target[current_layer]) + m_current_min_xy_dist_delta));
-            update_radius_until_layer(ceilRadius(coord_t(config.foot_target[current_layer])));
+        // Upper bound of the radius a branch can have here: the path without pause, plus all the foot the layer allows (the foot
+        // excess, foot_target - branch_radius; the foot only grows from a drawn radius of branch_radius), and a couple of scaled units of margin against the roundings.
+        const coord_t foot_excess = config.foot_target[current_layer] > double(config.branch_radius) && path_radius >= config.branch_radius ?
+            coord_t(config.foot_target[current_layer]) - config.branch_radius : 0;
+        const coord_t upper_radius = path_radius + foot_excess + 2;
+        // Every step of the table between the path radius and the bound, with and without the XY delta: the catch-up and the
+        // partial foot of a branch can stop on any of them.
+        for (const coord_t delta : { m_current_min_xy_dist_delta, coord_t(0) }) {
+            const coord_t last_step = ceilRadius(upper_radius + delta);
+            for (coord_t step = ceilRadius(path_radius + delta); ; step = ceilRadius(step + 1)) {
+                update_radius_until_layer(step);
+                if (step >= last_step)
+                    break;
+            }
         }
     }
 
@@ -815,26 +891,14 @@ coord_t TreeVolumes::ceilRadius(const coord_t radius) const
     if (radius == 0)
         return 0;
 
-    coord_t out = m_radius_0;
-    if (radius > m_radius_0) {
-        // generate SUPPORT_TREE_PRE_EXPONENTIAL_STEPS of radiis before starting to exponentially increase them.
-        coord_t initial_radius_delta = SUPPORT_TREE_EXPONENTIAL_THRESHOLD - m_radius_0;
-        auto ignore = [this](coord_t r) { return std::binary_search(m_ignorable_radii.begin(), m_ignorable_radii.end(), r); };
-        if (initial_radius_delta > SUPPORT_TREE_COLLISION_RESOLUTION) {
-            const int num_steps = round_up_divide(initial_radius_delta, SUPPORT_TREE_EXPONENTIAL_THRESHOLD);
-            const int stepsize  = initial_radius_delta / num_steps;
-            out += stepsize;
-            for (int step = 0; step < num_steps; ++ step) {
-                if (out >= radius && ! ignore(out))
-                    return out;
-                out += stepsize;
-            }
-        } else
-            out += SUPPORT_TREE_COLLISION_RESOLUTION;
-        while (out < radius || ignore(out)) {
-            assert(out * SUPPORT_TREE_EXPONENTIAL_FACTOR > out + SUPPORT_TREE_COLLISION_RESOLUTION);
-            out = out * SUPPORT_TREE_EXPONENTIAL_FACTOR;
-        }
+    std::vector<coord_t>::const_iterator it = std::lower_bound(m_radius_steps.begin(), m_radius_steps.end(), radius);
+    if (it != m_radius_steps.end())
+        return *it;
+    // Above the table the exponential scale goes on from its last step.
+    coord_t out = m_radius_steps.back();
+    while (out < radius) {
+        assert(out * SUPPORT_TREE_EXPONENTIAL_FACTOR > out + SUPPORT_TREE_COLLISION_RESOLUTION);
+        out = coord_t(out * SUPPORT_TREE_EXPONENTIAL_FACTOR);
     }
     return out;
 }

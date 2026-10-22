@@ -63,6 +63,9 @@ struct TreeSettings
     coord_t min_radius = 0;
     // Radius that a branch tries to reach on the build plate (top of layer 0).
     coord_t bp_radius = 0;
+    // Spacing of the cache radii (TreeVolumes::ceilRadius()) in the band where a branch widens into its foot: half the diameter of
+    // the largest nozzle of the support (the support material and the support interface extruders), 0.2 mm for 0.4 mm nozzles.
+    coord_t foot_cache_step = 0;
     // Radius from which the radius is always increased.
     coord_t increase_radius_until_radius = 0;
     // Radius gain (scaled, above min_radius) of a branch: it is gained step by step, a step going from a layer to the one

@@ -31,6 +31,8 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    The foot near the build plate has its own per-layer data: bp_gain[L], the widening allowed on the step whose upper layer is
    L, and foot_target[L], the radius a branch resting on the bed should have on layer L: branch_radius plus the remainder of
    (bp_radius - branch_radius) after the bp_gain of layers 1..L (the foot cone anchored at layer 0), never below branch_radius.
+   foot_cache_step, half the diameter of the largest support nozzle, is the spacing of the cache radii in the band where the branches
+   widen into their foot (see TreeVolumes).
 */
 
 namespace Slic3r::TreeFamily {
@@ -97,6 +99,7 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     increase_radius_until_radius = branch_radius;
 
     bp_radius = scale_i(bp_diameter_mm) / 2;
+    foot_cache_step = scale_i(0.5 * std::max(params.base_flow_mm.nozzle_diameter, params.interface_flow_mm.nozzle_diameter));
     min_height_to_model = scale_i(min_height_to_model_mm);
     max_to_model_radius_increase = scale_i(max_diameter_increase_by_merges_mm) / 2;
 
