@@ -11,6 +11,22 @@
 
 #include "ClipboardXX/include/clipboardxx.hpp"
 
+/*
+This command-line utility turns an STL mesh into C++ fixture declarations for
+tests. It loads a model, walks its objects and volumes, then writes each volume's
+vertices and triangle indices as an AABBMesh initializer. The generated text is
+printed and copied to the system clipboard only after the STL has loaded.
+
+    main()
+    |-- load_stl(): populate the locally owned model
+    |-- Model::objects(): enumerate volumes and format mesh data
+    `-- clipboard / stdout: publish the generated fixture text
+*/
+
+// Convert the single STL argument to fixture text; print usage for other argument
+// counts and a diagnostic when loading fails. Clipboard errors propagate.
+int main(int argc, char const *argv[]);
+
 int main(int argc, char const *argv[])
 {
     if (argc != 2) {
@@ -30,9 +46,9 @@ int main(int argc, char const *argv[])
     //TriangleMesh tm2 = TriangleMesh(std::vector<Vec3f>{{-5, -5, -0.1}},std::vector<Vec3i32>{{1,4,3}});
     std::stringstream out_cpp;
     int idx_obj = 0;
-    for (Slic3r::ModelObject* obj : model.objects) {
+    for (Slic3r::ModelObject &obj : model.objects()) {
         int idx_vol = 0;
-        for(Slic3r::ModelVolume *vol : obj->volumes) {
+        for(Slic3r::ModelVolume *vol : obj.volumes) {
             Slic3r::TriangleMesh mesh = vol->mesh();
             Slic3r::AABBMesh indexed_mesh(mesh); // more user-friendly
             out_cpp << "AABBMesh vol_"<< idx_obj << "_" << idx_vol <<" = AABBMesh(std::vector<Vec3f>{";

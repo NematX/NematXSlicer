@@ -11,6 +11,7 @@
 
 #include "ClipboardXX/include/clipboardxx.hpp"
 
+#include <libslic3r/ContainerUtils.hpp>
 #include <libslic3r/Config/Preset.hpp>
 #include <libslic3r/Config/PresetBundle.hpp>
 #include <libslic3r/LocalesUtils.hpp>
@@ -34,8 +35,31 @@
 
 #include <LibBGCode/core/core.hpp>
 
+/*
+This command-line utility converts vendor preset bundles to the current
+SuperSlicer configuration. It reads sections and their inheritance graph,
+resolves presets through the current configuration APIs, then writes the
+converted bundle and its version index. A directory invocation repeats the
+same conversion for each INI file; output paths are selected by main().
+
+    main()
+    `-- convert_config()
+        |-- load_sections(): read and order preset inheritance
+        |-- load_preset() / update_preset(): resolve values and differences
+        `-- save(): write the converted presets beside copied resources
+
+The conversion owns its preset graph and configuration copies. Filesystem and
+parse errors not handled by a conversion stage propagate to the command caller.
+*/
+
 using namespace Slic3r;
 using namespace std;
+
+// Return keys present in both configurations whose values differ, excluding
+// options that are phony in both. Neither configuration is changed.
+t_config_option_keys config_diffs(
+    const DynamicPrintConfig &current_config,
+    const DynamicPrintConfig &new_full_config);
 
 
 // 1) For the group given by group_name, initialize the presets.
@@ -97,7 +121,7 @@ t_config_option_keys config_diffs(
     const DynamicPrintConfig &current_config,
     const DynamicPrintConfig &new_full_config)
 {
-    const std::vector<std::string> &extruder_retract_keys = PrintConfigDef::instance().extruder_retract_keys();
+    const std::set<t_config_option_key> &extruder_retract_keys = PrintConfigDef::instance().extruder_retract_keys();
     const std::string               filament_prefix       = "filament_";
     t_config_option_keys            print_diff;
     for (const t_config_option_key &opt_key : current_config.keys()) {
