@@ -1286,7 +1286,7 @@ TEST_CASE("Default firmware interprets scope events with its extrusion visitor",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     ExtrusionNop event;
     event.add_property(ExtrusionPropertyCustomGcodeText("M117 scope event"));
@@ -1581,7 +1581,7 @@ TEST_CASE("Default firmware emits inherited process state and ordered linear mov
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print, 2);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -1981,7 +1981,7 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
 
     // Export resumes the slicing pipeline through production ordering and the
     // selected plugin writer. Always remove both output files, including on failure.
-    select_printing_plan_writer(print, "gcode.firmware.marlin2");
+    select_printing_plan_firmware(print, "gcode.firmware.marlin2");
     const boost::filesystem::path output_path = temporary_gcode_path();
     remove_output_pair(output_path);
     std::string output;
@@ -2498,7 +2498,7 @@ TEST_CASE("Default firmware preserves arcs and computes their extrusion length",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -2545,7 +2545,7 @@ TEST_CASE("Default firmware interprets one acceleration field from the movement 
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -2593,7 +2593,7 @@ TEST_CASE("Default firmware writes the E value prepared by the extruder state",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -3456,7 +3456,7 @@ TEST_CASE("E-only unretraction resolves zero speed per extruder without inherite
     const extruder_index_t tool_id = GENERATE(extruder_index_t(0), extruder_index_t(1));
     const bool explicit_speed = GENERATE(false, true);
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print, 2);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.use_firmware_retraction.value = false;
@@ -3514,7 +3514,7 @@ TEST_CASE("Default firmware encodes semantic retract wipe and unretract leaves",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -3606,7 +3606,7 @@ TEST_CASE("Default firmware accepts a motion-only wipe without an E request",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -3653,7 +3653,7 @@ TEST_CASE("Default firmware supports native semantic retraction",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     const_cast<PrintConfig &>(print.config()).use_firmware_retraction.value = true;
     PrintingPlan &plan = print.mutable_printing_plan();
@@ -3814,7 +3814,7 @@ TEST_CASE("Default firmware restores inherited requests between sibling nodes",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
@@ -4449,7 +4449,7 @@ TEST_CASE("Default firmware rejects missing process properties and unknown tools
 
     SECTION("printable leaf without valid flow attributes") {
         Print print;
-        select_printing_plan_writer(print);
+        select_printing_plan_firmware(print);
         configure_standard_firmware(print);
         PrintingPlan &plan = print.mutable_printing_plan();
         plan.groups.emplace_back();
@@ -4481,7 +4481,7 @@ TEST_CASE("Default firmware rejects missing process properties and unknown tools
 
     SECTION("printable leaf without speed") {
         Print print;
-        select_printing_plan_writer(print);
+        select_printing_plan_firmware(print);
         configure_standard_firmware(print);
         PrintingPlan &plan = print.mutable_printing_plan();
         plan.groups.emplace_back();
@@ -4511,7 +4511,7 @@ TEST_CASE("Default firmware rejects missing process properties and unknown tools
 
     SECTION("printable leaf without acceleration") {
         Print print;
-        select_printing_plan_writer(print);
+        select_printing_plan_firmware(print);
         configure_standard_firmware(print);
         PrintingPlan &plan = print.mutable_printing_plan();
         plan.groups.emplace_back();
@@ -4539,7 +4539,7 @@ TEST_CASE("Default firmware rejects missing process properties and unknown tools
 
     SECTION("tool group outside the configured range") {
         Print print;
-        select_printing_plan_writer(print);
+        select_printing_plan_firmware(print);
         configure_standard_firmware(print);
         PrintingPlan &plan = print.mutable_printing_plan();
         plan.groups.emplace_back();
@@ -4568,7 +4568,7 @@ TEST_CASE("Preamble brackets start script before priming and restores profile st
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool manual = GENERATE(false, true);
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.start_gcode_manual.value = manual;
@@ -4819,7 +4819,7 @@ TEST_CASE("Preamble leaves automatic heating to the temperature plugin",
     const bool mmu = GENERATE(false, true);
     const char *firmware_id = GENERATE("gcode.firmware.marlin2", "gcode.firmware.klipper");
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print, 2);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.single_extruder_multi_material.value = mmu;
@@ -4878,7 +4878,7 @@ TEST_CASE("Exporter chooses thumbnail placement including BIQU at byte zero",
     const std::string id = GENERATE("PNG", "JPG", "QOI", "BIQU");
     const bool at_end = GENERATE(false, true);
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     append_speed_validation_tool_group(print, scale_i(0.2), 0);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -4971,7 +4971,7 @@ TEST_CASE("Optional thumbnails are skipped when no GUI renderer is available",
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     append_speed_validation_tool_group(print, scale_i(0.2), 0);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -5016,7 +5016,7 @@ TEST_CASE("Thumbnail rendering failure preserves an existing G-code file",
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     append_speed_validation_tool_group(print, scale_i(0.2), 0);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -5064,7 +5064,7 @@ TEST_CASE("Every export renders its own thumbnails",
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     append_speed_validation_tool_group(print, scale_i(0.2), 0);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();

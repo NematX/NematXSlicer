@@ -1633,7 +1633,6 @@ TEST_CASE("Apply destroys invalidated outputs and the next run restores saved ch
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("gcode_flavor", "marlin");
-    config.set_deserialize_strict("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
     LifecyclePrint print;
     Model model;

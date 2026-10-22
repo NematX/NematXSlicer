@@ -210,11 +210,12 @@ TEST_CASE("G-code firmware service exposes its printer selector and standard ses
         "page:General:printer\n"
         "group:Firmware\n"
         "\tsetting:gcode_flavor\n");
-    const size_t writer_pos = merged.find("setting:step_gcode_plugin");
     const size_t firmware_pos = merged.find("setting:gcode_firmware_plugin");
-    REQUIRE(writer_pos != std::string::npos);
+    const size_t flavor_pos = merged.find("setting:gcode_flavor");
     REQUIRE(firmware_pos != std::string::npos);
-    CHECK(writer_pos < firmware_pos);
+    REQUIRE(flavor_pos != std::string::npos);
+    CHECK(firmware_pos < flavor_pos);
+    CHECK(merged.find("setting:step_gcode_plugin") == std::string::npos);
     CHECK(std::string(slic3r_api::GCodeGeneration::Firmware::printer_ui_fragment())
               .find("gcode_firmware_plugin") != std::string::npos);
 
@@ -982,7 +983,7 @@ TEST_CASE("Marlin 2 shares fan state but keeps heater state per extruder",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print, 2);
     // Isolate runtime command encoding from automatic startup requests.
     const_cast<PrintConfig &>(print.config()).start_gcode_manual.value = true;

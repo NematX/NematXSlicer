@@ -1,10 +1,12 @@
 #include <catch2/catch.hpp>
 
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
 #include <functional>
 #include <limits>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -358,7 +360,6 @@ CostSeamExportResult export_cost_seam_gcode(
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(extruder_count);
     config.set_deserialize_strict({
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
         {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
         {"seam_visibility", "0"}});
     config.set_deserialize_strict(seam_selector, "seam_placer.cost");
@@ -393,7 +394,7 @@ CostSeamExportResult export_cost_seam_gcode(
 
 } // namespace
 
-TEST_CASE("STEP_GCODE PrintingPlan writer is the default and owns the printer UI slot", "[plugins][gcode][default-writer]")
+TEST_CASE("STEP_GCODE is a normal step whose built-in writer is active by default", "[plugins][gcode][default-writer][step-gcode]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
@@ -405,49 +406,34 @@ TEST_CASE("STEP_GCODE PrintingPlan writer is the default and owns the printer UI
     CHECK(gcode_plugins.front()->get_id() == "gcode.printing_plan_file_writer");
     CHECK(orchestrator.get_plugin("gcode.legacy") == nullptr);
 
-    Plugin *selected = Steps::selected_or_active_plugin_for_step(
+    const std::vector<Plugin *> selected = Steps::selected_or_active_plugins_for_step(
         orchestrator, STEP_GCODE, &print.full_print_config());
-    REQUIRE(selected != nullptr);
-    CHECK(selected->get_id() == "gcode.printing_plan_file_writer");
-    const ConfigOptionDef *definition = PrintConfigDef::instance().get("step_gcode_plugin");
-    REQUIRE(definition != nullptr);
-    CHECK(definition->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+    REQUIRE(selected.size() == 1);
+    CHECK(selected.front()->get_id() == "gcode.printing_plan_file_writer");
+
+    // The step has no host-defined selector: no exclusive-step entry, no profile option.
+    CHECK(Steps::get_exclusive_steps().find(STEP_GCODE) == Steps::get_exclusive_steps().end());
+    CHECK(PrintConfigDef::instance().get("step_gcode_plugin") == nullptr);
     CHECK(PrintConfigDef::instance().option_keys(RAW_PRESET_TYPE_FFF_PRINTER).count(
-              "step_gcode_plugin") == 1);
+              "step_gcode_plugin") == 0);
 
-    const std::vector<Orchestrator::PluginUiFragment> printer_fragments =
-        orchestrator.ui_fragments_for_file("printer_fff.ui");
-    bool found_printer_fragment = false;
-    for (const Orchestrator::PluginUiFragment &fragment : printer_fragments) {
-        if (fragment.fragment_id != "step_gcode_plugin")
-            continue;
-        found_printer_fragment = true;
-        CHECK(fragment.content.find("setting:insert$beforesetting$gcode_flavor:step_gcode_plugin") !=
-              std::string::npos);
-    }
-    CHECK(found_printer_fragment);
-
-    // Merge the insertion rule against a minimal printer page to verify the
-    // user-visible order, not only the fragment registration.
+    // The firmware selector keeps its place before the flavor, and no layout
+    // file mentions a writer selector.
     const std::string merged_printer_layout = orchestrator.merged_ui_layout(
         "printer_fff.ui",
         "page:General:printer\n"
         "group:Firmware\n"
         "\tsetting:gcode_flavor\n");
-    const size_t gcode_selector_pos = merged_printer_layout.find("setting:step_gcode_plugin");
     const size_t flavor_pos = merged_printer_layout.find("setting:gcode_flavor");
     const size_t firmware_pos = merged_printer_layout.find("setting:gcode_firmware_plugin");
-    REQUIRE(gcode_selector_pos != std::string::npos);
     REQUIRE(flavor_pos != std::string::npos);
     REQUIRE(firmware_pos != std::string::npos);
-    CHECK(gcode_selector_pos < firmware_pos);
     CHECK(firmware_pos < flavor_pos);
-    CHECK(gcode_selector_pos < flavor_pos);
+    CHECK(merged_printer_layout.find("step_gcode_plugin") == std::string::npos);
 
-    const std::vector<Orchestrator::PluginUiFragment> print_fragments =
-        orchestrator.ui_fragments_for_file("print.ui");
-    for (const Orchestrator::PluginUiFragment &fragment : print_fragments)
-        CHECK(fragment.fragment_id != "step_gcode_plugin");
+    for (const char *layout_file : {"printer_fff.ui", "print.ui"})
+        for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file(layout_file))
+            CHECK(fragment.fragment_id != "step_gcode_plugin");
 }
 TEST_CASE("STEP_GCODE default writer rejects an invalid plan without publishing output", "[plugins][gcode][default-writer]")
 {
@@ -633,7 +619,7 @@ TEST_CASE("Default firmware selects the tool of an otherwise empty PrintingPlan"
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
     plan.groups.front().layers.emplace_back();
@@ -659,7 +645,7 @@ TEST_CASE("Default firmware publishes a preamble for an empty PrintingPlan", "[p
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     print.mutable_printing_plan();
     const boost::filesystem::path output_path = temporary_gcode_path();
     remove_output_pair(output_path);
@@ -731,7 +717,7 @@ TEST_CASE("PrintingPlan markers survive generated file Reader integration",
 
     Print print;
     configure_standard_firmware(print);
-    select_printing_plan_writer(print, "gcode.firmware.marlin2");
+    select_printing_plan_firmware(print, "gcode.firmware.marlin2");
     PrintingPlan &plan = print.mutable_printing_plan();
     plan.groups.emplace_back();
 
@@ -870,7 +856,7 @@ TEST_CASE("PrintingPlan firmware executes host-owned scripts",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     ExtrusionNop script(ExtrusionPropertyCustomGcodeText(
@@ -899,7 +885,7 @@ TEST_CASE("PrintingPlan scripts cannot replace a previously published file",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     PrintingPlan &plan = print.mutable_printing_plan();
     ExtrusionNop script(ExtrusionPropertyCustomGcodeText(
         ExtrusionPropertyCustomGcodeText::Code::SCRIPT,
@@ -950,7 +936,7 @@ TEST_CASE("STEP_GCODE fails when the output directory is unavailable", "[plugins
     Orchestrator &orchestrator = Orchestrator::instance();
     orchestrator.reset_plugin_cancel();
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     print.mutable_printing_plan();
     const boost::filesystem::path missing_directory =
         boost::filesystem::temp_directory_path() /
@@ -968,7 +954,7 @@ TEST_CASE("Orchestrator export_gcode still routes through ordering and STEP_GCOD
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.option<ConfigOptionString>("start_gcode")->value.clear();
     config.option<ConfigOptionString>("end_gcode")->value.clear();
@@ -1012,6 +998,439 @@ TEST_CASE("Orchestrator export_gcode still routes through ordering and STEP_GCOD
     remove_output_pair(output_path);
 }
 
+namespace {
+
+/*
+Behavior of the STEP_GCODE test modifier. It runs after the built-in writer
+(priority 100 against 0), finds the published file and appends one movement,
+then optionally reports an error or requests the cancellation of the plugins.
+*/
+enum class StepGcodeModifierMode { Append, AppendThenError, AppendThenCancel };
+
+// Identity shared by the test plugins below: the C callbacks read it through the plugin context.
+struct StepProbeState
+{
+    StepProbeState(const char *plugin_id, slicing_step_t plugin_step, int32_t plugin_priority) :
+        id(plugin_id), step(plugin_step), priority(plugin_priority) {}
+
+    const char *id;
+    slicing_step_t step;
+    int32_t priority;
+};
+
+// The STEP_GCODE modifier: appends a movement to the output and fails as its mode requests.
+struct StepGcodeModifierState : StepProbeState
+{
+    StepGcodeModifierState() : StepProbeState("test.step_gcode.modifier", STEP_GCODE, 100) {}
+
+    StepGcodeModifierMode mode = StepGcodeModifierMode::Append;
+    std::atomic_uint32_t run_count{0};
+    std::atomic_bool file_existed{false};
+};
+
+// A STEP_EXTRUSION_EDIT plugin that does nothing, or fails once when asked to.
+struct ExtrusionEditProbeState : StepProbeState
+{
+    ExtrusionEditProbeState(const char *plugin_id, int32_t plugin_priority) :
+        StepProbeState(plugin_id, STEP_EXTRUSION_EDIT, plugin_priority) {}
+
+    std::atomic_bool fail_next{false};
+    std::atomic_uint32_t run_count{0};
+};
+
+StepGcodeModifierState g_step_gcode_modifier;
+ExtrusionEditProbeState g_extrusion_edit_probe_first("test.step_gcode.edit_probe.first", 1000);
+ExtrusionEditProbeState g_extrusion_edit_probe_second("test.step_gcode.edit_probe.second", 1001);
+
+// Text appended by the modifier: an absolute movement the Reader turns into a move.
+const char *const k_step_gcode_modifier_line = "G1 X10 Y10 F1000\n";
+
+using ProbeRunFn = void (*)(void *, const plugin_run_context *);
+
+// Callbacks of the test plugins' C vtable. Each one answers from the StepProbeState behind the context.
+const char *probe_id(void *ctx);
+const char *probe_description(void *ctx);
+const char *probe_empty_text(void *ctx);
+slicing_step_t probe_step(void *ctx);
+int32_t probe_priority(void *ctx);
+const_strings_t probe_dependencies(void *ctx);
+int32_t probe_used_keys(void *ctx, raw_used_config_key *keys);
+int32_t probe_defined_keys(void *ctx, const char **keys);
+int32_t probe_initialize(void *ctx, storage_handle *storage);
+void probe_setup(void *ctx, const plugin_run_context *run_ctx, uint32_t run_count);
+void probe_setup_run(void *ctx, const plugin_run_context *run_ctx);
+
+// Append the movement to the file already published at output_path, then fail as the mode requests.
+void step_gcode_modifier_run(void *ctx, const plugin_run_context *run_ctx);
+
+// Count the run and report one error when fail_next was set, which it then clears.
+void extrusion_edit_probe_run(void *ctx, const plugin_run_context *run_ctx);
+
+// Build the vtable of a test plugin whose run callback is the given one.
+plugin_vtable make_probe_vtable(ProbeRunFn run);
+
+// Register a test plugin once per process; it stays inactive until a test activates it.
+void register_probe_plugin(StepProbeState &state, const plugin_vtable *vtable);
+void register_step_gcode_modifier();
+void register_extrusion_edit_probes();
+
+// Prepare a Print whose plan is empty and whose steps before STEP_GCODE are done, so
+// export_gcode() only has to run STEP_GCODE and the Reader.
+void prepare_step_gcode_print(Print &print);
+
+// Run export_gcode() and return the error message of the exception it throws, or an empty text.
+std::string export_gcode_error(Print &print, const boost::filesystem::path &path, GCodeProcessorResult &result);
+
+const char *probe_id(void *ctx) { return static_cast<StepProbeState *>(ctx)->id; }
+const char *probe_description(void *) { return "Test plugin of the STEP_GCODE tests."; }
+const char *probe_empty_text(void *) { return ""; }
+slicing_step_t probe_step(void *ctx) { return static_cast<StepProbeState *>(ctx)->step; }
+int32_t probe_priority(void *ctx) { return static_cast<StepProbeState *>(ctx)->priority; }
+const_strings_t probe_dependencies(void *) { return {}; }
+int32_t probe_used_keys(void *, raw_used_config_key *) { return 0; }
+int32_t probe_defined_keys(void *, const char **) { return 0; }
+int32_t probe_initialize(void *, storage_handle *) { return PLUGIN_ERROR_OK; }
+void probe_setup(void *, const plugin_run_context *, uint32_t) {}
+void probe_setup_run(void *, const plugin_run_context *) {}
+
+void step_gcode_modifier_run(void *ctx, const plugin_run_context *run_ctx)
+{
+    StepGcodeModifierState &state =
+        *static_cast<StepGcodeModifierState *>(static_cast<StepProbeState *>(ctx));
+    const run_ctx_generate_gcode *payload = plugin_ctx_as_generate_gcode(run_ctx);
+    ++state.run_count;
+    if (payload == nullptr || payload->output_path == nullptr)
+        return;
+
+    state.file_existed = boost::filesystem::exists(payload->output_path);
+    {
+        std::ofstream stream(payload->output_path, std::ios::out | std::ios::binary | std::ios::app);
+        stream << k_step_gcode_modifier_line;
+    }
+    if (state.mode == StepGcodeModifierMode::AppendThenError)
+        run_ctx->report_error(run_ctx->host_context, "test modifier failure");
+    else if (state.mode == StepGcodeModifierMode::AppendThenCancel)
+        Orchestrator::instance().request_plugin_cancel();
+}
+
+void extrusion_edit_probe_run(void *ctx, const plugin_run_context *run_ctx)
+{
+    ExtrusionEditProbeState &state =
+        *static_cast<ExtrusionEditProbeState *>(static_cast<StepProbeState *>(ctx));
+    ++state.run_count;
+    if (state.fail_next.exchange(false))
+        run_ctx->report_error(run_ctx->host_context, "test probe failure");
+}
+
+plugin_vtable make_probe_vtable(ProbeRunFn run)
+{
+    return plugin_vtable {
+        sizeof(plugin_vtable),
+        &probe_id,
+        &probe_id,
+        &probe_description,
+        &probe_empty_text,
+        &probe_step,
+        &probe_dependencies,
+        &probe_priority,
+        &probe_used_keys,
+        &probe_defined_keys,
+        &probe_initialize,
+        &probe_setup,
+        &probe_setup_run,
+        run
+    };
+}
+
+void register_probe_plugin(StepProbeState &state, const plugin_vtable *vtable)
+{
+    Orchestrator &orchestrator = Orchestrator::instance();
+    if (orchestrator.get_plugin(state.id) != nullptr)
+        return;
+    plugin_instance instance = {&state, vtable};
+    REQUIRE(orchestrator.register_plugin(instance));
+    Plugin *plugin = orchestrator.get_plugin(state.id);
+    REQUIRE(plugin != nullptr);
+    REQUIRE(orchestrator.set_plugin_active(plugin, false));
+}
+
+void register_step_gcode_modifier()
+{
+    static const plugin_vtable table = make_probe_vtable(&step_gcode_modifier_run);
+    register_probe_plugin(g_step_gcode_modifier, &table);
+}
+
+void register_extrusion_edit_probes()
+{
+    static const plugin_vtable table = make_probe_vtable(&extrusion_edit_probe_run);
+    register_probe_plugin(g_extrusion_edit_probe_first, &table);
+    register_probe_plugin(g_extrusion_edit_probe_second, &table);
+}
+
+void prepare_step_gcode_print(Print &print)
+{
+    select_printing_plan_firmware(print);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    print.mutable_printing_plan();
+    for (slicing_step_t step : Steps::execution_order())
+        print.mark_step_executed(step);
+}
+
+std::string export_gcode_error(Print &print, const boost::filesystem::path &path, GCodeProcessorResult &result)
+{
+    try {
+        Orchestrator::instance().export_gcode(print, path.string(), &result);
+    } catch (const std::exception &error) {
+        return error.what();
+    }
+    return std::string();
+}
+
+} // namespace
+
+TEST_CASE("STEP_GCODE plugins run by priority and the Reader sees the modified file",
+          "[plugins][gcode][step-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    g_step_gcode_modifier.run_count = 0;
+    g_step_gcode_modifier.file_existed = false;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+
+    Print print;
+    prepare_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+    const uint64_t writer_runs = writer->get_run_count();
+
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+
+    // The modifier found the writer's file and its movement follows the preamble.
+    CHECK(g_step_gcode_modifier.run_count.load() == 1);
+    CHECK(g_step_gcode_modifier.file_existed.load());
+    CHECK(writer->get_run_count() == writer_runs + 1);
+    CHECK(read_text_file(output_path) == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
+    // The Reader runs after the modifier: its last move is the appended one.
+    REQUIRE_FALSE(result.moves.empty());
+    CHECK(result.moves.back().position.x() == Approx(10.f));
+    CHECK(result.moves.back().position.y() == Approx(10.f));
+    CHECK(print.is_step_done(STEP_GCODE));
+    CHECK(print.current_checkpoint() == Steps::Checkpoint::GCode);
+    remove_output_pair(output_path);
+}
+
+TEST_CASE("A failing STEP_GCODE plugin leaves the step undone and the next attempt starts clean",
+          "[plugins][gcode][step-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+
+    Print print;
+    prepare_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+
+    struct Scenario
+    {
+        StepGcodeModifierMode mode;
+        const char *expected_message;
+    };
+    for (const Scenario &scenario : {Scenario{StepGcodeModifierMode::AppendThenError, "reported an error"},
+                                     Scenario{StepGcodeModifierMode::AppendThenCancel, "after a stop was requested"}}) {
+        g_step_gcode_modifier.mode = scenario.mode;
+        g_step_gcode_modifier.run_count = 0;
+        const uint64_t writer_runs = writer->get_run_count();
+
+        // The modifier already appended its movement when it failed: the step fails and names it.
+        const std::string message = export_gcode_error(print, output_path, result);
+        INFO(message);
+        CHECK(message.find("test.step_gcode.modifier") != std::string::npos);
+        CHECK(message.find(scenario.expected_message) != std::string::npos);
+        CHECK_FALSE(print.is_step_done(STEP_GCODE));
+        CHECK(print.current_checkpoint() != Steps::Checkpoint::GCode);
+        CHECK(g_step_gcode_modifier.run_count.load() == 1);
+        CHECK(writer->get_run_count() == writer_runs + 1);
+        // The failed attempt left the writer's file with the modifier's movement already appended.
+        CHECK(read_text_file(output_path) == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
+
+        // The next attempt runs both plugins again on the same Print, without slicing again.
+        g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+        REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+        CHECK(g_step_gcode_modifier.run_count.load() == 2);
+        CHECK(writer->get_run_count() == writer_runs + 2);
+        // Same bytes as after the failed attempt: the writer replaced that file, so the
+        // movement appears once and not twice.
+        CHECK(read_text_file(output_path) == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
+        CHECK(print.is_step_done(STEP_GCODE));
+        CHECK(print.current_checkpoint() == Steps::Checkpoint::GCode);
+    }
+    remove_output_pair(output_path);
+}
+
+TEST_CASE("STEP_GCODE marks each plugin completed in order and leaves the Reader unit pending",
+          "[plugins][gcode][step-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+
+    Print print;
+    print.status().set_silent();
+    prepare_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+
+    const std::map<slicing_step_t, std::vector<std::string>> plan {
+        { STEP_GCODE, { "gcode.printing_plan_file_writer", g_step_gcode_modifier.id,
+                        Steps::k_gcode_read_progress_unit } }
+    };
+    print.pipeline_progress().initialize(plan);
+    print.pipeline_progress().begin_step(STEP_GCODE, "Generating G-code");
+    orchestrator.reset_plugin_cancel();
+
+    // The runner alone, without the Reader pass: both plugin units are completed in plan order
+    // (complete_plugin throws otherwise), and the Reader unit is still pending.
+    REQUIRE_NOTHROW(Steps::StepGenerateGcode::run_step(orchestrator, print, output_path.string()));
+    CHECK(print.pipeline_progress().percent() == 66);
+    CHECK_THROWS_AS(print.pipeline_progress().verify_step_complete(STEP_GCODE), std::logic_error);
+    REQUIRE_NOTHROW(print.pipeline_progress().complete_plugin(STEP_GCODE, Steps::k_gcode_read_progress_unit));
+    CHECK_NOTHROW(print.pipeline_progress().verify_step_complete(STEP_GCODE));
+    CHECK(print.pipeline_progress().percent() == 100);
+    remove_output_pair(output_path);
+    orchestrator.reset_plugin_cancel();
+}
+
+TEST_CASE("The Reader pass is announced and counted as the last progress unit of STEP_GCODE",
+          "[plugins][gcode][step-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+
+    for (const bool with_result : {true, false}) {
+        INFO("viewer result requested: " << with_result);
+        Print print;
+        prepare_step_gcode_print(print);
+        std::vector<PrintBase::SlicingStatus> statuses;
+        print.set_status_callback([&statuses](const PrintBase::SlicingStatus &status) {
+            statuses.push_back(status);
+        });
+        const boost::filesystem::path output_path = temporary_gcode_path();
+        remove_output_pair(output_path);
+        GCodeProcessorResult result;
+
+        REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), with_result ? &result : nullptr));
+
+        // Three units (writer, modifier, Reader): the message appears after two of them.
+        int reading_percent = -1;
+        for (const PrintBase::SlicingStatus &status : statuses)
+            if (status.main_text == "Reading the generated G-code")
+                reading_percent = status.percent;
+        if (with_result)
+            CHECK(reading_percent == 66);
+        else
+            CHECK(reading_percent == -1);
+        CHECK_NOTHROW(print.pipeline_progress().verify_step_complete(STEP_GCODE));
+        CHECK(print.pipeline_progress().percent() == 100);
+        remove_output_pair(output_path);
+    }
+}
+
+TEST_CASE("A cancellation at the start of the Reader pass leaves a progress table the next export can use",
+          "[plugins][gcode][step-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+
+    Print print;
+    prepare_step_gcode_print(print);
+    // Cancel the Print as the Reader pass is announced, and raise the cancellation at that start:
+    // the plugin units are completed and the Reader unit is not, so only the pipeline can
+    // clean the progress table. (The Reader service never throws CanceledException itself.)
+    print.set_status_callback([&print](const PrintBase::SlicingStatus &status) {
+        if (status.main_text != "Reading the generated G-code")
+            return;
+        print.cancel();
+        throw CanceledException();
+    });
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+
+    CHECK_THROWS_AS(orchestrator.export_gcode(print, output_path.string(), &result), CanceledException);
+    CHECK_FALSE(print.is_step_done(STEP_GCODE));
+
+    // Same Print, no new slicing: the next export starts from a fresh progress table.
+    print.set_status_callback(nullptr);
+    print.restart();
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    CHECK(print.is_step_done(STEP_GCODE));
+    CHECK(read_text_file(output_path) == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
+    CHECK(print.pipeline_progress().percent() == 100);
+    remove_output_pair(output_path);
+}
+
+TEST_CASE("A failing second plugin of a normal step leaves a progress table the next run can use",
+          "[plugins][gcode][step-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_extrusion_edit_probes();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const ScopedPluginActivation first(orchestrator, g_extrusion_edit_probe_first.id);
+    const ScopedPluginActivation second(orchestrator, g_extrusion_edit_probe_second.id);
+    g_extrusion_edit_probe_first.run_count = 0;
+    g_extrusion_edit_probe_second.run_count = 0;
+
+    Print print;
+    prepare_step_gcode_print(print);
+    REQUIRE(print.save_ordering_checkpoint());
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+
+    // Replay from the Ordering copy: STEP_EXTRUSION_EDIT runs its two probes, then STEP_GCODE.
+    g_extrusion_edit_probe_second.fail_next = true;
+    print.request_replay_from_worker(Steps::Checkpoint::Ordering);
+    std::string message;
+    try {
+        Steps::StepPipeline::run_gcode(orchestrator, print, output_path.string());
+    } catch (const std::exception &error) {
+        message = error.what();
+    }
+    INFO(message);
+    CHECK(message.find(g_extrusion_edit_probe_second.id) != std::string::npos);
+    CHECK(g_extrusion_edit_probe_first.run_count.load() == 1);
+    CHECK(g_extrusion_edit_probe_second.run_count.load() == 1);
+    CHECK_FALSE(print.is_step_done(STEP_EXTRUSION_EDIT));
+
+    // Same Print: the second attempt replays the step and succeeds.
+    print.request_replay_from_worker(Steps::Checkpoint::Ordering);
+    REQUIRE_NOTHROW(Steps::StepPipeline::run_gcode(orchestrator, print, output_path.string()));
+    CHECK(g_extrusion_edit_probe_first.run_count.load() == 2);
+    CHECK(g_extrusion_edit_probe_second.run_count.load() == 2);
+    CHECK(print.is_step_done(STEP_EXTRUSION_EDIT));
+    CHECK(print.is_step_done(STEP_GCODE));
+    remove_output_pair(output_path);
+}
+
 // Export an unflattened object-owned brim through the real Cost ordering and
 // file writer, retaining marked auxiliary loops as distance-only seam targets.
 // The Print and Model are locally owned, plugin activations restore on scope exit,
@@ -1026,7 +1445,6 @@ TEST_CASE("PrintingPlan writer exports a cube with composed brim and cost seams"
     const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
         {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
         {"brim_width", "3.2"}, {"brim_per_object", "1"},
         {"draft_shield", "disabled"}, {"brim_skirt_trim", "0"},
@@ -1107,7 +1525,6 @@ TEST_CASE("PrintingPlan writer exports a cube with cost seam placement",
     const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
-    config.set_deserialize_strict("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
     // The Cost provider measures every candidate's visibility when seam_visibility
     // is enabled, which does not finish in test-scale time on this print, so the

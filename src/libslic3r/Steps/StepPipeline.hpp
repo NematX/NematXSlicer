@@ -109,6 +109,9 @@ struct StepExclusivePluginGroup
     bool whole_step = false;
 };
 
+// The host accounts for rereading the generated G-code separately from writer plugins.
+inline constexpr const char *k_gcode_read_progress_unit = "host:gcode_read";
+
 // These keys and labels identify settings that select a provider for an entire step.
 struct StepExclusiveIdentity
 {

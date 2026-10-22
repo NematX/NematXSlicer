@@ -1938,7 +1938,7 @@ TEST_CASE("Two overlapping model parts export both tools and a wipe tower", "[pl
         {"extrusion_multiplier", "1,1"}, {"perimeter_extruder", "1"}, {"infill_extruder", "1"},
         {"solid_infill_extruder", "1"}, {"support_material_extruder", "0"},
         {"step_perimeter_plugin", "perimeter.generator.simple"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin"}});
+        {"gcode_flavor", "marlin"}});
     Print print;
     Model model;
     ModelObject *object = model.add_object();
@@ -2011,7 +2011,7 @@ TEST_CASE("Two overlapping model parts keep the tower sparse share below ten per
         {"extrusion_multiplier", "1,1"}, {"perimeter_extruder", "1"}, {"infill_extruder", "1"},
         {"solid_infill_extruder", "1"}, {"support_material_extruder", "0"},
         {"step_perimeter_plugin", "perimeter.generator.simple"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin"}});
+        {"gcode_flavor", "marlin"}});
     Print print;
     Model model;
     ModelObject *object = model.add_object();
@@ -2199,7 +2199,7 @@ TEST_CASE("Tower tool changes export the manager speed override", "[plugins][wip
         });
         return lines;
     };
-    Test::GCode::select_printing_plan_writer(print, "gcode.firmware.marlin2");
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
     const std::string marlin_path = (checkout / "build" / "temp" /
         (std::string("tower_speed_override") + (semm ? "_semm" : "") + ".gcode")).string();
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, marlin_path, nullptr));
@@ -2242,7 +2242,7 @@ TEST_CASE("Tower tool changes export the manager speed override", "[plugins][wip
     CHECK(open == 0);
     CHECK_FALSE(nested);
     CHECK(covered == changes);
-    Test::GCode::select_printing_plan_writer(print, "gcode.firmware.klipper");
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.klipper");
     const std::string klipper_path = (checkout / "build" / "temp" /
         (std::string("tower_speed_override_klipper") + (semm ? "_semm" : "") + ".gcode")).string();
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, klipper_path, nullptr));

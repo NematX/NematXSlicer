@@ -1621,7 +1621,6 @@ TEST_CASE("Former skirt catch-all options resume at their verified first consume
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("gcode_flavor", "marlin");
-    config.set_deserialize_strict("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
     Model model;
     Print print;

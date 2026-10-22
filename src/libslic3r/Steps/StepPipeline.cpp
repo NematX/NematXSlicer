@@ -709,7 +709,6 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
         {STEP_INFILL,         {"step_infill_plugin",         "Infill plugin",          "Infill step plugin"}},
         {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
         {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
-        {STEP_GCODE,          {"step_gcode_plugin",          "G-code plugin",          "G-code step plugin"}},
         {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}},
         {GCODE_EXPORT,        {"gcode_exporter_plugin",      "G-code exporter",        "G-code exporter"}}
     };
@@ -998,6 +997,11 @@ void initialize_pipeline_progress(Orchestrator &orchestrator,
                 if (plugin != nullptr)
                     unit_ids.push_back(plugin->get_id());
         }
+        // After its plugins the host owns one more unit. It is completed by the end of the
+        // step (complete_step), after the Reader pass, so the percentage stays below 100
+        // until the pass is done.
+        if (step == STEP_GCODE)
+            unit_ids.push_back(k_gcode_read_progress_unit);
         if (unit_ids.empty())
             unit_ids.emplace_back();
     }
@@ -1042,21 +1046,31 @@ void run_step_if_requested(Print &print, slicing_step_t step, RunFn &&run_fn)
     if (step == STEP_LAYER_HEIGHT)
         print.save_metadata_checkpoint(Checkpoint::None);
     print.set_running_step(step);
-    {
-        const RunningStepScope running_step_scope{print};
-        run_fn();
-    }
+    try {
+        {
+            const RunningStepScope running_step_scope{print};
+            run_fn();
+        }
 
-    // A step may observe cancellation cooperatively and return without
-    // throwing. Do not publish such partial work as a completed step.
-    print.throw_if_canceled();
-    print.pipeline_progress().complete_step(step);
-    print.pipeline_progress().verify_step_complete(step);
-    if (step == STEP_POST_SLICING) {
+        // A step may observe cancellation cooperatively and return without
+        // throwing. Do not publish such partial work as a completed step.
         print.throw_if_canceled();
-        print.save_metadata_checkpoint(Checkpoint::Slicing);
+        print.pipeline_progress().complete_step(step);
+        print.pipeline_progress().verify_step_complete(step);
+        if (step == STEP_POST_SLICING) {
+            print.throw_if_canceled();
+            print.save_metadata_checkpoint(Checkpoint::Slicing);
+        }
+        print.mark_step_executed(step);
+    } catch (...) {
+        // A failed or cancelled step may have completed only some of its
+        // progress units, and the pipeline would then refuse the units of the
+        // next attempt as out of order. Drop the whole table: the next
+        // run_gcode() rebuilds a fresh one, because it only keeps a table that
+        // is active and incomplete.
+        print.pipeline_progress().reset();
+        throw;
     }
-    print.mark_step_executed(step);
 }
 
 void run_layer_height_generation(Orchestrator &orchestrator, Print &print, const std::string &path)
@@ -1254,13 +1268,16 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
         StepGenerateGcode::prepare(print);
         const std::string selected_reader = StepGenerateGcode::run_step(
             orchestrator, print, path);
-        // The writer published the source; associate its already-selected
-        // reader so an explicit CLI reread needs no new firmware session.
+        // The STEP_GCODE plugins have all finished and the writer published the
+        // source; associate its already-selected reader so an explicit CLI reread needs no new firmware session.
         print.set_gcode_reader_source_path(print.gcode_reader_source_path(), selected_reader);
         if (reader_plugin_id != nullptr)
             *reader_plugin_id = selected_reader;
 
+        // The Reader pass is a host progress unit of this step: announce it, then
+        // complete the unit below once the pass is over.
         if (gcode_result != nullptr) {
+            begin_step(print, STEP_GCODE, L("Reading the generated G-code"));
             try {
                 StepReadGeneratedGcode::run(
                     orchestrator, print, selected_reader, *gcode_result);
@@ -1292,13 +1309,6 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
                     PrintStateBase::WarningLevel::NON_CRITICAL, message);
             }
         }
-        // The Reader and firmware are services nested under the G-code writer.
-        // Complete the writer's single top-level unit only after those services
-        // and the optional viewer result have also finished.
-        Plugin *writer = selected_or_active_plugin_for_step(
-            orchestrator, STEP_GCODE, &print.full_print_config());
-        if (writer != nullptr)
-            print.pipeline_progress().complete_plugin(STEP_GCODE, writer->get_id());
     });
     if (stop_after(STEP_GCODE, until)) return;
 }

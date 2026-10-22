@@ -53,8 +53,23 @@
 #include "test_data.hpp"
 
 /*
+Create printing-plan events whose extrusion roles change, run the feature G-code
+path, and inspect the emitted annotations and placeholder values. Shared helpers
+own the neutral plan/session setup; the cases here decide which transitions
+should produce feature text and which should not repeat it.
+
 Feature G-code tests verify role-transition annotations and their serialized PlaceholderParser context.
 Shared plan construction and output helpers live in gcode_test_helpers so this file keeps only component-specific behavior.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- configure_standard_firmware()
+        |-- append_path_extrusion()
+        |-- make_firmware_path()
+        |-- make_firmware_travel()
+        |-- Steps::StepExtrusionEdition::run_step()
+        `-- export_with_firmware()
 */
 
 namespace {
@@ -69,7 +84,7 @@ TEST_CASE("Feature G-code counts stationary deposit role transitions",
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.option<ConfigOptionString>("feature_gcode")->value =
@@ -120,7 +135,7 @@ TEST_CASE("Feature G-code follows explicit role transitions without duplicating 
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.option<ConfigOptionString>("start_gcode")->value.clear();

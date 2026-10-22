@@ -35,15 +35,20 @@
 STEP_GCODE bridge
 =================
 
-The G-code step delegates file creation to a plugin. Earlier pipeline steps build a
+The G-code step is a plugin boundary. Earlier pipeline steps build a
 PrintingPlan, then this step creates the selected firmware session and invokes
-the active STEP_GCODE writer. The writer receives the source Print, read-only
-PrintingPlan, borrowed firmware session, and resolved final output path.
-Changing the writer, firmware or thumbnail selector requires G-code generation
-to run again, because it uses those choices to produce the output file.
-The thumbnail selector is stored under thumbnails_format. Callers can request
-an encoder without using that setting, so shared renderer settings remain editable
-regardless of the selected encoder.
+every selected STEP_GCODE plugin, one after the other, by increasing priority.
+All of them receive the same payload: the source Print, read-only
+PrintingPlan, borrowed firmware session, and resolved final output path. The
+built-in writer (priority 0) creates and publishes that file; plugins of higher
+priority may then modify it before the host Reader consumes it.
+
+The first plugin error or cancellation aborts the step, which is not marked as
+done; the next attempt rebuilds the file. Progress units are recorded only after
+every plugin succeeded, and a failure of the step resets the whole progress table,
+so the next attempt starts from a fresh one. The Reader pass that follows this step
+is a further host progress unit (k_gcode_read_progress_unit), completed by the
+pipeline after the read.
 
 Before crossing that plugin boundary, the step validates the process speed of
 every geometric leaf and explicit E-only extrusion command, including those in
@@ -1143,6 +1148,11 @@ bool validate_post(const Print &, std::string *)
     return true;
 }
 
+// Validate the plan, build the firmware session and the Reader association once,
+// then run every selected STEP_GCODE plugin in priority order on one payload.
+// Returns the Reader plugin ID chosen by the firmware. Any validation, plugin
+// error or cancellation throws; no plugin is then recorded as completed. The host
+// Reader unit is not completed here: the pipeline does it after the read.
 std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path)
 {
     if (path.empty())
@@ -1155,8 +1165,9 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     if (!validate_pre(print, &validation_error))
         throw RuntimeError(validation_error);
 
-    Plugin *plugin = selected_or_active_plugin_for_step(orchestrator, STEP_GCODE, &print.full_print_config());
-    if (plugin == nullptr)
+    const std::vector<Plugin *> plugins = selected_or_active_plugins_for_step(
+        orchestrator, STEP_GCODE, &print.full_print_config());
+    if (plugins.empty())
         throw RuntimeError("No active G-code generation plugin is available.");
 
     // The G-code step consumes the finalized PrintingPlan created by the
@@ -1183,19 +1194,33 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     payload.reader_source_context = &reader_source;
     payload.publish_reader_source_path = &ReaderSourcePathReceiver::publish_callback;
 
-    std::atomic_bool execution_error { false };
-    plugin_host_context host_context =
-        Detail::prepare_guarded_plugin_host_context(orchestrator, STEP_GCODE, *plugin, print, execution_error);
-    plugin_run_context run_context = orchestrator.prepare_plugin_run_context(STEP_GCODE, plugin, &host_context);
-    run_context.data = &payload;
+    // Plugins run one after the other, by increasing priority, on the same
+    // payload and firmware session: the writer creates the file, the following
+    // ones may modify it. The first error or cancellation aborts the step.
+    for (Plugin *plugin : plugins) {
+        if (plugin == nullptr)
+            continue;
 
-    plugin->setup(run_context, 1);
-    Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup");
-    plugin->setup_run(run_context);
-    Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup_run");
-    plugin->run(run_context);
-    Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "run");
+        std::atomic_bool execution_error { false };
+        plugin_host_context host_context =
+            Detail::prepare_guarded_plugin_host_context(orchestrator, STEP_GCODE, *plugin, print, execution_error);
+        plugin_run_context run_context = orchestrator.prepare_plugin_run_context(STEP_GCODE, plugin, &host_context);
+        run_context.data = &payload;
+
+        plugin->setup(run_context, 1);
+        Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup");
+        plugin->setup_run(run_context);
+        Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup_run");
+        plugin->run(run_context);
+        Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "run");
+    }
+    // Everything that can still fail runs before the progress units are recorded;
+    // the units are then marked in plan order. A failure of the step resets the whole
+    // progress table (see run_step_if_requested), so no unit stays half consumed.
     publish_plan_facts(print);
+    for (const Plugin *plugin : plugins)
+        if (plugin != nullptr)
+            print.pipeline_progress().complete_plugin(STEP_GCODE, plugin->get_id());
     return reader_plugin_id;
 }
 

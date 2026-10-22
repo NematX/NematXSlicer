@@ -279,7 +279,6 @@ void initialize_fff_print(Print &print, Model &model, const std::string &exporte
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(1);
     config.set_deserialize_strict({
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
         {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
         {"binary_gcode", "1"}});
     config.set_deserialize_strict("gcode_exporter_plugin", exporter_id);
@@ -650,18 +649,15 @@ TEST_CASE("G-code exporter is the visible FFF profile service", "[plugins][gcode
         "printer_fff.ui",
         "page:General:printer\n"
         "group:Firmware\n"
-        "\tsetting:step_gcode_plugin\n"
         "\tsetting:gcode_firmware_plugin\n"
         "\tsetting:gcode_flavor\n");
-    const size_t writer_position = merged_layout.find("setting:step_gcode_plugin");
     const size_t firmware_position = merged_layout.find("setting:gcode_firmware_plugin");
     const size_t exporter_position = merged_layout.find("setting:gcode_exporter_plugin");
     const size_t flavor_position = merged_layout.find("setting:gcode_flavor");
-    REQUIRE(writer_position != std::string::npos);
+    CHECK(merged_layout.find("setting:step_gcode_plugin") == std::string::npos);
     REQUIRE(firmware_position != std::string::npos);
     REQUIRE(exporter_position != std::string::npos);
     REQUIRE(flavor_position != std::string::npos);
-    CHECK(writer_position < firmware_position);
     CHECK(firmware_position < exporter_position);
     CHECK(exporter_position < flavor_position);
     for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file("print.ui"))
@@ -1798,8 +1794,7 @@ TEST_CASE("G-code export widths match legacy regions and first-layer options", "
         ScopedTestDirectory directory;
         DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
         config.set_num_extruders(1);
-        config.set_deserialize_strict({{"step_gcode_plugin", "gcode.printing_plan_file_writer"},
-                                       {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.marlin2"},
                                        {"gcode_exporter_plugin", "gcode.exporter.simple"},
                                        {"binary_gcode", "0"},
                                        {"layer_height", "0.20"},

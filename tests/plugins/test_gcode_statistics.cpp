@@ -118,7 +118,6 @@ DynamicPrintConfig statistics_config(size_t extruders)
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_num_extruders(extruders);
     config.set_deserialize_strict({
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
         {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
         {"gcode_exporter_plugin", "gcode.exporter.simple"},
         {"binary_gcode", "1"},

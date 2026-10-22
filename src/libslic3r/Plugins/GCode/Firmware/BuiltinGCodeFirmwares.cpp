@@ -311,7 +311,7 @@ const char *printer_ui_fragment() noexcept
 {
     return "page:General:printer\n"
            "group:Firmware\n"
-           "\tsetting:insert$aftersetting$step_gcode_plugin:gcode_firmware_plugin\n";
+           "\tsetting:insert$beforesetting$gcode_flavor:gcode_firmware_plugin\n";
 }
 
 void register_marlin1_gcode_firmware_plugin(orchestrator_handle *orchestrator)

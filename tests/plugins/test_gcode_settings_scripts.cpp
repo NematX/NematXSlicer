@@ -451,7 +451,7 @@ TEST_CASE("Configured scripts use ordered plan tools and final layer state",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print, 2);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.filament_diameter.set(std::vector<double>{1.75, 2.85});
@@ -570,7 +570,7 @@ TEST_CASE("Layer scripts report consumed filament",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.option<ConfigOptionString>("start_gcode")->value.clear();
@@ -652,7 +652,7 @@ TEST_CASE("Scripts read per-filament extruded volume and weight",
     const double filament_area = 1.75 * 1.75 * PI / 4.0;
     for (const bool semm : {false, true}) {
         Print print;
-        select_printing_plan_writer(print);
+        select_printing_plan_firmware(print);
         configure_standard_firmware(print, 2);
         PrintConfig &config = const_cast<PrintConfig &>(print.config());
         config.single_extruder_multi_material.value = semm;
@@ -1268,7 +1268,7 @@ TEST_CASE("End script uses stable defaults when a plan has no layers",
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Print print;
-    select_printing_plan_writer(print);
+    select_printing_plan_firmware(print);
     configure_standard_firmware(print);
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
     config.option<ConfigOptionString>("start_gcode")->value.clear();

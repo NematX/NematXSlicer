@@ -8,6 +8,16 @@ Wipe manager tests lend a test-only service to the host. The service reports
 real changes between consecutive concrete tool visits and writes one local
 straight line per band. Constructed plans isolate insertion and ownership;
 the sliced-print test exercises the export-side ordering and downstream path.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::init_print()
+        |-- print.apply()
+        |-- print.process()
+        |-- Steps::StepExtrusionOrdering::run_step()
+        |-- Steps::StepGenerateWipeTower::run_step()
+        `-- check_wipes()
 */
 #include <catch2/catch.hpp>
 
@@ -973,7 +983,7 @@ TEST_CASE("Parallel groups share one global tower with fused and stacked Z offse
         }
         CHECK(tool.extrusion(tool.extrusion_count() - 1).root().get(slic3r_api::EPropertyZOffset::key) == nullptr);
     }
-    Test::GCode::select_printing_plan_writer(print, "gcode.firmware.marlin2");
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
     const boost::filesystem::path checkout = boost::filesystem::path(__FILE__).parent_path().parent_path().parent_path();
     const std::string path = (checkout / "build" / "temp" / "wipe_tower_parallel.gcode").string();
     REQUIRE_NOTHROW(Steps::StepGenerateGcode::run_step(Orchestrator::instance(), print, path));
