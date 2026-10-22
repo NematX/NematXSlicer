@@ -1,0 +1,3 @@
+[plugin]
+package_version = @PLUGIN_PACKAGE_VERSION@
+slicer_version = @SUPERSLICER_VERSION_FULL@
