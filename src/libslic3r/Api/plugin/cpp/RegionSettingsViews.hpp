@@ -510,18 +510,21 @@ public:
                 for (const LayerRegion &region : m_regions) {
                     const RegionSettingsValue region_value =
                         RegionSettingsValue::create(m_default_config, region.print_region().config(), group);
+                    if (region.slices().empty())
+                        continue;
+
+                    StoredExPolygonCollection overlap =
+                        clipper_intersection(clip(region.slices()), clip(area)).to_expolygon_collection();
+                    if (overlap.empty())
+                        continue;
+
+                    // Keep both maps aligned with values that actually intersect this candidate area.
                     regions[region_value].push_back(region);
                     std::pair<AreaMap::iterator, bool> inserted =
                         areas.emplace(std::piecewise_construct,
                                       std::forward_as_tuple(region_value),
                                       std::forward_as_tuple(m_storage));
-
-                    if (!region.slices().empty()) {
-                        StoredExPolygonCollection overlap =
-                            clipper_intersection(clip(region.slices()), clip(area)).to_expolygon_collection();
-                        if (!overlap.empty())
-                            inserted.first->second.append_move_from(std::move(overlap));
-                    }
+                    inserted.first->second.append_move_from(std::move(overlap));
                 }
 
                 for (AreaMap::iterator it = areas.begin(); it != areas.end();) {

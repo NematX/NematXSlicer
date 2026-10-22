@@ -25,6 +25,8 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
 #include "libslic3r/Api/internal/LayerIslandAccess.hpp"
+#include "libslic3r/Api/internal/LayerAccess.hpp"
+#include "libslic3r/Api/internal/LayerRegionAccess.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
@@ -40,9 +42,11 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/PrintRegion.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/PrintingPlan/PrintingLayerTimeProperty.h"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
@@ -665,6 +669,56 @@ PluginPropertyKey<PrintingLayerTimeProperty> registered_layer_time_property_key(
 }
 
 } // namespace
+
+TEST_CASE("Regional segregation excludes empty and distant regions from matching values",
+          "[plugins][regions][region-settings]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({{"perimeter_speed", "70"}});
+    prepare_regional_process_plan(prepared, config,
+        {{"perimeter_speed", "30"}}, "perimeter_speed",
+        {ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}});
+    REQUIRE(prepared.source_layers.size() == 1);
+    Layer &layer = *prepared.source_layers.front();
+    REQUIRE(layer.lslices().size() == 1);
+
+    // These extra regions share a value with a region inside the candidate.
+    // They must not be returned as owners merely because that value exists.
+    const LayerRegion *near_region = nullptr;
+    for (const LayerRegion &region : layer.regions()) {
+        const slic3r_api::Config region_config(ApiHost::to_config_handle(&region.region().config()));
+        if (!region.get_raw_slices().empty() && region_config.get("perimeter_speed").get_float() == 30.)
+            near_region = &region;
+    }
+    REQUIRE(near_region != nullptr);
+    const size_t original_count = layer.region_count();
+    ApiInternal::LayerAccess::add_region(layer, near_region->region());
+    ExPolygons &far_slices = ApiInternal::LayerRegionAccess::slices_mutable(layer.region(original_count));
+    far_slices = near_region->get_raw_slices();
+    for (ExPolygon &slice : far_slices)
+        slice.translate(Point(scale_i(100.), 0));
+    ApiInternal::LayerAccess::add_region(layer, near_region->region());
+    REQUIRE(layer.region(original_count + 1).get_raw_slices().empty());
+
+    slic3r_api::RegionSettings settings(
+        reinterpret_cast<storage_handle *>(&prepared.storage),
+        slic3r_api::Config(ApiHost::to_config_handle(&near_region->region().config())),
+        {{"perimeter_speed"}});
+    for (const LayerRegion &region : layer.regions())
+        settings.add_region(slic3r_api::LayerRegion(reinterpret_cast<const layer_region_handle *>(&region)));
+    settings.segregate(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&layer.lslices().front())));
+
+    const slic3r_api::RegionSettings::AreaMap &areas = settings.get_areas("perimeter_speed");
+    REQUIRE(areas.size() == 2);
+    for (const auto &entry : areas) {
+        const std::vector<slic3r_api::LayerRegion> &regions = settings.get_regions("perimeter_speed", entry.first);
+        REQUIRE(regions.size() == 1);
+        CHECK_FALSE(regions.front().slices().empty());
+        CHECK(regions.front().handle() != reinterpret_cast<const layer_region_handle *>(&layer.region(original_count)));
+        CHECK(regions.front().handle() != reinterpret_cast<const layer_region_handle *>(&layer.region(original_count + 1)));
+    }
+}
 
 TEST_CASE("Layer extrusion editors expose independent config contracts",
           "[plugins][layer-extrusion-edit][speed][acceleration][api]")
