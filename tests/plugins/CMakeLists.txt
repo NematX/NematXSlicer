@@ -65,6 +65,7 @@ add_executable(${_TEST_NAME}_tests
     test_rectilinear_with_perimeter.cpp
     test_gcode_default_firmware_session.cpp
     test_gcode_exporter.cpp
+    test_step_export.cpp
     test_gcode_statistics.cpp
     test_gcode_custom_gcode_per_print_z.cpp
     test_gcode_feature_gcode.cpp
@@ -74,6 +75,7 @@ add_executable(${_TEST_NAME}_tests
     test_gcode_layer_height_slider.cpp
     test_gcode_reader_compatibility.cpp
     test_gcode_reader.cpp
+    test_gcode_post_process.cpp
     test_gcode_printing_plan_file_writer.cpp
     test_gcode_script_processor.cpp
     test_gcode_settings_scripts.cpp

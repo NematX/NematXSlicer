@@ -33,7 +33,7 @@ Member names are those of the native storage, not necessarily those of the API g
 | `Print` | After `STEP_FINALIZE_SLICING`: source tree finalized; resume at `STEP_ORDERING`. |
 | `Ordering` | After `STEP_ORDERING`: optional save of the plan, which remains editable in its working copy. |
 | `Plan` | After `STEP_EXTRUSION_SIMPLIFICATION`: final plan read-only for `STEP_GCODE`. |
-| `GCode` | End of export and of the optional read-back; does not reopen any write right on the inputs. |
+| `GCode` | G-code reference ready (`STEP_GCODE` and the optional read-back are done); resumes at `STEP_EXPORT`, which runs only on an export request and does not reopen any write right on the inputs. |
 | Call / session / storage | Lifetime independent of checkpoints, specified for the relevant owner. |
 
 The actual order is that of `Steps::execution_order()`, not the numeric order of the `slicing_step_t` values.

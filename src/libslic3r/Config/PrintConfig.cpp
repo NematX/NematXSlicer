@@ -286,6 +286,18 @@ void PrintConfigDef::init_common_params()
     def->cli = ConfigOptionDef::nocli;
     def->can_phony = true;
 
+    // Destination of one export. It lives only in the request that a Print carries for the export step: no
+    // static configuration has a member for it, so presets, projects, the G-code and the full print configuration
+    // never hold it, and changing it replays nothing.
+    def = this->add("output_path", coString);
+    def->label = L("Output path");
+    def->tooltip = L("Where the exported file is published. It is set for one export only and is never saved.");
+    def->printer_technology = ptFFF | ptSLA;
+    def->nature = ConfigOptionNature::Volatile;
+    def->invalidates_step = STEP_NONE;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("printer_technology", coEnum);
     def->label = L("Printer technology");
     def->tooltip = L("Printer technology");

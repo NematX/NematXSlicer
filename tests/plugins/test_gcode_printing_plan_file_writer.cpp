@@ -402,14 +402,16 @@ TEST_CASE("STEP_GCODE is a normal step whose built-in writer is active by defaul
     Print print;
 
     const std::vector<Plugin *> gcode_plugins = orchestrator.get_active_plugins_for_step(STEP_GCODE);
-    REQUIRE(gcode_plugins.size() == 1);
-    CHECK(gcode_plugins.front()->get_id() == "gcode.printing_plan_file_writer");
+    REQUIRE(gcode_plugins.size() == 2);
+    CHECK(gcode_plugins[0]->get_id() == "gcode.printing_plan_file_writer");
+    CHECK(gcode_plugins[1]->get_id() == "gcode.post_process");
     CHECK(orchestrator.get_plugin("gcode.legacy") == nullptr);
 
     const std::vector<Plugin *> selected = Steps::selected_or_active_plugins_for_step(
         orchestrator, STEP_GCODE, &print.full_print_config());
-    REQUIRE(selected.size() == 1);
-    CHECK(selected.front()->get_id() == "gcode.printing_plan_file_writer");
+    REQUIRE(selected.size() == 2);
+    CHECK(selected[0]->get_id() == "gcode.printing_plan_file_writer");
+    CHECK(selected[1]->get_id() == "gcode.post_process");
 
     // The step has no host-defined selector: no exclusive-step entry, no profile option.
     CHECK(Steps::get_exclusive_steps().find(STEP_GCODE) == Steps::get_exclusive_steps().end());
@@ -1003,9 +1005,10 @@ namespace {
 /*
 Behavior of the STEP_GCODE test modifier. It runs after the built-in writer
 (priority 100 against 0), finds the published file and appends one movement,
-then optionally reports an error or requests the cancellation of the plugins.
+then optionally reports an error or requests the cancellation of the plugins. In RemoveFile mode it deletes the
+published file instead, so that the Reader cannot open it.
 */
-enum class StepGcodeModifierMode { Append, AppendThenError, AppendThenCancel };
+enum class StepGcodeModifierMode { Append, AppendThenError, AppendThenCancel, RemoveFile };
 
 // Identity shared by the test plugins below: the C callbacks read it through the plugin context.
 struct StepProbeState
@@ -1078,6 +1081,9 @@ void register_extrusion_edit_probes();
 // export_gcode() only has to run STEP_GCODE and the Reader.
 void prepare_step_gcode_print(Print &print);
 
+// Same Print, but STEP_GCODE is still to run, as after Print::process() and the ordering of a first export.
+void prepare_pending_step_gcode_print(Print &print);
+
 // Run export_gcode() and return the error message of the exception it throws, or an empty text.
 std::string export_gcode_error(Print &print, const boost::filesystem::path &path, GCodeProcessorResult &result);
 
@@ -1103,6 +1109,10 @@ void step_gcode_modifier_run(void *ctx, const plugin_run_context *run_ctx)
         return;
 
     state.file_existed = boost::filesystem::exists(payload->output_path);
+    if (state.mode == StepGcodeModifierMode::RemoveFile) {
+        boost::filesystem::remove(payload->output_path);
+        return;
+    }
     {
         std::ofstream stream(payload->output_path, std::ios::out | std::ios::binary | std::ios::app);
         stream << k_step_gcode_modifier_line;
@@ -1176,6 +1186,12 @@ void prepare_step_gcode_print(Print &print)
     print.mutable_printing_plan();
     for (slicing_step_t step : Steps::execution_order())
         print.mark_step_executed(step);
+}
+
+void prepare_pending_step_gcode_print(Print &print)
+{
+    prepare_step_gcode_print(print);
+    print.mark_step_for_execution(STEP_GCODE);
 }
 
 std::string export_gcode_error(Print &print, const boost::filesystem::path &path, GCodeProcessorResult &result)
@@ -1253,6 +1269,9 @@ TEST_CASE("A failing STEP_GCODE plugin leaves the step undone and the next attem
         g_step_gcode_modifier.run_count = 0;
         const uint64_t writer_runs = writer->get_run_count();
 
+        // The second scenario starts from a valid reference, which an export would reuse: ask for a new pass.
+        print.request_replay_from_worker(Steps::Checkpoint::Plan);
+
         // The modifier already appended its movement when it failed: the step fails and names it.
         const std::string message = export_gcode_error(print, output_path, result);
         INFO(message);
@@ -1295,17 +1314,17 @@ TEST_CASE("STEP_GCODE marks each plugin completed in order and leaves the Reader
     remove_output_pair(output_path);
 
     const std::map<slicing_step_t, std::vector<std::string>> plan {
-        { STEP_GCODE, { "gcode.printing_plan_file_writer", g_step_gcode_modifier.id,
+        { STEP_GCODE, { "gcode.printing_plan_file_writer", "gcode.post_process", g_step_gcode_modifier.id,
                         Steps::k_gcode_read_progress_unit } }
     };
     print.pipeline_progress().initialize(plan);
     print.pipeline_progress().begin_step(STEP_GCODE, "Generating G-code");
     orchestrator.reset_plugin_cancel();
 
-    // The runner alone, without the Reader pass: both plugin units are completed in plan order
+    // The runner alone, without the Reader pass: the three plugin units are completed in plan order
     // (complete_plugin throws otherwise), and the Reader unit is still pending.
     REQUIRE_NOTHROW(Steps::StepGenerateGcode::run_step(orchestrator, print, output_path.string()));
-    CHECK(print.pipeline_progress().percent() == 66);
+    CHECK(print.pipeline_progress().percent() == 75);
     CHECK_THROWS_AS(print.pipeline_progress().verify_step_complete(STEP_GCODE), std::logic_error);
     REQUIRE_NOTHROW(print.pipeline_progress().complete_plugin(STEP_GCODE, Steps::k_gcode_read_progress_unit));
     CHECK_NOTHROW(print.pipeline_progress().verify_step_complete(STEP_GCODE));
@@ -1337,13 +1356,13 @@ TEST_CASE("The Reader pass is announced and counted as the last progress unit of
 
         REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), with_result ? &result : nullptr));
 
-        // Three units (writer, modifier, Reader): the message appears after two of them.
+        // Four units (writer, post-processing, modifier, Reader): the message appears after three of them.
         int reading_percent = -1;
         for (const PrintBase::SlicingStatus &status : statuses)
             if (status.main_text == "Reading the generated G-code")
                 reading_percent = status.percent;
         if (with_result)
-            CHECK(reading_percent == 66);
+            CHECK(reading_percent == 75);
         else
             CHECK(reading_percent == -1);
         CHECK_NOTHROW(print.pipeline_progress().verify_step_complete(STEP_GCODE));
@@ -1386,6 +1405,285 @@ TEST_CASE("A cancellation at the start of the Reader pass leaves a progress tabl
     CHECK(print.is_step_done(STEP_GCODE));
     CHECK(read_text_file(output_path) == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
     CHECK(print.pipeline_progress().percent() == 100);
+    remove_output_pair(output_path);
+}
+
+// Two exports to the same path, without any change: the second one reuses the reference, so no plugin of STEP_GCODE runs,
+// and the file, the statistics, the step timestamp and the result of the first reading stay as they were.
+TEST_CASE("Exporting a valid reference to the same path does not run STEP_GCODE again",
+          "[plugins][gcode][step-gcode][export-reuse]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    g_step_gcode_modifier.run_count = 0;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+
+    Print print;
+    prepare_pending_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    CHECK(g_step_gcode_modifier.run_count.load() == 1);
+    const uint64_t writer_runs = writer->get_run_count();
+    REQUIRE(print.is_step_done(STEP_GCODE));
+    REQUIRE_FALSE(result.moves.empty());
+    REQUIRE(print.print_statistics().statistics_available.load());
+
+    // Age the reference so that a rewrite would change its time, and mark the statistics so that a reread would reset them.
+    boost::filesystem::last_write_time(output_path, boost::filesystem::last_write_time(output_path) - 3600);
+    const std::time_t reference_time = boost::filesystem::last_write_time(output_path);
+    const std::string reference_text = read_text_file(output_path);
+    CHECK(reference_text == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
+    print.print_statistics().total_extruded_volume = 4242.5;
+    const size_t gcode_timestamp = print.step_state_with_timestamp(STEP_GCODE).timestamp;
+    const unsigned int result_id = result.id;
+    const size_t move_count = result.moves.size();
+
+    // The first export asked for a result; the second one does too, and the third one does not.
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), nullptr));
+
+    CHECK(g_step_gcode_modifier.run_count.load() == 1);
+    CHECK(writer->get_run_count() == writer_runs);
+    CHECK(print.step_state_with_timestamp(STEP_GCODE).timestamp == gcode_timestamp);
+    CHECK(boost::filesystem::last_write_time(output_path) == reference_time);
+    CHECK(read_text_file(output_path) == reference_text);
+    CHECK(print.print_statistics().statistics_available.load());
+    CHECK(print.print_statistics().total_extruded_volume == 4242.5);
+    CHECK(result.id == result_id);
+    CHECK(result.moves.size() == move_count);
+
+    // Reusing the reference does not enter the pipeline: the finished progress stays at 100 % and a cancellation of the
+    // plugins requested before the export is not cleared, which a pass of the pipeline would do.
+    CHECK(print.pipeline_progress().percent() == 100);
+    orchestrator.request_plugin_cancel();
+    const bool plugins_cancelled_before = orchestrator.is_plugin_cancelled();
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    const bool plugins_cancelled_after = orchestrator.is_plugin_cancelled();
+    orchestrator.reset_plugin_cancel();
+    CHECK(plugins_cancelled_before);
+    CHECK(plugins_cancelled_after);
+    CHECK(print.pipeline_progress().percent() == 100);
+    CHECK(g_step_gcode_modifier.run_count.load() == 1);
+
+    // A canceled Print stops the export even though the reference could be reused.
+    print.cancel();
+    CHECK_THROWS_AS(orchestrator.export_gcode(print, output_path.string(), &result), CanceledException);
+    print.restart();
+    remove_output_pair(output_path);
+}
+
+// The reader is a property of the reference: the Print keeps the one published with it, and when the step is skipped
+// the export assigns it again from the Print, to the given result as to every later one.
+TEST_CASE("Reusing the reference keeps the reader of its first reading", "[plugins][gcode][step-gcode][export-reuse]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+
+    Print print;
+    prepare_pending_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    CHECK(result.reader_plugin_id == "gcode.reader.marlin2");
+    CHECK(print.gcode_reader_plugin_id() == "gcode.reader.marlin2");
+
+    // A result that the first export never filled receives the reader, and nothing else.
+    GCodeProcessorResult other_result;
+    result.reader_plugin_id.clear();
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &other_result));
+    CHECK(result.reader_plugin_id == "gcode.reader.marlin2");
+    CHECK(other_result.reader_plugin_id == "gcode.reader.marlin2");
+    CHECK(other_result.moves.empty());
+    CHECK(print.gcode_reader_plugin_id() == "gcode.reader.marlin2");
+    remove_output_pair(output_path);
+}
+
+// Another destination is not the reference that was published: the step runs again and writes the new file, even when
+// that file already exists.
+TEST_CASE("Exporting to another path runs STEP_GCODE again", "[plugins][gcode][step-gcode][export-reuse]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    g_step_gcode_modifier.run_count = 0;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+
+    Print print;
+    prepare_pending_step_gcode_print(print);
+    const boost::filesystem::path first_path = temporary_gcode_path();
+    const boost::filesystem::path second_path = temporary_gcode_path();
+    remove_output_pair(first_path);
+    remove_output_pair(second_path);
+    GCodeProcessorResult result;
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, first_path.string(), &result));
+    const uint64_t writer_runs = writer->get_run_count();
+
+    // The second destination exists with another content, so only the comparison of the paths can decide.
+    {
+        std::ofstream witness(second_path.string(), std::ios::out | std::ios::binary);
+        witness << "witness\n";
+    }
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, second_path.string(), &result));
+
+    CHECK(read_text_file(second_path) == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
+    CHECK(print.gcode_reader_source_path() == second_path.string());
+    CHECK(writer->get_run_count() == writer_runs + 1);
+    CHECK(g_step_gcode_modifier.run_count.load() == 2);
+    CHECK(boost::filesystem::exists(first_path));
+    CHECK(print.is_step_done(STEP_GCODE));
+    remove_output_pair(first_path);
+    remove_output_pair(second_path);
+}
+
+// The reference is a file: once it is gone, the export writes it again.
+TEST_CASE("Exporting after the reference was deleted runs STEP_GCODE again", "[plugins][gcode][step-gcode][export-reuse]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+
+    Print print;
+    prepare_pending_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    const uint64_t writer_runs = writer->get_run_count();
+    remove_output_pair(output_path);
+    REQUIRE(print.is_step_done(STEP_GCODE));
+
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+
+    CHECK(boost::filesystem::exists(output_path));
+    CHECK(read_text_file(output_path) == "G21\nG90\nM82\nG1 X10 Y10 F1000\n");
+    CHECK(writer->get_run_count() == writer_runs + 1);
+    remove_output_pair(output_path);
+}
+
+// A step that is to be run again is not a reference, even when the published path and its file are intact.
+TEST_CASE("Exporting while STEP_GCODE is to be run again runs it", "[plugins][gcode][step-gcode][export-reuse]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+
+    Print print;
+    prepare_pending_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    const uint64_t writer_runs = writer->get_run_count();
+
+    print.mark_step_for_execution(STEP_GCODE);
+    REQUIRE_FALSE(print.is_step_done(STEP_GCODE));
+    CHECK(print.gcode_reader_source_path() == output_path.string());
+    CHECK(boost::filesystem::exists(output_path));
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+
+    CHECK(writer->get_run_count() == writer_runs + 1);
+    CHECK(print.is_step_done(STEP_GCODE));
+    remove_output_pair(output_path);
+}
+
+// A change of setting that Print::apply() propagates to STEP_GCODE makes the next export run it again, on a printed cube.
+TEST_CASE("A setting change that invalidates STEP_GCODE makes the export run it again",
+          "[plugins][gcode][step-gcode][export-reuse]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.marlin2"}, {"seam_visibility", "0"}});
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    print.process();
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    GCodeProcessorResult result;
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    const uint64_t writer_runs = writer->get_run_count();
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    CHECK(writer->get_run_count() == writer_runs);
+
+    DynamicPrintConfig changed = print.full_print_config();
+    changed.set_deserialize_strict("fill_density", "35%");
+    print.apply(model, changed);
+    REQUIRE_FALSE(print.is_step_done(STEP_GCODE));
+    print.process();
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+
+    CHECK(writer->get_run_count() == writer_runs + 1);
+    CHECK(print.is_step_done(STEP_GCODE));
+    remove_output_pair(output_path);
+}
+
+// A reading that fails ends STEP_GCODE in failure: the step is not done, the result does not keep an older reading, and
+// the next export runs the step again. Without a requested result nothing is read, so nothing can fail.
+TEST_CASE("A failing read of the generated G-code fails STEP_GCODE", "[plugins][gcode][step-gcode][export-reuse]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_step_gcode_modifier();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::RemoveFile;
+    const ScopedPluginActivation modifier(orchestrator, g_step_gcode_modifier.id);
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    REQUIRE(writer != nullptr);
+
+    Print print;
+    prepare_pending_step_gcode_print(print);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+
+    // The modifier deleted the file the writer published; without a result the pipeline never opens it.
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), nullptr));
+    CHECK(print.is_step_done(STEP_GCODE));
+    CHECK_FALSE(boost::filesystem::exists(output_path));
+
+    // The file is gone, so the next export runs the step, and its reading fails.
+    GCodeProcessorResult result;
+    result.moves.emplace_back();
+    const uint64_t writer_runs = writer->get_run_count();
+    const std::string message = export_gcode_error(print, output_path, result);
+    INFO(message);
+    CHECK(message.find("Cannot open the G-code Reader source file") != std::string::npos);
+    CHECK(writer->get_run_count() == writer_runs + 1);
+    CHECK_FALSE(print.is_step_done(STEP_GCODE));
+    CHECK_FALSE(print.print_statistics().statistics_available.load());
+    CHECK(result.moves.empty());
+
+    // The next attempt runs the step again and its reading succeeds.
+    g_step_gcode_modifier.mode = StepGcodeModifierMode::Append;
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), &result));
+    CHECK(writer->get_run_count() == writer_runs + 2);
+    CHECK(print.is_step_done(STEP_GCODE));
+    CHECK_FALSE(result.moves.empty());
+    CHECK(print.print_statistics().statistics_available.load());
     remove_output_pair(output_path);
 }
 
@@ -1597,6 +1895,12 @@ TEST_CASE("PrintingPlan writer exports a cube with cost seam placement",
         const std::vector<std::string> fresh_commands = normalized_commands(read_text_file(output_path));
         PrintStateBase::TimeStamp previous_pipeline_timestamp = 0;
         for (const slicing_step_t step : Steps::execution_order()) {
+            // The reference does not run the export: it stays undone until an export is requested.
+            if (step == STEP_EXPORT) {
+                CHECK_FALSE(print.is_step_done(STEP_EXPORT));
+                CHECK_FALSE(print.should_execute_step(STEP_EXPORT));
+                continue;
+            }
             const PrintStateBase::StateWithWarnings state = print.step_state_with_warnings(step);
             CAPTURE(step);
             CHECK(state.is_done());
@@ -1686,8 +1990,10 @@ TEST_CASE("PrintingPlan writer exports a cube with cost seam placement",
             CHECK_FALSE(print.is_step_done(STEP_GCODE));
             for (const slicing_step_t step : Steps::execution_order()) {
                 CAPTURE(step);
+                // The export is queued by an export request only, never by a replay.
                 CHECK(print.should_execute_step(step) ==
-                      !Steps::executes_before(step, Steps::checkpoint_resume_step(Steps::Checkpoint::Ordering)));
+                      (step != STEP_EXPORT &&
+                       !Steps::executes_before(step, Steps::checkpoint_resume_step(Steps::Checkpoint::Ordering))));
             }
             CHECK(slicing_count == 1);
             CHECK(finalize_slicing_count == 1);

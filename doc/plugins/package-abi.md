@@ -10,7 +10,7 @@ slicer_version = 2.7.63.0-alpha+UNKNOWN
 [abi]
 slic3r_plugin_types.h = 4.1
 slic3r_orchestrator.h = 3.5
-slic3r_slicing_step.h = 2.2
+slic3r_slicing_step.h = 2.3
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
 steps/slic3r_step_gcode_export.h = 2.1

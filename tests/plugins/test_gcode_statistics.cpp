@@ -58,6 +58,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepReadGeneratedGcode.hpp"
 
 
@@ -430,10 +431,13 @@ TEST_CASE("The availability flag follows the life of the measured statistics",
     Orchestrator::instance().export_gcode(print, reference, &result);
     CHECK(print.print_statistics().statistics_available.load());
 
-    // An export that does not ask for a result replays STEP_GCODE and leaves the statistics unavailable.
+    // A pass of STEP_GCODE without a result leaves the statistics unavailable. It is asked for explicitly: an export reuses a valid reference.
+    print.request_replay_from_worker(Steps::Checkpoint::Plan);
     Orchestrator::instance().export_gcode(print, reference, nullptr);
     CHECK_FALSE(print.print_statistics().statistics_available.load());
 
+    // A result is needed to read the reference: ask for a new pass.
+    print.request_replay_from_worker(Steps::Checkpoint::Plan);
     Orchestrator::instance().export_gcode(print, reference, &result);
     REQUIRE(print.print_statistics().statistics_available.load());
     // Invalidating STEP_GCODE alone, without the checkpoint cleanup of an apply, also withdraws the statistics.

@@ -1130,6 +1130,8 @@ TEST_CASE("G-code exporter receives the statistics list only after a Reader resu
     CHECK_MESSAGE(Slic3r::Test::Plugins::GCodeExportTest::is_statistics_block(block, first_bad_line),
                   "Malformed statistics line: " << first_bad_line);
 
+    // Generate the reference again without a result: a valid one would be reused, with the statistics of the reading above.
+    print.request_replay_from_worker(Steps::Checkpoint::Plan);
     orchestrator.export_gcode(print, reference.string(), nullptr);
     orchestrator.export_print(print, probe_config, reference.string(), (directory.path() / "two.probe").string(), selection);
     CHECK(g_exporter_probe_state.export_statistics.empty());

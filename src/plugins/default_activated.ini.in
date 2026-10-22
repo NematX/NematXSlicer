@@ -14,6 +14,7 @@ overhang_slope_fill = 1
 max_overhang_threshold = 1
 vase.multi_island_connector = 1
 gcode.printing_plan_file_writer = 1
+gcode.post_process = 1
 gcode.exporter.simple = 1
 gcode.settings_scripts = 1
 gcode.feature_gcode = 1

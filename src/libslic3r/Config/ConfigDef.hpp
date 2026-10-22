@@ -24,11 +24,23 @@
 #ifndef slic3r_ConfigDef_hpp_
 #define slic3r_ConfigDef_hpp_
 
-/* Configuration definitions own option metadata/defaults; config stores hold
-   the corresponding values. Nature predicates describe persistence and comparison
-   eligibility by testing withdrawal flags without filtering values; zero withdraws nothing.
-   A required plugin group connects an active value
-   (different from its definition default) to a provider's declared config keys. */
+/*
+A configuration definition describes an option's key, value type, default and
+display metadata. A configuration store holds chosen values. ConfigOptionNature
+controls where a value may be saved or compared: its withdrawal flags remove
+permissions from the normal set, without deleting or changing the stored value.
+
+Define metadata before loading typed values. During loading, known keys can be
+parsed into options; unrecognized keys can instead be reported as name/text
+substitutions for the caller to preserve separately. A required plugin group
+links an active setting to the selected provider's declared support for that key.
+
+Configuration definitions own option metadata/defaults; config stores hold
+the corresponding values. Nature predicates describe persistence and comparison
+eligibility by testing withdrawal flags without filtering values; zero withdraws nothing.
+A required plugin group connects an active value
+(different from its definition default) to a provider's declared config keys.
+*/
 
 #include <cstdint>
 #include <functional>
@@ -879,6 +891,10 @@ public:
     //bool&               opt_bool(const t_config_option_key &opt_key)                            { return this->option<ConfigOptionBool>(opt_key)->value; }
     //uint8_t&            opt_bool(const t_config_option_key &opt_key, size_t idx)          { return this->option<ConfigOptionBools>(opt_key)->get_at(idx); }
 
+    // Put the options in the environment of the process as SLIC3R_<KEY> (upper case), for the programs started afterwards.
+    // Only the keys that writes_key() accepts for ConfigWriteTarget::Project are exported: LOCAL (connection, secrets)
+    // and VOLATILE keys never are. The environment is process-wide and is not restored; the variables inherited from the user
+    // are neither read nor filtered.
     void setenv_() const;
     ConfigSubstitutions load(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule);
     ConfigSubstitutions load_from_ini(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule);

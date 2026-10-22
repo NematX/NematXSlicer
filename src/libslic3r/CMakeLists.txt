@@ -287,6 +287,8 @@ set(SLIC3R_SOURCES
 	Plugins/GCode/CustomGCodePerPrintZOrdering.cpp
 	Plugins/GCode/CustomGCodePerPrintZRecord.cpp
 	Plugins/GCode/CustomGCodePerPrintZRecord.hpp
+	Plugins/GCode/PostProcessScripts.cpp
+	Plugins/GCode/PostProcessScripts.hpp
 	Plugins/GCode/PrintingPlanFileWriter.cpp
 	Plugins/GCode/PrintingPlanFileWriter.hpp
 	Plugins/GCode/SettingsGCodeScripts.cpp
@@ -641,6 +643,8 @@ set(SLIC3R_SOURCES
 	Steps/StepPrepareForPeriemters.hpp
 	Steps/StepPrepareInfill.cpp
 	Steps/StepPrepareInfill.hpp
+	Steps/StepExport.cpp
+	Steps/StepExport.hpp
 	Steps/StepReadGeneratedGcode.cpp
 	Steps/StepReadGeneratedGcode.hpp
 	Steps/StepSlicing.cpp
@@ -740,6 +744,7 @@ set(SLIC3R_SOURCES
     FileParserError.hpp
     FilesystemTransaction.cpp
     FilesystemTransaction.hpp
+	ScopedTemporaryFile.hpp
     FilesystemTransactionTest.hpp
     Fill/Fill.cpp
     Fill/Fill3DHoneycomb.cpp

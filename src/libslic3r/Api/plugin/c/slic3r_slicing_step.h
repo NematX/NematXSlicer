@@ -6,7 +6,7 @@
 #define slic3r_slicing_step_h_
 
 #define SLIC3R_PLUGIN_API_SLICING_STEP_MAJOR 2u
-#define SLIC3R_PLUGIN_API_SLICING_STEP_MINOR 2u
+#define SLIC3R_PLUGIN_API_SLICING_STEP_MINOR 3u
 
 #include <stdint.h>
 
@@ -73,6 +73,11 @@ enum slicing_step_values
     STEP_EXTRUSION_EDIT            = 1800,
     STEP_EXTRUSION_SIMPLIFICATION  = 1900,
     STEP_GCODE                     = 2000,
+    /*
+    Publishes the finished G-code reference. It runs only when an export is
+    requested, never as part of the preview.
+    */
+    STEP_EXPORT                    = 2100,
 
     /*
     Service plugin type used to create infill extrusion for a surface.

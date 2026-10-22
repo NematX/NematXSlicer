@@ -2719,6 +2719,8 @@ TEST_CASE("Export statistics include the tower share for preview and explicit CL
     CHECK(boost::filesystem::exists(print.gcode_reader_source_path()));
     CHECK(print.gcode_reader_plugin_id() == result.reader_plugin_id);
     GCodeProcessorResult local_result;
+    // The reference of the export above is valid and would be reused without reading: ask for a new pass that reads it.
+    print.request_replay_from_worker(Steps::Checkpoint::Plan);
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, cli_path, &local_result));
     CHECK(stats.statistics_available);
     CHECK(stats.total_extruded_volume == Approx(expected_volume));

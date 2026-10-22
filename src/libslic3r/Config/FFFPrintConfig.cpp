@@ -45,6 +45,11 @@ init_fff_params() supplies their types, defaults, validation limits and GUI text
 These definitions describe settings; they do not hold a user's chosen values or
 generate toolpaths. Consumers copy defaults into the appropriate config store.
 
+Built-in FFF option definitions and preset key lists. Tower options invalidate
+tower generation, and export merges their current envelopes with the cached
+slicing hull. Object tower offsets use model-instance XY. Active single-extruder
+multi-material (SEMM) requires support from the selected firmware provider.
+
 Retained unknown settings are text, not options used by slicing.
 print_custom_setting stores JSON groups named print and printer.
 filament_custom_setting stores one JSON string per filament position.
@@ -5116,8 +5121,10 @@ void init_fff_params(PrintConfigDef &definition)
     def->tooltip = L("If you want to process the output G-code through custom scripts, "
                    "just list their absolute paths here."
                    "\nSeparate multiple scripts with a semicolon or a line return.\n!! please use '\\;' here if you want a not-line-separation ';'!!"
-                   "\nScripts will be passed the absolute path to the G-code file as the first argument, "
-                   "and they can access the Slic3r config settings by reading environment variables."
+                   "\nScripts run when the G-code is generated, before it is previewed, and are passed the absolute path "
+                   "of a temporary copy of the generated G-code as the last argument. They must modify that file in place. "
+                   "The copy does not contain the header, thumbnails and configuration added when the file is exported. "
+                   "They can access the Slic3r config settings that a project file contains by reading environment variables."
                    "\nThe script, if passed as a relative path, will also be searched from the slic3r directory, "
                    "the slic3r configuration directory and the user directory.");
     def->multiline = true;

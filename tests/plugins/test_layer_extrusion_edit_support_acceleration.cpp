@@ -15,15 +15,27 @@
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 
-/* Support and brim/skirt acceleration.
-   The default acceleration plugin roots support acceleration on
-   default_acceleration, the support interface on the support acceleration,
-   and brim/skirt on the support acceleration too; zero in any of them inherits
-   its base. Unit cases publish one support, one interface and one skirt leaf
-   on a small auxiliary layer, let ordering clone them into the PrintingPlan,
-   run only the acceleration plugin and read the effective acceleration of
-   each leaf. A final case slices a real object with grid support, exports it
-   and checks the print acceleration (Marlin M204 P) active on support moves. */
+/*
+Support and brim/skirt acceleration.
+The default acceleration plugin roots support acceleration on
+default_acceleration, the support interface on the support acceleration,
+and brim/skirt on the support acceleration too; zero in any of them inherits
+its base. Unit cases publish one support, one interface and one skirt leaf
+on a small auxiliary layer, let ordering clone them into the PrintingPlan,
+run only the acceleration plugin and read the effective acceleration of
+each leaf. A final case slices a real object with grid support, exports it
+and checks the print acceleration (Marlin M204 P) active on support moves.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- Test::SupportGrid::config()
+        |-- Test::init_print()
+        |-- print.process()
+        |-- export_gcode()
+        `-- Test::GCode::read_text_file()
+*/
 
 using namespace Slic3r;
 using namespace Slic3r::Printing;
@@ -183,7 +195,7 @@ TEST_CASE("A print with support exports support moves at the support acceleratio
     std::string code;
     try {
         print.process();
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Test::GCode::read_text_file(path);
     } catch (...) {
         Test::GCode::remove_output_pair(path);

@@ -904,7 +904,7 @@ TEST_CASE("Selector dropdown preferences preserve native ordering and historical
     CHECK(exporter_table.ui_fragment.find("line:G-code exporter\n") != std::string::npos);
 }
 
-// Check the keys, labels and declared settings of all ten selectors for entire steps.
+// Check the keys, labels and declared settings of all nine selectors for entire steps.
 TEST_CASE("Whole-step selector traits come from their owner module",
           "[plugins][step-pipeline][selector-snapshot][selector-traits]")
 {
@@ -929,7 +929,7 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         {GCODE_FIRMWARE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true}
     };
     const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &identities = Steps::get_exclusive_steps();
-    REQUIRE(identities.size() == 10);
+    REQUIRE(identities.size() == 9);
     for (const Expected &entry : expected) {
         INFO(int(entry.step));
         const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator identity = identities.find(entry.step);

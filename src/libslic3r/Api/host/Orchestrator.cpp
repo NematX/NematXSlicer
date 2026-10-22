@@ -3305,16 +3305,34 @@ void Orchestrator::slice(Print &print) {
     Steps::StepPipeline::run_slice(*this, print);
 }
 
+// Run the export-side steps up to STEP_GCODE, unless the reference of the previous pass can be reused. The reference is
+// reusable when STEP_GCODE is done (so its reading, when one was requested, succeeded), the source it published is at
+// the requested path, and that file still exists. The paths are compared as strings: the GUI always passes the same
+// one, and a different spelling only costs one more pass of STEP_GCODE. A filesystem error counts as "not usable",
+// like in export_print(). Only a reference that is not usable makes STEP_GCODE run again; reusing it leaves the
+// reference file, the Print statistics and the published reader untouched, and runs no plugin (writer,
+// post-processing scripts, modifiers). The reader ID always comes from the Print, which is the only place that keeps
+// it between passes. When the reference is reused, `result` keeps the content of the last reading and only its
+// reader_plugin_id is assigned again. A pass that runs reads the file into `result` when one is given; if that read
+// fails, `result` is reset, STEP_GCODE is not marked as done and the exception propagates. The final statuses are
+// published when the step ran and when the reference was reused. Cancellation and plugin failures throw.
 std::string Orchestrator::export_gcode(Print &print,
                                        const std::string &path_template,
                                        GCodeProcessorResult *result)
 {
-    // output everything to a G-code file
     // The following call may die if the output_filename_format template substitution fails.
     const std::string path = print.output_filepath(path_template);
-    // Re-export through the worker path: the UI cancellation callback would wait for this very thread.
-    print.request_replay_from_worker(Steps::Checkpoint::Plan);
-    const std::string reader_plugin_id = Steps::StepPipeline::run_gcode(*this, print, path, result);
+    // A pass that has nothing to run would not notice a cancellation requested before it.
+    print.throw_if_canceled();
+    boost::system::error_code filesystem_error;
+    const bool reusable = print.is_step_done(STEP_GCODE) && print.gcode_reader_source_path() == path &&
+        boost::filesystem::is_regular_file(boost::filesystem::path(path), filesystem_error) && !filesystem_error;
+    if (!reusable) {
+        // Replay through the worker path: the UI cancellation callback would wait for this very thread.
+        print.request_replay_from_worker(Steps::Checkpoint::Plan);
+        Steps::StepPipeline::run_gcode(*this, print, path, result);
+    }
+    const std::string reader_plugin_id = print.gcode_reader_plugin_id();
 
     if (result != nullptr) {
         result->reader_plugin_id = reader_plugin_id;
@@ -3324,6 +3342,8 @@ std::string Orchestrator::export_gcode(Print &print,
 
     print.set_status(100, "", PrintBase::SlicingStatus::DEFAULT | PrintBase::SlicingStatus::SECONDARY_STATE);
     print.set_status(100, L("Gcode done"), PrintBase::SlicingStatus::FlagBits::GCODE_ENDED);
+    // The bar shows 100 % now, even when no plan published it (a reused reference): an export continues from it.
+    print.pipeline_progress().set_shown_percent(100);
     return path;
 }
 
@@ -3543,9 +3563,18 @@ std::string Orchestrator::export_print(Print &print,
     return destination.string();
 }
 
+// Run STEP_EXPORT alone for the deposited request and return the path it published. The pipeline throws when no
+// request is queued or when the reference is not ready, and no earlier step is replayed.
+std::string Orchestrator::export_requested(Print &print)
+{
+    Steps::StepPipeline::run_export(*this, print);
+    return print.export_result_path();
+}
+
 // Select the exporter and refuse an incompatible typed suffix before any work, then generate a private reference
 // beside the requested destination (STEP_GCODE rereads it into the print statistics), export it to the
-// statistics-finalized path, and always remove the reference. The caller keeps the post-processing scripts. Failures throw.
+// statistics-finalized path, and always remove the reference. The post-processing scripts have already run in STEP_GCODE, on the
+// reference. Failures throw.
 std::string Orchestrator::export_gcode_cli(Print &print, const std::string &requested_output_path)
 {
     const DynamicPrintConfig &config = print.full_print_config();
@@ -3563,8 +3592,11 @@ std::string Orchestrator::export_gcode_cli(Print &print, const std::string &requ
         GCodeProcessorResult statistics_result;
         const std::string reference_path = this->export_gcode(print, reference.string(), &statistics_result);
         const std::string finalized_path = print.print_statistics().finalize_output_path(requested_path);
-        const std::string exported_path = this->export_print(
-            print, config, reference_path, finalized_path, selection);
+        // No renderer on the command line: the exporter's thumbnail requests are skipped.
+        Print::ExportRequest request = print.make_export_request(ThumbnailsGeneratorCallback());
+        request.set_output_path(finalized_path);
+        print.request_export(std::move(request));
+        const std::string exported_path = this->export_requested(print);
         boost::system::error_code cleanup_error;
         boost::filesystem::remove(reference, cleanup_error);
         if (cleanup_error)

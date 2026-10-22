@@ -100,6 +100,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/GCode/FeatureGCode.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp"
 #include "libslic3r/Plugins/GCode/Thumbnail/BuiltinGCodeThumbnails.hpp"
+#include "libslic3r/Plugins/GCode/PostProcessScripts.hpp"
 #include "libslic3r/Plugins/GCode/PrintingPlanFileWriter.hpp"
 #include "libslic3r/Plugins/SeamPlacer/AlignedSeamPlacer.hpp"
 #include "libslic3r/Plugins/SeamPlacer/ContiguousSeamPlacer.hpp"
@@ -726,6 +727,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::VaseMultiIslandConnectorPlugin::register_vase_multi_island_connector_plugin);
     register_builtin_plugin(orchestrator, "gcode.printing_plan_file_writer",
         slic3r_api::GCodeGeneration::PrintingPlanFileWriterPlugin::register_printing_plan_file_writer_plugin);
+    register_builtin_plugin(orchestrator, "gcode.post_process",
+        slic3r_api::GCodeGeneration::PostProcessScriptsPlugin::register_post_process_scripts_plugin);
     register_builtin_plugin(orchestrator, "gcode.exporter.simple",
         slic3r_api::GCodeGeneration::Exporter::register_default_gcode_exporter_plugin);
     register_builtin_plugin(

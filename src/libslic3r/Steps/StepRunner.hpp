@@ -104,6 +104,7 @@ inline const char *builtin_step_name(slicing_step_t step)
     case STEP_EXTRUSION_EDIT:        return "STEP_EXTRUSION_EDIT";
     case STEP_EXTRUSION_SIMPLIFICATION: return "STEP_EXTRUSION_SIMPLIFICATION";
     case STEP_GCODE:                 return "STEP_GCODE";
+    case STEP_EXPORT:                return "STEP_EXPORT";
     case INFILL_PATTERN:             return "INFILL_PATTERN";
     case INFILL_SURFACE_RECIPE_MODIFIER: return "INFILL_SURFACE_RECIPE_MODIFIER";
     case BRIDGE_DETECTOR:            return "BRIDGE_DETECTOR";

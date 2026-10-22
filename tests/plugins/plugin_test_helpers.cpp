@@ -73,6 +73,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/GCode/Exporter/DefaultGCodeExporter.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp"
 #include "libslic3r/Plugins/GCode/Thumbnail/BuiltinGCodeThumbnails.hpp"
+#include "libslic3r/Plugins/GCode/PostProcessScripts.hpp"
 #include "libslic3r/Plugins/GCode/PrintingPlanFileWriter.hpp"
 #include "libslic3r/Plugins/GCode/Reader/DefaultGCodeReader.hpp"
 #include "libslic3r/Plugins/GCode/SettingsGCodeScripts.hpp"
@@ -785,6 +786,8 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::GCodeGeneration::Exporter::register_default_gcode_exporter_plugin(
             orchestrator_handle_value);
+        slic3r_api::GCodeGeneration::PostProcessScriptsPlugin::register_post_process_scripts_plugin(
+            orchestrator_handle_value);
         register_gcode_exporter_test_providers(orchestrator_handle_value);
         slic3r_api::GCodeGeneration::SettingsGCodeScriptsPlugin::register_settings_gcode_scripts_plugin(
             orchestrator_handle_value);
@@ -938,6 +941,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "overhang_slope_fill");
         activate_plugin_or_fail(orchestrator, "vase.multi_island_connector");
         activate_plugin_or_fail(orchestrator, "gcode.printing_plan_file_writer");
+        activate_plugin_or_fail(orchestrator, "gcode.post_process");
         // A child test process can start without the built-in exporter to check how an unavailable default behaves.
         if (std::getenv("SLIC3R_TEST_SIMPLE_EXPORTER_DISABLED") == nullptr)
             activate_plugin_or_fail(orchestrator, "gcode.exporter.simple");

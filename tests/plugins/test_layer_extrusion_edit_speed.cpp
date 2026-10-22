@@ -66,6 +66,16 @@ Tests inspect effective process values through the extrusion tree because the
 default plugins deliberately hoist identical speed and acceleration values to
 parents independently. Direct-property checks are used only where the storage
 placement is itself the behavior under test.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- prepare_regional_process_plan()
+        |-- append()
+        |-- run_default_editors()
+        |-- obstacle.make_clockwise()
+        |-- make_path()
+        `-- run_editors()
 */
 
 namespace {
@@ -1745,7 +1755,7 @@ TEST_CASE("A print with support exports support moves at the support speeds",
     std::string code;
     try {
         print.process();
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Slic3r::Test::GCode::read_text_file(path);
     } catch (...) {
         Slic3r::Test::GCode::remove_output_pair(path);

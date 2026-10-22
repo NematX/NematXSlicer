@@ -34,8 +34,9 @@ share, the support flag and the availability flag are set too. Every caller that
 statistics (the GUI, the CLI) asks STEP_GCODE for a viewer result; exports without a
 requested viewer result do not trigger reading in the pipeline.
 
-The caller decides whether a Reader failure is fatal. run() reports failures as
-exceptions and never removes or modifies the producer-owned source file.
+run() reports failures as exceptions and never removes or modifies the producer-owned
+source file. When the pipeline asks for a viewer result, a failure ends STEP_GCODE
+without marking it done.
 
 At host startup, register_selector_traits(orchestrator) declares the reader's
 settings metadata. StepSelectorTraits.hpp defines that metadata; the reading

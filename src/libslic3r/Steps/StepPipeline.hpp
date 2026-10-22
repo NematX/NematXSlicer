@@ -67,7 +67,10 @@ enum class Checkpoint : uint8_t
     Ordering,
     // The finished PrintingPlan, read-only for STEP_GCODE; resumes at STEP_GCODE.
     Plan,
-    // Every step has run. Asking to resume here forces nothing.
+    // The G-code reference is ready (STEP_GCODE and its reading are done). The
+    // export is not part of the reference: it is requested explicitly and
+    // resumes here, so keeping this checkpoint discards nothing. Asking to
+    // replay from here forces no step.
     GCode
 };
 
@@ -209,12 +212,14 @@ slicing_step_t tightened_invalidation_step(slicing_step_t current, slicing_step_
 // Checkpoint::None. A step outside execution_order() is a caller error; it
 // asserts and conservatively maps to Checkpoint::None.
 Checkpoint checkpoint_before_step(slicing_step_t step);
-// First step executed when resuming from checkpoint, or STEP_NONE for
-// Checkpoint::GCode, which has nothing left to run.
+// First step executed when resuming from checkpoint. For Checkpoint::GCode this
+// is STEP_EXPORT, which runs only when requested (see Print::request_export).
 slicing_step_t checkpoint_resume_step(Checkpoint checkpoint);
 
 // Direct dependency graph used by Print's new invalidation plan. If A maps to
-// B, invalidating A also asks B to run on the next process().
+// B, invalidating A also asks B to run on the next process(). STEP_EXPORT has no
+// incoming edge: its output (a published file) is not a reusable result, so no
+// invalidation queues it; only Print::request_export does.
 const std::map<slicing_step_t, std::vector<slicing_step_t>> &step_dependents();
 
 // Stable transitive closure of step_dependents(). The returned vector follows
@@ -250,6 +255,13 @@ public:
     // post-ordering step, STEP_GCODE, and the host-only preview reader phase.
     static std::string run_gcode(Orchestrator &orchestrator, Print &print, const std::string &path,
         GCodeProcessorResult *result = nullptr);
+
+    // Run STEP_EXPORT alone on the G-code reference that STEP_GCODE already prepared. Print::request_export
+    // must have queued it: otherwise this throws. No earlier step runs, even when an invalidation made one
+    // pending since: the export then fails with a "reference not ready" error (see StepExport::run_step) and
+    // writes nothing. It resets the pipeline progress and plans a one-step table, consumes the request on
+    // every outcome, and stores the published path in the Print. The caller must not hold state_mutex().
+    static void run_export(Orchestrator &orchestrator, Print &print);
 
     // Compatibility wrapper for code that still wants the whole migrated
     // pipeline in one call. Normal GUI/CLI flow uses run_slice() and run_gcode()

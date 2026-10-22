@@ -6,12 +6,24 @@
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 
-/* Grid-family tests inspect geometric output before toolpath generation. A
-   slab on a post needs bed-reaching columns; a low platform also needs bottom
-   contacts. Surface position bits encode which side of the object is supported.
-   These tests exercise the real STEP_SUPPORT dispatcher and API publication.
-   Variable-height cantilevers additionally check temporary slab placement and
-   the published support tops before a complete G-code export. */
+/*
+Grid-family tests inspect geometric output before toolpath generation. A
+slab on a post needs bed-reaching columns; a low platform also needs bottom
+contacts. Surface position bits encode which side of the object is supported.
+These tests exercise the real STEP_SUPPORT dispatcher and API publication.
+Variable-height cantilevers additionally check temporary slab placement and
+the published support tops before a complete G-code export.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- make_cube()
+        |-- mesh.merge()
+        |-- SG::init_print_with_profile()
+        |-- print.validate()
+        |-- print.process()
+        `-- export_gcode()
+*/
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -171,7 +183,7 @@ TEST_CASE("Grid variable height contacts slabs and export follow each roof", "[p
     std::string code;
     try {
         print.process();
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Test::GCode::read_text_file(path);
     } catch (...) {
         Test::GCode::remove_output_pair(path);

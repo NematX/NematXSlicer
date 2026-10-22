@@ -17,13 +17,25 @@
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/BranchIslandClass.hpp"
 
-/* Tree branch sheaths, run through the support toolpath step on synthetic auxiliary layers. Each layer is built from a
-   subject area and holds typed surfaces; the step then runs the active providers, and the helpers read the published
-   region islands back. The first-layer case compares the branch flange with the legacy base flange of the same surface,
-   and the selector case runs both algorithms over the same sparse surfaces, including an inactive-provider fallback.
-   The thin islands print their centreline instead
-    of a sheath or a stationary deposit when elongated (BranchIslandClass.hpp); their cases check order, flow, volume,
-    and the islands that fall back to a deposit. A full tree print checks deposit G-code and the reader's support volume. */
+/*
+Tree branch sheaths, run through the support toolpath step on synthetic auxiliary layers. Each layer is built from a
+subject area and holds typed surfaces; the step then runs the active providers, and the helpers read the published
+region islands back. The first-layer case compares the branch flange with the legacy base flange of the same surface,
+and the selector case runs both algorithms over the same sparse surfaces, including an inactive-provider fallback.
+The thin islands print their centreline instead
+ of a sheath or a stationary deposit when elongated (BranchIslandClass.hpp); their cases check order, flow, volume,
+ and the islands that fall back to a deposit. A full tree print checks deposit G-code and the reader's support volume.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- slice()
+        |-- branch_config()
+        |-- branch_width()
+        |-- circle()
+        `-- run_layer()
+*/
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -900,7 +912,7 @@ TEST_CASE("Tree tips export deposits with conserved support volume", "[plugins][
     CAPTURE(volume, print.object(0).auxiliary_layers().size());
     REQUIRE(deposits > 0);
     try {
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Test::GCode::read_text_file(path);
     } catch (...) {
         Test::GCode::remove_output_pair(path);

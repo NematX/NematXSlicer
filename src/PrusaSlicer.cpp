@@ -11,7 +11,8 @@ an error can be reported as a command-line failure without leaving GUI work queu
 
 CLI actions load models/config and run exports or launch the GUI. FFF export
 explicitly rereads its published G-code for statistics before resolving
-measured filename placeholders and running post-processing scripts.
+measured filename placeholders. The post-processing scripts have already run,
+during the generation of that G-code (STEP_GCODE), before it is reread.
 
 Representative direct calls (branches are not a timeline):
 
@@ -70,7 +71,6 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Geometry.hpp"
-#include "libslic3r/GCode/PostProcessor.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/ModelArrange.hpp"
@@ -750,8 +750,6 @@ int CLI::run(int argc, char **argv)
                             }
                             outfile = outfile_final;
                         }
-                        // Run the post-processing scripts if defined.
-                        run_post_process_scripts(outfile, fff_print.full_print_config());
                         boost::nowide::cout << "Slicing result exported to " << outfile << std::endl;
                     } catch (const std::exception &ex) {
                         boost::nowide::cerr << ex.what() << std::endl;

@@ -287,7 +287,8 @@ TEST_CASE("Pipeline state invalidation preserves checkpoint prefixes and is idem
             CHECK_FALSE(print.request_replay_from(checkpoint));
         }
         for (const slicing_step_t step : Steps::execution_order()) {
-            const bool invalid = checkpoint != Checkpoint::GCode &&
+            // The export is never invalidated by a replay: it is queued by an export request only.
+            const bool invalid = checkpoint != Checkpoint::GCode && step != STEP_EXPORT &&
                 !Steps::executes_before(step, Steps::checkpoint_resume_step(checkpoint));
             const PrintStateBase::StateWithWarnings state = print.step_state_with_warnings(step);
             CAPTURE(checkpoint, step);
@@ -405,7 +406,8 @@ TEST_CASE("Apply retains the affected first running step across stops and deeper
     CHECK(print.current_checkpoint() == Steps::Checkpoint::None);
     for (const slicing_step_t step : Steps::execution_order()) {
         CHECK_FALSE(print.is_step_done(step));
-        CHECK(print.should_execute_step(step));
+        // A full replay queues every step except the export, which only an export request queues.
+        CHECK(print.should_execute_step(step) == (step != STEP_EXPORT));
     }
     print.set_cancel_callback([]() {});
 }
@@ -1250,7 +1252,8 @@ TEST_CASE("Checkpoint replay invalidates and republishes every canonical Print r
     print.set_cancel_callback([]() {});
     for (size_t index = 0; index < milestones.size(); ++index) {
         const slicing_step_t step = milestones[index];
-        const bool invalidated = checkpoint != Checkpoint::GCode &&
+        // The export is never queued by a replay: it stays done until an export is requested.
+        const bool invalidated = checkpoint != Checkpoint::GCode && step != STEP_EXPORT &&
             !Steps::executes_before(step, Steps::checkpoint_resume_step(checkpoint));
         CAPTURE(checkpoint, step);
         CHECK(print.is_step_done(step) == !invalidated);
@@ -1373,7 +1376,8 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
         { STEP_LAYER_STICHING, Checkpoint::Ordering },
         { STEP_EXTRUSION_EDIT, Checkpoint::Ordering },
         { STEP_EXTRUSION_SIMPLIFICATION, Checkpoint::Ordering },
-        { STEP_GCODE, Checkpoint::Plan }
+        { STEP_GCODE, Checkpoint::Plan },
+        { STEP_EXPORT, Checkpoint::GCode }
     };
 
     REQUIRE(expected.size() == Slic3r::Steps::execution_order().size());
@@ -1390,7 +1394,7 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Print) == STEP_ORDERING);
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Ordering) == STEP_WIPETOWER);
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Plan) == STEP_GCODE);
-    CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::GCode) == STEP_NONE);
+    CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::GCode) == STEP_EXPORT);
 
     // Numeric ABI values deliberately disagree with the execution order here.
     CHECK(STEP_SKIRT_BRIM < STEP_SUPPORT);
@@ -1551,7 +1555,9 @@ TEST_CASE("Tower position changes replay only from the ordering checkpoint",
     CHECK(print.has_ordering_checkpoint());
     for (const slicing_step_t step : Steps::execution_order()) {
         CAPTURE(step);
-        CHECK(print.should_execute_step(step) == !Steps::executes_before(step, STEP_WIPETOWER));
+        // The export is queued by an export request only, never by a replay.
+        CHECK(print.should_execute_step(step) ==
+              (step != STEP_EXPORT && !Steps::executes_before(step, STEP_WIPETOWER)));
     }
     print.prepare_checkpoint_resume();
     CHECK(print.current_checkpoint() == Checkpoint::Ordering);

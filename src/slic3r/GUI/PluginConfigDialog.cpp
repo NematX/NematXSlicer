@@ -460,6 +460,7 @@ wxString step_name(slicing_step_t step)
     case STEP_EXTRUSION_EDIT:            return _L("Extrusion editing");
     case STEP_EXTRUSION_SIMPLIFICATION:  return _L("Extrusion simplification");
     case STEP_GCODE:                     return _L("G-code generation");
+    case STEP_EXPORT:                    return _L("Export");
     case GCODE_FIRMWARE:                 return _L("G-code firmware");
     case GCODE_THUMBNAIL:                return _L("G-code thumbnails");
     case GCODE_READER:                   return _L("G-code readers");
@@ -531,6 +532,7 @@ std::optional<PluginPhase> phase_for_step(slicing_step_t step)
     case STEP_EXTRUSION_SIMPLIFICATION:
         return PluginPhase::PostProcessing;
     case STEP_GCODE:
+    case STEP_EXPORT:
     case GCODE_FIRMWARE:
         return PluginPhase::Output;
     default:
@@ -1247,7 +1249,7 @@ void PluginConfigDialog::build_navigation()
         STEP_FINALIZE_SLICING, STEP_ORDERING, SEAM_PLACER,
         STEP_CHECK_CONFLICT, STEP_LAYER_EXTRUSION_EDIT, STEP_LAYER_STICHING,
         STEP_EXTRUSION_EDIT, STEP_EXTRUSION_SIMPLIFICATION,
-        STEP_GCODE, GCODE_FIRMWARE
+        STEP_GCODE, STEP_EXPORT, GCODE_FIRMWARE
     };
     for (PluginPhase phase : phases) {
         const NavigationScope phase_scope { PluginNavigationKind::Phase, phase, STEP_NONE };

@@ -659,6 +659,14 @@ public:
     // before STEP_GCODE runs, so the selected G-code plugin receives the exact
     // file path it must create. The file is the G-code reference: it holds no
     // header, notes or thumbnails, which export_print() adds. No image is rendered here.
+    // The reference is read-only for the export: when STEP_GCODE is done, its
+    // published source is the resolved path and that file still exists, nothing
+    // runs again (no writer, post-processing script or modifier), and `result`
+    // is not reset: it keeps the content of the last reading, and only its
+    // reader_plugin_id is assigned again from the Print. Otherwise STEP_GCODE
+    // runs and fills `result` when one is given; a failing read resets `result`,
+    // leaves STEP_GCODE not done and propagates the exception. The final statuses
+    // are published when the step ran and when the reference was reused.
     std::string export_gcode(Print &print_to_export,
                              const std::string &path_template,
                              GCodeProcessorResult *result);
@@ -673,6 +681,12 @@ public:
                              const std::string &destination_path,
                              const GCodeExporterSelection &selection,
                              ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    // Run STEP_EXPORT for the request that Print::request_export queued, on the reference that STEP_GCODE
+    // already prepared, and return the published path (also kept in Print::export_result_path()). Unlike
+    // export_gcode(), it never replays STEP_GCODE: with no request, or with a reference that is not ready, it
+    // throws and writes nothing. It publishes no 100 % status of its own; the progress of the step is
+    // Print::pipeline_progress(). The caller must not hold Print::state_mutex().
+    std::string export_requested(Print &print);
     // Generate a private reference beside the requested destination (STEP_GCODE rereads it for the statistics), export its finalized path, and remove the reference.
     std::string export_gcode_cli(Print &print, const std::string &requested_output_path);
 

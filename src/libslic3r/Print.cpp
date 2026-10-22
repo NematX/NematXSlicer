@@ -360,6 +360,9 @@ void Print::clear() {
     // Plans borrow islands and layers; release them before their owners.
     this->reset_printing_plan();
     this->reset_gcode_reader_source_path();
+    // The request owns a configuration copy and a GUI callback: it must not outlive the print it was made for.
+    m_export_request.reset();
+    m_export_result_path.clear();
     m_print_statistics.statistics_available = false;
     this->reset_step_execution_plan_all_unguarded();
     m_pipeline_state.clear();
@@ -516,6 +519,17 @@ bool Print::mark_step_for_execution_unguarded(slicing_step_t step)
     // PrintStatistics::clear() also lower the availability flag.
     if (step == STEP_GCODE)
         m_print_statistics.statistics_available = false;
+    const bool affected = this->queue_step_unguarded(step);
+    // The step may reuse owners that plugin caches still hold, so the next
+    // apply() or resume must offer a clear callback before running it.
+    m_plugin_cleanup_pending.store(true, std::memory_order_release);
+    return affected;
+}
+
+// Mark the step as not done and add it to the steps to execute. state_mutex() must be held. The plugin cleanup
+// is not armed here. Return whether the step was done or running, that is whether the request changes a result.
+bool Print::queue_step_unguarded(slicing_step_t step)
+{
     PipelineStepState &state = m_pipeline_state[step];
     const bool affected = state.done || running_step() == step;
     const bool warnings_changed = std::any_of(state.warnings.begin(), state.warnings.end(),
@@ -527,10 +541,71 @@ bool Print::mark_step_for_execution_unguarded(slicing_step_t step)
         state.timestamp = PrintStateBase::next_timestamp();
     }
     m_steps_to_execute.insert(step);
-    // The step may reuse owners that plugin caches still hold, so the next
-    // apply() or resume must offer a clear callback before running it.
-    m_plugin_cleanup_pending.store(true, std::memory_order_release);
     return affected;
+}
+
+// Build a request owned by the caller: copy m_full_print_config and keep the thumbnail renderer. The copy is taken under
+// state_mutex(), which this function locks itself (the caller must not hold it), so that a concurrent apply() cannot
+// replace the configuration while it is read. The Print is not modified.
+Print::ExportRequest Print::make_export_request(ThumbnailsGeneratorCallback thumbnails) const
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    ExportRequest request;
+    request.config     = m_full_print_config;
+    request.thumbnails = std::move(thumbnails);
+    return request;
+}
+
+// Store the request (replacing an unconsumed one), forget the path of the previous export and queue STEP_EXPORT, all under
+// state_mutex(), which this function locks itself. Only queue_step_unguarded() is used, never the generic marking: the
+// plugin cleanup stays unarmed, because the export only reads the reference and a later apply() must not stop the worker
+// for it. The Print owns the request until take_export_request() or clear().
+void Print::request_export(ExportRequest request)
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    m_export_request = std::move(request);
+    m_export_result_path.clear();
+    // The export only reads the reference: queuing it must not stop the worker through a pending cleanup.
+    this->queue_step_unguarded(STEP_EXPORT);
+}
+
+// Move the pending request out of the Print under state_mutex() (locked here), leaving none: a request serves one attempt.
+// Return an empty optional when nothing was deposited or when it was already taken. STEP_EXPORT stays queued.
+std::optional<Print::ExportRequest> Print::take_export_request()
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    std::optional<ExportRequest> request = std::move(m_export_request);
+    m_export_request.reset();
+    return request;
+}
+
+// Return the reference path when STEP_GCODE is done and not running, or an empty string. The step state is read under
+// state_mutex() (locked here), but the path itself is written without that lock by set_gcode_reader_source_path() and
+// reset_gcode_reader_source_path(): it is safe to read only from the thread that produces or consumes the reference
+// (the worker, or the thread that runs the pipeline), never concurrently with its regeneration.
+std::string Print::ready_gcode_reference_path() const
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    const std::map<slicing_step_t, PipelineStepState>::const_iterator found = m_pipeline_state.find(STEP_GCODE);
+    const bool ready = found != m_pipeline_state.end() && found->second.done && running_step() != STEP_GCODE;
+    return ready ? m_gcode_reader_source_path : std::string();
+}
+
+// Return a copy, read under state_mutex() (locked here), of the path published by the last export. It is valid until the
+// next request_export() or clear(): an invalidation of STEP_GCODE does not clear it, because it names a file that the
+// export already published and that its caller may still have to remove.
+std::string Print::export_result_path() const
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    return m_export_result_path;
+}
+
+// Record the path published by the export, under state_mutex() (locked here). Called by the export step as soon as the
+// exporter returned, before any later check can cancel the step.
+void Print::set_export_result_path(std::string path)
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    m_export_result_path = std::move(path);
 }
 
 void Print::mark_step_and_dependents_for_execution(slicing_step_t step)
@@ -595,8 +670,10 @@ void Print::reset_step_execution_plan_all_unguarded()
     clear_ordering_checkpoint();
     m_slicing_metadata_checkpoint.reset();
     m_steps_to_execute.clear();
+    // The export is never queued by a reset: only request_export() does, when a destination exists.
     for (slicing_step_t step : Steps::execution_order())
-        mark_step_for_execution_unguarded(step);
+        if (step != STEP_EXPORT)
+            mark_step_for_execution_unguarded(step);
     // A full replay can reuse every owner, so plugin caches must be cleared first.
     m_plugin_cleanup_pending.store(true, std::memory_order_release);
 }

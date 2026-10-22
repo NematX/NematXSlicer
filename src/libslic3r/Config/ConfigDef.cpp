@@ -55,6 +55,16 @@
 #include "Utils.hpp"
 
 /*
+A configuration definition describes an option's key, value type, default and
+display metadata. A configuration store holds chosen values. ConfigOptionNature
+controls where a value may be saved or compared: its withdrawal flags remove
+permissions from the normal set, without deleting or changing the stored value.
+
+Define metadata before loading typed values. During loading, known keys can be
+parsed into options; unrecognized keys can instead be reported as name/text
+substitutions for the caller to preserve separately. A required plugin group
+links an active setting to the selected provider's declared support for that key.
+
 Configuration definitions describe options and own their default values.
 An option's nature determines where it may be saved and whether it is compared.
 These permission checks do not change the stored value.
@@ -1198,10 +1208,18 @@ double ConfigBase::get_computed_value(
     throw ConfigurationError(ss.str());
 }
 
+// Publish the options as environment variables of the process, in the form SLIC3R_<KEY>, for programs started afterwards.
+// Only the keys that writes_key() accepts for a project are published: a key that must stay on this machine (connection
+// data, secrets) or that is only a one-shot request is never given to a child program.
+// This changes the environment of the whole process and nothing restores it: a published variable stays set until a later
+// call overwrites it. A filtered key is never written, so it neither sets nor clears a variable of that name. The environment
+// inherited from the user is not filtered.
 void ConfigBase::setenv_() const
 {
     t_config_option_keys opt_keys = this->keys();
     for (t_config_option_keys::const_iterator it = opt_keys.begin(); it != opt_keys.end(); ++it) {
+        if (! this->writes_key(*it, ConfigWriteTarget::Project))
+            continue;
         // prepend the SLIC3R_ prefix
         std::ostringstream ss;
         ss << "SLIC3R_";
