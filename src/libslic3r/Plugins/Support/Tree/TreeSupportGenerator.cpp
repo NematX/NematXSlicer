@@ -173,7 +173,7 @@ Common::GeneratorLayer *collapse_neighbor(const Common::GeneratorLayers &listed,
 // Starts the stem of every root that rests on a floor at the top of that floor.
 void raise_stems_onto_floors(const Common::GeneratedSupport &out, std::vector<RootRest> &rests);
 // Removes from the slab the outline of every object layer that lies within its Z span grown by the Z gaps (gap_above over the top,
-// gap_below under the bottom), the outline being grown by the XY distance. A gap not larger than the Z tolerance counts as zero, and
+// gap_below under the bottom), the outline being grown by the XY distance of the routing. A gap not larger than the Z tolerance counts as zero, and
 // a gap larger than it is shortened by that tolerance, as in the routing windows of TreeSettings. The layer the slab supports or
 // rests on (supported_layer, size_t(-1) for none) is kept: the contact placement sets its clearance, and aligning the slab bounds
 // can move them by more than the tolerance.
@@ -181,9 +181,9 @@ void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const Poly
                size_t supported_layer, storage_handle *scratch);
 // Removes from each slab the footprint of the object bridges whose threads hang over it, grown by the XY gap, so that no support is
 // printed where a bridge thread is extruded. The object layers within the slab's Z span grown by both Z gaps are already removed by
-// trim_slab() with the keep_out outline (xy_min_distance), but the bridges are searched from the slab top, not from the gap limit,
-// so that those of the window layers also lose the wider XY gap. A slab that ends under the bridge threads keeps its footprint: it
-// supports them.
+// trim_slab() with the keep_out outline (the XY distance of the routing), but the bridges are searched from the slab top, not from
+// the gap limit, so that the bridges of the window layers are removed too, with the same XY gap as the keep_out outline. A slab
+// that ends under the bridge threads keeps its footprint: it supports them.
 void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const LayerList &layers, const slic3r_api::Config &print_config,
                             const Common::SupportParams &params, storage_handle *scratch);
 // Adds to every base slab the branches that cross it, then trims each slab against the object within both Z gaps. Tree branches are
@@ -267,7 +267,8 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
         // The branches drawn in the base and branch slabs are trimmed too: a slab can reach into the thread band when the bridge is
         // thicker than a layer (thin support layers, high bridge flow ratio). The interfaces are carved out of these slabs afterwards.
         // The bridge search starts at the slab top, not at the gap limit, so the bridges of the layers inside the gap window are
-        // removed too, with the XY gap gap_xy, which is wider than the keep_out outline (xy_min_distance) that trim_slab() removes.
+        // removed too, with the same XY gap as the keep_out outline that trim_slab() removes (the bridge pass is still needed: it
+        // searches from the slab top in the Z window).
         trim_bridges(out.base);
         Common::GeneratorLayers drawn_slabs = out.base;
         if (without_interfaces) {

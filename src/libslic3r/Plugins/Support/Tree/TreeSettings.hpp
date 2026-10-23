@@ -98,7 +98,9 @@ struct TreeSettings
     coord_t max_to_model_radius_increase = 0;
     // False when the object only allows branches on the build plate.
     bool support_rests_on_model = true;
-    // XY distance from the object, and the smaller one used for overhang outlines (scaled).
+    // XY distance from the object (scaled): the user's support_material_xy_spacing, at least 0.1 mm for a soluble support. The tree uses it
+    // everywhere, so xy_min_distance is kept equal to it; the min-XY variants of the routing and of the volumes are dormant code kept for
+    // a later cleanup.
     coord_t xy_distance = 0;
     coord_t xy_min_distance = 0;
     // Collision windows from real Z, indexed by object layer; the top continues virtually at the last layer height.

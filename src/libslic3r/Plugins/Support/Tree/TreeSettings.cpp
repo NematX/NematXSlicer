@@ -75,12 +75,13 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     support_line_width = object.support_flow(support_role, layer_height_mm).width;
     support_rests_on_model = ! config.get("support_material_buildplate_only").get_bool();
     xy_distance = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_perimeter_width));
-    xy_min_distance = std::min(xy_distance, scale_i(0.5 * external_perimeter_width));
+    // The tree keeps the user's XY spacing everywhere, from the routing to the final trim. xy_min_distance is kept equal to
+    // xy_distance, so the min-XY variants of the routing and of the volumes are never used.
     if (params.soluble) {
         // A soluble support touches the object, so its XY distance is its only separation: the safe offset steps by it and needs it above zero.
-        xy_min_distance = std::max(xy_min_distance, scale_i(0.1));
-        xy_distance = std::max(xy_distance, xy_min_distance);
+        xy_distance = std::max(xy_distance, scale_i(0.1));
     }
+    xy_min_distance = xy_distance;
     const coord_t gap_above = scale_to_layer_coord(params.gap_above);
     const coord_t gap_below = scale_to_layer_coord(params.gap_below);
     const coord_t eps = scale_to_layer_coord(EPSILON);

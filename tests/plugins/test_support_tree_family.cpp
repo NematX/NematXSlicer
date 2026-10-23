@@ -2419,6 +2419,62 @@ TEST_CASE("Rebuilt tip contacts of a sloped overhang respect the physical Z gaps
     check_final_slab_clearance(std::move(mesh), style, 0, scenario, false);
 }
 
+// The routing and the final trim both use the XY distance of the user (support_material_xy_spacing). With a spacing of 1 mm no
+// final slab may come closer than that to the layers of its Z span or of its gap windows, except to the layer a top contact supports
+// or a floor rests on, whose clearance is set by the contact placement.
+TEST_CASE("Final tree and organic slabs keep the normal XY distance from the object", "[plugins][support-tree-family][support-tree-xy-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    const int interfaces = GENERATE(3, 0);
+    CAPTURE(style, interfaces);
+    DynamicPrintConfig config = SG::config(style, false, interfaces);
+    config.set_deserialize_strict({{"support_material_synchronize_layers", "0"}, {"support_material_xy_spacing", "1"}});
+    TriangleMesh mesh = Slic3r::Test::SupportTree::comparison_mesh(2);
+    TriangleMesh low_roof = make_cube(12., 8., 0.4);
+    low_roof.translate(0., 0., 2.);
+    mesh.merge(low_roof);
+    Print print;
+    Model model;
+    Test::init_print({mesh}, print, model, config);
+    REQUIRE(print.validate().first == PrintBase::PrintValidationError::pveNone);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const Common::SupportParams params = SG::params(print, object);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, params);
+    const coord_t gap_above = scale_to_layer_coord(params.gap_above), gap_below = scale_to_layer_coord(params.gap_below);
+    // The Z gaps count as in trim_slab: not above the tolerance they are zero, above it they are shortened by it.
+    const coord_t eps = scale_to_layer_coord(EPSILON);
+    const coord_t above = gap_above > eps ? gap_above - eps : 0, below = gap_below > eps ? gap_below - eps : 0;
+    Routed routed(print);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support);
+    // The outline of every layer grown by the normal distance, less the tolerance of the drawn checks.
+    const std::vector<Polygons> keep_out = keep_out_outlines(object, settings.xy_distance - coord_t(scale_d(tolerance_mm)));
+    const std::vector<std::pair<const char *, const Common::GeneratorLayers *>> roles{
+        {"base", &routed.support.base}, {"interfaces", &routed.support.interfaces}, {"top", &routed.support.top}, {"bottom", &routed.support.bottom}};
+    size_t non_empty = 0, checked_pairs = 0;
+    for (const std::pair<const char *, const Common::GeneratorLayers *> &role : roles)
+        for (const Common::GeneratorLayer *slab : *role.second) {
+            const Polygons area = to_native(slab->polygons);
+            if (area.empty())
+                continue;
+            ++non_empty;
+            for (size_t id = 0; id < object.layer_count(); ++id) {
+                const Layer &layer = object.layer(id);
+                const bool supported = (std::string(role.first) == "top" && id == slab->object_above) ||
+                                       (std::string(role.first) == "bottom" && id == slab->object_below);
+                if (supported || layer.scaled_bottom_z() >= slab->print_z + above || layer.scaled_print_z() <= slab->bottom_z - below)
+                    continue;
+                ++checked_pairs;
+                INFO("role " << role.first << " layer " << id);
+                CHECK(intersection(area, keep_out[id]).empty());
+            }
+        }
+    // The check must not pass on nothing.
+    REQUIRE(non_empty > 0);
+    REQUIRE(checked_pairs > 0);
+}
+
 // A tree or organic support under an object with thin and thick layer bands is generated and exported on the real layer heights.
 TEST_CASE("Tree and organic supports are generated and exported on a variable layer height", "[plugins][support-tree-family][variable-layer-height][gcode]")
 {

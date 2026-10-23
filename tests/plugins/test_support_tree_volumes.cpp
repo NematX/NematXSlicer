@@ -267,9 +267,9 @@ private:
     boost::shared_ptr<Sink> m_sink;
 };
 
-// The first object of a sliced print, with the tree settings read from it. The default XY spacing of 3 mm makes the difference
-// between the regular and the minimum XY distance large, so the radii with and without the minimum XY distance fall into
-// different buckets.
+// The first object of a sliced print, with the tree settings read from it. Production keeps the minimum XY distance equal to the
+// XY distance; the scene builds a smaller one (0.21 mm, below the default XY spacing of 3 mm) to exercise the min-XY code, which is
+// kept until a cleanup. The difference makes the radii with and without the minimum XY distance fall into different buckets.
 struct Scene {
     // The storage owns the areas of the volumes made from the scene, so it is declared first and destroyed last.
     PluginStorage    storage;
@@ -286,6 +286,7 @@ struct Scene {
         Test::init_print({SG::slab(true)}, print, model, config);
         SG::prefix(print);
         settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
+        settings.xy_min_distance = std::min(settings.xy_distance, scale_i(0.21));
     }
     const PrintObject &object() const { return print.object(0); }
     // New volumes over the first object, owning their areas in the storage of the scene; the context (nullptr never cancels) is the one they check.
@@ -460,8 +461,13 @@ TEST_CASE("Support blockers are part of the collision", "[plugins][support-tree-
     storage_handle *run_storage = SG::handle(storage);
     constexpr TF::LayerIndex layer = 8;
     const slic3r_api::StoredPolygonCollection without = blocker_collision(run_storage, {}, layer);
-    const slic3r_api::StoredPolygonCollection with = blocker_collision(run_storage, { blocker_box(5., 2., 1., 3., 3., 2.) }, layer);
-    CHECK(PM::mm2(TF::polygons_area(with) - TF::polygons_area(without)) > 5.);
+    // The scene grows the object by the 3 mm XY distance, so the post reaches x = 7 on this layer, while a blocker enters the
+    // collision with its own outline (radius 0). A 3 x 3 mm blocker at x = 9 to 12 does not touch the grown post, so the collision
+    // gains exactly its 9 mm2.
+    const slic3r_api::StoredPolygonCollection with = blocker_collision(run_storage, { blocker_box(9., 2., 1., 3., 3., 2.) }, layer);
+    const double added_mm2 = PM::mm2(TF::polygons_area(with) - TF::polygons_area(without));
+    CAPTURE(added_mm2);
+    CHECK(added_mm2 == Approx(9.).margin(0.05));
     const slic3r_api::StoredPolygonCollection lost = TF::polygons_diff(run_storage, without, with);
     CHECK(PM::mm2(TF::polygons_area(lost)) < 1e-3);
 
@@ -896,10 +902,10 @@ TEST_CASE("A TBB group that is cancelled during a lazy computation leaves no par
     }
 }
 
-// The routing asks for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
+// The routing can ask for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
 // radii that precalculate() computes: the foot target of every layer where a branch can have it (its drawn radius reaches the branch
-// radius, which the foot needs) must be covered, or the routing computes it on demand from its parallel loops. The XY spacing of the
-// scene is large, so the minimum XY bucket of the base is not the regular one.
+// radius, which the foot needs) must be covered, or the routing computes it on demand from its parallel loops. The minimum XY
+// distance of the scene is smaller than its XY distance, so the minimum XY bucket of the base is not the regular one.
 TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY distance", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1039,6 +1045,8 @@ TEST_CASE("Tree cache radii end the band at the foot radius and have no band wit
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Scene scene(false, "3");
     const coord_t branch = scene.settings.branch_radius;
+    // The scene sets a minimum XY distance below the XY distance: production keeps them equal, and the code of the delta variant is
+    // kept until a cleanup.
     const coord_t delta  = scene.settings.xy_distance - scene.settings.xy_min_distance;
     REQUIRE(delta > 0);
     // The scale step that branch_radius + delta rounds up to: the start of the band in key space (the scale is 0.4; 1.5; 2.6; 3.9).
