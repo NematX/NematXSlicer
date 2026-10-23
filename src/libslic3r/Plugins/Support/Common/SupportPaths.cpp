@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #include "PerimeterFill.hpp"
@@ -102,22 +103,55 @@ void append_paths(storage_handle *storage, MutableExtrusionEntity parent, const 
     }
 }
 
+namespace {
+// Where an island holds its deposit: the contour centroid when the island contains it, else the point of the boundary (contour and
+// holes) closest to the centroid, found by projecting the centroid on every segment. A crescent or a C-shaped island has its
+// centroid outside.
+c_point deposit_point(const ExPolygon &island)
+{
+    const c_point centroid = island.contour().centroid();
+    if (island.contains(centroid))
+        return centroid;
+    c_point best = centroid;
+    double best_squared = std::numeric_limits<double>::max();
+    const auto visit = [&](const Polygon &ring) {
+        const multipoint_const_view points = ring.view();
+        for (uint32_t index = 0; index < points.size; ++index) {
+            const c_point a = points.array[index], b = points.array[(index + 1) % points.size];
+            const double abx = double(b.x) - double(a.x), aby = double(b.y) - double(a.y);
+            const double length_squared = abx * abx + aby * aby;
+            const double t = length_squared > 0. ?
+                std::clamp(((double(centroid.x) - double(a.x)) * abx + (double(centroid.y) - double(a.y)) * aby) / length_squared, 0., 1.) : 0.;
+            const double dx = double(a.x) + t * abx - double(centroid.x), dy = double(a.y) + t * aby - double(centroid.y);
+            if (dx * dx + dy * dy < best_squared) {
+                best_squared = dx * dx + dy * dy;
+                best = c_point{ coord_t(std::llround(double(a.x) + t * abx)), coord_t(std::llround(double(a.y) + t * aby)) };
+            }
+        }
+    };
+    visit(island.contour());
+    for (uint32_t hole = 0; hole < island.hole_size(); ++hole)
+        visit(island.hole(hole));
+    return best;
+}
+} // namespace
+
 // Build a one-point leaf from a fused island and support flow, then move it into a parent that accepts children. storage
-// owns the temporary entity; parent receives its contents. Holes reduce volume but not the contour centroid.
+// owns the temporary entity; parent receives its contents. Holes reduce the volume (net area times layer height). The centroid is the
+// contour's: when it falls in a hole or outside the contour, the deposit goes to the closest boundary point, holes included.
 void append_deposit(storage_handle *storage, MutableExtrusionEntity parent, const ExPolygon &island, const c_flow &flow)
 {
     const double volume = unscaled(unscaled(island.area())) * unscaled(flow.height);
     // A degenerate island prints nothing.
     if (!std::isfinite(volume) || volume <= 0.)
         return;
-    StoredExtrusionEntity deposit(storage, std::vector<c_point>{island.contour().centroid()});
+    StoredExtrusionEntity deposit(storage, std::vector<c_point>{deposit_point(island)});
     deposit.set_flags(0u);
     deposit.get_or_add(EPropertyAttributes::key).extrusion_role(int32_t(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL))
         .mm3_per_mm(flow.mm3_per_mm).width(float(unscaled(flow.width))).height(float(unscaled(flow.height)));
     deposit.get_or_add(EPropertySpecialCommand::key).set(C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT, volume);
     parent.append_child_move(deposit.mutable_view());
 }
-
 // The polylines are copied into a host collection, which simplifies its own copy in place; the input is not modified.
 std::vector<std::vector<c_point>> valid_polylines(storage_handle *storage, const std::vector<std::vector<c_point>> &lines,
                                                   coord_t resolution)

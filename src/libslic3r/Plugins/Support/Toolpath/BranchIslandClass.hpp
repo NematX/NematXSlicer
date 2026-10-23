@@ -15,8 +15,10 @@
        thin fraction < 50 %              Sheath      the sheath, as for any wide island
        thin fraction >= 50 %, Q < 2 pi/9 Centreline  the medial axis of the island, one variable-width line
        thin fraction >= 50 %, Q >= 2 pi/9 Blob       the island is a small compact dot (a medial axis of a small
-                                                      disc is a point); one stationary deposit at the contour
-                                                      centroid prints its net area times layer height
+                                                      disc is a point); one stationary deposit prints
+                                                      its net area times layer height, at the contour centroid
+                                                      when the island contains it, else at the closest boundary
+                                                      point (contour or holes)
 
    The opening uses the default miter join of the Clipper offsets, which keeps the convex corners: the opening of a
    rectangle is the rectangle, so a 2 x 1 mm island has no thin part.
@@ -24,7 +26,7 @@
    The centreline is the output of the medial axis helper, configured by centreline_widths(). Where the island is S wide
    (a spacing), the helper prints the extrusion width l = S + h (1 - pi / 4) sr, with h the layer height and sr the spacing
    ratio. A part whose width l is below the nozzle diameter b is widened to b when the widening is small (under
-   centreline_max_widening) and within the nominal support XY budget; narrower parts print nothing. The widest island part
+   centreline_max_widening) and within the nominal support XY budget; narrower parts are trimmed; an island left with no line prints a deposit (BranchSheathPaths.cpp). The widest island part
    the line covers is 1.5 w.
 
    Every limit is a named constant below. They are first limits that may be tuned: no other file repeats their values.
@@ -67,8 +69,8 @@ constexpr double compactness_limit = 2. * PI / 9.;
 // endpoint extended onto the contour, is skipped by growth and keeps its then-current width (at least the trim threshold before
 // volume scaling) instead of reaching b. ensure_not_overextrude() scales widths only when the line volume exceeds a bound based
 // on island area times layer height plus contour and hole gap terms. A width reduction of roughly 5% and an overall widening of
-// roughly 15% at the limit are examples for one island, not fixed factors. A narrower part prints nothing, as does an island
-// narrower everywhere. The nozzle sets b; the extrusion width w sets the case.
+// roughly 15% at the limit are examples for one island, not fixed factors. A narrower part is trimmed, and an island narrower
+// everywhere has no line and prints a stationary deposit instead (BranchSheathPaths.cpp). The nozzle sets b; the extrusion width w sets the case.
 // A first limit that may be tuned.
 constexpr double centreline_max_widening = 0.1;
 
@@ -107,7 +109,7 @@ struct CentrelineWidths {
 
 // The widths of the centreline of an island printed with the flow, whose nozzle_diameter sets the extrusion width b of the
 // widened parts. xy_distance is the support XY distance (scaled units). A flow whose widest width 1.5 w is under the narrowest
-// gives a maximum under the minimum, which the helper refuses: the island prints nothing.
+// gives a maximum under the minimum, which the helper refuses: the island has no line and prints a deposit.
 CentrelineWidths centreline_widths(const c_flow &flow, coord_t xy_distance);
 
 } // namespace slic3r_api::Support::Toolpath

@@ -21,8 +21,8 @@
    subject area and holds typed surfaces; the step then runs the active providers, and the helpers read the published
    region islands back. The first-layer case compares the branch flange with the legacy base flange of the same surface,
    and the provider case deactivates one of the two producers at a time. The thin islands print their centreline instead
-    of a sheath or a stationary deposit when compact (BranchIslandClass.hpp); their cases check order, flow, volume,
-    and the islands that print nothing. A full tree print checks deposit G-code and the reader's support volume. */
+    of a sheath or a stationary deposit when elongated (BranchIslandClass.hpp); their cases check order, flow, volume,
+    and the islands that fall back to a deposit. A full tree print checks deposit G-code and the reader's support volume. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -534,9 +534,11 @@ size_t child_in(const std::vector<const ExtrusionEntity *> &children, double x0,
 // The nozzle diameter of SG::config() in millimeters.
 constexpr double k_nozzle = 0.4;
 
-// The width and the flow of every line that the centreline prints, and the layer height.
+// The width and the flow of every line that the centreline prints, the number of stationary deposits it falls back to when it has
+// no line, and the layer height.
 struct PrintedLines {
     std::vector<std::pair<double, double>> lines;
+    size_t deposits = 0;
     double height = 0.;
 };
 
@@ -561,6 +563,10 @@ PrintedLines printed_lines(double extrusion_width, const char *xy_spacing)
     result.height = unscaled(flow.height);
     for (const ExtrusionEntity *child : bucket_children(print.object(0)))
         for_each_leaf(*child, [&](const ExtrusionEntity &leaf) {
+            if (slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&leaf)).is_deposit()) {
+                ++result.deposits;
+                return;
+            }
             const ExtrusionAttributes *attributes = leaf.get_property<ExtrusionAttributes>();
             REQUIRE(attributes != nullptr);
             result.lines.emplace_back(double(attributes->width), attributes->mm3_per_mm);
@@ -748,15 +754,16 @@ TEST_CASE("A blob island prints one deposit at its contour centroid", "[plugins]
     CHECK(command->extra_data == Approx(unscaled(unscaled(fused.at(0).area())) * unscaled(flow.height)));
 }
 
-// The direct builder subtracts holes from volume while using only the contour centroid, even when it is inside a hole.
-TEST_CASE("A support deposit uses net area but the contour centroid", "[plugins][support-branch-blob][deposit]")
+// The direct builder subtracts holes from volume. The contour centroid lies inside a hole here, so the island does not contain it and
+// the deposit sits on the hole boundary closest to it.
+TEST_CASE("A support deposit uses net area and moves off a centroid inside a hole", "[plugins][support-branch-blob][deposit]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     slice(print, SG::config());
     const c_flow flow = SG::params(print, print.object(0)).base_flow;
     ExPolygon island = square(4., 4., 6., 6.);
-    Polygon hole = square(4.8, 4.8, 5.4, 5.4).contour;
+    Polygon hole = square(4.6, 4.8, 5.4, 5.3).contour;
     hole.make_clockwise();
     island.holes.push_back(hole);
     PluginStorage storage;
@@ -767,12 +774,46 @@ TEST_CASE("A support deposit uses net area but the contour centroid", "[plugins]
     const slic3r_api::ExtrusionEntity deposit = parent.readonly().child(0);
     CHECK(deposit.is_deposit());
     REQUIRE(deposit.point_count() == 1);
+    // The hole edges are 0.4, 0.4, 0.2 and 0.3 mm from the centroid (5, 5): the closest is y = 4.8.
     CHECK(deposit.point(0).x == scale_i(5.));
-    CHECK(deposit.point(0).y == scale_i(5.));
+    CHECK(deposit.point(0).y == scale_i(4.8));
     CHECK(deposit.get(slic3r_api::EPropertySpecialCommand::key)->extra_data ==
-        Approx((4. - 0.36) * unscaled(flow.height)));
+        Approx((4. - 0.4) * unscaled(flow.height)));
 }
 
+// A crescent (a C-shaped island) has its contour centroid in the hollow: the deposit sits on the boundary, at the point closest to
+// the centroid, and its volume stays the net area times the layer height.
+TEST_CASE("A support deposit of a crescent sits on the boundary closest to the centroid", "[plugins][support-branch-blob][deposit]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    slice(print, SG::config());
+    const c_flow flow = SG::params(print, print.object(0)).base_flow;
+    const ExPolygons crescents = diff_ex(Polygons{circle(2., 5., 5.).contour}, Polygons{circle(1.8, 5.5, 5.).contour});
+    REQUIRE(crescents.size() == 1);
+    const ExPolygon &island = crescents.front();
+    REQUIRE(island.holes.empty());
+    const Point centroid = island.contour.centroid();
+    REQUIRE_FALSE(island.contains(centroid));
+    PluginStorage storage;
+    slic3r_api::StoredExtrusionEntity parent(reinterpret_cast<storage_handle *>(&storage));
+    slic3r_api::Support::Common::append_deposit(reinterpret_cast<storage_handle *>(&storage), parent.mutable_view(),
+        slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&island)), flow);
+    REQUIRE(parent.readonly().child_count() == 1);
+    const slic3r_api::ExtrusionEntity deposit = parent.readonly().child(0);
+    REQUIRE(deposit.point_count() == 1);
+    const Point point(deposit.point(0).x, deposit.point(0).y);
+    double closest = std::numeric_limits<double>::max(), on_boundary = std::numeric_limits<double>::max();
+    for (const Line &line : island.contour.lines()) {
+        closest = std::min(closest, line.distance_to(centroid));
+        on_boundary = std::min(on_boundary, line.distance_to(point));
+    }
+    CAPTURE(closest, on_boundary, (point - centroid).cast<double>().norm());
+    // The point lies on the boundary and is as close to the centroid as the boundary gets (a few units of rounding).
+    CHECK(on_boundary <= 3.);
+    CHECK((point - centroid).cast<double>().norm() <= closest + 3.);
+    CHECK(deposit.get(slic3r_api::EPropertySpecialCommand::key)->extra_data == Approx(unscaled(unscaled(island.area())) * unscaled(flow.height)));
+}
 // Blob replacement preserves closed-piece order; a vanished blob appends after the sheaths instead of disappearing.
 TEST_CASE("Blob islands replace their first piece or append after sheaths", "[plugins][support-toolpath-branch][support-branch-blob]")
 {
@@ -912,8 +953,8 @@ TEST_CASE("The centreline of a thin strip runs inside it with the width of the s
 }
 
 // A part whose extrusion width is below the nozzle by less than the widening limit prints as wide as the nozzle, with the flow
-// of that width. Parts below the limit, or whose widening exceeds twice the support XY distance, print nothing. The strips are
-// narrower than the support width, so no sheath could print in their place.
+// of that width. Parts below the limit, or whose widening exceeds twice the support XY distance, have no line and print one stationary
+// deposit instead. The strips are narrower than the support width, so no sheath could print in their place.
 TEST_CASE("A strip within the widening limit below the nozzle prints as wide as the nozzle", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -926,20 +967,22 @@ TEST_CASE("A strip within the widening limit below the nozzle prints as wide as 
     }
 }
 
-TEST_CASE("A strip more than the widening limit below the nozzle prints nothing", "[plugins][support-toolpath][support-toolpath-branch]")
+TEST_CASE("A strip more than the widening limit below the nozzle prints a deposit instead of a line", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const PrintedLines printed = printed_lines(k_nozzle / (1. + 1.5 * slic3r_api::Support::Toolpath::centreline_max_widening), nullptr);
     CHECK(printed.lines.empty());
+    CHECK(printed.deposits == 1);
 }
 
 // With an XY distance of 0.01 mm the widening may not exceed 0.02 mm: the strip of the first case, 6 % under the nozzle, prints
-// nothing, and a strip 0.01 mm under it, whose half widening is 0.005 mm, prints as wide as the nozzle.
+// a deposit and no line, and a strip 0.01 mm under it, whose half widening is 0.005 mm, prints as wide as the nozzle.
 TEST_CASE("The support XY distance bounds the widening of a strip", "[plugins][support-toolpath][support-toolpath-branch]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const PrintedLines too_wide = printed_lines(k_nozzle / (1. + 0.6 * slic3r_api::Support::Toolpath::centreline_max_widening), "0.01");
     CHECK(too_wide.lines.empty());
+    CHECK(too_wide.deposits == 1);
     const PrintedLines allowed = printed_lines(k_nozzle - 0.01, "0.01");
     REQUIRE(allowed.lines.size() >= 1);
     for (const std::pair<double, double> &line : allowed.lines)

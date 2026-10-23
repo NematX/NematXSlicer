@@ -47,9 +47,12 @@
    - Sheath: the sheaths above, from the pieces of the island that survive the closing. Their thin leftovers stay unfilled.
    - Centreline: no sheath. The medial axis of the island prints as one variable-width line, as wide as the island where it
      is at most 1.5 widths wide. A part narrower than the nozzle is widened to the nozzle when the widening is small and
-     within the support XY distance (centreline_widths()); a narrower part, or an island with no line left, prints nothing.
-   - Blob: a thin island that is not elongated. One stationary deposit at its contour centroid prints the island's net
-     area times layer height, before the extrusion multiplier, with the sheath's support flow attributes.
+     within the support XY distance (centreline_widths()); a narrower part is trimmed. An island with no line left (a thin
+     elongated island narrower than the trim width, such as the crescent a tip leaves on a slope) falls back to the Blob
+     below, so that the tip does not end without material at its contact.
+   - Blob: a thin island that is not elongated, or a Centreline island with no line. One stationary deposit at its contour
+     centroid (the closest boundary point when the centroid lies outside the island) prints the island's net area times layer
+     height, before the extrusion multiplier, with the sheath's support flow attributes.
    A Centreline or Blob entity takes the place of the first sheath piece that its island would have printed, so the order of the
    sheaths of the other islands does not change; an island whose pieces all vanished appends its entity after them.
 
@@ -110,9 +113,10 @@ void append_flange(const plugin_run_context *context, const run_ctx_support_tool
 // Append island methods in closed-piece order, replacing the first thin-island piece or appending when no piece survives.
 void append_island_paths(storage_handle *storage, const StoredExPolygonCollection &fused, const StoredExPolygonCollection &closed,
                          const BranchParams &params, const c_flow &flow, MutableExtrusionEntity out);
-// The medial axis of a thin elongated island as one entity of variable-width lines, appended to out; nothing when it yields no line.
-// xy_distance is the support XY distance that bounds the widening of the lines narrower than the nozzle.
-void append_centreline(storage_handle *storage, const ExPolygon &island, const c_flow &flow, coord_t xy_distance, MutableExtrusionEntity out);
+// The medial axis of a thin elongated island as one entity of variable-width lines, appended to out; returns whether it appended one.
+// A thin elongated island narrower than the trim width (the crescent a tip leaves on a slope) yields no line. xy_distance is the
+// support XY distance that bounds the widening of the lines narrower than the nozzle.
+bool append_centreline(storage_handle *storage, const ExPolygon &island, const c_flow &flow, coord_t xy_distance, MutableExtrusionEntity out);
 // The paths of one closed surface: its sheaths, or the double-wall group when the surface is larger than the threshold.
 void append_surface_paths(storage_handle *storage, const ExPolygon &surface, const BranchParams &params, const c_flow &flow,
                           MutableExtrusionEntity out);
@@ -259,22 +263,18 @@ void append_island_paths(storage_handle *storage, const StoredExPolygonCollectio
             append_surface_paths(storage, closed.at(piece), params, flow, out);
         } else if (!drawn[island]) {
             drawn[island] = true;
-            if (kinds[island] == BranchIslandClass::Blob)
+            if (kinds[island] == BranchIslandClass::Blob || !append_centreline(storage, fused.at(uint32_t(island)), flow, params.geometry.gap_xy, out))
                 Common::append_deposit(storage, out, fused.at(uint32_t(island)), flow);
-            else
-                append_centreline(storage, fused.at(uint32_t(island)), flow, params.geometry.gap_xy, out);
         }
     }
     for (uint32_t island = 0; island < fused.size(); ++island)
         if (kinds[island] != BranchIslandClass::Sheath && !drawn[island]) {
-            if (kinds[island] == BranchIslandClass::Blob)
+            if (kinds[island] == BranchIslandClass::Blob || !append_centreline(storage, fused.at(island), flow, params.geometry.gap_xy, out))
                 Common::append_deposit(storage, out, fused.at(island), flow);
-            else
-                append_centreline(storage, fused.at(island), flow, params.geometry.gap_xy, out);
         }
 }
 
-void append_centreline(storage_handle *storage, const ExPolygon &island, const c_flow &flow, coord_t xy_distance, MutableExtrusionEntity out)
+bool append_centreline(storage_handle *storage, const ExPolygon &island, const c_flow &flow, coord_t xy_distance, MutableExtrusionEntity out)
 {
     // The helper trims the parts of the island narrower than the nozzle by more than the widening limit and widens the others
     // to the nozzle (centreline_widths()). It is told no extrusion maximum and no endpoint extension. The line is extended to
@@ -284,8 +284,10 @@ void append_centreline(storage_handle *storage, const ExPolygon &island, const c
     std::optional<StoredExtrusionEntity> centreline = medial_axis_extrusion(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, flow)
         .medial_widths(widths.min_medial_width, widths.max_medial_width).extrusion_widths(widths.min_extrusion_width, 0).can_reverse()
         .try_build(storage, island);
-    if (centreline.has_value())
-        out.append_child_move(centreline->mutable_view());
+    if (!centreline.has_value())
+        return false;
+    out.append_child_move(centreline->mutable_view());
+    return true;
 }
 void append_surface_paths(storage_handle *storage, const ExPolygon &surface, const BranchParams &params, const c_flow &flow,
                           MutableExtrusionEntity out)
