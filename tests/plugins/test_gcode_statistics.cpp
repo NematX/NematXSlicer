@@ -25,7 +25,7 @@ Representative direct calls (branches are not a timeline):
         |-- print.process()
         |-- orchestrator.export_gcode()
         |-- read_file()
-        |-- orchestrator.export_print()
+        |-- Test::export_print_to()
         `-- split_lines()
 */
 
@@ -305,9 +305,9 @@ ExportedFile export_print_file(Print &print, const boost::filesystem::path &dire
     orchestrator.export_gcode(print, reference.string(), ask_for_result ? &exported.result : nullptr);
     exported.body = read_file(reference);
     const DynamicPrintConfig config = print.full_print_config();
-    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(config);
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
     const boost::filesystem::path destination = directory / "exported.gcode";
-    orchestrator.export_print(print, config, reference.string(), destination.string(), selection);
+    Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection);
     exported.text = read_file(destination);
     exported.statistics_block = block_between_body_and_configuration(exported.text, exported.body);
     return exported;
@@ -615,9 +615,9 @@ TEST_CASE("Measured tools beyond the exported configuration are ignored",
 
     DynamicPrintConfig one_tool = print.full_print_config();
     one_tool.set_num_extruders(1);
-    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(one_tool);
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, one_tool);
     const boost::filesystem::path destination = directory.path() / "exported.gcode";
-    orchestrator.export_print(print, one_tool, reference.string(), destination.string(), selection);
+    Test::export_print_to(orchestrator, print, one_tool, reference.string(), destination.string(), selection);
     const std::string block = block_between_body_and_configuration(read_file(destination), body);
 
     const DynamicPrintConfig original_config = print.full_print_config();

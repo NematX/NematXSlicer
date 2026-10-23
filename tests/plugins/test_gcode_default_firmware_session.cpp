@@ -1,5 +1,33 @@
 #include <catch2/catch.hpp>
 
+/*
+Build small owned printing plans and drive real firmware sessions through the
+public plugin views. Controlled machine state and event trees isolate traversal,
+extrusion accounting, scripts, cancellation labels and syntax-extension hooks.
+Assertions inspect the returned command text and the state it is meant to encode.
+
+The test owns each plan and source object. Borrowed session views are used only
+while their raw instance remains alive. Shared helpers construct neutral fixtures;
+the probes here expose only the state needed by the behavior being checked.
+
+Tests run firmware sessions through public plugin views and inspect generated
+G-code. Export helpers select the text exporter with a borrowed Print and a
+separate configuration copy, then read its published file for assertions.
+
+Default firmware-session tests verify neutral machine-state interpretation, extrusion traversal and extension hooks.
+Shared plan construction and output helpers live in gcode_test_helpers so this file keeps only component-specific behavior.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- firmware.setup()
+        |-- firmware.write_event()
+        |-- make_firmware_path()
+        |-- encoded_temperature()
+        |-- klipper.setup()
+        `-- klipper.write_event()
+*/
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -74,29 +102,7 @@
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "test_data.hpp"
 
-/*
-Build small owned printing plans and drive real firmware sessions through the
-public plugin views. Controlled machine state and event trees isolate traversal,
-extrusion accounting, scripts, cancellation labels and syntax-extension hooks.
-Assertions inspect the returned command text and the state it is meant to encode.
 
-The test owns each plan and source object. Borrowed session views are used only
-while their raw instance remains alive. Shared helpers construct neutral fixtures;
-the probes here expose only the state needed by the behavior being checked.
-
-Default firmware-session tests verify neutral machine-state interpretation, extrusion traversal and extension hooks.
-Shared plan construction and output helpers live in gcode_test_helpers so this file keeps only component-specific behavior.
-
-Representative direct calls (branches are not a timeline):
-
-    TEST_CASE
-        |-- firmware.setup()
-        |-- firmware.write_event()
-        |-- make_firmware_path()
-        |-- encoded_temperature()
-        |-- klipper.setup()
-        `-- klipper.write_event()
-*/
 
 namespace {
 using namespace Slic3r;
@@ -5152,12 +5158,12 @@ static std::string export_with_simple_exporter(Print &print,
                                                const ThumbnailsGeneratorCallback &render)
 {
     Orchestrator &orchestrator = Orchestrator::instance();
-    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(config);
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
     REQUIRE(selection.plugin_id == "gcode.exporter.simple");
     const boost::filesystem::path destination = temporary_gcode_path();
     remove_output_pair(destination);
     try {
-        orchestrator.export_print(print, config, reference.string(), destination.string(), selection, render);
+        Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection, render);
         const std::string text = read_text_file(destination);
         remove_output_pair(destination);
         return text;
@@ -5326,11 +5332,11 @@ TEST_CASE("Thumbnail rendering failure preserves an existing G-code file",
         Steps::StepGenerateGcode::run_step(Orchestrator::instance(), print, reference.string());
         write_text_file(destination, "previous output\n");
         Orchestrator &orchestrator = Orchestrator::instance();
-        const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(config);
+        const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
         const ThumbnailsGeneratorCallback failing = [](const ThumbnailsParams &) -> ThumbnailsList {
             throw std::runtime_error("thumbnail rendering failed before publication");
         };
-        CHECK_THROWS_WITH(orchestrator.export_print(print, config, reference.string(), destination.string(), selection, failing),
+        CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection, failing),
                           Catch::Matchers::Contains("thumbnail rendering failed before publication"));
         CHECK(read_text_file(destination) == "previous output\n");
         // The failure happens before any output file exists, and no private file of this export stays beside the destination.
@@ -5349,7 +5355,7 @@ TEST_CASE("Thumbnail rendering failure preserves an existing G-code file",
             std::fill(data.pixels.begin(), data.pixels.end(), 255);
             return ThumbnailsList{data};
         };
-        orchestrator.export_print(print, config, reference.string(), destination.string(), selection, working);
+        Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection, working);
         CHECK(read_text_file(destination).find("thumbnail begin") != std::string::npos);
     } catch (...) { remove_output_pair(reference); remove_output_pair(destination); throw; }
     remove_output_pair(reference);

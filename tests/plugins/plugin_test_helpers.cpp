@@ -949,6 +949,9 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator.set_plugin_active("gcode.exporter.simple", false);
         activate_plugin_or_fail(orchestrator, "test.gcode.exporter.probe");
         activate_plugin_or_fail(orchestrator, "test.gcode.exporter.raw_query");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.nofile");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.inputs");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.raw_inputs");
         activate_plugin_or_fail(orchestrator, "gcode.settings_scripts");
         activate_plugin_or_fail(orchestrator, "gcode.feature_gcode");
         activate_plugin_or_fail(orchestrator, "gcode.reader.default");
@@ -1108,6 +1111,9 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.finalize_plugin_option_defs();
         orchestrator.set_plugin_active("test.gcode.exporter.probe", false);
         orchestrator.set_plugin_active("test.gcode.exporter.raw_query", false);
+        orchestrator.set_plugin_active("test.gcode.exporter.nofile", false);
+        orchestrator.set_plugin_active("test.gcode.exporter.inputs", false);
+        orchestrator.set_plugin_active("test.gcode.exporter.raw_inputs", false);
         orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);
         orchestrator.set_plugin_active("com.example.selector", false);
         orchestrator.set_plugin_active("com.example.selector.foreign", false);

@@ -298,7 +298,14 @@ public:
         // one_string,// it's now the default for vector without any idx. If you want to edit the first value, set the idx to 0
         // Close parameter, string value could be one of the list values.
         select_close,
+        // File path, string value, chosen to be written. sidetext holds the file filter (wxWidgets format).
+        save_path,
+        // File path, string value, chosen to be read. sidetext holds the file filter (wxWidgets format).
+        open_path,
     };
+    // Whether the value is in the range of the enumeration; the plugin ABI lets any integer through.
+    static bool is_gui_type_valid(GUIType gui_type)
+        { return gui_type >= GUIType::undefined && gui_type <= GUIType::open_path; }
     static bool is_gui_type_enum_open(const GUIType gui_type) 
         { return gui_type == ConfigOptionDef::GUIType::i_enum_open || gui_type == ConfigOptionDef::GUIType::f_enum_open || gui_type == ConfigOptionDef::GUIType::select_open; }
 

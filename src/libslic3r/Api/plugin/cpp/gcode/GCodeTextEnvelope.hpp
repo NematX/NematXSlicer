@@ -54,14 +54,14 @@ std::string format_gcode_generated_by();
 std::string format_gcode_notes(const Config &config);
 
 // Write `envelope.header`, the reference in bounded blocks, then `envelope.trailer` to the output path. Both paths are
-// borrowed UTF-8 strings. Throws on open, read, write, flush or close failure and on cancellation; the host removes a
-// partial output.
+// borrowed UTF-8 strings. Throws on open, read, write, flush or close failure and on cancellation; the caller removes a
+// partial output (publish_gcode_file() does).
 void write_gcode_text_file(const plugin_run_context &run_context,
                            std::string_view reference_path_utf8,
                            std::string_view output_path_utf8,
                            const GCodeTextEnvelope &envelope);
 
-// Encode requested thumbnails, read required ABI 2.1 metadata and the optional ABI 2.2 statistics, and compose owned header/trailer text; the Print is a render context and invalid metadata or encoder failures throw before file I/O.
+// Encode requested thumbnails, read the metadata (its statistics are optional), and compose owned header/trailer text; the Print is a render context and invalid metadata or encoder failures throw before file I/O.
 GCodeTextEnvelope build_gcode_text_envelope(const OrchestratorView &orchestrator,
                                              const Print &print,
                                              const Config &config,

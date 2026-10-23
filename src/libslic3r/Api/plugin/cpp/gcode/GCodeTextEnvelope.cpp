@@ -170,7 +170,7 @@ GCodeTextEnvelope build_gcode_text_envelope(const OrchestratorView &orchestrator
 }
 
 
-// Open borrowed UTF-8 paths, write the borrowed envelope around bounded reference blocks, then flush and close; I/O or cancellation throws and the host removes partial output.
+// Open borrowed UTF-8 paths, write the borrowed envelope around bounded reference blocks, then flush and close; I/O or cancellation throws and the caller removes partial output.
 void write_gcode_text_file(const plugin_run_context &run_context,
                            std::string_view reference_path_utf8,
                            std::string_view output_path_utf8,

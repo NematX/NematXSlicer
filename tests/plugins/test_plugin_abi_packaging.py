@@ -115,7 +115,7 @@ class AbiPackagingTests(unittest.TestCase):
         self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [4, 1])
         self.assertEqual(namespace["SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH"], 58)
         self.assertEqual(namespace["SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT"], 59)
-        self.assertEqual(catalog["headers"]["slic3r_config_def.h"]["version"], [1, 5])
+        self.assertEqual(catalog["headers"]["slic3r_config_def.h"]["version"], [1, 6])
         self.assertEqual(catalog["headers"]["slic3r_orchestrator.h"]["version"], [3, 5])
         self.assertEqual(namespace["PLUGIN_INITIALIZE"]._restype_, ctypes.c_int32)
         self.assertEqual(self.generator.ctype_expr("raw_plugin_log_level", set(), {}), "ctypes.c_int")

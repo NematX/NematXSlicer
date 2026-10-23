@@ -21,7 +21,7 @@ Representative direct calls (branches are not a timeline):
         |-- write_script()
         |-- cube.export_reference()
         |-- read_file()
-        `-- export_print()
+        `-- Test::export_print_to()
 */
 
 #include <catch2/catch.hpp>
@@ -39,6 +39,7 @@ Representative direct calls (branches are not a timeline):
 #include <boost/nowide/fstream.hpp>
 
 #include "gcode_test_helpers.hpp"
+#include "gcode_export_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 
@@ -456,12 +457,12 @@ TEST_CASE("Exporting a valid reference does not run the scripts again",
 
     // The exporter publishes copies of the reference: the scripts are not part of it.
     const DynamicPrintConfig config = cube.print.full_print_config();
-    const Orchestrator::GCodeExporterSelection selection = Orchestrator::instance().select_gcode_exporter(config);
+    const Orchestrator::GCodeExporterSelection selection = Orchestrator::instance().select_gcode_exporter(cube.print, config);
     const boost::filesystem::path first = directory.path() / ("first" + selection.extension);
     const boost::filesystem::path second = directory.path() / ("second" + selection.extension);
-    CHECK(Orchestrator::instance().export_print(cube.print, config, reference.string(), first.string(), selection) ==
+    CHECK(Test::export_print_to(Orchestrator::instance(), cube.print, config, reference.string(), first.string(), selection) ==
           first.string());
-    CHECK(Orchestrator::instance().export_print(cube.print, config, reference.string(), second.string(), selection) ==
+    CHECK(Test::export_print_to(Orchestrator::instance(), cube.print, config, reference.string(), second.string(), selection) ==
           second.string());
 
     CHECK(read_file(counter) == run_text);

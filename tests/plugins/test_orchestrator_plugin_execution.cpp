@@ -529,8 +529,8 @@ TEST_CASE("Group preference defaults to 100 when the optional ABI callback is om
 {
     static_assert(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR == 4u && SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR == 1u,
                   "Provider metadata matches plugin_types 4.1.");
-    static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 5u,
-                  "Complete group declarations require config_def 1.5.");
+    static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 6u,
+                  "Group declarations and file paths use config_def 1.6.");
     static_assert(SLIC3R_PLUGIN_API_ORCHESTRATOR_MAJOR == 3u && SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR == 5u,
                   "Registration queries and application logging require orchestrator 3.5.");
     static_assert(std::is_same<plugin_initialize_fn, int32_t (*)(void *, storage_handle *)>::value,

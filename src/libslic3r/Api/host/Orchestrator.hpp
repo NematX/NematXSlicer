@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -24,11 +25,13 @@
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/MultiPoint.hpp"
 #include "libslic3r/Polygon.hpp"
 
 #include "libslic3r/Config/GuiRuleRegistry.hpp"
+#include "ExportInputs.hpp"
 
 #include "Plugin.hpp"
 #include "StepSelectorTraits.hpp"
@@ -337,9 +340,10 @@ public:
     struct GCodeExporterSelection
     {
         std::string plugin_id;
+        // Suffix with its dot for an exporter that writes a local file; empty otherwise.
         std::string extension;
 
-        // Tell whether a typed suffix (with its dot, any case) is this exporter's extension or a text alias of the built-in exporter.
+        // Tell whether a typed suffix (with its dot, any case) is this exporter's extension or a text alias of the built-in exporter; true for an exporter without extension.
         bool accepts_extension(const std::string &suffix) const;
         // Return a unique path in the system temporary directory, `prefix` + random part + the exporter extension; nothing is created.
         std::string temporary_path(const std::string &prefix) const;
@@ -671,24 +675,40 @@ public:
                              const std::string &path_template,
                              GCodeProcessorResult *result);
 
-    // Resolve and query the exporter chosen by a borrowed configuration copy, returning its ID and extension or throwing.
-    GCodeExporterSelection select_gcode_exporter(const DynamicPrintConfig &config);
-    // Export a borrowed reference with configuration, sliced-width and (when available) statistics metadata, then atomically publish the destination or throw. The reference is never reread here.
-    // thumbnail_cb renders the images the exporter asks for (empty: none, as on the command line).
-    std::string export_print(Print &print,
-                             const DynamicPrintConfig &config,
-                             const std::string &reference_path,
-                             const std::string &destination_path,
-                             const GCodeExporterSelection &selection,
-                             ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+    // Resolve and query the exporter using stable borrowed Print data and settings from config; return its ID/extension or throw, without rendering or writing.
+    GCodeExporterSelection select_gcode_exporter(const Print &print, const DynamicPrintConfig &config);
+    // Run the exporter chosen by `selection` (from select_gcode_exporter(), which ran QUERY) on a borrowed reference, with
+    // configuration, sliced-width and (when available) statistics metadata. The exporter reads its destination from the
+    // `output_path` setting of `config` and publishes its output itself; it reports what it wrote, and the host keeps
+    // that in Print::export_result() as soon as it is reported. The reference is never reread here, and the host does
+    // not check the destination. thumbnail_cb renders the images the exporter asks for (empty: none, as on the command
+    // line). inputs_cb asks the requester for the values that the exporter needs during its setup (empty: the requester cannot be
+    // asked, which fails an exporter that asks); the answers are copied into config, which the exporter reads, after the
+    // metadata were encoded, so they are not part of the metadata. A cancellation by the requester cancels the Print and throws
+    // CanceledException; any other refusal throws a RuntimeError that gives its cause. Throws on failure and on cancellation. The
+    // caller must not hold Print::state_mutex().
+    void export_print(Print &print,
+                      DynamicPrintConfig &config,
+                      const std::string &reference_path,
+                      const GCodeExporterSelection &selection,
+                      ThumbnailsGeneratorCallback thumbnail_cb = nullptr,
+                      ExportInputsCallback inputs_cb = nullptr);
+    // Convert one definition sent by a running exporter into a native one, without registering it in the catalogue of settings;
+    // throws std::invalid_argument, naming the key, when it is refused.
+    ConfigOptionDef export_input_definition(const Plugin &plugin, const raw_config_option_def &raw) const;
     // Run STEP_EXPORT for the request that Print::request_export queued, on the reference that STEP_GCODE
-    // already prepared, and return the published path (also kept in Print::export_result_path()). Unlike
-    // export_gcode(), it never replays STEP_GCODE: with no request, or with a reference that is not ready, it
-    // throws and writes nothing. It publishes no 100 % status of its own; the progress of the step is
-    // Print::pipeline_progress(). The caller must not hold Print::state_mutex().
-    std::string export_requested(Print &print);
-    // Generate a private reference beside the requested destination (STEP_GCODE rereads it for the statistics), export its finalized path, and remove the reference.
+    // already prepared; what the exporter reported is in Print::export_result(). Unlike export_gcode(), it never
+    // replays STEP_GCODE: with no request, or with a reference that is not ready, it throws and exports nothing. It
+    // publishes no 100 % status of its own; the progress of the step is Print::pipeline_progress(). The caller must not
+    // hold Print::state_mutex().
+    void export_requested(Print &print);
+    // Select the exporter first (its QUERY gives the extension that names the destination, like the GUI does; the runner
+    // selects it again for the export), generate a private reference beside the requested destination (STEP_GCODE rereads
+    // it for the statistics), export to the statistics-finalized path, and remove the reference. Return the local file that
+    // the exporter reported; an exporter that wrote none fails the command.
     std::string export_gcode_cli(Print &print, const std::string &requested_output_path);
+    // Same, with the streams that the exporter's input requests use (a question per setting on out, the answer on in).
+    std::string export_gcode_cli(Print &print, const std::string &requested_output_path, std::istream &in, std::ostream &out);
 
     Orchestrator(const Orchestrator&) = delete;
     Orchestrator& operator=(const Orchestrator&) = delete;
@@ -881,6 +901,10 @@ private:
     bool m_initializing_plugin_failed { false };
     std::string m_initializing_plugin_failure;
 };
+
+// Resolve the pipeline step whose results a plugin's options invalidate: the executable producer that a service runs in. Services that
+// only change delivery (GCODE_THUMBNAIL, the exporters of STEP_EXPORT) and unsupported steps give STEP_NONE.
+slicing_step_t plan_owner_step(const Plugin &plugin);
 
 // Owns every object a plugin creates through the C API (polylines, extrusions, configs, meshes, ...)
 // and hands out stable pointers ("handles") to them.

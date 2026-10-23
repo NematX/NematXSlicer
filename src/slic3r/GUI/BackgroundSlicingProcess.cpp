@@ -9,6 +9,10 @@
 
 #include "BackgroundSlicingProcess.hpp"
 
+// Background slicing coordinates the worker and GUI callbacks. FFF exports use
+// a request-owned configuration and thumbnail callback; uploads first publish a
+// private file, then transfer it to the upload queue after successful export.
+
 #include "GUI_App.hpp"
 #include "GUI.hpp"
 #include "MainFrame.hpp"
@@ -778,7 +782,8 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 // header, notes and thumbnails, rendered here through render_thumbnails), then copy it to the user destination. The post-processing
 // scripts have already modified the reference in STEP_GCODE, so they are not run here. The export is a STEP_EXPORT request
 // deposited in the print: it carries a configuration copy taken under the print state mutex. The private file is removed on
-// every path, including a cancellation after the export wrote it; export and copy failures propagate.
+// every path, including a cancellation after the export wrote it; export and copy failures propagate. Limit: only the private
+// path that was requested is removed. An exporter that reports another local file has it copied, but nothing deletes it.
 void BackgroundSlicingProcess::finalize_gcode()
 {
 	// The request holds the configuration copy (taken under the print state mutex) that selects the exporter and
@@ -786,7 +791,7 @@ void BackgroundSlicingProcess::finalize_gcode()
 	Print::ExportRequest request = m_fff_print->make_export_request(
 		[this](const ThumbnailsParams &params) { return this->render_thumbnails(params); });
 	const Orchestrator::GCodeExporterSelection selection =
-		Orchestrator::instance().select_gcode_exporter(request.config);
+		Orchestrator::instance().select_gcode_exporter(*m_fff_print, request.config);
 	boost::filesystem::path requested_path(m_export_path);
 	if (requested_path.extension().empty())
 		requested_path += selection.extension;
@@ -797,7 +802,10 @@ void BackgroundSlicingProcess::finalize_gcode()
 	ScopedTemporaryFile private_file(private_path);
 	request.set_output_path(private_path);
 	m_fff_print->request_export(std::move(request));
-	const std::string exported_path = Orchestrator::instance().export_requested(*m_fff_print);
+	Orchestrator::instance().export_requested(*m_fff_print);
+	const std::string exported_path = m_fff_print->export_result().local_path;
+	if (exported_path.empty())
+		throw Slic3r::ExportError(_u8L("The selected G-code exporter did not write a local file."));
 
 	//FIXME localize the messages
 	std::string error_message;
@@ -835,7 +843,7 @@ void BackgroundSlicingProcess::finalize_gcode()
 
 // Export the generated reference with the profile's exporter (thumbnails rendered through render_thumbnails) into a private upload file
 // and queue the upload; the file is removed if the upload name cannot be resolved. The post-processing scripts have already modified
-// the reference in STEP_GCODE. SLA writes its raster file instead.
+// the reference in STEP_GCODE. SLA writes its raster file instead. The borrowed Print supplies QUERY services; failures propagate before queue ownership is transferred.
 void BackgroundSlicingProcess::prepare_upload()
 {
 	// Generate a unique temp path to which the gcode/zip file is copied/exported
@@ -850,13 +858,16 @@ void BackgroundSlicingProcess::prepare_upload()
 		Print::ExportRequest request = m_fff_print->make_export_request(
 			[this](const ThumbnailsParams &params) { return this->render_thumbnails(params); });
 		const Orchestrator::GCodeExporterSelection selection =
-			Orchestrator::instance().select_gcode_exporter(request.config);
+			Orchestrator::instance().select_gcode_exporter(*m_fff_print, request.config);
 		// The temporary path must end with the exporter extension, otherwise the random part would be taken for a suffix.
 		const std::string private_path = selection.temporary_path("." SLIC3R_APP_KEY ".upload.");
 		private_file.emplace(private_path);
 		request.set_output_path(private_path);
 		m_fff_print->request_export(std::move(request));
-		const std::string exported_path = Orchestrator::instance().export_requested(*m_fff_print);
+		Orchestrator::instance().export_requested(*m_fff_print);
+		const std::string exported_path = m_fff_print->export_result().local_path;
+		if (exported_path.empty())
+			throw Slic3r::ExportError(_u8L("The selected G-code exporter did not write a local file."));
 		source_path = boost::filesystem::path(exported_path);
 		if (m_upload_job.upload_data.upload_path.extension().empty())
 			m_upload_job.upload_data.upload_path += selection.extension;

@@ -65,6 +65,7 @@ Validation includes print-level setting requirements on selected providers.
 #include "PrintBase.hpp"
 #include "Config/FFFPrintConfig.hpp"
 #include "PrintRecords.hpp"
+#include "Api/host/ExportInputs.hpp"
 #include "Api/plugin/c/slic3r_slicing_step.h"
 #include "Steps/PipelineProgress.hpp"
 
@@ -341,13 +342,16 @@ public:
     One export request, from its deposit by the caller to its consumption by the STEP_EXPORT runner.
     It is single-use: the runner moves it out of the Print when it starts, so a later export needs a
     new request. config is a private copy of full_print_config() plus the request-only entries
-    (output_path); it never takes part in Print::apply(). thumbnails renders the images the exporter
-    asks for, and stays empty when no graphical renderer exists (command line).
+    (output_path, output_path_suggestion); it never takes part in Print::apply(). thumbnails renders the images the exporter
+    asks for, and stays empty when no graphical renderer exists (command line). inputs asks the requester for the values
+    that the exporter needs (see ExportInputForm); it stays empty when the requester cannot be asked, which fails an
+    exporter that asks.
     */
     struct ExportRequest
     {
         DynamicPrintConfig          config;
         ThumbnailsGeneratorCallback thumbnails;
+        ExportInputsCallback        inputs;
 
         // Destination of the export, or an empty string when none was set.
         std::string output_path() const
@@ -361,7 +365,7 @@ public:
     // without destination. The request is owned by the caller until request_export().
     ExportRequest make_export_request(ThumbnailsGeneratorCallback thumbnails) const;
     // Queue STEP_EXPORT with this request. Takes state_mutex() (the caller must not hold it), replaces
-    // any previous unconsumed request and discards the previous result path. It never arms the plugin
+    // any previous unconsumed request and discards the previous result. It never arms the plugin
     // cleanup, so a later apply() does not stop the worker because of it. The request lives until
     // take_export_request() or clear().
     void request_export(ExportRequest request);
@@ -372,11 +376,21 @@ public:
     // ready (never produced, invalidated or being regenerated). The step state is read under state_mutex(); the path
     // is only safe to read from the thread that produces or consumes the reference (see Print.cpp).
     std::string ready_gcode_reference_path() const;
-    // Path published by the last export, or empty. Set as soon as the exporter published the file,
-    // before the step returns, so that a caller can clean up even when the step fails afterwards.
-    // Valid until the next request_export() or clear(); an invalidation of STEP_GCODE leaves it.
-    std::string export_result_path() const;
-    void        set_export_result_path(std::string path);
+    /*
+    What the exporter reported about its export: the local file it wrote and a label to display. Either may be empty;
+    an exporter that writes no local file reports an empty local_path.
+    */
+    struct ExportResult
+    {
+        std::string local_path;
+        std::string label;
+    };
+    // Result reported by the last export, or an empty result. Orchestrator::export_print() empties it when it starts, then it is recorded as soon as the exporter reports it, before
+    // the step returns, so that a caller can clean up a file already published even when the step fails or is cancelled
+    // afterwards. Valid until the next export, request_export() or clear(); an invalidation of STEP_GCODE leaves it.
+    ExportResult export_result() const;
+    // Record the result under state_mutex() (locked here). The host calls it while the exporter runs, when it reports; it replaces the previous result.
+    void         set_export_result(ExportResult result);
 
     const PrintObject *auxiliary_object() const { return m_auxiliary_object.get(); }
     PrintObject &mutable_auxiliary_object();
@@ -569,9 +583,9 @@ private:
     mutable std::atomic_bool                m_freeze_diagnostic_claimed{false};
     std::string                             m_gcode_reader_source_path;
     std::string                             m_gcode_reader_plugin_id;
-    // Pending export request and last published export path, both guarded by state_mutex().
+    // Pending export request and last reported export result, both guarded by state_mutex().
     std::optional<ExportRequest>            m_export_request;
-    std::string                             m_export_result_path;
+    ExportResult                            m_export_result;
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

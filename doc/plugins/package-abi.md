@@ -10,10 +10,11 @@ slicer_version = 2.7.63.0-alpha+UNKNOWN
 [abi]
 slic3r_plugin_types.h = 4.1
 slic3r_orchestrator.h = 3.5
-slic3r_slicing_step.h = 2.3
+slic3r_slicing_step.h = 2.4
+slic3r_config_def.h = 1.6
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
-steps/slic3r_step_gcode_export.h = 2.1
+steps/slic3r_step_gcode_export.h = 4.0
 slic3r_gcode_thumbnail.h = 2.0
 ```
 
@@ -41,12 +42,22 @@ gained the optional `encode_image` callback.
 
 Plugin-types 4.1 includes the support-toolpath header identity
 `SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH` (58), naming
-`steps/slic3r_step_support_toolpath.h`. Its sized vtable layout is unchanged from 4.0.
+`steps/slic3r_step_support_toolpath.h`, and the exporter header identity
+`SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT` (59), naming
+`steps/slic3r_step_gcode_export.h`. Its sized vtable layout is unchanged from 4.0.
 
 Data-tree 5.0 removes the branch surface modifier and reserves bit 10. Support-toolpath
 2.0 removes the branch role: branch bodies are sparse support, and the sheath algorithm
 shares the sparse selector. Packages requiring data-tree 4.x or support-toolpath 1.x
 must be rebuilt. Support-step remains 1.3; its publication payload is unchanged.
+
+The G-code exporter step is at 4.0: QUERY requires a borrowed Print in its
+payload, while the generic execution-context Print remains null. Exporter 3.x
+packages are incompatible. QUERY reads settings from its configuration argument
+and only computation-stable Print data (applied configuration and selected
+services), never geometry or layers. It may acquire a service to inspect a
+capability, but must stay quick, without rendering or writing, including on the
+GUI thread. Compatibility cannot depend on request-only destination settings.
 
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the

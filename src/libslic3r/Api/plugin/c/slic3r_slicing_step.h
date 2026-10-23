@@ -6,7 +6,7 @@
 #define slic3r_slicing_step_h_
 
 #define SLIC3R_PLUGIN_API_SLICING_STEP_MAJOR 2u
-#define SLIC3R_PLUGIN_API_SLICING_STEP_MINOR 3u
+#define SLIC3R_PLUGIN_API_SLICING_STEP_MINOR 4u
 
 #include <stdint.h>
 
@@ -75,7 +75,8 @@ enum slicing_step_values
     STEP_GCODE                     = 2000,
     /*
     Publishes the finished G-code reference. It runs only when an export is
-    requested, never as part of the preview.
+    requested, never as part of the preview. G-code exporter plugins declare
+    this step; see steps/slic3r_step_gcode_export.h.
     */
     STEP_EXPORT                    = 2100,
 
@@ -134,10 +135,12 @@ enum slicing_step_values
     GCODE_READER                   = 10400,
 
     /* Non-exclusive wipe services driven in phases by STEP_WIPETOWER. */
-    WIPE_TOWER_WIPE                = 10450,
+    WIPE_TOWER_WIPE                = 10450
 
-    /* Selects a G-code file exporter after the reference has been generated. */
-    GCODE_EXPORT                   = 10500
+    /*
+    10500 is reserved: it named the former G-code exporter service, which STEP_EXPORT
+    replaced. Do not reuse it.
+    */
 
 }
 #ifdef __cplusplus

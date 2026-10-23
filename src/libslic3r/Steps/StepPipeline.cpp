@@ -409,7 +409,7 @@ std::string option_key_for_plugin_group(const Orchestrator &orchestrator,
     return generated_plugin_exclusive_group_option_key(orchestrator, step, group_id);
 }
 
-// Return whether the supplied ID is a recognized built-in step or service; GCODE_EXPORT is known but outside execution order, and unknown IDs return false without mutation.
+// Return whether the supplied ID is a recognized built-in step or service; unknown IDs return false without mutation.
 bool is_known_builtin_step(slicing_step_t step)
 {
     switch (step) {
@@ -450,7 +450,6 @@ bool is_known_builtin_step(slicing_step_t step)
     case GCODE_THUMBNAIL:
     case GCODE_READER:
     case WIPE_TOWER_WIPE:
-    case GCODE_EXPORT:
         return true;
     default:
         return false;
@@ -481,7 +480,7 @@ std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std:
 /*
 Populate one exclusive group with owned display strings, borrowed raw-option pointers, and a UI
 fragment; the raw definition borrows strings stored by the group. Mark plugin IDs for pruning during
-finalization and keep GCODE_EXPORT's selector at STEP_NONE because it changes only output format.
+finalization and keep STEP_EXPORT's selector at STEP_NONE because it changes only output format.
 The group must outlive registration, while option finalization replaces borrowed enum storage only
 before selector-bearing configs are created. Allocation failures propagate; no option definition is
 registered here.
@@ -715,7 +714,7 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
         {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
         {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
         {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}},
-        {GCODE_EXPORT,        {"gcode_exporter_plugin",      "G-code exporter",        "G-code exporter"}}
+        {STEP_EXPORT,        {"gcode_exporter_plugin",      "G-code exporter",        "G-code exporter"}}
     };
     return s_groups;
 }

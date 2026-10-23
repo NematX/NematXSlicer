@@ -298,6 +298,17 @@ void PrintConfigDef::init_common_params()
     def->cli = ConfigOptionDef::nocli;
     def->set_default_value(new ConfigOptionString(""));
 
+    // Path that the host proposes for one export: the name built by output_filename_format with the final statistics, in the directory of
+    // the project. An exporter that asks for its destination proposes it. Like output_path, it lives only in the export request.
+    def = this->add("output_path_suggestion", coString);
+    def->label = L("Suggested output path");
+    def->tooltip = L("Where the host proposes to publish the exported file. It is computed for one export only and is never saved.");
+    def->printer_technology = ptFFF | ptSLA;
+    def->nature = ConfigOptionNature::Volatile;
+    def->invalidates_step = STEP_NONE;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionString(""));
+
     def = this->add("printer_technology", coEnum);
     def->label = L("Printer technology");
     def->tooltip = L("Printer technology");

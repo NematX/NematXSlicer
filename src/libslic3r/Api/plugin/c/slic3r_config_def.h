@@ -31,7 +31,7 @@
 #define slic3r_config_def_h_
 
 #define SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 5u
+#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 6u
 
 #include "slic3r_config_option.h"
 #include "slic3r_config_types.h"
@@ -79,7 +79,13 @@ typedef enum raw_gui_type {
     RAW_GUI_TYPE_LEGEND,
 
     /* Closed enum (must match provided values) */
-    RAW_GUI_TYPE_SELECT_CLOSE
+    RAW_GUI_TYPE_SELECT_CLOSE,
+
+    /* File path (string value) chosen to be written; sidetext is the file filter in the wxWidgets format */
+    RAW_GUI_TYPE_SAVE_PATH,
+
+    /* File path (string value) chosen to be read; sidetext is the file filter in the wxWidgets format */
+    RAW_GUI_TYPE_OPEN_PATH
 } raw_gui_type;
 
 /* Category of a configuration field (GUI grouping) */

@@ -7298,7 +7298,7 @@ void Plater::export_gcode(bool prefer_removable)
             return;
         const fs::path project_path = into_path(get_project_filename(".3mf"));
         if (printer_technology() == ptFFF) {
-            exporter_selection = Orchestrator::instance().select_gcode_exporter(fff_print().full_print_config());
+            exporter_selection = Orchestrator::instance().select_gcode_exporter(fff_print(), fff_print().full_print_config());
             default_output_file = this->p->background_process.output_filepath_for_project(
                 project_path, exporter_selection.extension);
         } else {
@@ -8131,7 +8131,7 @@ void Plater::send_gcode()
             return;
         const fs::path project_path = into_path(get_project_filename(".3mf"));
         if (printer_technology() == ptFFF) {
-            exporter_selection = Orchestrator::instance().select_gcode_exporter(fff_print().full_print_config());
+            exporter_selection = Orchestrator::instance().select_gcode_exporter(fff_print(), fff_print().full_print_config());
             default_output_file = this->p->background_process.output_filepath_for_project(
                 project_path, exporter_selection.extension);
         } else {

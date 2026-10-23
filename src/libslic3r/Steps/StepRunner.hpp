@@ -112,7 +112,6 @@ inline const char *builtin_step_name(slicing_step_t step)
     case GCODE_FIRMWARE:             return "GCODE_FIRMWARE";
     case GCODE_THUMBNAIL:            return "GCODE_THUMBNAIL";
     case GCODE_READER:               return "GCODE_READER";
-    case GCODE_EXPORT:               return "GCODE_EXPORT";
     case WIPE_TOWER_WIPE:            return "WIPE_TOWER_WIPE";
     default:                         return nullptr;
     }

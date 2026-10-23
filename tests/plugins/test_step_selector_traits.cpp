@@ -890,17 +890,17 @@ TEST_CASE("Selector dropdown preferences preserve native ordering and historical
     CHECK(firmware_group.traits.invalidates_step == firmware_whole.traits.invalidates_step);
     CHECK(Steps::get_exclusive_steps().count(STEP_GCODE) == 0);
     CHECK(PrintConfigDef::instance().get("step_gcode_plugin") == nullptr);
-    ThumbnailActivationGuard exporter_guard(host, GCODE_EXPORT);
+    ThumbnailActivationGuard exporter_guard(host, STEP_EXPORT);
     REQUIRE(host.set_plugin_active("gcode.exporter.simple", true));
     bool found_exporter = false;
     for (const Steps::StepExclusivePluginGroup &entry : Steps::active_exclusive_plugin_groups(host))
-        if (entry.group.step == GCODE_EXPORT) {
+        if (entry.group.step == STEP_EXPORT) {
             found_exporter = true;
             CHECK(entry.group.ui_fragment.find("line:G-code exporter\n") != std::string::npos);
         }
     CHECK(found_exporter);
-    const Steps::StepExclusiveGroup exporter_table = Steps::make_exclusive_step_group(host, GCODE_EXPORT,
-        Steps::get_exclusive_steps().at(GCODE_EXPORT));
+    const Steps::StepExclusiveGroup exporter_table = Steps::make_exclusive_step_group(host, STEP_EXPORT,
+        Steps::get_exclusive_steps().at(STEP_EXPORT));
     CHECK(exporter_table.ui_fragment.find("line:G-code exporter\n") != std::string::npos);
 }
 
@@ -925,7 +925,7 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         {STEP_INFILL, RAW_OPTION_CATEGORY_INFILL, RAW_PRESET_TYPE_FFF_PRINT, STEP_INFILL, false},
         {STEP_WIPETOWER, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_WIPETOWER, false},
         {STEP_LAYER_STICHING, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_LAYER_STICHING, false},
-        {GCODE_EXPORT, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_NONE, true},
+        {STEP_EXPORT, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_NONE, true},
         {GCODE_FIRMWARE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true}
     };
     const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &identities = Steps::get_exclusive_steps();
@@ -964,11 +964,11 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
     Plugin provider(probe.c_instance(), "Slic3r", "");
     const std::pair<slicing_step_t, const char *> services[] = {
         {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
-        {GCODE_READER, "reader_invalidation_probe"}, {GCODE_EXPORT, "gcode_exporter_plugin"}
+        {GCODE_READER, "reader_invalidation_probe"}, {STEP_EXPORT, "gcode_exporter_plugin"}
     };
     for (const std::pair<slicing_step_t, const char *> &service : services) {
         INFO(int(service.first));
-        const slicing_step_t invalidation = service.first == GCODE_THUMBNAIL || service.first == GCODE_EXPORT ?
+        const slicing_step_t invalidation = service.first == GCODE_THUMBNAIL || service.first == STEP_EXPORT ?
             STEP_NONE : STEP_GCODE;
         const StepSelectorTraits *declared = host.step_selector(service.first, "");
         REQUIRE(declared != nullptr);

@@ -1,4 +1,21 @@
-"""Behavior tests for immutable Python configuration-definition values."""
+"""Check that Python configuration-definition views expose immutable copied values.
+
+Controlled definitions supply labels, enum entries and GUI metadata, including
+file-path fields. Tests read them through the public wrappers and compare values
+and container behavior without creating GUI widgets or changing the host schema.
+The fixture owns the C-facing data; returned Python values must not depend on
+temporary buffers that the fixture can replace after a query.
+
+Representative direct calls (branches are not a timeline):
+
+    test_orchestrator_and_api_facades_return_the_same_values()
+        |-- self.make_api()
+        |-- self.orchestrator_views.OrchestratorView()
+        |-- orchestrator.option_keys()
+        |-- orchestrator.option_definition()
+        |-- self.api_module.Slic3rAPI.__new__()
+        `-- public_api.option_keys()
+"""
 
 import ctypes
 from dataclasses import FrozenInstanceError
@@ -244,6 +261,15 @@ class PythonConfigDefinitionViewTests(unittest.TestCase):
         with self.assertRaises(FrozenInstanceError):
             first.label = "changed"
         self.assertIsNone(self.views.option_definition(api, "missing"))
+
+    def test_gui_types_keep_their_numeric_values_and_the_path_types_come_last(self):
+        """Check that the generated constants match the C++ enumeration and that the path types were appended."""
+        self.assertEqual(
+            (self.generated.RAW_GUI_TYPE_UNDEFINED, self.generated.RAW_GUI_TYPE_F_ENUM_OPEN,
+             self.generated.RAW_GUI_TYPE_SELECT_CLOSE, self.generated.RAW_GUI_TYPE_SAVE_PATH,
+             self.generated.RAW_GUI_TYPE_OPEN_PATH),
+            (0, 2, 7, 8, 9),
+        )
 
     def test_natures_copy_stable_numeric_values_from_raw(self):
         """Check literal withdrawal constants and copied named or unnamed combinations."""

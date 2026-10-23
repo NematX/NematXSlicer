@@ -22,7 +22,12 @@ temporary line buffer.
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/Print.hpp"
 
 
 #ifndef CHECK_MESSAGE
@@ -33,6 +38,28 @@ temporary line buffer.
         CHECK(catch_check_message_result); \
     } while (false)
 #endif
+
+namespace Slic3r::Test {
+
+// Export a reference through the exporter of `selection`, as a requester does: `destination` is set as the
+// output_path of a copy of `config`. Return the local file that the exporter reported (empty when it reported none).
+inline std::string export_print_to(Orchestrator &orchestrator,
+                                   Print &print,
+                                   const DynamicPrintConfig &config,
+                                   const std::string &reference_path,
+                                   const std::string &destination,
+                                   const Orchestrator::GCodeExporterSelection &selection,
+                                   ThumbnailsGeneratorCallback thumbnail_cb = nullptr,
+                                   ExportInputsCallback inputs_cb = nullptr)
+{
+    DynamicPrintConfig request_config = config;
+    request_config.set_key_value("output_path", new ConfigOptionString(destination));
+    orchestrator.export_print(print, request_config, reference_path, selection, std::move(thumbnail_cb),
+                              std::move(inputs_cb));
+    return print.export_result().local_path;
+}
+
+} // namespace Slic3r::Test
 
 namespace Slic3r::Test::Plugins::GCodeExportTest {
 

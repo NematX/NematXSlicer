@@ -362,7 +362,7 @@ void Print::clear() {
     this->reset_gcode_reader_source_path();
     // The request owns a configuration copy and a GUI callback: it must not outlive the print it was made for.
     m_export_request.reset();
-    m_export_result_path.clear();
+    m_export_result = ExportResult();
     m_print_statistics.statistics_available = false;
     this->reset_step_execution_plan_all_unguarded();
     m_pipeline_state.clear();
@@ -556,7 +556,7 @@ Print::ExportRequest Print::make_export_request(ThumbnailsGeneratorCallback thum
     return request;
 }
 
-// Store the request (replacing an unconsumed one), forget the path of the previous export and queue STEP_EXPORT, all under
+// Store the request (replacing an unconsumed one), forget the result of the previous export and queue STEP_EXPORT, all under
 // state_mutex(), which this function locks itself. Only queue_step_unguarded() is used, never the generic marking: the
 // plugin cleanup stays unarmed, because the export only reads the reference and a later apply() must not stop the worker
 // for it. The Print owns the request until take_export_request() or clear().
@@ -564,7 +564,7 @@ void Print::request_export(ExportRequest request)
 {
     std::scoped_lock<std::mutex> lock(this->state_mutex());
     m_export_request = std::move(request);
-    m_export_result_path.clear();
+    m_export_result = ExportResult();
     // The export only reads the reference: queuing it must not stop the worker through a pending cleanup.
     this->queue_step_unguarded(STEP_EXPORT);
 }
@@ -591,21 +591,21 @@ std::string Print::ready_gcode_reference_path() const
     return ready ? m_gcode_reader_source_path : std::string();
 }
 
-// Return a copy, read under state_mutex() (locked here), of the path published by the last export. It is valid until the
-// next request_export() or clear(): an invalidation of STEP_GCODE does not clear it, because it names a file that the
-// export already published and that its caller may still have to remove.
-std::string Print::export_result_path() const
+// Return a copy, read under state_mutex() (locked here), of the result reported by the last export. It is valid until the
+// next export, request_export() or clear(): an invalidation of STEP_GCODE does not clear it, because it may name a file that
+// the export already published and that its caller may still have to remove.
+Print::ExportResult Print::export_result() const
 {
     std::scoped_lock<std::mutex> lock(this->state_mutex());
-    return m_export_result_path;
+    return m_export_result;
 }
 
-// Record the path published by the export, under state_mutex() (locked here). Called by the export step as soon as the
-// exporter returned, before any later check can cancel the step.
-void Print::set_export_result_path(std::string path)
+// Record the result reported by the exporter, under state_mutex() (locked here). Called while the exporter runs, as soon as
+// it reports, so that no later check can lose it.
+void Print::set_export_result(ExportResult result)
 {
     std::scoped_lock<std::mutex> lock(this->state_mutex());
-    m_export_result_path = std::move(path);
+    m_export_result = std::move(result);
 }
 
 void Print::mark_step_and_dependents_for_execution(slicing_step_t step)
@@ -2132,20 +2132,21 @@ DynamicConfig PrintStatistics::placeholders()
     return config;
 }
 
+// Apply the print statistics to the stem of an output path; a variable that the statistics do not hold (for example print_time
+// when the G-code was not read back) throws a PlaceholderParserError that cites the template line and the variable, instead of
+// keeping the variable in the name.
 std::string PrintStatistics::finalize_output_path(const std::string &path_in) const
 {
-    std::string final_path;
+    const boost::filesystem::path path(path_in);
+    const DynamicConfig cfg = this->config();
+    const PlaceholderParser pp;
     try {
-        boost::filesystem::path path(path_in);
-        DynamicConfig cfg = this->config();
-        PlaceholderParser pp;
-        std::string new_stem = pp.process(path.stem().string(), 0, &cfg);
-        final_path = (path.parent_path() / (new_stem + path.extension().string())).string();
-    } catch (const std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to apply the print statistics to the export file name: " << ex.what();
-        final_path = path_in;
+        const std::string new_stem = pp.process(path.stem().string(), 0, &cfg);
+        return (path.parent_path() / (new_stem + path.extension().string())).string();
+    } catch (const PlaceholderParserError &error) {
+        throw PlaceholderParserError(_u8L("Cannot apply the print statistics to the export file name (output_filename_format):") +
+                                     "\n" + error.what());
     }
-    return final_path;
 }
 
 

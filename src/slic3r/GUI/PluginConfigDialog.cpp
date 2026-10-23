@@ -464,7 +464,6 @@ wxString step_name(slicing_step_t step)
     case GCODE_FIRMWARE:                 return _L("G-code firmware");
     case GCODE_THUMBNAIL:                return _L("G-code thumbnails");
     case GCODE_READER:                   return _L("G-code readers");
-    case GCODE_EXPORT:                   return _L("G-code exporters");
     case INFILL_PATTERN:                 return _L("Infill patterns");
     case INFILL_SURFACE_RECIPE_MODIFIER: return _L("Infill surface recipes");
     case BRIDGE_DETECTOR:                return _L("Bridge detectors");
