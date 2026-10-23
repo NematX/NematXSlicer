@@ -1,3 +1,4 @@
+#include "polygon_metrics_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 #include "gcode_test_helpers.hpp"
 #include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
@@ -589,6 +590,62 @@ TEST_CASE("Grid first-layer and height limits cover the cube-with-hole support c
         CHECK(distance <= 0.4 + EPSILON);
     }
     CHECK(shared_z > 0);
+}
+
+// The support ignores the brim and the skirt: with a brim_width of 2, a brim_width_interior of 1 and a skirt, every slab of every list, floors included,
+// equals the slab of the same print without a brim (same print Z, type and area), and the first layer holds support.
+TEST_CASE("Grid first layer slabs ignore the brim", "[plugins][support-grid][brim]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("grid", "snug");
+    const int interfaces = GENERATE(0, 3);
+    CAPTURE(style, interfaces);
+    // Slice a print of the slab with the given brim widths and generate its grid slabs.
+    struct Run {
+        Print print;
+        Model model;
+        std::unique_ptr<SG::Generated> generated;
+        Run(const char *style, int interfaces, const char *brim_width, const char *interior, const char *skirts)
+        {
+            DynamicPrintConfig config = SG::config(style, false, interfaces);
+            config.set_deserialize_strict({{"brim_width", brim_width}, {"brim_width_interior", interior},
+                                           {"skirts", skirts}, {"skirt_distance", "1"}});
+            Test::init_print({SG::slab()}, print, model, config);
+            SG::prefix(print);
+            generated = std::make_unique<SG::Generated>(print, print.object(0));
+        }
+    };
+    const Run plain(style, interfaces, "0", "0", "0"), brimmed(style, interfaces, "2", "1", "1");
+    // Only the second print has a brim and a skirt.
+    REQUIRE_FALSE(plain.print.object(0).has_brim());
+    REQUIRE(brimmed.print.object(0).has_brim());
+    const slic3r_api::Support::Common::GeneratedSupport &before = plain.generated->support, &after = brimmed.generated->support;
+    const std::vector<std::pair<const slic3r_api::Support::Common::GeneratorLayers *, const slic3r_api::Support::Common::GeneratorLayers *>> lists = {
+        {&before.top, &after.top}, {&before.base, &after.base}, {&before.interfaces, &after.interfaces}, {&before.bottom, &after.bottom}};
+    // The plain print has the slabs that the brim used to cut.
+    REQUIRE_FALSE(before.top.empty());
+    REQUIRE_FALSE(before.base.empty());
+    if (interfaces > 0)
+        REQUIRE_FALSE(before.interfaces.empty());
+    const coord_t first = scale_to_layer_coord(SG::params(plain.print, plain.print.object(0)).first_layer_height);
+    double first_layer_mm2 = 0.;
+    for (const std::pair<const slic3r_api::Support::Common::GeneratorLayers *, const slic3r_api::Support::Common::GeneratorLayers *> &list : lists) {
+        REQUIRE(list.first->size() == list.second->size());
+        for (size_t i = 0; i < list.first->size(); ++i) {
+            const slic3r_api::Support::Common::GeneratorLayer &a = *(*list.first)[i], &b = *(*list.second)[i];
+            const Polygons &polygons_a = SG::native(a.polygons), &polygons_b = SG::native(b.polygons);
+            CHECK(a.print_z == b.print_z);
+            CHECK(a.bottom_z == b.bottom_z);
+            CHECK(a.height == b.height);
+            CHECK(a.bridging == b.bridging);
+            CHECK(a.type == b.type);
+            CHECK(Slic3r::Test::PolygonMetrics::sym_diff_mm2(polygons_a, polygons_b) < 1e-4);
+            if (a.print_z <= first)
+                first_layer_mm2 += unscaled(unscaled(area(union_ex(polygons_b))));
+        }
+    }
+    // The case is not vacuous: the first layer holds support.
+    CHECK(first_layer_mm2 > 0.);
 }
 
 // The family gives every area of one auxiliary layer a single owner: a lower surface loses the

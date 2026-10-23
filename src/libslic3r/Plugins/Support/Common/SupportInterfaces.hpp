@@ -9,11 +9,10 @@
        Common::project_interface_contacts(params, out);  // tree only
        Common::carve_interfaces(params, snug, out);
 
-   Once the slabs are final, expand_first_layer_foot() widens the first base slab and then remove_first_layer_brim() cuts the
-   reserved brim area of the object out of the slabs of the first layer, for every family and in this order:
+   Once the slabs are final, expand_first_layer_foot() widens the first base slab, for every family. The support ignores the
+   brim and the skirt: it uses all the room it wants on the first layer.
 
-       Common::expand_first_layer_foot(object, layers, params, out);
-       Common::remove_first_layer_brim(object, layers, params, out); */
+       Common::expand_first_layer_foot(object, layers, params, out); */
 #ifndef plugins_support_common_interfaces_hpp_
 #define plugins_support_common_interfaces_hpp_
 
@@ -30,11 +29,6 @@ void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out);
 // layer grown by gap_xy, then remove from it the footprints of the contacts and interfaces on the bed. Other slabs are not changed.
 // Details are in the definition.
 void expand_first_layer_foot(const Object &object, const std::vector<Layer> &layers, const SupportParams &p, GeneratedSupport &out);
-// Remove the reserved brim area of the object from the support slabs of the first layer (top, base and interface slabs; not the
-// floors), in place. Nothing is removed unless the object has a brim in the sense of the native PrintObject::has_brim(), so a brim
-// with only one of the two widths positive removes nothing, and with both widths positive the holes are shrunk by brim_width
-// (not by brim_width_interior). Details are in the definition.
-void remove_first_layer_brim(const Object &object, const std::vector<Layer> &layers, const SupportParams &p, GeneratedSupport &out);
 } // namespace slic3r_api::Support::Common
 
 #endif

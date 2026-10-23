@@ -143,9 +143,8 @@ void generate_support(const plugin_run_context *context, const Print &print, con
             if (bottom->bottom_print_z() <= top->bottom_z && top->print_z <= bottom->print_z)
                 top->polygons = polygons(clipper_diff(run.clipper(top->polygons), run.clipper(bottom->polygons)));
     Common::carve_interfaces(params, run.style == Common::SupportStyle::Snug, out);
-    // The foot of the support is widened, then the reserved brim area is cut out of the slabs of the first layer, as in every family.
+    // The foot of the support is widened, as in every family. The support ignores the brim and the skirt.
     Common::expand_first_layer_foot(run.object, run.layers, params, out);
-    Common::remove_first_layer_brim(run.object, run.layers, params, out);
 }
 
 namespace {

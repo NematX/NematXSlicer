@@ -50,8 +50,7 @@
       own top; then clear_under_floors() removes the floor footprints from the base slabs and these contacts;
    7. carve_interfaces() splits the dense interfaces out; expand_first_layer_foot() then widens the first base slab when it
       starts on the bed (the first tree base slab, or the first organic branch slab, whose flange follows it; tips on the bed
-      without a base slab are not widened) by raft_first_layer_expansion, and remove_first_layer_brim() cuts the reserved brim
-      area of the object out of the top, base and interface slabs of the first layer (a slab can end empty); the base slabs
+      without a base slab are not widened) by raft_first_layer_expansion; the support ignores the brim and the skirt; the base slabs
       take their branch type.
 
    Everything is written on the plugin API: the object and the print are views, the areas are polygon collections of the plugin
@@ -279,7 +278,6 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
         clear_under_floors(layers, drawn_slabs, out.bottom, scratch);
         Common::carve_interfaces(params, false, out);
         Common::expand_first_layer_foot(object, layers, params, out);
-        Common::remove_first_layer_brim(object, layers, params, out);
         for (Common::GeneratorLayer *slab : out.base)
             slab->type = organic ? Common::LayerType::Branch : Common::LayerType::Base;
     });

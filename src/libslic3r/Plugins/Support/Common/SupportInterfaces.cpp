@@ -6,20 +6,19 @@
 #include <utility>
 
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
-#include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 
-/* Implementation of the shared interface carving and of the first-layer foot widening and brim removal (see SupportInterfaces.hpp).
+/* Implementation of the shared interface carving and of the first-layer foot widening (see SupportInterfaces.hpp).
 
    Both entry points read the same windows. For base slab i, the top contacts above it are taken when their bottom lies under
    the top of the window of the top interface count, and the bottom contacts below it when their top lies above the bottom of
    the window of the bottom interface count. Projection copies those footprints into the slab; carving intersects them with
    the slab's regularized union, so the interface is the part of the slab under the contacts.
 
-   The file has four entry points. project_interface_contacts() and carve_interfaces() build the interfaces, in this order for a family
-   whose base slabs do not cover the contacts. expand_first_layer_foot() and remove_first_layer_brim() then act on the slabs of the
-   first layer, in this order: the first widens the first base slab, the second cuts the reserved brim area out of the slabs. The
-   widening uses the finalized contacts and interfaces (it keeps the foot clear of those on the bed), so it runs after carve_interfaces(). */
+   The file has three entry points. project_interface_contacts() and carve_interfaces() build the interfaces, in this order for a family
+   whose base slabs do not cover the contacts. expand_first_layer_foot() then widens the first base slab. The widening uses the
+   finalized contacts and interfaces (it keeps the foot clear of those on the bed), so it runs after carve_interfaces().
+   The support ignores the brim and the skirt: it uses all the room it wants on the first layer. */
 
 namespace slic3r_api::Support::Common {
 namespace {
@@ -28,10 +27,6 @@ constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
 
 // Collect the top and bottom contacts whose interface windows reach base slab i, in the order of out.top and out.bottom.
 void interface_contacts(const SupportParams &p, const GeneratedSupport &out, size_t i, GeneratorLayers &top, GeneratorLayers &bottom);
-// Reverse the point order of every polygon, like the native polygons_reverse().
-void reverse(Polys &polys);
-// Whether the object has a brim under its first layer, the native PrintObject::has_brim().
-bool has_brim(const Object &object, double brim_width, double brim_width_interior, int raft_layers);
 } // namespace
 
 // Copy the footprints of the reaching contacts into each base slab; contacts keep their own footprints.
@@ -107,7 +102,7 @@ void carve_interfaces(const SupportParams &p, bool snug, GeneratedSupport &out)
 // Inputs: layers must contain the object's first layer as layers[0]; out.storage must stay valid, it holds the temporary areas.
 // The foot is normalized at p.resolution (ensure_valid) at the end, and p.first_flow.width must be positive: it sets the step size.
 // Effects and ownership: the polygons of the foot are replaced in place and the slab keeps its owner (out); the other slabs are
-// not changed. Called before remove_first_layer_brim(), which can cut the widened foot again.
+// not changed. The brim and the skirt are ignored: the foot may use all the room of the first layer.
 // Families: the grid's first base slab is a base slab; the tree style's is its first base slab (type Intermediate until the tree
 // types it as Base), and the organic style's is its first branch slab, which the flange of the first layer then follows.
 void expand_first_layer_foot(const Object &object, const std::vector<Layer> &layers, const SupportParams &p, GeneratedSupport &out)
@@ -131,70 +126,7 @@ void expand_first_layer_foot(const Object &object, const std::vector<Layer> &lay
     foot.ensure_valid(p.resolution);
 }
 
-// Reserve the brim area around the first object layer and cut it out of the support slabs of the first layer.
-// Mechanism: when the object has a brim (the native PrintObject::has_brim(): a brim patch volume, or brim_width > 0 and
-// brim_width_interior > 0 with no raft), the slices of layers[0] are grown into the reserved brim area, and that area is
-// subtracted from every slab of out.top, out.base and out.interfaces whose print Z does not exceed p.first_layer_height. The
-// floors (out.bottom) do not stand on the bed and are left alone. The area is reserved, not exactly the printed brim: with two
-// different widths the printed brim is not the same shape.
-// Inputs: layers must contain the object's first layer as layers[0]; the brim settings are read from the object config;
-// out.storage must stay valid, it holds the temporary areas.
-// Effects and ownership: the polygons of the slabs are replaced in place, the slabs keep their owner (out) and stay in their
-// lists. A slab whose whole footprint lies in the brim area ends empty; it stays listed and the publication skips it, so nothing
-// is printed for it.
-// brim_separation is not read: the brim loops stay within brim_width from the object (Brim.cpp:1119), so this area covers them.
-// The legacy support cut brim_width + brim_separation, a band that carries no loop.
-// Limits, unchanged from the grid: nothing is removed unless has_brim() is true,
-// so a brim with only one of the two widths positive removes nothing; and when both widths are positive the holes of the slices
-// are shrunk by the outer width (brim_width), not by brim_width_interior.
-void remove_first_layer_brim(const Object &object, const std::vector<Layer> &layers, const SupportParams &p, GeneratedSupport &out)
-{
-    const Config config = object.config();
-    const double brim_width = config.get("brim_width").get_float();
-    const double brim_width_interior = config.get("brim_width_interior").get_float();
-    if (!has_brim(object, brim_width, brim_width_interior, config.get("raft_layers").get_int())) return;
-    const ClipperContext clipper(out.storage);
-    const coord_t first = scale_to_layer_coord(p.first_layer_height);
-    Polys brim(out.storage);
-    const double distance = scale_d(brim_width);
-    const double round_tolerance = float(scale_d(0.1));
-    for (const ExPolygon slice : layers[0].slices()) {
-        if (brim_width > 0 && brim_width_interior > 0)
-            brim.append_move_from(clipper_offset(clipper(slice), distance).to_polygon_collection());
-        else {
-            if (brim_width > 0)
-                brim.append_move_from(clipper_offset(clipper(slice.contour()), distance, CLIPPER_JOIN_ROUND, round_tolerance).to_polygon_collection());
-            else brim.push_back(slice.contour());
-            Polys holes(out.storage);
-            for (const Polygon hole : slice.holes()) holes.push_back(hole);
-            if (brim_width_interior > 0) {
-                reverse(holes);
-                holes = clipper_offset(clipper(holes), -distance, CLIPPER_JOIN_ROUND, round_tolerance).to_polygon_collection();
-                reverse(holes);
-            }
-            brim.append_move_from(holes);
-        }
-    }
-    brim = clipper_union(clipper(brim)).to_polygon_collection();
-    for (GeneratorLayers *slabs : {&out.top, &out.base, &out.interfaces})
-        for (GeneratorLayer *slab : *slabs)
-            if (slab->print_z <= first) slab->polygons = clipper_diff(clipper(slab->polygons), clipper(brim)).to_polygon_collection();
-}
-
 namespace {
-void reverse(Polys &polys)
-{
-    for (uint32_t idx = 0; idx < polys.size(); ++idx)
-        multipoint_reverse(polygon_as_multipoint(polygons_at(polys.mutable_handle(), idx)));
-}
-
-bool has_brim(const Object &object, double brim_width, double brim_width_interior, int raft_layers)
-{
-    for (uint32_t idx = 0; idx < object.volume_count(); ++idx)
-        if (object.volume(idx).type() == RAW_VOLUME_TYPE_BRIM_PATCH) return true;
-    return brim_width > 0 && brim_width_interior > 0 && raft_layers <= 0;
-}
-
 void interface_contacts(const SupportParams &p, const GeneratedSupport &out, size_t i, GeneratorLayers &top, GeneratorLayers &bottom)
 {
     const GeneratorLayer &base = *out.base[i];

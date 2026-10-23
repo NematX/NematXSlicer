@@ -104,6 +104,7 @@ void record_comparison(const std::string &section, double slice, double length, 
     REQUIRE(out.good());
 }
 // Apply one comparison variant's extra settings on top of the shared configuration; an empty variant keeps the defaults.
+// There is no brim variant: the legacy support still cuts the brim area out of the first layer, while the plugin ignores the brim and the skirt, so the two diverge by design.
 void apply_variant(DynamicPrintConfig &config, const char *variant)
 {
     if (variant == nullptr || variant[0] == 0) return;
@@ -132,8 +133,6 @@ void apply_variant(DynamicPrintConfig &config, const char *variant)
         // A bridge flow ratio below one exercises its square root in the nozzle and flow types.
         config.set_deserialize_strict({{"support_material_contact_distance_type", "filament"},
                                        {"bridge_type", variant + 7}, {"bridge_flow_ratio", "80%"}});
-    else if (strcmp(variant, "brim") == 0)
-        config.set_deserialize_strict({{"brim_width", "2"}, {"brim_width_interior", "1"}});
     else if (strcmp(variant, "feet") == 0)
         config.set_deserialize_strict({{"raft_first_layer_expansion", "2"}});
     else if (strcmp(variant, "closing") == 0)
@@ -554,11 +553,6 @@ TEST_CASE("Grid legacy comparison: filament contact distance", "[plugins][suppor
 TEST_CASE("Grid legacy comparison: bridge types", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const char *style : {"grid", "snug"})
         for (const char *variant : {"bridge_flow", "bridge_height", "bridge_nozzle"}) compare(2, style, false, 3, false, variant);
-}
-// Compare a brim with an interior width: the first-layer support keeps away from it.
-TEST_CASE("Grid legacy comparison: brim", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
-    for (const int model_id : {0, 1})
-        for (const char *style : {"grid", "snug"}) compare(model_id, style, false, 3, false, "brim");
 }
 // Compare an expanded first-layer foot of the support columns.
 TEST_CASE("Grid legacy comparison: foot expansion", "[plugins][support-grid][legacy-compare][support-settings][slow]") {

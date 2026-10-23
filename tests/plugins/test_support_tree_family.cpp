@@ -2580,28 +2580,22 @@ TriangleMesh brim_hollow_mesh()
     return mesh;
 }
 
-// A print of the hollow block sliced with the tree slabs generated, with the given brim_width_interior (the brim width is 2 mm).
+// A print of a mesh sliced with the tree slabs generated, with the given brim widths and raft_first_layer_expansion.
 struct BrimRun {
     Print print;
     Model model;
     std::unique_ptr<Routed> routed;
-    BrimRun(TriangleMesh mesh, bool organic, int interfaces, const char *interior, const char *expansion = "0")
+    BrimRun(TriangleMesh mesh, bool organic, int interfaces, const char *brim_width, const char *interior, const char *expansion = "0", const char *skirts = "0")
     {
         DynamicPrintConfig config = SG::config(organic ? "organic" : "tree", false, interfaces);
-        config.set_deserialize_strict({{"brim_width", "2"}, {"brim_width_interior", interior}, {"raft_first_layer_expansion", expansion}});
+        config.set_deserialize_strict({{"brim_width", brim_width}, {"brim_width_interior", interior}, {"raft_first_layer_expansion", expansion},
+                                       {"skirts", skirts}, {"skirt_distance", "1"}});
         Test::init_print({std::move(mesh)}, print, model, config);
         SG::prefix(print);
         routed = std::make_unique<Routed>(print);
         TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed->trees, organic, routed->support);
     }
 };
-
-// The brim area of the first layer, built independently of Common::remove_first_layer_brim() with the same recipe: the slices grown
-// by the brim width, as the native offset does (miter joins).
-Polygons brim_mask(const PrintObject &object, double width)
-{
-    return to_polygons(offset_ex(object.layer(0).lslices(), float(scale_d(width))));
-}
 
 // The area in mm2 of the symmetric difference of two sets of polygons, without any filter of small areas.
 double xor_mm2(const Polygons &a, const Polygons &b)
@@ -2610,216 +2604,45 @@ double xor_mm2(const Polygons &a, const Polygons &b)
 }
 }
 
-// The brim area is removed from the top, base and interface slabs of the first layer, for the tree and organic styles: each such slab
-// equals the slab of the same print without the brim minus the brim area; every other slab (floors included) and every dimension is
-// unchanged. With a brim_width_interior of 0 the brim is not removed (a documented limit) and nothing changes.
-TEST_CASE("Tree first layer slabs lose the brim area", "[plugins][support-tree-family][brim]")
-{
-    Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool organic = GENERATE(false, true);
-    const int interfaces = GENERATE(0, 3);
-    const bool interior = GENERATE(true, false);
-    CAPTURE(organic, interfaces, interior);
-    // The foot is widened by 3 mm: without interface layers the foot loses the area of the contacts on the bed, and the widening gives
-    // the first base slab the area that the brim removal is then checked on.
-    const BrimRun plain(brim_hollow_mesh(), organic, interfaces, "0", "3"), brimmed(brim_hollow_mesh(), organic, interfaces, interior ? "1" : "0", "3");
-    // Both prints have brim_width 2; the plain one has an interior width of 0, which disables the removal of the brim area (a
-    // documented limit), so its slabs are the ones before the cut.
-    const Polygons mask = interior ? brim_mask(brimmed.print.object(0), 2.) : Polygons();
-    ExPolygons holes;
-    for (const ExPolygon &slice : plain.print.object(0).layer(0).lslices())
-        for (const Polygon &hole : slice.holes) {
-            ExPolygon area_of_hole;
-            area_of_hole.contour = hole;
-            area_of_hole.contour.reverse();
-            holes.push_back(std::move(area_of_hole));
-        }
-    REQUIRE_FALSE(holes.empty());
-    const coord_t first = scale_to_layer_coord(plain.routed->params.first_layer_height);
-    const Common::GeneratedSupport &before = plain.routed->support, &after = brimmed.routed->support;
-    // The lists that the brim touches, then the floors that it never touches.
-    struct List { const char *name; const Common::GeneratorLayers &before, &after; bool brimmed; };
-    const std::vector<List> lists = {{"top", before.top, after.top, true}, {"base", before.base, after.base, true},
-                                     {"interfaces", before.interfaces, after.interfaces, true}, {"bottom", before.bottom, after.bottom, false}};
-    size_t first_slabs[3] = {0, 0, 0};
-    double removed = 0., support_in_hole = 0., removed_in_hole = 0., in_mask[3] = {0., 0., 0.};
-    for (size_t kind = 0; kind < lists.size(); ++kind) {
-        const List &list = lists[kind];
-        REQUIRE(list.before.size() == list.after.size());
-        for (size_t i = 0; i < list.before.size(); ++i) {
-            const Common::GeneratorLayer &slab_before = *list.before[i], &slab_after = *list.after[i];
-            CAPTURE(list.name, i, unscaled(slab_before.print_z));
-            CHECK(slab_before.type == slab_after.type);
-            CHECK(slab_before.print_z == slab_after.print_z);
-            CHECK(slab_before.bottom_z == slab_after.bottom_z);
-            CHECK(slab_before.height == slab_after.height);
-            const Polygons polygons_before = to_native(slab_before.polygons), polygons_after = to_native(slab_after.polygons);
-            if (!list.brimmed || slab_before.print_z > first) {
-                CHECK(xor_mm2(polygons_after, polygons_before) < 1e-4);
-                continue;
-            }
-            CHECK(xor_mm2(polygons_after, diff(polygons_before, mask)) < 1e-3);
-            removed += unscaled(unscaled(area(union_ex(polygons_before)))) - unscaled(unscaled(area(union_ex(polygons_after))));
-            if (polygons_before.empty())
-                continue;
-            ++first_slabs[kind];
-            support_in_hole += unscaled(unscaled(area(intersection_ex(polygons_before, to_polygons(holes)))));
-            in_mask[kind] += unscaled(unscaled(area(intersection_ex(polygons_before, mask))));
-            removed_in_hole += unscaled(unscaled(area(intersection_ex(intersection_ex(polygons_before, mask), holes))));
-        }
-    }
-    // The case is not vacuous: the first layer has top contact, base and (with interface layers) interface slabs, and the hole holds support.
-    CHECK(first_slabs[0] > 0);
-    CHECK(first_slabs[1] > 0);
-    CHECK((first_slabs[2] > 0) == (interfaces > 0));
-    CHECK(support_in_hole > 0.);
-    CAPTURE(removed, removed_in_hole, in_mask[0], in_mask[1], in_mask[2]);
-    if (interior) {
-        // Each list present has first-layer support inside the brim area before the cut, and the hole loses some.
-        CHECK(in_mask[0] > 0.);
-        CHECK(in_mask[1] > 0.);
-        CHECK((in_mask[2] > 0.) == (interfaces > 0));
-        CHECK(removed_in_hole > 0.);
-        CHECK(removed > 0.1);
-    } else
-        CHECK(removed == Approx(0.).margin(1e-6));
-}
-
-// Publication and toolpaths run on the sliced print with the brim, and the extrusions of the first support layer (the organic flange
-// included) stay out of the brim area.
-TEST_CASE("Tree first layer extrusions keep out of the brim area", "[plugins][support-tree-family][brim]")
-{
-    Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool organic = GENERATE(false, true);
-    CAPTURE(organic);
-    DynamicPrintConfig config = SG::config(organic ? "organic" : "tree", false, 3);
-    config.set_deserialize_strict({{"brim_width", "2"}, {"brim_width_interior", "1"}});
-    Print print;
-    Model model;
-    Test::init_print({brim_hollow_mesh()}, print, model, config);
-    SG::prefix(print);
-    REQUIRE_NOTHROW(SG::family(print));
-    REQUIRE_NOTHROW(SG::toolpaths(print));
-    const PrintObject &object = print.object(0);
-    REQUIRE_FALSE(object.auxiliary_layers().empty());
-    coord_t previous_z = 0;
-    for (const Layer &layer : object.auxiliary_layers()) {
-        INFO("auxiliary layer id " << layer.id() << " print_z " << unscaled(layer.scaled_print_z()) << " previous " << previous_z);
-        CHECK(layer.scaled_print_z() >= previous_z);
-        previous_z = layer.scaled_print_z();
-    }
-    // The support layers of the bed layer: their extrusion polylines, measured whole, against the brim area shrunk by 0.05 mm. A
-    // path centre lies at least half an extrusion width (0.2 mm) inside the surface it fills, and the clipping of the surfaces and
-    // the mask rounds by micrometres, so only a path that really enters the brim area exceeds the 0.01 mm tolerance.
-    const ExPolygons mask = offset_ex(brim_mask(object, 2.), -float(scale_d(0.05)));
-    // A mask grown by 1 mm shows that the measure sees paths: the support stands close to the brim area.
-    const ExPolygons grown_mask = offset_ex(brim_mask(object, 3.), -float(scale_d(0.05)));
-    size_t points = 0, branch_surfaces = 0;
-    double inside_mm = 0., grown_inside_mm = 0.;
-    const SurfaceType branch_type = stModSupport | stModBranch | stPosInternal | stDensSparse;
-    for (const Layer &layer : object.auxiliary_layers()) {
-        if (layer.scaled_print_z() > object.layer(0).scaled_print_z())
-            continue;
-        for (const LayerSliceIsland &island : layer.islands())
-            for (const LayerRegionIsland &region : island.regions_islands()) {
-                for (const Surface &surface : region.fill_surfaces())
-                    branch_surfaces += surface.surface_type == branch_type && !surface.expolygon.empty();
-                for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE}) {
-                    if (!region.has_extrusion(bucket))
-                        continue;
-                    ExtrusionPaths paths;
-                    SG::legacy_paths(region.extrusion(bucket), paths);
-                    Polylines polylines;
-                    for (const ExtrusionPath &path : paths) {
-                        polylines.push_back(path.polyline_ref().to_polyline());
-                        points += polylines.back().points.size();
-                    }
-                    for (const Polyline &clipped : intersection_pl(polylines, mask))
-                        inside_mm += unscaled(clipped.length());
-                    for (const Polyline &clipped : intersection_pl(polylines, grown_mask))
-                        grown_inside_mm += unscaled(clipped.length());
-                }
-            }
-    }
-    CAPTURE(points, branch_surfaces, inside_mm, grown_inside_mm);
-    CHECK(points > 0);
-    CHECK(grown_inside_mm > 0.);
-    // The organic flange is printed on the Branch surfaces that touch the bed; the tree style has none.
-    if (organic)
-        CHECK(branch_surfaces > 0);
-    else
-        CHECK(branch_surfaces == 0);
-    CHECK(inside_mm < 0.01);
-}
-
-namespace {
-// A block with a 1.5 mm shelf at 0.4 mm: the only support is under the shelf, a foot that lies entirely within the 2 mm of the brim
-// width from the wall.
-TriangleMesh brim_foot_mesh()
-{
-    TriangleMesh mesh = make_cube(10., 10., 4.);
-    TriangleMesh shelf = make_cube(1.5, 6., 0.4);
-    shelf.translate(9.5f, 2.f, 0.4f);
-    mesh.merge(shelf);
-    return mesh;
-}
-}
-
-// A first layer slab that lies entirely in the brim area ends empty. It stays listed, and publication and toolpaths run without error
-// and print nothing for it: no support layer of the bed layer holds an island.
-TEST_CASE("Tree first layer slabs inside the brim area end empty and publish nothing", "[plugins][support-tree-family][brim]")
+// The support ignores the brim and the skirt: with a brim_width of 2, a brim_width_interior of 1 and a skirt, every slab of every list, floors included, equals the slab of the same print without a brim.
+TEST_CASE("Tree first layer slabs ignore the brim", "[plugins][support-tree-family][brim]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool organic = GENERATE(false, true);
     const int interfaces = GENERATE(0, 3);
     CAPTURE(organic, interfaces);
-    const BrimRun plain(brim_foot_mesh(), organic, interfaces, "0"), brimmed(brim_foot_mesh(), organic, interfaces, "1");
-    const coord_t first = scale_to_layer_coord(plain.routed->params.first_layer_height);
-    const Polygons mask = brim_mask(brimmed.print.object(0), 2.);
-    size_t listed = 0, emptied = 0;
-    double before_mm2 = 0., outside_mm2 = 0.;
+    const BrimRun plain(brim_hollow_mesh(), organic, interfaces, "0", "0", "3"), brimmed(brim_hollow_mesh(), organic, interfaces, "2", "1", "3", "1");
+    // Only the second print has a brim and a skirt.
+    REQUIRE_FALSE(plain.print.object(0).has_brim());
+    REQUIRE(brimmed.print.object(0).has_brim());
     const Common::GeneratedSupport &before = plain.routed->support, &after = brimmed.routed->support;
     const std::vector<std::pair<const Common::GeneratorLayers *, const Common::GeneratorLayers *>> lists = {
-        {&before.top, &after.top}, {&before.base, &after.base}, {&before.interfaces, &after.interfaces}};
+        {&before.top, &after.top}, {&before.base, &after.base}, {&before.interfaces, &after.interfaces}, {&before.bottom, &after.bottom}};
+    // The plain print has the slabs that the brim used to cut.
+    REQUIRE_FALSE(before.top.empty());
+    REQUIRE_FALSE(before.base.empty());
+    if (interfaces > 0)
+        REQUIRE_FALSE(before.interfaces.empty());
+    const coord_t first = scale_to_layer_coord(plain.routed->params.first_layer_height);
+    double first_layer_mm2 = 0.;
     for (const std::pair<const Common::GeneratorLayers *, const Common::GeneratorLayers *> &list : lists) {
         REQUIRE(list.first->size() == list.second->size());
         for (size_t i = 0; i < list.first->size(); ++i) {
-            const Common::GeneratorLayer &slab = *(*list.first)[i];
-            if (slab.print_z > first || slab.polygons.empty())
-                continue;
-            ++listed;
-            const Polygons polygons_before = to_native(slab.polygons);
-            before_mm2 += unscaled(unscaled(area(union_ex(polygons_before))));
-            outside_mm2 += unscaled(unscaled(area(diff_ex(polygons_before, mask))));
-            emptied += (*list.second)[i]->polygons.empty();
+            const Common::GeneratorLayer &a = *(*list.first)[i], &b = *(*list.second)[i];
+            const Polygons polygons_a = to_native(a.polygons), polygons_b = to_native(b.polygons);
+            CHECK(a.print_z == b.print_z);
+            CHECK(a.bottom_z == b.bottom_z);
+            CHECK(a.height == b.height);
+            CHECK(a.bridging == b.bridging);
+            CHECK(a.type == b.type);
+            CHECK(xor_mm2(polygons_a, polygons_b) < 1e-4);
+            if (a.print_z <= first)
+                first_layer_mm2 += unscaled(unscaled(area(union_ex(polygons_b))));
         }
     }
-    CAPTURE(listed, emptied, before_mm2, outside_mm2);
-    // The foot exists before the cut, lies in the brim area, and every first layer slab ends empty.
-    REQUIRE(listed > 0);
-    CHECK(before_mm2 > 0.);
-    CHECK(outside_mm2 < 1e-3);
-    CHECK(emptied == listed);
-    for (const Common::GeneratorLayers *list : {&after.top, &after.base, &after.interfaces})
-        for (const Common::GeneratorLayer *slab : *list)
-            if (slab->print_z <= first)
-                REQUIRE(slab->polygons.empty());
-    // The same print goes through publication and toolpaths.
-    DynamicPrintConfig config = SG::config(organic ? "organic" : "tree", false, interfaces);
-    config.set_deserialize_strict({{"brim_width", "2"}, {"brim_width_interior", "1"}});
-    Print print;
-    Model model;
-    Test::init_print({brim_foot_mesh()}, print, model, config);
-    SG::prefix(print);
-    REQUIRE_NOTHROW(SG::family(print));
-    REQUIRE_NOTHROW(SG::toolpaths(print));
-    size_t islands = 0;
-    for (const Layer &layer : print.object(0).auxiliary_layers())
-        if (layer.scaled_print_z() <= print.object(0).layer(0).scaled_print_z())
-            islands += layer.islands().size();
-    CHECK(islands == 0);
+    // The case is not vacuous: the first layer holds support.
+    CHECK(first_layer_mm2 > 0.);
 }
-
 namespace {
 // The foot of a run: the first base slab, which must start on the bed.
 const Common::GeneratorLayer &foot_of(const BrimRun &run)
@@ -2851,7 +2674,7 @@ TEST_CASE("Tree first layer foot grows by the expansion", "[plugins][support-tre
     const bool organic = GENERATE(false, true);
     const int interfaces = GENERATE(0, 3);
     CAPTURE(organic, interfaces);
-    const BrimRun narrow(Test::SupportGrid::slab(), organic, interfaces, "0", "0"), wide(Test::SupportGrid::slab(), organic, interfaces, "0", "3");
+    const BrimRun narrow(Test::SupportGrid::slab(), organic, interfaces, "0", "0", "0"), wide(Test::SupportGrid::slab(), organic, interfaces, "0", "0", "3");
     const Common::GeneratorLayer &foot0 = foot_of(narrow), &foot3 = foot_of(wide);
     CAPTURE(foot0.type, foot3.type);
     CHECK(foot3.type == (organic ? Common::LayerType::Branch : Common::LayerType::Base));
@@ -2899,26 +2722,6 @@ TEST_CASE("Tree first layer foot grows by the expansion", "[plugins][support-tre
                 CHECK(xor_mm2(to_native(a.polygons), to_native(b.polygons)) < 1e-4);
         }
     }
-}
-
-// The widening comes before the brim removal: the widened foot loses the reserved brim area, which reaches into the part it gained.
-TEST_CASE("Tree widened foot loses the brim area", "[plugins][support-tree-family][foot]")
-{
-    Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool organic = GENERATE(false, true);
-    CAPTURE(organic);
-    const BrimRun plain(Test::SupportGrid::slab(), organic, 3, "0", "3"), brimmed(Test::SupportGrid::slab(), organic, 3, "1", "3");
-    const Polygons mask = brim_mask(brimmed.print.object(0), 2.);
-    const Polygons before = to_native(foot_of(plain).polygons), after = to_native(foot_of(brimmed).polygons);
-    const double in_mask = unscaled(unscaled(area(intersection_ex(before, mask))));
-    CAPTURE(in_mask);
-    CHECK(in_mask > 0.1);
-    CHECK(xor_mm2(after, diff(before, mask)) < 1e-3);
-    // The part of the widened foot that the narrow foot does not have lies in the brim area as well.
-    const BrimRun narrow(Test::SupportGrid::slab(), organic, 3, "0", "0");
-    const double gained_in_mask = unscaled(unscaled(area(intersection_ex(diff(before, to_native(foot_of(narrow).polygons)), mask))));
-    CAPTURE(gained_in_mask);
-    CHECK(gained_in_mask > 0.);
 }
 
 namespace {

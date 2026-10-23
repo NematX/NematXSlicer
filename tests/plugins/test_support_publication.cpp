@@ -127,6 +127,22 @@ private:
 };
 } // namespace
 
+// A slab without polygons publishes nothing: no auxiliary layer, island or extrusion is created for it.
+TEST_CASE("Empty slab publishes nothing and prints nothing", "[plugins][support-publication]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    slice_cube(print);
+    PluginStorage storage;
+    GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    add_slab(support, support.base, LayerType::Base, rect_polygon(2., 2., 6., 6.));
+    support.slabs.back().polygons.clear();
+    REQUIRE(support.slabs.back().polygons.empty());
+    publish_support(print, support);
+    REQUIRE_NOTHROW(SG::toolpaths(print));
+    CHECK(print.object(0).auxiliary_layers().empty());
+}
+
 // A branch slab prints as a branch surface of the base extruder, without the area that the interface above owns.
 TEST_CASE("Branch slab publishes as a branch surface and yields the area an interface covers", "[plugins][support-publication]")
 {

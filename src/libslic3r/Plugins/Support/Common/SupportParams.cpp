@@ -95,6 +95,8 @@ SupportParams::SupportParams(const Print &print, const Object &object)
 {
     const Config print_config = print.config();
     const Config config = object.config();
+    // The extruder set mirrors the native slicing of the object (it includes the perimeter extruder when a brim is set, which prints it),
+    // so the support heights stay consistent with the object layers; this is not brim handling.
     const std::set<extruder_index_t> extruders = object_extruders(print, object);
     z_step = print_config.get("z_step").get_float();
     style = support_style(config);
