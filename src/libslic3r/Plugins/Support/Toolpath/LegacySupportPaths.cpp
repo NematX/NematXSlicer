@@ -46,6 +46,12 @@ using PointLists = std::vector<Points>;
 using PointKey = std::pair<coord_t, coord_t>;
 using SplitPoints = std::map<PointKey, int>;
 
+// How far a support layer may lie from the exact position of a contact (under or over an object layer) and still be matched with that object layer.
+// The tree's own snapping (align_slab_bounds/merge_close_bounds) and the host pass at the end of STEP_SUPPORT can each move a support z by up to
+// 4 * SCALED_EPSILON, so the margin is the matching epsilon plus both moves. It stays far below the spacing of two layers of one object, so it cannot
+// match another layer. It applies to every print: a layer that close to the exact contact position is the contact.
+constexpr coord_t CONTACT_MATCH_TOLERANCE = SCALED_EPSILON + 2 * (4 * SCALED_EPSILON);
+
 // Settings that every layer of one support role reads, derived once per callback from the object.
 struct PathParams {
     PathParams(const Print &print, const Object &object, const object_handle *handle);
@@ -212,7 +218,7 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
         Polys adjacent(storage);
         for (uint32_t index = 0; index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
-            if (std::abs(object_layer.print_z() - layer_bottom) <= SCALED_EPSILON) append_expolygons(adjacent, object_layer.slices());
+            if (std::abs(object_layer.print_z() - layer_bottom) <= CONTACT_MATCH_TOLERANCE) append_expolygons(adjacent, object_layer.slices());
         }
         parts.bottom_contact = as_polygons(clipper_intersection(clipper(bottom), clipper(adjacent)));
         parts.bottom_interface = as_polygons(clipper_diff(clipper(bottom), clipper(parts.bottom_contact)));
@@ -224,7 +230,7 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
         Polys adjacent(storage);
         for (uint32_t index = 0; index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
-            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) <= SCALED_EPSILON) append_expolygons(adjacent, object_layer.slices());
+            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) <= CONTACT_MATCH_TOLERANCE) append_expolygons(adjacent, object_layer.slices());
         }
         parts.top_contact = as_polygons(clipper_intersection(clipper(top), clipper(adjacent)));
         parts.top_interface = as_polygons(clipper_diff(clipper(top), clipper(parts.top_contact)));
@@ -587,7 +593,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     if (role == SurfaceRole::Top && params.top_enabled && geometry.interface_contact_loops)
         for (uint32_t index = 0; index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
-            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) > SCALED_EPSILON) continue;
+            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) > CONTACT_MATCH_TOLERANCE) continue;
             for (uint32_t island = 0; island < object_layer.island_count(); ++island)
                 append_expolygons(overhang, object_layer.island(island).support_demand());
         }

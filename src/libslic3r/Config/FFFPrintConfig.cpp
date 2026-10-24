@@ -6150,7 +6150,7 @@ void init_fff_params(PrintConfigDef &definition)
     def = definition.add("parallel_objects_step", coFloat, ptFFF);
     def->label = L("Parallel printing step");
     def->category = OptionCategory::output;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_SUPPORT;
     def->tooltip = L("When multiple objects are present, instead of jumping from one to another at each layer"
         " the printer will continue to print the current object layers up to this height before moving to the next object."
         " (first layers will be still printed one by one)."

@@ -4,6 +4,8 @@
 #include "gcode_test_helpers.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
+#include "libslic3r/Api/internal/LayerAccess.hpp"
+#include "libslic3r/Steps/StepGenerateSupport.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/BranchIslandClass.hpp"
@@ -3297,4 +3299,618 @@ TEST_CASE("The islands of the layers of the downward point are ordered from outs
     REQUIRE(groups > 0);
     CAPTURE(groups, violations, report.str());
     CHECK(violations == 0);
+}
+
+// Close print Z: the print z of the supports are kept more than 4 * SCALED_EPSILON (512 units, 0.5 um) apart from the other z of the print by a host pass
+// at the end of STEP_SUPPORT (Steps::StepGenerateSupport). The reproductions list the Z involved (on stderr, and in CLOSEZ_DUMP_DIR when that
+// variable is set), establish on the slabs that the family generates that the close pair exists before the pass, then check the layers after the
+// step and the export up to the G-code.
+namespace {
+namespace CloseZ = Slic3r::Steps::StepGenerateSupport::Detail;
+
+struct CloseZLayer {
+    size_t  object;
+    bool    support;
+    coord_t z;
+    bool    extrusions;
+};
+
+struct CloseZObject {
+    TriangleMesh                                      mesh;
+    Vec3d                                             offset;
+    std::vector<std::pair<std::string, std::string>> options;
+};
+
+void close_z_place(const std::vector<CloseZObject> &objects, const DynamicPrintConfig &config, Print &print, Model &model)
+{
+    for (const CloseZObject &placed : objects) {
+        ModelObject *object = model.add_object();
+        object->name += "object.stl";
+        object->add_volume(placed.mesh);
+        object->add_instance();
+        object->instances.front()->set_offset(placed.offset);
+        for (const std::pair<std::string, std::string> &option : placed.options)
+            object->config.set_deserialize_strict(option.first, option.second);
+    }
+    for (ModelObject &object : model.objects()) {
+        object.ensure_on_bed();
+        print.auto_assign_extruders(&object);
+    }
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+}
+
+std::vector<CloseZLayer> close_z_layers(const Print &print)
+{
+    std::vector<CloseZLayer> zs;
+    for (size_t idx = 0; idx < print.objects().size(); ++idx) {
+        const PrintObject &object = print.object(idx);
+        for (const Layer &layer : object.layers())
+            zs.push_back({ idx, false, layer.scaled_print_z(), layer.has_extrusions() });
+        for (const Layer &layer : object.auxiliary_layers())
+            zs.push_back({ idx, true, layer.scaled_print_z(), layer.has_extrusions() });
+    }
+    std::sort(zs.begin(), zs.end(), [](const CloseZLayer &a, const CloseZLayer &b) { return a.z < b.z; });
+    return zs;
+}
+
+// The pairs of layers of the print whose Z differ by more than zero and by at most the merge tolerance, as the tool ordering sees them
+// (only the layers with extrusions count when with_extrusions is set). Only the layers of the object are compared when object is given.
+std::vector<std::pair<CloseZLayer, CloseZLayer>> close_z_pairs(const Print &print, bool with_extrusions, const size_t *object = nullptr)
+{
+    std::vector<CloseZLayer> zs;
+    for (const CloseZLayer &layer : close_z_layers(print))
+        if ((!with_extrusions || layer.extrusions) && (object == nullptr || layer.object == *object))
+            zs.push_back(layer);
+    std::vector<std::pair<CloseZLayer, CloseZLayer>> pairs;
+    for (size_t i = 0; i < zs.size(); ++i)
+        for (size_t j = i + 1; j < zs.size() && zs[j].z <= zs[i].z + 4 * SCALED_EPSILON; ++j)
+            if (zs[j].z != zs[i].z)
+                pairs.push_back({ zs[i], zs[j] });
+    return pairs;
+}
+
+// Writes a report on stderr, and in CLOSEZ_DUMP_DIR/closez_<name>.txt (appended) when that variable is set. The stderr of a test case is
+// lost when an assertion ends the process, the file is not.
+void close_z_report(const std::string &name, const std::string &text)
+{
+    std::fputs(text.c_str(), stderr);
+    std::fflush(stderr);
+    if (const char *directory = std::getenv("CLOSEZ_DUMP_DIR")) {
+        const std::string path = std::string(directory) + "/closez_" + name + ".txt";
+        if (FILE *file = std::fopen(path.c_str(), "ab")) {
+            std::fwrite(text.data(), 1, text.size(), file);
+            std::fclose(file);
+        }
+    }
+}
+
+// Lists the Z of the supports of every object and the close pairs.
+void close_z_dump(const char *label, const Print &print)
+{
+    std::ostringstream out;
+    out << "\n[support-close-z] " << label << "\n";
+    for (size_t idx = 0; idx < print.objects().size(); ++idx) {
+        const PrintObject &object = print.object(idx);
+        out << "  object " << idx << " support z (units):";
+        for (const Layer &layer : object.auxiliary_layers())
+            out << " " << layer.scaled_print_z() << (layer.has_extrusions() ? "" : "(empty)");
+        out << "\n";
+    }
+    for (const auto &pair : close_z_pairs(print, false))
+        out << "  close pair: object " << pair.first.object << " " << (pair.first.support ? "support" : "layer") << " z=" << pair.first.z
+            << "  object " << pair.second.object << " " << (pair.second.support ? "support" : "layer") << " z=" << pair.second.z
+            << "  (diff " << pair.second.z - pair.first.z << ")\n";
+    close_z_report(label, out.str());
+}
+
+DynamicPrintConfig close_z_gcode_config(const char *style, int interfaces)
+{
+    DynamicPrintConfig config = SG::config(style, false, interfaces, true);
+    config.set_deserialize_strict({
+        {"z_step", "0"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
+        {"max_print_speed", "80"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
+        {"max_volumetric_speed", "0"}, {"filament_max_speed", "0,0"},
+        {"filament_max_volumetric_speed", "0,0"}, {"slowdown_below_layer_time", "0,0"},
+        {"use_relative_e_distances", "1"}, {"wipe", "0,0"}, {"filament_diameter", "1.75,1.75"}
+    });
+    return config;
+}
+
+// The Z (tops and published bottoms, print_z - height, the values that the host pass moves) of the slabs that the family generates for an object of the sliced print, before the host pass of STEP_SUPPORT.
+std::vector<coord_t> close_z_generated(Print &print, size_t object_idx, const std::string &style)
+{
+    PluginStorage storage;
+    Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
+    const PrintObject &object = print.object(object_idx);
+    if (style == "grid") {
+        slic3r_api::Support::Grid::generate_support(nullptr, SG::print_view(print), SG::object_view(object), SG::params(print, object), support);
+    } else {
+        const Slic3r::Test::SupportTree::SupportPatternContext patterns(print, reinterpret_cast<storage_handle *>(&storage));
+        TF::generate_tree_support(patterns.context(), SG::print_view(print), SG::object_view(object), style == "organic", support);
+    }
+    std::vector<coord_t> zs;
+    for (const auto *list : { &support.top, &support.bottom, &support.base, &support.interfaces })
+        for (const Common::GeneratorLayer *slab : *list) {
+            zs.push_back(slab->print_z);
+            zs.push_back(slab->print_z - slab->height);
+        }
+    std::sort(zs.begin(), zs.end());
+    zs.erase(std::unique(zs.begin(), zs.end()), zs.end());
+    return zs;
+}
+
+// A pair of distinct Z within the merge tolerance, among the generated slabs of the objects (support) and the object layers.
+struct CloseZGeneratedPair {
+    size_t  object_a, object_b;
+    bool    support_a, support_b;
+    coord_t z_a, z_b;
+};
+
+// The pairs of distinct Z within the merge tolerance of the slabs that the family generates for each object and of the object layers (each
+// listed with its object), with at least one slab in the pair.
+std::vector<CloseZGeneratedPair> close_z_generated_pairs(Print &print, const std::string &style)
+{
+    struct Entry { coord_t z; size_t object; bool support; };
+    std::vector<Entry> zs;
+    for (size_t idx = 0; idx < print.objects().size(); ++idx) {
+        for (const coord_t z : close_z_generated(print, idx, style))
+            zs.push_back({ z, idx, true });
+        for (const Layer &layer : print.object(idx).layers())
+            zs.push_back({ layer.scaled_print_z(), idx, false });
+    }
+    std::sort(zs.begin(), zs.end(), [](const Entry &a, const Entry &b) { return a.z < b.z; });
+    std::vector<CloseZGeneratedPair> pairs;
+    for (size_t i = 0; i < zs.size(); ++i)
+        for (size_t j = i + 1; j < zs.size() && zs[j].z <= zs[i].z + 4 * SCALED_EPSILON; ++j)
+            if (zs[j].z != zs[i].z && (zs[i].support || zs[j].support))
+                pairs.push_back({ zs[i].object, zs[j].object, zs[i].support, zs[j].support, zs[i].z, zs[j].z });
+    return pairs;
+}
+
+// True when a pair has a slab and a slab of another object (cross_support), or a slab and an object layer of any object (otherwise).
+bool close_z_generated_pair(Print &print, const std::string &style, bool cross_support)
+{
+    for (const CloseZGeneratedPair &pair : close_z_generated_pairs(print, style))
+        if (cross_support ? (pair.support_a && pair.support_b && pair.object_a != pair.object_b) : (pair.support_a != pair.support_b))
+            return true;
+    return false;
+}
+// Runs the production steps up to the support toolpaths (STEP_SUPPORT included, so with the host pass on the support z).
+void close_z_run_supports(Print &print)
+{
+    SG::prefix(print);
+    SG::family(print);
+    SG::toolpaths(print);
+}
+
+// The auxiliary layers of every object are in increasing z, the thickest first at an equal z.
+void close_z_check_order(const Print &print)
+{
+    for (size_t idx = 0; idx < print.objects().size(); ++idx) {
+        const PrintObject &object = print.object(idx);
+        for (size_t id = 1; id < object.auxiliary_layers().size(); ++id) {
+            const Layer &before = object.auxiliary_layer(id - 1), &after = object.auxiliary_layer(id);
+            CHECK(before.scaled_print_z() <= after.scaled_print_z());
+            if (before.scaled_print_z() == after.scaled_print_z())
+                CHECK(before.scaled_height() >= after.scaled_height());
+        }
+    }
+}
+
+// The G-code of the print. The text is also kept in the directory of CLOSEZ_DUMP_DIR when it is set.
+std::string close_z_export(Print &print, const char *name)
+{
+    const boost::filesystem::path path = Slic3r::Test::GCode::temporary_gcode_path();
+    std::string code;
+    try {
+        print.process();
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        code = Slic3r::Test::GCode::read_text_file(path);
+    } catch (...) {
+        Slic3r::Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Slic3r::Test::GCode::remove_output_pair(path);
+    if (const char *directory = std::getenv("CLOSEZ_DUMP_DIR")) {
+        const std::string copy = std::string(directory) + "/closez_" + name + ".gcode";
+        if (FILE *file = std::fopen(copy.c_str(), "wb")) {
+            std::fwrite(code.data(), 1, code.size(), file);
+            std::fclose(file);
+        }
+    }
+    return code;
+}
+
+// The Z of the layer changes of the G-code, in the order they are printed.
+std::vector<double> close_z_layer_changes(const std::string &code)
+{
+    std::vector<double> zs;
+    std::istringstream stream(code);
+    for (std::string line; std::getline(stream, line);)
+        if (line.rfind(";Z:", 0) == 0)
+            zs.push_back(std::stod(line.substr(3)));
+    return zs;
+}
+
+// Checks that the layer changes of the G-code never go back (one object at a time, a sequential print restarts from the bottom for each).
+void close_z_check_gcode(const std::string &code, const char *name, bool sequential = false)
+{
+    const std::vector<double> zs = close_z_layer_changes(code);
+    REQUIRE(zs.size() > 2);
+    size_t backwards = 0;
+    for (size_t i = 1; i < zs.size(); ++i)
+        if (zs[i] < zs[i - 1] - 1e-9 && !(sequential && zs[i] < 0.5))
+            ++backwards;
+    close_z_report(name, "[support-close-z] " + std::to_string(zs.size()) + " layer changes, " + std::to_string(backwards) + " going backwards\n");
+    CHECK(backwards == 0);
+}
+
+// Two objects with the contact distances distance_a and distance_b: the contacts (and with them the slabs that start or end at them) lie
+// 100 units apart, away from every object layer, so the bound snapping of the tree cannot help.
+void close_z_two_objects(const char *style, const char *name, const char *distance_a, const char *distance_b)
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    close_z_place({
+        { SG::slab(true), Vec3d(100., 100., 0.), { {"support_material_contact_distance", distance_a}, {"support_material_bottom_contact_distance", distance_a} } },
+        { SG::slab(true), Vec3d(160., 100., 0.), { {"support_material_contact_distance", distance_b}, {"support_material_bottom_contact_distance", distance_b} } } },
+        close_z_gcode_config(style, 0), print, model);
+    SG::prefix(print);
+    // The close pair exists between the slabs that the families generate for the two objects (a support against a support of the other one).
+    REQUIRE(close_z_generated_pair(print, style, true));
+    SG::family(print);
+    SG::toolpaths(print);
+    close_z_dump(name, print);
+    CHECK(close_z_pairs(print, false).empty());
+    close_z_check_order(print);
+    const std::string code = close_z_export(print, name);
+    close_z_check_gcode(code, name);
+}
+} // namespace
+
+// The mapping of the host pass: fixed values never move, a movable value within 512 units of one takes the nearest (the lower on a tie),
+// the other movable values are merged in ascending order onto the first of a series.
+TEST_CASE("Close Z mapping near a fixed value", "[plugins][support-tree-family][support-close-z][support-close-z-pure]")
+{
+    const coord_t fixed = 1000000;
+    const CloseZ::CloseZMapping mapping = CloseZ::close_z_mapping({ fixed, fixed + 5000 }, { fixed - 512, fixed - 513, fixed + 512, fixed + 513, fixed + 2000 });
+    CHECK(CloseZ::close_z_target(mapping, fixed - 512) == fixed);
+    CHECK(CloseZ::close_z_target(mapping, fixed - 513) == fixed - 513);
+    CHECK(CloseZ::close_z_target(mapping, fixed + 512) == fixed);
+    CHECK(CloseZ::close_z_target(mapping, fixed + 513) == fixed + 513);
+    CHECK(CloseZ::close_z_target(mapping, fixed + 2000) == fixed + 2000);
+    // Equal to a fixed value: unchanged and not listed.
+    CHECK(CloseZ::close_z_mapping({ fixed }, { fixed }).empty());
+    // Both sides of a fixed value, the nearest wins and the lower one wins a tie.
+    const CloseZ::CloseZMapping sides = CloseZ::close_z_mapping({ fixed, fixed + 1024 }, { fixed + 300, fixed + 724, fixed + 512 });
+    CHECK(CloseZ::close_z_target(sides, fixed + 300) == fixed);
+    CHECK(CloseZ::close_z_target(sides, fixed + 724) == fixed + 1024);
+    CHECK(CloseZ::close_z_target(sides, fixed + 512) == fixed);
+}
+
+TEST_CASE("Close Z mapping merges chains of movable values", "[plugins][support-tree-family][support-close-z][support-close-z-pure]")
+{
+    const coord_t z = 2000000;
+    // z, z + 400, z + 800: the second takes the first, the third is more than 512 from the kept one and stays.
+    const CloseZ::CloseZMapping chain = CloseZ::close_z_mapping({}, { z + 800, z, z + 400, z + 400 });
+    CHECK(CloseZ::close_z_target(chain, z) == z);
+    CHECK(CloseZ::close_z_target(chain, z + 400) == z);
+    CHECK(CloseZ::close_z_target(chain, z + 800) == z + 800);
+    // The kept value is the first of the series, not the nearest of the values taken.
+    const CloseZ::CloseZMapping series = CloseZ::close_z_mapping({}, { z, z + 512, z + 513, z + 1024 });
+    CHECK(CloseZ::close_z_target(series, z + 512) == z);
+    CHECK(CloseZ::close_z_target(series, z + 513) == z + 513);
+    CHECK(CloseZ::close_z_target(series, z + 1024) == z + 513);
+    // A value taken by a fixed value does not become the kept value of the sweep.
+    const CloseZ::CloseZMapping taken = CloseZ::close_z_mapping({ z }, { z + 300, z + 700 });
+    CHECK(CloseZ::close_z_target(taken, z + 300) == z);
+    CHECK(CloseZ::close_z_target(taken, z + 700) == z + 700);
+    // Empty inputs.
+    CHECK(CloseZ::close_z_mapping({}, {}).empty());
+    CHECK(CloseZ::close_z_mapping({ z }, {}).empty());
+    CHECK(CloseZ::close_z_target({}, z) == z);
+}
+
+// Guarantee: each value moves by at most 512 units, and two distinct results (fixed values included) are more than 512 units apart.
+TEST_CASE("Close Z mapping guarantee on many values", "[plugins][support-tree-family][support-close-z][support-close-z-pure]")
+{
+    std::vector<coord_t> fixed, movable;
+    for (coord_t z = 200000; z <= 220000; z += 2000)
+        fixed.push_back(z);
+    uint32_t state = 12345;
+    for (int i = 0; i < 600; ++i) {
+        state = state * 1664525u + 1013904223u;
+        movable.push_back(coord_t(200000 + 100 * (state >> 16) % 21000));
+    }
+    const CloseZ::CloseZMapping mapping = CloseZ::close_z_mapping(fixed, movable);
+    std::vector<coord_t> results = fixed;
+    for (const coord_t z : movable) {
+        const coord_t target = CloseZ::close_z_target(mapping, z);
+        CHECK(std::abs(target - z) <= 4 * SCALED_EPSILON);
+        results.push_back(target);
+    }
+    std::sort(results.begin(), results.end());
+    results.erase(std::unique(results.begin(), results.end()), results.end());
+    for (size_t i = 1; i < results.size(); ++i)
+        CHECK(results[i] - results[i - 1] > 4 * SCALED_EPSILON);
+}
+
+TEST_CASE("Close Z two objects tree", "[plugins][support-tree-family][support-close-z][support-close-z-tree]")
+{
+    close_z_two_objects("tree", "tree", "0.25", "0.2501");
+}
+
+TEST_CASE("Close Z two objects organic", "[plugins][support-tree-family][support-close-z][support-close-z-organic]")
+{
+    close_z_two_objects("organic", "organic", "0.25", "0.2501");
+}
+
+TEST_CASE("Close Z two objects grid", "[plugins][support-tree-family][support-close-z][support-close-z-grid]")
+{
+    close_z_two_objects("grid", "grid", "0.25", "0.2501");
+}
+
+// One grid object whose floor contact lies 62 um under its top contact, with a support layer height (60 um) not much above the minimum
+// height (50 um): the 62 um between the two extremes are split in two slabs thinner than the minimum height, and the top contact is one of them.
+// The host pass does not change this (a known limit): the slabs print as they are.
+TEST_CASE("Close Z grid contact thinner than the minimum", "[plugins][support-tree-family][support-close-z][support-close-z-thin]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = close_z_gcode_config("grid", 0);
+    config.set_deserialize_strict({ {"support_material_contact_distance", "2.738"}, {"support_material_layer_height", "0.06"} });
+    Print print;
+    Model model;
+    close_z_place({ { SG::slab(true), Vec3d(100., 100., 0.), {} } }, config, print, model);
+    SG::prefix(print);
+    std::ostringstream out;
+    const coord_t minimum = SG::params(print, print.object(0)).min_height;
+    out << "\n[support-close-z] thin\n  minimum height " << minimum << "\n";
+    size_t thinner = 0;
+    {
+        const SG::Generated generated(print, print.object(0));
+        for (const auto &role : { std::make_pair("top", &generated.support.top), std::make_pair("bottom", &generated.support.bottom),
+                                  std::make_pair("base", &generated.support.base) })
+            for (const Common::GeneratorLayer *slab : *role.second) {
+                out << "  " << role.first << " " << slab->bottom_z << ".." << slab->print_z << " height " << slab->height << (slab->height < minimum ? "  THINNER" : "") << "\n";
+                thinner += slab->height < minimum;
+            }
+    }
+    close_z_report("thin", out.str());
+    REQUIRE(thinner > 0);
+    const std::string code = close_z_export(print, "thin");
+    close_z_check_gcode(code, "thin");
+}
+
+namespace {
+// One object whose top contact lies 0.3 um under an object layer (contact distance 0.3997 mm under the roof at 4 mm, so at 3.6003 mm and the
+// object layer is at 3.6 mm). The tree snaps its bounds onto the object layer; the grid does not, so the host pass moves its slabs.
+void close_z_one_object(const char *style, const char *name)
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = close_z_gcode_config(style, 0);
+    config.set_deserialize_strict({ {"support_material_contact_distance", "0.3997"} });
+    Print print;
+    Model model;
+    close_z_place({ { SG::slab(true), Vec3d(100., 100., 0.), {} } }, config, print, model);
+    SG::prefix(print);
+    // The grid generates slabs close to its own object layers; the tree already snaps them.
+    CHECK(close_z_generated_pair(print, style, false) == (std::string(style) == "grid"));
+    SG::family(print);
+    SG::toolpaths(print);
+    close_z_dump(name, print);
+    CHECK(close_z_pairs(print, false).empty());
+    close_z_check_order(print);
+    const std::string code = close_z_export(print, name);
+    close_z_check_gcode(code, name);
+}
+
+// The path measures of the auxiliary layers of an object at a print z, per tool and role.
+SG::PathMeasures close_z_measure_support(const Print &print, coord_t z)
+{
+    SG::PathMeasures total;
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        if (layer.scaled_print_z() == z)
+        for (const auto &entry : SG::measure_layer(layer)) {
+            SG::PathMeasure &measure = total[entry.first];
+            measure.length += entry.second.length;
+            measure.volume += entry.second.volume;
+            measure.count += entry.second.count;
+        }
+    return total;
+}
+} // namespace
+
+TEST_CASE("Close Z one object grid contact near an object layer", "[plugins][support-tree-family][support-close-z][support-close-z-one-grid]")
+{
+    close_z_one_object("grid", "one-grid");
+}
+
+TEST_CASE("Close Z one object tree contact near an object layer", "[plugins][support-tree-family][support-close-z][support-close-z-one-tree]")
+{
+    close_z_one_object("tree", "one-tree");
+}
+
+// With interface layers, the contact that the pass moves onto the object layer is still recognised as a contact by the toolpaths: the
+// paths of its layer (count and length per tool and role, removable contact loops included; the volume depends on the slab thickness) match those of the print whose contact
+// lies exactly on the object layer (contact distance 0.4 mm, no close z). The other slabs are not compared: their planning differs.
+TEST_CASE("Close Z moved contact stays a contact for the toolpaths", "[plugins][support-tree-family][support-close-z][support-close-z-contact]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto measure = [](const char *distance, bool close) {
+        DynamicPrintConfig config = close_z_gcode_config("grid", 3);
+        config.set_deserialize_strict({ {"support_material_contact_distance", distance}, {"support_material_interface_contact_loops", "1"} });
+        Print print;
+        Model model;
+        close_z_place({ { SG::slab(true), Vec3d(100., 100., 0.), {} } }, config, print, model);
+        SG::prefix(print);
+        CHECK(close_z_generated_pair(print, "grid", false) == close);
+        SG::family(print);
+        SG::toolpaths(print);
+        CHECK(close_z_pairs(print, false).empty());
+        return close_z_measure_support(print, scale_to_layer_coord(3.6));
+    };
+    const SG::PathMeasures moved = measure("0.3997", true), reference = measure("0.4", false);
+    REQUIRE_FALSE(reference.empty());
+    REQUIRE(moved.size() == reference.size());
+    for (const auto &entry : reference) {
+        const auto found = moved.find(entry.first);
+        REQUIRE(found != moved.end());
+        CAPTURE(entry.first.second, entry.second.count, found->second.count, entry.second.length, found->second.length);
+        CHECK(found->second.count == entry.second.count);
+        CHECK(found->second.length == Approx(entry.second.length).epsilon(0.02));
+    }
+}
+
+namespace {
+// A print printed object by object (the option is complete_objects or parallel_objects_step) of two objects whose layer heights are 0.2 and
+// 0.2001 mm: the layers of the two objects are close to one another, which only the layer-by-layer plan would mind. Each object gets its
+// own pass: no close pair inside an object, and no support z of one object was moved onto a layer z of the other.
+void close_z_object_by_object(const char *option, const char *value, const char *name)
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = close_z_gcode_config("grid", 0);
+    config.set_deserialize_strict({ {option, value} });
+    Print print;
+    Model model;
+    close_z_place({
+        { SG::slab(true), Vec3d(100., 100., 0.), {} },
+        { SG::slab(true), Vec3d(160., 100., 0.), { {"layer_height", "0.2001"} } } },
+        config, print, model);
+    SG::prefix(print);
+    std::vector<std::vector<coord_t>> generated;
+    for (size_t idx = 0; idx < 2; ++idx)
+        generated.push_back(close_z_generated(print, idx, "grid"));
+    SG::family(print);
+    SG::toolpaths(print);
+    close_z_dump(name, print);
+    for (size_t idx = 0; idx < 2; ++idx) {
+        CHECK(close_z_pairs(print, false, &idx).empty());
+        std::set<coord_t> own;
+        for (const Layer &layer : print.object(idx).layers())
+            own.insert(layer.scaled_print_z());
+        std::set<coord_t> other;
+        for (const Layer &layer : print.object(1 - idx).layers())
+            other.insert(layer.scaled_print_z());
+        for (const Layer &layer : print.object(idx).auxiliary_layers()) {
+            const coord_t z = layer.scaled_print_z();
+            // Not equal to a layer of the other object, unless it already was (or equals a layer of its own object).
+            CHECK((other.count(z) == 0 || own.count(z) == 1 || std::binary_search(generated[idx].begin(), generated[idx].end(), z)));
+            // Every z is one of the generated slabs, or a z of the object (or moved by at most the tolerance onto an object layer).
+            const bool known = std::binary_search(generated[idx].begin(), generated[idx].end(), z) ||
+                std::any_of(own.begin(), own.end(), [z](coord_t o) { return std::abs(o - z) <= 4 * SCALED_EPSILON; });
+            CHECK(known);
+        }
+    }
+    close_z_check_order(print);
+    const std::string code = close_z_export(print, name);
+    close_z_check_gcode(code, name, true);
+}
+} // namespace
+
+TEST_CASE("Close Z sequential print passes per object", "[plugins][support-tree-family][support-close-z][support-close-z-sequential]")
+{
+    close_z_object_by_object("complete_objects", "1", "sequential");
+}
+
+TEST_CASE("Close Z parallel objects step passes per object", "[plugins][support-tree-family][support-close-z][support-close-z-parallel]")
+{
+    close_z_object_by_object("parallel_objects_step", "5", "parallel");
+}
+
+// The internal setter moves a layer and its slice z and keeps its id.
+TEST_CASE("Close Z layer setter keeps the id and moves the slice z", "[plugins][support-tree-family][support-close-z][support-close-z-setter]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    close_z_place({ { SG::slab(true), Vec3d(100., 100., 0.), {} } }, close_z_gcode_config("grid", 0), print, model);
+    close_z_run_supports(print);
+    PrintObject &object = print.object(0);
+    REQUIRE(object.auxiliary_layers().size() > 12);
+    Layer &layer = *object.mutable_auxiliary_layers()[12];
+    const size_t id = layer.id();
+    const coord_t z = layer.scaled_print_z(), height = layer.scaled_height();
+    ApiInternal::LayerAccess::set_z(layer, z - 300, height - 300);
+    CHECK(layer.scaled_print_z() == z - 300);
+    CHECK(layer.scaled_height() == height - 300);
+    CHECK(layer.scaled_bottom_z() == z - height);
+    CHECK(layer.slice_z == Approx(unscaled(z - 300 - (height - 300) / 2)));
+    CHECK(layer.id() == id);
+}
+
+// The sort of the pass: layers put out of order with set_z come back by increasing print z, and the thickest first at an equal print z.
+TEST_CASE("Close Z support layers are sorted by z then thickness", "[plugins][support-tree-family][support-close-z][support-close-z-sort]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    close_z_place({ { SG::slab(true), Vec3d(100., 100., 0.), {} } }, close_z_gcode_config("grid", 0), print, model);
+    close_z_run_supports(print);
+    LayerUPtrs &layers = print.object(0).mutable_auxiliary_layers();
+    REQUIRE(layers.size() > 12);
+    const Layer *thin = layers[3].get(), *middle = layers[9].get(), *thick = layers[10].get();
+    const coord_t z = middle->scaled_print_z(), height = middle->scaled_height();
+    // Layer 3 jumps to the z of layer 9 with a thinner height, layer 10 comes down to it with a thicker one.
+    ApiInternal::LayerAccess::set_z(*layers[3], z, height / 100 / 2 * 100);
+    ApiInternal::LayerAccess::set_z(*layers[10], z, height + 100);
+    Slic3r::Steps::StepGenerateSupport::Detail::sort_support_layers(layers);
+    std::vector<const Layer *> order;
+    for (const LayerUPtr &layer : layers)
+        order.push_back(layer.get());
+    const auto position = [&order](const Layer *layer) { return std::find(order.begin(), order.end(), layer) - order.begin(); };
+    CHECK(position(thick) + 1 == position(middle));
+    CHECK(position(middle) + 1 == position(thin));
+    close_z_check_order(print);
+}
+
+// The tree's own snapping and the host pass can both move the same contact. A full print cannot show it (a floor contact and a top contact
+// 0.4 um apart leave no body between them, and the families publish no support there), so the two moves are chained on a synthetic support:
+// the tree merges a floor contact and a top contact 0.4 um above it (align_slab_bounds), then the mapping of the host pass takes the merged z to
+// the z of a support of another object, 0.5 um lower. The contact moves by more than 640 units in all, and still by at most the contact match
+// tolerance of the toolpaths (SCALED_EPSILON + 2 * 4 * SCALED_EPSILON, LegacySupportPaths.cpp).
+TEST_CASE("Close Z contact moved by the tree and by the pass stays within the contact match", "[plugins][support-tree-family][support-close-z][support-close-z-cumulative]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({ SG::slab() }, print, model, SG::config("tree", false, 0));
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    std::vector<coord_t> object_zs;
+    for (size_t id = 0; id < object.layer_count(); ++id)
+        object_zs.push_back(object.layer(id).scaled_print_z());
+    PluginStorage storage;
+    Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
+    const coord_t floor_top = scale_to_layer_coord(1.25), contact_top = scale_to_layer_coord(1.2504);
+    Common::GeneratorLayer &floor_contact = Common::add_layer(support, Common::LayerType::BottomContact, floor_top, scale_to_layer_coord(1.05), scale_to_layer_coord(0.2));
+    Common::GeneratorLayer &overhang_contact = Common::add_layer(support, Common::LayerType::TopContact, contact_top, scale_to_layer_coord(1.0504), scale_to_layer_coord(0.2));
+    support.bottom = { &floor_contact };
+    support.top = { &overhang_contact };
+    Polygon floor_circle = make_circle(scale_d(1.), 1000.), overhang_circle = make_circle(scale_d(1.), 1000.);
+    floor_circle.translate(Point(scale_i(-4.), coord_t(0)));
+    overhang_circle.translate(Point(scale_i(4.), coord_t(0)));
+    assign_native(floor_contact.polygons, Polygons{ floor_circle });
+    assign_native(overhang_contact.polygons, Polygons{ overhang_circle });
+    TF::align_slab_bounds(object_zs, support);
+    const coord_t merged = overhang_contact.print_z;
+    REQUIRE(floor_contact.print_z == merged);
+    const coord_t by_tree = merged - contact_top;
+    // A support of another object, 500 units under the merged z on the far side from the contact.
+    const coord_t other = merged + (by_tree < 0 ? -500 : 500);
+    const Slic3r::Steps::StepGenerateSupport::Detail::CloseZMapping mapping =
+        Slic3r::Steps::StepGenerateSupport::Detail::close_z_mapping(object_zs, { other, merged });
+    const coord_t final_z = Slic3r::Steps::StepGenerateSupport::Detail::close_z_target(mapping, merged);
+    close_z_report("cumulative", "[support-close-z] contact z " + std::to_string(contact_top) + ", merged by the tree " + std::to_string(merged) +
+        ", after the pass " + std::to_string(final_z) + "\n");
+    CHECK(std::abs(by_tree) > 0);
+    const coord_t cumulative = std::abs(final_z - contact_top);
+    CHECK(cumulative > 640);
+    CHECK(cumulative <= 1024);
+    CHECK(cumulative <= SCALED_EPSILON + 2 * (4 * SCALED_EPSILON));
 }

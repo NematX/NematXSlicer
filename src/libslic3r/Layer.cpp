@@ -97,6 +97,19 @@ void ApiInternal::LayerAccess::add_region(Layer &layer, const PrintRegion &regio
     layer.m_regions.emplace_back(new LayerRegion(&layer, &region));
 }
 
+// Sets m_print_z and m_height (scaled layer units) and slice_z (mm, unscaled) to the middle of the layer, under the constraints of the constructor,
+// checked the same way: print_z > 100, height > min_scaled_height (100) and print_z on the layer grid (asserts, no check in Release).
+// Layer::m_id, the links and the content are not touched.
+void ApiInternal::LayerAccess::set_z(Layer &layer, coord_t print_z, coord_t height)
+{
+    assert(print_z > 100);
+    assert(height > min_scaled_height);
+    assert(scale_to_layer_coord(unscaled(print_z)) == print_z);
+    layer.m_print_z = print_z;
+    layer.m_height  = height;
+    layer.slice_z   = unscaled(print_z - height / 2);
+}
+
 // was Layer::make_slices()
 void ApiInternal::LayerAccess::recompute_slices_from_layer_regions(Layer &layer) {
     ExPolygons slices;
