@@ -11,6 +11,8 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_clipper.h"
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
+#include <limits>
+#include <stdexcept>
 
 namespace slic3r_api {
 
@@ -694,6 +696,29 @@ inline ClipperOperand clipper_offset_polylines(storage_handle *storage,
     clipper_shapes_handle *handle =
         ::clipper_offset_polylines(storage, polylines.handle(), delta, join_type, miter_limit, end_type);
     return handle == nullptr ? ClipperOperand::create_empty(storage) : ClipperOperand::adopt(storage, handle);
+}
+
+// Validate ring sizes before flattening: a mismatch must never reach the kernel
+// where distances are indexed by source vertex. The C ABI validates values too.
+inline StoredExPolygonCollection clipper_variable_offset_inner(
+    storage_handle *storage, const ExPolygon &source,
+    const std::vector<std::vector<float>> &deltas, double miter_limit = 2.)
+{
+    if (deltas.size() != size_t(source.hole_size()) + 1)
+        throw std::invalid_argument("Variable offset requires one delta vector per ring.");
+    std::vector<float> flat;
+    for (size_t ring = 0; ring < deltas.size(); ++ring) {
+        const size_t expected = ring == 0 ? source.contour().size() : source.hole(uint32_t(ring - 1)).size();
+        if (deltas[ring].size() != expected ||
+            expected > std::numeric_limits<uint32_t>::max() - flat.size())
+            throw std::invalid_argument("Variable offset delta count does not match source vertices.");
+        flat.insert(flat.end(), deltas[ring].begin(), deltas[ring].end());
+    }
+    auto *result = ::clipper_variable_offset_inner(storage, source.handle(), flat.data(),
+                                                   uint32_t(flat.size()), miter_limit);
+    if (result == nullptr)
+        throw std::invalid_argument("Invalid variable inward offset arguments.");
+    return StoredExPolygonCollection::adopt(storage, result);
 }
 
 inline StoredPolylineCollection clipper_diff_polyline_expolygons(storage_handle *storage,

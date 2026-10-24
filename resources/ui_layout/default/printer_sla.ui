@@ -30,7 +30,7 @@ group:Corrections
 		setting:label$Z:relative_correction_z
 	end_line
 	setting:absolute_correction
-	setting:first_layer_size_compensation
+	setting:sla_first_layer_size_compensation
 	setting:elephant_foot_min_width
 	setting:gamma_correction
 group:Exposure

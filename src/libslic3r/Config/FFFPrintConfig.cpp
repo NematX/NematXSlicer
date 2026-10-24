@@ -3294,40 +3294,8 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comExpert | comSuSi;
     def->set_default_value(new ConfigOptionPercent(100));
 
-    def = definition.add("first_layer_size_compensation", coFloat, ptFFF);
-    def->label = L("First layer");
-    def->full_label = L("XY First layer compensation");
-    def->category = OptionCategory::slicing;
-    def->invalidates_step = STEP_SLICING;
-    def->tooltip = L("The first layer will be grown / shrunk in the XY plane by the configured value "
-        "to compensate for the 1st layer squish aka an Elephant Foot effect. (should be negative = inwards = remove area)");
-    def->sidetext = L("mm");
-    def->mode = comAdvancedE | comSuSi | comPrusa; // just a rename & inverted of prusa 's elefant_foot
-    def->set_default_value(new ConfigOptionFloat(0));
-
-    def = definition.add("first_layer_size_compensation_layers", coInt, ptFFF);
-    def->label = L("height in layers");
-    def->full_label = L("XY First layer compensation height in layers");
-    def->category = OptionCategory::slicing;
-    def->invalidates_step = STEP_SLICING;
-    def->tooltip = L("The number of layers on which the elephant foot compensation will be active. "
-        "The first layer will be shrunk by the elephant foot compensation value, then "
-        "the next layers will be gradually shrunk less, up to the layer indicated by this value.");
-    def->sidetext = L("layers");
-    def->min = 1;
-    def->max = 30;
-    def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(new ConfigOptionInt(1));
-
-    def = definition.add("first_layer_size_compensation_no_collapse", coBool, ptFFF);
-    def->label = L("No collapse");
-    def->full_label = L("XY First layer compensation: no collapse");
-    def->category = OptionCategory::slicing;
-    def->invalidates_step = STEP_SLICING;
-    def->tooltip = L("The compensations won't shrink thin areas below a threshold for the first layer(s)."
-                    "\nThe layer(s) where this is activated depends on the 'first_layer_size_compensation_layers' setting.");
-    def->mode = comAdvancedE | comSuSi;
-    def->set_default_value(new ConfigOptionBool(true));
+    // First-layer compensation, its layer count and no-collapse are defined by
+    // the regional XY plugin. SLA uses its own sla_first_layer_size_compensation.
 
     def = definition.add("first_layer_strong_start", coPercent, ptFFF);
     def->label = L("First layer squished start point");

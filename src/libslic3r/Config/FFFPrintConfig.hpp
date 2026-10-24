@@ -278,9 +278,6 @@ PRINT_CONFIG_CLASS_DEFINE_WITH_SCOPE(
     ((ConfigOptionFloatOrPercent,       first_layer_extrusion_spacing))
     ((ConfigOptionFloatOrPercent,       first_layer_infill_extrusion_width))
     ((ConfigOptionFloatOrPercent,       first_layer_infill_extrusion_spacing))
-    ((ConfigOptionFloat,                first_layer_size_compensation))  /* elefant_foot_compensation */
-    ((ConfigOptionInt,                  first_layer_size_compensation_layers))
-    ((ConfigOptionBool,                 first_layer_size_compensation_no_collapse))
     ((ConfigOptionFloatOrPercent,       first_layer_speed_over_raft))
     ((ConfigOptionPercent,              first_layer_strong_start))
     ((ConfigOptionFloat,                hole_size_threshold))

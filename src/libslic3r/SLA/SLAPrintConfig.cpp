@@ -317,7 +317,7 @@ void init_sla_params(PrintConfigDef &definition)
         "branchingsupport_head_penetration",
         "branchingsupport_head_width",
         "branchingsupport_pillar_diameter",
-        "first_layer_size_compensation",
+        "sla_first_layer_size_compensation",
         "relative_correction_x",
         "relative_correction_y",
         "relative_correction_z",
@@ -439,7 +439,7 @@ void init_sla_params(PrintConfigDef &definition)
         "material_ow_relative_correction_x",
         "material_ow_relative_correction_y",
         "material_ow_relative_correction_z",
-        "material_ow_first_layer_size_compensation"
+        "material_ow_sla_first_layer_size_compensation"
     });
 
     definition.option_keys(RAW_PRESET_TYPE_SLA_PRINTER).insert({
@@ -454,7 +454,7 @@ void init_sla_params(PrintConfigDef &definition)
         "relative_correction_y",
         "relative_correction_z",
         "absolute_correction",
-        "first_layer_size_compensation",
+        "sla_first_layer_size_compensation",
         "elephant_foot_min_width",
         "gamma_correction",
         "min_exposure_time", "max_exposure_time",
@@ -610,6 +610,18 @@ void init_sla_params(PrintConfigDef &definition)
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionFloat(0.0));
     
+    // Was first_layer_size_compensation, shared with FFF until the FFF setting
+    // moved to the XY compensation plugin.
+    def = definition.add("sla_first_layer_size_compensation", coFloat, ptSLA);
+    def->label = L("First layer");
+    def->full_label = L("First layer compensation");
+    def->category = OptionCategory::slicing;
+    def->tooltip = L("The first layer will be grown / shrunk in the XY plane by the configured value "
+        "to compensate for the 1st layer squish aka an Elephant Foot effect. (should be negative = inwards = remove area)");
+    def->sidetext = L("mm");
+    def->mode = comAdvancedE | comSuSi | comPrusa; // just a rename & inverted of prusa 's elefant_foot
+    def->set_default_value(new ConfigOptionFloat(0));
+
     def = definition.add("elephant_foot_min_width", coFloat, ptSLA);
     def->label = L("minimum width");
     def->category = OptionCategory::slicing;

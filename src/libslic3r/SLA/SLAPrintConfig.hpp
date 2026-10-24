@@ -283,7 +283,7 @@ PRINT_CONFIG_CLASS_DEFINE_WITH_SCOPE(
     ((ConfigOptionFloat,                       material_ow_branchingsupport_head_width))
     ((ConfigOptionInt,                         material_ow_support_points_density_relative))
 
-    ((ConfigOptionFloat,                       material_ow_first_layer_size_compensation)) /* material_ow_elefant_foot_compensation */
+    ((ConfigOptionFloat,                       material_ow_sla_first_layer_size_compensation)) /* material_ow_elefant_foot_compensation */
     ((ConfigOptionFloat,                       material_ow_relative_correction_x))
     ((ConfigOptionFloat,                       material_ow_relative_correction_y))
     ((ConfigOptionFloat,                       material_ow_relative_correction_z))
@@ -309,7 +309,7 @@ PRINT_CONFIG_CLASS_DEFINE_WITH_SCOPE(
     ((ConfigOptionFloat,                        relative_correction_y))
     ((ConfigOptionFloat,                        relative_correction_z))
     ((ConfigOptionFloat,                        absolute_correction))
-    ((ConfigOptionFloat,                        first_layer_size_compensation))
+    ((ConfigOptionFloat,                        sla_first_layer_size_compensation))
     ((ConfigOptionFloat,                        elephant_foot_min_width))
     ((ConfigOptionFloat,                        gamma_correction))
     ((ConfigOptionFloat,                        fast_tilt_time))

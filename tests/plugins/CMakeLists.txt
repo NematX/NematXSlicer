@@ -38,6 +38,7 @@ add_executable(${_TEST_NAME}_tests
     test_extrusion_continuity.cpp
     test_extrusion_linear_points.cpp
     test_extrusion_ordered_leaf.cpp
+    test_geometry_primitives.cpp
     test_extrusion_split_by_areas.cpp
     test_extrusion_views.cpp
     test_fff_print_gui_rules.cpp
@@ -151,6 +152,8 @@ test_support_tree_family.cpp
     test_print_status_queue.cpp
     test_skirt_brim_default_generator.cpp
     test_slice_volume.cpp
+    test_xy_size_compensation_geometry.cpp
+    test_xy_size_compensation_integration.cpp
     test_step_pipeline_invalidation.cpp
     test_step_selector_snapshot.cpp
     test_step_selector_traits.cpp

@@ -259,7 +259,7 @@ static t_config_option_keys print_config_diffs(const StaticPrintConfig     &curr
         "relative_correction_x"sv,
         "relative_correction_y"sv,
         "relative_correction_z"sv,
-        "first_layer_size_compensation"sv,
+        "sla_first_layer_size_compensation"sv,
     };
 
     static constexpr auto material_ow_prefix = "material_ow_";
@@ -878,7 +878,7 @@ bool SLAPrint::invalidate_state_by_config_options(const std::vector<t_config_opt
         "relative_correction_y"sv,
         "relative_correction_z"sv,
         "absolute_correction"sv,
-        "first_layer_size_compensation"sv,
+        "sla_first_layer_size_compensation"sv,
         "elefant_foot_min_width"sv,
         "gamma_correction"sv,
     };
@@ -924,7 +924,7 @@ bool SLAPrint::invalidate_state_by_config_options(const std::vector<t_config_opt
         "material_ow_branchingsupport_head_front_diameter"sv,
         "material_ow_branchingsupport_head_penetration"sv,
         "material_ow_branchingsupport_head_width"sv,
-        "material_ow_first_layer_size_compensation"sv,
+        "material_ow_sla_first_layer_size_compensation"sv,
         "material_ow_support_points_density_relative"sv,
         "material_ow_relative_correction_x"sv,
         "material_ow_relative_correction_y"sv,
