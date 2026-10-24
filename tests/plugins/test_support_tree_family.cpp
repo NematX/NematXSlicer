@@ -16,6 +16,9 @@
 #include "libslic3r/Plugins/Support/Tree/TreeSupportGenerator.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSmoothing.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeZPlanner.hpp"
+#include "libslic3r/Format/OBJ.hpp"
+#include "libslic3r/Support/SupportMaterial.hpp"
+#include "libslic3r/Support/TreeSupport.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -3193,6 +3196,189 @@ TEST_CASE("Tree routing and slab generation benchmark", "[.][tree-routing-benchm
                         model_id, style, nodes, route_min, median(route_times), slab_min, median(slab_times));
             CHECK(nodes > 0);
         }
+}
+
+namespace {
+struct PerfModel {
+    std::string  name;
+    TriangleMesh mesh;
+};
+
+// The comma list of an environment variable, empty when it is not set.
+std::vector<std::string> perf_list(const char *variable)
+{
+    std::vector<std::string> result;
+    if (const char *value = std::getenv(variable)) {
+        std::istringstream in(value);
+        for (std::string item; std::getline(in, item, ',');)
+            if (!item.empty())
+                result.push_back(item);
+    }
+    return result;
+}
+
+bool perf_selected(const std::vector<std::string> &list, const std::string &name)
+{
+    return list.empty() || std::find(list.begin(), list.end(), name) != list.end();
+}
+
+// An obj of tests/data, scaled so that its longest side is 120 mm when it is smaller than 100 mm.
+TriangleMesh perf_obj(const char *file)
+{
+    TriangleMesh mesh;
+    REQUIRE(load_obj((std::string(TEST_DATA_DIR) + "/" + file).c_str(), &mesh));
+    const Vec3d size = mesh.bounding_box().size();
+    const double longest = std::max({ size.x(), size.y(), size.z() });
+    if (longest > 0. && longest < 100.)
+        mesh.scale(float(120. / longest));
+    return mesh;
+}
+
+struct PerfStat {
+    std::vector<double> values;
+    void add(double value) { values.push_back(value); }
+    double min() const { return values.empty() ? 0. : *std::min_element(values.begin(), values.end()); }
+    double median() const
+    {
+        std::vector<double> sorted = values;
+        std::sort(sorted.begin(), sorted.end());
+        return sorted.empty() ? 0. : sorted[sorted.size() / 2];
+    }
+};
+
+double perf_ms(const std::chrono::steady_clock::time_point &from, const std::chrono::steady_clock::time_point &to)
+{
+    return std::chrono::duration<double, std::milli>(to - from).count();
+}
+} // namespace
+
+// Hidden benchmark of the support generation on large objects, the plugin (the STEP_SUPPORT family run and its print Z host pass, then
+// the STEP_SUPPORT_TOOLPATH run) against the native legacy generator, in the same binary. Models: frog_legs.obj and A_upsidedown.obj of
+// tests/data (scaled to a longest side of 120 mm when smaller than 100 mm) and comparison_mesh(2); styles grid, snug, tree and organic,
+// with three interface layers and a layer height of 0.2. Every run builds its print and runs the slicing prefix (SG::prefix) untimed.
+// Plugin side: support_ms is SG::family() (the family run and the host pass), toolpath_ms SG::toolpaths(). Legacy side: the whole native
+// generation, which includes its toolpaths (PrintObjectSupportMaterial::generate() for grid and snug, fff_tree_support_generate() for
+// tree and organic, both end with generate_support_toolpaths()); the untimed prepare_legacy_inputs() precedes it. The plugin total
+// (support + toolpath) is therefore the one to compare with the legacy total. For tree and organic a third print is timed apart, split as
+// Routed construction (volumes precalculation and routing), generate_tree_slabs() and Common::publish().
+// Environment: SLIC3R_PERF_THREADS (tbb::global_control, default every thread), SLIC3R_PERF_RUNS (default 3), SLIC3R_PERF_MODELS
+// (frog_legs, A_upsidedown, comparison2) and SLIC3R_PERF_STYLES (grid, snug, tree, organic) as comma lists (default all), and
+// SLIC3R_PERF_LEGACY=0 to skip the legacy side. No timing is asserted; the support must exist. Build Release and run it from
+// build/tests/plugins with: .\Release\plugins_tests.exe "[support-perf-benchmark]"
+TEST_CASE("Support generation performance benchmark, plugin against legacy", "[.][support-perf-benchmark]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *threads_env = std::getenv("SLIC3R_PERF_THREADS");
+    const char *runs_env = std::getenv("SLIC3R_PERF_RUNS");
+    const char *legacy_env = std::getenv("SLIC3R_PERF_LEGACY");
+    const int runs = std::max(1, runs_env ? std::atoi(runs_env) : 3);
+    const bool with_legacy = legacy_env == nullptr || std::atoi(legacy_env) != 0;
+    std::unique_ptr<tbb::global_control> thread_limit;
+    if (threads_env && std::atoi(threads_env) > 0)
+        thread_limit = std::make_unique<tbb::global_control>(tbb::global_control::max_allowed_parallelism, size_t(std::atoi(threads_env)));
+    const size_t threads = tbb::global_control::active_value(tbb::global_control::max_allowed_parallelism);
+    const std::vector<std::string> model_filter = perf_list("SLIC3R_PERF_MODELS"), style_filter = perf_list("SLIC3R_PERF_STYLES");
+
+    std::vector<PerfModel> models;
+    if (perf_selected(model_filter, "frog_legs"))
+        models.push_back({ "frog_legs", perf_obj("frog_legs.obj") });
+    if (perf_selected(model_filter, "A_upsidedown"))
+        models.push_back({ "A_upsidedown", perf_obj("A_upsidedown.obj") });
+    if (perf_selected(model_filter, "comparison2"))
+        models.push_back({ "comparison2", Slic3r::Test::SupportTree::comparison_mesh(2) });
+    REQUIRE_FALSE(models.empty());
+
+    for (const PerfModel &model_entry : models) {
+        const Vec3d size = model_entry.mesh.bounding_box().size();
+        std::printf("PERF-MODEL model=%s triangles=%zu size_mm=%.2fx%.2fx%.2f threads=%zu runs=%d\n", model_entry.name.c_str(),
+                    model_entry.mesh.facets_count(), size.x(), size.y(), size.z(), threads, runs);
+        for (const char *style : { "grid", "snug", "tree", "organic" }) {
+            if (!perf_selected(style_filter, style))
+                continue;
+            const bool tree_family = std::strcmp(style, "tree") == 0 || std::strcmp(style, "organic") == 0;
+            const bool organic = std::strcmp(style, "organic") == 0;
+            const DynamicPrintConfig config = SG::config(style, false, 3, false);
+            PerfStat plugin_support, plugin_toolpath, plugin_total, legacy_total, routed_stat, slabs_stat, publish_stat, split_total;
+            for (int run = 0; run < runs; ++run) {
+                {
+                    Print print;
+                    Model model;
+                    Test::init_print({ model_entry.mesh }, print, model, config);
+                    SG::prefix(print);
+                    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+                    SG::family(print);
+                    const std::chrono::steady_clock::time_point supported = std::chrono::steady_clock::now();
+                    SG::toolpaths(print);
+                    const std::chrono::steady_clock::time_point done = std::chrono::steady_clock::now();
+                    plugin_support.add(perf_ms(start, supported));
+                    plugin_toolpath.add(perf_ms(supported, done));
+                    plugin_total.add(perf_ms(start, done));
+                    const size_t layers = print.object(0).auxiliary_layers().size();
+                    std::printf("PERF-RUN model=%s style=%s run=%d side=plugin layers=%zu support_ms=%.1f toolpath_ms=%.1f total_ms=%.1f\n",
+                                model_entry.name.c_str(), style, run, layers, plugin_support.values.back(), plugin_toolpath.values.back(), plugin_total.values.back());
+                    CHECK(layers > 0);
+                }
+                if (with_legacy) {
+                    Print print;
+                    Model model;
+                    Test::init_print({ model_entry.mesh }, print, model, config);
+                    SG::prefix(print);
+                    PrintObject &object = print.object(0);
+                    REQUIRE(object.auxiliary_layers().empty());
+                    SG::prepare_legacy_inputs(object);
+                    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+                    if (tree_family)
+                        fff_tree_support_generate(object);
+                    else {
+                        PrintObjectSupportMaterial generator(&object, std::make_shared<SlicingParameters>(object.slicing_parameters()));
+                        generator.generate(object);
+                    }
+                    legacy_total.add(perf_ms(start, std::chrono::steady_clock::now()));
+                    const size_t layers = object.auxiliary_layers().size();
+                    std::printf("PERF-RUN model=%s style=%s run=%d side=legacy layers=%zu total_ms=%.1f\n", model_entry.name.c_str(), style, run,
+                                layers, legacy_total.values.back());
+                    CHECK(layers > 0);
+                }
+                if (tree_family) {
+                    Print print;
+                    Model model;
+                    Test::init_print({ model_entry.mesh }, print, model, config);
+                    SG::prefix(print);
+                    PrintObject &object = print.object(0);
+                    const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
+                    Routed routed(print);
+                    const std::chrono::steady_clock::time_point routed_at = std::chrono::steady_clock::now();
+                    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
+                    const std::chrono::steady_clock::time_point slabs_at = std::chrono::steady_clock::now();
+                    Common::publish(nullptr, SG::object_view(object), routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+                    const std::chrono::steady_clock::time_point done = std::chrono::steady_clock::now();
+                    routed_stat.add(perf_ms(start, routed_at));
+                    slabs_stat.add(perf_ms(routed_at, slabs_at));
+                    publish_stat.add(perf_ms(slabs_at, done));
+                    split_total.add(perf_ms(start, done));
+                    size_t nodes = 0;
+                    for (const TF::RoutedTree &tree : routed.trees)
+                        nodes += tree.nodes.size();
+                    std::printf("PERF-SPLIT model=%s style=%s run=%d nodes=%zu routed_ms=%.1f slabs_ms=%.1f publish_ms=%.1f total_ms=%.1f\n",
+                                model_entry.name.c_str(), style, run, nodes, routed_stat.values.back(), slabs_stat.values.back(),
+                                publish_stat.values.back(), split_total.values.back());
+                    CHECK(nodes > 0);
+                }
+            }
+            const double ratio_min = legacy_total.min() > 0. ? plugin_total.min() / legacy_total.min() : 0.;
+            const double ratio_median = legacy_total.median() > 0. ? plugin_total.median() / legacy_total.median() : 0.;
+            std::printf("PERF-SUMMARY model=%s style=%s threads=%zu runs=%d plugin_support_min_ms=%.1f plugin_support_median_ms=%.1f "
+                        "plugin_toolpath_min_ms=%.1f plugin_toolpath_median_ms=%.1f plugin_total_min_ms=%.1f plugin_total_median_ms=%.1f "
+                        "legacy_total_min_ms=%.1f legacy_total_median_ms=%.1f ratio_plugin_over_legacy_min=%.2f ratio_plugin_over_legacy_median=%.2f\n",
+                        model_entry.name.c_str(), style, threads, runs, plugin_support.min(), plugin_support.median(), plugin_toolpath.min(),
+                        plugin_toolpath.median(), plugin_total.min(), plugin_total.median(), legacy_total.min(), legacy_total.median(), ratio_min, ratio_median);
+            if (tree_family)
+                std::printf("PERF-SUMMARY-SPLIT model=%s style=%s routed_min_ms=%.1f routed_median_ms=%.1f slabs_min_ms=%.1f slabs_median_ms=%.1f "
+                            "publish_min_ms=%.1f publish_median_ms=%.1f split_total_min_ms=%.1f split_total_median_ms=%.1f\n",
+                            model_entry.name.c_str(), style, routed_stat.min(), routed_stat.median(), slabs_stat.min(), slabs_stat.median(),
+                            publish_stat.min(), publish_stat.median(), split_total.min(), split_total.median());
+        }
+    }
 }
 
 
