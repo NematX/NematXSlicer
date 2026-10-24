@@ -9,7 +9,8 @@
    cone anchored at the top of layer 0 whose radius is bp_radius there. Collision Z gaps use per-layer windows
    from the real Z: layers closer than the gap enter the window, within the Z rounding tolerance. The minimum height of a
    branch above the model and the search depth of the roots are physical distances measured on the real layer tops
-   (reaches_min_height_to_model, lowest_layer_within). Between two consecutive
+   (reaches_min_height_to_model, lowest_layer_within); with top interface layers every branch is exempt from that minimum height
+   (branches_carry_roof). Between two consecutive
    layers, the maximum move of the branch centres is tan(effective angle) times the height of the upper layer.
 
    The effective angle is the branch angle, capped so that the horizontal overhang of a branch per support layer does not
@@ -92,6 +93,11 @@ struct TreeSettings
     double cone_slope = 0;
     // Minimum height (scaled) between the tip of a branch and an element that rests on the model.
     coord_t min_height_to_model = 0;
+    // True when the support has top interface layers (support_material_interface_layers > 0). Policy: every branch is then exempt from
+    // min_height_to_model, whatever happens later to its roof (the trims of the contacts and of the interfaces). The tips start under the interface
+    // stack (tip_sources in TreeRouting.cpp), so each branch carries it, like a roof-carrying branch of the legacy tree (supports_roof, which the
+    // legacy sets per tip and could keep a tip without roof when the layer count is nonzero): this is not an exact per-branch equivalent of it.
+    bool branches_carry_roof = false;
     // Real top Z (scaled) of every object layer, bottom first.
     std::vector<coord_t> layer_print_z;
     // Radius increase allowed when a model branch merges with branches that reach the bed.

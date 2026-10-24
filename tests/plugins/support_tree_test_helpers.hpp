@@ -146,12 +146,14 @@ struct Routed {
     const slic3r_api::Support::Common::SupportParams params;
     const TF::TreeSettings settings;
     SupportPatternContext patterns;
+    // The resting parts of the contacts, to pass to generate_tree_slabs() with the trees.
+    std::vector<TF::RestingPart> resting;
     std::vector<TF::RoutedTree> trees;
     explicit Routed(Print &print)
         : params(SupportGrid::params(print, print.object(0))), settings(Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params)),
           patterns(print, reinterpret_cast<storage_handle *>(&storage)),
           trees(TF::route_trees(SupportGrid::print_view(print), SupportGrid::object_view(print.object(0)), params, settings, support,
-                                patterns.context())) {}
+                                patterns.context(), resting)) {}
 };
 
 /* ============================ rings and records ============================ */

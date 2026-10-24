@@ -33,7 +33,8 @@
    interfaces starts. A root reaches the bed, or the object layer where its unsupported part comes to rest. The steps run
    in this order:
    1. smooth_organic_branches() relaxes the nodes of organic trees, so that the planner measures their smoothed paths;
-   2. root_rests() finds the object layer that each root standing on the model rests on, and add_floors() makes its contact;
+   2. root_rests() finds the object layer that each root standing on the model rests on, and add_floors() makes its contact, and the contact of
+       each resting part of the top contacts (the part over the object on the tip layer, which has no tip: its stack rests on the floor, as in the grid);
    3. place_slabs() fills the span of every interval between extremes, with the middle planned by plan_branch_slabs(); for
       the organic branches, refine_branch_slabs() then cuts the middle slabs whose drawn sections overhang more than the limit;
    4. align_slab_bounds() snaps every slab bound that lies within the layer merge tolerance of an object print Z onto it,
@@ -134,10 +135,10 @@ double section_overhang(const PolygonCollection &upper, const PolygonCollection 
 bool inside_section(const PolygonCollection &section, c_point point);
 // The distance in scaled units from a point to the nearest edge of the polygons.
 double distance_to_outline(const PolygonCollection &polygons, c_point point);
-// Creates the bottom contacts of the roots that rest on the object: one contact per object layer, on the part of its top surfaces
-// that the root circles cover.
-void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, const PolygonList &keep_out, const Common::SupportParams &params,
-                const slic3r_api::Config &config, storage_handle *scratch, Common::GeneratedSupport &out);
+// Creates the bottom contacts of the roots that rest on the object and of the resting parts of the contacts: one contact per object layer, on the part of
+// its top surfaces that the root circles and the resting parts cover.
+void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, const std::vector<RestingPart> &resting_parts, const PolygonList &keep_out,
+                const Common::SupportParams &params, const slic3r_api::Config &config, storage_handle *scratch, Common::GeneratedSupport &out);
 // Places the slabs of every interval between extremes; the middle of each interval is planned from the branch overhangs. Returns the
 // middle slabs, the ones that carry branches; the dense interface slabs are not among them.
 std::vector<Common::GeneratorLayer *> place_slabs(const LayerList &layers, const Common::SupportParams &params, const TreeSettings &settings,
@@ -211,13 +212,16 @@ void generate_tree_support(const plugin_run_context *context, const slic3r_api::
 {
     const Common::SupportParams params(print, object);
     const TreeSettings settings(object, print, params);
-    std::vector<RoutedTree> trees = route_trees(print, object, params, settings, out, context);
-    generate_tree_slabs(context, print, object, trees, organic, out);
+    std::vector<RestingPart> resting;
+    std::vector<RoutedTree> trees = route_trees(print, object, params, settings, out, context, resting);
+    generate_tree_slabs(context, print, object, trees, organic, out, resting);
 }
 
-// Build the slabs of the given routed trees in the order of the file header; organic trees are smoothed in place first.
+// Build the slabs of the given routed trees in the order of the file header; organic trees are smoothed in place first. resting_parts are the resting
+// parts that route_trees() returned with the trees (the parts of the contacts over the object on their tip layer, which have no tip): add_floors()
+// gives them their floors, and the stacks of their contacts shorten down to those floors, as in the grid. Trees built by hand pass an empty collection.
 void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
-                         std::vector<RoutedTree> &trees, bool organic, Common::GeneratedSupport &out)
+                         std::vector<RoutedTree> &trees, bool organic, Common::GeneratedSupport &out, const std::vector<RestingPart> &resting_parts)
 {
     const Common::SupportParams params(print, object);
     const TreeSettings settings(object, print, params);
@@ -235,7 +239,7 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
         if (organic)
             smooth_organic_branches(object, keep_out, trees, context);
         std::vector<RootRest> rests = root_rests(layers, trees, keep_out, settings, scratch);
-        add_floors(layers, rests, keep_out, params, config, scratch, out);
+        add_floors(layers, rests, resting_parts, keep_out, params, config, scratch, out);
         raise_stems_onto_floors(out, rests);
         const std::vector<Segment> segments = branch_segments(layers, trees, rests);
         const std::vector<OverhangLayer> overhang = organic ? section_overhang_layers(layers, trees, segments, scratch, context)
@@ -538,8 +542,18 @@ double distance_to_outline(const PolygonCollection &polygons, c_point point)
     return best;
 }
 
-void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, const PolygonList &keep_out, const Common::SupportParams &params,
-                const slic3r_api::Config &config, storage_handle *scratch, Common::GeneratedSupport &out)
+// A resting part is a contact area whose stack rests on the object: its floor is made like the floor of a root, on the top surfaces of the object
+// layers under it. The floors stop at the first support, as in the grid (project_columns() in GridSupportGenerator.cpp, which removes the object
+// from its projection layer by layer): the walk goes down from the layer under the contact; on each layer the part of the remaining area that meets a
+// placeable top surface gets its footprint there and leaves the remaining area, and the walk goes on with the rest until nothing remains or the
+// lowest layer is reached. A cavity under the first support therefore gets no floor. The footprints join the circles of the roots, and the
+// union of both is one floor per layer.
+// Known limit: the top surfaces are the outlines grown by the XY distance (the rule of the root floors), so a band of up to that distance at the edge
+// of a resting part may meet none of them and get no floor; every other point of a part meets a top surface between the tip layer (inside the object)
+// and the contact (outside it).
+// The place_slabs() step then shortens the stack down to the floor (the fallback of place_handed_over_interval()).
+void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, const std::vector<RestingPart> &resting_parts, const PolygonList &keep_out,
+                const Common::SupportParams &params, const slic3r_api::Config &config, storage_handle *scratch, Common::GeneratedSupport &out)
 {
     PolygonList resting;
     resting.reserve(keep_out.size());
@@ -548,6 +562,19 @@ void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, con
     for (const RootRest &rest : rests)
         if (rest.landing >= 0)
             add_branch_circle(resting[size_t(rest.landing)], scratch, to_vec2d(rest.centre), double(rest.radius));
+    // The top surface of the layer under a contact is never under its area, so the walk starts one layer below that one.
+    for (const RestingPart &part : resting_parts) {
+        StoredPolygonCollection remaining = part.area.readonly().clone(scratch);
+        for (size_t id = std::min(resting.size() - 1, part.object_above - 1); id-- > 0 && ! remaining.empty();) {
+            const StoredPolygonCollection placeable = polygons_diff(scratch, keep_out[id], keep_out[id + 1]);
+            const StoredPolygonCollection touching = polygons_intersection(scratch, remaining, placeable);
+            if (touching.empty())
+                continue;
+            resting[id].append_copy_from(touching);
+            StoredPolygonCollection rest = polygons_diff(scratch, remaining, touching);
+            remaining.move_from(rest);
+        }
+    }
     const Common::ContactDistanceType distance_type = Common::contact_distance_type(config);
     for (size_t id = 0; id + 1 < resting.size(); ++id) {
         if (resting[id].empty())

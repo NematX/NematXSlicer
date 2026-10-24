@@ -6,7 +6,9 @@
    (TreeZPlanner.hpp), the object print Z values snapped into the slab bounds, the branches drawn in every slab (circles for
    tree, smoothed meshes for organic, TreeBranchMesh.hpp), the object outline removed, and the dense interfaces carved under the contacts and above the floors
    (Common/SupportInterfaces.hpp), the first base slab widened on the bed. The brim and the skirt are ignored. Without interface layers the contacts keep only the branches drawn in them.
-   generate_tree_slabs() builds the same slabs from trees routed beforehand. Organic trees are smoothed first
+   generate_tree_slabs() builds the same slabs from trees routed beforehand, and from the resting parts that route_trees() returns with them (the
+   parts of the contacts over the object on their tip layer, which have no tip: each gets a floor on the object, and its stack shortens down to it,
+   as in the grid). Organic trees are smoothed first
    (TreeSmoothing.hpp), and their branches become branch slabs, tree branches sparse base slabs. Nothing is published here:
    the family publishes the slabs. */
 #ifndef plugins_support_tree_generator_hpp_
@@ -35,9 +37,11 @@ void generate_tree_support(const plugin_run_context *context, const slic3r_api::
 // Fill out with the slabs of the given routed trees of one object, the contacts already in out.top. The same rules as
 // generate_tree_support(), without the routing; organic trees are smoothed in place before the slabs are built. As in the grid,
 // the first base slab is widened by raft_first_layer_expansion when it starts on the bed (Common::expand_first_layer_foot()).
-// The brim and the skirt are ignored.
+// The brim and the skirt are ignored. The resting parts (RestingPart, from route_trees()) are the parts of the contacts that rest on the object: each gets
+// a floor on the object under it, and the stack of the contact then shortens down to that floor, as in the grid.
 void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
-                         std::vector<RoutedTree> &trees, bool organic, slic3r_api::Support::Common::GeneratedSupport &out);
+                         std::vector<RoutedTree> &trees, bool organic, slic3r_api::Support::Common::GeneratedSupport &out,
+                         const std::vector<RestingPart> &resting);
 
 // Snaps the bounds of the slabs onto the object print Z values within the layer merge tolerance of them, merges the support
 // bounds that lie within the tolerance of each other, and merges the slabs that collapse; the rules are explained at the

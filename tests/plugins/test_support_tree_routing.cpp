@@ -620,7 +620,8 @@ TEST_CASE("Tip sampling stops after the pattern call that cancels the step", "[p
             patterns.cancel_after_calls(cancel_after);
             bool cancelled = false;
             try {
-                TF::route_trees(SG::print_view(print), SG::object_view(print.object(0)), params, settings, support, patterns.context());
+                std::vector<TF::RestingPart> resting;
+                TF::route_trees(SG::print_view(print), SG::object_view(print.object(0)), params, settings, support, patterns.context(), resting);
             } catch (const slic3r_api::PluginCancelled &) {
                 cancelled = true;
             }

@@ -170,7 +170,7 @@ void dump_one(Dump &dump, const DumpCase &current, Print &print)
     dump_routing(dump, prefix + "/routing", routed.trees);
     dump_slabs(dump, prefix + "/routed_contacts", routed.support);
     const bool organic = std::string(current.style) == "organic";
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
     dump_routing(dump, prefix + "/routing_smoothed", routed.trees);
     dump_slabs(dump, prefix, routed.support);
 }

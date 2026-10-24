@@ -10,7 +10,7 @@
        Print print; ... SupportGrid::prefix(print);
        PluginStorage storage;
        SupportPatternContext context(print, reinterpret_cast<storage_handle *>(&storage));
-       route_trees(..., context.context());
+       route_trees(..., context.context(), resting);
 
    The test runtime leaves the supportbase pattern inactive: the fixture activates it for its lifetime (before the service is
    built, which prepares the active patterns) and restores the previous state. It counts the calls by pattern plugin id. */

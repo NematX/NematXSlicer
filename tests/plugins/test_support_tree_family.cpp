@@ -438,7 +438,7 @@ TEST_CASE("Tree contacts without interface layers publish the branches under the
     SG::prefix(print);
     const PrintObject &object = print.object(0);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
     REQUIRE_FALSE(routed.support.top.empty());
     double overhang_mm2 = 0.;
     for (size_t id = 1; id < object.layer_count(); ++id)
@@ -503,7 +503,7 @@ TEST_CASE("Tips below a thin contact are published at its Z", "[plugins][support
     SG::prefix(print);
     PrintObject &object = print.object(0);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
     REQUIRE_FALSE(routed.support.top.empty());
     const coord_t contact_z = routed.support.top.front()->print_z;
     REQUIRE(unscaled(contact_z) == Approx(4.05));
@@ -655,7 +655,7 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
     // The routing varies from run to run, so the tips and the slabs come from the same routing: the trees are routed once, their
     // slabs are published, and the support toolpaths run on those layers.
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.trees, true, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.trees, true, routed.support, routed.resting);
     Common::publish(nullptr, SG::object_view(print.object(0)), routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     SG::toolpaths(print);
     const double process_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
@@ -1025,7 +1025,7 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     PluginStorage storage;
     Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
     std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support, std::vector<TF::RestingPart>{});
     const coord_t block_z = object.layer(block_top).scaled_print_z(), root_z = object.layer(root_layer).scaled_print_z();
     REQUIRE_FALSE(support.bottom.empty());
     for (const Common::GeneratorLayer *contact : support.bottom) {
@@ -1092,7 +1092,7 @@ TEST_CASE("Tree roots in thin layers go down five root radii of real Z", "[plugi
     tip_circle.translate(to_point(upper.position));
     assign_native(contact.polygons, Polygons{ tip_circle });
     std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support, std::vector<TF::RestingPart>{});
     REQUIRE_FALSE(support.base.empty());
     // The lowest slab that draws the stem: its middle lies within the stem, so the slab below it has its middle under the stem
     // bottom. The slabs are at most the maximum slab height thick.
@@ -1355,7 +1355,7 @@ TEST_CASE("Tree floors keep the gap and the contact footprint free of branch sur
     PluginStorage storage;
     Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
     std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support, std::vector<TF::RestingPart>{});
     REQUIRE_FALSE(support.bottom.empty());
     const Common::GeneratorLayer &floor = *support.bottom.front();
     const Polygons footprint = to_native(floor.polygons);
@@ -1421,7 +1421,7 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
     PluginStorage probe_storage;
     Common::GeneratedSupport probe{ reinterpret_cast<storage_handle *>(&probe_storage) };
     std::vector<TF::RoutedTree> probe_trees = make_trees();
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), probe_trees, true, probe);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), probe_trees, true, probe, std::vector<TF::RestingPart>{});
     REQUIRE(probe.bottom.size() == 1);
     const coord_t floor_top = probe.bottom.front()->print_z, floor_height = probe.bottom.front()->height;
     REQUIRE(unscaled(floor_top) == Approx(4.4));
@@ -1431,7 +1431,7 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
         floor_top - floor_height - scale_to_layer_coord(0.1), floor_height + scale_to_layer_coord(0.1));
     support.top = { &other };
     std::vector<TF::RoutedTree> trees = make_trees();
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, true, support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, true, support, std::vector<TF::RestingPart>{});
     Common::publish(nullptr, SG::object_view(object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     const auto surfaces_of = [](const Layer &layer) {
         ExPolygons surfaces;
@@ -2374,7 +2374,7 @@ TEST_CASE("Tree slabs keep the bridge footprint out of the bridge thread band", 
     REQUIRE(band.start < object.layer(thin_layer).scaled_bottom_z());
     REQUIRE_FALSE(band.footprint.empty());
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
     // Both contacts of the roof layer survive the merge: one at the bridge height, one at the normal contact distance.
     const coord_t bridge_z = band.start - gap_above, normal_z = object.layer(thin_layer).scaled_bottom_z() - gap_above;
     const Common::GeneratorLayer *bridge_contact = nullptr, *normal_contact = nullptr;
@@ -2452,7 +2452,7 @@ TEST_CASE("Tree floors keep the bridge footprint out of the bridge thread band",
     }
     Routed routed(print);
     routed.trees = { branch };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
     REQUIRE_FALSE(routed.support.bottom.empty());
     for (const Common::GeneratorLayer *floor : routed.support.bottom)
         REQUIRE(in_thread_band(*floor, band, gap_above));
@@ -2479,7 +2479,7 @@ TEST_CASE("Tree interface slabs keep the bridge footprint out of the bridge thre
     const ThreadBand band = thread_band(print, object, thin_layer);
     REQUIRE_FALSE(band.footprint.empty());
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
     size_t interfaces_in_band = 0;
     for (const Common::GeneratorLayer *slab : routed.support.interfaces)
         interfaces_in_band += in_thread_band(*slab, band, gap_above) && !slab->polygons.empty() ? 1 : 0;
@@ -2597,7 +2597,7 @@ void check_final_slab_clearance(TriangleMesh mesh, const char *style, int interf
     const coord_t snap_tolerance = 4 * SCALED_EPSILON;
     const coord_t thin_start = scale_to_layer_coord(thin_band_start_mm), thin_end = scale_to_layer_coord(thin_band_end_mm);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support, routed.resting);
     const std::vector<std::pair<const char *, const Common::GeneratorLayers *>> roles{
         {"base", &routed.support.base}, {"interfaces", &routed.support.interfaces}, {"top", &routed.support.top}, {"bottom", &routed.support.bottom}};
     constexpr double overlap_tolerance_mm2 = 1e-6;
@@ -2751,7 +2751,7 @@ TEST_CASE("Final tree and organic slabs keep the normal XY distance from the obj
     const coord_t eps = scale_to_layer_coord(EPSILON);
     const coord_t above = gap_above > eps ? gap_above - eps : 0, below = gap_below > eps ? gap_below - eps : 0;
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support, routed.resting);
     // The outline of every layer grown by the normal distance, less the tolerance of the drawn checks.
     const std::vector<Polygons> keep_out = keep_out_outlines(object, settings.xy_distance - coord_t(scale_d(tolerance_mm)));
     const std::vector<std::pair<const char *, const Common::GeneratorLayers *>> roles{
@@ -2897,7 +2897,7 @@ struct BrimRun {
         Test::init_print({std::move(mesh)}, print, model, config);
         SG::prefix(print);
         routed = std::make_unique<Routed>(print);
-        TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed->trees, organic, routed->support);
+        TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed->trees, organic, routed->support, routed->resting);
     }
 };
 
@@ -3179,7 +3179,7 @@ TEST_CASE("Tree routing and slab generation benchmark", "[.][tree-routing-benchm
                 const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
                 Routed routed(print);
                 const std::chrono::steady_clock::time_point routed_at = std::chrono::steady_clock::now();
-                TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.trees, organic, routed.support);
+                TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.trees, organic, routed.support, routed.resting);
                 const std::chrono::steady_clock::time_point done = std::chrono::steady_clock::now();
                 route_times.push_back(std::chrono::duration<double, std::milli>(routed_at - start).count());
                 slab_times.push_back(std::chrono::duration<double, std::milli>(done - routed_at).count());
@@ -3271,7 +3271,7 @@ TEST_CASE("The islands of the layers of the downward point are ordered from outs
         object_violations += island_order_violation(object.layer(layer_idx).lslices(), earlier, later) ? 1 : 0;
     CHECK(object_violations == 0);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, true, routed.support);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, true, routed.support, routed.resting);
     Common::GeneratorLayers sorted = routed.support.top;
     for (const Common::GeneratorLayers *list : { &routed.support.bottom, &routed.support.base, &routed.support.interfaces })
         sorted.insert(sorted.end(), list->begin(), list->end());
@@ -3913,4 +3913,404 @@ TEST_CASE("Close Z contact moved by the tree and by the pass stays within the co
     CHECK(cumulative > 640);
     CHECK(cumulative <= 1024);
     CHECK(cumulative <= SCALED_EPSILON + 2 * (4 * SCALED_EPSILON));
+}
+namespace {
+const SurfaceType roof_rest_top_type = stModSupport | stPosTop | stDensSolid;
+const SurfaceType roof_rest_floor_type = stModSupport | stPosBottom | stDensSolid | stModBridge;
+
+// A block of a roof scene: x, y, width, depth, z and height in mm, in the frame where the roof footprint is 12 x 8 mm from the origin.
+struct RoofBlock {
+    double x, y, width, depth, z, height;
+};
+
+// A post (4 x 8 mm from the origin) with a roof (12 x 8 x 1 mm) at roof_z that overhangs the post by 8 mm on one side, and the given blocks.
+TriangleMesh roof_scene(double roof_z, const std::vector<RoofBlock> &blocks)
+{
+    TriangleMesh mesh = make_cube(4., 8., roof_z), roof = make_cube(12., 8., 1.);
+    roof.translate(0., 0., roof_z);
+    mesh.merge(roof);
+    for (const RoofBlock &block : blocks) {
+        TriangleMesh part = make_cube(block.width, block.depth, block.height);
+        part.translate(block.x, block.y, block.z);
+        mesh.merge(part);
+    }
+    return mesh;
+}
+
+// The roof scene over a platform from the bed to platform_z, of the given width in x (centred on platform_centre_x) and depth in y (centred under the
+// roof). A platform of 12 x 8 mm centred on 6 mm is the footprint of the roof.
+TriangleMesh roof_over_platform(double roof_z, double platform_z, double platform_width, double platform_depth, double platform_centre_x = 6.)
+{
+    return roof_scene(roof_z, { { platform_centre_x - platform_width / 2., 4. - platform_depth / 2., platform_width, platform_depth, 0., platform_z } });
+}
+
+// The model preparation of the roof tests: a print of a roof scene sliced up to the support demand, with the bottom contact distance (mm), the
+// interface layers and the print options given. The roof footprint is the one of the top layer.
+struct RoofRest {
+    Print print;
+    Model model;
+    RoofRest(const char *style, TriangleMesh mesh, const char *bottom_distance, int interfaces,
+             const std::vector<std::pair<std::string, std::string>> &print_options = {})
+    {
+        DynamicPrintConfig config = close_z_gcode_config(style, interfaces);
+        for (const auto &option : print_options)
+            config.set_deserialize_strict({ {option.first, option.second} });
+        close_z_place({ { std::move(mesh), Vec3d(100., 100., 0.), { {"support_material_bottom_contact_distance", bottom_distance} } } }, config, print, model);
+        SG::prefix(print);
+    }
+    RoofRest(const char *style, double roof_z, double platform_z, const char *bottom_distance, int interfaces, double platform_width = 12.,
+             double platform_depth = 8., double platform_centre_x = 6.)
+        : RoofRest(style, roof_over_platform(roof_z, platform_z, platform_width, platform_depth, platform_centre_x), bottom_distance, interfaces) {}
+    BoundingBox roof_extents() const
+    {
+        const PrintObject &object = print.object(0);
+        return get_extents(object.layer(object.layer_count() - 1).lslices());
+    }
+    // A point under the roof at x mm from its left edge (the post is the first 4 mm), in the middle in y.
+    Point under_roof_at(double x_mm) const
+    {
+        const BoundingBox extents = roof_extents();
+        return Point(extents.min.x() + scale_to_layer_coord(x_mm), extents.center().y());
+    }
+    // A point under the part of the roof that overhangs the post.
+    Point under_overhang() const { return under_roof_at(9.); }
+};
+
+// What the published auxiliary layers of the first object hold under the overhang of the roof.
+struct RoofRestPublished {
+    // Layers (bottom, top) whose top surfaces (the contact and the interfaces) contain the point under the overhang.
+    std::vector<std::pair<coord_t, coord_t>> top_layers;
+    // Layers (bottom, top) with a branch or sparse surface that lies entirely beyond the post.
+    std::vector<std::pair<coord_t, coord_t>> branch_layers;
+};
+
+RoofRestPublished roof_rest_published(const RoofRest &fixture, bool organic)
+{
+    const SurfaceType branch_type = organic ? (stModSupport | stModBranch | stPosInternal | stDensSparse) : (stModSupport | stPosInternal | stDensSparse);
+    const BoundingBox extents = fixture.roof_extents();
+    const Point point = fixture.under_overhang();
+    const coord_t beyond_post = extents.min.x() + scale_to_layer_coord(4.);
+    RoofRestPublished published;
+    for (const Layer &layer : fixture.print.object(0).auxiliary_layers()) {
+        bool top = false, branch = false;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces()) {
+                    top = top || (surface.surface_type == roof_rest_top_type && surface.expolygon.contains(point));
+                    branch = branch || (surface.surface_type == branch_type && get_extents(surface.expolygon).min.x() >= beyond_post);
+                }
+        if (top)
+            published.top_layers.push_back({ layer.scaled_bottom_z(), layer.scaled_print_z() });
+        if (branch)
+            published.branch_layers.push_back({ layer.scaled_bottom_z(), layer.scaled_print_z() });
+    }
+    return published;
+}
+
+// The published surfaces of a type in the auxiliary layers of the first object that span [bottom, top], united.
+ExPolygons roof_rest_surfaces(const Print &print, SurfaceType type, coord_t bottom, coord_t top)
+{
+    ExPolygons surfaces;
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        if (layer.scaled_bottom_z() == bottom && layer.scaled_print_z() == top)
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region_island : island.regions_islands())
+                    for (const Surface &surface : region_island.fill_surfaces())
+                        if (surface.surface_type == type)
+                            surfaces.push_back(surface.expolygon);
+    return union_ex(surfaces);
+}
+
+// The area (mm2) of the published surfaces of a type spanning [bottom, top], within a region.
+double roof_rest_area(const Print &print, SurfaceType type, coord_t bottom, coord_t top, const ExPolygons &region)
+{
+    return unscaled(unscaled(Slic3r::area(intersection_ex(roof_rest_surfaces(print, type, bottom, top), region))));
+}
+
+// Whether a published surface of a type spanning [bottom, top] contains the point.
+bool roof_rest_covers(const Print &print, SurfaceType type, coord_t bottom, coord_t top, const Point &point)
+{
+    for (const ExPolygon &surface : roof_rest_surfaces(print, type, bottom, top))
+        if (surface.contains(point))
+            return true;
+    return false;
+}
+} // namespace
+
+// Branches that carry the interface stack rest on the model whatever the height of their tip above it (they are exempt from
+// min_height_to_model, like the roof branches of the legacy tree). The roof is at 2.8 mm over a platform of 0.8 mm, the bottom contact distance
+// is 0.25 mm and the interfaces are 3 layers of 0.3 mm: the contact is published at 2.6 mm (gap 0.2 mm), the stack under it from 1.7 mm, the tips
+// start on the object layer at 1.6 mm, and the first layer that may rest on the platform (0.8 + 0.25 mm) is the one at 1.2 mm. The tips are 0.4 mm
+// above it, less than the minimum of 1 mm. The support must still be routed, kept, and published under the roof: the contact and the interfaces
+// over the overhang, and the branch bodies between the platform and the stack, which rest on the platform. The platform is the footprint of the
+// roof (12 x 8 mm) or 40 x 40 mm; the second variant is the control where no branch has a way down to the bed past the platform edge.
+TEST_CASE("Tree branches that carry the interface stack rest on the model under a low tip", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    const auto [platform_width, platform_depth] = GENERATE(table<double, double>({ { 12., 8. }, { 40., 40. } }));
+    CAPTURE(style, platform_width, platform_depth);
+    RoofRest fixture(style, 2.8, 0.8, "0.25", 3, platform_width, platform_depth);
+    // The key heights: the tips are less than the minimum height above the first layer that may rest on the platform.
+    const PrintObject &object = fixture.print.object(0);
+    const coord_t stack_bottom = scale_to_layer_coord(1.7), first_rest = scale_to_layer_coord(0.8 + 0.25);
+    coord_t tip_layer = 0, rest_layer = 0;
+    for (size_t id = 0; id < object.layer_count(); ++id) {
+        if (object.layer(id).scaled_print_z() <= stack_bottom)
+            tip_layer = object.layer(id).scaled_print_z();
+        if (rest_layer == 0 && object.layer(id).scaled_print_z() >= first_rest)
+            rest_layer = object.layer(id).scaled_print_z();
+    }
+    CHECK(tip_layer == scale_to_layer_coord(1.6));
+    CHECK(rest_layer == scale_to_layer_coord(1.2));
+    CHECK(tip_layer - rest_layer < scale_to_layer_coord(1.));
+    {
+        const Slic3r::Test::SupportTree::Routed routed(fixture.print);
+        CHECK(routed.trees.size() > 0);
+        CHECK(routed.support.top.size() > 0);
+    }
+    SG::family(fixture.print);
+    const RoofRestPublished published = roof_rest_published(fixture, std::string(style) == "organic");
+    // The contact (top at 2.6 mm) and the two interfaces under it cover the overhang; the stack starts at 1.7 mm.
+    REQUIRE(published.top_layers.size() == 3);
+    std::vector<std::pair<coord_t, coord_t>> top_layers = published.top_layers;
+    std::sort(top_layers.begin(), top_layers.end(), [](const auto &a, const auto &b) { return a.second < b.second; });
+    CHECK(top_layers[0] == std::make_pair(stack_bottom, scale_to_layer_coord(2.0)));
+    CHECK(top_layers[1] == std::make_pair(scale_to_layer_coord(2.0), scale_to_layer_coord(2.3)));
+    CHECK(top_layers[2] == std::make_pair(scale_to_layer_coord(2.3), scale_to_layer_coord(2.6)));
+    // A branch body under the stack, over the platform and beyond the post: it rests on the platform.
+    coord_t lowest_bottom = std::numeric_limits<coord_t>::max();
+    for (const auto &layer : published.branch_layers)
+        if (layer.second <= stack_bottom)
+            lowest_bottom = std::min(lowest_bottom, layer.first);
+    REQUIRE(lowest_bottom != std::numeric_limits<coord_t>::max());
+    CHECK(lowest_bottom > scale_to_layer_coord(0.8));
+    CHECK(lowest_bottom <= rest_layer);
+}
+
+// Without interface layers a branch does not carry a roof, so the rule of min_height_to_model holds: a roof at 2.0 mm over a platform of 0.8 mm
+// puts the tips (on the layer at 1.8 mm) 0.8 mm above the first layer that may rest on the platform (1.0 mm), and they are dropped, with their
+// contact. The platform is 40 mm wide: a branch cannot slant down to the bed past its edge (14 mm away, which needs more than 16 mm of height at
+// the largest branch angle of 40 degrees, and the tips are less than 2 mm high).
+TEST_CASE("Tree branches without interface layers keep the minimum height to the model", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    RoofRest fixture(style, 2.0, 0.8, "0.2", 0, 40., 40.);
+    const Slic3r::Test::SupportTree::Routed routed(fixture.print);
+    CHECK(routed.trees.empty());
+    CHECK(routed.support.top.empty());
+    // Control: a roof 1.2 mm higher leaves the tips 2.0 mm above the platform, and they are kept.
+    RoofRest high(style, 3.2, 0.8, "0.2", 0, 40., 40.);
+    const Slic3r::Test::SupportTree::Routed routed_high(high.print);
+    CHECK(routed_high.trees.size() > 0);
+    CHECK(routed_high.support.top.size() > 0);
+}
+
+// The reported case: a roof at 2.0 mm over a platform of 0.8 mm, a bottom contact distance of 0.2 mm and 3 interface layers of 0.3 mm. The
+// contact is at 1.8 mm and the nominal stack under it would start at 0.9 mm, on the platform layer itself, so no tip can start there. The part of
+// the contact that lies over the object on the tip layer needs no tip: the stack fills the interval down to the object, as the grid does. The
+// floor is the bottom contact on the platform ([1.0, 1.2], the platform top 0.8 + the gap 0.2), and the stack the interface [1.2, 1.5] and the
+// contact [1.5, 1.8] (the interval of 0.6 mm holds two dense slabs of 0.3 mm). No branch is drawn under the part.
+// Inside the raw slices of the platform, the tree matches the grid within 1 percent: both are the overhang of the roof over the platform. The floor
+// of the tree also has a rim outside the platform, on the top surfaces grown by the XY distance (the rule of the floors of the roots): it lies in the
+// band of the XY distance around the outline of the platform, and nowhere else.
+TEST_CASE("Tree roof 2 mm over a platform with 3 interface layers rests its stack on the platform", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    const coord_t floor_bottom = scale_to_layer_coord(1.0), floor_top = scale_to_layer_coord(1.2), middle = scale_to_layer_coord(1.5), roof_top = scale_to_layer_coord(1.8);
+    RoofRest tree(style, 2.0, 0.8, "0.2", 3);
+    RoofRest grid("grid", 2.0, 0.8, "0.2", 3);
+    {
+        const Slic3r::Test::SupportTree::Routed routed(tree.print);
+        CHECK(routed.trees.empty());
+        CHECK(routed.support.top.size() > 0);
+        CHECK(routed.resting.size() == 1);
+    }
+    const coord_t gap_xy = SG::params(tree.print, tree.print.object(0)).gap_xy;
+    SG::family(tree.print);
+    SG::family(grid.print);
+    const ExPolygons platform_slices = tree.print.object(0).layer(0).lslices();
+    const struct { const char *name; SurfaceType type; coord_t bottom, top; } parts[] = {
+        { "floor", roof_rest_floor_type, floor_bottom, floor_top }, { "interface", roof_rest_top_type, floor_top, middle }, { "contact", roof_rest_top_type, middle, roof_top } };
+    for (const auto &part : parts) {
+        const double tree_area = roof_rest_area(tree.print, part.type, part.bottom, part.top, platform_slices);
+        const double grid_area = roof_rest_area(grid.print, part.type, part.bottom, part.top, platform_slices);
+        CAPTURE(part.name, tree_area, grid_area);
+        CHECK(tree_area > 0.);
+        CHECK(grid_area > 0.);
+        CHECK(tree_area == Approx(grid_area).epsilon(0.01));
+    }
+    // The rim of the floor outside the platform: within the band of the XY distance around its outline.
+    const ExPolygons rim = diff_ex(roof_rest_surfaces(tree.print, roof_rest_floor_type, floor_bottom, floor_top), platform_slices);
+    const ExPolygons band = offset_ex(platform_slices, float(gap_xy + SCALED_EPSILON));
+    CHECK(unscaled(unscaled(Slic3r::area(diff_ex(rim, band)))) < 1e-4);
+    CHECK(unscaled(unscaled(Slic3r::area(rim))) > 0.);
+    // The same z ranges cover the point under the overhang, and no branch is published there.
+    const Point point = tree.under_overhang();
+    CHECK(roof_rest_covers(tree.print, roof_rest_floor_type, floor_bottom, floor_top, point) == roof_rest_covers(grid.print, roof_rest_floor_type, floor_bottom, floor_top, point));
+    CHECK(roof_rest_covers(tree.print, roof_rest_top_type, floor_top, middle, point));
+    CHECK(roof_rest_covers(tree.print, roof_rest_top_type, middle, roof_top, point));
+    CHECK(roof_rest_published(tree, std::string(style) == "organic").branch_layers.empty());
+}
+
+// A roof half over the platform and half over the bed: the platform is under the right 4 mm of the roof (x from 8 to 12 mm), the post is under the
+// first 4 mm. The part over the platform has its floor and its stack on it; the rest routes as before, with branches down to the bed.
+TEST_CASE("Tree roof half over a platform and half over the bed", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    RoofRest fixture(style, 2.0, 0.8, "0.2", 3, 4., 8., 10.);
+    const coord_t floor_bottom = scale_to_layer_coord(1.0), floor_top = scale_to_layer_coord(1.2);
+    {
+        const Slic3r::Test::SupportTree::Routed routed(fixture.print);
+        CHECK(routed.trees.size() > 0);
+        coord_t lowest = std::numeric_limits<coord_t>::max();
+        for (const TF::RoutedTree &tree : routed.trees)
+            for (const TF::TreeNode &node : tree.nodes)
+                lowest = std::min<coord_t>(lowest, coord_t(node.layer));
+        CHECK(lowest == 0);
+    }
+    SG::family(fixture.print);
+    // Over the platform (x = 10 mm): the floor on it, and the stack. Over the bed (x = 6 mm): no floor, and the contact still covers it.
+    const Point on_platform = fixture.under_roof_at(10.), on_bed = fixture.under_roof_at(6.);
+    CHECK(roof_rest_covers(fixture.print, roof_rest_floor_type, floor_bottom, floor_top, on_platform));
+    CHECK_FALSE(roof_rest_covers(fixture.print, roof_rest_floor_type, floor_bottom, floor_top, on_bed));
+    CHECK(roof_rest_covers(fixture.print, roof_rest_top_type, scale_to_layer_coord(1.5), scale_to_layer_coord(1.8), on_platform));
+    CHECK(roof_rest_covers(fixture.print, roof_rest_top_type, scale_to_layer_coord(1.5), scale_to_layer_coord(1.8), on_bed));
+    // Branches reach the bed under the part that is not over the platform.
+    coord_t lowest_bottom = std::numeric_limits<coord_t>::max();
+    for (const auto &layer : roof_rest_published(fixture, std::string(style) == "organic").branch_layers)
+        lowest_bottom = std::min(lowest_bottom, layer.first);
+    CHECK(lowest_bottom <= scale_to_layer_coord(0.2));
+}
+
+// Two superposed surfaces: a shelf (0.4 mm high) under a platform (from 1.0 to 1.2 mm, held by the post and by a pillar at the other end), under
+// the roof at 2.4 mm. The cavity between them is 0.6 mm high. The platform has a support of its own (its underside, whose floor stands on the shelf),
+// and the roof has its resting part on the platform (dont_support_bridges narrows the underside part to the strips that are not bridged). The floors of the roof stop at the first support, the platform: the floor of the shelf is the one
+// of the underside of the platform alone, which is narrower in y than the roof part (about 5.6 mm against 8 mm), so it does not cover the point
+// at 3.6 mm from the middle of the roof in y, while the floor of the platform does. The check is made on the floors generated for the slabs (the
+// published ones are widened by the bottom expansion). The floor of the platform is [1.4, 1.6] (top 1.2 + gap 0.2) and the shelf [0.6, 0.8] (top
+// 0.4 + gap 0.2).
+TEST_CASE("Tree resting part floors stop at the first support", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool organic = GENERATE(false, true);
+    CAPTURE(organic);
+    RoofRest fixture(organic ? "organic" : "tree", roof_scene(2.4, { { 0., 0., 12., 8., 0., 0.4 }, { 0., 0., 12., 8., 1.0, 0.2 }, { 11., 0., 1., 8., 0., 1.0 } }), "0.2", 3,
+                       { {"dont_support_bridges", "1"} });
+    const Point wide = fixture.under_roof_at(9.) + Point(coord_t(0), scale_to_layer_coord(3.6));
+    {
+        Slic3r::Test::SupportTree::Routed routed(fixture.print);
+        CHECK(routed.trees.empty());
+        REQUIRE(routed.resting.size() == 2);
+        TF::generate_tree_slabs(nullptr, SG::print_view(fixture.print), SG::object_view(fixture.print.object(0)), routed.trees, organic, routed.support, routed.resting);
+        const Common::GeneratorLayer *shelf = nullptr, *platform = nullptr;
+        for (const Common::GeneratorLayer *floor : routed.support.bottom) {
+            if (floor->print_z == scale_to_layer_coord(0.8))
+                shelf = floor;
+            if (floor->print_z == scale_to_layer_coord(1.6))
+                platform = floor;
+        }
+        REQUIRE(shelf != nullptr);
+        REQUIRE(platform != nullptr);
+        const auto covers = [](const Common::GeneratorLayer &floor, const Point &point) {
+            for (const ExPolygon &expolygon : union_ex(to_native(floor.polygons)))
+                if (expolygon.contains(point))
+                    return true;
+            return false;
+        };
+        CHECK(covers(*platform, wide));
+        CHECK_FALSE(covers(*shelf, wide));
+    }
+    SG::family(fixture.print);
+    // The roof stack rests on the platform, and the shelf has the floor of the underside of the platform.
+    const Point near_post = fixture.under_roof_at(6.);
+    CHECK(roof_rest_covers(fixture.print, roof_rest_floor_type, scale_to_layer_coord(0.6), scale_to_layer_coord(0.8), near_post));
+    CHECK(roof_rest_covers(fixture.print, roof_rest_floor_type, scale_to_layer_coord(1.4), scale_to_layer_coord(1.6), near_post));
+    CHECK(roof_rest_covers(fixture.print, roof_rest_top_type, scale_to_layer_coord(1.6), scale_to_layer_coord(1.9), near_post));
+    CHECK(roof_rest_covers(fixture.print, roof_rest_top_type, scale_to_layer_coord(1.9), scale_to_layer_coord(2.2), near_post));
+}
+// With a support restricted to the build plate, the resting rule is off: the demand over the object is removed by the demand plugin before the
+// routing, so the roof over the platform has no contact at all, nothing is routed or published, and no resting part exists.
+TEST_CASE("Tree resting part is off for a build plate only support", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    RoofRest fixture(style, roof_over_platform(2.0, 0.8, 12., 8.), "0.2", 3, { {"support_material_buildplate_only", "1"} });
+    {
+        const Slic3r::Test::SupportTree::Routed routed(fixture.print);
+        CHECK(routed.trees.empty());
+        CHECK(routed.support.top.empty());
+        CHECK(routed.resting.empty());
+    }
+    SG::family(fixture.print);
+    CHECK(fixture.print.object(0).auxiliary_layers().empty());
+}
+
+// A soluble support (contact distance type none, distances 0): the contact fills the object layer under the roof ([1.8, 2.0]) and the floor lies on
+// the platform itself ([0.8, 1.0], no gap), under a bottom interface. The configuration is valid for the low roof; the part over the platform rests
+// there as well, with no branch, and its stack is the contact, two interfaces and the bottom interface.
+TEST_CASE("Tree soluble support rests its stack on the platform", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    RoofRest fixture(style, roof_over_platform(2.0, 0.8, 12., 8.), "0.2", 3, { {"support_material_contact_distance_type", "none"}, {"support_material_contact_distance", "0"} });
+    {
+        const Slic3r::Test::SupportTree::Routed routed(fixture.print);
+        CHECK(routed.trees.empty());
+        CHECK(routed.resting.size() == 1);
+    }
+    SG::family(fixture.print);
+    const SurfaceType soluble_floor_type = stModSupport | stPosBottom | stDensSolid;
+    CHECK(roof_rest_covers(fixture.print, soluble_floor_type, scale_to_layer_coord(0.8), scale_to_layer_coord(1.0), fixture.under_overhang()));
+    const RoofRestPublished published = roof_rest_published(fixture, std::string(style) == "organic");
+    REQUIRE(published.top_layers.size() == 3);
+    coord_t lowest = std::numeric_limits<coord_t>::max(), highest = 0;
+    for (const auto &layer : published.top_layers) {
+        lowest = std::min(lowest, layer.first);
+        highest = std::max(highest, layer.second);
+    }
+    CHECK(highest == scale_to_layer_coord(2.0));
+    CHECK(lowest > scale_to_layer_coord(1.2));
+    CHECK(published.branch_layers.empty());
+}
+
+// A contact split by the resting part: two platforms under the roof (x from 4.5 to 6.0 mm and from 6.6 to 9.0 mm) leave a slot of 0.6 mm between
+// them over the bed and a component beyond them (x from 9 to 12 mm). The slot is too narrow for a tip, so its component is trimmed alone; the far
+// component has tips and branches down to the bed; the platforms have their floors and stacks. (Before the components were split, the whole remainder
+// was one tip source, and the slot stayed in the contact because of the tips of the far component.)
+TEST_CASE("Tree contact split by the resting part trims the component without a tip", "[plugins][support-tree-family][support-tree-roof-rest]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    RoofRest fixture(style, roof_scene(2.0, { { 4.5, 0., 1.5, 8., 0., 0.8 }, { 6.6, 0., 2.4, 8., 0., 0.8 } }), "0.2", 3);
+    {
+        const Slic3r::Test::SupportTree::Routed routed(fixture.print);
+        CHECK(routed.trees.size() > 0);
+        CHECK(routed.resting.size() == 1);
+    }
+    SG::family(fixture.print);
+    const Point first = fixture.under_roof_at(5.2), slot = fixture.under_roof_at(6.3), second = fixture.under_roof_at(7.8), far = fixture.under_roof_at(10.5);
+    const coord_t floor_bottom = scale_to_layer_coord(1.0), floor_top = scale_to_layer_coord(1.2), middle = scale_to_layer_coord(1.5), roof_top = scale_to_layer_coord(1.8);
+    for (const Point &platform : { first, second }) {
+        CHECK(roof_rest_covers(fixture.print, roof_rest_floor_type, floor_bottom, floor_top, platform));
+        CHECK(roof_rest_covers(fixture.print, roof_rest_top_type, floor_top, middle, platform));
+        CHECK(roof_rest_covers(fixture.print, roof_rest_top_type, middle, roof_top, platform));
+    }
+    CHECK(roof_rest_covers(fixture.print, roof_rest_top_type, middle, roof_top, far));
+    CHECK_FALSE(roof_rest_covers(fixture.print, roof_rest_top_type, middle, roof_top, slot));
+    CHECK_FALSE(roof_rest_covers(fixture.print, roof_rest_top_type, floor_top, middle, slot));
+    CHECK_FALSE(roof_rest_covers(fixture.print, roof_rest_floor_type, floor_bottom, floor_top, far));
+    coord_t lowest_bottom = std::numeric_limits<coord_t>::max();
+    for (const auto &layer : roof_rest_published(fixture, std::string(style) == "organic").branch_layers)
+        lowest_bottom = std::min(lowest_bottom, layer.first);
+    CHECK(lowest_bottom <= scale_to_layer_coord(0.2));
 }

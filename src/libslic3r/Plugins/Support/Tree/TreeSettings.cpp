@@ -24,7 +24,8 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    A window includes object layers closer than the gap, allowing EPSILON for Z rounding; its top extends virtually
    at the last layer height so the collision's XY ramp has its full physical extent near the top of the object.
    It also stores the real top of every object layer (layer_print_z), which reaches_min_height_to_model and
-   lowest_layer_within read to measure the minimum height to the model and the root search depth in real Z.
+   lowest_layer_within read to measure the minimum height to the model and the root search depth in real Z. With top interface layers every
+   branch is exempt from that minimum height (branches_carry_roof: the interface stack it carries plays the role of the legacy roof).
    The radius gain of a branch per layer step (tip_gain, cone_gain) comes from the real height of the upper layer of the
    step. advance() applies one step to a gain; path_gain() gives the gain of a branch that grew at every step since its tip
    in O(1), from prefix sums of the tip gains and from the layer where each possible tip ends.
@@ -74,6 +75,8 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     const raw_extrusion_role support_role = raw_extrusion_role(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL);
     support_line_width = object.support_flow(support_role, layer_height_mm).width;
     support_rests_on_model = ! config.get("support_material_buildplate_only").get_bool();
+    // The same option as tip_sources(): the interface layers under which the tips start.
+    branches_carry_roof = config.get("support_material_interface_layers").get_int() > 0;
     xy_distance = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_perimeter_width));
     // The tree keeps the user's XY spacing everywhere, from the routing to the final trim. xy_min_distance is kept equal to
     // xy_distance, so the min-XY variants of the routing and of the volumes are never used.
