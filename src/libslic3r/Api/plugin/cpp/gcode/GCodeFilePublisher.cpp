@@ -5,11 +5,17 @@
 
 #include "GCodeFilePublisher.hpp"
 
+#include <array>
+#include <cstdint>
+#include <fstream>
 #include <stdexcept>
+#include <streambuf>
 
 #include <boost/algorithm/string/predicate.hpp>
+#include <boost/crc.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/log/trivial.hpp>
+#include <boost/nowide/fstream.hpp>
 
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/FilesystemTransaction.hpp"
@@ -19,14 +25,14 @@ Transactional publication of an exported file
 =============================================
 
 See GCodeFilePublisher.hpp for the sequence. The destination is validated first,
-so that a refusal costs no work. The writer then runs on a unique sibling of the
-destination (name reserved by randomness and checked against collisions, no file
-created yet). After a successful write the cancellation flag is read once more, so
-that a Print cancelled during the write publishes nothing (a cancellation after the
-replacement does not undo it). The replacement itself is delegated to
-FilesystemTransaction: it renames the existing destination to a backup, renames the
-sibling to the destination, then discards the backup, and tries to restore the backup
-when the second rename fails.
+so that a refusal costs no work. The writer then runs on a unique sibling stream.
+The helper counts and checksums each byte accepted by the stream, closes the file,
+and rereads it in bounded blocks to compare the same fingerprint. A mismatch or a
+Print cancellation before replacement publishes nothing. The replacement itself
+is delegated to FilesystemTransaction: it renames the existing destination to a
+backup, renames the sibling to the destination, then discards the backup, and
+tries to restore the backup when the second rename fails. Cancellation after the
+replacement does not undo it.
 
 Representative direct calls (branches are not a timeline):
 
@@ -34,12 +40,24 @@ Representative direct calls (branches are not a timeline):
         |-- destination_with_suffix()
         |-- check_destination()
         |-- reserve_sibling()
-        |-- write()
         `-- replace_destination()
 */
 
 namespace slic3r_api {
 namespace {
+
+// Byte count and CRC-32 calculated for one complete file stream, kept internal to the publisher.
+struct GCodeFileFingerprint
+{
+    std::uint64_t byte_count = 0;
+    std::uint32_t crc32 = 0;
+};
+
+// Compare the byte count and CRC-32 values without modifying either fingerprint.
+bool same_gcode_file_fingerprint(const GCodeFileFingerprint &left, const GCodeFileFingerprint &right)
+{
+    return left.byte_count == right.byte_count && left.crc32 == right.crc32;
+}
 
 // Return the destination with the main suffix added when it has none, or throw when its suffix is not accepted.
 boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, std::string_view destination_utf8);
@@ -52,6 +70,49 @@ boost::filesystem::path reserve_sibling(const GCodeFileFormat &format, const boo
 
 // Replace the destination by the staging file through a transaction; log cleanup warnings and throw when it did not commit.
 void replace_destination(const boost::filesystem::path &staging, const boost::filesystem::path &destination);
+
+// Add accepted bytes to the CRC-32 and byte count used to fingerprint a stream.
+class GCodeFileFingerprintBuilder
+{
+public:
+    // Add the supplied byte range; the caller provides a readable range of `size` bytes.
+    void add(const char *data, std::size_t size);
+    // Return the current byte count and finalized CRC-32 value.
+    GCodeFileFingerprint result() const;
+
+private:
+    boost::crc_32_type m_crc32;
+    std::uint64_t m_byte_count = 0;
+};
+
+// Forward stream writes to the file and fingerprint exactly the bytes accepted by its file buffer.
+class GCodeFingerprintStreambuf : public std::streambuf
+{
+public:
+    // Borrow the opened file buffer and the fingerprint builder for one writer call.
+    GCodeFingerprintStreambuf(std::streambuf &file_buffer, GCodeFileFingerprintBuilder &fingerprint);
+
+protected:
+    // Forward one character and fingerprint it only when the file buffer accepts it.
+    int_type overflow(int_type value) override;
+    // Forward a byte block and fingerprint only the number of bytes accepted by the file buffer.
+    std::streamsize xsputn(const char *data, std::streamsize size) override;
+    // Flush the borrowed file buffer.
+    int sync() override;
+
+private:
+    std::streambuf &m_file_buffer;
+    GCodeFileFingerprintBuilder &m_fingerprint;
+};
+
+// Read a closed sibling in bounded blocks and return its byte count and CRC-32; I/O errors or cancellation throw.
+GCodeFileFingerprint fingerprint_gcode_file(const plugin_run_context &run_context,
+                                           const boost::filesystem::path &path);
+
+// Open the reserved sibling, invoke the writer, close it, and compare the written and reread fingerprints; false is propagated and failures throw.
+bool write_and_verify_sibling(const plugin_run_context &run_context,
+                              const boost::filesystem::path &sibling,
+                              const GCodeFileWriter &write);
 
 // Build the destination path. An empty path, or a suffix that is neither the main one nor an alias, is refused.
 boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, std::string_view destination_utf8)
@@ -71,6 +132,118 @@ boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, s
         throw std::runtime_error("The G-code exporter '" + format.exporter_id +
                                  "' does not support the destination extension '" + suffix + "'.");
     return destination;
+}
+
+// Add a byte range to the running CRC-32 and its total byte count without taking ownership of the data.
+void GCodeFileFingerprintBuilder::add(const char *data, std::size_t size)
+{
+    m_crc32.process_bytes(data, size);
+    m_byte_count += static_cast<std::uint64_t>(size);
+}
+
+// Return the accumulated byte count and finalized CRC-32 without changing the builder.
+GCodeFileFingerprint GCodeFileFingerprintBuilder::result() const
+{
+    GCodeFileFingerprint fingerprint;
+    fingerprint.byte_count = m_byte_count;
+    fingerprint.crc32 = static_cast<std::uint32_t>(m_crc32.checksum());
+    return fingerprint;
+}
+
+// Retain references to the file buffer and fingerprint builder for the lifetime of one output stream.
+GCodeFingerprintStreambuf::GCodeFingerprintStreambuf(std::streambuf &file_buffer,
+                                                     GCodeFileFingerprintBuilder &fingerprint)
+    : m_file_buffer(file_buffer)
+    , m_fingerprint(fingerprint)
+{}
+
+// Forward a single character and count it only after the borrowed file buffer accepts it; report EOF when the write fails.
+GCodeFingerprintStreambuf::int_type GCodeFingerprintStreambuf::overflow(int_type value)
+{
+    if (traits_type::eq_int_type(value, traits_type::eof()))
+        return traits_type::not_eof(value);
+    const char character = traits_type::to_char_type(value);
+    if (traits_type::eq_int_type(m_file_buffer.sputc(character), traits_type::eof()))
+        return traits_type::eof();
+    m_fingerprint.add(&character, 1);
+    return value;
+}
+
+// Forward a block and fingerprint only its accepted prefix; the caller retains ownership of the bytes.
+std::streamsize GCodeFingerprintStreambuf::xsputn(const char *data, std::streamsize size)
+{
+    if (size <= 0)
+        return 0;
+    const std::streamsize written = m_file_buffer.sputn(data, size);
+    if (written > 0)
+        m_fingerprint.add(data, static_cast<std::size_t>(written));
+    return written;
+}
+
+// Flush the underlying file buffer and return its synchronization status.
+int GCodeFingerprintStreambuf::sync()
+{
+    return m_file_buffer.pubsync();
+}
+
+// Read the closed sibling in fixed-size chunks, checking cancellation between reads and rejecting open/read failures.
+GCodeFileFingerprint fingerprint_gcode_file(const plugin_run_context &run_context,
+                                            const boost::filesystem::path &path)
+{
+    const std::string path_utf8 = path.string();
+    boost::nowide::ifstream input(path_utf8.c_str(), std::ios::in | std::ios::binary);
+    if (!input)
+        throw std::runtime_error("Cannot reopen temporary G-code output file '" + path_utf8 + "'.");
+
+    GCodeFileFingerprintBuilder fingerprint;
+    std::array<char, 64 * 1024> buffer;
+    while (true) {
+        throw_if_cancelled(&run_context);
+        input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const std::streamsize count = input.gcount();
+        if (count > 0)
+            fingerprint.add(buffer.data(), static_cast<std::size_t>(count));
+        if (input.bad() || (input.fail() && !input.eof()))
+            throw std::runtime_error("Failed while rereading the temporary G-code output file.");
+        if (input.eof())
+            break;
+    }
+    return fingerprint.result();
+}
+
+// Open the helper-owned sibling and lend its stream to the writer; return false on writer refusal, otherwise close and reread it, throwing on writer, I/O, cancellation, or fingerprint failures.
+bool write_and_verify_sibling(const plugin_run_context &run_context,
+                              const boost::filesystem::path &sibling,
+                              const GCodeFileWriter &write)
+{
+    const std::string sibling_utf8 = sibling.string();
+    boost::nowide::ofstream file(sibling_utf8.c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
+    if (!file)
+        throw std::runtime_error("Cannot open temporary G-code output file '" + sibling_utf8 + "'.");
+
+    GCodeFileFingerprintBuilder fingerprint;
+    GCodeFingerprintStreambuf fingerprint_buffer(*file.rdbuf(), fingerprint);
+    std::ostream output(&fingerprint_buffer);
+    const bool writer_succeeded = write(output);
+    if (writer_succeeded) {
+        output.flush();
+        if (!output)
+            throw std::runtime_error("Failed while flushing the temporary G-code output stream.");
+    }
+    file.flush();
+    if (writer_succeeded && !file)
+        throw std::runtime_error("Failed while flushing the temporary G-code output file.");
+    file.close();
+    if (writer_succeeded && !file)
+        throw std::runtime_error("Failed while closing the temporary G-code output file.");
+    if (!writer_succeeded)
+        return false;
+
+    const GCodeFileFingerprint written = fingerprint.result();
+    const GCodeFileFingerprint reread = fingerprint_gcode_file(run_context, sibling);
+    if (!same_gcode_file_fingerprint(written, reread))
+        throw std::runtime_error("G-code export temporary file changed while writing.");
+    return true;
 }
 
 // Check the directory first, then the destination itself, so that the error names the first thing that is wrong.
@@ -120,7 +293,7 @@ void replace_destination(const boost::filesystem::path &staging, const boost::fi
 
 } // namespace
 
-// Validate, write into a sibling, then replace the destination; the sibling is removed unless it was published.
+// Validate borrowed paths, own sibling cleanup, and replace the destination only after the writer's stream matches its reread; return the published path or empty on writer refusal, and throw on validation, I/O, fingerprint, cancellation, or replacement failure.
 std::string publish_gcode_file(const plugin_run_context &run_context,
                                const GCodeFileFormat &format,
                                std::string_view destination_utf8,
@@ -132,7 +305,7 @@ std::string publish_gcode_file(const plugin_run_context &run_context,
     const boost::filesystem::path sibling = reserve_sibling(format, destination);
 
     try {
-        if (!write(sibling.string())) {
+        if (!write_and_verify_sibling(run_context, sibling, write)) {
             boost::system::error_code cleanup_error;
             boost::filesystem::remove(sibling, cleanup_error);
             return std::string();

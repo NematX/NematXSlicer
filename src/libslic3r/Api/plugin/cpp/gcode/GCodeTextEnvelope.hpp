@@ -7,6 +7,7 @@
 
 #include <string>
 #include <string_view>
+#include <ostream>
 #include <vector>
 
 #include "libslic3r/Api/plugin/c/slic3r_gcode_thumbnail.h"
@@ -34,8 +35,9 @@ describe the file around a copy of it:
 The notes and thumbnail requests use the configuration copy supplied for the
 export; extrusion widths and statistics come from the host metadata (statistics
 are absent unless the host measured them), and the producer line comes
-from the host version API. Thumbnails are encoded before a file exists, so a
-failing renderer or encoder leaves no output to clean up.
+from the host version API. Thumbnails are encoded before envelope bytes are
+written. The publisher has already created a sibling file by then and removes
+it if rendering or encoding fails before publication.
 */
 
 namespace slic3r_api {
@@ -53,12 +55,10 @@ std::string format_gcode_generated_by();
 // Borrow the export configuration and return owned note comments with Windows line endings normalized, or empty text; allocation failures propagate.
 std::string format_gcode_notes(const Config &config);
 
-// Write `envelope.header`, the reference in bounded blocks, then `envelope.trailer` to the output path. Both paths are
-// borrowed UTF-8 strings. Throws on open, read, write, flush or close failure and on cancellation; the caller removes a
-// partial output (publish_gcode_file() does).
+// Write `envelope.header`, the borrowed reference in bounded blocks, then `envelope.trailer` to the borrowed output stream. Throws on reference-open, read, write or cancellation failure; the caller owns and closes the stream.
 void write_gcode_text_file(const plugin_run_context &run_context,
                            std::string_view reference_path_utf8,
-                           std::string_view output_path_utf8,
+                           std::ostream &output,
                            const GCodeTextEnvelope &envelope);
 
 // Encode requested thumbnails, read the metadata (its statistics are optional), and compose owned header/trailer text; the Print is a render context and invalid metadata or encoder failures throw before file I/O.

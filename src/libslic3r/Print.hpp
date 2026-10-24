@@ -342,16 +342,23 @@ public:
     One export request, from its deposit by the caller to its consumption by the STEP_EXPORT runner.
     It is single-use: the runner moves it out of the Print when it starts, so a later export needs a
     new request. config is a private copy of full_print_config() plus the request-only entries
-    (output_path, output_path_suggestion); it never takes part in Print::apply(). thumbnails renders the images the exporter
-    asks for, and stays empty when no graphical renderer exists (command line). inputs asks the requester for the values
-    that the exporter needs (see ExportInputForm); it stays empty when the requester cannot be asked, which fails an
-    exporter that asks.
+    (output_path, output_path_suggestion); it never takes part in Print::apply(). The optional suggestion directory and
+    filename base let the caller influence the exporter's proposed path without setting its destination. thumbnails renders
+    the images the exporter asks for, and stays empty when no graphical renderer exists (command line). inputs asks the
+    requester for the values that the exporter needs (see ExportInputForm); it stays empty when the requester cannot be
+    asked, which fails an exporter that asks.
     */
     struct ExportRequest
     {
         DynamicPrintConfig          config;
         ThumbnailsGeneratorCallback thumbnails;
         ExportInputsCallback        inputs;
+        // Existing directory to use when forming the exporter's proposed destination; empty keeps the model-derived directory.
+        std::string output_path_suggestion_directory;
+        // Base name used when forming the exporter's proposed destination; empty keeps the automatic name.
+        std::string output_path_suggestion_filename_base;
+        // Fold accents in the suggested filename for outputs intended for legacy firmware.
+        bool output_path_suggestion_ascii_fallback = false;
 
         // Destination of the export, or an empty string when none was set.
         std::string output_path() const

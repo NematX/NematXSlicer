@@ -39,6 +39,9 @@ struct ExportInputForm
     DynamicConfig                values;
 };
 
+// Return true only for one save_path or open_path definition on a string option; proposed values are not inspected.
+bool is_single_path_input(const std::vector<ConfigOptionDef> &definitions);
+
 // Ask the requester for the values of a form. Return true when it validated (the answers are in the form), false when it
 // cancelled; a CanceledException thrown by the requester is a cancellation too. Any other exception means that the requester
 // could not ask; its message is reported as the cause of the failure.

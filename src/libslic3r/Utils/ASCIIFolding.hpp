@@ -5,6 +5,23 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/*
+ASCII approximations for selected Unicode characters
+------------------------------------------------------
+fold_utf8_to_ascii converts UTF-8 to wide characters, maps supported characters
+to ASCII approximations, preserves characters without a mapping, and converts
+the result back to UTF-8. fold_to_ascii applies the same mapping to one wide
+character and writes at most four wide characters to the caller's buffer.
+
+For a filename proposal, use the whole-string helper:
+
+    std::string proposal = fold_utf8_to_ascii(source_name);
+
+For one wide character, provide wchar_t output[4] to fold_to_ascii() and consume
+the range from output to its returned end pointer. That range is not promised to
+have a trailing zero. Both forms return or write caller-owned text.
+*/
+
 #ifndef slic3r_ASCIIFolding_hpp_
 #define slic3r_ASCIIFolding_hpp_
 

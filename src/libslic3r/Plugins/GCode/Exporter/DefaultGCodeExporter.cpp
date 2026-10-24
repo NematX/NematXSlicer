@@ -25,8 +25,8 @@ Built-in G-code text exporter
 The provider advertises the text extension and writes the file named by the
 output_path setting of the export: thumbnails, generated producer line, notes and extrusion widths
 before the reference; the statistics (when the host measured them), the filtered configuration and end thumbnails follow it.
-Thumbnails are encoded before the file is opened, so a render failure creates
-nothing. The file is written next to its destination and replaces it only when complete
+Thumbnails are encoded before envelope bytes are written. The publisher creates
+the sibling first and removes it if rendering or encoding fails; it replaces the destination only when complete
 (publish_gcode_file()). The provider then reports the published path and a label to the host. It does not invoke scripts.
 
 When the export has no destination (the output_path setting is empty), the provider asks the requester for one while the export sets up: a save-path
@@ -153,10 +153,7 @@ GCodeExportQuery DefaultGCodeExporter::query_impl(const Print &, const Config &,
     return query;
 }
 
-// Check the destination first (publish_gcode_file), then, inside its writer, format thumbnails, notes, widths and metadata
-// before opening the output and copy the reference and ordered trailer into the sibling file that the helper publishes. A
-// destination that is refused therefore renders no thumbnail. Borrowed inputs are not retained and cancellation, encoding,
-// or I/O failures throw.
+// Check the destination first (publish_gcode_file), then format thumbnails, notes, widths and metadata and write the envelope around the reference into the helper-owned stream. The helper verifies and publishes the sibling; a refusal renders no thumbnail, borrowed inputs are not retained, and cancellation, encoding or I/O failures throw.
 void DefaultGCodeExporter::export_impl(const plugin_run_context &run_context,
                                        const Print &print,
                                        const Config &config,
@@ -173,12 +170,12 @@ void DefaultGCodeExporter::export_impl(const plugin_run_context &run_context,
     format.aliases.assign(k_default_gcode_exporter_aliases.begin(), k_default_gcode_exporter_aliases.end());
     const std::string published = publish_gcode_file(
         run_context, format, gcode_export_output_path(config), reference_path_utf8,
-        [&](const std::string &temporary_path) {
+        [&](std::ostream &output) {
             const GCodeTextEnvelope envelope = build_gcode_text_envelope(
                 OrchestratorView(m_orchestrator), print, config, thumbnail_renderer.handle(),
                 default_gcode_thumbnail_requests(config), metadata);
             throw_if_cancelled(&run_context);
-            write_gcode_text_file(run_context, reference_path_utf8, temporary_path, envelope);
+            write_gcode_text_file(run_context, reference_path_utf8, output, envelope);
             return true;
         });
     result.report(published, "G-code file");

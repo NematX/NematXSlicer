@@ -42,9 +42,7 @@ Representative direct calls (branches are not a timeline):
 
     write_gcode_text_file()
         |-- output.write()
-        |-- input.read()
-        |-- output.flush()
-        `-- output.close()
+        `-- input.read()
 */
 
 namespace slic3r_api {
@@ -170,20 +168,16 @@ GCodeTextEnvelope build_gcode_text_envelope(const OrchestratorView &orchestrator
 }
 
 
-// Open borrowed UTF-8 paths, write the borrowed envelope around bounded reference blocks, then flush and close; I/O or cancellation throws and the caller removes partial output.
+// Open the borrowed UTF-8 reference, write the borrowed envelope around bounded blocks into the caller-owned stream, and throw on read, write or cancellation failure without closing that stream.
 void write_gcode_text_file(const plugin_run_context &run_context,
                            std::string_view reference_path_utf8,
-                           std::string_view output_path_utf8,
+                           std::ostream &output,
                            const GCodeTextEnvelope &envelope)
 {
     const std::string reference_path(reference_path_utf8);
-    const std::string output_path(output_path_utf8);
     boost::nowide::ifstream input(reference_path.c_str(), std::ios::in | std::ios::binary);
     if (!input)
         throw std::runtime_error("Cannot open G-code reference file '" + reference_path + "'.");
-    boost::nowide::ofstream output(output_path.c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
-    if (!output)
-        throw std::runtime_error("Cannot open temporary G-code output file '" + output_path + "'.");
 
     output.write(envelope.header.data(), static_cast<std::streamsize>(envelope.header.size()));
     if (!output)
@@ -206,12 +200,8 @@ void write_gcode_text_file(const plugin_run_context &run_context,
     }
 
     output.write(envelope.trailer.data(), static_cast<std::streamsize>(envelope.trailer.size()));
-    output.flush();
     if (!output)
-        throw std::runtime_error("Failed while flushing the temporary G-code output file.");
-    output.close();
-    if (!output)
-        throw std::runtime_error("Failed while closing the temporary G-code output file.");
+        throw std::runtime_error("Failed while writing the temporary G-code output stream.");
 }
 
 } // namespace slic3r_api

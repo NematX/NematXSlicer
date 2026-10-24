@@ -210,6 +210,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/wxExtensions.hpp
     GUI/ExtruderSequenceDialog.cpp
     GUI/ExtruderSequenceDialog.hpp
+    GUI/ExportInputsDialog.cpp
+    GUI/ExportInputsDialog.hpp
     GUI/WipeTowerDialog.cpp
     GUI/WipeTowerDialog.hpp
     GUI/RammingChart.cpp
@@ -232,8 +234,6 @@ set(SLIC3R_GUI_SOURCES
     Config/Snapshot.hpp
     Config/Version.cpp
     Config/Version.hpp    
-    Utils/ASCIIFolding.cpp
-    Utils/ASCIIFolding.hpp
     Utils/PresetUpdater.cpp
     Utils/PresetUpdater.hpp
     Utils/Serial.cpp

@@ -306,6 +306,9 @@ public:
     // Whether the value is in the range of the enumeration; the plugin ABI lets any integer through.
     static bool is_gui_type_valid(GUIType gui_type)
         { return gui_type >= GUIType::undefined && gui_type <= GUIType::open_path; }
+    // Whether sidetext holds a file filter instead of a displayed unit.
+    bool sidetext_is_file_filter() const
+        { return gui_type == GUIType::save_path || gui_type == GUIType::open_path; }
     static bool is_gui_type_enum_open(const GUIType gui_type) 
         { return gui_type == ConfigOptionDef::GUIType::i_enum_open || gui_type == ConfigOptionDef::GUIType::f_enum_open || gui_type == ConfigOptionDef::GUIType::select_open; }
 

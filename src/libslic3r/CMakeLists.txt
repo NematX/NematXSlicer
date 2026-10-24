@@ -1107,6 +1107,8 @@ set(SLIC3R_SOURCES
     TriangulateWall.hpp
     utils.cpp
     Utils.hpp
+    Utils/ASCIIFolding.cpp
+    Utils/ASCIIFolding.hpp
     Time.cpp
     Time.hpp
     Timer.cpp

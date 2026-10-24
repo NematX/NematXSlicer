@@ -68,6 +68,17 @@ ExportInputsCallback make_stream_export_inputs(std::istream &in, std::ostream &o
     return [&in, &out](ExportInputForm &form) { return ask_form(in, out, form); };
 }
 
+// Check the borrowed definition list for exactly one string-valued path request; the predicate changes no form or option values.
+bool is_single_path_input(const std::vector<ConfigOptionDef> &definitions)
+{
+    if (definitions.size() != 1)
+        return false;
+
+    const ConfigOptionDef &definition = definitions.front();
+    return (definition.gui_type == ConfigOptionDef::GUIType::save_path ||
+            definition.gui_type == ConfigOptionDef::GUIType::open_path) && definition.type == coString;
+}
+
 static bool ask_form(std::istream &in, std::ostream &out, ExportInputForm &form)
 {
     for (const ConfigOptionDef &definition : form.definitions)

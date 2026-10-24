@@ -41,8 +41,8 @@ Representative direct calls (branches are not a timeline):
 
     Plater::priv::export_gcode()
         |-- update_background_process()
-        |-- background_process.schedule_export()
         |-- background_process.schedule_upload()
+        |-- background_process.schedule_export()
         `-- this->restart_background_process()
 */
 #include "Plater.hpp"
@@ -163,7 +163,7 @@ Representative direct calls (branches are not a timeline):
 #include "Jobs/PlaterWorker.hpp"
 #include "Jobs/BoostThreadWorker.hpp"
 #include "Jobs/OrientJob.hpp"
-#include "slic3r/Utils/ASCIIFolding.hpp"
+#include "libslic3r/Utils/ASCIIFolding.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
@@ -1846,6 +1846,7 @@ bool PlaterDropTarget::OnDropFiles(wxCoord x, wxCoord y, const wxArrayString &fi
 // State to manage showing after export notifications and device ejecting
 enum ExportingStatus{
     NOT_EXPORTING,
+    EXPORTING_FFF,
     EXPORTING_TO_REMOVABLE,
     EXPORTING_TO_LOCAL
 };
@@ -2113,7 +2114,11 @@ struct Plater::priv
 			GUI::show_error(this->q, msg);
 		}
 	}
-    void export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job);
+    // Schedule an SLA path, an FFF suggestion, or a printer upload on the background process; invalid configuration leaves work unscheduled.
+    void export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job,
+                      const std::string &fff_suggestion_directory = std::string(),
+                      const std::string &fff_suggestion_filename_base = std::string(),
+                      bool fff_ascii_fallback = false);
     void reload_from_disk();
     bool replace_volume_with_stl(int object_idx, int volume_idx, const fs::path& new_path, const wxString& snapshot = "");
     void replace_with_stl();
@@ -2124,6 +2129,7 @@ struct Plater::priv
     void on_slicing_update(SlicingStatusEvent&);
     void process_slicing_status(const PrintStatus::SlicingStatus &status);
     void on_slicing_completed(wxCommandEvent&);
+    // Stop completed work before reading results; classify an FFF cancellation by reference readiness, then update GUI state and notifications.
     void on_process_completed(SlicingProcessCompletedEvent&);
 	void on_export_began(wxCommandEvent&);
     void on_layer_editing_toggled(bool enable);
@@ -3864,15 +3870,20 @@ bool Plater::priv::restart_background_process(unsigned int state)
     return false;
 }
 
-void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job)
+// Queue a moved upload job, copy FFF suggestion values without a destination, or schedule the supplied SLA path; validate and restart the current model, report refusals, and leave pending work unchanged when another job is queued.
+void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_removable_media, PrintHostJob upload_job,
+                                const std::string &fff_suggestion_directory,
+                                const std::string &fff_suggestion_filename_base,
+                                bool fff_ascii_fallback)
 {
-    wxCHECK_RET(!(output_path.empty() && upload_job.empty()), "export_gcode: output_path and upload_job empty");
+    wxCHECK_RET(!(output_path.empty() && upload_job.empty() && printer_technology != ptFFF),
+                "export_gcode: no SLA output path, FFF export, or upload job");
     
     if (model.objects().empty())
         return;
 
-    if (background_process.is_export_scheduled()) {
-        GUI::show_error(q, _L("Another export job is currently running."));
+    if (background_process.is_export_scheduled() || background_process.is_upload_scheduled()) {
+        GUI::show_error(q, _L("Another export or upload job is currently running."));
         return;
     }
 
@@ -3885,11 +3896,19 @@ void Plater::priv::export_gcode(fs::path output_path, bool output_path_on_remova
         return;
 
     show_warning_dialog = true;
-    if (! output_path.empty()) {
-        background_process.schedule_export(output_path.string(), output_path_on_removable_media);
+    if (!upload_job.empty()) {
+        background_process.schedule_upload(std::move(upload_job));
+    } else if (printer_technology == ptFFF) {
+        background_process.schedule_fff_export(fff_suggestion_directory,
+                                              fff_suggestion_filename_base,
+                                              fff_ascii_fallback);
+        exporting_status = ExportingStatus::EXPORTING_FFF;
+        notification_manager->new_export_began(false);
         notification_manager->push_delayed_notification(NotificationType::ExportOngoing, []() {return true; }, 1000, 0);
     } else {
-        background_process.schedule_upload(std::move(upload_job));
+        background_process.schedule_export(output_path.string());
+        notification_manager->new_export_began(output_path_on_removable_media);
+        notification_manager->push_delayed_notification(NotificationType::ExportOngoing, []() {return true; }, 1000, 0);
     }
 
     // If the SLA processing of just a single object's supports is running, restart slicing for the whole object.
@@ -4766,12 +4785,18 @@ bool Plater::priv::warnings_dialog()
 	return res == wxID_OK;
 
 }
+// Stop the worker before inspecting Print state; copy the reported FFF result only with STEP_GCODE ready, report event errors/cancellation, refresh GUI state and notifications, and leave SLA/upload completion separate.
 void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
 {
     // Stop the background task, wait until the thread goes into the "Idle" state.
     // At this point of time the thread should be either finished or canceled,
     // so the following call just confirms, that the produced data were consumed.
     this->background_process.stop();
+    const bool fff_export_scheduled = exporting_status == ExportingStatus::EXPORTING_FFF;
+    const bool fff_export = fff_export_scheduled && fff_print.is_step_done(STEP_GCODE);
+    Print::ExportResult fff_export_result;
+    if (fff_export && evt.success())
+        fff_export_result = fff_print.export_result();
     // Completion makes Print data safe to inspect. Wake the GUI once more if
     // reload or warning events were deliberately retained while work was active.
     fff_print.status().request_pending_delivery();
@@ -4819,10 +4844,15 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
     }
     if (evt.cancelled()) {
 //        this->statusbar()->set_status_text(_L("Cancelled"));
-        this->notification_manager->set_slicing_progress_canceled(_u8L("Slicing Cancelled."));
+        this->notification_manager->set_slicing_progress_canceled(
+            fff_export ? _u8L("Export cancelled") : _u8L("Slicing Cancelled."));
+        if (fff_export_scheduled) {
+            notification_manager->stop_delayed_notifications_of_type(NotificationType::ExportOngoing);
+            notification_manager->close_notification_of_type(NotificationType::ExportOngoing);
+        }
     }
 
-    this->sidebar->show_sliced_info_sizer(evt.success());
+    this->sidebar->show_sliced_info_sizer(evt.success() || (fff_export && evt.cancelled()));
 
     // This updates the "Slice now", "Export G-code", "Arrange" buttons status.
     // Namely, it refreshes the "Out of print bed" property of all the ModelObjects, and it enables
@@ -4848,19 +4878,49 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         if (wxGetApp().get_mode() == comSimple && !get_app_config()->get_bool("objects_always_expert")) {
             show_action_buttons(false);
         }
+    }
+
+    if (fff_export_scheduled) {
+        notification_manager->stop_delayed_notifications_of_type(NotificationType::ExportOngoing);
+        notification_manager->close_notification_of_type(NotificationType::ExportOngoing);
+        if (fff_export && !evt.cancelled() && evt.success() && !has_error) {
+            if (!fff_export_result.local_path.empty()) {
+                const fs::path written_path(fff_export_result.local_path);
+                const std::string written_directory = written_path.parent_path().string();
+                const bool written_to_removable = wxGetApp().removable_drive_manager()->set_and_verify_last_save_path(
+                    fff_export_result.local_path);
+                wxGetApp().app_config->update_last_output_dir(written_directory, written_to_removable);
+                if (written_to_removable) {
+                    show_action_buttons(false);
+                    notification_manager->push_exporting_finished_notification(
+                        fff_export_result.local_path, written_directory,
+                        platform_flavor() != PlatformFlavor::LinuxOnChromium);
+                    wxGetApp().removable_drive_manager()->set_exporting_finished(true);
+                } else {
+                    notification_manager->push_exporting_finished_notification(
+                        fff_export_result.local_path, written_directory, false);
+                }
+            } else {
+                const std::string label = fff_export_result.label.empty() ? _u8L("Export finished.") : fff_export_result.label;
+                notification_manager->push_notification(NotificationType::CustomNotification,
+                    NotificationManager::NotificationLevel::RegularNotificationLevel, label);
+                notification_manager->set_slicing_progress_hidden();
+            }
+        }
+    } else {
         if (exporting_status != ExportingStatus::NOT_EXPORTING && !has_error) {
             notification_manager->stop_delayed_notifications_of_type(NotificationType::ExportOngoing);
             notification_manager->close_notification_of_type(NotificationType::ExportOngoing);
         }
-        // If writing to removable drive was scheduled, show notification with eject button
+        // SLA retains the path selected before its worker starts and removable-volume behavior.
         if (exporting_status == ExportingStatus::EXPORTING_TO_REMOVABLE && !has_error) {
             show_action_buttons(false);
             notification_manager->push_exporting_finished_notification(last_output_path, last_output_dir_path,
-                // Don't offer the "Eject" button on ChromeOS, the Linux side has no control over it.
                 platform_flavor() != PlatformFlavor::LinuxOnChromium);
             wxGetApp().removable_drive_manager()->set_exporting_finished(true);
-        } else if (exporting_status == ExportingStatus::EXPORTING_TO_LOCAL && !has_error)
+        } else if (exporting_status == ExportingStatus::EXPORTING_TO_LOCAL && !has_error) {
             notification_manager->push_exporting_finished_notification(last_output_path, last_output_dir_path, false);
+        }
     }
     exporting_status = ExportingStatus::NOT_EXPORTING;
 }
@@ -7251,9 +7311,7 @@ static wxString check_gcode_exporter_extension(
                         selection.extension, extension);
 }
 
-
-
-// Validate the FFF exporter before opening the file dialog, then dispatch export or SLA output; show failures in the GUI and retain user-owned paths.
+// On the GUI thread, apply configuration and query FFF compatibility before scheduling; the selection result is discarded. Use prefer_removable for the suggested folder, keep the SLA save dialog, and show failures without scheduling an incompatible export.
 void Plater::export_gcode(bool prefer_removable)
 {
     if (p->model.objects().empty())
@@ -7286,10 +7344,9 @@ void Plater::export_gcode(bool prefer_removable)
             return;
     }
 
-    // If possible, remove accents from accented latin characters.
-    // This function is useful for generating file names to be processed by legacy firmwares.
     fs::path default_output_file;
-    Orchestrator::GCodeExporterSelection exporter_selection;
+    AppConfig &appconfig = *wxGetApp().app_config;
+    RemovableDriveManager &removable_drive_manager = *wxGetApp().removable_drive_manager();
     try {
         // Update the background processing, so that the placeholder parser will get the correct values for the ouput file template.
         // Also if there is something wrong with the current configuration, a pop-up dialog will be shown and the export will not be performed.
@@ -7298,12 +7355,21 @@ void Plater::export_gcode(bool prefer_removable)
             return;
         const fs::path project_path = into_path(get_project_filename(".3mf"));
         if (printer_technology() == ptFFF) {
-            exporter_selection = Orchestrator::instance().select_gcode_exporter(fff_print(), fff_print().full_print_config());
-            default_output_file = this->p->background_process.output_filepath_for_project(
-                project_path, exporter_selection.extension);
-        } else {
-            default_output_file = this->p->background_process.output_filepath_for_project(project_path);
+            // Reject incompatible exporters before scheduling work or announcing an export; the outer handler shows a non-critical error.
+            Orchestrator::instance().select_gcode_exporter(fff_print(), fff_print().full_print_config());
+            default_output_file = this->p->background_process.output_filepath_for_project(project_path, ".gcode");
+            std::string suggestion_directory = default_output_file.parent_path().string();
+            std::string suggestion_filename_base = project_path.empty() ? std::string() : project_path.stem().string();
+            std::string start_dir = appconfig.get_last_output_dir(suggestion_directory, prefer_removable);
+            if (prefer_removable) {
+                start_dir = removable_drive_manager.get_removable_drive_path(start_dir);
+                if (start_dir.empty())
+                    start_dir = appconfig.get_last_output_dir(suggestion_directory, false);
+            }
+            p->export_gcode(fs::path(), false, PrintHostJob(), start_dir, suggestion_filename_base, true);
+            return;
         }
+        default_output_file = this->p->background_process.output_filepath_for_project(project_path);
     } catch (const Slic3r::PlaceholderParserError &ex) {
         // Show the error with monospaced font.
         show_error(this, ex.what(), true);
@@ -7313,8 +7379,6 @@ void Plater::export_gcode(bool prefer_removable)
         return;
     }
     default_output_file = fs::path(Slic3r::fold_utf8_to_ascii(default_output_file.string()));
-    AppConfig 				&appconfig 				 = *wxGetApp().app_config;
-    RemovableDriveManager 	&removable_drive_manager = *wxGetApp().removable_drive_manager();
     // Get a last save path, either to removable media or to an internal media.
     std::string      		 start_dir 				 = appconfig.get_last_output_dir(default_output_file.parent_path().string(), prefer_removable);
 	if (prefer_removable) {
@@ -7328,47 +7392,31 @@ void Plater::export_gcode(bool prefer_removable)
     fs::path output_path;
     {
         std::string ext = default_output_file.extension().string();
-        wxFileDialog dlg(this, (printer_technology() == ptFFF) ? _L("Save G-code file as:") : _L("Save SL1 / SL1S file as:"),
+        wxFileDialog dlg(this, _L("Save SL1 / SL1S file as:"),
             start_dir,
             from_path(default_output_file.filename()),
-            printer_technology() == ptFFF ? GUI::file_wildcards(FT_GCODE, ext) :
-                                            GUI::sla_wildcards(p->sla_print.printer_config().output_format.value, ext),
+            GUI::sla_wildcards(p->sla_print.printer_config().output_format.value, ext),
             wxFD_SAVE | (wxGetApp().app_config->get_show_overwrite_dialog() ? wxFD_OVERWRITE_PROMPT : 0)
         );
         if (dlg.ShowModal() == wxID_OK) {
             output_path = into_path(dlg.GetPath());
 
-            auto check_for_error = [this, &exporter_selection](const boost::filesystem::path& path, wxString& err_out) -> bool {
-                const std::string filename = path.filename().string();
-                const std::string ext      = boost::algorithm::to_lower_copy(path.extension().string());
-                if (has_illegal_filename_characters(filename)) {
-                    err_out = _L("The provided file name is not valid.") + "\n" +
-                              _L("The following characters are not allowed by a FAT file system:") + " <>:/\\|?*\"";
-                    return true;
-                }
-                if (this->printer_technology() == ptFFF) {
-					err_out = check_gcode_exporter_extension(exporter_selection, ext);
-                }
-                return !err_out.IsEmpty();
-            };
-
             wxString error_str;
-            if (check_for_error(output_path, error_str)) {
+            if (has_illegal_filename_characters(output_path.filename().string())) {
+                error_str = _L("The provided file name is not valid.") + "\n" +
+                            _L("The following characters are not allowed by a FAT file system:") + " <>:/\\|?*\"";
                 ErrorDialog(this, error_str, [this](const std::string& key) -> void { sidebar().jump_to_option(key); }).ShowModal();
                 output_path.clear();
-			} else if (printer_technology() == ptFFF && output_path.extension().empty()) {
-				output_path += exporter_selection.extension;
             }
         }
     }
 
     if (! output_path.empty()) {
 		bool path_on_removable_media = removable_drive_manager.set_and_verify_last_save_path(output_path.string());
-        p->notification_manager->new_export_began(path_on_removable_media);
-        p->exporting_status = path_on_removable_media ? ExportingStatus::EXPORTING_TO_REMOVABLE : ExportingStatus::EXPORTING_TO_LOCAL;
-        p->last_output_path = output_path.string();
-        p->last_output_dir_path = output_path.parent_path().string();
-        p->export_gcode(output_path, path_on_removable_media, PrintHostJob());
+	        p->exporting_status = path_on_removable_media ? ExportingStatus::EXPORTING_TO_REMOVABLE : ExportingStatus::EXPORTING_TO_LOCAL;
+	        p->last_output_path = output_path.string();
+	        p->last_output_dir_path = output_path.parent_path().string();
+	        p->export_gcode(output_path, path_on_removable_media, PrintHostJob());
         // Storing a path to AppConfig either as path to removable media or a path to internal media.
         // is_path_on_removable_drive() is called with the "true" parameter to update its internal database as the user may have shuffled the external drives
         // while the dialog was open.
@@ -8655,6 +8703,11 @@ void Plater::unbind_canvas_event_handlers()
 void Plater::reset_canvas_volumes()
 {
     p->reset_canvas_volumes();
+}
+
+bool Plater::close_export_inputs_dialog(std::function<void()> after, bool forced, bool closing)
+{
+    return p->background_process.close_inputs_dialog(std::move(after), forced, closing);
 }
 
 PrinterTechnology Plater::printer_technology() const

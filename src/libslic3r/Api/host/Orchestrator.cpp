@@ -914,6 +914,9 @@ ExportInputForm ExportInputsReceiver::make_form(const raw_config_option_def *def
     for (size_t idx = 0; idx < count; ++idx) {
         form.definitions.push_back(m_orchestrator.export_input_definition(m_plugin, definitions[idx]));
         const ConfigOptionDef &definition = form.definitions.back();
+        // One field per key: a repeated key would give two fields for one value.
+        if (form.values.has(definition.opt_key))
+            throw std::invalid_argument("The input '" + definition.opt_key + "' is asked more than once.");
 
         // A key that the export already holds is proposed with its value, unless that value is empty.
         const ConfigOption *existing = m_config.option(definition.opt_key);
@@ -2619,7 +2622,7 @@ bool Orchestrator::validate_plugin_activation(const std::vector<std::string> &pl
 
 // Convert one definition that a running exporter sent, without registering it anywhere. A definition is refused (std::invalid_argument
 // naming its key) when its key or default value is missing, when the default does not deserialize, when its type or GUI type
-// is unknown or when its graph settings are invalid. The translation domain is the explicit domain of the definition, which must
+// is unknown, when its type is a list or cannot be edited by the form (3D point), or when its graph settings are invalid. The translation domain is the explicit domain of the definition, which must
 // be available for the package of the plugin, or else the default domain of the plugin.
 ConfigOptionDef Orchestrator::export_input_definition(const Plugin &plugin, const raw_config_option_def &raw) const
 {
@@ -2645,6 +2648,13 @@ ConfigOptionDef Orchestrator::export_input_definition(const Plugin &plugin, cons
 
     ConfigOptionDef definition;
     populate_config_option_def_from_raw(definition, &raw, translation_domain);
+    // An input is one value; the fields of the requester do not edit the elements of a list.
+    if (!definition.is_scalar())
+        throw std::invalid_argument("The input '" + key + "' is a list; an input must be a single setting.");
+    // Follows OptionsGroup::build_field (GUI), which has no field for this single type. Remove this check if a coPoint3 field
+    // is added there.
+    if (definition.type == coPoint3)
+        throw std::invalid_argument("The input '" + key + "' has a type that the form of the requester cannot show.");
     // populate_config_option_def_from_raw() ignores a default that does not deserialize; an input needs a usable proposal.
     std::unique_ptr<ConfigOption> probe(definition.create_empty_option());
     if (!probe->deserialize(raw.default_serialized_value))

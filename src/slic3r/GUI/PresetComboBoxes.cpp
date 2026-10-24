@@ -41,7 +41,7 @@
 #include "format.hpp"
 #include "Tab.hpp"
 #include "ConfigWizard.hpp"
-#include "slic3r/Utils/ASCIIFolding.hpp"
+#include "libslic3r/Utils/ASCIIFolding.hpp"
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "BitmapCache.hpp"
@@ -57,6 +57,29 @@
     #include <pango-1.0/pango/pango-layout.h>
     #include <gtk/gtk.h>
 #endif
+
+/*
+Display and select preset names in the application's combo boxes. The controls
+read preset collections and compatibility state, build their labels/icons and
+notify the owning tab or Plater when selection changes. They do not own the
+profile records or decide how a selected profile is sliced.
+
+Refreshing the list updates presentation while retaining the appropriate
+selection. User selection and programmatic refresh are separate paths so
+rebuilding choices does not accidentally perform the user's editing action.
+
+Representative direct calls (branches are not a timeline):
+
+    PlaterPresetComboBox::update()
+        |-- invalidate_selection()
+        |-- this->set_label_marker()
+        |-- set_label_marker()
+        |-- validate_selection()
+        `-- update_selection()
+
+    PresetComboBox::OnSelect()
+        `-- on_selection_changed()
+*/
 
 using Slic3r::GUI::format_wxstr;
 

@@ -6,6 +6,7 @@
 #define slic3r_Api_plugin_cpp_gcode_GCodeFilePublisher_hpp_
 
 #include <functional>
+#include <ostream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -20,8 +21,8 @@ A file exporter should not leave a half-written file at its destination, and
 should keep the file that already sits there when its work fails or is
 cancelled. publish_gcode_file() gives every such exporter the same behavior:
 
-    destination checks  ->  write into a unique sibling  ->  replace the destination
-    (not empty, suffix,      (the exporter's own work)       (FilesystemTransaction)
+    destination checks  ->  write into a unique sibling  ->  verify its fingerprint  ->  replace the destination
+    (not empty, suffix,      (the exporter's own work)       (byte count and CRC-32)      (FilesystemTransaction)
      directory, not the
      reference)
 
@@ -34,9 +35,13 @@ write, a refusal to publish, or a failed replacement. Before the replacement the
 destination is untouched. A cancellation that arrives after the replacement does
 not undo it: the file stays published. The reference is never touched.
 
-The exporter supplies the work as a function that receives the sibling's path and
-returns whether it succeeded. It reports a failure itself (an exception, or
-report_error followed by `false`), and nothing is published in that case.
+The exporter supplies the work as a function that writes to a stream opened on the
+sibling and returns whether it succeeded. While bytes pass through that stream,
+the helper records their byte count and CRC-32. It closes and rereads the sibling,
+then compares that fingerprint before replacing the destination. A failure or a
+different fingerprint leaves the destination untouched. CRC-32 detects changed
+bytes but is not a cryptographic authenticity check. The exporter reports a
+failure itself (an exception, or report_error followed by `false`).
 
 Call publish_gcode_file() with the export context, destination description and a
 writer that fills the supplied private output. The writer must finish its work
@@ -58,18 +63,10 @@ struct GCodeFileFormat
     std::vector<std::string> aliases;
 };
 
-// Writes the complete file at the path it receives (a UTF-8 sibling of the destination). Returns true on success; false
-// when it already reported the failure; throws on I/O failure or cancellation.
-using GCodeFileWriter = std::function<bool(const std::string &temporary_path_utf8)>;
+// Write the complete file into the helper-owned sibling stream; return false after reporting a failure, or throw on I/O failure or cancellation.
+using GCodeFileWriter = std::function<bool(std::ostream &output)>;
 
-// Check the destination, run the writer on a unique sibling and replace the destination by it. Return the path that
-// was published (the destination, with the main suffix added when it had none), or an empty string when the writer
-// returned false. Throws for an empty destination, a suffix that the format does not accept, a missing directory, a
-// destination that is a directory or the reference, a writer that created no regular file, a cancellation before the
-// replacement, and a failed replacement. In all these cases no sibling remains, and the destination is unchanged except when
-// the replacement itself fails: it renames the old destination to a backup and then the sibling to the destination, and only
-// tries to restore the backup if the second rename fails (it reports RollbackFailed when that does not work). A
-// cancellation that arrives after the replacement does not undo it: the file stays published.
+// Check the borrowed destination/reference, write and reread a unique sibling stream, then transactionally replace the destination; return its published path or empty on writer refusal, and throw on validation, I/O, fingerprint, cancellation, or replacement failure.
 std::string publish_gcode_file(const plugin_run_context &run_context,
                                const GCodeFileFormat &format,
                                std::string_view destination_utf8,

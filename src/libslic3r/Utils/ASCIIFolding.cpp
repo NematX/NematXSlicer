@@ -12,6 +12,19 @@
 #include <locale>
 
 #include <boost/locale/encoding_utf.hpp>
+
+/*
+Approximate selected Unicode characters by ASCII text for consumers such as
+legacy printer filenames and fuzzy matching. fold_utf8_to_ascii() converts a
+whole UTF-8 string; fold_to_ascii() expands one wide character through the same
+mapping. Characters without a mapping remain unchanged, so a result is not
+guaranteed to contain ASCII only. The mapping creates text, not filesystem paths.
+
+Representative direct calls (branches are not a timeline):
+
+    fold_utf8_to_ascii()
+        `-- fold_to_ascii()
+*/
 namespace Slic3r {
 
 // Based on http://svn.apache.org/repos/asf/lucene/java/tags/lucene_solr_4_5_1/lucene/analysis/common/src/java/org/apache/lucene/analysis/miscellaneous/ASCIIFoldingFilter.java

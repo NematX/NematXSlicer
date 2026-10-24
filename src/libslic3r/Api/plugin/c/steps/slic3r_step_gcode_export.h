@@ -192,7 +192,9 @@ with an array of definitions (contiguous raw_config_option_def, count entries). 
 call blocks until the requester has answered. The host copies what it keeps during
 the call; the exporter keeps every pointed string valid until the call returns. A
 definition describes one setting: its key, its type, its label, its default value and
-its GUI type; the host never registers it in the global catalogue. The path types
+its GUI type; the host never registers it in the global catalogue. The type must be a
+single value that a form can edit (not a list, not RAW_CO_POINT3) and a key may appear
+only once, or the host refuses the call. The path types
 RAW_GUI_TYPE_SAVE_PATH and RAW_GUI_TYPE_OPEN_PATH use sidetext as a file filter in
 the wxWidgets format (for example "G-code (*.gcode)|*.gcode"). The requester sees one
 field per definition, filled with the value that config already holds for the key

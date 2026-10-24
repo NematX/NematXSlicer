@@ -1,5 +1,5 @@
 /*
-Tests cover G-code exporter selection, synchronous QUERY validation, file publication, and per-call failures.
+Tests cover G-code exporter selection, synchronous QUERY validation, fingerprint-checked file publication, and per-call failures.
 
 G-code exporter service tests
 =============================
@@ -11,6 +11,12 @@ with controllable per-call failures and one raw C++ provider for malformed
 QUERY answers. Test files live in unique directories under the current project
 working directory and are removed at scope exit; the print pipeline and the
 exporter action are checked separately.
+
+Controlled exporters isolate compatibility queries, input requests, failure
+reporting and publication. Production exporters are then exercised through the
+same host boundary for the formats available in this build. Assertions inspect
+the published bytes, metadata and destination preservation, not just a provider's
+return value. The source reference is checked separately from the destination.
 
 Representative direct calls (branches are not a timeline):
 
@@ -54,6 +60,7 @@ Representative direct calls (branches are not a timeline):
 #include "test_data.hpp"
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Api/host/ExportInputs.hpp"
 #include "libslic3r/Api/host/GCodeThumbnailRenderer.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
@@ -95,7 +102,7 @@ const char *const k_no_dependencies[] = {nullptr};
 
 enum class ProbeQueryMode { Compatible, Incompatible };
 // PublishThenCancel copies the reference, publishes and reports it, then raises the Print cancellation before returning.
-enum class ProbeExportMode { Copy, FailOpen, ReportErrorAfterWrite, CancelAfterWrite, FailingEncoder, PublishThenCancel };
+enum class ProbeExportMode { Copy, FailOpen, ReportErrorAfterWrite, CancelAfterWrite, FailingEncoder, PublishThenCancel, TamperAfterWrite };
 // What the exporter without local file reports: nothing, a label (whose buffer it overwrites afterwards), or two results.
 enum class NoFileMode { ReportNothing, ReportLabel, ReportTwice };
 enum class RawQueryMode {
@@ -138,6 +145,8 @@ struct ExporterProbeState
     std::vector<std::pair<std::string, std::string>> export_configuration;
     std::vector<std::pair<std::string, std::string>> export_extrusion_widths;
     std::vector<std::pair<std::string, std::string>> export_statistics;
+    // Test writer action that changes its open sibling after its stream has been flushed.
+    std::function<void()> tamper_sibling_after_write;
     // Print whose user cancellation the CancelAfterWrite mode raises, as the GUI Cancel button does.
     Print *print_to_cancel = nullptr;
 };
@@ -430,8 +439,8 @@ private:
         format.extension = ".probe";
         const std::string published = slic3r_api::publish_gcode_file(
             run_context, format, g_exporter_probe_state.export_output_path, reference_path_utf8,
-            [&run_context, reference_path_utf8](const std::string &temporary_path) {
-                return write_probe_output(run_context, reference_path_utf8, temporary_path);
+            [&run_context, reference_path_utf8](std::ostream &output) {
+                return write_probe_output(run_context, reference_path_utf8, output);
             });
         if (!published.empty())
             result.report(published, "Probe export");
@@ -439,23 +448,18 @@ private:
             g_exporter_probe_state.print_to_cancel->cancel();
     }
 
-    // Write the probe's output into the sibling the helper reserved: a copy of the reference, or, for the failure modes,
-    // a partial file followed by a reported error (return false) or a Print cancellation (the helper then refuses to publish).
+    // Borrow the helper-owned stream, copy the reference or write the selected partial failure, then optionally tamper with the flushed sibling; report refusal with false and propagate read, write, callback, and cancellation failures.
     static bool write_probe_output(const plugin_run_context &run_context,
                                    std::string_view reference_path_utf8,
-                                   const std::string &output_path)
+                                   std::ostream &output)
     {
-        boost::nowide::ofstream output(output_path.c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
-        if (!output)
-            throw std::runtime_error("probe exporter could not open its output");
-
         if (g_exporter_probe_state.export_mode != ProbeExportMode::Copy &&
-            g_exporter_probe_state.export_mode != ProbeExportMode::PublishThenCancel) {
+            g_exporter_probe_state.export_mode != ProbeExportMode::PublishThenCancel &&
+            g_exporter_probe_state.export_mode != ProbeExportMode::TamperAfterWrite) {
             output.write("partial", 7);
             output.flush();
-            output.close();
             if (!output)
-                throw std::runtime_error("probe exporter could not close its partial output");
+                throw std::runtime_error("probe exporter could not flush its partial output");
             if (g_exporter_probe_state.export_mode == ProbeExportMode::ReportErrorAfterWrite) {
                 if (run_context.report_error == nullptr)
                     throw std::runtime_error("probe exporter has no error callback");
@@ -483,9 +487,11 @@ private:
                 break;
         }
         output.flush();
-        output.close();
         if (!output)
-            throw std::runtime_error("probe exporter could not close its output");
+            throw std::runtime_error("probe exporter could not flush its output");
+        if (g_exporter_probe_state.export_mode == ProbeExportMode::TamperAfterWrite &&
+            g_exporter_probe_state.tamper_sibling_after_write)
+            g_exporter_probe_state.tamper_sibling_after_write();
         return true;
     }
 };
@@ -706,7 +712,7 @@ constexpr const char *k_input_flag_key = "test.export.flag";
 constexpr const char *k_input_existing_key = "notes";
 
 // What the exporter asks for: its three inputs, or one definition that the host has to refuse.
-enum class InputsMode { Standard, EmptyKey, BadDefault, BadGuiType, WrongType, BadGraph, DomainUnregistered };
+enum class InputsMode { Standard, EmptyKey, BadDefault, BadGuiType, WrongType, BadGraph, DomainUnregistered, List, RepeatedKey, Point3 };
 // What the raw exporter does with the answer of the host: ignore a refusal, or ask a second time.
 enum class RawInputsMode { IgnoreStop, AskTwice };
 
@@ -819,10 +825,20 @@ private:
             definitions.push_back(domain);
             break;
         }
+        case InputsMode::List:
+            definitions.push_back(make_input_definition("test.export.list", RAW_CO_VECTOR_STRING, "List", "a;b"));
+            break;
+        case InputsMode::Point3:
+            definitions.push_back(make_input_definition("test.export.point3", RAW_CO_POINT3, "Point", "0,0,0"));
+            break;
+        case InputsMode::RepeatedKey:
+            definitions.push_back(make_input_definition("test.export.twice", RAW_CO_STRING, "First", "x"));
+            definitions.push_back(make_input_definition("test.export.twice", RAW_CO_STRING, "Second", "y"));
+            break;
         }
     }
 
-    // Record the inputs read from the configuration and the metadata, then copy the reference to the destination of the request.
+    // Copy borrowed input values and metadata into test state, stream the borrowed reference into the helper-owned sibling, and report its path; I/O and publisher failures propagate.
     void export_impl(const plugin_run_context &run_context,
                      const slic3r_api::Print &,
                      const slic3r_api::Config &config,
@@ -851,8 +867,21 @@ private:
         const std::string reference(reference_path_utf8);
         const std::string published = slic3r_api::publish_gcode_file(
             run_context, format, slic3r_api::gcode_export_output_path(config), reference_path_utf8,
-            [&reference](const std::string &temporary_path) {
-                boost::filesystem::copy_file(reference, temporary_path, boost::filesystem::copy_option::overwrite_if_exists);
+            [&reference](std::ostream &output) {
+                boost::nowide::ifstream input(reference.c_str(), std::ios::in | std::ios::binary);
+                if (!input)
+                    throw std::runtime_error("inputs exporter could not open its reference");
+                std::vector<char> buffer(16384);
+                while (true) {
+                    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+                    const std::streamsize count = input.gcount();
+                    if (count > 0)
+                        output.write(buffer.data(), count);
+                    if (!output || input.bad() || (input.fail() && !input.eof()))
+                        throw std::runtime_error("inputs exporter encountered a file error");
+                    if (input.eof())
+                        break;
+                }
                 return true;
             });
         if (!published.empty())
@@ -2800,6 +2829,69 @@ TEST_CASE("The file helper refuses a destination that cannot be published", "[pl
     CHECK(snapshot_directory(directory.path()) == original_files);
 }
 
+// Export through the probe, alter one existing sibling byte through a second handle while preserving length, and require CRC rejection, old-destination preservation, and sibling cleanup; the publisher owns the sibling.
+TEST_CASE("The publisher rejects a sibling changed after its writer flushes", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path output_directory = directory.path() / "outputs";
+    boost::filesystem::create_directories(output_directory);
+    Print print;
+    Model model;
+    g_exporter_probe_state.export_mode = ProbeExportMode::TamperAfterWrite;
+    const boost::filesystem::path reference = prepare_print_with_reference(
+        print, model, k_probe_exporter_id, directory.path());
+    const boost::filesystem::path destination = output_directory / "existing.probe";
+    write_binary_file(destination, "keep-existing-output");
+    g_exporter_probe_state.tamper_sibling_after_write = [&output_directory, &destination]() {
+        boost::filesystem::path sibling;
+        size_t sibling_count = 0;
+        for (boost::filesystem::directory_iterator entry(output_directory);
+             entry != boost::filesystem::directory_iterator(); ++entry) {
+            if (entry->path() != destination) {
+                sibling = entry->path();
+                ++sibling_count;
+            }
+        }
+        if (sibling_count != 1)
+            throw std::runtime_error("probe test did not find one sibling beside the destination");
+        const std::uintmax_t sibling_size = boost::filesystem::file_size(sibling);
+        if (sibling_size == 0)
+            throw std::runtime_error("probe test found an empty sibling to tamper with");
+        boost::nowide::fstream tamper(sibling.string().c_str(), std::ios::in | std::ios::out | std::ios::binary);
+        if (!tamper)
+            throw std::runtime_error("probe test could not open the sibling through a second descriptor");
+        char original_byte = 0;
+        tamper.read(&original_byte, 1);
+        if (!tamper)
+            throw std::runtime_error("probe test could not read the sibling byte");
+        tamper.seekp(0, std::ios::beg);
+        tamper.put(static_cast<char>(original_byte ^ 0x01));
+        tamper.flush();
+        if (!tamper)
+            throw std::runtime_error("probe test could not replace the sibling byte");
+        tamper.close();
+        if (!tamper)
+            throw std::runtime_error("probe test could not close the sibling descriptor");
+        if (boost::filesystem::file_size(sibling) != sibling_size)
+            throw std::runtime_error("probe test changed the sibling length");
+    };
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                            destination.string(), selection),
+                      "G-code export temporary file changed while writing.");
+    CHECK(read_binary_file(destination) == "keep-existing-output");
+    size_t output_count = 0;
+    for (boost::filesystem::directory_iterator entry(output_directory);
+         entry != boost::filesystem::directory_iterator(); ++entry)
+        ++output_count;
+    CHECK(output_count == 1);
+    g_exporter_probe_state.tamper_sibling_after_write = std::function<void()>();
+}
+
 // An exporter without local file answers QUERY without extension, reads no destination, and may report nothing, a label
 // copied during the call, or (refused) a second result. The command line, which prints the file, refuses it clearly.
 TEST_CASE("An exporter without local file needs no extension and no destination", "[plugins][gcode][exporter][export-contract]")
@@ -3034,6 +3126,31 @@ void reset_inputs_state(InputsMode mode)
 
 } // namespace
 
+// Cover the definition shape used by the GUI's direct file picker without constructing widgets.
+TEST_CASE("A single path input is one string-valued save or open definition", "[plugins][export-inputs]")
+{
+    Slic3r::ConfigOptionDef definition;
+    definition.type = Slic3r::coString;
+    definition.gui_type = Slic3r::ConfigOptionDef::GUIType::save_path;
+    std::vector<Slic3r::ConfigOptionDef> definitions(1, definition);
+    CHECK(Slic3r::is_single_path_input(definitions));
+
+    definitions.front().gui_type = Slic3r::ConfigOptionDef::GUIType::open_path;
+    CHECK(Slic3r::is_single_path_input(definitions));
+
+    definitions.front().gui_type = Slic3r::ConfigOptionDef::GUIType::save_path;
+    definitions.front().type = Slic3r::coBool;
+    CHECK_FALSE(Slic3r::is_single_path_input(definitions));
+
+    definitions.front() = definition;
+    definitions.push_back(definition);
+    CHECK_FALSE(Slic3r::is_single_path_input(definitions));
+
+    definitions.resize(1);
+    definitions.front().gui_type = Slic3r::ConfigOptionDef::GUIType::undefined;
+    CHECK_FALSE(Slic3r::is_single_path_input(definitions));
+}
+
 // The requester sees the definitions the exporter sent, filled with the value of the request (else the default), and its answers
 // reach the exporter in the configuration of the request, with the pointer it already read. The answers are not metadata.
 TEST_CASE("A validated form gives its answers to the exporter", "[plugins][gcode][exporter][export-inputs]")
@@ -3187,6 +3304,9 @@ TEST_CASE("A refused definition fails the export before the requester is asked",
         {InputsMode::WrongType, "The input 'notes' is asked with another type than the setting the export already holds."},
         {InputsMode::BadGraph, "The input 'test.export.bad_graph' has invalid graph settings."},
         {InputsMode::DomainUnregistered, "The input 'test.export.domain' uses the translation domain 'test.unregistered.domain', which the plugin did not register."},
+        {InputsMode::List, "The input 'test.export.list' is a list; an input must be a single setting."},
+        {InputsMode::RepeatedKey, "The input 'test.export.twice' is asked more than once."},
+        {InputsMode::Point3, "The input 'test.export.point3' has a type that the form of the requester cannot show."},
     };
     for (const Case &refused : cases) {
         reset_inputs_state(refused.mode);
@@ -3309,6 +3429,68 @@ TEST_CASE("The export request holds the suggested output path with the final sta
     // The suggestion is a setting of the request only.
     CHECK_FALSE(cube.print.full_print_config().has("output_path_suggestion"));
 }
+
+// Verify that the runner combines an existing proposed directory and request-owned basename with final print statistics.
+TEST_CASE("STEP_EXPORT uses the request directory and basename for its file suggestion", "[plugins][exporter][step-export]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path suggestion_directory = directory.path() / "suggested";
+    boost::filesystem::create_directories(suggestion_directory);
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", "{input_filename_base}_{total_toolchanges}.gcode"}});
+    Print::ExportRequest request = cube.request(directory.path() / "written.inputs", [](ExportInputForm &) { return true; });
+    request.output_path_suggestion_directory = suggestion_directory.string();
+    request.output_path_suggestion_filename_base = "custom";
+
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+    CHECK(g_inputs_state.suggestion == (suggestion_directory / "custom_0.inputs").string());
+}
+
+// Verify that a missing proposed directory is ignored while the supplied basename still uses the current model-derived directory.
+TEST_CASE("STEP_EXPORT ignores a missing proposed directory", "[plugins][exporter][step-export]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path missing_directory = directory.path() / "removed-folder";
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", "{input_filename_base}_{total_toolchanges}.gcode"}});
+    const std::string model_directory_suggestion = cube.print.output_filepath(std::string(), "fallback", ".inputs");
+    Print::ExportRequest request = cube.request(directory.path() / "written.inputs", [](ExportInputForm &) { return true; });
+    request.output_path_suggestion_directory = missing_directory.string();
+    request.output_path_suggestion_filename_base = "fallback";
+
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+    CHECK(g_inputs_state.suggestion == model_directory_suggestion);
+    CHECK(boost::filesystem::path(g_inputs_state.suggestion).parent_path() != missing_directory);
+}
+
+// Export with ASCII fallback from a UTF-8 base and literal template text; require the final filename to be folded while the proposed directory is unchanged.
+TEST_CASE("STEP_EXPORT folds only the suggested filename when requested", "[plugins][gcode][exporter][step-export]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path suggestion_directory = directory.path() / boost::filesystem::path(u8"sortie-\u00e9");
+    boost::filesystem::create_directories(suggestion_directory);
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", u8"{input_filename_base}_sortié_{total_toolchanges}.gcode"}});
+    Print::ExportRequest request = cube.request(directory.path() / "written.inputs", [](ExportInputForm &) { return true; });
+    request.output_path_suggestion_directory = suggestion_directory.string();
+    request.output_path_suggestion_filename_base = u8"caf\u00e9";
+    request.output_path_suggestion_ascii_fallback = true;
+
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+    const boost::filesystem::path suggestion(g_inputs_state.suggestion);
+    CHECK(suggestion.parent_path() == suggestion_directory);
+    CHECK(suggestion.filename().string() == "cafe_sortie_0.inputs");
+}
+
 // A statistic that the print does not hold fails with a message that cites the template and the variable, for the helper and for the runner.
 TEST_CASE("A missing statistic in the output name is an error", "[plugins][gcode][exporter][export-inputs][output-filename]")
 {

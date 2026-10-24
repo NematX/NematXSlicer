@@ -37,6 +37,30 @@
 #include "OG_CustomCtrl.hpp"
 #include "Plater.hpp"
 #include "Tab.hpp"
+
+/*
+Build a settings form from configuration option definitions. OptionsGroup
+chooses a Field specialization, places it in a row, then connects validated edits
+to the group's value/change callbacks. ConfigOptionsGroup adds access to an
+actual configuration store; the row layout and the stored option value remain
+different responsibilities.
+
+Field creation uses gui_type before falling back to the option's value type.
+This lets path, choice and other specialized editors reuse ordinary setting
+definitions without publishing an extra global option. Widgets are parent-owned
+and all layout/validation callbacks run on the GUI thread.
+
+Representative direct calls (branches are not a timeline):
+
+    OptionsGroup::activate_line()
+        |-- opt.sidetext_is_file_filter()
+        |-- build_field()
+        |-- field->create_enable_widget()
+        `-- option.sidetext_is_file_filter()
+
+    OptionsGroup::build_field()
+        `-- field->set_edit_tooltip()
+*/
 namespace Slic3r { namespace GUI {
 
 const t_field& OptionsGroup::build_field(const Option& opt) {
@@ -66,6 +90,14 @@ const t_field& OptionsGroup::build_field(const OptionKeyIdx& key_idx, const Conf
     case ConfigOptionDef::GUIType::legend: // StaticText
         m_fields.emplace(key_idx, StaticText::Create<StaticText>(this->ctrl_parent(), opt, key_idx));
         break;
+    case ConfigOptionDef::GUIType::save_path:
+    case ConfigOptionDef::GUIType::open_path:
+        // A path is a string; for any other type of option, the field of the type is the only one that can edit it.
+        if (opt.type == coString) {
+            m_fields.emplace(key_idx, PathCtrl::Create<PathCtrl>(this->ctrl_parent(), opt, key_idx));
+            break;
+        }
+        [[fallthrough]];
     default:
         switch (opt.type) {
             case coFloatOrPercent:
@@ -340,8 +372,8 @@ void OptionsGroup::activate_line(Line& line)
 
 	// if we have a single option with no label, no sidetext just add it directly to sizer
     if (option_set.size() == 1 && title_width == 0 && option_set.front().opt.full_width &&
-		option_set.front().opt.sidetext.size() == 0 && option_set.front().side_widget == nullptr &&
-		line.get_extra_widgets().size() == 0) {
+		(option_set.front().opt.sidetext.empty() || option_set.front().opt.sidetext_is_file_filter()) &&
+		option_set.front().side_widget == nullptr && line.get_extra_widgets().size() == 0) {
 
 		const auto& option = option_set.front();
 		const auto& field = build_field(option);
@@ -419,7 +451,8 @@ void OptionsGroup::activate_line(Line& line)
     }
 
     // If we have a single option with no sidetext just add it directly to the grid sizer
-    if (option_set.size() == 1 && option_set.front().opt.sidetext.size() == 0 &&
+    if (option_set.size() == 1 &&
+        (option_set.front().opt.sidetext.empty() || option_set.front().opt.sidetext_is_file_filter()) &&
         option_set.front().opt.label.size() == 0 && option_set.front().side_widget == nullptr &&
         line.get_extra_widgets().size() == 0 && !option_set.front().opt.can_be_disabled) {
         const auto& option = option_set.front();
@@ -487,10 +520,11 @@ void OptionsGroup::activate_line(Line& line)
                 h_sizer->Add(field->getSizer(), 0, wxALIGN_CENTER_VERTICAL, 0) :
                 h_sizer->Add(field->getWindow(), 0, wxALIGN_CENTER_VERTICAL, 0);
 
-            // add sidetext if any
-            if ((!option.sidetext.empty() || sidetext_width > 0) && option.sidetext_width != 0){
+            // add sidetext if any (the sidetext of a path is a file filter, not a text to show)
+            const bool has_sidetext = !option.sidetext.empty() && !option.sidetext_is_file_filter();
+            if ((has_sidetext || sidetext_width > 0) && option.sidetext_width != 0){
                 wxString textstring;
-                if(!option.sidetext.empty())
+                if(has_sidetext)
                     if (option.sidetext.at(option.sidetext.size() - 1) != '_') {
                         textstring = I18N::translate_in_domain(option.sidetext, option.translation_domain, option.untranslated);
                     } else {

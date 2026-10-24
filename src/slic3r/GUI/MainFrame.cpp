@@ -71,6 +71,27 @@
 #include <shlobj.h>
 #endif // _WIN32
 
+/*
+MainFrame owns the application's main windows and menus. Construction connects
+menu commands to Plater actions; update handlers decide which commands are
+available from current GUI state. The frame requests work from Plater rather
+than running slicing or a file exporter from a menu callback.
+
+Representative direct calls (branches are not a timeline):
+
+    MainFrame::MainFrame()
+        |-- init_tabpanel()
+        |-- init_menubar_as_gcodeviewer()
+        |-- update_layout()
+        |-- Bind()
+        `-- update_ui_from_settings()
+
+    MainFrame::update_menubar()
+        |-- printer_technology()
+        |-- SetItemLabel()
+        `-- m_menubar->EnableTop()
+*/
+
 namespace Slic3r {
 namespace GUI {
 
@@ -249,6 +270,15 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxDEFAULT_FRAME_S
         //std::cout << "Not closing!\n";
         //event.Veto();
         //return;
+
+        // The dialog of the inputs of an export is modal and a child of this window: the window cannot be destroyed under it.
+        // The dialog is asked to cancel, the closing is refused for now and asked again, with the same force, once the dialog
+        // (and the windows it opened) have returned.
+        if (m_plater != nullptr && m_plater->close_export_inputs_dialog([this, force = !event.CanVeto()]() { Close(force); }, !event.CanVeto(), true)) {
+            if (event.CanVeto())
+                event.Veto();
+            return;
+        }
 
         if (event.CanVeto() && m_plater->canvas3D()->get_gizmos_manager().is_in_editing_mode(true)) {
             // prevents to open the save dirty project dialog
@@ -919,6 +949,7 @@ void MainFrame::shutdown()
 #endif // _WIN32
 
     if (m_plater != nullptr) {
+
         m_plater->get_ui_job_worker().cancel_all();
 
         //close calibration dialog if opened

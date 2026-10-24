@@ -19,6 +19,26 @@
 #include "I18N.hpp"
 #include "OptionsGroup.hpp"
 #include "Plater.hpp"
+
+/*
+Render and interact with an options group's custom row layout. OG_CustomCtrl
+draws row text, icons and state indicators, lays out the group's child fields,
+and turns mouse/keyboard events into the group's editing actions. Field objects
+own value parsing and validation; this panel does not serialize preset values.
+
+The wxWidgets parent owns the controls. Rebuild layout when visibility, labels
+or field size changes, and perform drawing and widget interaction on the UI thread.
+
+Representative direct calls (branches are not a timeline):
+
+    OG_CustomCtrl::CtrlLine::render()
+        |-- render_separator()
+        |-- draw_mode_bmp()
+        |-- draw_act_bmps()
+        |-- draw_edit_bmp()
+        |-- draw_text()
+        `-- draw_blinking_bmp()
+*/
 namespace Slic3r { namespace GUI {
 
 static bool is_point_in_rect(const wxPoint& pt, const wxRect& rect)
@@ -103,8 +123,8 @@ void OG_CustomCtrl::init_ctrl_lines()
 
         // if we have a single option with no label, no sidetext just add it directly to sizer
         if (option_set.size() == 1 && opt_group->title_width == 0 && option_set.front().opt.full_width &&
-            option_set.front().opt.sidetext.size() == 0 && option_set.front().side_widget == nullptr &&
-            line.get_extra_widgets().size() == 0)
+            (option_set.front().opt.sidetext.empty() || option_set.front().opt.sidetext_is_file_filter()) &&
+            option_set.front().side_widget == nullptr && line.get_extra_widgets().size() == 0)
         {
             height = m_bmp_blinking_sz.GetHeight() + m_v_gap;
             ctrl_lines.emplace_back(CtrlLine(height, this, line, true));
@@ -191,7 +211,8 @@ wxPoint OG_CustomCtrl::get_pos(const Line& line, Field* field_in/* = nullptr*/)
 
             // If we have a single option with no sidetext
             const std::vector<Option>& option_set = line.get_options();
-            if (option_set.size() == 1 && option_set.front().opt.sidetext.size() == 0 &&
+            if (option_set.size() == 1 &&
+                (option_set.front().opt.sidetext.empty() || option_set.front().opt.sidetext_is_file_filter()) &&
                 option_set.front().opt.label.size() == 0 && option_set.front().side_widget == nullptr &&
                 line.get_extra_widgets().size() == 0)
             {
@@ -293,8 +314,9 @@ wxPoint OG_CustomCtrl::get_pos(const Line& line, Field* field_in/* = nullptr*/)
                 if (option_set.size() == 1 && option_set.front().opt.full_width)
                     break;
 
-                // add sidetext if any
-                if ((!option.sidetext.empty() || opt_group->sidetext_width > 0 || option.sidetext_width > 0) && option.sidetext_width != 0)
+                // add sidetext if any (the sidetext of a path is a file filter, not a text to show)
+                const bool has_sidetext = !option.sidetext.empty() && !option.sidetext_is_file_filter();
+                if ((has_sidetext || opt_group->sidetext_width > 0 || option.sidetext_width > 0) && option.sidetext_width != 0)
                     h_pos += (option.sidetext_width > 0 ? option.sidetext_width : opt_group->sidetext_width)* m_em_unit + m_h_gap;
 
                 if (opt.opt_key != option_set.back().opt_key || opt.opt_idx != option_set.back().opt_idx) //! instead of (opt != option_set.back())
@@ -786,7 +808,8 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord v_pos)
     // so we need a horizontal sizer to arrange these things
 
     // If we have a single option with no sidetext just add it directly to the grid sizer
-    if (option_set.size() == 1 && option_set.front().opt.sidetext.size() == 0 &&
+    if (option_set.size() == 1 &&
+        (option_set.front().opt.sidetext.empty() || option_set.front().opt.sidetext_is_file_filter()) &&
         option_set.front().opt.label.size() == 0 && option_set.front().side_widget == nullptr &&
         og_line.get_extra_widgets().size() == 0)
     {
@@ -798,8 +821,14 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord v_pos)
             else
                 h_pos += 2 * blinking_button_width;
             // update width for full_width fields
-            if (option_set.front().opt.full_width && front_field->getWindow())
-                front_field->getWindow()->SetSize(ctrl->GetSize().x - h_pos, -1);
+            if (option_set.front().opt.full_width && front_field->getWindow()) {
+                // A field with controls after the main one (the button of a path) leaves room for them, and they move
+                // to follow the main control.
+                const int extra_width = front_field->extra_width();
+                front_field->getWindow()->SetSize(ctrl->GetSize().x - h_pos - (extra_width > 0 ? extra_width + ctrl->m_h_gap : 0), -1);
+                if (extra_width > 0 && front_field->getSizer())
+                    ctrl->correct_widgets_position(front_field->getSizer(), og_line, front_field);
+            }
         }
         return;
     }
@@ -870,9 +899,10 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord v_pos)
         if (option_set.size() == 1 && option_set.front().opt.full_width)
             break;
 
-        // add sidetext if any
-        if ( (!option.sidetext.empty() || ctrl->opt_group->sidetext_width > 0 || option.sidetext_width > 0 ) && option.sidetext_width != 0)
-            h_pos = draw_text(dc, wxPoint(h_pos, v_pos), I18N::translate_in_domain(option.sidetext, option.translation_domain, option.untranslated), option_tooltip, nullptr, (option.sidetext_width > 0 ? option.sidetext_width : ctrl->opt_group->sidetext_width ) * ctrl->m_em_unit);
+        // add sidetext if any (the sidetext of a path is a file filter, not a text to show)
+        const bool has_sidetext = !option.sidetext.empty() && !option.sidetext_is_file_filter();
+        if ( (has_sidetext || ctrl->opt_group->sidetext_width > 0 || option.sidetext_width > 0 ) && option.sidetext_width != 0)
+            h_pos = draw_text(dc, wxPoint(h_pos, v_pos), has_sidetext ? I18N::translate_in_domain(option.sidetext, option.translation_domain, option.untranslated) : wxString(), option_tooltip, nullptr, (option.sidetext_width > 0 ? option.sidetext_width : ctrl->opt_group->sidetext_width ) * ctrl->m_em_unit);
 
         if (opt.opt_key != option_set.back().opt_key || opt.opt_idx != option_set.back().opt_idx) //! istead of (opt != option_set.back())
             h_pos += lround(0.6 * ctrl->m_em_unit);

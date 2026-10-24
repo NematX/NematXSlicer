@@ -17,12 +17,17 @@
 #include "GUI.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
+#include "ExportInputsDialog.hpp"
+#include "Field.hpp"
+#include "MsgDialog.hpp"
+#include "libslic3r/Api/host/ExportInputs.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 
 #include <wx/app.h>
 #include <wx/panel.h>
 #include <wx/stdpaths.h>
+#include <wx/weakref.h>
 
 // For zipped archive creation
 #include <wx/stdstream.h>
@@ -213,8 +218,7 @@ std::string BackgroundSlicingProcess::output_filepath_for_project(
                                     default_extension);
 }
 
-// This function may one day be merged into the Print, but historically the print was separated
-// from the G-code generator.
+// Run m_fff_print, publish m_temp_output_path for preview, finalize a queued file export or upload, and propagate print, exporter, and cancellation failures.
 void BackgroundSlicingProcess::process_fff()
 {
 	assert(m_print == m_fff_print);
@@ -227,7 +231,7 @@ void BackgroundSlicingProcess::process_fff()
 	// The preview needs only the G-code reference: thumbnails are rendered by the export, when a file is written.
 	Orchestrator::instance().export_gcode(*m_fff_print, m_temp_output_path, m_gcode_result);
 	if (this->set_step_started(bspsGCodeFinalize)) {
-	    if (! m_export_path.empty()) {
+	    if (m_fff_export_scheduled) {
 			wxQueueEvent(GUI::wxGetApp().mainframe->m_plater, new wxCommandEvent(m_event_export_began_id));
 			finalize_gcode();
 	    } else if (! m_upload_job.empty()) {
@@ -646,14 +650,48 @@ bool BackgroundSlicingProcess::execute_ui_task(std::function<void()> task)
 	return result;
 }
 
-// To be called on the UI thread from ::stop() and ::stop_internal().
+// Under m_mutex on the UI thread, mark the shared task cancelled, wake its worker, and invoke requester cancellation without touching windows; forms queue cancellation and native pickers observe it after returning.
 void BackgroundSlicingProcess::cancel_ui_task(std::shared_ptr<UITask> task)
 {
+	assert(wxIsMainThread());
 	if (task) {
 		std::unique_lock<std::mutex> lck(task->mutex);
 		task->state = UITask::Canceled;
 		lck.unlock();
 		task->condition.notify_all();
+		// The task may be inside the form or native picker; the callback requests cancellation without touching windows while the callers hold locks.
+		if (m_close_inputs_dialog)
+			m_close_inputs_dialog();
+	}
+}
+
+// On the UI thread outside locks, request cancellation and move an accepted continuation into process state until return; application then forced closing takes precedence, and false means none is open.
+bool BackgroundSlicingProcess::close_inputs_dialog(std::function<void()> after, bool forced, bool closing)
+{
+	if (!m_close_inputs_dialog)
+		return false;
+	// A closing of the application wins over another kind of continuation (the recreation of the GUI); between closings a forced
+	// one wins; otherwise the first request is kept.
+	const bool replace = !m_after_inputs_dialog || (closing && !m_after_inputs_closing) ||
+		(closing && forced && !m_after_inputs_forced);
+	if (after && replace) {
+		m_after_inputs_dialog = std::move(after);
+		m_after_inputs_closing = closing;
+		m_after_inputs_forced = forced;
+	}
+	m_close_inputs_dialog();
+	return true;
+}
+
+// On the UI thread, clear the requester's closer, move its continuation to the event queue after task return, and clear continuation flags.
+void BackgroundSlicingProcess::end_inputs_dialog()
+{
+	m_close_inputs_dialog = nullptr;
+	if (m_after_inputs_dialog) {
+		GUI::wxGetApp().CallAfter(std::move(m_after_inputs_dialog));
+		m_after_inputs_dialog = nullptr;
+		m_after_inputs_closing = false;
+		m_after_inputs_forced = false;
 	}
 }
 
@@ -706,33 +744,48 @@ void BackgroundSlicingProcess::set_task(const PrintBase::TaskParams &params)
 	m_print->set_task(params);
 }
 
-// Set the output path of the G-code.
-void BackgroundSlicingProcess::schedule_export(const std::string &path, bool export_path_on_removable_media)
-{ 
-	assert(m_export_path.empty());
-	if (! m_export_path.empty())
+// Copy the supplied SLA destination and invalidate finalization under the print state lock; leave pending work unchanged when an export or upload is already queued.
+void BackgroundSlicingProcess::schedule_export(const std::string &path)
+{
+	assert(!this->is_export_scheduled() && m_upload_job.empty());
+	if (this->is_export_scheduled() || !m_upload_job.empty())
 		return;
 
-	// Guard against entering the export step before changing the export path.
 	std::scoped_lock<std::mutex> lock(m_print->state_mutex());
 	this->invalidate_step(bspsGCodeFinalize);
 	m_export_path = path;
-	m_export_path_on_removable_media = export_path_on_removable_media;
 }
 
-void BackgroundSlicingProcess::schedule_upload(Slic3r::PrintHostJob upload_job)
+// Copy the FFF suggestion directory and base, store the ASCII-fallback flag, and invalidate finalization under the print state lock; leave pending work unchanged when another export or upload is queued.
+void BackgroundSlicingProcess::schedule_fff_export(const std::string &suggestion_directory,
+                                                   const std::string &suggestion_filename_base,
+                                                   bool ascii_fallback)
 {
-	assert(m_export_path.empty());
-	if (! m_export_path.empty())
+	assert(!this->is_export_scheduled() && m_upload_job.empty());
+	if (this->is_export_scheduled() || !m_upload_job.empty())
 		return;
 
-	// Guard against entering the export step before changing the export path.
 	std::scoped_lock<std::mutex> lock(m_print->state_mutex());
 	this->invalidate_step(bspsGCodeFinalize);
-	m_export_path.clear();
+	m_fff_export_suggestion_directory = suggestion_directory;
+	m_fff_export_suggestion_filename_base = suggestion_filename_base;
+	m_fff_export_suggestion_ascii_fallback = ascii_fallback;
+	m_fff_export_scheduled = true;
+}
+
+// Move the upload job into the pending request and invalidate finalization under the print state lock; leave pending work unchanged when an export or upload is already queued.
+void BackgroundSlicingProcess::schedule_upload(Slic3r::PrintHostJob upload_job)
+{
+	assert(!this->is_export_scheduled() && m_upload_job.empty());
+	if (this->is_export_scheduled() || !m_upload_job.empty())
+		return;
+
+	std::scoped_lock<std::mutex> lock(m_print->state_mutex());
+	this->invalidate_step(bspsGCodeFinalize);
 	m_upload_job = std::move(upload_job);
 }
 
+// When the worker is idle, clear the SLA destination and FFF suggestions and invalidate finalization under the print state lock; leave them unchanged while the worker is running.
 void BackgroundSlicingProcess::reset_export()
 {
 	bool running = true;
@@ -745,7 +798,10 @@ void BackgroundSlicingProcess::reset_export()
 	}
 	if (!running) {
 		m_export_path.clear();
-		m_export_path_on_removable_media = false;
+		m_fff_export_scheduled = false;
+		m_fff_export_suggestion_directory.clear();
+		m_fff_export_suggestion_filename_base.clear();
+		m_fff_export_suggestion_ascii_fallback = false;
 		// invalidate_step expects the mutex to be locked.
 		std::scoped_lock<std::mutex> lock(m_print->state_mutex());
 		this->invalidate_step(bspsGCodeFinalize);
@@ -778,67 +834,18 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 	return m_step_state.invalidate_all([this](){ this->stop_internal(); });
 }
 
-// Export the generated reference with the exporter chosen in the printer profile into a private file (the exporter writes the
-// header, notes and thumbnails, rendered here through render_thumbnails), then copy it to the user destination. The post-processing
-// scripts have already modified the reference in STEP_GCODE, so they are not run here. The export is a STEP_EXPORT request
-// deposited in the print: it carries a configuration copy taken under the print state mutex. The private file is removed on
-// every path, including a cancellation after the export wrote it; export and copy failures propagate. Limit: only the private
-// path that was requested is removed. An exporter that reports another local file has it copied, but nothing deletes it.
+// Build a single-use STEP_EXPORT request from the FFF Print's configuration and a renderer borrowing this process; attach the GUI input callback and path suggestions, deposit it on the Print, and propagate export failures.
 void BackgroundSlicingProcess::finalize_gcode()
 {
-	// The request holds the configuration copy (taken under the print state mutex) that selects the exporter and
-	// that the exporter reads, and the renderer of the thumbnails.
 	Print::ExportRequest request = m_fff_print->make_export_request(
 		[this](const ThumbnailsParams &params) { return this->render_thumbnails(params); });
-	const Orchestrator::GCodeExporterSelection selection =
-		Orchestrator::instance().select_gcode_exporter(*m_fff_print, request.config);
-	boost::filesystem::path requested_path(m_export_path);
-	if (requested_path.extension().empty())
-		requested_path += selection.extension;
-	const std::string export_path = m_fff_print->print_statistics().finalize_output_path(requested_path.string());
-	// The exported file is a separate copy that the G-code viewer never maps (the viewer maps the reference, m_temp_output_path,
-	// and m_gcode_result refers to lines of that file).
-	const std::string private_path = selection.temporary_path(".slic3r-export-");
-	ScopedTemporaryFile private_file(private_path);
-	request.set_output_path(private_path);
+	request.inputs = [this](ExportInputForm &form) { return this->request_export_inputs(form); };
+	request.output_path_suggestion_directory = m_fff_export_suggestion_directory;
+	request.output_path_suggestion_filename_base = m_fff_export_suggestion_filename_base;
+	request.output_path_suggestion_ascii_fallback = m_fff_export_suggestion_ascii_fallback;
 	m_fff_print->request_export(std::move(request));
 	Orchestrator::instance().export_requested(*m_fff_print);
-	const std::string exported_path = m_fff_print->export_result().local_path;
-	if (exported_path.empty())
-		throw Slic3r::ExportError(_u8L("The selected G-code exporter did not write a local file."));
-
-	//FIXME localize the messages
-	std::string error_message;
-	int copy_ret_val = CopyFileResult::SUCCESS;
-	try {
-		copy_ret_val = copy_file(exported_path, export_path, error_message, m_export_path_on_removable_media);
-	} catch (...) {
-		throw Slic3r::ExportError(_u8L("Unknown error occured during exporting G-code."));
-	}
-	switch (copy_ret_val) {
-	case CopyFileResult::SUCCESS: break; // no error
-	case CopyFileResult::FAIL_COPY_FILE:
-		throw Slic3r::ExportError(GUI::format(_L("Copying of the temporary G-code to the output G-code failed. Maybe the SD card is write locked?\nError message: %1%"), error_message));
-		break;
-	case CopyFileResult::FAIL_FILES_DIFFERENT:
-		throw Slic3r::ExportError(GUI::format(_L("Copying of the temporary G-code to the output G-code failed. There might be problem with target device, please try exporting again or using different device. The corrupted output G-code is at %1%.tmp."), export_path));
-		break;
-	case CopyFileResult::FAIL_RENAMING:
-		throw Slic3r::ExportError(GUI::format(_L("Renaming of the G-code after copying to the selected destination folder has failed. Current path is %1%.tmp. Please try exporting again."), export_path));
-		break;
-	case CopyFileResult::FAIL_CHECK_ORIGIN_NOT_OPENED:
-		throw Slic3r::ExportError(GUI::format(_L("Copying of the temporary G-code has finished but the original code at %1% couldn't be opened during copy check. The output G-code is at %2%.tmp."), exported_path, export_path));
-		break;
-	case CopyFileResult::FAIL_CHECK_TARGET_NOT_OPENED:
-		throw Slic3r::ExportError(GUI::format(_L("Copying of the temporary G-code has finished but the exported code couldn't be opened during copy check. The output G-code is at %1%.tmp."), export_path));
-		break;
-	default:
-		throw Slic3r::ExportError(_u8L("Unknown error occured during exporting G-code."));
-		BOOST_LOG_TRIVIAL(error) << "Unexpected fail code(" << (int)copy_ret_val << ") durring copy_file() to " << export_path << ".";
-		break;
-	}
-
-	m_print->set_status(100, GUI::format(_L("G-code file exported to %1%"), export_path));
+	m_print->set_status(100, _u8L("G-code export finished."));
 }
 
 // Export the generated reference with the profile's exporter (thumbnails rendered through render_thumbnails) into a private upload file
@@ -857,6 +864,7 @@ void BackgroundSlicingProcess::prepare_upload()
 		// The request holds the configuration copy (taken under the print state mutex) and the thumbnail renderer.
 		Print::ExportRequest request = m_fff_print->make_export_request(
 			[this](const ThumbnailsParams &params) { return this->render_thumbnails(params); });
+		request.inputs = [this](ExportInputForm &form) { return this->request_export_inputs(form); };
 		const Orchestrator::GCodeExporterSelection selection =
 			Orchestrator::instance().select_gcode_exporter(*m_fff_print, request.config);
 		// The temporary path must end with the exporter extension, otherwise the random part would be taken for a suffix.
@@ -900,6 +908,79 @@ ThumbnailsList BackgroundSlicingProcess::render_thumbnails(const ThumbnailsParam
 	if (m_thumbnail_cb)
 		this->execute_ui_task([this, &params, &thumbnails](){ thumbnails = m_thumbnail_cb(params); });
 	return thumbnails;
+}
+
+namespace {
+// Data shared by the export-input requester and its waiting worker. A cancelled worker can return while the UI task is still in a
+// form or native picker, so the task retains this exchange until it finishes and the worker reads it only after successful completion.
+struct ExportInputsExchange
+{
+	// Copy of the form the requester works on; on validation it holds the answers.
+	ExportInputForm form;
+	// Whether the user validated the requester.
+	bool            validated = false;
+	// Whether stop or application closing asked the native picker to cancel after it returns.
+	bool            cancellation_requested = false;
+	// Message of the exception that stopped the requester, empty when there was none.
+	std::string     error;
+};
+} // namespace
+
+// Copy the caller's form into shared UI-task storage, use the native picker for is_single_path_input() or ExportInputsDialog otherwise, and move answers back only after validation; a cancelled worker leaves the exchange to the UI task, whose exceptions are rethrown here.
+bool BackgroundSlicingProcess::request_export_inputs(ExportInputForm &form)
+{
+	std::shared_ptr<ExportInputsExchange> exchange = std::make_shared<ExportInputsExchange>();
+	exchange->form = form;
+	const bool completed = this->execute_ui_task([this, exchange]() {
+		try {
+			if (is_single_path_input(exchange->form.definitions)) {
+				m_close_inputs_dialog = [exchange]() { exchange->cancellation_requested = true; };
+				const ConfigOptionDef &definition = exchange->form.definitions.front();
+				ConfigOptionString *path_option = exchange->form.values.option<ConfigOptionString>(definition.opt_key);
+				while (!exchange->cancellation_requested) {
+					if (!GUI::PathCtrl::choose_path(GUI::wxGetApp().mainframe, definition, path_option->value, false, {}))
+						break;
+					if (exchange->cancellation_requested)
+						break;
+					if (definition.gui_type == ConfigOptionDef::GUIType::save_path) {
+						const boost::filesystem::path selected_path = GUI::into_path(GUI::from_u8(path_option->value));
+						if (!GUI::validate_export_save_filename(GUI::wxGetApp().mainframe, selected_path.filename().string())) {
+							if (exchange->cancellation_requested)
+								break;
+							continue;
+						}
+					}
+					exchange->validated = true;
+					break;
+				}
+			} else {
+				GUI::ExportInputsDialog dialog(GUI::wxGetApp().mainframe, exchange->form);
+				wxWeakRef<GUI::ExportInputsDialog> weak_dialog(&dialog);
+				m_close_inputs_dialog = [weak_dialog]() {
+					GUI::wxGetApp().CallAfter([weak_dialog]() {
+						if (GUI::ExportInputsDialog *open_dialog = weak_dialog.get())
+							open_dialog->request_cancel();
+					});
+				};
+				const int result = dialog.ShowModal();
+				exchange->validated = result == wxID_OK;
+				exchange->error     = dialog.error();
+			}
+		} catch (const std::exception &ex) {
+			exchange->error = ex.what();
+		} catch (...) {
+			exchange->error = "Unknown error while asking for the inputs of the export.";
+		}
+		this->end_inputs_dialog();
+	});
+	if (!completed)
+		return false;
+	if (!exchange->error.empty())
+		throw Slic3r::RuntimeError(exchange->error);
+	if (!exchange->validated)
+		return false;
+	form.values = std::move(exchange->form.values);
+	return true;
 }
 
 }; // namespace Slic3r

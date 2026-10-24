@@ -44,6 +44,20 @@
 #define wxMSW false
 #endif
 
+/*
+Field and its specializations turn one configuration option into a GUI editor.
+The option definition chooses the widget and supplies its bounds, labels and
+display hints; the field parses the user's edit and reports a typed value to
+its options group. Validation and change notification are separate from saving
+the configuration to a preset or file.
+
+Create fields through the owning group's factory, then use their value and
+validation callbacks rather than reading widget text directly. Path fields add
+file selection to a string editor; their filter text is UI metadata, not the
+value stored for the setting. Widgets stay on the UI thread and belong to their
+wxWidgets parent.
+*/
+
 namespace Slic3r { namespace GUI {
 
 class Field;
@@ -370,6 +384,9 @@ public:
 
     virtual void msw_rescale();
     virtual void sys_color_changed();
+    // Width in pixels of the controls that follow the main one (getWindow()) in a field made of several controls.
+    // A full width field leaves that room to them.
+    virtual int  extra_width() const { return 0; }
 
     bool get_enter_pressed() const { return bEnterPressed; }
     void set_enter_pressed(bool pressed) { bEnterPressed = pressed; }
@@ -435,6 +452,7 @@ public:
 	TextCtrl(wxWindow* parent, const ConfigOptionDef& opt, const OptionKeyIdx &key_idx) : TextField(parent, opt, key_idx) {}
 	~TextCtrl() {}
 
+    // Build the text widget from the field's copied definition; only the window parent is borrowed.
     void BUILD() override;
     bool value_was_changed();
     // Propagate value from field to the OptionGroupe and Config after kill_focus/ENTER
@@ -446,13 +464,76 @@ public:
 
 	boost::any&		get_value() override;
 
+    // Reapply the configured or virtual text width after the parent em unit changes.
     void            msw_rescale() override;
     
     void			widget_enable() override;
     void			widget_disable() override;
     wxWindow* 		getWindow() override { return window; }
+
+protected:
+    // Width of the text control, in em units, when the option does not set one.
+    virtual int     default_width() const { return def_width(); }
 };
 
+// Text field holding a file path, followed by a "Browse" button that opens a file dialog.
+// It is the field of the save_path and open_path GUI types on a string option. The text control stays `window`,
+// so every text access of TextCtrl keeps working; getSizer() exposes the text control and the button as direct
+// children of a horizontal sizer, which is what the layout of the option groups expects of a field made of two controls.
+class PathCtrl : public TextCtrl {
+public:
+    // Field of the option `opt`; the controls are built by BUILD().
+    PathCtrl(const ConfigOptionDef &opt, const OptionKeyIdx &key_idx) : TextCtrl(opt, key_idx) {}
+    // Same, with the parent window of the controls.
+    PathCtrl(wxWindow *parent, const ConfigOptionDef &opt, const OptionKeyIdx &key_idx) : TextCtrl(parent, opt, key_idx) {}
+    // Frees the sizer when nothing else owns it (see the comment of the definition).
+    ~PathCtrl() override;
+
+    // Build the text control, then the button, and gather them in the sizer.
+    void BUILD() override;
+
+    // Called with the message of an error raised while browsing. When empty, the error is logged and shown to the user.
+    std::function<void(const std::string &)> m_on_browse_error;
+    // Called with true when the file dialog opens and with false once it has closed, so that the owner of the field knows
+    // that a modal window it cannot control is open on top of it.
+    std::function<void(bool)> m_on_browse_modal;
+    // Let a parent form confirm overwrites after all fields are validated instead of in the file picker.
+    bool m_defer_overwrite_confirmation = false;
+
+    // Rescale both controls while keeping the text control's minimum width ordinary.
+    void msw_rescale() override;
+    // Set the text control's minimum width to one ordinary field width at the current scale.
+    void set_minimum_width();
+    // Update the colors of the text control and the button.
+    void sys_color_changed() override;
+    // Enable the text control and the button together.
+    void widget_enable() override;
+    // Disable the text control and the button together.
+    void widget_disable() override;
+    // The text control and the button, as direct children of one horizontal sizer.
+    wxSizer *getSizer() override { return m_sizer; }
+    // The room taken by the button.
+    int extra_width() const override;
+
+    // Use the borrowed parent and path definition to update a UTF-8 path on selection; false means cancellation, and picker failures propagate.
+    static bool choose_path(wxWindow *parent, const ConfigOptionDef &option, std::string &value,
+                            bool defer_overwrite_confirmation, const std::function<void(bool)> &on_modal);
+
+protected:
+    // Return eight ordinary text-field widths for a path unless the definition supplies a width.
+    int default_width() const override { return 8 * def_width(); }
+
+private:
+    // Let the user pick a file; a chosen path replaces the field value and is propagated like a typed one.
+    void browse();
+    // Pass an error of browse() to m_on_browse_error, or log it and show it when nobody handles it.
+    void report_browse_error(const std::string &message);
+
+    // Horizontal sizer holding `window` and m_button.
+    wxBoxSizer     *m_sizer  { nullptr };
+    // The "Browse" button.
+    ScalableButton *m_button { nullptr };
+};
 class CheckBox : public Field {
 	using Field::Field;
 public:

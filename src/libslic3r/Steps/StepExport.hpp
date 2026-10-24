@@ -22,19 +22,16 @@ STEP_EXPORT runner
 STEP_EXPORT hands the G-code reference that STEP_GCODE prepared to the selected
 exporter plugin, which publishes it (a file, a stream or anything else). It runs
 only when a caller deposited an export request in the Print
-(Print::request_export): the request carries the configuration copy, the
-destination (output_path) and the thumbnail renderer of this export alone.
+(Print::request_export): the request carries the configuration copy, an
+optional destination, optional proposed directory and filename base, optional ASCII
+filename fallback, and thumbnail renderer of this export alone.
 
 The step reads the reference and never changes it. It does not replay any
 earlier step: when the reference is not ready (never produced, invalidated since
 the request, or regenerated meanwhile) the export fails and writes nothing.
 */
 
-// Move the pending request out of the Print, then verify the reference and export it with the exporter that the
-// request configuration selects (one QUERY). What the exporter reports is stored in the Print (Print::set_export_result)
-// as soon as it reports it. The runner does not check the destination: the exporter does. Throws RuntimeError when no
-// request was deposited or when the reference is not a ready regular file; exporter failures and cancellation propagate and leave the
-// request consumed. Locking: each Print access takes state_mutex() on its own; the caller must not hold it.
+// Consume one request, verify the ready G-code reference, form the request's file suggestion from an existing proposed directory and optional base, then run its selected exporter.
 void run_step(Orchestrator &orchestrator, Print &print);
 
 } // namespace Steps::StepExport
