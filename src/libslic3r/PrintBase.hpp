@@ -592,7 +592,7 @@ protected:
     // Wrapper around this->throw_if_canceled(), so that throw_if_canceled() may be passed to a function without making throw_if_canceled() public.
     PrintTryCancel         make_try_cancel() const { return PrintTryCancel(this); }
 
-    // To be called by this->output_filename() with the format string pulled from the configuration layer.
+    // Expand the configured format and filter filename text while preserving late variables and the extension.
     std::string            output_filename(const std::string &format, const std::string &default_ext, const std::string &filename_base, const DynamicConfig *config_override = nullptr) const;
 
 	Model                                   m_model;

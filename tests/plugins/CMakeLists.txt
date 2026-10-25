@@ -119,6 +119,7 @@ add_executable(${_TEST_NAME}_tests
     test_plugin_storage.cpp
     test_polygon_simplify.cpp
     test_polyholes.cpp
+    test_output_filename.cpp
     test_printing_plan.cpp
     test_print_status_queue.cpp
     test_skirt_brim_default_generator.cpp

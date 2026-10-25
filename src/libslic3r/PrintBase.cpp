@@ -4,6 +4,9 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// PrintBase prepares model placeholders and output paths shared by print implementations.
+// Output names preserve late variables (brace-delimited names resolved from print statistics)
+// while filtering the surrounding text before the extension is appended.
 #include "PrintBase.hpp"
 
 #include <regex>
@@ -63,8 +66,9 @@ void PrintBase::update_object_placeholders(DynamicConfig &config, const std::str
     }
 }
 
-// Generate an output file name based on the format template, default extension, and template parameters
-// (timestamps, object placeholders derived from the model, current placeholder prameters, print statistics - config_override)
+// Expand borrowed format and configuration inputs, filter text around late variables, and return an owned name;
+// preserve explicit extensions, use 0 for absent or non-integer initial_extruder options, propagate std::invalid_argument
+// for integer values outside [-1, 32767], and wrap runtime formatting failures as PlaceholderParserError.
 std::string PrintBase::output_filename(const std::string &format, const std::string &default_ext, const std::string &filename_base, const DynamicConfig *config_override) const
 {
     DynamicConfig cfg;
@@ -96,38 +100,37 @@ std::string PrintBase::output_filename(const std::string &format, const std::str
         }
         if (!forbidden_base.empty()) {
             const std::string filename_init = filepath.stem().string();
-            std::string filename = filename_init;
+            std::string filename;
             std::string extension = filepath.extension().string();
-            //remove {print_time} and things like that that may be computed after, and re-put them inside it after the replace.
-            std::regex placehoder = std::regex("\\{[a-z_]+\\}");
-            std::smatch matches;
-            std::string::const_iterator searchStart(filename_init.cbegin());
-            while (std::regex_search(searchStart, filename_init.cend(), matches, placehoder)) {
-                for (size_t i = 0; i < matches.size(); i++) {
-                    filename.replace(matches.position(i), matches.length(i), matches.length(i), '_');
-                }
-                searchStart = matches.suffix().first;
-            }
-            //remove unwanted characters from the cleaned string
+            const std::regex placeholder("\\{[a-z_]+\\}");
+            std::regex forbidden_regex;
             bool regexp_used = false;
             if (forbidden_base.front() == '(' || forbidden_base.front() == '[') {
                 try {
-                    filename = std::regex_replace(filename, std::regex(forbidden_base), "_");
+                    forbidden_regex = std::regex(forbidden_base);
                     regexp_used = true;
                 }catch(std::exception){}
             }
-            if (!regexp_used) {
-                for(size_t i = 0; i < forbidden_base.size(); i++)
-                    std::replace(filename.begin(), filename.end(), forbidden_base.at(i), '_');
-            }
-            //re-put {print_time} and things like that
-            searchStart = (filename_init.cbegin());
-            while (std::regex_search(searchStart, filename_init.cend(), matches, placehoder)) {
-                for (size_t i = 0; i < matches.size(); i++) {
-                    filename.replace(matches.position(i), matches.length(i), matches.str());
+
+            // Filter each text segment independently: replacements may change its length, but late variables stay intact.
+            std::smatch matches;
+            std::string::const_iterator searchStart = filename_init.cbegin();
+            bool has_placeholder;
+            do {
+                has_placeholder = std::regex_search(searchStart, filename_init.cend(), matches, placeholder);
+                std::string segment(searchStart, has_placeholder ? matches[0].first : filename_init.cend());
+                if (regexp_used) {
+                    segment = std::regex_replace(segment, forbidden_regex, "_");
+                } else {
+                    for (size_t i = 0; i < forbidden_base.size(); ++i)
+                        std::replace(segment.begin(), segment.end(), forbidden_base.at(i), '_');
                 }
-                searchStart = matches.suffix().first;
-            }
+                filename += segment;
+                if (has_placeholder) {
+                    filename += matches.str();
+                    searchStart = matches.suffix().first;
+                }
+            } while (has_placeholder);
             // set the path var
             filepath = filename + extension;
         }
