@@ -255,7 +255,8 @@ public:
         // Input ranges are sorted lexicographically. First range trims the other ranges.
         coord_t last_z = 0;
         for (const std::pair<const t_layer_height_range, ModelConfig> &range : in_mm)
-            if (range.first.second > last_z) {
+            // The upper bound is in mm: it must be converted to the unit of last_z, otherwise every range after the first one is skipped.
+            if (scale_to_layer_coord(range.first.second) > last_z) {
                 coord_t min_z = std::max(scale_to_layer_coord(range.first.first), coord_t(0));
                 if (min_z > last_z + EPSILON) {
                     m_ranges.push_back({ std::pair<coord_t, coord_t>(last_z, min_z) });

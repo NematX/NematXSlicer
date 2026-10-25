@@ -20,6 +20,8 @@
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
+#include <cmath>
+#include <set>
 #include <vector>
 
 namespace {
@@ -456,4 +458,33 @@ TEST_CASE("Auxiliary fill-surface publication moves and clears but rejects objec
     CHECK(surfaces.size() == 1);
     CHECK(layer_region_island_set_fill_surfaces(nullptr, surfaces.mutable_handle()) == 0);
     CHECK(surfaces.size() == 1);
+}
+
+// Three height ranges of one object each override fill_density: PrintApply must create a printing region for every
+// range. Before the fix, LayerRanges::assign ignored every range after the first one.
+TEST_CASE("PrintApply applies every layer height range", "[plugins][regions][layer-ranges]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model = make_auxiliary_region_model(false, false, false);
+    // Every range config carries a layer height within the printer limits, which the height profile reads.
+    const auto range_config = [](const char *density) {
+        DynamicPrintConfig config = fill_density_config(density);
+        config.set_deserialize_strict("layer_height", "0.2");
+        return config;
+    };
+    for (ModelObject &object : model.objects()) {
+        object.layer_config_ranges[t_layer_height_range(0., 3.)].assign_config(range_config("10%"));
+        object.layer_config_ranges[t_layer_height_range(3., 6.)].assign_config(range_config("40%"));
+        object.layer_config_ranges[t_layer_height_range(6., 9.)].assign_config(range_config("70%"));
+    }
+    Print print;
+    init_print_from_model(model, print);
+
+    const PrintObject &object = print.object(0);
+    std::set<long> densities;
+    for (size_t idx = 0; idx < object.num_printing_regions(); ++idx)
+        densities.insert(std::lround(object.printing_region(idx).config().fill_density.value));
+    CHECK(densities.count(10) == 1);
+    CHECK(densities.count(40) == 1);
+    CHECK(densities.count(70) == 1);
 }
