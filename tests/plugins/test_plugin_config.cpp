@@ -27,6 +27,7 @@ the host log, independently of the returned registration status.
 #include <atomic>
 #include <cstdint>
 #include <cstring>
+#include <fstream>
 #include <initializer_list>
 #include <limits>
 #include <memory>
@@ -2290,4 +2291,370 @@ TEST_CASE("ConfigBase save writes the keys that have no definition",
             CHECK(has_config_line(text, "", volatile_key));
         }
     }
+}
+
+// compares_key follows the nature of the definition: every nature but BOOKKEEPING and VOLATILE is comparable, and a key or a
+// configuration without definition has no policy.
+TEST_CASE("Only the comparable natures take part in comparisons",
+          "[plugins][config][compare]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::pair<const char *, bool> expectations[] = {
+        {"layer_height", true}, {"print_host", true}, {"host_type", true}, {"inherits", true}, {"compatible_printers", true},
+        {"printer_model", true}, {"print_settings_id", false}, {"filament_settings_modified", false},
+        {"print_version", false}, {"test_config_nature_normal", true}, {"test_config_nature_local", true},
+        {"test_config_nature_bookkeeping", false}, {"test_config_nature_preset_meta", true},
+        {"test_config_nature_volatile", false}, {"undefined_nature_key", true},
+    };
+    Slic3r::DynamicPrintConfig config;
+    for (const std::pair<const char *, bool> &expectation : expectations) {
+        CAPTURE(expectation.first);
+        CHECK_NOTHROW(config.compares_key(expectation.first));
+        CHECK(config.compares_key(expectation.first) == expectation.second);
+    }
+    // Without definition there is no policy, even for a key that a definition refuses.
+    Slic3r::DynamicConfig without_definition;
+    REQUIRE(without_definition.def() == nullptr);
+    CHECK(without_definition.compares_key("print_settings_id"));
+    CHECK(without_definition.compares_key("test_config_nature_volatile"));
+}
+
+// equals ignores the keys that the nature refuses and the keys present on one side only; diff stays a plain difference of values.
+TEST_CASE("Equality compares the comparable keys present in both configurations",
+          "[plugins][config][compare]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    SECTION("a BOOKKEEPING key alone does not make a difference")
+    {
+        Slic3r::DynamicPrintConfig left, right;
+        left.set_deserialize_strict("print_settings_id", "Left");
+        right.set_deserialize_strict("print_settings_id", "Right");
+        CHECK(left.equals(right));
+        CHECK(left.equals(right, false));
+        // The difference of values is not filtered: it decides what a caller copies.
+        CHECK(left.diff(right) == Slic3r::t_config_option_keys{"print_settings_id"});
+    }
+    SECTION("a LOCAL or PRESET_META key makes a difference")
+    {
+        Slic3r::DynamicPrintConfig left, right;
+        left.set_deserialize_strict("print_host", "Left");
+        right.set_deserialize_strict("print_host", "Right");
+        CHECK_FALSE(left.equals(right));
+        CHECK(left.diff(right) == Slic3r::t_config_option_keys{"print_host"});
+        Slic3r::DynamicPrintConfig meta_left, meta_right;
+        meta_left.set_deserialize_strict("inherits", "Left");
+        meta_right.set_deserialize_strict("inherits", "Right");
+        CHECK_FALSE(meta_left.equals(meta_right));
+    }
+    SECTION("a NORMAL key makes a difference")
+    {
+        Slic3r::DynamicPrintConfig left, right;
+        left.set_deserialize_strict("layer_height", "0.2");
+        right.set_deserialize_strict("layer_height", "0.3");
+        CHECK_FALSE(left.equals(right));
+    }
+    SECTION("a key present on one side only is not a difference, an empty value is a value")
+    {
+        Slic3r::DynamicPrintConfig left, right;
+        left.set_deserialize_strict("print_host", "host");
+        left.set_deserialize_strict("compatible_printers_condition", "");
+        CHECK(left.equals(right));
+        CHECK(right.equals(left));
+        right.set_deserialize_strict("compatible_printers_condition", "nozzle_diameter[0]==0.4");
+        CHECK_FALSE(left.equals(right));
+    }
+}
+
+// The dirty state and the list of modified options follow the same rule, and no longer look at the presence of the compatibility lists.
+TEST_CASE("The modified state ignores the keys that are not comparable",
+          "[plugins][config][compare]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    NaturePreset reference;
+    NaturePreset edited;
+    reference.config.set_deserialize_strict("layer_height", "0.2");
+    edited.config.set_deserialize_strict("layer_height", "0.2");
+
+    SECTION("an identifier alone does not modify the preset")
+    {
+        reference.config.set_deserialize_strict("print_settings_id", "Reference");
+        edited.config.set_deserialize_strict("print_settings_id", "Edited");
+        reference.config.set_deserialize_strict("filament_settings_id", "A;B");
+        edited.config.set_deserialize_strict("filament_settings_id", "A;C");
+        CHECK_FALSE(Slic3r::PresetCollection::is_dirty(&edited, &reference));
+        CHECK(Slic3r::PresetCollection::dirty_options(&edited, &reference).empty());
+    }
+    SECTION("the presence of the compatibility lists alone does not modify the preset")
+    {
+        edited.config.set_deserialize_strict("compatible_printers", "Printer");
+        edited.config.set_deserialize_strict("compatible_prints", "");
+        CHECK_FALSE(Slic3r::PresetCollection::is_dirty(&edited, &reference));
+        CHECK(Slic3r::PresetCollection::dirty_options(&edited, &reference).empty());
+        CHECK_FALSE(Slic3r::PresetCollection::is_dirty(&reference, &edited));
+    }
+    SECTION("a LOCAL or PRESET_META value modifies the preset and is listed")
+    {
+        reference.config.set_deserialize_strict("print_host", "Reference");
+        edited.config.set_deserialize_strict("print_host", "Edited");
+        reference.config.set_deserialize_strict("inherits", "Parent");
+        edited.config.set_deserialize_strict("inherits", "Other parent");
+        CHECK(Slic3r::PresetCollection::is_dirty(&edited, &reference));
+        const std::map<Slic3r::OptionKeyIdx, uint16_t> options = Slic3r::PresetCollection::dirty_options(&edited, &reference);
+        CHECK(options.size() == 2);
+        CHECK(options.count(Slic3r::OptionKeyIdx::scalar("print_host")) == 1);
+        CHECK(options.count(Slic3r::OptionKeyIdx::scalar("inherits")) == 1);
+    }
+    SECTION("a NORMAL vector value is still reported by index")
+    {
+        reference.config.set_deserialize_strict("nozzle_diameter", "0.4,0.4");
+        edited.config.set_deserialize_strict("nozzle_diameter", "0.4,0.6");
+        edited.config.set_deserialize_strict("print_settings_id", "Edited");
+        CHECK(Slic3r::PresetCollection::is_dirty(&edited, &reference));
+        const std::map<Slic3r::OptionKeyIdx, uint16_t> options = Slic3r::PresetCollection::dirty_options(&edited, &reference);
+        CHECK(options.size() == 1);
+        CHECK(options.count(Slic3r::OptionKeyIdx{"nozzle_diameter", 1}) == 1);
+    }
+    SECTION("a version that differs is ignored, even when one side is phony")
+    {
+        // print_version is BOOKKEEPING and can be phony: a phony side is a difference for the comparison of values,
+        // but the nature is looked at first.
+        reference.config.set_key_value("print_version", new Slic3r::ConfigOptionStringVersion("SUSI_2.7.0.0"));
+        edited.config.set_key_value("print_version", new Slic3r::ConfigOptionStringVersion("SUSI_2.7.1.0"));
+        CHECK_FALSE(Slic3r::PresetCollection::is_dirty(&edited, &reference));
+        CHECK(Slic3r::PresetCollection::dirty_options(&edited, &reference).empty());
+        edited.config.option("print_version")->set_phony(true);
+        CHECK_FALSE(Slic3r::PresetCollection::is_dirty(&edited, &reference));
+        CHECK(Slic3r::PresetCollection::dirty_options(&edited, &reference).empty());
+        CHECK_FALSE(Slic3r::PresetCollection::is_dirty(&reference, &edited));
+        CHECK(Slic3r::PresetCollection::dirty_options(&reference, &edited).empty());
+    }
+}
+namespace {
+// A project configuration as the loader builds it: the defaults with their optional values disabled, then the contents of the file.
+Slic3r::DynamicPrintConfig project_like_config(const char *printer_name)
+{
+    Slic3r::DynamicPrintConfig config;
+    config.apply(Slic3r::FullPrintConfig::defaults());
+    config.disable_optionals();
+    config.set_deserialize_strict({{"printer_technology", "FFF"},
+                                   {"print_settings_id", "PrintX"},
+                                   {"filament_settings_id", "FilX"},
+                                   {"printer_settings_id", printer_name}});
+    Slic3r::Preset::normalize(config);
+    return config;
+}
+
+// Add a printer preset to the bundle, not selected and hidden until a loaded project selects it. It holds a hostname kind,
+// a parent and a default print profile that a project or a G-code does not carry.
+Slic3r::Preset &add_installed_printer(Slic3r::PresetBundle &bundle, const char *name)
+{
+    Slic3r::DynamicPrintConfig printer_config = bundle.printers.default_preset().config;
+    printer_config.set_deserialize_strict("host_type", "octoprint");
+    printer_config.opt_string("inherits", true) = "Parent printer";
+    printer_config.opt_string("default_print_profile", true) = "Default print";
+    Slic3r::Preset &preset = bundle.printers.load_preset("", name, printer_config, false);
+    preset.is_visible = false;
+    REQUIRE(bundle.printers.get_selected_preset_name() != name);
+    return preset;
+}
+
+// Add a filament preset to the bundle, not selected. Its compatibility condition tells it apart from the other ones.
+Slic3r::Preset &add_installed_filament(Slic3r::PresetBundle &bundle, const char *name, const char *parent, const char *condition, bool visible)
+{
+    Slic3r::DynamicPrintConfig filament_config = bundle.filaments.default_preset().config;
+    filament_config.opt_string("inherits", true) = parent;
+    filament_config.opt_string("compatible_printers_condition", true) = condition;
+    Slic3r::Preset &preset = bundle.filaments.load_preset("", name, filament_config, false);
+    preset.is_visible = visible;
+    return preset;
+}
+} // namespace
+
+// Recognizing an installed profile looks at the keys that a file of the G-code destination holds, with their default value when
+// the file lacks them. The ones it does not hold, such as the hostname kind of a project, keep the value of the installed profile.
+TEST_CASE("A loaded project recognizes the installed profile from the values that it holds",
+          "[plugins][config][compare][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Slic3r::PresetBundle bundle;
+    Slic3r::Preset &installed = add_installed_printer(bundle, "Installed printer");
+    // The identifier of the installed profile differs from the one of the project: it is not comparable, so it is never copied.
+    installed.config.set_deserialize_strict("printer_settings_id", "Installed sentinel");
+
+    SECTION("the same values recognize the profile and keep its hostname kind")
+    {
+        Slic3r::DynamicPrintConfig config = project_like_config("Installed printer");
+        bundle.load_config_model("project.3mf", config, "");
+        CHECK(bundle.printers.get_selected_preset_name() == "Installed printer");
+        CHECK_FALSE(bundle.printers.get_edited_preset().is_dirty);
+        CHECK(bundle.printers.get_edited_preset().config.opt_serialize("host_type") == "octoprint");
+        // The profile was hidden: loading it reports it as an installed profile that is now visible.
+        CHECK(bundle.tmp_installed_presets.count("Installed printer") == 1);
+        CHECK(bundle.printers.find_preset("Installed printer", false, false)->is_visible);
+    }
+    SECTION("a profile that is already visible is recognized as well")
+    {
+        bundle.printers.find_preset("Installed printer", false, false)->is_visible = true;
+        Slic3r::DynamicPrintConfig config = project_like_config("Installed printer");
+        bundle.load_config_model("project.3mf", config, "");
+        CHECK(bundle.printers.get_selected_preset_name() == "Installed printer");
+        CHECK_FALSE(bundle.printers.get_edited_preset().is_dirty);
+        CHECK(bundle.printers.get_edited_preset().config.opt_serialize("host_type") == "octoprint");
+    }
+    SECTION("a different NORMAL value modifies the profile without changing its hostname kind")
+    {
+        Slic3r::DynamicPrintConfig config = project_like_config("Installed printer");
+        config.set_deserialize_strict("printer_notes", "changed notes");
+        config.set_deserialize_strict("printer_model", "Model X");
+        bundle.load_config_model("project.3mf", config, "");
+        CHECK(bundle.printers.get_selected_preset_name() == "Installed printer");
+        CHECK(bundle.printers.get_edited_preset().is_dirty);
+        CHECK(bundle.printers.get_edited_preset().config.opt_string("printer_notes") == "changed notes");
+        // The model used to be left out of the copy; it is NORMAL, so it is copied like any other value.
+        CHECK(bundle.printers.get_edited_preset().config.opt_string("printer_model") == "Model X");
+        CHECK(bundle.printers.get_edited_preset().config.opt_string("printer_settings_id") == "Installed sentinel");
+        CHECK(bundle.printers.get_edited_preset().config.opt_serialize("host_type") == "octoprint");
+        CHECK(bundle.printers.get_edited_preset().inherits() == "Parent printer");
+    }
+    SECTION("a section with a different parent does not recognize the profile")
+    {
+        Slic3r::DynamicPrintConfig config = project_like_config("Installed printer");
+        bundle.load_config_model("project.3mf", config, "[printer:Installed printer]\ninherits = Other parent\n\n");
+        CHECK(bundle.printers.get_selected_preset_name() == "Installed printer");
+        CHECK(bundle.printers.get_edited_preset().is_dirty);
+        CHECK(bundle.printers.get_edited_preset().inherits() == "Other parent");
+        // The section does not hold the default print profile: the installed value stays.
+        CHECK(bundle.printers.get_edited_preset().config.opt_string("default_print_profile") == "Default print");
+        CHECK(bundle.printers.get_edited_preset().config.opt_serialize("host_type") == "octoprint");
+    }
+    SECTION("a section with a different default print profile is copied into the profile")
+    {
+        Slic3r::DynamicPrintConfig config = project_like_config("Installed printer");
+        bundle.load_config_model("project.3mf", config, "[printer:Installed printer]\ninherits = Parent printer\ndefault_print_profile = Other print\n\n");
+        CHECK(bundle.printers.get_edited_preset().is_dirty);
+        CHECK(bundle.printers.get_edited_preset().config.opt_string("default_print_profile") == "Other print");
+        CHECK(bundle.printers.get_edited_preset().inherits() == "Parent printer");
+    }
+    SECTION("a section equal to the installed metadata keeps the profile unmodified")
+    {
+        Slic3r::DynamicPrintConfig config = project_like_config("Installed printer");
+        bundle.load_config_model("project.3mf", config, "[printer:Installed printer]\ninherits = Parent printer\ndefault_print_profile = Default print\n\n");
+        CHECK_FALSE(bundle.printers.get_edited_preset().is_dirty);
+        CHECK(bundle.printers.get_edited_preset().config.opt_serialize("host_type") == "octoprint");
+    }
+}
+
+// Two filaments: the first and the second load differently (OnlyIfModified, then Never once one was modified). Each one reads
+// the section of its own profile and nothing of the other one.
+TEST_CASE("Each filament of a project is recognized from its own section",
+          "[plugins][config][compare][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Slic3r::PresetBundle bundle;
+    Slic3r::DynamicPrintConfig config = project_like_config("Project printer");
+    config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.4"},
+                                   {"filament_diameter", "1.75,1.75"},
+                                   {"filament_settings_id", "Filament A;Filament B"}});
+    Slic3r::Preset::normalize(config);
+
+    SECTION("the second filament differs")
+    {
+        add_installed_filament(bundle, "Filament A", "Parent A", "nozzle_diameter[0]==0.6", false);
+        add_installed_filament(bundle, "Filament B", "Parent B", "nozzle_diameter[0]==0.8", false);
+        bundle.load_config_model("project.3mf", config,
+                                 "[filament:Filament A]\ninherits = Parent A\n\n[filament:Filament B]\ninherits = Other B\n\n");
+        REQUIRE(bundle.extruders_filaments.size() == 2);
+        CHECK(bundle.extruders_filaments[0].get_selected_preset_name() == "Filament A");
+        CHECK(bundle.extruders_filaments[1].get_selected_preset_name() == "Filament B");
+        // The second filament is the edited one: it takes the parent of its section and keeps its own condition.
+        const Slic3r::Preset &edited = bundle.filaments.get_edited_preset();
+        CHECK(edited.name == "Filament B");
+        CHECK(edited.is_dirty);
+        CHECK(edited.inherits() == "Other B");
+        CHECK(edited.compatible_printers_condition() == "nozzle_diameter[0]==0.8");
+        // The stored presets keep their own metadata.
+        const Slic3r::Preset *first = bundle.filaments.find_preset("Filament A", false, false);
+        const Slic3r::Preset *second = bundle.filaments.find_preset("Filament B", false, false);
+        REQUIRE(first != nullptr);
+        REQUIRE(second != nullptr);
+        CHECK_FALSE(first->is_dirty);
+        CHECK(first->inherits() == "Parent A");
+        CHECK(first->compatible_printers_condition() == "nozzle_diameter[0]==0.6");
+        CHECK(second->inherits() == "Parent B");
+    }
+    SECTION("the first filament differs")
+    {
+        add_installed_filament(bundle, "Filament A", "Parent A", "nozzle_diameter[0]==0.6", true);
+        add_installed_filament(bundle, "Filament B", "Parent B", "nozzle_diameter[0]==0.8", true);
+        bundle.load_config_model("project.3mf", config,
+                                 "[filament:Filament A]\ninherits = Other A\n\n[filament:Filament B]\ninherits = Parent B\n\n");
+        REQUIRE(bundle.extruders_filaments.size() == 2);
+        CHECK(bundle.extruders_filaments[0].get_selected_preset_name() == "Filament A");
+        CHECK(bundle.extruders_filaments[1].get_selected_preset_name() == "Filament B");
+        const Slic3r::Preset &edited = bundle.filaments.get_edited_preset();
+        CHECK(edited.name == "Filament A");
+        CHECK(edited.is_dirty);
+        CHECK(edited.inherits() == "Other A");
+        CHECK(edited.compatible_printers_condition() == "nozzle_diameter[0]==0.6");
+        const Slic3r::Preset *second = bundle.filaments.find_preset("Filament B", false, false);
+        REQUIRE(second != nullptr);
+        CHECK(second->inherits() == "Parent B");
+        CHECK(second->compatible_printers_condition() == "nozzle_diameter[0]==0.8");
+        CHECK_FALSE(second->is_dirty);
+    }
+}
+
+// A configuration file has no section: its profile is recognized from the values of the G-code destination.
+TEST_CASE("A loaded configuration file recognizes the installed profile",
+          "[plugins][config][compare][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    Slic3r::PresetBundle bundle;
+    add_installed_printer(bundle, "Installed printer");
+
+    Slic3r::DynamicPrintConfig config = project_like_config("Installed printer");
+    config.set_deserialize_strict("host_type", "klipper");
+    const boost::filesystem::path file = directory.path() / "profile.ini";
+    config.save(file.string(), Slic3r::ConfigWriteTarget::GCode);
+    REQUIRE_FALSE(Slic3r::Test::GCode::read_text_file(file).find("host_type") != std::string::npos);
+
+    bundle.load_config_file(file.string(), Slic3r::ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK(bundle.printers.get_selected_preset_name() == "Installed printer");
+    CHECK_FALSE(bundle.printers.get_edited_preset().is_dirty);
+    CHECK(bundle.printers.get_edited_preset().config.opt_serialize("host_type") == "octoprint");
+}
+
+// The compared keys follow the nature, not the contents of the file: a LOCAL key that the file holds is ignored, and a NORMAL
+// key that it lacks is compared with its default value.
+TEST_CASE("A minimal configuration file is compared on the keys of the G-code destination",
+          "[plugins][config][compare][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    Slic3r::PresetBundle bundle;
+    Slic3r::Preset &installed = add_installed_printer(bundle, "Installed printer");
+    // The file lacks printer_notes, so the loaded value is the default one, an empty text.
+    installed.config.set_deserialize_strict("printer_notes", "installed notes");
+
+    const boost::filesystem::path file = directory.path() / "minimal.ini";
+    {
+        std::ofstream stream(file.string(), std::ios::binary);
+        stream << "printer_technology = FFF\nnozzle_diameter = 0.4\nfilament_diameter = 1.75\n"
+                  "print_settings_id = PrintX\nfilament_settings_id = FilX\nprinter_settings_id = Installed printer\n"
+                  "host_type = klipper\n";
+    }
+    bundle.load_config_file(file.string(), Slic3r::ForwardCompatibilitySubstitutionRule::Enable);
+
+    const Slic3r::Preset &edited = bundle.printers.get_edited_preset();
+    CHECK(bundle.printers.get_selected_preset_name() == "Installed printer");
+    // The missing NORMAL key makes the profile modified, and the default value is copied.
+    CHECK(edited.is_dirty);
+    CHECK(edited.config.opt_string("printer_notes").empty());
+    // The LOCAL key of the file is neither compared nor copied.
+    CHECK(edited.config.opt_serialize("host_type") == "octoprint");
+    const std::map<Slic3r::OptionKeyIdx, uint16_t> options =
+        Slic3r::PresetCollection::dirty_options(&edited, &bundle.printers.get_selected_preset());
+    CHECK(options.count(Slic3r::OptionKeyIdx::scalar("printer_notes")) == 1);
+    CHECK(options.count(Slic3r::OptionKeyIdx::scalar("host_type")) == 0);
 }

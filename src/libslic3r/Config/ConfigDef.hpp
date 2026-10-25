@@ -773,8 +773,6 @@ public:
     // or this ConfigBase is of a StaticConfig type and it does not support some of the keys, and ignore_nonexistent is not set.
     void apply_only(const ConfigBase &other, const t_config_option_keys &keys, bool ignore_nonexistent = false);
     void apply_only(const ConfigBase &other, const std::set<t_config_option_key> &keys, bool ignore_nonexistent = false);
-    // Are the two configs equal? Ignoring options not present in both configs.
-    bool equals(const ConfigBase &other) const;
     // Returns options differing in the two configs, ignoring options not present in both configs.
     t_config_option_keys diff(const ConfigBase &other, bool even_phony = true) const;
     // Returns options being equal in the two configs, ignoring options not present in both configs.
@@ -889,6 +887,9 @@ public:
     // Return whether the nature of the key allows writing it to the destination.
     // A configuration or a key without definition has no policy: the key is written.
     bool writes_key(const t_config_option_key &opt_key, ConfigWriteTarget target) const;
+    // Return whether the nature of the key lets it take part in value comparisons (equals(), dirty state, profile recognition).
+    // A configuration or a key without definition has no policy: the key is comparable.
+    bool compares_key(const t_config_option_key &opt_key) const;
 #ifdef _DEBUG
     std::string to_debug_string() const;
 #endif
@@ -968,9 +969,13 @@ public:
     // Be careful, as this method does not test the existence of opt_key in this->def().
     bool set_key_value(const std::string &opt_key, ConfigOption *opt);
 
-    // Are the two configs equal? Ignoring options not present in both configs and phony fields.
+    // Are the two configs equal? Only the options present in both configs and whose nature is comparable are compared.
+    // With even_phony == false a pair of options that are both phony counts as equal, otherwise their values are compared;
+    // a phony option never equals a non phony one.
     bool equals(const DynamicConfig &other, bool even_phony =true) const;
-    // Returns options differing in the two configs, ignoring options not present in both configs and phony fields.
+    // Returns options differing in the two configs, ignoring options not present in both configs. The nature is not looked
+    // at: the result is the set of values to copy. With even_phony == false a pair of options that are both phony counts as
+    // equal, otherwise their values are compared; a phony option never equals a non phony one.
     t_config_option_keys diff(const DynamicConfig &other, bool even_phony=true) const;
     // Returns options being equal in the two configs, ignoring options not present in both configs.
     t_config_option_keys equal(const DynamicConfig &other) const;

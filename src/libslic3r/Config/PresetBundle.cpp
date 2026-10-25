@@ -59,8 +59,10 @@ static boost::property_tree::ptree parse_profile_sections(const std::string &tex
 // Apply to cfg the section of the profile called original_name, when the tree has one. Only the keys that the section
 // writer could have produced are applied (accepted by the project and refused by the G-code); anything else in the
 // section, such as a post-processing script, is ignored. The preset loading then keeps only the keys of its own type.
+// The keys that were applied are added to applied_keys, which is not cleared.
 static void apply_profile_section(DynamicPrintConfig &cfg, const PresetCollection &presets, const boost::property_tree::ptree &sections,
-                                  const std::string &original_name, ConfigSubstitutionContext &substitutions);
+                                  const std::string &original_name, ConfigSubstitutionContext &substitutions,
+                                  std::set<t_config_option_key> &applied_keys);
 
 PresetBundle::PresetBundle()
     : fff_prints(Preset::TYPE_FFF_PRINT,
@@ -910,7 +912,8 @@ static boost::property_tree::ptree parse_profile_sections(const std::string &tex
 }
 
 static void apply_profile_section(DynamicPrintConfig &cfg, const PresetCollection &presets, const boost::property_tree::ptree &sections,
-                                  const std::string &original_name, ConfigSubstitutionContext &substitutions)
+                                  const std::string &original_name, ConfigSubstitutionContext &substitutions,
+                                  std::set<t_config_option_key> &applied_keys)
 {
     if (original_name.empty())
         return;
@@ -919,8 +922,10 @@ static void apply_profile_section(DynamicPrintConfig &cfg, const PresetCollectio
     if (section == sections.not_found())
         return;
     for (const boost::property_tree::ptree::value_type &entry : section->second)
-        if (cfg.writes_key(entry.first, ConfigWriteTarget::Project) && !cfg.writes_key(entry.first, ConfigWriteTarget::GCode))
+        if (cfg.writes_key(entry.first, ConfigWriteTarget::Project) && !cfg.writes_key(entry.first, ConfigWriteTarget::GCode)) {
             cfg.set_deserialize(entry.first, entry.second.data(), substitutions);
+            applied_keys.insert(entry.first);
+        }
 }
 
 // Load an external config file containing the print, filament and printer presets.
@@ -1041,6 +1046,16 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
     default: break;
 	}
 
+    // A project, a config file and a G-code are all written with the G-code destination, so the keys that it accepts are the
+    // ones the file can hold: they are compared and copied with their value, a default one when the file lacks the key.
+    // LOCAL keys are ignored, even if an old file contains them. PRESET_META keys are ignored too, unless the section of a
+    // profile brings them (a section only holds PRESET_META keys). These keys are the only ones that recognizing an installed
+    // profile looks at.
+    std::set<t_config_option_key> file_read_keys;
+    for (const t_config_option_key &key : config.keys())
+        if (config.writes_key(key, ConfigWriteTarget::GCode))
+            file_read_keys.insert(key);
+
     // 1) Create a name from the file name.
     // Keep the suffix (.ini, .gcode, .amf, .3mf etc) to differentiate it from the normal profiles.
     std::string name = is_external ? boost::filesystem::path(name_or_path).filename().string() : name_or_path;
@@ -1052,14 +1067,15 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
 
     std::set<std::string>& tmp_installed_presets_ref = tmp_installed_presets;
 	auto load_preset = 
-		[&config, &sections, &section_substitutions, is_external, &name, &name_or_path, &tmp_installed_presets_ref]
+		[&config, &sections, &section_substitutions, &file_read_keys, is_external, &name, &name_or_path, &tmp_installed_presets_ref]
 		(PresetCollection &presets, const std::string &key) {
 		// The section of this profile is applied on a copy of the configuration, named by the original profile name.
 		const std::string original_name = config.opt_string(key, true);
 		DynamicPrintConfig preset_config = config;
-		apply_profile_section(preset_config, presets, sections, original_name, section_substitutions);
+		std::set<t_config_option_key> read_keys = file_read_keys;
+		apply_profile_section(preset_config, presets, sections, original_name, section_substitutions, read_keys);
 		if (is_external) {
-			ExternalPreset ext_preset = presets.load_external_preset(name_or_path, name, original_name, preset_config);
+			ExternalPreset ext_preset = presets.load_external_preset(name_or_path, name, original_name, preset_config, PresetCollection::LoadAndSelect::Always, &read_keys);
 			if (ext_preset.is_installed)
 				tmp_installed_presets_ref.emplace(ext_preset.preset->name);
 		}
@@ -1080,12 +1096,14 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         this->extruders_filaments.clear();
         if (num_extruders <= 1) {
             DynamicPrintConfig filament_config = config;
+            std::set<t_config_option_key> read_keys = file_read_keys;
             apply_profile_section(filament_config, this->filaments, sections,
-                                  old_filament_profile_names->empty() ? std::string() : old_filament_profile_names->get_at(0), section_substitutions);
+                                  old_filament_profile_names->empty() ? std::string() : old_filament_profile_names->get_at(0), section_substitutions, read_keys);
 			Preset                *loaded = nullptr;
             if (is_external) {
                 assert(!old_filament_profile_names->empty());
-                ExternalPreset ext_preset = this->filaments.load_external_preset(name_or_path, name, old_filament_profile_names->get_at(0), filament_config);
+                ExternalPreset ext_preset = this->filaments.load_external_preset(name_or_path, name, old_filament_profile_names->get_at(0), filament_config,
+                                                                                  PresetCollection::LoadAndSelect::Always, &read_keys);
                 loaded = ext_preset.preset;
                 if (ext_preset.is_installed)
                     tmp_installed_presets.emplace(ext_preset.preset->name);
@@ -1119,13 +1137,15 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
                 DynamicPrintConfig &cfg = configs[i];
                 // Two extruders that use the same filament profile read the same section.
                 const std::string original_name = (i < int(old_filament_profile_names->size())) ? old_filament_profile_names->get_at(i) : "";
-                apply_profile_section(cfg, this->filaments, sections, original_name, section_substitutions);
+                std::set<t_config_option_key> read_keys = file_read_keys;
+                apply_profile_section(cfg, this->filaments, sections, original_name, section_substitutions, read_keys);
                 // Load all filament presets, but only select the first one in the preset dialog.
                 auto [loaded, modified, installed] = this->filaments.load_external_preset(name_or_path, name,
                     original_name,
                     std::move(cfg),
                     any_modified ? PresetCollection::LoadAndSelect::Never : 
-                        PresetCollection::LoadAndSelect::OnlyIfModified);
+                        PresetCollection::LoadAndSelect::OnlyIfModified,
+                    &read_keys);
                 any_modified |= modified;
                 extr_names[i] = loaded->name;
                 if (installed)

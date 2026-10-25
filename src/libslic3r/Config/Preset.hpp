@@ -215,8 +215,6 @@ public:
     // Return a label of this preset, consisting of a name and a "(modified)" suffix, if this preset is dirty.
     std::string         label() const;
 
-    // Set the is_dirty flag if the provided config is different from the active one.
-    void                set_dirty(const DynamicPrintConfig &config) { this->is_dirty = ! this->config.diff(config).empty(); }
     void                set_dirty(bool dirty = true) { this->is_dirty = dirty; }
     void                reset_dirty() { this->is_dirty = false; }
 
@@ -407,7 +405,13 @@ public:
         // Config to initialize the preset from.
         const DynamicPrintConfig    &config,
         // Select the preset after loading?
-        LoadAndSelect                select = LoadAndSelect::Always);
+        LoadAndSelect                select = LoadAndSelect::Always,
+        // Keys that recognizing an existing profile and copying values into it are restricted to, besides the nature
+        // of the keys. The loader deduces them from the nature: the keys that a G-code destination accepts (with their
+        // default values when the source lacks them) and the keys of the profile section. with this set LOCAL keys are never compared nor
+        // copied, and PRESET_META keys are only when the section brings them.
+        // Borrowed for the duration of the call; nullptr means no restriction.
+        const std::set<t_config_option_key> *read_keys = nullptr);
 
     // Save the preset under a new name. If the name is different from the old one,
     // a new preset is stored into the list of presets.
@@ -629,11 +633,17 @@ private:
 
     size_t update_compatible_internal(const PresetWithVendorProfile &active_printer, const PresetWithVendorProfile *active_print, PresetSelectCompatibleType unselect_if_incompatible);
 public:
+    // Is the edited preset different from the reference? Only the keys present in both configs whose nature is comparable
+    // are compared (DynamicConfig::equals() with even_phony == false), so identifiers do not make a preset modified and
+    // a key present on one side only is not a difference.
     static bool is_dirty(const Preset *edited, const Preset *reference);
     // with negative, is still ok for "vector size change" (if vector)
     static constexpr int32_t DIRTY_VECTOR_CHANGE_SIZE = 1 << 1;
     static constexpr int32_t DIRTY_VECTOR_ADDED_IDX = 1 << 2;
     static constexpr int32_t DIRTY_VECTOR_SAME_AS_FIRST = 1 << 3;
+    // Options of the edited preset that differ from the reference, vector options being split by index. Follows the same
+    // rule as is_dirty(): non comparable keys and keys present on one side only are never listed. A pair of phony options
+    // is compared only if ignore_phony is true (the name is inverted: true means "compare them anyway").
     static std::map<OptionKeyIdx, uint16_t> dirty_options(const Preset *edited, const Preset *reference, const bool ignore_phony = false);
 
     const std::vector<std::pair<std::string, std::string>>& map_alias_to_profile_name() { return m_map_alias_to_profile_name; }

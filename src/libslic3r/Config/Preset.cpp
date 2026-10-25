@@ -650,21 +650,17 @@ Preset& PresetCollection::load_preset(const std::string &path, const std::string
     return this->load_preset(path, name, std::move(cfg), select);
 }
 
-static bool profile_print_params_same(const DynamicPrintConfig &cfg_old, const DynamicPrintConfig &cfg_new)
+// Are the values of the two profiles equal? The compared keys are the ones present in both configs whose nature is
+// comparable (the same rule as DynamicConfig::equals()) and, if read_keys is set, which belong to that set. The loader
+// deduces read_keys from the nature of the keys, not from the file: it holds the keys that a G-code destination accepts
+// (default values included) and the keys of the profile section. read_keys is borrowed; nullptr means no restriction.
+static bool profile_print_params_same(const DynamicPrintConfig &cfg_old, const DynamicPrintConfig &cfg_new,
+                                      const std::set<t_config_option_key> *read_keys)
 {
-    t_config_option_keys diff = cfg_old.diff(cfg_new);
-    // Following keys are used by the UI, not by the slicing core, therefore they are not important
-    // when comparing profiles for equality. Ignore them.
-    for (const char *key : { "compatible_prints", "compatible_prints_condition",
-                             "compatible_printers", "compatible_printers_condition", "inherits",
-                             "print_settings_id", "filament_settings_id", "sla_print_settings_id", "sla_material_settings_id", "printer_settings_id", "filament_vendor",
-                             "print_settings_modified", "filament_settings_modified", "sla_print_settings_modified", "sla_material_settings_modified", "printer_settings_modified",
-                             "printer_model", "printer_variant", "default_print_profile", "default_filament_profile", "default_sla_print_profile", "default_sla_material_profile",
-                             //FIXME remove the print host keys?
-                             "print_host", "printhost_apikey", "printhost_cafile", "printhost_port" })
-        diff.erase(std::remove(diff.begin(), diff.end(), key), diff.end());
-    // Preset with the same name as stored inside the config exists.
-    return diff.empty();
+    for (const t_config_option_key &key : cfg_old.diff(cfg_new))
+        if (cfg_old.compares_key(key) && (read_keys == nullptr || read_keys->count(key) > 0))
+            return false;
+    return true;
 }
 
 // Load a preset from an already parsed config file, insert it into the sorted sequence of presets
@@ -681,7 +677,10 @@ ExternalPreset PresetCollection::load_external_preset(
     // Config to initialize the preset from. It may contain configs of all presets merged in a single dictionary!
     const DynamicPrintConfig    &combined_config,
     // Select the preset after loading?
-    LoadAndSelect                select)
+    LoadAndSelect                select,
+    // Keys that comparing and copying are restricted to, besides their nature: the keys that a G-code destination accepts and the
+    // keys of the profile section (see Preset.hpp). Borrowed; nullptr means no restriction.
+    const std::set<t_config_option_key> *read_keys)
 {
     // Load the preset over a default preset, so that the missing fields are filled in from the default preset.
     DynamicPrintConfig cfg(this->default_preset_for(combined_config).config);
@@ -694,7 +693,7 @@ ExternalPreset PresetCollection::load_external_preset(
         // Some filament profile has been selected and modified already.
         // Check whether this profile is equal to the modified edited profile.
         const Preset &edited = this->get_edited_preset();
-        if ((edited.name == original_name || edited.name == inherits) && profile_print_params_same(edited.config, cfg))
+        if ((edited.name == original_name || edited.name == inherits) && profile_print_params_same(edited.config, cfg, read_keys))
             // Just point to that already selected and edited profile.
             return ExternalPreset(&(*this->find_preset_internal(edited.name)), false);
     }
@@ -706,7 +705,7 @@ ExternalPreset PresetCollection::load_external_preset(
 		it = this->find_preset_renamed(original_name);
 		found = it != m_presets.end();
     }
-    if (found && profile_print_params_same(it->config, cfg) && it->is_visible) {
+    if (found && profile_print_params_same(it->config, cfg, read_keys) && it->is_visible) {
         // The preset exists and is visible and it matches the values stored inside config.
         if (select == LoadAndSelect::Always)
             this->select_preset(it - m_presets.begin());
@@ -718,7 +717,7 @@ ExternalPreset PresetCollection::load_external_preset(
         assert(it == m_presets.end());
         it    = this->find_preset_internal(inherits);
         found = it != m_presets.end() && it->name == inherits;
-        if (found && profile_print_params_same(it->config, cfg)) {
+        if (found && profile_print_params_same(it->config, cfg, read_keys)) {
             // The system preset exists and it matches the values stored inside config.
             if (select == LoadAndSelect::Always)
                 this->select_preset(it - m_presets.begin());
@@ -736,15 +735,14 @@ ExternalPreset PresetCollection::load_external_preset(
             this->select_preset(idx);
 
             // update dirty state only if it's needed
-            if (!profile_print_params_same(it->config, cfg)) {
-                // The source config may contain keys from many possible preset types. Just copy those that relate to this preset.
-
-                // Following keys are not used neither by the UI nor by the slicing core, therefore they are not important 
-                // Erase them from config apply to avoid redundant "dirty" parameter in loaded preset.
-                for (const char* key : { "print_settings_id", "filament_settings_id", "sla_print_settings_id", "sla_material_settings_id", "printer_settings_id", "filament_vendor", 
-                                         "print_settings_modified", "filament_settings_modified", "sla_print_settings_modified", "sla_material_settings_modified", "printer_settings_modified",
-                                         "printer_model", "printer_variant", "default_print_profile", "default_filament_profile", "default_sla_print_profile", "default_sla_material_profile" })
-                    keys.erase(std::remove(keys.begin(), keys.end(), key), keys.end());
+            if (!profile_print_params_same(it->config, cfg, read_keys)) {
+                // The source config may contain keys from many possible preset types. Just copy those that relate to this preset
+                // (the keys of cfg), and only the ones that the comparison above looks at: the comparable keys of read_keys.
+                // A NORMAL key that the source lacks is copied with its default value; a LOCAL or PRESET_META key that is not
+                // in the section keeps the value of the installed profile.
+                keys.erase(std::remove_if(keys.begin(), keys.end(), [&cfg, read_keys](const t_config_option_key &key) {
+                               return !cfg.compares_key(key) || (read_keys != nullptr && read_keys->count(key) == 0);
+                           }), keys.end());
 
                 this->get_edited_preset().config.apply_only(combined_config, keys, true);
                 this->update_dirty();
@@ -781,7 +779,7 @@ ExternalPreset PresetCollection::load_external_preset(
         if (it == m_presets.end() || it->name != new_name)
             // Unique profile name. Insert a new profile.
             break;
-        if (profile_print_params_same(it->config, cfg)) {
+        if (profile_print_params_same(it->config, cfg, read_keys)) {
             // The preset exists and it matches the values stored inside config.
             if (select == LoadAndSelect::Always)
                 this->select_preset(it - m_presets.begin());
@@ -1192,21 +1190,10 @@ bool PresetCollection::update_dirty()
     return was_dirty != is_dirty;
 }
 
-static constexpr const std::initializer_list<const char*> optional_keys { "compatible_prints", "compatible_printers" };
 bool PresetCollection::is_dirty(const Preset *edited, const Preset *reference)
 {
-    if (edited != nullptr && reference != nullptr) {
-        // Only compares options existing in both configs.
-        if (! reference->config.equals(edited->config, false))
-            return true;
-        // The "compatible_printers" option key is handled differently from the others:
-        // It is not mandatory. If the key is missing, it means it is compatible with any printer.
-        // If the key exists and it is empty, it means it is compatible with no printer.
-        for (auto &opt_key : optional_keys)
-            if (reference->config.has(opt_key) != edited->config.has(opt_key))
-                return true;
-    }
-    return false;
+    // Only compares the comparable options existing in both configs.
+    return edited != nullptr && reference != nullptr && ! reference->config.equals(edited->config, false);
 }
 template<class T>
 void add_correct_opts_to_diff(const t_config_option_key &opt_key,
@@ -1242,8 +1229,9 @@ inline std::map<OptionKeyIdx, uint16_t> deep_diff(const ConfigBase &config_this,
     for (const t_config_option_key &opt_key : config_this.keys()) {
         const ConfigOption *this_opt  = config_this.option(opt_key);
         const ConfigOption *other_opt = config_other.option(opt_key);
-        //dirty if both exist, they aren't both phony and value is different
-        if (this_opt != nullptr && other_opt != nullptr 
+        // dirty if both exist, the key is comparable, they aren't both phony and value is different.
+        // A non comparable key is skipped before its vector is split by index.
+        if (this_opt != nullptr && other_opt != nullptr && config_this.compares_key(opt_key)
             && (ignore_phony || !(this_opt->is_phony() && other_opt->is_phony()))
             && ((*this_opt != *other_opt) || (this_opt->is_phony() != other_opt->is_phony())))
         {
@@ -1268,14 +1256,8 @@ std::map<OptionKeyIdx, uint16_t> PresetCollection::dirty_options(const Preset *e
                                                          const bool ignore_phony /*= false*/) {
     std::map<OptionKeyIdx, uint16_t> changed;
     if (edited != nullptr && reference != nullptr) {
-        // Only compares options existing in both configs.
+        // Only compares the comparable options existing in both configs.
         changed = deep_diff(edited->config, reference->config, ignore_phony);
-        // The "compatible_printers" option key is handled differently from the others:
-        // It is not mandatory. If the key is missing, it means it is compatible with any printer.
-        // If the key exists and it is empty, it means it is compatible with no printer.
-        for (auto &opt_key : optional_keys)
-            if (reference->config.has(opt_key) != edited->config.has(opt_key))
-                changed.emplace(OptionKeyIdx::scalar(opt_key), 0);
     }
     return changed;
 }

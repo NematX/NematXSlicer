@@ -808,20 +808,6 @@ void ConfigBase::apply_only(const ConfigBase &other, const t_config_option_keys 
     }
 }
 
-// Are the two configs equal? Ignoring options not present in both configs.
-bool ConfigBase::equals(const ConfigBase &other) const
-{ 
-    if(this->keys().size() != other.keys().size())
-        return false;
-    for (const t_config_option_key &opt_key : this->keys()) {
-        const ConfigOption *this_opt  = this->option(opt_key);
-        const ConfigOption *other_opt = other.option(opt_key);
-        if (this_opt != nullptr && other_opt != nullptr && *this_opt != *other_opt)
-            return false;
-    }
-    return true;
-}
-
 // Returns options differing in the two configs, ignoring options not present in both configs.
 t_config_option_keys ConfigBase::diff(const ConfigBase &other, bool even_phony /*=true*/) const
 {
@@ -1764,6 +1750,16 @@ bool ConfigBase::writes_key(const t_config_option_key &opt_key, ConfigWriteTarge
     return opt_def == nullptr || config_nature_writes(opt_def->nature, target);
 }
 
+// Return whether the nature of the key allows comparing its values. Like writes_key(), a configuration without
+// definition or a key that no definition knows has no policy, so the key is comparable. Never throws.
+bool ConfigBase::compares_key(const t_config_option_key &opt_key) const
+{
+    if (this->def() == nullptr)
+        return true;
+    const ConfigOptionDef *opt_def = this->get_option_def(opt_key);
+    return opt_def == nullptr || config_nature_comparable(opt_def->nature);
+}
+
 #ifdef _DEBUG
 std::string ConfigBase::to_debug_string() const
 {
@@ -2133,12 +2129,14 @@ static inline bool dynamic_config_iterate(const DynamicConfig &lhs, const Dynami
     return false;
 }
 
-// Are the two configs equal? Ignoring options not present in both configs and phony fields.
+// Are the two configs equal? Only the options present in both configs and whose nature is comparable are compared.
+// Both-phony pairs are compared by value when even_phony is set, and skipped otherwise.
 bool DynamicConfig::equals(const DynamicConfig &other, bool even_phony /*=true*/) const
 { 
     return ! dynamic_config_iterate(*this, other, 
-        [even_phony](const t_config_option_key & /* key */, const ConfigOption *l, const ConfigOption *r) {
+        [this, even_phony](const t_config_option_key &key, const ConfigOption *l, const ConfigOption *r) {
             return (l != nullptr && r != nullptr
+                && this->compares_key(key)
                 && (even_phony || !(r->is_phony() && l->is_phony()))
                 && ((*r != *l) || (r->is_phony() != l->is_phony())));
         });
