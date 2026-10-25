@@ -3538,9 +3538,10 @@ void Fill::connect_base_support(Polylines &&infill_ordered, const std::vector<co
 #endif // INFILL_DEBUG_OUTPUT
 
     const std::vector<FakePerimeterConnect::SupportArcCost> arches = FakePerimeterConnect::evaluate_support_arches(infill_ordered, graph, params);
-    static const double cost_low      = line_spacing * 1.3;
-    static const double cost_high     = line_spacing * 2.;
-    static const double cost_veryhigh = line_spacing * 3.;
+    // Thresholds follow this call's spacing; a function-local static would keep the first call's values.
+    const double cost_low      = line_spacing * 1.3;
+    const double cost_high     = line_spacing * 2.;
+    const double cost_veryhigh = line_spacing * 3.;
 
     {
         std::vector<const FakePerimeterConnect::SupportArcCost*> selected;

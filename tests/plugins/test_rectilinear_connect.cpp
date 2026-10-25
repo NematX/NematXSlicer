@@ -156,6 +156,39 @@ void make_support_base_infill_lines(Slic3r::Polylines &core, rect_work::Polyline
     }
 }
 
+// Outputs of one support-base connect: the native generator and the port, on the same lines and boundary.
+struct SupportBaseConnect
+{
+    Slic3r::Polylines core;
+    rect_work::Polylines ported;
+};
+
+// Connect the support-base lines once through the native generator and once through the port, with the line spacing of
+// this call; both start from fresh copies of the same lines.
+SupportBaseConnect connect_support_base(storage_handle *storage, const Slic3r::Polygons &core_boundary,
+                                        const Slic3r::BoundingBox &core_bbox, const rect_work::Polygons &ported_boundary,
+                                        const rect_work::BoundingBox &ported_bbox, coord_t line_spacing, float density)
+{
+    Slic3r::Polylines core_infill;
+    rect_work::Polylines ported_infill;
+    make_support_base_infill_lines(core_infill, ported_infill);
+
+    Slic3r::FillParams core_params;
+    core_params.density = density;
+    core_params.anchor_length = 1000.f;
+    core_params.anchor_length_max = 1000.f;
+    raw_infill_pattern_params ported_params = {};
+    ported_params.density = density;
+    ported_params.anchor_length = 1000.f;
+    ported_params.anchor_length_max = 1000.f;
+
+    SupportBaseConnect result;
+    Slic3r::Fill::connect_base_support(std::move(core_infill), core_boundary, core_bbox, result.core, line_spacing, core_params);
+    rect_connect::connect_base_support(storage, std::move(ported_infill), ported_boundary, ported_bbox, result.ported,
+                                       line_spacing, ported_params);
+    return result;
+}
+
 } // namespace
 
 TEST_CASE("Rectilinear API boundary views selectively materialize cleanup",
@@ -502,4 +535,49 @@ TEST_CASE("Rectilinear support-base connect port matches the core strategy",
             REQUIRE(!ported_out.empty());
             require_same_infill(core_out, ported_out);
         }
+}
+
+// The native connect derives its arc-cost thresholds from the spacing of each call, not from an earlier call of the
+// process: after a call with another spacing, the first spacing gives its first result again, and every call agrees
+// with the port.
+TEST_CASE("Native support-base connect takes its thresholds from each call's spacing",
+          "[plugins][infill][rectilinear][supportbase]")
+{
+    const Slic3r::ExPolygon core_expolygon = make_core_boundary();
+    const Slic3r::Polygons core_boundary = [&core_expolygon]() {
+        Slic3r::Polygons boundary;
+        boundary.emplace_back(core_expolygon.contour);
+        for (const Slic3r::Polygon &hole : core_expolygon.holes)
+            boundary.emplace_back(hole);
+        return boundary;
+    }();
+
+    rect_work::Polygons ported_boundary;
+    for (const Slic3r::Polygon &polygon : core_boundary) {
+        rect_work::Polygon converted;
+        converted.points.reserve(polygon.points.size());
+        for (const Slic3r::Point &point : polygon.points)
+            converted.points.emplace_back(point.x(), point.y());
+        ported_boundary.emplace_back(std::move(converted));
+    }
+
+    Slic3r::PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const Slic3r::BoundingBox core_bbox = Slic3r::get_extents(core_boundary);
+    const rect_work::BoundingBox ported_bbox = rect_work::get_extents(ported_boundary.front().points);
+
+    // Two line spacings of one 0.4 mm fill at densities 0.5 and 0.15, as the fill derives them.
+    const coord_t dense_line_spacing = scale_i(0.8);
+    const coord_t sparse_line_spacing = scale_i(2.6);
+    const SupportBaseConnect first = connect_support_base(storage, core_boundary, core_bbox, ported_boundary, ported_bbox,
+                                                          dense_line_spacing, 0.5f);
+    const SupportBaseConnect other = connect_support_base(storage, core_boundary, core_bbox, ported_boundary, ported_bbox,
+                                                          sparse_line_spacing, 0.15f);
+    const SupportBaseConnect again = connect_support_base(storage, core_boundary, core_bbox, ported_boundary, ported_bbox,
+                                                          dense_line_spacing, 0.5f);
+    REQUIRE(!first.core.empty());
+    REQUIRE(!other.core.empty());
+    require_same_infill(first.core, first.ported);
+    require_same_infill(other.core, other.ported);
+    require_same_infill(again.core, first.core);
 }
