@@ -1,4 +1,10 @@
 
+// Post-infill step: host callback given to post-infill plugins through run_ctx_post_infill_generation.
+// A plugin borrows the mutable extrusion root of an infill-owned bucket of a region island and appends its
+// generated subtrees to it. The callback may create the root, so it can throw (bad_alloc): it is noexcept,
+// hands a failure to Detail::contain_callback_failure() (which stops the step) and returns NULL. Once a
+// stop is requested it returns NULL at once. After the plugins finish, empty roots are removed.
+
 #include "StepPostInfillGeneration.hpp"
 
 #include <algorithm>
@@ -48,9 +54,14 @@ ExtrusionRole bucket_role_from_raw(raw_extrusion_role role)
     return LayerRegionIsland::INFILLS;
 }
 
+// Borrow the mutable extrusion root of the bucket matching role, creating the empty root if needed.
+// Returns NULL for a NULL island, a role not owned by this step, or a contained failure: creating the
+// root can throw (bad_alloc), which is handed to contain_callback_failure() and stops the step. Once the
+// plugin stop is already requested it also returns NULL, without creating anything or adding a message.
+// A print cancellation is not checked here: the runner rethrows the cancellation at the phase boundary.
 extrusion_entity_handle *get_region_island_mutable_extrusion_callback(
     const layer_region_island_handle *region_island_handle,
-    raw_extrusion_role role)
+    raw_extrusion_role role) noexcept
 {
     LayerRegionIsland *region_island = to_layer_region_island(region_island_handle);
     if (region_island == nullptr || !role_is_post_infill_owned(role))
@@ -60,9 +71,17 @@ extrusion_entity_handle *get_region_island_mutable_extrusion_callback(
     // It may be empty when the plugin is about to append the first generated
     // child subtree. Empty roots are removed by the step cleanup after the
     // plugin returns, so a harmless probe does not permanently dirty the tree.
-    const ExtrusionRole bucket_role = bucket_role_from_raw(role);
-    ExtrusionEntityCollection &collection = region_island->mutable_extrusion(bucket_role);
-    return reinterpret_cast<extrusion_entity_handle *>(&collection);
+    if (Orchestrator::instance().is_plugin_cancelled())
+        return nullptr;
+
+    try {
+        const ExtrusionRole bucket_role = bucket_role_from_raw(role);
+        ExtrusionEntityCollection &collection = region_island->mutable_extrusion(bucket_role);
+        return reinterpret_cast<extrusion_entity_handle *>(&collection);
+    } catch (...) {
+        Detail::contain_callback_failure(Orchestrator::instance(), STEP_POST_INFILL);
+        return nullptr;
+    }
 }
 
 void remove_empty_region_islands(Print &print)

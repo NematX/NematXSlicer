@@ -67,6 +67,10 @@ typedef struct run_ctx_post_infill_generation {
 
     The returned handle is borrowed from the host and is valid only during the
     current plugin callback. Do not store it for a later run and do not free it.
+
+    Also returns NULL when the host failed while creating the root (for example
+    out of memory); the step is then stopped like a plugin-requested stop.
+    Once a stop was already requested it returns NULL at once, creating nothing.
     */
     post_infill_get_region_island_mutable_extrusion_fn get_region_island_mutable_extrusion;
 } run_ctx_post_infill_generation;

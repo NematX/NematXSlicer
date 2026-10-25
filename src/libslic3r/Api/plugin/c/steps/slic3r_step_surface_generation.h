@@ -59,6 +59,11 @@ metadata: bridge angle, thickness, priority, dense-infill hints, and any future
 fields that are not represented by the small C surface type bitmask. Newly
 created surfaces can still use the surface_collection_append_expolygon*()
 helpers.
+
+There is no return value. If the host fails while appending (for example out
+of memory), dst keeps its previous content and the step is stopped like a
+plugin-requested stop. Once a stop was already requested, the call returns at
+once and leaves dst unchanged.
 */
 typedef void (*surface_generation_append_surface_like_fn)(
     surface_collection_handle *dst,

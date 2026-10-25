@@ -2,18 +2,24 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// Layer-height step host side: converts the legacy object layer-height profile into explicit
+// [layer_top_z, layer_height] pairs for the plugin (make_layer_height_run_context), and provides the
+// callback by which the plugin gives back the final pairs (set_layer_height_profile).
+
 #include "LayerHeightStep.hpp"
 
 #include <memory>
 #include <utility>
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/internal/PrintObjectAccess.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/Steps/StepRunner.hpp"
 
 namespace Slic3r::ApiHost::Steps {
 namespace {
@@ -44,19 +50,31 @@ std::vector<coord_t> layer_profile_from_legacy_height_profile(const PrintObject 
     return out;
 }
 
+// Store the explicit [layer_top_z, layer_height] pairs given by the plugin as the object layer profile.
+// The new vector is built completely first and only then move-assigned (a non-throwing move) by
+// set_layer_profile(), so if copying the descriptors throws (bad_alloc) the profile is unchanged and the
+// failure is handed to contain_callback_failure(), which stops the step. There is no return value. When the
+// plugin stop is requested or the print is cancelled, it returns at once without touching the profile and
+// without a message (a cancelled print is not an error; the runner rethrows the cancellation).
 void set_layer_height_profile(const object_handle *object_handler,
                               coord_t *layer_descriptors,
-                              uint32_t descriptor_count)
+                              uint32_t descriptor_count) noexcept
 {
     if (object_handler == nullptr || (layer_descriptors == nullptr && descriptor_count != 0))
         return;
 
     PrintObject *object = const_cast<PrintObject *>(reinterpret_cast<const PrintObject *>(object_handler));
-    std::vector<coord_t> new_layer_profile;
-    new_layer_profile.reserve(descriptor_count);
-    for (uint32_t i = 0; i < descriptor_count; ++i)
-        new_layer_profile.push_back(layer_descriptors[i]);
-    ApiInternal::PrintObjectAccess::set_layer_profile(*object, std::move(new_layer_profile));
+    if (Orchestrator::instance().is_plugin_cancelled() || object->print()->canceled())
+        return;
+    try {
+        std::vector<coord_t> new_layer_profile;
+        new_layer_profile.reserve(descriptor_count);
+        for (uint32_t i = 0; i < descriptor_count; ++i)
+            new_layer_profile.push_back(layer_descriptors[i]);
+        ApiInternal::PrintObjectAccess::set_layer_profile(*object, std::move(new_layer_profile));
+    } catch (...) {
+        Slic3r::Steps::Detail::contain_callback_failure(Orchestrator::instance(), STEP_LAYER_HEIGHT);
+    }
 }
 
 } // namespace

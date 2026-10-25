@@ -40,6 +40,9 @@ typedef struct c_layer_config_range {
 } c_layer_config_range;
 
 // Set object layers as [layer_top_z, layer_height, ...] pairs.
+// There is no return value. If the host fails while storing the profile (for example out of
+// memory), the object profile stays unchanged and the step is stopped like a plugin-requested stop.
+// Once a stop was requested or the print is cancelled, the call returns at once and changes nothing.
 typedef void (*set_layer_height_profile_fn)(const object_handle *object,
                                             coord_t *layer_descriptors,
                                             uint32_t descriptor_count);

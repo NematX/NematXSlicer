@@ -49,6 +49,12 @@ Replace the island fill areas used by later surface/infill steps.
 
 areas == NULL clears the collection. Non-NULL areas are copied into the host
 island and the host refreshes the associated bounding boxes.
+
+Returns 1 on success. Returns 0 for a NULL island, without stopping the step.
+Also returns 0 at once, changing nothing and adding no message, when a stop was
+already requested. Returns 0 as well when the host failed while copying or
+validating the areas (for example out of memory): the island is then left
+unchanged and the step is stopped like a plugin-requested stop.
 */
 typedef int32_t (*post_perimeter_set_island_fill_areas_fn)(
     const layer_island_handle *island,
@@ -59,6 +65,11 @@ Replace the island free/no-encroachment fill areas.
 
 These polygons describe the space available to infill without perimeter
 encroachment. areas == NULL clears the collection. Non-NULL areas are copied.
+
+Returns 1 on success. Returns 0 for a NULL island, without stopping the step,
+and returns 0 at once (no change, no message) when a stop was already requested.
+When the host fails while copying or validating the areas, it returns 0, the
+island is left unchanged and the step is stopped like a plugin-requested stop.
 */
 typedef int32_t (*post_perimeter_set_island_fill_free_areas_fn)(
     const layer_island_handle *island,
@@ -74,7 +85,7 @@ typedef struct run_ctx_post_perimeter_generation {
     The region_island argument is const because the data-tree traversal should
     not let this step modify island topology. Only the selected extrusion bucket
     is made mutable through this explicit post-perimeter capability. Returns
-    NULL when the bucket does not exist.
+    NULL when the bucket is absent or empty.
     */
     post_perimeter_get_region_island_mutable_extrusion_fn get_region_island_mutable_extrusion;
 

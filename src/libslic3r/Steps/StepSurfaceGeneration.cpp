@@ -11,6 +11,13 @@
 // geometric defects checked against epsilon squared. ExPolygon clipping can
 // already discard bands narrower than approximately epsilon. One scaled unit
 // is SCALING_FACTOR mm, or 1 nm in the default 64-bit configuration.
+//
+// Surface-generation step: splits the fillable area of each island into typed fill surfaces. Surface
+// plugins build temporary SurfaceCollections with the host callbacks below, then publish them into a
+// LayerRegionIsland; after all plugins ran, empty region islands are removed and the result is checked
+// (no overlap, exact coverage of the island infill areas). Callbacks cross the C ABI: the publishing one
+// only moves vectors (noexcept), the appending one contains any failure through
+// Detail::contain_callback_failure().
 
 #include "StepSurfaceGeneration.hpp"
 
@@ -172,22 +179,39 @@ bool validate_island_surface_partition(const LayerSliceIsland &island,
 }
 
 // Publish the temporary surfaces through the shared whole-collection move; null source clears and null destination returns zero.
+// Cannot throw: it only moves or clears a vector, so noexcept needs no try block.
 int32_t set_region_island_fill_surfaces_callback(layer_region_island_handle *region_island_handle,
-                                                 surface_collection_handle *surfaces_handle)
+                                                 surface_collection_handle *surfaces_handle) noexcept
 {
     return ApiInternal::LayerRegionAccess::set_fill_surfaces(
         to_layer_region_island(region_island_handle), to_surface_collection(surfaces_handle));
 }
 
+// Append one surface per ExPolygon of areas_handle to dst, copying the metadata of source. Output: dst
+// grows. On failure (bad_alloc) the surfaces added so far are erased, which cannot throw, so dst keeps
+// its previous content; contain_callback_failure() then stops the step. There is no return value. Once the
+// plugin stop is already requested it returns at once, leaving dst untouched and adding no message. A print
+// cancellation is not checked here: the runner rethrows the cancellation at the phase boundary.
 void append_surface_like_callback(surface_collection_handle *dst_handle,
                                   const surface_handle *source_handle,
-                                  const expolygon_collection_handle *areas_handle)
+                                  const expolygon_collection_handle *areas_handle) noexcept
 {
     // A Surface contains more than its ExPolygon and type bitmask. When a
     // plugin splits an existing Surface, this callback lets the host preserve
     // all metadata while replacing only the geometry pieces.
-    if (dst_handle != nullptr && source_handle != nullptr && areas_handle != nullptr)
-        to_surface_collection(dst_handle)->append(*to_expolygons(areas_handle), *to_surface(source_handle));
+    if (dst_handle == nullptr || source_handle == nullptr || areas_handle == nullptr ||
+        Orchestrator::instance().is_plugin_cancelled())
+        return;
+
+    SurfaceCollection &dst = *to_surface_collection(dst_handle);
+    const size_t previous_size = dst.surfaces.size();
+    try {
+        dst.append(*to_expolygons(areas_handle), *to_surface(source_handle));
+    } catch (...) {
+        // Drop the trailing surfaces appended before the failure (shrinking never allocates).
+        dst.surfaces.erase(dst.surfaces.begin() + previous_size, dst.surfaces.end());
+        Detail::contain_callback_failure(Orchestrator::instance(), STEP_SURFACE_GENERATION);
+    }
 }
 
 void remove_empty_region_islands(Print &print)

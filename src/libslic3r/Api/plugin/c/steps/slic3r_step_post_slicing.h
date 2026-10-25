@@ -23,6 +23,7 @@ mutable directly. Layer slices and island slices require the callbacks below so
 the host can keep its caches consistent.
 */
 // get mutable layer from const object to be able to do stuff in this step
+// idx must be below the object's layer count; it is not checked by the host.
 typedef layer_handle *(*object_borrow_mutable_layer_fn)(const object_handle *me, uint32_t idx);
 // clear previous layer's islands, move expolygon_collection_handle into the layer slices and construct islands from it.
 typedef void (*layer_assign_islands_by_moving_contents_fn)(layer_handle *me, expolygon_collection_handle *in_out_islands);
@@ -30,6 +31,10 @@ typedef void (*layer_assign_islands_by_moving_contents_fn)(layer_handle *me, exp
 typedef void (*layer_recompute_slices_from_islands_fn)(layer_handle *me);
 // this layer region has been modified, clear all islands and slices from the layer and recompute them from this layer's layer_region;
 typedef void (*layer_recompute_slices_and_islands_from_layer_region_fn)(layer_handle *me);
+// The three layer_* rewrite callbacks above return nothing. If the host fails while rebuilding (for
+// example out of memory), the layer keeps its previous content (and, for assign_islands, the source
+// collection is not emptied) and the step is stopped like a plugin-requested stop. Once a stop was
+// requested or the print is cancelled, they return at once and change nothing.
 // if don't want ot reconstruct all islands from scratch, you can also modify the layer slices & islands slice &
 // region slices, but be careful to keep them consistent. You can use other methodds to recompute one from the other.
 typedef expolygon_collection_handle *(*layer_borrow_mutable_slices_fn)(layer_handle *me);
