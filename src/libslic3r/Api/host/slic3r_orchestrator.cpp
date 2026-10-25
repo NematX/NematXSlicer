@@ -4,6 +4,7 @@
 ///|/
 #include <algorithm>
 #include <cstddef>
+#include <cmath>
 #include <string>
 #include <utility>
 #include <vector>
@@ -533,18 +534,26 @@ int orchestrator_plugin_is_cancelled(plugin_host_context *host_context)
     return print_cancelled || plugin_cancelled ? 1 : 0;
 }
 
+// Logs the plugin warning, then queues a copy of the message on the orchestrator.
+// A NULL host context, plugin or message is tolerated; the caller keeps ownership
+// of the message. A lost warning must neither cross the C boundary nor stop the
+// step, so any failure is ignored (no message, no plugin stop).
 void orchestrator_plugin_report_warning(plugin_host_context *host_context, const char *message)
 {
-    const char *plugin_id = host_context != nullptr && host_context->plugin != nullptr ?
-                                host_context->plugin->get_id().c_str() :
-                                "<unknown>";
-    BOOST_LOG_TRIVIAL(warning) << "Plugin warning from " << plugin_id << ": " << (message != nullptr ? message : "");
+    try {
+        const char *plugin_id = host_context != nullptr && host_context->plugin != nullptr ?
+                                    host_context->plugin->get_id().c_str() :
+                                    "<unknown>";
+        BOOST_LOG_TRIVIAL(warning) << "Plugin warning from " << plugin_id << ": " << (message != nullptr ? message : "");
 
-    if (host_context != nullptr && host_context->orchestrator != nullptr)
-        host_context->orchestrator->add_plugin_message(Slic3r::Orchestrator::PluginMessageLevel::Warning,
-                                                       host_context->plugin,
-                                                       host_context->step,
-                                                       message);
+        if (host_context != nullptr && host_context->orchestrator != nullptr)
+            host_context->orchestrator->add_plugin_message(Slic3r::Orchestrator::PluginMessageLevel::Warning,
+                                                           host_context->plugin,
+                                                           host_context->step,
+                                                           message);
+    } catch (...) {
+        // A lost warning must neither cross the C boundary nor stop the step: ignore the failure.
+    }
 }
 
 void orchestrator_plugin_report_error(plugin_host_context *host_context, const char *message)
@@ -571,24 +580,36 @@ void orchestrator_plugin_report_error(plugin_host_context *host_context, const c
     }
 }
 
+// Clamps the progress to [0, 1], rounds it to a percentage and publishes it as the
+// secondary status, with the message or "Plugin <id>" when the message is NULL or
+// empty. A NULL host context, print or plugin is tolerated; the caller keeps
+// ownership of the message. A non-finite progress is ignored: NaN has no defined
+// integer conversion and the infinities are not a valid progress. A lost progress update must neither
+// cross the C boundary nor stop the step, so any failure is ignored.
 void orchestrator_plugin_report_progress(plugin_host_context *host_context, double progress, const char *message)
 {
     if (host_context == nullptr || host_context->print == nullptr)
         return;
-
-    const int percent = int(std::clamp(progress, 0.0, 1.0) * 100.0 + 0.5);
-    if (message != nullptr && message[0] != '\0') {
-        host_context->print->set_status(percent,
-                                        message,
-                                        Slic3r::PrintBase::SlicingStatus::SECONDARY_STATE);
+    if (!std::isfinite(progress))
         return;
-    }
 
-    const std::string plugin_id = host_context->plugin != nullptr ? host_context->plugin->get_id() : "<unknown>";
-    const std::string message_text = "Plugin " + plugin_id;
-    host_context->print->set_status(percent,
-                                    message_text,
-                                    Slic3r::PrintBase::SlicingStatus::SECONDARY_STATE);
+    try {
+        const int percent = int(std::clamp(progress, 0.0, 1.0) * 100.0 + 0.5);
+        if (message != nullptr && message[0] != '\0') {
+            host_context->print->set_status(percent,
+                                            message,
+                                            Slic3r::PrintBase::SlicingStatus::SECONDARY_STATE);
+            return;
+        }
+
+        const std::string plugin_id = host_context->plugin != nullptr ? host_context->plugin->get_id() : "<unknown>";
+        const std::string message_text = "Plugin " + plugin_id;
+        host_context->print->set_status(percent,
+                                        message_text,
+                                        Slic3r::PrintBase::SlicingStatus::SECONDARY_STATE);
+    } catch (...) {
+        // A lost progress update must neither cross the C boundary nor stop the step: ignore the failure.
+    }
 }
 
 int32_t orchestrator_set_error_message(orchestrator_handle *orchestrator, const char *message)

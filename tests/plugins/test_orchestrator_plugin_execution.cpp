@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -437,6 +438,49 @@ TEST_CASE("PluginProgress publishes terminal completion without hiding later pha
         CHECK(capture.values.back() == Approx(0.0));
         CHECK(capture.messages.back() == "Second: 0 / 5");
     }
+}
+
+TEST_CASE("Host progress callback never lets a throwing status callback escape",
+          "[plugins][progress]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    size_t calls = 0;
+    print.set_status_callback([&calls](const PrintBase::SlicingStatus &) {
+        ++calls;
+        throw std::runtime_error("status callback failure");
+    });
+    plugin_host_context host_context;
+    host_context.print = &print;
+
+    // Both the explicit message and the "Plugin <id>" fallback reach the callback.
+    CHECK_NOTHROW(orchestrator_plugin_report_progress(&host_context, 0.5, "Working"));
+    CHECK(calls == 1);
+    CHECK_NOTHROW(orchestrator_plugin_report_progress(&host_context, 0.5, nullptr));
+    CHECK(calls == 2);
+}
+
+TEST_CASE("Host progress callback ignores non-finite progress",
+          "[plugins][progress]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    std::vector<int> percents;
+    print.set_status_callback([&percents](const PrintBase::SlicingStatus &status) {
+        percents.push_back(status.percent);
+    });
+    plugin_host_context host_context;
+    host_context.print = &print;
+
+    orchestrator_plugin_report_progress(&host_context, std::numeric_limits<double>::quiet_NaN(), "Working");
+    orchestrator_plugin_report_progress(&host_context, std::numeric_limits<double>::infinity(), "Working");
+    orchestrator_plugin_report_progress(&host_context, -std::numeric_limits<double>::infinity(), nullptr);
+    CHECK(percents.empty());
+
+    // A finite value still goes through and is clamped.
+    orchestrator_plugin_report_progress(&host_context, 2.0, "Working");
+    REQUIRE(percents.size() == 1);
+    CHECK(percents.front() == 100);
 }
 
 TEST_CASE("Missing dependencies block indirect consumers without executing them",

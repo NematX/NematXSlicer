@@ -39,7 +39,8 @@ typedef void (*plugin_report_fn)(plugin_host_context *host_context, const char *
 
 /*
 Report progress inside the currently running step.
-progress is clamped by the host to the [0.0, 1.0] range. message is optional
+Finite progress values are clamped by the host to the [0.0, 1.0] range;
+non-finite values (NaN, +/-infinity) are ignored. message is optional
 UTF-8 text and may be NULL to let the host use a default step/plugin message.
 */
 typedef void (*plugin_report_progress_fn)(plugin_host_context *host_context, double progress, const char *message);
