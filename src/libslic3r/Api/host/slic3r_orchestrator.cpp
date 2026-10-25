@@ -560,8 +560,13 @@ void orchestrator_plugin_report_error(plugin_host_context *host_context, const c
 {
     if (host_context != nullptr && host_context->execution_error != nullptr)
         host_context->execution_error->store(true, std::memory_order_relaxed);
-    if (host_context != nullptr && host_context->orchestrator != nullptr && host_context->cancel_on_error)
-        host_context->orchestrator->request_plugin_cancel();
+    if (host_context != nullptr && host_context->orchestrator != nullptr && host_context->cancel_on_error) {
+        // The failing plugin becomes the recorded cause of the stop, so other plugins stopped by it can name it.
+        if (host_context->plugin != nullptr)
+            host_context->orchestrator->request_plugin_cancel(*host_context->plugin);
+        else
+            host_context->orchestrator->request_plugin_cancel();
+    }
 
     try {
         const char *plugin_id = host_context != nullptr && host_context->plugin != nullptr ?

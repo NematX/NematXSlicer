@@ -95,7 +95,7 @@ static bool check_freeze(const Print *print, slicing_step_t last_editor_step, co
 #if defined(SLIC3R_STRICT_FREEZE)
     if (!allowed) {
         Orchestrator &orchestrator = Orchestrator::instance();
-        orchestrator.request_plugin_cancel();
+        orchestrator.request_plugin_cancel_after_host_failure();
         if (!print->claim_freeze_diagnostic())
             return false;
         try {

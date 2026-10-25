@@ -7,6 +7,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -1227,4 +1228,174 @@ TEST_CASE("Print cancellation reaches plugins and stops the step pipeline",
     CHECK_THROWS_AS(
         Slic3r::Steps::StepPipeline::run_slice(orchestrator, print),
         CanceledException);
+}
+
+// Exercise every transition of the recorded stop cause (first known cause wins) on two service plugins.
+TEST_CASE("The orchestrator records the first known cause of a plugin stop",
+          "[plugins][orchestrator][stop-cause]")
+{
+    using Kind = Orchestrator::PluginStopCause::Kind;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ensure_service_plugins_registered();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ActivePluginGuard active(orchestrator, {g_service_low.id, g_service_high.id});
+    Plugin *low = orchestrator.get_plugin(g_service_low.id);
+    Plugin *high = orchestrator.get_plugin(g_service_high.id);
+    REQUIRE(low != nullptr);
+    REQUIRE(high != nullptr);
+    orchestrator.reset_plugin_cancel();
+    CHECK(orchestrator.plugin_stop_cause().kind == Kind::Unknown);
+
+    SECTION("the first plugin cause is kept over a later plugin")
+    {
+        orchestrator.request_plugin_cancel(*low);
+        orchestrator.request_plugin_cancel(*high);
+        CHECK(orchestrator.is_plugin_cancelled());
+        CHECK(orchestrator.plugin_stop_cause().kind == Kind::Plugin);
+        CHECK(orchestrator.plugin_stop_cause().plugin == low);
+    }
+    SECTION("a host cause is kept over a later plugin")
+    {
+        orchestrator.request_plugin_cancel_after_host_failure();
+        orchestrator.request_plugin_cancel(*high);
+        CHECK(orchestrator.is_plugin_cancelled());
+        CHECK(orchestrator.plugin_stop_cause().kind == Kind::Host);
+        CHECK(orchestrator.plugin_stop_cause().plugin == nullptr);
+    }
+    SECTION("a plugin cause is kept over a later host failure")
+    {
+        orchestrator.request_plugin_cancel(*high);
+        orchestrator.request_plugin_cancel_after_host_failure();
+        CHECK(orchestrator.plugin_stop_cause().kind == Kind::Plugin);
+        CHECK(orchestrator.plugin_stop_cause().plugin == high);
+    }
+    SECTION("a plain cancellation records no cause and hides no later one")
+    {
+        orchestrator.request_plugin_cancel();
+        CHECK(orchestrator.is_plugin_cancelled());
+        CHECK(orchestrator.plugin_stop_cause().kind == Kind::Unknown);
+        orchestrator.request_plugin_cancel(*low);
+        CHECK(orchestrator.plugin_stop_cause().kind == Kind::Plugin);
+        CHECK(orchestrator.plugin_stop_cause().plugin == low);
+    }
+    SECTION("a plain cancellation keeps an earlier cause")
+    {
+        orchestrator.request_plugin_cancel_after_host_failure();
+        orchestrator.request_plugin_cancel();
+        CHECK(orchestrator.plugin_stop_cause().kind == Kind::Host);
+    }
+    SECTION("reset clears the flag and the cause, then a new cause is recorded")
+    {
+        orchestrator.request_plugin_cancel(*low);
+        orchestrator.reset_plugin_cancel();
+        CHECK_FALSE(orchestrator.is_plugin_cancelled());
+        CHECK(orchestrator.plugin_stop_cause().kind == Kind::Unknown);
+        orchestrator.request_plugin_cancel(*high);
+        CHECK(orchestrator.plugin_stop_cause().plugin == high);
+    }
+    SECTION("concurrent requests leave a consistent cause")
+    {
+        std::vector<std::thread> threads;
+        for (int i = 0; i < 8; ++i)
+            threads.emplace_back([&orchestrator, low, high, i] {
+                if (i % 3 == 0)
+                    orchestrator.request_plugin_cancel(*low);
+                else if (i % 3 == 1)
+                    orchestrator.request_plugin_cancel(*high);
+                else
+                    orchestrator.request_plugin_cancel_after_host_failure();
+            });
+        for (std::thread &thread : threads)
+            thread.join();
+        const Orchestrator::PluginStopCause cause = orchestrator.plugin_stop_cause();
+        CHECK(orchestrator.is_plugin_cancelled());
+        REQUIRE(cause.kind != Kind::Unknown);
+        CHECK((cause.kind == Kind::Plugin) == (cause.plugin != nullptr));
+        CHECK((cause.plugin == nullptr || cause.plugin == low || cause.plugin == high));
+    }
+}
+
+// report_error records the context's plugin as the cause only when it asks for the stop.
+TEST_CASE("report_error records its plugin as the stop cause only when it cancels",
+          "[plugins][orchestrator][stop-cause]")
+{
+    using Kind = Orchestrator::PluginStopCause::Kind;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ensure_service_plugins_registered();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ActivePluginGuard active(orchestrator, {g_service_low.id});
+    Plugin *low = orchestrator.get_plugin(g_service_low.id);
+    REQUIRE(low != nullptr);
+    orchestrator.reset_plugin_cancel();
+    (void) orchestrator.consume_plugin_messages();
+
+    Print print;
+    plugin_host_context host_context = orchestrator.prepare_plugin_host_context(low->get_step(), low, &print);
+    plugin_run_context run_context = orchestrator.prepare_plugin_run_context(low->get_step(), low, &host_context);
+    REQUIRE(run_context.report_error != nullptr);
+
+    host_context.cancel_on_error = false;
+    run_context.report_error(run_context.host_context, "non-blocking error");
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+    CHECK(orchestrator.plugin_stop_cause().kind == Kind::Unknown);
+
+    host_context.cancel_on_error = true;
+    run_context.report_error(run_context.host_context, "blocking error");
+    CHECK(orchestrator.is_plugin_cancelled());
+    CHECK(orchestrator.plugin_stop_cause().kind == Kind::Plugin);
+    CHECK(orchestrator.plugin_stop_cause().plugin == low);
+    (void) orchestrator.consume_plugin_messages();
+}
+
+// A healthy plugin stopped by something else gets a step error that names the real cause.
+TEST_CASE("throw_if_plugin_stopped names the cause that stopped a healthy plugin",
+          "[plugins][orchestrator][stop-cause]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ensure_service_plugins_registered();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ActivePluginGuard active(orchestrator, {g_service_low.id, g_service_high.id});
+    Plugin *low = orchestrator.get_plugin(g_service_low.id);
+    Plugin *high = orchestrator.get_plugin(g_service_high.id);
+    REQUIRE(low != nullptr);
+    REQUIRE(high != nullptr);
+    orchestrator.reset_plugin_cancel();
+    (void) orchestrator.consume_plugin_messages();
+
+    Print print;
+    const std::atomic_bool no_error { false };
+    const auto stop_message = [&](const Plugin &plugin, const std::atomic_bool &execution_error) {
+        try {
+            Steps::Detail::throw_if_plugin_stopped(orchestrator, print, plugin.get_step(), plugin, execution_error, "run");
+        } catch (const Steps::Detail::PluginStopped &error) {
+            return std::string(error.what());
+        }
+        return std::string();
+    };
+    const std::string step_name = Steps::Detail::step_name_for_diagnostic(orchestrator, low->get_step());
+
+    // Nothing requested a stop.
+    CHECK(stop_message(*low, no_error).empty());
+
+    // The other plugin failed: the healthy one names it.
+    plugin_host_context other_host = orchestrator.prepare_plugin_host_context(high->get_step(), high, &print);
+    plugin_run_context other_run = orchestrator.prepare_plugin_run_context(high->get_step(), high, &other_host);
+    other_run.report_error(other_run.host_context, "the other plugin failed");
+    CHECK(stop_message(*low, no_error) == step_name + " stopped during run of plugin '" + g_service_low.id +
+                                              "' after plugin '" + g_service_high.id + "' reported an error.");
+    // The failing plugin keeps the text about its own error.
+    const std::atomic_bool own_error { true };
+    CHECK(stop_message(*high, own_error) == step_name + " stopped after plugin '" + g_service_high.id +
+                                                "' reported an error during run.");
+
+    orchestrator.reset_plugin_cancel();
+    orchestrator.request_plugin_cancel_after_host_failure();
+    CHECK(stop_message(*low, no_error) ==
+          step_name + " stopped during run of plugin '" + g_service_low.id + "' after a host failure.");
+
+    orchestrator.reset_plugin_cancel();
+    orchestrator.request_plugin_cancel();
+    CHECK(stop_message(*low, no_error) ==
+          step_name + " stopped during run of plugin '" + g_service_low.id + "' after a stop was requested.");
+    (void) orchestrator.consume_plugin_messages();
 }

@@ -221,6 +221,11 @@ void defer_current_perimeter_exception(PerimeterRunContext &run,
     } catch (const CanceledException &) {
         if (run.orchestrator != nullptr)
             run.orchestrator->request_plugin_cancel();
+    } catch (const Steps::Detail::PluginStopped &) {
+        // A PluginStopped adds no diagnostic: a known cause already has its own message, and an Unknown
+        // cause has none (the final step error says a stop was requested). Only keep the stop requested.
+        if (run.orchestrator != nullptr)
+            run.orchestrator->request_plugin_cancel();
     } catch (const std::exception &error) {
         try {
             slic3r_api::report_error(report_context, error.what());
@@ -252,6 +257,7 @@ void contain_current_perimeter_exception(PerimeterRunContext *run,
         throw;
     } catch (const slic3r_api::PluginCancelled &) {
     } catch (const CanceledException &) {
+    } catch (const Steps::Detail::PluginStopped &) {
     } catch (const std::exception &error) {
         try {
             slic3r_api::report_error(report_context, error.what());

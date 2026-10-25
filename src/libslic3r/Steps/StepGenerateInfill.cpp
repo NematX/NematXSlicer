@@ -246,8 +246,10 @@ int32_t report_pattern_assignments_callback(const run_ctx_generate_infill *ctx,
 }
 
 // Build a borrowed pattern payload and run it through the step-owned service. Null required inputs are ordinary
-// refusals; a pending stop returns 0 after emptying output. Other C++ failures empty output, record the exception
-// unless the print was cancelled, and request a plugin stop. The service owns its contexts; output stays caller-owned.
+// refusals; a pending stop returns 0 after emptying output. A failure empties output and requests a plugin stop.
+// A PluginStopped adds no diagnostic (a known cause already has its own message; an Unknown cause has none, and
+// the final step error says a stop was requested); any other exception is recorded as a host failure, unless the
+// print was cancelled. The service owns its contexts; output stays caller-owned.
 int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
                                   infill_pattern_runtime_id pattern_id,
                                   const layer_handle *layer,
@@ -292,8 +294,8 @@ int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
 // Run borrowed modifiers in priority order against one mutable recipe. Invalid inputs and a pending stop are refused;
 // plugin failures are contained without rolling back earlier edits. Each plugin keeps its own host context, while the
 // generator retains recipe ownership. A plugin stop or print cancellation observed after a modifier phase returns 0
-// without another diagnostic: whoever requested the stop has already reported it, and the runner rethrows a print
-// cancellation.
+// without another diagnostic: a known cause already has its own message, an Unknown cause has none (the final step
+// error says a stop was requested), and the runner rethrows a print cancellation.
 int32_t modify_surface_recipe_callback(const run_ctx_generate_infill *ctx,
                                        const layer_handle *layer,
                                        const layer_island_handle *island,

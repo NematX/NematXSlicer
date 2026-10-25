@@ -443,8 +443,8 @@ TEST_CASE("STEP_INFILL discovery groups surfaces and replays them from the cache
 }
 
 // Build a test-owned gyroid-configured print, then activate only the shared partial-write pattern so the host's normal
-// inactive-id fallback selects it. The probe confirms its write before failure, while the test captures a
-// cancelled-during-run stop rather than a reported generator error and checks the original diagnostic appears once.
+// inactive-id fallback selects it. The probe confirms its write before failure, while the test captures the stop
+// of the healthy generator, whose text names the pattern plugin as the cause, and checks the original diagnostic appears once.
 TEST_CASE("STEP_INFILL contains a failing pattern callback", "[plugins][infill][patterns][callback-failure]")
 {
     using namespace Test::ProbePatternPlugin;
@@ -479,9 +479,8 @@ TEST_CASE("STEP_INFILL contains a failing pattern callback", "[plugins][infill][
     const std::vector<Orchestrator::PluginMessage> messages = orchestrator.consume_plugin_messages();
 
     CHECK(pattern_wrote_before_failure);
-    CHECK(failure.find("STEP_INFILL stopped after plugin 'infill.generator.default' was cancelled during run") !=
-          std::string::npos);
-    CHECK(failure.find("reported an error") == std::string::npos);
+    CHECK(failure.find("STEP_INFILL stopped during run of plugin 'infill.generator.default' after plugin '" +
+                       std::string(probe_pattern_id) + "' reported an error.") != std::string::npos);
     CHECK(orchestrator.is_plugin_cancelled());
     CHECK(std::count_if(messages.begin(), messages.end(), [](const Orchestrator::PluginMessage &message) {
         return message.level == Orchestrator::PluginMessageLevel::Error &&
@@ -537,9 +536,8 @@ TEST_CASE("STEP_INFILL stops the recipe modifier chain at its first failure",
 
     CHECK(recipe_modifier_calls == std::vector<std::string>{ k_recipe_modifier_a, k_recipe_modifier_b });
     CHECK(recipe_modifier_density_seen == Approx(0.375f));
-    CHECK(failure.find("STEP_INFILL stopped after plugin 'infill.generator.default' was cancelled during setup_run") !=
-          std::string::npos);
-    CHECK(failure.find("reported an error") == std::string::npos);
+    CHECK(failure.find("STEP_INFILL stopped during setup_run of plugin 'infill.generator.default' after plugin '" +
+                       std::string(k_recipe_modifier_b) + "' reported an error.") != std::string::npos);
     CHECK(orchestrator.is_plugin_cancelled());
     CHECK(std::count_if(messages.begin(), messages.end(), [](const Orchestrator::PluginMessage &message) {
         return message.level == Orchestrator::PluginMessageLevel::Error &&
@@ -595,8 +593,8 @@ TEST_CASE("STEP_INFILL contains a recipe modifier failing in setup_run",
     const std::vector<Orchestrator::PluginMessage> messages = orchestrator.consume_plugin_messages();
 
     CHECK(recipe_modifier_calls.empty());
-    CHECK(failure.find("STEP_INFILL stopped after plugin 'infill.generator.default' was cancelled during setup_run") !=
-          std::string::npos);
+    CHECK(failure.find("STEP_INFILL stopped during setup_run of plugin 'infill.generator.default' after plugin '" +
+                       std::string(k_recipe_modifier_setup_failure) + "' reported an error.") != std::string::npos);
     CHECK(orchestrator.is_plugin_cancelled());
     CHECK(std::count_if(messages.begin(), messages.end(), [](const Orchestrator::PluginMessage &message) {
         return message.level == Orchestrator::PluginMessageLevel::Error &&
@@ -663,24 +661,23 @@ TEST_CASE("STEP_INFILL recipe modifiers observe a contained pattern failure",
     CHECK(recipe_modifier_pattern_callback_record.second_result == 0);
     CHECK(recipe_modifier_pattern_callback_record.second_output_empty);
     CHECK(recipe_modifier_pattern_callback_record.resolve_after == INFILL_PATTERN_RUNTIME_ID_INVALID);
-    CHECK(failure.find("STEP_INFILL stopped after plugin 'infill.generator.default' was cancelled during setup_run") !=
-          std::string::npos);
-    CHECK(failure.find("reported an error") == std::string::npos);
+    CHECK(failure.find("STEP_INFILL stopped during setup_run of plugin 'infill.generator.default' after plugin '" +
+                       std::string(probe_pattern_id) + "' reported an error.") != std::string::npos);
     CHECK(orchestrator.is_plugin_cancelled());
+    // The contained PluginStopped adds no host message: its cause is the probe's own error.
     CHECK(std::count_if(messages.begin(), messages.end(), [&stopped_message](const Orchestrator::PluginMessage &message) {
-        return message.level == Orchestrator::PluginMessageLevel::Error && message.plugin_id == "<unknown>" &&
-               message.message.find(stopped_message) != std::string::npos;
-    }) == 1);
+        return message.message.find(stopped_message) != std::string::npos;
+    }) == 0);
     CHECK(std::count_if(messages.begin(), messages.end(), [](const Orchestrator::PluginMessage &message) {
         return message.level == Orchestrator::PluginMessageLevel::Error &&
                message.plugin_id == probe_pattern_id &&
                message.message.find("probe pattern run failure") != std::string::npos;
     }) == 1);
-    // Two errors remain after the prerequisite steps are drained: the probe's original run failure and the host's
-    // INFILL_PATTERN containment report. The modifier callback returns without blaming the modifier for the stop.
+    // Only the probe's original run failure remains after the prerequisite steps are drained. The modifier
+    // callback returns without blaming the modifier for the stop and the host adds no report of its own.
     CHECK(std::count_if(messages.begin(), messages.end(), [](const Orchestrator::PluginMessage &message) {
         return message.level == Orchestrator::PluginMessageLevel::Error;
-    }) == 2);
+    }) == 1);
     CHECK(std::none_of(messages.begin(), messages.end(), [](const Orchestrator::PluginMessage &message) {
         return message.message.find("stopped after plugin '" + std::string(k_recipe_modifier_pattern_callback) + "'") !=
                std::string::npos;

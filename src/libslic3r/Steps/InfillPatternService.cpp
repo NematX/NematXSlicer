@@ -201,8 +201,8 @@ InfillPatternService::Pattern *InfillPatternService::pattern_for_generation(infi
 
 // Called from a catch block of a step callback. The failure is handled by Detail::contain_callback_failure
 // (StepRunner.hpp), which rethrows the active exception internally: a CanceledException is left to the
-// runner; any other exception is logged, added as an error message of the step, and the plugin stop is
-// requested. output is then emptied in all cases, because a failed fill may have written part of its
+// runner; a PluginStopped only requests the stop again and adds no message; any other exception is logged,
+// added as an error message of the step, and the plugin stop is requested as a host failure. output is then emptied in all cases, because a failed fill may have written part of its
 // result into it. Nothing escapes.
 void contain_pattern_callback_failure(Orchestrator &orchestrator,
                                       slicing_step_t step,

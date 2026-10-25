@@ -281,3 +281,90 @@ TEST_CASE("Python perimeter generation reports native module failures without pu
 }
 
 #endif
+
+namespace {
+using namespace Slic3r;
+using namespace Slic3r::Test::PerimeterPluginTests;
+
+constexpr const char *FAILING_NATIVE_MODULE = "tests.perimeter.failing_native_module";
+const char *k_failing_module_dependencies[] = { nullptr };
+
+// Perimeter module that throws in the chosen phase; the plugin base reports the exception as the
+// module's own error, which must be the only error the user gets.
+class FailingNativeModule : public slic3r_api::PluginBase
+{
+public:
+    enum class Phase { Setup, SetupRun, Run };
+
+    static FailingNativeModule &instance(orchestrator_handle *orchestrator)
+    {
+        static FailingNativeModule plugin(orchestrator);
+        return plugin;
+    }
+
+    void set_phase(const Phase phase) { m_phase = phase; }
+
+private:
+    explicit FailingNativeModule(orchestrator_handle *orchestrator) : PluginBase(orchestrator) {}
+
+    const char *id_impl() const noexcept override { return FAILING_NATIVE_MODULE; }
+    const char *name_impl() const noexcept override { return "Failing native perimeter module"; }
+    const char *description_impl() const noexcept override { return "Fails in the chosen phase."; }
+    const char *exclusive_group_impl() const noexcept override { return ""; }
+    const char *exclusive_group_label_impl() const noexcept override { return ""; }
+    const char *exclusive_group_tooltip_impl() const noexcept override { return ""; }
+    slicing_step_t step_impl() const noexcept override { return PERIMETER_GENERATION_MODULE; }
+    const char *const *dependencies_impl() const noexcept override { return k_failing_module_dependencies; }
+    int32_t priority_impl() const noexcept override { return 0; }
+
+    void setup_impl(const plugin_run_context *, uint32_t) const override
+    {
+        if (m_phase == Phase::Setup)
+            throw std::runtime_error("failing module error");
+    }
+
+    void setup_run_impl(const plugin_run_context *) const override
+    {
+        if (m_phase == Phase::SetupRun)
+            throw std::runtime_error("failing module error");
+    }
+
+    void run_impl(const plugin_run_context *) const override
+    {
+        if (m_phase == Phase::Run)
+            throw std::runtime_error("failing module error");
+    }
+
+    Phase m_phase = Phase::Setup;
+};
+
+} // namespace
+
+TEST_CASE("A failing perimeter module reports only its own error",
+          "[plugins][perimeter][module-failure]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    FailingNativeModule &module = FailingNativeModule::instance(reinterpret_cast<orchestrator_handle *>(&orchestrator));
+    if (orchestrator.get_plugin(FAILING_NATIVE_MODULE) == nullptr)
+        REQUIRE(orchestrator.register_plugin(module.c_instance()));
+
+    const FailingNativeModule::Phase phase = GENERATE(FailingNativeModule::Phase::Setup,
+                                                      FailingNativeModule::Phase::SetupRun,
+                                                      FailingNativeModule::Phase::Run);
+    CAPTURE(int(phase));
+    module.set_phase(phase);
+    const PerimeterCancellationCapture capture =
+        run_perimeter_cancellation_case(perimeter_config({}), {SIMPLE_PERIMETER_GENERATOR, FAILING_NATIVE_MODULE});
+
+    // The step stops, nothing is published, and the queue holds the module's error alone: the generator
+    // adds no report about the stop.
+    CHECK(capture.runtime_error);
+    CAPTURE(capture.runtime_error_message);
+    CHECK(capture.runtime_error_message.find("stopped during ") != std::string::npos);
+    CHECK(capture.runtime_error_message.find("of plugin '" + std::string(SIMPLE_PERIMETER_GENERATOR) + "' after plugin '" +
+                                              FAILING_NATIVE_MODULE + "' reported an error.") != std::string::npos);
+    CHECK(capture.perimeter_output_count == 0);
+    REQUIRE(capture.error_messages.size() == 1);
+    CHECK(capture.error_messages.front().find("failing module error") != std::string::npos);
+}

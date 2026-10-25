@@ -122,8 +122,9 @@ private:
 
 // Contain the exception being handled by the calling catch block at a pattern callback boundary (it
 // rethrows it internally, so it must only be called from an active catch block): a print cancellation is
-// left to the runner; any other exception is logged and added as an error message of the step, and the
-// plugin stop is requested (see Detail::contain_callback_failure in StepRunner.hpp). A non-null output is
+// left to the runner; a PluginStopped (a stop already requested, see Detail::PluginStopped) adds no message; any
+// other exception is logged and added as an error message of the step, and the plugin stop is requested as
+// a host failure (see Detail::contain_callback_failure in StepRunner.hpp). A non-null output is
 // then left as an empty collection. Never throws.
 void contain_pattern_callback_failure(Orchestrator &orchestrator,
                                       slicing_step_t step,

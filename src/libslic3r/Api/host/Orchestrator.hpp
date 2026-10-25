@@ -512,9 +512,27 @@ public:
     std::string error_message(int32_t id) const;
     // Return whether cancellation was requested by the host.
     bool is_plugin_cancelled() const;
-    // Request cancellation; plugin code must observe it at a cancellation point.
-    void request_plugin_cancel();
-    // Clear cancellation before starting an independent operation.
+    // First known cause of a plugin stop, used to explain why a healthy plugin was stopped.
+    struct PluginStopCause
+    {
+        enum class Kind { Unknown, Plugin, Host };
+        Kind kind = Kind::Unknown;
+        // Set when kind is Plugin. Plugins are never unregistered, so the pointer stays valid.
+        const Plugin *plugin = nullptr;
+    };
+    // The three request functions never throw: if the mutex cannot be locked, the flag is still set and
+    // the cause stays as it was (possibly Unknown).
+    // Request cancellation whose cause is unknown or is not an error (user cancel, silent stop).
+    // It records no cause, and it keeps a cause that was already recorded.
+    void request_plugin_cancel() noexcept;
+    // Request cancellation because `failed_plugin` reported an error. Records the cause when none is recorded yet.
+    void request_plugin_cancel(const Plugin &failed_plugin) noexcept;
+    // Request cancellation because the host itself failed. Records the cause when none is recorded yet.
+    void request_plugin_cancel_after_host_failure() noexcept;
+    // Return the first known cause recorded since the last reset (Unknown when none).
+    PluginStopCause plugin_stop_cause() const;
+    // Clear cancellation and the recorded cause before starting an independent operation.
+    // Called between runs, never while plugin workers are running.
     void reset_plugin_cancel();
     // Initialize active plugins after registration and activation are finalized.
     void initialize_plugins();
@@ -597,6 +615,10 @@ private:
     std::map<std::string, RuntimeIdRegistry> m_runtime_id_registries;
     std::vector<GenericFacetsAnnotationDefinition> m_generic_facets_annotations;
     std::atomic_bool m_plugin_cancel_requested { false };
+    // Protects m_plugin_stop_cause. A request records the cause, then sets the flag, inside this mutex;
+    // is_plugin_cancelled() only reads the atomic flag and never takes it.
+    mutable std::mutex m_plugin_stop_cause_mutex;
+    PluginStopCause m_plugin_stop_cause;
     std::mutex m_plugin_messages_mutex;
     std::vector<PluginMessage> m_plugin_messages;
     // Process-lifetime diagnostics registered through store_error_message().

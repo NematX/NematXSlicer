@@ -1597,10 +1597,62 @@ std::string Orchestrator::error_message(int32_t id) const
 bool Orchestrator::is_plugin_cancelled() const { return m_plugin_cancel_requested.load(std::memory_order_relaxed); }
 
 // Publish cancellation for running plugin code to observe at its next cancellation point.
-void Orchestrator::request_plugin_cancel() { m_plugin_cancel_requested.store(true, std::memory_order_relaxed); }
+// The cause stays unchanged: an earlier recorded cause is kept and none is invented.
+void Orchestrator::request_plugin_cancel() noexcept
+{
+    // Locking can in theory throw; the flag must be set in every case, so the fallback sets it without the lock.
+    try {
+        std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
+        m_plugin_cancel_requested.store(true, std::memory_order_relaxed);
+    } catch (...) {
+        m_plugin_cancel_requested.store(true, std::memory_order_relaxed);
+    }
+}
 
-// Clear cancellation before starting an independent operation.
-void Orchestrator::reset_plugin_cancel() { m_plugin_cancel_requested.store(false, std::memory_order_relaxed); }
+// Record the plugin as the cause if none is known yet, then publish cancellation.
+void Orchestrator::request_plugin_cancel(const Plugin &failed_plugin) noexcept
+{
+    // If the lock fails, the flag is still set and the cause stays unrecorded.
+    try {
+        std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
+        if (m_plugin_stop_cause.kind == PluginStopCause::Kind::Unknown) {
+            m_plugin_stop_cause.kind   = PluginStopCause::Kind::Plugin;
+            m_plugin_stop_cause.plugin = &failed_plugin;
+        }
+        m_plugin_cancel_requested.store(true, std::memory_order_relaxed);
+    } catch (...) {
+        m_plugin_cancel_requested.store(true, std::memory_order_relaxed);
+    }
+}
+
+// Record the host as the cause if none is known yet, then publish cancellation.
+void Orchestrator::request_plugin_cancel_after_host_failure() noexcept
+{
+    // If the lock fails, the flag is still set and the cause stays unrecorded.
+    try {
+        std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
+        if (m_plugin_stop_cause.kind == PluginStopCause::Kind::Unknown)
+            m_plugin_stop_cause.kind = PluginStopCause::Kind::Host;
+        m_plugin_cancel_requested.store(true, std::memory_order_relaxed);
+    } catch (...) {
+        m_plugin_cancel_requested.store(true, std::memory_order_relaxed);
+    }
+}
+
+// Copy the recorded cause under the mutex.
+Orchestrator::PluginStopCause Orchestrator::plugin_stop_cause() const
+{
+    std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
+    return m_plugin_stop_cause;
+}
+
+// Clear cancellation and the cause before starting an independent operation.
+void Orchestrator::reset_plugin_cancel()
+{
+    std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
+    m_plugin_stop_cause = PluginStopCause();
+    m_plugin_cancel_requested.store(false, std::memory_order_relaxed);
+}
 
 bool Orchestrator::validate_plugin_activation(const std::vector<std::string> &plugin_ids,
                                               std::string &error_message) const
