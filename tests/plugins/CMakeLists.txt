@@ -16,6 +16,7 @@ add_executable(${_TEST_NAME}_tests
     test_auxiliary_layer_helpers.cpp
     test_bridge_detector_cancellation.cpp
     mesh_queries_c_fixture.c
+    plugin_api_headers_c_fixture.c
     mesh_query_visibility_reference.cpp
     test_mesh_queries.cpp
     test_triangle_mesh_storage.cpp

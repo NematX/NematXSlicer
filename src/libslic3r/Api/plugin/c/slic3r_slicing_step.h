@@ -18,7 +18,13 @@ Defines the execution stage of a plugin in the slicing pipeline.
 Values intentionally leave gaps so the host can add built-in stages and plugin
 extensions without renumbering the existing API values.
 */
+#ifdef __cplusplus
 typedef enum slicing_step_t : uint16_t
+#else
+/* C before C23 has no enum base type (enumerators are int): the type is a plain 16-bit integer
+   and the enum only provides the constants. */
+enum slicing_step_values
+#endif
 {
     /*
     No explicit slicing invalidation step.
@@ -123,7 +129,14 @@ typedef enum slicing_step_t : uint16_t
     /* Non-exclusive wipe services driven in phases by STEP_WIPETOWER. */
     WIPE_TOWER_WIPE                = 10450
 
-} slicing_step_t;
+}
+#ifdef __cplusplus
+slicing_step_t
+#endif
+;
+#ifndef __cplusplus
+typedef uint16_t slicing_step_t;
+#endif
 
 /*
 Runtime service steps use the upper half of the 16-bit step namespace.

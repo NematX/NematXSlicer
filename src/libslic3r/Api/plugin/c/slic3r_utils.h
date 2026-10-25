@@ -16,7 +16,9 @@
 #define SLIC3R_HOST_API
 #endif
 
+#ifdef __cplusplus
 extern "C" {
+#endif
 
 // handle type for temporary storage
 typedef struct storage_handle storage_handle;
@@ -82,5 +84,7 @@ deterministic slicing sequence is required.
 */
 SLIC3R_HOST_API int32_t slic3r_safe_rand(int32_t max);
 
+#ifdef __cplusplus
 }
+#endif
 #endif // slic3r_utils_h_

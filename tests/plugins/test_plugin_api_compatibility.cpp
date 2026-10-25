@@ -7,6 +7,8 @@
 
 using namespace Slic3r;
 
+extern "C" int test_plugin_api_headers_c(void);
+
 TEST_CASE("Package ABI diagnostics identify the manifest section key and invalid value", "[plugins][abi][repository]")
 {
     const std::string declaration = GENERATE(std::string(""),
@@ -99,4 +101,9 @@ TEST_CASE("DLL and package validators share the same contract registry", "[plugi
     table.assign(1, {4, 0});
     CHECK_FALSE(validate_plugin_api_table(table).compatible());
     CHECK(PluginPackageMetadata{}.compatibility.status == PluginApiCompatibilityStatus::NotChecked);
+}
+
+TEST_CASE("Volume, run context and clipper headers compile as C", "[plugins][abi][c-headers]")
+{
+    REQUIRE(test_plugin_api_headers_c() == 1);
 }

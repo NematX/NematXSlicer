@@ -266,12 +266,12 @@ that geometry, and the pointer must not be freed. It remains valid only until
 the source Surface or its containing SurfaceCollection is mutated, cleared or
 destroyed. Do not retain this value beyond that lifetime.
 */
-struct c_surface
+typedef struct c_surface
 {
     const expolygon_handle *expolygon;
     raw_surface_type type;
     uint64_t id;
-};
+} c_surface;
 /* Return a zero-initialized value for null; otherwise return the borrowed snapshot above. */
 SLIC3R_HOST_API c_surface surface_c_view(const surface_handle *me);
 
