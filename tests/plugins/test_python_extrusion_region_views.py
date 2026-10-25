@@ -238,6 +238,22 @@ class PythonExtrusionRegionViewTests(unittest.TestCase):
 
         # The wrapper must forward the borrowed array, not a rebuilt copy.
         self.assertEqual(api.host.polyline_set, (42, ctypes.addressof(points), 3))
+    def test_linear_points_use_the_two_call_size_query(self):
+        api = self.make_api()
+        linear = [(0, 0), (500, 120), (1000, 0)]
+        calls = []
+
+        def copy_linear_points(entity, dst, capacity):
+            calls.append((address(entity), dst is None, int(capacity)))
+            if dst is not None:
+                for idx, (x, y) in enumerate(linear):
+                    dst[idx] = self.generated.CPoint(x, y)
+            return len(linear)
+
+        api.host.extrusion_polyline_copy_linear_points = copy_linear_points
+        points = self.extrusions.ExtrusionEntity(api, 7).linear_points()
+        self.assertEqual([(point.x, point.y) for point in points], linear)
+        self.assertEqual(calls, [(7, True, 0), (7, False, 3)])
 
     def test_dynamic_property_key_is_typed_and_orchestrator_bound(self):
         api = self.make_api()

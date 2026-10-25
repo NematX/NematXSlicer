@@ -6,7 +6,7 @@
 #define slic3r_extrusion_polyline_h_
 
 #define SLIC3R_PLUGIN_API_EXTRUSION_POLYLINE_MAJOR 1u
-#define SLIC3R_PLUGIN_API_EXTRUSION_POLYLINE_MINOR 0u
+#define SLIC3R_PLUGIN_API_EXTRUSION_POLYLINE_MINOR 1u
 
 #include <stdint.h>
 
@@ -116,6 +116,21 @@ enough buffer.
 */
 SLIC3R_HOST_API uint32_t extrusion_polyline_copy_points(const extrusion_entity_handle *entity, c_point *dst, uint32_t dst_capacity);
 
+/*
+Copy the polyline as straight points into dst and return the number of points
+required, with the same two-call pattern as extrusion_polyline_copy_points().
+
+Straight segments keep their points. Each arc is replaced by points on the arc,
+as the host does when it needs a plain polyline (ArcPolyline::to_polyline()):
+an arc turning more than 22.5 degrees gets intermediate points, one every 22.5
+degrees at most. Use it for geometry (offsets, areas) that must follow the
+printed path; without arcs the result equals extrusion_polyline_copy_points().
+
+The host builds the points before copying them. If that fails (no memory),
+the function returns 0 and writes nothing to dst, like an entity without a
+local polyline.
+*/
+SLIC3R_HOST_API uint32_t extrusion_polyline_copy_linear_points(const extrusion_entity_handle *entity, c_point *dst, uint32_t dst_capacity);
 /*
 Replace the local polyline with count straight points.
 

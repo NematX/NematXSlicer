@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -247,6 +248,52 @@ static FlowRole to_flow_role(raw_extrusion_role role)
             return frSolidInfill;
     }
     return frInfill;
+}
+
+// Compute a support flow from the object settings at any height; unusable input or settings give no flow rather than throwing through the C API.
+static std::optional<Flow> object_support_flow_or_none(const object_handle *me, raw_extrusion_role flow_role,
+                                                               double flow_height_mm, double print_height_mm, uint32_t flags)
+{
+    if (me == nullptr || (flow_role & RAW_EXTRUSION_ROLE_SUPPORT) == 0 ||
+        ((flags & OBJECT_SUPPORT_FLOW_BRIDGE) != 0 && print_height_mm <= 0))
+        return std::nullopt;
+    try {
+        const PrintObject &object = *to_object(me);
+        // The bottom-contact ratio is an average over the regions, undefined without any.
+        if (object.print() == nullptr ||
+            ((flags & OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT) != 0 && object.num_printing_regions() == 0))
+            return std::nullopt;
+        const Flow flow = object_support_flow(object, to_flow_role(flow_role), flow_height_mm, print_height_mm, flags);
+        // mm3_per_mm() throws for a flow without a positive cross section (FlowErrorNegativeFlow): such
+        // a flow is refused here, so the c_flow and the millimeter results agree.
+        (void)flow.mm3_per_mm();
+        return flow;    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// Compute a regional perimeter or infill flow at any height and layer id; unusable input or settings give no flow rather than throwing through the C API.
+static std::optional<Flow> object_region_flow_or_none(const object_handle *me, uint32_t region_idx,
+                                                              raw_extrusion_role flow_role, double height_mm, uint32_t layer_id)
+{
+    if (me == nullptr || height_mm <= 0 || (flow_role & RAW_EXTRUSION_ROLE_SUPPORT) != 0)
+        return std::nullopt;
+    try {
+        const PrintObject &object = *to_object(me);
+        if (object.print() == nullptr || region_idx >= object.num_printing_regions())
+            return std::nullopt;
+        const Flow flow = object.printing_region(region_idx).flow(object, to_flow_role(flow_role), height_mm, layer_id);
+        // A flow without a positive cross section is refused, as for the support flows.
+        (void)flow.mm3_per_mm();
+        return flow;    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+// Copy the float millimeter values of a host flow.
+static c_flow_mm to_c_flow_mm(const Flow &flow)
+{
+    return c_flow_mm{flow.width(), flow.spacing(), flow.height(), flow.nozzle_diameter()};
 }
 
 static ExtrusionRole to_extrusion_role(raw_extrusion_role role)
@@ -1136,38 +1183,49 @@ const print_region_handle *object_get_print_region(const object_handle *me, uint
     return reinterpret_cast<const print_region_handle*>(&Slic3r::to_object(me)->printing_region(idx));
 }
 
-// Compute a support flow from the object settings at any height; unusable input or settings return zero rather than throwing through the C API.
 c_flow object_get_support_flow(const object_handle *me, raw_extrusion_role flow_role, double flow_height_mm,
                                double print_height_mm, uint32_t flags)
 {
-    if (me == nullptr || (flow_role & RAW_EXTRUSION_ROLE_SUPPORT) == 0 ||
-        ((flags & OBJECT_SUPPORT_FLOW_BRIDGE) != 0 && print_height_mm <= 0))
-        return {};
+    // The conversion reads the flow again; no exception may cross the C ABI.
     try {
-        const Slic3r::PrintObject &object = *Slic3r::to_object(me);
-        // The bottom-contact ratio is an average over the regions, undefined without any.
-        if (object.print() == nullptr ||
-            ((flags & OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT) != 0 && object.num_printing_regions() == 0))
-            return {};
-        return Slic3r::to_c_flow(Slic3r::object_support_flow(object, Slic3r::to_flow_role(flow_role), flow_height_mm,
-                                                             print_height_mm, flags));
+        const std::optional<Slic3r::Flow> flow = Slic3r::object_support_flow_or_none(me, flow_role, flow_height_mm, print_height_mm, flags);
+        return flow ? Slic3r::to_c_flow(*flow) : c_flow{};
     } catch (...) {
         return {};
     }
 }
 
-// Compute a regional perimeter or infill flow at any height and layer id; unusable input or settings return zero rather than throwing through the C API.
 c_flow object_get_region_flow(const object_handle *me, uint32_t region_idx, raw_extrusion_role flow_role,
                               double height_mm, uint32_t layer_id)
 {
-    if (me == nullptr || height_mm <= 0 || (flow_role & RAW_EXTRUSION_ROLE_SUPPORT) != 0)
-        return {};
+    // The conversion reads the flow again; no exception may cross the C ABI.
     try {
-        const Slic3r::PrintObject &object = *Slic3r::to_object(me);
-        if (object.print() == nullptr || region_idx >= object.num_printing_regions())
-            return {};
-        return Slic3r::to_c_flow(object.printing_region(region_idx).flow(object, Slic3r::to_flow_role(flow_role),
-                                                                         height_mm, layer_id));
+        const std::optional<Slic3r::Flow> flow = Slic3r::object_region_flow_or_none(me, region_idx, flow_role, height_mm, layer_id);
+        return flow ? Slic3r::to_c_flow(*flow) : c_flow{};
+    } catch (...) {
+        return {};
+    }
+}
+
+c_flow_mm object_get_support_flow_mm(const object_handle *me, raw_extrusion_role flow_role, double flow_height_mm,
+                                     double print_height_mm, uint32_t flags)
+{
+    // The conversion reads the flow again; no exception may cross the C ABI.
+    try {
+        const std::optional<Slic3r::Flow> flow = Slic3r::object_support_flow_or_none(me, flow_role, flow_height_mm, print_height_mm, flags);
+        return flow ? Slic3r::to_c_flow_mm(*flow) : c_flow_mm{};
+    } catch (...) {
+        return {};
+    }
+}
+
+c_flow_mm object_get_region_flow_mm(const object_handle *me, uint32_t region_idx, raw_extrusion_role flow_role,
+                                    double height_mm, uint32_t layer_id)
+{
+    // The conversion reads the flow again; no exception may cross the C ABI.
+    try {
+        const std::optional<Slic3r::Flow> flow = Slic3r::object_region_flow_or_none(me, region_idx, flow_role, height_mm, layer_id);
+        return flow ? Slic3r::to_c_flow_mm(*flow) : c_flow_mm{};
     } catch (...) {
         return {};
     }

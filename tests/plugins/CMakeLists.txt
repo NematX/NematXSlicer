@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
     test_config_translations.cpp
     test_deferred_callback_exception.cpp
     test_extrusion_continuity.cpp
+    test_extrusion_linear_points.cpp
     test_extrusion_ordered_leaf.cpp
     test_extrusion_split_by_areas.cpp
     test_extrusion_views.cpp

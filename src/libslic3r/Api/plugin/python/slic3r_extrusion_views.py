@@ -505,6 +505,14 @@ class ExtrusionPolylineReadMixin:
         out = (CPoint * needed)()
         written = int(self.api.host.extrusion_polyline_copy_points(self.c_handle(), out, needed))
         return [out[idx] for idx in range(written)]
+    def linear_points(self) -> list[CPoint]:
+        """Return the local polyline with every arc replaced by points on it."""
+        needed = int(self.api.host.extrusion_polyline_copy_linear_points(self.c_handle(), None, 0))
+        if needed == 0:
+            return []
+        out = (CPoint * needed)()
+        written = int(self.api.host.extrusion_polyline_copy_linear_points(self.c_handle(), out, needed))
+        return [out[idx] for idx in range(written)]
 
     def segments(self) -> list[CExtrusionSegment]:
         needed = int(self.api.host.extrusion_polyline_copy_segments(self.c_handle(), None, 0))

@@ -274,6 +274,24 @@ class PythonDataTreeViewTests(unittest.TestCase):
             ("support", 50, 7, 0.2, 0.0, 0),
             ("region", 50, 1, 9, 0.2, 2),
         ])
+
+        def support_flow_mm(obj, role, flow_height, print_height, flags):
+            calls.append(("support_mm", address(obj), int(role), flow_height, print_height, int(flags)))
+            return self.generated.CFlowMm(spacing=0.44)
+
+        def region_flow_mm(obj, region_idx, role, height, layer_id):
+            calls.append(("region_mm", address(obj), int(region_idx), int(role), height, int(layer_id)))
+            return self.generated.CFlowMm(width=0.45)
+
+        api.host.object_get_support_flow_mm = support_flow_mm
+        api.host.object_get_region_flow_mm = region_flow_mm
+        calls.clear()
+        self.assertEqual(obj.support_flow_mm(7, 0.2, 0.15, flags).spacing, 0.44)
+        self.assertEqual(obj.region_flow_mm(1, 9, 0.2, 2).width, 0.45)
+        self.assertEqual(calls, [
+            ("support_mm", 50, 7, 0.2, 0.15, flags),
+            ("region_mm", 50, 1, 9, 0.2, 2),
+        ])
         self.assertEqual(
             (self.generated.OBJECT_SUPPORT_FLOW_FIRST_LAYER, self.generated.OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT,
              self.generated.OBJECT_SUPPORT_FLOW_BRIDGE),

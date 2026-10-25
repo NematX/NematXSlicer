@@ -618,7 +618,14 @@ public:
     c_flow region_flow(uint32_t region_idx, raw_extrusion_role role, double height_mm, uint32_t layer_id) const {
         return object_get_region_flow(handle(), region_idx, role, height_mm, layer_id);
     }
-
+    // The same flows in the host's millimeters, for computations that must match the host exactly (see c_flow_mm).
+    c_flow_mm support_flow_mm(raw_extrusion_role role, double flow_height_mm, double print_height_mm = 0.,
+                              uint32_t flags = 0) const {
+        return object_get_support_flow_mm(handle(), role, flow_height_mm, print_height_mm, flags);
+    }
+    c_flow_mm region_flow_mm(uint32_t region_idx, raw_extrusion_role role, double height_mm, uint32_t layer_id) const {
+        return object_get_region_flow_mm(handle(), region_idx, role, height_mm, layer_id);
+    }
     uint32_t volume_count() const;
     Volume volume(uint32_t idx) const;
 };

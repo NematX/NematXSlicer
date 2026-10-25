@@ -244,6 +244,27 @@ uint32_t extrusion_polyline_copy_points(const extrusion_entity_handle *entity, c
     return count;
 }
 
+// Build the straight polyline with the host conversion (ArcPolyline::to_polyline(), which places points
+// on each arc) and copy it when dst is large enough. The conversion allocates: on any failure nothing
+// is written and 0 is returned, so no exception crosses the C ABI.
+uint32_t extrusion_polyline_copy_linear_points(const extrusion_entity_handle *entity, c_point *dst, uint32_t dst_capacity)
+{
+    const Slic3r::ArcPolyline *polyline = Slic3r::polyline_or_null(entity);
+    if (polyline == nullptr)
+        return 0;
+
+    try {
+        const Slic3r::Polyline linear = polyline->to_polyline();
+        const uint32_t count = static_cast<uint32_t>(linear.size());
+        if (dst != nullptr && dst_capacity >= count) {
+            for (uint32_t idx = 0; idx < count; ++idx)
+                dst[idx] = Slic3r::to_c_point(linear.points[idx]);
+        }
+        return count;
+    } catch (...) {
+        return 0;
+    }
+}
 int32_t extrusion_polyline_set_points(extrusion_entity_handle *entity, const c_point *points, uint32_t count)
 {
     if (entity == nullptr)

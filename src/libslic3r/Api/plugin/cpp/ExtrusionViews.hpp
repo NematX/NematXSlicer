@@ -590,6 +590,13 @@ public:
             extrusion_polyline_copy_points(self().handle(), out.data(), static_cast<uint32_t>(out.size()));
         return out;
     }
+    // The local polyline with every arc replaced by points on it (see extrusion_polyline_copy_linear_points()).
+    std::vector<c_point> linear_points() const {
+        std::vector<c_point> out(extrusion_polyline_copy_linear_points(self().handle(), nullptr, 0));
+        if (!out.empty())
+            extrusion_polyline_copy_linear_points(self().handle(), out.data(), static_cast<uint32_t>(out.size()));
+        return out;
+    }
 
     std::vector<c_extrusion_segment> segments() const {
         std::vector<c_extrusion_segment> out(segment_count());

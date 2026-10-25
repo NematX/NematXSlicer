@@ -8,7 +8,9 @@
    The object-level flows (object_get_support_flow, object_get_region_flow) are
    compared with the native calls of the legacy grid support at several
    heights, soluble or not. A modifier volume gives a second region, to check
-   that the bottom contact uses the bridge flow ratio averaged over regions. */
+   that the bottom contact uses the bridge flow ratio averaged over regions.
+   The millimeter variants (object_get_support_flow_mm, object_get_region_flow_mm)
+   must give the native float values exactly, without the scaled truncation. */
 #include <catch2/catch.hpp>
 
 #include <cmath>
@@ -41,6 +43,15 @@ void check_flow(const c_flow &actual, const Flow &expected)
     CHECK(actual.is_bridge == (expected.bridge() ? 1 : 0));
     CHECK(actual.spacing_ratio == Approx(expected.spacing_ratio()));
     CHECK(actual.mm3_per_mm == Approx(expected.mm3_per_mm()));
+}
+
+// Compare the millimeter fields with the native float values, exactly.
+void check_flow_mm(const c_flow_mm &actual, const Flow &expected)
+{
+    CHECK(actual.width == double(expected.width()));
+    CHECK(actual.spacing == double(expected.spacing()));
+    CHECK(actual.height == double(expected.height()));
+    CHECK(actual.nozzle_diameter == double(expected.nozzle_diameter()));
 }
 } // namespace
 
@@ -182,6 +193,9 @@ TEST_CASE("Object support and region flows match the native flows at any height"
         const Flow bottom = soluble ? interface_flow.with_flow_ratio(bridge_ratio) :
             Flow::bridging_flow(std::sqrt(bridge_ratio) * interface_flow.nozzle_diameter(), interface_flow.nozzle_diameter());
         check_flow(object_get_support_flow(handle, interface_role, height, 0., OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), bottom);
+        check_flow_mm(object_get_support_flow_mm(handle, base_role, height, 0., 0), base_flow);
+        check_flow_mm(object_get_support_flow_mm(handle, interface_role, height, 0., 0), interface_flow);
+        check_flow_mm(object_get_support_flow_mm(handle, interface_role, height, 0., OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), bottom);
         if (height <= 0.)
             continue;
         // A bridge thread at the printed height and a nominal flow printed at another height.
@@ -197,6 +211,8 @@ TEST_CASE("Object support and region flows match the native flows at any height"
                        object.printing_region(0).flow(object, frExternalPerimeter, height, layer_id));
         check_flow(object_get_region_flow(handle, 0, RAW_EXTRUSION_ROLE_INFILL, height, 2),
                    object.printing_region(0).flow(object, frInfill, height, 2));
+        check_flow_mm(object_get_region_flow_mm(handle, 0, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, height, 2),
+                      object.printing_region(0).flow(object, frExternalPerimeter, height, 2));
     }
 
     // Inputs the host cannot turn into a flow give a zero flow without throwing.
@@ -215,6 +231,16 @@ TEST_CASE("Object support and region flows match the native flows at any height"
         CHECK(flow.height == 0);
         CHECK(flow.nozzle_diameter == 0);
         CHECK(flow.mm3_per_mm == 0);
+    }
+    const c_flow_mm zero_flows_mm[] = {
+        object_get_support_flow_mm(handle, RAW_EXTRUSION_ROLE_INFILL, 0.2, 0., 0),
+        object_get_region_flow_mm(handle, 1, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0.2, 2),
+    };
+    for (const c_flow_mm &flow : zero_flows_mm) {
+        CHECK(flow.width == 0);
+        CHECK(flow.spacing == 0);
+        CHECK(flow.height == 0);
+        CHECK(flow.nozzle_diameter == 0);
     }
 }
 
@@ -266,4 +292,52 @@ TEST_CASE("Object bottom-contact support flow averages the bridge flow ratio of 
     // The C++ view forwards the same request.
     check_flow(slic3r_api::Object(handle).support_flow(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, 0.2, 0.,
                                                        OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), expected);
+    check_flow_mm(slic3r_api::Object(handle).support_flow_mm(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, 0.2, 0.,
+                                                             OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), expected);
+}
+
+// A thin flow printed too high can have a positive spacing but a negative cross section: the host's
+// Flow::mm3_per_mm() throws for it. The C functions must not let that exception out and return a
+// zero flow, in both result forms.
+TEST_CASE("Object flows without a positive cross section are zero flows", "[plugins][support-flow]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"external_perimeter_extrusion_width", "0.1"}, {"external_perimeter_overlap", "10%"},
+                                   {"support_material_extrusion_width", "0.1"}});
+    Print print;
+    Model model;
+    Test::init_print({make_cube(4., 4., 2.)}, print, model, config);
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+    const PrintObject &object = print.object(0);
+    const object_handle *handle = reinterpret_cast<const object_handle *>(&object);
+
+    // The native region flow exists, with a positive spacing, but has no volume. The support flow
+    // printed 1 mm high already fails on its spacing; it must give a zero flow too.
+    const Flow region_flow = object.printing_region(0).flow(object, frExternalPerimeter, 1., 2);
+    REQUIRE(region_flow.spacing() > 0);
+    REQUIRE_THROWS_AS(region_flow.mm3_per_mm(), FlowErrorNegativeFlow);
+    REQUIRE_THROWS(support_material_flow(&object, 0.2f).with_height(1.f));
+
+    const c_flow flows[] = {
+        object_get_region_flow(handle, 0, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 1., 2),
+        object_get_support_flow(handle, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, 0.2, 1., 0),
+    };
+    for (const c_flow &flow : flows) {
+        CHECK(flow.width == 0);
+        CHECK(flow.spacing == 0);
+        CHECK(flow.height == 0);
+        CHECK(flow.mm3_per_mm == 0);
+    }
+    const c_flow_mm flows_mm[] = {
+        object_get_region_flow_mm(handle, 0, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 1., 2),
+        object_get_support_flow_mm(handle, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, 0.2, 1., 0),
+    };
+    for (const c_flow_mm &flow : flows_mm) {
+        CHECK(flow.width == 0);
+        CHECK(flow.spacing == 0);
+        CHECK(flow.height == 0);
+    }
 }

@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 4u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 2u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 3u
 
 /*
 Data-tree access for a sliced Print.
@@ -931,6 +931,40 @@ SLIC3R_HOST_API c_flow object_get_region_flow(const object_handle *me,
                                               raw_extrusion_role flow_role,
                                               double height_mm,
                                               uint32_t layer_id);
+/*
+The millimeter values of a flow, as the host computed them.
+
+c_flow stores scaled integers, truncated from the host's float millimeters, so
+unscaled(c_flow.spacing) can differ from the host spacing by up to one scaled
+unit. A plugin that must repeat a host computation exactly (for example the
+size of a grid cell, the configured gap plus the flow spacing) reads
+these values instead. width, spacing, height and nozzle_diameter are the float
+values of the host flow widened to double; zero means the host could not
+compute the flow.
+*/
+typedef struct c_flow_mm
+{
+    double width;
+    double spacing;
+    double height;
+    double nozzle_diameter;
+} c_flow_mm;
+
+/*
+The same flows as object_get_support_flow() and object_get_region_flow(), with
+the same arguments and the same rules, returned in millimeters. Input or
+settings the host cannot compute return all fields zero.
+*/
+SLIC3R_HOST_API c_flow_mm object_get_support_flow_mm(const object_handle *me,
+                                                     raw_extrusion_role flow_role,
+                                                     double flow_height_mm,
+                                                     double print_height_mm,
+                                                     uint32_t flags);
+SLIC3R_HOST_API c_flow_mm object_get_region_flow_mm(const object_handle *me,
+                                                    uint32_t region_idx,
+                                                    raw_extrusion_role flow_role,
+                                                    double height_mm,
+                                                    uint32_t layer_id);
 
 /* ========================= PRINT ========================= */
 

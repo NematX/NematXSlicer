@@ -55,6 +55,7 @@ from slic3r_api_generated import (
     CLayerSupportProperty,
     CCurledLine,
     CFlow,
+    CFlowMm,
     CFloatOrPercent,
     CMatrix4d,
     CMeshSlicingParams,
@@ -1749,6 +1750,27 @@ class Object(DataTreeView):
         gives a zero flow. The ``CFlow`` is a copy.
         """
         return self.api.host.object_get_region_flow(
+            self.c_handle(), int(region_idx), int(role), float(height_mm), int(layer_id)
+        )
+    @abi_requires_headers("slic3r_data_tree.h")
+    def support_flow_mm(
+        self, role: int, flow_height_mm: float, print_height_mm: float = 0.0, flags: int = 0
+    ) -> CFlowMm:
+        """
+        Return the same flow as ``support_flow()`` in the host's millimeters.
+
+        Use it when a computation must match the host exactly; the scaled
+        integers of ``CFlow`` are truncated. A flow the host cannot compute
+        has all fields zero. The ``CFlowMm`` is a copy.
+        """
+        return self.api.host.object_get_support_flow_mm(
+            self.c_handle(), int(role), float(flow_height_mm), float(print_height_mm), int(flags)
+        )
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def region_flow_mm(self, region_idx: int, role: int, height_mm: float, layer_id: int) -> CFlowMm:
+        """Return the same flow as ``region_flow()`` in the host's millimeters."""
+        return self.api.host.object_get_region_flow_mm(
             self.c_handle(), int(region_idx), int(role), float(height_mm), int(layer_id)
         )
 
