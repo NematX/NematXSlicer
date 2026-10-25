@@ -330,6 +330,50 @@ TEST_CASE("Detect overhang keeps diagonal split loops closed", "[plugins][perime
     CHECK(total_polyline_points(capture.external_perimeters) > total_polyline_points(baseline.external_perimeters));
 }
 
+// Generate a stepped loop whose starting point lies over lower-layer support, then
+// inspect the owned result without mutation for LOOP entities that lost closure.
+TEST_CASE("Detect overhang keeps supported seam fragments oriented", "[plugins][perimeter][detect-overhang]")
+{
+    const DynamicPrintConfig config = detect_overhang_config({
+        {"overhangs_width", "0.2"},
+        {"overhangs_width_speed", "0.2"}
+    });
+    const ExPolygon source_area(Polygon({
+        Point(-9517193, -2282851), Point(-5774973, -2282851),
+        Point(-5774973, -2482851), Point(-5380883, -2482851),
+        Point(-5380883, -2282851), Point(-1638663, -2282851),
+        Point(-1638663, -2482851), Point(-379649, -2482851),
+        Point(-379649, -2282851), Point(1661672, -2282851),
+        Point(1661672, -2482851), Point(3532853, -2482851),
+        Point(3532853, -2082851), Point(13345765, -2082851),
+        Point(13345765, 2482853), Point(-14480354, 2482853),
+        Point(-14480354, -2082851), Point(-11032852, -2082851),
+        Point(-11032852, -2482851), Point(-9517193, -2482851)
+    }));
+    const double width = unscaled(run_detect_overhang_case(config, half_width_lower_support()).external_perimeter_width);
+    // Expand the centerline by half the extrusion width so the generator's
+    // inward offset preserves its short bottom steps. Only the right edge
+    // extends beyond the lower layer's supported centerline area.
+    const ExPolygon target = offset_ex(source_area, scale_i(width * 0.5)).front();
+    const ExPolygon lower_support = rectangle_expolygon(-20., -5., 13.23042 + width * 0.5, 5.);
+    const PerimeterRunCapture baseline = run_perimeter_and_post_case_with_lower_area(
+        config, {SIMPLE_PERIMETER_GENERATOR}, {}, target, lower_support, 1);
+    size_t flagged = 0;
+    size_t broken = 0;
+    count_flagged_loops(baseline.external_perimeters, flagged, broken);
+    REQUIRE(flagged > 0);
+    REQUIRE(broken == 0);
+
+    const PerimeterRunCapture capture = run_perimeter_and_post_case_with_lower_area(
+        config, {SIMPLE_PERIMETER_GENERATOR}, {DETECT_OVERHANG}, target, lower_support, 1);
+    REQUIRE(detected_overhang_stats(capture).overhang_properties > 0);
+    flagged = 0;
+    broken = 0;
+    count_flagged_loops(capture.external_perimeters, flagged, broken);
+    REQUIRE(flagged > 0);
+    CHECK(broken == 0);
+}
+
 TEST_CASE("Detect overhang separates flow and speed thresholds", "[plugins][perimeter][detect-overhang]")
 {
     // Flow and speed have independent thresholds. With a half-supported
