@@ -3,6 +3,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include <algorithm>
+#include <cstddef>
 #include <string>
 #include <utility>
 #include <vector>
@@ -14,6 +15,8 @@
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/libslic3r.h"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
@@ -115,6 +118,53 @@ Slic3r::PluginPackageLoadErrorCode plugin_package_load_error_code(raw_plugin_pac
 } // namespace
 
 extern "C" {
+
+/* Construct the generated header before writing caller storage, and catch every exception so none crosses the C ABI boundary. */
+int32_t orchestrator_get_version_info(raw_slic3r_version_info *info)
+{
+    if (info == nullptr)
+        return 0;
+
+    const size_t struct_size = info->struct_size;
+    constexpr size_t minimum_version_info_size =
+        offsetof(raw_slic3r_version_info, generated_header) + sizeof(info->generated_header);
+    if (struct_size < minimum_version_info_size)
+        return 0;
+
+    static thread_local std::string generated_header;
+    try {
+        generated_header = Slic3r::header_slic3r_generated();
+        if (generated_header.empty())
+            return 0;
+    } catch (...) {
+        return 0;
+    }
+
+// Field bounds prepare the API for fields appended after the stable version 3.4 prefix.
+#define SET_VERSION_INFO_FIELD(field, value) \
+    do { \
+        if (offsetof(raw_slic3r_version_info, field) + sizeof(info->field) <= struct_size) \
+            info->field = value; \
+    } while (false)
+    SET_VERSION_INFO_FIELD(application_name, SLIC3R_APP_NAME);
+    SET_VERSION_INFO_FIELD(application_key, SLIC3R_APP_KEY);
+    SET_VERSION_INFO_FIELD(application_command, SLIC3R_APP_CMD);
+    SET_VERSION_INFO_FIELD(version, SLIC3R_VERSION);
+    SET_VERSION_INFO_FIELD(version_full, SLIC3R_VERSION_FULL);
+    SET_VERSION_INFO_FIELD(build_id, SLIC3R_BUILD_ID);
+    SET_VERSION_INFO_FIELD(gcodeviewer_name, GCODEVIEWER_APP_NAME);
+    SET_VERSION_INFO_FIELD(gcodeviewer_key, GCODEVIEWER_APP_KEY);
+    SET_VERSION_INFO_FIELD(gcodeviewer_command, GCODEVIEWER_APP_CMD);
+    SET_VERSION_INFO_FIELD(gcodeviewer_build_id, GCODEVIEWER_BUILD_ID);
+    SET_VERSION_INFO_FIELD(based_on, SLIC3R_BASED_ON);
+    SET_VERSION_INFO_FIELD(github_url, SLIC3R_GITHUB);
+    SET_VERSION_INFO_FIELD(download_url, SLIC3R_DOWNLOAD);
+    SET_VERSION_INFO_FIELD(documentation_url, SLIC3R_DOC_URL);
+    SET_VERSION_INFO_FIELD(intro_url, SLIC3R_INTRO);
+    SET_VERSION_INFO_FIELD(generated_header, generated_header.c_str());
+#undef SET_VERSION_INFO_FIELD
+    return 1;
+}
 
 void orchestrator_register_plugin(orchestrator_handle *orch, plugin_instance plugin) {
     Slic3r::Orchestrator *orchestrator = orch == nullptr ? &Slic3r::Orchestrator::instance() :

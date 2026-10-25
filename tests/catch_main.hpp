@@ -6,6 +6,8 @@
 // #define CATCH_CONFIG_DEFAULT_REPORTER "verboseconsole"
 #include <catch2/catch.hpp>
 
+#include "libslic3r/Utils.hpp"
+
 #ifdef _MSC_VER
 #include <crtdbg.h>
 #include <stdlib.h>
@@ -36,6 +38,14 @@ struct NoCrtDialogs {
 const NoCrtDialogs no_crt_dialogs;
 } // namespace
 #endif // _MSC_VER
+
+namespace {
+struct NoGeneratedGcodeHeaderDate {
+    // Disable generated-file timestamps before Catch starts any test binary.
+    NoGeneratedGcodeHeaderDate() { Slic3r::set_header_generate_with_date(false); }
+};
+const NoGeneratedGcodeHeaderDate no_generated_gcode_header_date;
+} // namespace
 
 namespace Catch {
 struct VerboseConsoleReporter : public ConsoleReporter {

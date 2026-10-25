@@ -9,7 +9,7 @@
 an independent activation reason and the target is enabled when any of them is
 true. */
 #define SLIC3R_PLUGIN_API_ORCHESTRATOR_MAJOR 3u
-#define SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR 3u
+#define SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR 4u
 
 /*
 Property registration guide:
@@ -72,6 +72,44 @@ typedef enum raw_plugin_execution_status {
     RAW_PLUGIN_EXECUTION_INACTIVE = -2,
     RAW_PLUGIN_EXECUTION_PLUGIN_ERROR = -3
 } raw_plugin_execution_status;
+
+/*
+Host application and G-code viewer version information
+======================================================
+
+Set struct_size to sizeof the caller's structure. The version 3.4 prefix
+through generated_header is the minimum size; future fields are appended after
+it. Macro-backed strings are valid for the process lifetime. generated_header
+is borrowed until the next call on the same thread or that thread exits, and
+contains neither the G-code comment prefix "; " nor a line break.
+*/
+typedef struct raw_slic3r_version_info {
+    uint32_t struct_size;
+    const char *application_name;
+    const char *application_key;
+    const char *application_command;
+    const char *version;
+    const char *version_full;
+    const char *build_id;
+    const char *gcodeviewer_name;
+    const char *gcodeviewer_key;
+    const char *gcodeviewer_command;
+    const char *gcodeviewer_build_id;
+    const char *based_on;
+    const char *github_url;
+    const char *download_url;
+    const char *documentation_url;
+    const char *intro_url;
+    const char *generated_header;
+} raw_slic3r_version_info;
+
+/*
+Fill host version information. Returns 1 on success; a null pointer, a size
+smaller than the version 3.4 prefix, or failure to produce the generated header
+returns 0 without modifying the structure. On success, only complete fields
+that fit within struct_size are written.
+*/
+SLIC3R_HOST_API int32_t orchestrator_get_version_info(raw_slic3r_version_info *info);
 
 /*
 Register a plugin instance.

@@ -53,6 +53,11 @@
 
 namespace {
 
+// Building an AppConfig turns the global G-code header date back on; restore the value the tests run with.
+struct HeaderDateRestorer {
+    ~HeaderDateRestorer() { Slic3r::set_header_generate_with_date(false); }
+};
+
 #ifdef SLIC3R_FILESYSTEM_TRANSACTION_TESTING
 class ScopedFilesystemTransactionHook {
 public:
@@ -811,6 +816,7 @@ TEST_CASE("UpdaterError explicitly represents success and failure", "[plugins][u
 TEST_CASE("Plugin background update check frequencies have stable defaults and legacy migration",
           "[plugins][updater][plugin-updates]")
 {
+    const HeaderDateRestorer header_date_restorer;
     Slic3r::AppConfig config(Slic3r::AppConfig::EAppMode::Editor);
     CHECK(config.get("plugin_update_background_check") == "daily");
     CHECK(config.get("plugin_update_background_check_last_epoch") == "0");
@@ -842,6 +848,7 @@ TEST_CASE("Dismissed plugin update snapshots only reopen for newer offers",
     CHECK(Slic3r::has_new_plugin_package_updates(
         {{"alpha", "2.0.0"}}, {{"alpha", "not-a-version"}}));
 
+    const HeaderDateRestorer header_date_restorer;
     Slic3r::AppConfig config(Slic3r::AppConfig::EAppMode::Editor);
     REQUIRE(config.set_section("dismissed_plugin_updates", dismissed));
     REQUIRE(config.set_section("dismissed_plugin_updates", {{"alpha", "2.1.0"}}));
