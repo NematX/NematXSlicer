@@ -159,6 +159,11 @@ namespace {
 // Register module-owned built-ins with a non-null borrowed host; registrations and diagnostics are retained by the host.
 void register_builtin_plugins(orchestrator_handle *orchestrator);
 
+// Register selector-conditioned GUI rules for settings used by exclusive providers.
+void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
+                                          const Steps::StepExclusiveGroup &group,
+                                          const std::vector<Plugin *> &plugins);
+
 using RegisterPluginFn = void (*)(orchestrator_handle *);
 using PluginAbiVersionFn = int32_t (*)(slic3r_major_minor_version *);
 using PluginLoadClock = std::chrono::steady_clock;
@@ -825,26 +830,31 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
 }
 
 
+/*
+For each non-thumbnail provider, add a STRING_EQUALS activation reason for every setting it declares
+as read, so that reason enables the setting when the provider ID is selected. The setting remains
+visible in the profile for other selections without presenting that provider's controls as active;
+other rules may independently activate the same setting. This registers rule metadata without
+changing configuration values. The ordered plugin list contains active non-null providers, and the
+group option key is populated. The group, plugins, and key strings are borrowed; GuiRuleRegistry
+copies clause strings during add() or queues them until a target definition exists. Thumbnail
+consumers may acquire several encoders independently of the default selector, so their shared
+renderer controls must remain editable and receive no selector rules. Invalid registrations are
+logged by the registry and ignored here; allocation failures propagate.
+*/
 void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
                                            const Steps::StepExclusiveGroup &group,
                                            const std::vector<Plugin *> &plugins)
 {
-    // Thumbnail consumers may acquire several encoders independently of the
-    // default selector. Their shared renderer controls must remain editable.
     if (group.step == GCODE_THUMBNAIL)
         return;
-    // An exclusive group exposes one enum selector whose values are plugin ids.
-    // Settings declared as "used" by a plugin should only be editable when
-    // that plugin is the selected implementation. These generated rules keep
-    // old plugin-specific options visible in the preset but avoid presenting
-    // inactive implementation details as active controls.
-    for (size_t plugin_idx = 0; plugin_idx < plugins.size(); ++plugin_idx) {
-        const Plugin *plugin = plugins[plugin_idx];
+    for (const Plugin *plugin : plugins) {
         for (const Plugin::UsedConfigKey &setting : plugin->get_used_config_keys()) {
             raw_gui_rule_clause clause = raw_gui_rule_clause_init();
-            clause.condition = RAW_GUI_RULE_CONDITION_INT_EQUALS;
+            // Compare the stored provider ID, not its changeable enum-table rank.
+            clause.condition = RAW_GUI_RULE_CONDITION_STRING_EQUALS;
             clause.condition_key = group.option_def.opt_key;
-            clause.condition_float_value = double(plugin_idx);
+            clause.condition_string_value = plugin->get_id().c_str();
 
             raw_gui_rule rule = raw_gui_rule_init();
             rule.target_key = setting.key.c_str();

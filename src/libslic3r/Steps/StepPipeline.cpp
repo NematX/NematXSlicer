@@ -396,6 +396,14 @@ raw_option_preset_type option_preset_type_for_step(slicing_step_t step)
     return found == s_step_preset_types.end() ? RAW_PRESET_TYPE_FFF_PRINT : found->second;
 }
 
+/*
+Populate the returned group with owned display strings, borrowed raw-option pointers, and its UI
+fragment; copied strings become group-owned buffers, while the raw option definition borrows those
+buffers. Mark the selector enum for inactive-ID pruning during finalization. That finalization
+replaces the enum table, which ConfigOptionEnumGeneric only borrows, so no selector-bearing config
+may exist before finalize_plugin_option_defs(); this function creates metadata only. Allocation
+failures propagate and no option-definition validation occurs here.
+*/
 StepExclusiveGroup make_exclusive_group(slicing_step_t step,
                                         const std::string &group_id,
                                         const std::string &key,
@@ -416,6 +424,8 @@ StepExclusiveGroup make_exclusive_group(slicing_step_t step,
     def.type = RAW_CO_ENUM;
     def.gui_type = RAW_GUI_TYPE_SELECT_CLOSE;
     def.container_type = RAW_CONTAINER_TYPE_PROJECT;
+    // Request removal of inactive plugin IDs from this selector during finalization.
+    def.contains_plugin_id = 1;
     def.option_preset_type = option_preset_type;
     def.printer_technology = RAW_PT_FFF;
     def.category = category;

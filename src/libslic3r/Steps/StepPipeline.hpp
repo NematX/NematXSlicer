@@ -67,9 +67,8 @@ struct StepExclusiveGroup
     raw_config_option_def option_def;
     std::string ui_fragment;
     std::vector<raw_gui_rule> gui_activation_rules;
-    // The option enum stores plugin ids as serialized values. Its integer
-    // value is the index in enum_values, which is also the index used by
-    // generated RAW_GUI_RULE_CONDITION_INT_EQUALS rules.
+    // The option enum serializes plugin IDs. Its integer value is only the
+    // current enum-table rank; generated provider rules compare the serialized ID.
     std::vector<std::string> enum_values;
     std::vector<std::string> enum_labels;
     std::vector<key_value_string_pair_t> enum_pairs;

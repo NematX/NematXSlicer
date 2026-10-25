@@ -31,6 +31,7 @@
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Plugins/GCode/FeatureGCode.hpp"
 #include "libslic3r/Plugins/GCode/CustomGCodePerPrintZ.hpp"
@@ -114,12 +115,118 @@
 
 namespace {
 
+constexpr char k_exclusive_pruning_failed_plugin_id[] = "slic3r.test.exclusive_pruning.failed";
+constexpr char k_exclusive_pruning_valid_plugin_id[] = "slic3r.test.exclusive_pruning.valid";
+constexpr char k_exclusive_pruning_group_id[] = "test.exclusive.selector_pruning";
+constexpr char k_exclusive_pruning_failed_setting[] = "test.s2.failed_provider_setting";
+constexpr char k_exclusive_pruning_valid_setting[] = "test.s2.valid_provider_setting";
+
+/*
+Two startup providers exercise post-initialization pruning and selector-driven GUI rules. Their
+provider metadata is borrowed from static strings; initialization creates only the valid provider's
+own setting, while the lower-priority provider deliberately conflicts with an existing option.
+*/
+class ExclusivePruningTestPlugin final : public slic3r_api::PluginBase
+{
+public:
+    ExclusivePruningTestPlugin(orchestrator_handle *orchestrator,
+                               const char *id,
+                               const char *read_key,
+                               const char *defined_key,
+                               const int32_t priority,
+                               const bool fail_initialization) :
+        PluginBase(orchestrator),
+        m_orchestrator(orchestrator),
+        m_id(id),
+        m_read_key(read_key),
+        m_defined_key(defined_key),
+        m_priority(priority),
+        m_fail_initialization(fail_initialization)
+    {}
+
+private:
+    const char *id_impl() const noexcept override { return m_id; }
+
+    const char *exclusive_group_impl() const noexcept override
+    {
+        return k_exclusive_pruning_group_id;
+    }
+
+    slicing_step_t step_impl() const noexcept override { return STEP_POST_SLICING; }
+
+    const char *const *dependencies_impl() const noexcept override
+    {
+        static const char *const no_dependencies[] = { nullptr };
+        return no_dependencies;
+    }
+
+    int32_t priority_impl() const noexcept override { return m_priority; }
+
+    // The host first queries the count with a null buffer, then supplies one slot. This callback
+    // writes one borrowed key description without changing provider state or failing.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
+    {
+        if (keys != nullptr) {
+            keys[0] = raw_used_config_key{
+                m_read_key,
+                m_fail_initialization ? RAW_CO_FLOAT : RAW_CO_BOOL,
+                RAW_CONTAINER_TYPE_PROJECT,
+                RAW_PRESET_TYPE_FFF_PRINT};
+        }
+        return 1;
+    }
+
+    // The host uses the same count-then-fill calls. This callback returns zero for the failing
+    // provider or one borrowed key string for the valid provider, without changing state or failing.
+    int32_t defined_config_keys(const char **keys) const noexcept override
+    {
+        if (m_defined_key == nullptr)
+            return 0;
+        if (keys != nullptr)
+            keys[0] = m_defined_key;
+        return 1;
+    }
+
+    // Ignore the unused storage handle and register one option through the borrowed orchestrator.
+    // The valid provider adds its bool setting; the other submits a string definition for an
+    // existing float key, which the host rejects and uses to disable that provider. The C API
+    // copies the definition, produces no direct output, and reports registration failure through
+    // the startup diagnostic.
+    void inilialize_impl(storage_handle *) const override
+    {
+        raw_config_option_def definition = raw_config_option_def_init();
+        definition.opt_key = m_fail_initialization ? m_read_key : m_defined_key;
+        definition.type = m_fail_initialization ? RAW_CO_STRING : RAW_CO_BOOL;
+        definition.container_type = RAW_CONTAINER_TYPE_PROJECT;
+        definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+        definition.printer_technology = RAW_PT_FFF;
+        definition.category = RAW_OPTION_CATEGORY_SLICING;
+        definition.invalidates_step = STEP_POST_SLICING;
+        definition.default_serialized_value = m_fail_initialization ? "invalid" : "0";
+        definition.label = m_fail_initialization ? "Conflicting test option" : "Valid provider setting";
+        definition.full_label = definition.label;
+        definition.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI;
+        (void)orchestrator_create_option_def(m_orchestrator, &definition);
+    }
+
+    void run_impl(const plugin_run_context *) const override {}
+
+    orchestrator_handle *m_orchestrator;
+    const char *m_id;
+    const char *m_read_key;
+    const char *m_defined_key;
+    int32_t m_priority;
+    bool m_fail_initialization;
+};
+
 // Register one deliberately rich option before PrintConfigDef is finalized so
 // introspection tests can verify every pointer-backed and presence-tracked field.
 void register_config_introspection_fixture(orchestrator_handle *orchestrator);
 void register_config_option_or_fail(orchestrator_handle *orchestrator,
                                     const raw_config_option_def &definition);
 void register_plugin_option_list_fixtures(orchestrator_handle *orchestrator);
+// Register the selector providers before the shared menu and GUI rules are built.
+void register_exclusive_pruning_test_plugins(orchestrator_handle *orchestrator);
 
 // Set while the runtime finalizes plugin option definitions when the empty
 // plugin-id list fixture reports its non-fatal error.
@@ -227,6 +334,42 @@ void register_config_option_or_fail(orchestrator_handle *orchestrator,
             "Failed to register configuration introspection fixture '" + key +
             "' (error " + std::to_string(int(result)) + ").");
     }
+}
+
+/*
+With a valid borrowed orchestrator handle, register a float option used by the failing provider and
+then add two process-lifetime plugin objects before selector options are built. The host retains
+borrowed callback contexts, while option-definition strings are copied by the C API; a definition or
+registration failure throws through the test startup path, and active state is chosen separately.
+*/
+void register_exclusive_pruning_test_plugins(orchestrator_handle *orchestrator)
+{
+    Slic3r::Orchestrator &host = *reinterpret_cast<Slic3r::Orchestrator *>(orchestrator);
+    raw_config_option_def failed_setting = raw_config_option_def_init();
+    failed_setting.opt_key = k_exclusive_pruning_failed_setting;
+    failed_setting.type = RAW_CO_FLOAT;
+    failed_setting.container_type = RAW_CONTAINER_TYPE_PROJECT;
+    failed_setting.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    failed_setting.printer_technology = RAW_PT_FFF;
+    failed_setting.category = RAW_OPTION_CATEGORY_SLICING;
+    failed_setting.invalidates_step = STEP_POST_SLICING;
+    failed_setting.default_serialized_value = "0.25";
+    failed_setting.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI;
+    register_config_option_or_fail(orchestrator, failed_setting);
+
+    static ExclusivePruningTestPlugin failed(
+        orchestrator, k_exclusive_pruning_failed_plugin_id, k_exclusive_pruning_failed_setting,
+        nullptr, -100, true);
+    static ExclusivePruningTestPlugin valid(
+        orchestrator, k_exclusive_pruning_valid_plugin_id, k_exclusive_pruning_valid_setting,
+        k_exclusive_pruning_valid_setting, 100, false);
+
+    if (host.get_plugin(k_exclusive_pruning_failed_plugin_id) == nullptr &&
+        !host.register_plugin(failed.c_instance()))
+        throw std::runtime_error("Could not register the failing exclusive-selector test provider.");
+    if (host.get_plugin(k_exclusive_pruning_valid_plugin_id) == nullptr &&
+        !host.register_plugin(valid.c_instance()))
+        throw std::runtime_error("Could not register the valid exclusive-selector test provider.");
 }
 
 // Register the fixtures used by the plugin-defined option list tests. They must
@@ -469,7 +612,17 @@ void activate_plugin_or_fail(Slic3r::Orchestrator &orchestrator, const char *plu
 
 namespace Slic3r::Test::Plugins {
 
-// Register and activate the shared providers once, finalize settings, initialize the FFF/SLA print config caches and disable scoped probes; call before constructing Slic3r::Print or DynamicPrintConfig::full_print_config(). Missing expected plugins log an error and call assert(false), not a return value.
+// A function-local static caches successful initialization once per process; this no-argument
+// void function registers and activates providers in the process-wide Orchestrator.
+// The Orchestrator owns the registered Plugin objects, which borrow the provider instances; those
+// instances stay owned by function-local statics in plugin sources and test files. Option
+// definitions are finalized and FFF/SLA print-config caches are initialized. The regional seam and
+// storage test providers, plus the aligned, contiguous, cost, and random seam placers, are
+// deactivated. The failing exclusive-selector test provider is disabled during initialization, and
+// its one expected option diagnostic is filtered; the valid test provider is disabled after option
+// finalization. Call before Slic3r::Print or DynamicPrintConfig::full_print_config(). A missing
+// expected plugin is logged then asserted; a failed option or test-provider registration, or a
+// Python plugin load, can throw std::runtime_error.
 void ensure_plugin_test_runtime_initialized()
 {
     static bool initialized = []() {
@@ -542,6 +695,7 @@ void ensure_plugin_test_runtime_initialized()
         slic3r_api::SeamPlacement::RandomPlugin::register_random_seam_placer_plugin(orchestrator_handle_value);
         register_regional_seam_test_provider(orchestrator_handle_value);
         register_plugin_storage_test_provider(orchestrator_handle_value);
+        register_exclusive_pruning_test_plugins(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateToolChangePlugin::register_create_tool_change_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateTransitionScopePlugin::register_create_transition_scope_plugin(
@@ -710,6 +864,8 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "seam_placer.cost");
         activate_plugin_or_fail(orchestrator, "seam_placer.fixed");
         activate_plugin_or_fail(orchestrator, "seam_placer.random");
+        activate_plugin_or_fail(orchestrator, k_exclusive_pruning_failed_plugin_id);
+        activate_plugin_or_fail(orchestrator, k_exclusive_pruning_valid_plugin_id);
         // Keep a second SeamPlacer active only while the generated regional
         // selector is registered and initialized for its dedicated tests.
         activate_plugin_or_fail(orchestrator, "slic3r.test.seam_placer.regional");
@@ -769,11 +925,17 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.initialize_plugins();
         if (without_png) orchestrator.set_plugin_active("PNG", true);
         orchestrator.finalize_plugin_option_defs();
+        orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);
         {
             // Capture the empty plugin-id list diagnostic without hiding it
             // from tests that assert plugin messages later.
             std::vector<Orchestrator::PluginMessage> messages = orchestrator.consume_plugin_messages();
             for (const Orchestrator::PluginMessage &message : messages) {
+                if (message.plugin_id == k_exclusive_pruning_failed_plugin_id &&
+                    message.message.find(
+                        "Plugin config option 'test.s2.failed_provider_setting' is already defined with incompatible type.") !=
+                        std::string::npos)
+                    continue;
                 if (message.message.find("test.infill.empty_list") != std::string::npos) {
                     g_empty_option_list_error_reported = true;
                     continue;

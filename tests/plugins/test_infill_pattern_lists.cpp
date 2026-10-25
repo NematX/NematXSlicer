@@ -9,19 +9,18 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 
 /*
 Plugin-defined option lists
 ===========================
 
-These tests cover the generic machinery behind plugin-defined enum settings:
-contains_plugin_id pruning, deferred option definition patches and the
-STRING_EQUALS GUI condition. The infill pattern lists are the reference user of
-that machinery.
+These tests cover plugin-ID enum pruning, deferred option-definition patches,
+exclusive provider selectors, and STRING_EQUALS GUI conditions. Infill pattern
+lists are the reference user of the plugin-defined enum machinery.
 
-The option fixtures are registered by the shared test runtime before it applies
-deferred patches, because PrintConfigDef can only be extended before it is
-finalized.
+Test option definitions are registered by the shared runtime before it applies
+deferred patches, because PrintConfigDef can only be extended before finalization.
 */
 
 using namespace Slic3r;
@@ -141,6 +140,57 @@ TEST_CASE("Plugin-id option lists prune inactive plugins", "[plugins][infill][op
     // A list left empty by pruning is reported as a non-fatal error.
     CHECK(option_values("test.infill.empty_list").empty());
     CHECK(Slic3r::Test::Plugins::plugin_test_empty_option_list_error_reported());
+}
+
+/*
+Read the finalized selector and evaluate its real GUI registry with the valid provider ID. The local
+configuration owns its values and rule applications are returned by value; evaluation refreshes the
+registry's explanation cache but does not alter provider activation, while failed Catch2 checks report
+missing options, a wrong menu/default, or a disabled setting. Identifier-versus-label matching is
+covered by test_fff_print_gui_rules.cpp:804-829, where perimeter-generator labels differ from IDs.
+*/
+TEST_CASE("Exclusive selectors prune failed providers and match GUI rules by ID",
+          "[plugins][config][gui-rules][options]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const char *const failed_id = "slic3r.test.exclusive_pruning.failed";
+    const char *const valid_id = "slic3r.test.exclusive_pruning.valid";
+    const char *const valid_setting = "test.s2.valid_provider_setting";
+    const std::string group_id = "test.exclusive.selector_pruning";
+
+    const Plugin *failed = orchestrator.get_plugin(failed_id);
+    const Plugin *valid = orchestrator.get_plugin(valid_id);
+    REQUIRE(failed != nullptr);
+    REQUIRE(valid != nullptr);
+    CHECK(failed->get_priority() < valid->get_priority());
+    CHECK_FALSE(orchestrator.is_plugin_active(failed));
+    CHECK_FALSE(orchestrator.is_plugin_active(valid));
+
+    const std::string selector_key = Steps::plugin_exclusive_group_option_key(
+        orchestrator, STEP_POST_SLICING, group_id);
+    const ConfigOptionDef *selector = option_def(selector_key.c_str());
+    REQUIRE(selector != nullptr);
+    CHECK(selector->contains_plugin_id);
+    REQUIRE(selector->enum_def.get() != nullptr);
+    CHECK(selector->enum_def->values() == std::vector<std::string>{ valid_id });
+    REQUIRE(selector->default_value);
+    CHECK(selector->default_value->serialize() == valid_id);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    REQUIRE(config.option(selector_key) != nullptr);
+    REQUIRE(config.option(valid_setting) != nullptr);
+    config.set_deserialize_strict(selector_key, valid_id);
+    const std::vector<Orchestrator::GuiRuleApplication> applications =
+        orchestrator.gui_rules().evaluate(
+            config, RAW_PRESET_TYPE_FFF_PRINT, -1, valid_id);
+    const std::vector<Orchestrator::GuiRuleApplication>::const_iterator valid_rule =
+        std::find_if(applications.begin(), applications.end(),
+                     [valid_setting](const Orchestrator::GuiRuleApplication &application) {
+                         return application.target_key == valid_setting;
+                     });
+    REQUIRE(valid_rule != applications.end());
+    CHECK(valid_rule->enabled);
 }
 
 TEST_CASE("REPLICATE_ENUM copies a resolved list and breaks cycles softly", "[plugins][infill][options]")
