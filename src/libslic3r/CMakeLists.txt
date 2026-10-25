@@ -167,6 +167,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/GeometryViews.hpp
 	Api/plugin/cpp/GuiRuleHelpers.hpp
 	Api/plugin/cpp/PluginPropertyKey.hpp
+	Api/plugin/cpp/PolygonOps.hpp
 	Api/plugin/cpp/properties/DataTreeProperties.hpp
 	Api/plugin/cpp/properties/ExtrusionProperties.hpp
 	Api/plugin/cpp/properties/PrintingExtrusionScopeProperty.hpp

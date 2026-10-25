@@ -116,6 +116,7 @@ add_executable(${_TEST_NAME}_tests
     test_perimeter_separate_hole_contour.cpp
     test_perimeter_simple_generator.cpp
     test_plugin_storage.cpp
+    test_polygon_simplify.cpp
     test_polyholes.cpp
     test_printing_plan.cpp
     test_print_status_queue.cpp
