@@ -9,6 +9,38 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/*
+Present application preferences as typed controls grouped into notebook tabs.
+The dialog initializes controls from AppConfig, validates user changes and applies
+accepted values to the owning application configuration. These settings affect
+the GUI and shared behavior, not a sliced object's local profile overrides.
+
+Building controls, handling edits and accepting/cancelling the dialog are UI-thread
+operations. Keep saving and any required application refresh separate from merely
+displaying a field so opening preferences does not change the user's settings.
+
+The preferences dialog groups application settings into notebook tabs and
+builds one control for each setting in its owning options group.
+
+Representative direct calls (branches are not a timeline):
+
+    PreferencesDialog::build()
+        |-- append_bool_option()
+        |-- append_int_option()
+        |-- integrations->append_single_option_line()
+        |-- interface_layout->append_single_option_line()
+        |-- startup->append_single_option_line()
+        `-- append_color_option()
+
+    PreferencesDialog::accept()
+        |-- is_editor()
+        |-- this->m_downloader->allow()
+        |-- this->m_downloader->on_finish()
+        |-- DesktopIntegrationDialog::perform_downloader_desktop_integration()
+        |-- apply_repository_archive_download_timeout()
+        `-- update_ui_from_settings()
+*/
+
 #include "Preferences.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -502,6 +534,7 @@ static void append_preferences_option_to_searcher(std::shared_ptr<ConfigOptionsG
     wxGetApp().sidebar().get_searcher().append_preferences_option(Line(opt_key, label, ""));
 }
 
+// Read application settings and construct this dialog's tabs, groups and controls; the dialog owns the controls, the shared AppConfig handle stays local, no value is returned, and UI/configuration failures propagate.
 void PreferencesDialog::build()
 {
 #ifdef _WIN32
@@ -768,12 +801,7 @@ void PreferencesDialog::build()
             L("When loading a configuration, if it's coming from an earlier, a future or from another software, show the ignored settings that doesn't suit this version. Uncheck to remove this anoying pop-up."),
 			app_config->get_bool("show_unknown_setting"));
 
-        append_bool_option(files_export, "use_binary_gcode_when_supported", L("Use binary G-code when the printer supports it"),
-                    L("If the 'Supports binary G-code' option is enabled in Printer Settings, "
-                      "checking this option will result in the export of G-code in binary format."),
-                    app_config->get_bool("use_binary_gcode_when_supported"));
-
-		append_bool_option(files_import, "show_drop_project_dialog",
+        append_bool_option(files_import, "show_drop_project_dialog",
 			L("Show drop project dialog"),
             L("When checked, whenever dragging and dropping a project file on the application, shows a dialog asking to select the action to take on the file to load."),
 			app_config->get_bool("show_drop_project_dialog"));

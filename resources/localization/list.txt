@@ -7,6 +7,7 @@ src/libslic3r/GCode/PostProcessor.cpp
 src/libslic3r/GCode.cpp
 src/libslic3r/miniz_extension.cpp
 src/libslic3r/Preset.cpp
+src/libslic3r/Plugins/GCode/Exporter/BinaryGCodeExporter.cpp
 src/libslic3r/Plugins/GCode/Exporter/DefaultGCodeExporter.cpp
 src/libslic3r/Print.cpp
 src/libslic3r/PrintBase.cpp

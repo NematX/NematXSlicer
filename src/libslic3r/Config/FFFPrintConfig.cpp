@@ -4215,9 +4215,8 @@ void init_fff_params(PrintConfigDef &definition)
 
     def = definition.add("binary_gcode", coBool, ptFFF);
     def->label = L("Supports binary G-code");
-    def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("Enable, if the firmware supports binary G-code format (bgcode). "
-                     "To generate .bgcode files, make sure you have binary G-code enabled in Configuration->Preferences->Other.");
+    def->invalidates_step = STEP_NONE;
+    def->tooltip = L("Enable when the printer supports binary G-code (bgcode); this makes the Binary G-code exporter compatible with this printer.");
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
 

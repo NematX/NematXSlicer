@@ -3669,10 +3669,7 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
     // bitmap of enum UpdateBackgroundProcessReturnState
     unsigned int return_state = 0;
 
-    // Get the config ready. The binary gcode flag depends on Preferences, which the backend has no access to.
     DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
-    if (full_config.has("binary_gcode")) // needed for SLA
-        full_config.set("binary_gcode", bool(full_config.opt_bool("binary_gcode") & wxGetApp().app_config->get_bool("use_binary_gcode_when_supported")));
 
     // If the update_background_process() was not called by the timer, kill the timer,
     // so the update_restart_background_process() will not be called again in vain.

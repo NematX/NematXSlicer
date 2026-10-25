@@ -4,6 +4,37 @@
 ///|/ SuperSlicer and PrusaSlicer are released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
+/*
+Load, maintain and save per-user application preferences and profile selections.
+AppConfig groups text values into named sections and supplies defaults for
+missing entries. These values control application behavior; they are not the
+typed print/filament/printer configuration that directly drives slicing.
+
+Load first, query or update sections while the application runs, then save the
+owned state through the configured application path. Defaulting and retiring
+keys are separate from interpreting a printer profile's option definitions.
+
+Application configuration stores per-user settings and fills missing values
+when defaults are applied. Retired keys are erased so later consumers do not
+keep presenting options that no longer have an owner.
+
+FIXME replace the two following includes with <boost/md5.hpp> after it becomes mainstream.
+
+Representative direct calls (branches are not a timeline):
+
+    AppConfig::load()
+        |-- check_config_file_and_verify_checksum()
+        |-- pt::read_ini()
+        |-- unescape_strings_cstyle()
+        |-- this->set_defaults()
+        `-- this->init_ui_layout()
+
+    AppConfig::save()
+        |-- escape_strings_cstyle()
+        |-- appconfig_md5_hash_line()
+        `-- copy_file()
+*/
 #include "AppConfig.hpp"
 
 #include <stdexcept>
@@ -33,7 +64,7 @@
 #include "Thread.hpp"
 
 #ifdef WIN32
-//FIXME replace the two following includes with <boost/md5.hpp> after it becomes mainstream.
+
 #include <boost/uuid/detail/md5.hpp>
 #include <boost/algorithm/hex.hpp>
 #endif
@@ -102,7 +133,7 @@ uint32_t AppConfig::create_color(float saturation, float value, EAppColorType co
     return rgb2int(rgb_color);
 }
 
-// Override missing or keys with their defaults.
+// Fill missing settings, normalize migrated values and erase retired keys in this AppConfig; changes stay in its stored values, the void method returns no result, and configuration failures propagate.
 void AppConfig::set_defaults()
 {
 
@@ -236,6 +267,8 @@ void AppConfig::set_defaults()
         // remove old 'use_legacy_opengl' parameter from this config, if present
         if (!get("use_legacy_opengl").empty())
             erase("", "use_legacy_opengl");
+        if (!get("use_binary_gcode_when_supported").empty())
+            erase("", "use_binary_gcode_when_supported");
 
 #ifdef __APPLE__
         if (get("use_retina_opengl").empty())
@@ -288,9 +321,6 @@ void AppConfig::set_defaults()
         if (get("auto_toolbar_size").empty())
             set("auto_toolbar_size", "100");
 
-        if (get("use_binary_gcode_when_supported").empty())
-            set("use_binary_gcode_when_supported", "1");
- 
        if (get("notify_release").empty())
            set("notify_release", "all"); // or "none" or "release"
 

@@ -1051,6 +1051,53 @@ TEST_CASE("Thumbnail selector traits are declared by the G-code module",
     CHECK_FALSE(other.traits.provider_settings_rules);
 }
 
+// Check export-only declarations and selection with and without the required built-in exporter, restoring activation afterward.
+// The application owns the retained descriptions and providers; the test owns configurations and inserts no application setting.
+TEST_CASE("Export selector traits preserve the strict built-in default even when unavailable",
+          "[plugins][step-pipeline][selector-traits][exporter]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const StepSelectorTraits *whole = host.step_selector(STEP_EXPORT, "");
+    const StepSelectorTraits *exporter = host.step_selector(STEP_EXPORT, "gcode_exporter_plugin");
+    REQUIRE(whole != nullptr);
+    REQUIRE(exporter != nullptr);
+    CHECK(whole != exporter);
+    CHECK(host.step_selector_is_builtin(STEP_EXPORT, ""));
+    CHECK(host.step_selector_is_builtin(STEP_EXPORT, "gcode_exporter_plugin"));
+    CHECK(exporter->exclusive_group == "gcode_exporter_plugin");
+    CHECK(exporter->option_key == "gcode_exporter_plugin");
+    for (const StepSelectorTraits *traits : {whole, exporter}) {
+        REQUIRE(traits->invalidates_step.has_value());
+        CHECK(*traits->invalidates_step == STEP_NONE);
+        CHECK(traits->category == RAW_OPTION_CATEGORY_OUTPUT);
+        CHECK(traits->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+        CHECK(traits->strict_selection);
+        CHECK(traits->read_with_one_provider);
+        CHECK(traits->show_with_one_provider);
+        CHECK_FALSE(traits->auto_value);
+        REQUIRE(traits->value_when_absent.has_value());
+        CHECK(*traits->value_when_absent == "gcode.exporter.simple");
+    }
+    ThumbnailActivationGuard guard(host, STEP_EXPORT);
+    Plugin *simple = host.get_plugin("gcode.exporter.simple");
+    Plugin *binary = host.get_plugin("gcode.exporter.bgcode");
+    REQUIRE(simple != nullptr);
+    REQUIRE(binary != nullptr);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == STEP_EXPORT) REQUIRE(host.set_plugin_active(plugin, plugin == binary));
+    DynamicConfig absent;
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", nullptr, nullptr);
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &absent, nullptr);
+    DynamicConfig config;
+    config.set_key_value("gcode_exporter_plugin", new ConfigOptionString("gcode.exporter.bgcode"));
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &config, binary);
+    config.set_key_value("gcode_exporter_plugin", new ConfigOptionString("missing.exporter"));
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &config, nullptr);
+    REQUIRE(host.set_plugin_active(simple, true));
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", nullptr, simple);
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &absent, simple);
+}
 
 // Check that GUI rules do not depend on the thumbnail selector and invalid choices select no encoder, even with one active.
 // Use the registered selector's choices and restore activation flags after the checks.

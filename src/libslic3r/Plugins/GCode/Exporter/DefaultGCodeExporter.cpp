@@ -16,7 +16,7 @@
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFilePublisher.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
-#include "libslic3r/Config/ConfigOption.hpp"
+#include "GCodeExporterShared.hpp"
 #include "libslic3r/I18N.hpp"
 
 /*
@@ -96,7 +96,7 @@ private:
     // Run the built-in provider at the default priority in the exporter group.
     int32_t priority_impl() const noexcept override { return 0; }
 
-    // Ask for the destination when the export has none: a save-path input proposed with the host's suggested path.
+    // Append the shared suffix-specific save-path input when this export has no destination.
     void input_definitions(const Config &config, std::vector<raw_config_option_def> &definitions) const override;
 
     // Accept every firmware configuration and advertise the text-file suffix.
@@ -114,36 +114,14 @@ private:
 
 } // namespace
 
-// When output_path is empty, append one save-path definition whose default is the output_path_suggestion setting and whose file filter
-// lists the text suffix and its aliases. The strings are thread-local so they stay valid while the host reads the definition on this thread.
+// Read the borrowed configuration and format, append a save-path request only when output_path is empty, and keep its serialized suggestion and filter alive in thread-local strings until the host consumes them; allocation or config failures propagate without changing Print state.
 void DefaultGCodeExporter::input_definitions(const Config &config, std::vector<raw_config_option_def> &definitions) const
 {
-    if (!gcode_export_output_path(config).empty())
-        return;
-
-    static thread_local std::string default_value;
-    static thread_local std::string file_filter;
-    // The default is a serialized value: backslashes of a Windows path are escaped.
-    default_value = config.has("output_path_suggestion") ?
-        Slic3r::escape_string_cstyle(config.get("output_path_suggestion").get_string()) : std::string();
-    std::string patterns = std::string("*") + k_default_gcode_exporter_extension;
-    for (const char *alias : k_default_gcode_exporter_aliases)
-        patterns += std::string(";*") + alias;
-    file_filter = "G-code (" + patterns + ")|" + patterns;
-
-    raw_config_option_def definition = raw_config_option_def_init();
-    definition.opt_key = "output_path";
-    definition.type = RAW_CO_STRING;
-    definition.container_type = RAW_CONTAINER_TYPE_PLATER;
-    definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
-    definition.printer_technology = RAW_PT_FFF;
-    definition.category = RAW_OPTION_CATEGORY_OUTPUT;
-    definition.gui_type = RAW_GUI_TYPE_SAVE_PATH;
-    definition.label = "Output path";
-    definition.tooltip = "Where the G-code file is written.";
-    definition.sidetext = file_filter.c_str();
-    definition.default_serialized_value = default_value.c_str();
-    definitions.push_back(definition);
+    GCodeFileFormat format;
+    format.exporter_id = id_impl();
+    format.extension = k_default_gcode_exporter_extension;
+    format.aliases.assign(k_default_gcode_exporter_aliases.begin(), k_default_gcode_exporter_aliases.end());
+    append_gcode_output_path_input_definition(format, config, definitions);
 }
 // Ignore the borrowed Print, settings and firmware ID, returning owned text-file action information suitable for removable media without changing Print state or failing.
 GCodeExportQuery DefaultGCodeExporter::query_impl(const Print &, const Config &, std::string_view) const

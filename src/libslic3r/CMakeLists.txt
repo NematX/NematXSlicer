@@ -250,8 +250,11 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/Views.hpp
 	Plugins/BridgeDetector.cpp
 	Plugins/BridgeDetector.hpp
+	Plugins/GCode/Exporter/BinaryGCodeExporter.cpp
+	Plugins/GCode/Exporter/BinaryGCodeExporter.hpp
 	Plugins/GCode/Exporter/DefaultGCodeExporter.cpp
 	Plugins/GCode/Exporter/DefaultGCodeExporter.hpp
+	Plugins/GCode/Exporter/GCodeExporterShared.hpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.cpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp
 	Plugins/GCode/Firmware/KlipperGCodeFirmware.cpp

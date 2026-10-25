@@ -96,6 +96,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Plugins/GCode/CustomGCodePerPrintZ.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/BinaryGCodeExporter.hpp"
 #include "libslic3r/Plugins/GCode/Exporter/DefaultGCodeExporter.hpp"
 #include "libslic3r/Plugins/GCode/FeatureGCode.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp"
@@ -731,6 +732,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::GCodeGeneration::PostProcessScriptsPlugin::register_post_process_scripts_plugin);
     register_builtin_plugin(orchestrator, "gcode.exporter.simple",
         slic3r_api::GCodeGeneration::Exporter::register_default_gcode_exporter_plugin);
+    register_builtin_plugin(orchestrator, "gcode.exporter.bgcode",
+        slic3r_api::GCodeGeneration::Exporter::register_binary_gcode_exporter_plugin);
     register_builtin_plugin(
         orchestrator, "gcode.settings_scripts",
         slic3r_api::GCodeGeneration::SettingsGCodeScriptsPlugin::register_settings_gcode_scripts_plugin);
