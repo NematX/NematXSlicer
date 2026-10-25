@@ -5,6 +5,7 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -390,4 +391,69 @@ TEST_CASE("Auxiliary layer helper ignores negative volumes by default",
     for (const LayerRegion &region : auxiliary_layer.regions())
         append(raw_union, region.get_raw_slices());
     CHECK(area_mm2(union_ex(raw_union)) == Approx(area_mm2(source_layer.lslices())).epsilon(0.001));
+}
+
+// Publish fill surfaces into an auxiliary island-region through the C API: replace, clear, and the refusal on an
+// object layer (checked unchanged). Auxiliary editing is allowed through STEP_FINALIZE_SLICING and while idle.
+TEST_CASE("Auxiliary fill-surface publication moves and clears but rejects object layers",
+          "[plugins][auxiliary-layer][surface]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model = make_auxiliary_region_model(false, false, false);
+    Print print;
+    init_print_from_model(model, print);
+    print.process();
+    PrintObject &object = print.object(0);
+    REQUIRE_FALSE(object.layers().empty());
+    REQUIRE_FALSE(object.layer(0).islands().empty());
+    REQUIRE_FALSE(object.layer(0).island(0).regions_islands().empty());
+    LayerRegionIsland &object_region = object.layer(0).island(0).regions_island(0);
+    const size_t original_count = object_region.fill_surfaces().size();
+    REQUIRE(original_count > 0);
+    const SurfaceType original_type = object_region.fill_surfaces().at(0).surface_type;
+
+    // Build an auxiliary layer with one island, then create its island-region.
+    const ExPolygon area = rectangle_expolygon(0., 0., 4., 4.);
+    const ExPolygons subject{area};
+    PluginStorage storage;
+    const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
+        reinterpret_cast<storage_handle *>(&storage), print_view(print), object_view(object),
+        expolygons_view(subject), scale_i(0.2), scale_i(0.2), scale_i(0.1));
+    REQUIRE(built.created);
+    layer_handle *layer = object_get_auxiliary_layer(reinterpret_cast<const object_handle *>(&object), 0);
+    layer_region_island_handle *region = layer_island_get_or_create_region_island(
+        layer_get_island_mutable(layer, 0), nullptr, 0, 0);
+    REQUIRE(region != nullptr);
+    slic3r_api::StoredSurfaceCollection surfaces(reinterpret_cast<storage_handle *>(&storage));
+    const slic3r_api::ExPolygon surface_area(reinterpret_cast<const expolygon_handle *>(&area));
+    const raw_surface_type type = slic3r_api::srf_type().internal().sparse().raw();
+
+    // Replace: the source is emptied and the destination holds exactly one surface, in every editable state.
+    struct RunningStep {
+        Print &print;
+        // Restore idle access even if an assertion stops the loop.
+        ~RunningStep() { print.set_running_step(STEP_NONE); }
+    } reset{print};
+    for (slicing_step_t step : {STEP_SUPPORT, STEP_FINALIZE_SLICING, STEP_NONE}) {
+        print.set_running_step(step);
+        surfaces.append(surface_area, type);
+        REQUIRE(layer_region_island_set_fill_surfaces(region, surfaces.mutable_handle()) == 1);
+        CHECK(surfaces.empty());
+        CHECK(layer_region_island_count_fill_surface(region) == 1);
+        CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 0)) == type);
+    }
+
+    // Clear with a null source.
+    REQUIRE(layer_region_island_set_fill_surfaces(region, nullptr) == 1);
+    CHECK(layer_region_island_count_fill_surface(region) == 0);
+
+    // An island-region of an object layer is refused and neither side changes; so is a null destination.
+    surfaces.append(surface_area, type);
+    CHECK(layer_region_island_set_fill_surfaces(reinterpret_cast<layer_region_island_handle *>(&object_region),
+                                                surfaces.mutable_handle()) == 0);
+    CHECK(object_region.fill_surfaces().size() == original_count);
+    CHECK(object_region.fill_surfaces().at(0).surface_type == original_type);
+    CHECK(surfaces.size() == 1);
+    CHECK(layer_region_island_set_fill_surfaces(nullptr, surfaces.mutable_handle()) == 0);
+    CHECK(surfaces.size() == 1);
 }

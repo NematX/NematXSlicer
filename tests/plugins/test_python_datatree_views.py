@@ -179,6 +179,39 @@ class PythonDataTreeViewTests(unittest.TestCase):
             island.get_or_create_full_region_island(1.5)
         self.assertEqual(len(host.region_island_calls), call_count)
 
+    def test_auxiliary_fill_surface_binding_moves_clears_and_reports_rejection(self):
+        """Forward temporary surfaces or None to the auxiliary mutator and preserve its success result."""
+        api = self.make_api()
+        calls = []
+        collections = {801: ["support"]}
+        destination = []
+
+        def publish(region, surfaces):
+            """Model native move semantics for auxiliary region 30 and reject object region 31."""
+            source = address(surfaces) if surfaces is not None else 0
+            calls.append((address(region), source))
+            if address(region) != 30:
+                return 0
+            destination[:] = collections[source] if source else []
+            if source:
+                collections[source].clear()
+            return 1
+
+        api.host.layer_region_island_set_fill_surfaces = publish
+        api.host.storage_new_surface_collection = lambda storage: 801
+        surfaces = self.views.StoredSurfaceCollection(api, 11)
+        region = self.views.LayerRegionIsland(api, 30)
+        self.assertTrue(region.set_fill_surfaces(surfaces))
+        self.assertEqual(destination, ["support"])
+        self.assertEqual(collections[801], [])
+        self.assertTrue(region.set_fill_surfaces())
+        self.assertEqual(destination, [])
+        collections[801].append("interface")
+        self.assertFalse(self.views.LayerRegionIsland(api, 31).set_fill_surfaces(surfaces))
+        self.assertEqual(collections[801], ["interface"])
+        self.assertEqual(calls, [(30, 801), (30, 0), (31, 801)])
+        surfaces.free_from_storage()
+
     def test_stored_config_has_unique_ownership(self):
         api = self.make_api()
         config = self.views.StoredConfig(api, 11)

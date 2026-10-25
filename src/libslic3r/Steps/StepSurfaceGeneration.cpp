@@ -13,6 +13,7 @@
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
+#include "libslic3r/Api/internal/LayerRegionAccess.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_surface_generation.h"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/DataTreeFwd.hpp"
@@ -139,22 +140,12 @@ bool validate_island_surface_partition(const LayerSliceIsland &island,
     return true;
 }
 
+// Publish the temporary surfaces through the shared whole-collection move; null source clears and null destination returns zero.
 int32_t set_region_island_fill_surfaces_callback(layer_region_island_handle *region_island_handle,
                                                  surface_collection_handle *surfaces_handle)
 {
-    // Replace the complete fill-surface collection. A whole-collection move is
-    // easier to reason about than incremental append/remove callbacks and keeps
-    // surface ownership on the host side of the C API boundary.
-    LayerRegionIsland *region_island = to_layer_region_island(region_island_handle);
-    if (region_island == nullptr)
-        return 0;
-
-    SurfaceCollection &surfaces = region_island->set_fill_surfaces();
-    if (surfaces_handle == nullptr)
-        surfaces.clear();
-    else
-        surfaces.set(std::move(*to_surface_collection(surfaces_handle)));
-    return 1;
+    return ApiInternal::LayerRegionAccess::set_fill_surfaces(
+        to_layer_region_island(region_island_handle), to_surface_collection(surfaces_handle));
 }
 
 void append_surface_like_callback(surface_collection_handle *dst_handle,

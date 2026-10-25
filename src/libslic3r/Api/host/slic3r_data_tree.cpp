@@ -796,6 +796,32 @@ const surface_collection_handle *layer_region_island_get_fill_surfaces(const lay
                reinterpret_cast<const surface_collection_handle *>(&Slic3r::to_layer_region_island(me)->fill_surfaces());
 }
 
+// Check that every associated region is auxiliary and editable, then move the temporary surfaces; object layers or null destinations return zero unchanged.
+int32_t layer_region_island_set_fill_surfaces(layer_region_island_handle *region_island,
+                                             surface_collection_handle *surfaces)
+{
+    Slic3r::LayerRegionIsland *island = Slic3r::to_layer_region_island(region_island);
+    if (island == nullptr || island->regions().empty())
+        return 0;
+    for (const Slic3r::LayerRegion *region : island->regions()) {
+        const Slic3r::Layer *layer = region->layer();
+        const Slic3r::PrintObject *object = layer == nullptr ? nullptr : layer->object();
+        if (object == nullptr)
+            return 0;
+        bool auxiliary = false;
+        for (const Slic3r::Layer &candidate : object->auxiliary_layers())
+            if (&candidate == layer) {
+                auxiliary = true;
+                break;
+            }
+        if (!auxiliary)
+            return 0;
+        if (!Slic3r::data_tree_editable(*object, "layer_region_island_set_fill_surfaces"))
+            return 0;
+    }
+    return Slic3r::ApiInternal::LayerRegionAccess::set_fill_surfaces(island, Slic3r::to_surface_collection(surfaces));
+}
+
 uint32_t layer_region_island_count_fill_surface(const layer_region_island_handle *me)
 {
     return surface_collection_size(layer_region_island_get_fill_surfaces(me));

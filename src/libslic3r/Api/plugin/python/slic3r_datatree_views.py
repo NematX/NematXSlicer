@@ -1334,6 +1334,12 @@ class LayerRegionIsland(DataTreeView):
     def fill_surfaces_collection(self) -> SurfaceCollection:
         return SurfaceCollection(self.api, self.api.host.layer_region_island_get_fill_surfaces(self.c_handle()))
 
+    @abi_requires_headers("slic3r_data_tree.h")
+    def set_fill_surfaces(self, surfaces: StoredSurfaceCollection | None = None) -> bool:
+        """Move temporary surfaces into an auxiliary layer, or clear with None; rejected edits return False."""
+        return bool(self.api.host.layer_region_island_set_fill_surfaces(
+            self.c_handle(), None if surfaces is None else surfaces.mutable_c_handle()))
+
     def fill_surface_count(self) -> int:
         return int(self.api.host.layer_region_island_count_fill_surface(self.c_handle()))
 

@@ -570,6 +570,13 @@ inline SurfaceCollection LayerRegionIsland::fill_surfaces_collection() const
     return SurfaceCollection(layer_region_island_get_fill_surfaces(handle()));
 }
 
+// Move a temporary collection into this auxiliary island-region, leaving it empty; nullptr clears and a rejected destination returns false.
+inline bool LayerRegionIsland::set_fill_surfaces(StoredSurfaceCollection *surfaces) const
+{
+    return layer_region_island_set_fill_surfaces(const_cast<layer_region_island_handle *>(handle()),
+                                                surfaces == nullptr ? nullptr : surfaces->mutable_handle()) != 0;
+}
+
 inline uint32_t LayerRegionIsland::fill_surface_count() const
 {
     return fill_surfaces_collection().size();

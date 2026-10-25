@@ -37,6 +37,21 @@
 
 namespace Slic3r {
 
+// Move the complete temporary collection into the island-region and empty it; null clears the destination, and a missing destination returns zero.
+int32_t ApiInternal::LayerRegionAccess::set_fill_surfaces(LayerRegionIsland *island, SurfaceCollection *surfaces)
+{
+    if (island == nullptr)
+        return 0;
+    SurfaceCollection &destination = island->set_fill_surfaces();
+    if (surfaces == nullptr)
+        destination.clear();
+    else {
+        destination.set(std::move(*surfaces));
+        surfaces->clear();
+    }
+    return 1;
+}
+
 SurfaceCollection &ApiInternal::LayerRegionAccess::surfaces_mutable(LayerRegion &layer_region)
 {
     return layer_region.m_slices;

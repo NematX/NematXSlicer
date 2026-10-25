@@ -99,6 +99,7 @@ namespace slic3r_api {
 
 class Surface;
 class SurfaceCollection;
+class StoredSurfaceCollection;
 class MutableSurface;
 class Volume;
 class PrintRegion;
@@ -364,6 +365,9 @@ public:
     }
 
     SurfaceCollection fill_surfaces_collection() const;
+
+    // Replace auxiliary fill surfaces from storage, or clear with nullptr; rejected edits return false.
+    bool set_fill_surfaces(StoredSurfaceCollection *surfaces = nullptr) const;
 
     uint32_t fill_surface_count() const;
 

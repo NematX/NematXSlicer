@@ -452,6 +452,15 @@ class AbiPackagingTests(unittest.TestCase):
             self.assertIn(seam_header, bindings.methods["publish_seam_placer"])
             self.assertIn(seam_header, bindings.methods["place_seam"])
 
+    def test_auxiliary_fill_surface_mutator_abi(self):
+        """The auxiliary mutator is exported by data tree 4.1 and its Python method declares that header."""
+        with tempfile.TemporaryDirectory() as directory:
+            catalog, _catalog_path = self._write_catalog(Path(directory))
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [4, 1])
+            self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
+            bindings = self.analyzer.build_binding_index(ROOT / "src/libslic3r/Api/plugin/python", catalog)
+            self.assertIn("slic3r_data_tree.h", bindings.methods["set_fill_surfaces"])
+
     def _write_catalog(self, root):
         catalog_path = root / "catalog.json"
         catalog_path.write_text(self.generator.generate_abi_catalog(), encoding="utf-8")

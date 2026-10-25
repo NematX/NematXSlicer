@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 4u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 0u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 1u
 
 /*
 Data-tree access for a sliced Print.
@@ -611,6 +611,23 @@ SLIC3R_HOST_API const surface_collection_handle *layer_region_island_get_fill_su
 SLIC3R_HOST_API uint32_t layer_region_island_count_fill_surface(const layer_region_island_handle *me);
 /* Borrow one fill Surface; return null for null or out-of-range input. */
 SLIC3R_HOST_API const surface_handle *layer_region_island_get_fill_surface(const layer_region_island_handle *me, uint32_t idx);
+
+/*
+Replace an auxiliary layer's island-region fill surfaces. Build surfaces with
+storage_new_surface_collection(); a successful call moves the complete content
+into the data tree and leaves the source valid and empty. NULL surfaces clears
+the destination. Replacing surfaces invalidates its previous Surface handles.
+
+Only island-regions associated with their object's auxiliary layers are
+accepted. A null destination or an object-layer island-region returns 0 and
+changes neither collection. Auxiliary editing is allowed through
+STEP_FINALIZE_SLICING inclusive, or while idle. Outside that window the standard
+freeze check applies (Debug assertion, or rejection and cancellation in strict
+freeze mode). Returns 1 on success. Never pass a collection from the data tree
+as the source; its container must remain in plugin storage.
+*/
+SLIC3R_HOST_API int32_t layer_region_island_set_fill_surfaces(layer_region_island_handle *region_island,
+                                                           surface_collection_handle *surfaces);
 
 /* Borrow this work bucket's metadata container; null returns null. */
 SLIC3R_HOST_API const plugin_property_container_handle *layer_region_island_get_properties(const layer_region_island_handle *me);
