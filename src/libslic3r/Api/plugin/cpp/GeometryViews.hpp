@@ -434,6 +434,14 @@ inline c_point bounding_box_center(const c_bounding_box &box)
     return c_point{(box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2};
 }
 
+// True when the two boxes share at least one point, borders included, like
+// BoundingBoxBase::overlap().
+inline bool bounding_box_overlap(const c_bounding_box &lhs, const c_bounding_box &rhs)
+{
+    return lhs.min.x <= rhs.max.x && rhs.min.x <= lhs.max.x &&
+           lhs.min.y <= rhs.max.y && rhs.min.y <= lhs.max.y;
+}
+
 // Merge one point into the box. An empty box is initialized by the first point.
 inline void bounding_box_merge(c_bounding_box &box, c_point point)
 {

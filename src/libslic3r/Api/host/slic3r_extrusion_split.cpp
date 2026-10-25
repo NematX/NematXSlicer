@@ -19,6 +19,16 @@ individual geometry, but intentionally does not test whether the collections
 overlap or whether their union covers the path. Keeping that responsibility at
 the producer avoids hiding configuration-partition errors in this low-level
 mutation primitive.
+
+Area pieces and their holes are indexed by bounding box once for the call.
+Each temporary chord is clipped only against nearby geometry. These read-only
+references remain valid until clipping finishes, before the source is replaced.
+
+    extrusion_split_leaf_by_areas()
+    |-- linearize_source(): retain the native distance of temporary chords
+    |-- clip_source_by_areas()
+    |   `-- clip_chord(): omit pieces and holes outside the chord's box
+    `-- publish_split(): cut native arcs and transfer owned children
 */
 
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
@@ -57,6 +67,14 @@ struct ExtrusionAreaSpan
     uint32_t area_index = 0;
 };
 
+// Borrow one area piece and cache its contour and hole boxes during clipping.
+struct AreaPiece
+{
+    const ExPolygon *expolygon = nullptr;
+    BoundingBox box;
+    std::vector<BoundingBox> hole_boxes;
+};
+
 static ExtrusionEntity *to_extrusion(extrusion_entity_handle *handle);
 static extrusion_entity_handle *to_handle(ExtrusionEntity *entity);
 static const ExPolygons *to_expolygons(const expolygon_collection_handle *handle);
@@ -69,6 +87,11 @@ static distf_t source_distance_for_point(const Point &point,
 static void append_area_span(std::vector<ExtrusionAreaSpan> &spans,
                              ExtrusionAreaSpan span,
                              distf_t merge_tolerance);
+// Clip against a borrowed area piece, omitting holes whose boxes miss the chord.
+// Return owned fragments without changing the chord or area; failures propagate.
+static Polylines clip_chord(const Polyline &chord, const BoundingBox &chord_box, const AreaPiece &piece);
+// Collect source-ordered spans against the caller-owned area partition. Clipping
+// or allocation errors become CLIPPING_FAILED before publication mutates a leaf.
 static raw_extrusion_split_status clip_source_by_areas(
     const std::vector<LinearizedExtrusionSegment> &segments,
     const expolygon_collection_handle *const *areas,
@@ -225,6 +248,21 @@ static void append_area_span(std::vector<ExtrusionAreaSpan> &spans,
     spans.push_back(span);
 }
 
+static Polylines clip_chord(const Polyline &chord, const BoundingBox &chord_box, const AreaPiece &piece)
+{
+    const ExPolygon &expolygon = *piece.expolygon;
+    ExPolygon nearby;
+    for (size_t hole_idx = 0; hole_idx < piece.hole_boxes.size(); ++hole_idx)
+        if (piece.hole_boxes[hole_idx].overlap(chord_box))
+            nearby.holes.push_back(expolygon.holes[hole_idx]);
+    if (nearby.holes.empty())
+        return intersection_pl(chord, expolygon.contour);
+    if (nearby.holes.size() == expolygon.holes.size())
+        return intersection_pl(chord, expolygon);
+    nearby.contour = expolygon.contour;
+    return intersection_pl(chord, nearby);
+}
+
 static raw_extrusion_split_status clip_source_by_areas(
     const std::vector<LinearizedExtrusionSegment> &segments,
     const expolygon_collection_handle *const *areas,
@@ -235,19 +273,31 @@ static raw_extrusion_split_status clip_source_by_areas(
     const distf_t merge_tolerance = distf_t(std::max(max_deviation, SCALED_EPSILON));
 
     try {
+        // The caller supplies disjoint area pieces. Index them once so each
+        // chord visits only geometry that can change its clipped intervals.
+        std::vector<std::vector<AreaPiece>> area_pieces(area_count);
+        for (uint32_t area_idx = 0; area_idx < area_count; ++area_idx)
+            for (const ExPolygon &expolygon : *to_expolygons(areas[area_idx])) {
+                AreaPiece piece{ &expolygon, get_extents(expolygon.contour), {} };
+                piece.hole_boxes.reserve(expolygon.holes.size());
+                for (const Polygon &hole : expolygon.holes)
+                    piece.hole_boxes.push_back(get_extents(hole));
+                area_pieces[area_idx].push_back(std::move(piece));
+            }
+
         // Clip each temporary chord independently. Iterating the chords in
         // source order makes the result deterministic without asking Clipper
         // to preserve or reconstruct traversal order for a complete polyline.
         for (const LinearizedExtrusionSegment &segment : segments) {
             std::vector<ExtrusionAreaSpan> local_spans;
             const Polyline chord(segment.chord_start, segment.chord_end);
+            const BoundingBox chord_box(chord.points);
 
             for (uint32_t area_idx = 0; area_idx < area_count; ++area_idx) {
-                const ExPolygons &area = *to_expolygons(areas[area_idx]);
-                if (area.empty())
-                    continue;
-
-                const Polylines clipped = intersection_pl(chord, area);
+                Polylines clipped;
+                for (const AreaPiece &piece : area_pieces[area_idx])
+                    if (piece.box.overlap(chord_box))
+                        append(clipped, clip_chord(chord, chord_box, piece));
                 for (const Polyline &fragment : clipped) {
                     if (fragment.size() < 2)
                         continue;

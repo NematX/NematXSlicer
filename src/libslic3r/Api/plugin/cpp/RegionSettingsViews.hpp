@@ -49,6 +49,8 @@ Typical use:
 
 An empty clip means "accept all". This matches the native RegionSettings
 convention and avoids allocating geometry for the common single-value case.
+When values differ, only regions intersecting the candidate are recorded as
+owners of each clipped value; distant slices are skipped before clipping.
 */
 
 class RegionSettingsValue
@@ -481,10 +483,13 @@ public:
             add_region(island.region(idx));
     }
 
+    // Rebuild value masks and their source-region lists for one candidate area.
+    // Stored masks belong to m_storage; configuration and source views stay borrowed.
     void segregate(const ExPolygon &area) {
         m_key_areas.clear();
         m_key_regions.clear();
         ClipperContext clip(m_storage);
+        const c_bounding_box area_bbox = area.contour().bounding_box();
 
         for (const OptionKeyGroup &group : m_option_groups) {
             if (group.empty())
@@ -513,8 +518,17 @@ public:
                     if (region.slices().empty())
                         continue;
 
+                    // A region can span many islands. Avoid copying its distant
+                    // slices for each island; they cannot intersect this candidate.
+                    StoredExPolygonCollection nearby(m_storage);
+                    for (const ExPolygon slice : region.slices())
+                        if (bounding_box_overlap(slice.contour().bounding_box(), area_bbox))
+                            nearby.push_back(slice);
+                    if (nearby.empty())
+                        continue;
+
                     StoredExPolygonCollection overlap =
-                        clipper_intersection(clip(region.slices()), clip(area)).to_expolygon_collection();
+                        clipper_intersection(clip(nearby.readonly()), clip(area)).to_expolygon_collection();
                     if (overlap.empty())
                         continue;
 

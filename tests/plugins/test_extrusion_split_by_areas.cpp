@@ -14,6 +14,7 @@ exact ArcPolyline geometry reconstructed after temporary clipping.
 
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <memory>
@@ -22,6 +23,7 @@ exact ArcPolyline geometry reconstructed after temporary clipping.
 
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
+#include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
@@ -198,6 +200,86 @@ TEST_CASE("Adjacent pieces owned by one area become one extrusion fragment",
     CHECK(capture.area_indices == std::vector<uint32_t>{ 0, 1 });
     CHECK(leaf.child(0).first_point() == Point(0, 0));
     CHECK(leaf.child(0).last_point() == Point(10 * unit, 0));
+}
+
+TEST_CASE("Extrusion area splitting handles holes near and far from the path",
+          "[plugins][extrusion][split-by-areas]")
+{
+    const coord_t unit = scale_i(1.);
+    // The diagonal path enters the first hole at x = 10 and leaves it through
+    // its top at x = 15. The second hole is near the path (their boxes touch)
+    // but never crossed; the third hole and its filling are far away.
+    ExtrusionPath leaf = straight_path({ Point(0, 0), Point(30 * unit, 4 * unit) });
+    const ExPolygon crossed_hole = rectangle(10 * unit, -2 * unit, 20 * unit, 2 * unit);
+    const ExPolygon near_hole = rectangle(2 * unit, 3 * unit, 4 * unit, 4 * unit + unit / 2);
+    const ExPolygon far_hole = rectangle(26 * unit, -4 * unit, 28 * unit, -3 * unit);
+    ExPolygon perforated = rectangle(-unit, -5 * unit, 31 * unit, 5 * unit);
+    for (const ExPolygon &hole : { crossed_hole, near_hole, far_hole }) {
+        perforated.holes.push_back(hole.contour);
+        perforated.holes.back().reverse();
+    }
+    // The second area fills the three holes, so the two areas cover the path.
+    const std::vector<ExPolygons> areas = { { perforated }, { crossed_hole, near_hole, far_hole } };
+    const std::vector<const expolygon_collection_handle *> handles = area_handles(areas);
+    CallbackCapture capture;
+
+    REQUIRE(extrusion_split_leaf_by_areas(
+                entity_handle(leaf), handles.data(), uint32_t(handles.size()), SCALED_EPSILON,
+                collect_fragment, &capture) == RAW_EXTRUSION_SPLIT_STATUS_SUCCESS);
+
+    REQUIRE(leaf.child_count() == 3);
+    CHECK(capture.area_indices == std::vector<uint32_t>{ 0, 1, 0 });
+    const double tolerance = 2. * double(SCALED_EPSILON);
+    CHECK((leaf.child(0).last_point() - Point(10 * unit, 4 * unit / 3)).cast<double>().norm() < tolerance);
+    CHECK((leaf.child(1).last_point() - Point(15 * unit, 2 * unit)).cast<double>().norm() < tolerance);
+    CHECK(leaf.child(2).last_point() == Point(30 * unit, 4 * unit));
+}
+
+TEST_CASE("Indexed area splitting matches whole-area clipping across a perforated region",
+          "[plugins][extrusion][split-by-areas]")
+{
+    const coord_t unit = scale_i(1.);
+    ExPolygon perforated = rectangle(-unit, -unit, 81 * unit, 81 * unit);
+    ExPolygons fillings;
+    for (coord_t row = 0; row < 8; ++row)
+        for (coord_t column = 0; column < 8; ++column) {
+            const coord_t x = (5 + 10 * column) * unit;
+            const coord_t y = (5 + 10 * row) * unit;
+            fillings.push_back(rectangle(x - unit, y - unit, x + unit, y + unit));
+            perforated.holes.push_back(fillings.back().contour);
+            perforated.holes.back().reverse();
+        }
+    const std::vector<ExPolygons> areas = {{perforated}, fillings};
+    const std::vector<const expolygon_collection_handle *> handles = area_handles(areas);
+    for (coord_t row = 0; row < 8; ++row) {
+        const coord_t y = (5 + 10 * row) * unit;
+        const Polyline source(Point(0, y), Point(80 * unit, y));
+        std::vector<std::pair<uint32_t, Polyline>> expected;
+        for (uint32_t area_idx = 0; area_idx < areas.size(); ++area_idx)
+            for (Polyline fragment : intersection_pl(source, areas[area_idx])) {
+                if (fragment.front().x() > fragment.back().x())
+                    fragment.reverse();
+                expected.emplace_back(area_idx, std::move(fragment));
+            }
+        std::sort(expected.begin(), expected.end(),
+            [](const std::pair<uint32_t, Polyline> &lhs, const std::pair<uint32_t, Polyline> &rhs) {
+                return lhs.second.front().x() < rhs.second.front().x();
+            });
+        REQUIRE(expected.size() == 17);
+        ExtrusionPath leaf = straight_path(source.points);
+        CallbackCapture capture;
+        REQUIRE(extrusion_split_leaf_by_areas(entity_handle(leaf), handles.data(), uint32_t(handles.size()),
+                    SCALED_EPSILON, collect_fragment, &capture) == RAW_EXTRUSION_SPLIT_STATUS_SUCCESS);
+        REQUIRE(leaf.child_count() == expected.size());
+        REQUIRE(capture.area_indices.size() == expected.size());
+        for (size_t idx = 0; idx < expected.size(); ++idx) {
+            CAPTURE(row, idx);
+            CHECK(capture.area_indices[idx] == expected[idx].first);
+            CHECK(leaf.child(idx).first_point() == expected[idx].second.front());
+            CHECK(leaf.child(idx).last_point() == expected[idx].second.back());
+            CHECK(leaf.child(idx).length() == expected[idx].second.length());
+        }
+    }
 }
 
 TEST_CASE("Arc and Z geometry survive extrusion area splitting",
