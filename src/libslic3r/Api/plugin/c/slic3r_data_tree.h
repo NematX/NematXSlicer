@@ -440,22 +440,23 @@ SLIC3R_HOST_API const plugin_property_container_handle *layer_region_get_propert
 SLIC3R_HOST_API plugin_property_container_handle *layer_region_get_properties_mutable(layer_region_handle *me);
 
 /*
-Compute the normal extrusion flow for flow_role using this LayerRegion's region,
-object and layer settings, including its layer height and first-layer state.
-The LayerRegion is borrowed and is not modified. The returned c_flow is an
-independent value snapshot and needs no release. A null region returns a
-zero-initialized flow. Recognized role flags select support, perimeter, top or
-solid flow as appropriate; other values fall back to ordinary infill. Use
-layer_region_get_bridging_flow() when bridge/overhang flow rules are required.
+Compute normal flow at this LayerRegion's layer height. Support and support
+interface use the object's support flow settings; both use first-layer support
+flow when layer id is zero and its bottom touches the bed. Other recognized
+flags select perimeter, top or solid flow; remaining values select infill.
+The result needs no release. A null region or a flow that cannot be calculated
+returns all zero fields; no exception crosses this C function. Use
+layer_region_get_bridging_flow() for bridge/overhang rules.
 */
 SLIC3R_HOST_API c_flow layer_region_get_flow(const layer_region_handle *me, raw_extrusion_role flow_role);
 
 /*
-Compute the bridge/overhang flow for flow_role using this LayerRegion's region,
-object and layer settings. The LayerRegion is borrowed and is not modified.
-The returned c_flow is a value snapshot and needs no release. A null region
-returns a zero-initialized flow. Roles that do not select support, perimeter,
-top or solid flow fall back to the infill bridge flow.
+Compute bridge/overhang flow for this LayerRegion. For support and support
+interface, the bridge diameter is the layer height and the nozzle comes from
+the corresponding object support flow. Other roles use regional bridge rules;
+unrecognized flags select infill. The result needs no release. A null region or
+a flow that cannot be calculated returns all zero fields; no exception crosses
+this C function.
 */
 SLIC3R_HOST_API c_flow layer_region_get_bridging_flow(const layer_region_handle *me, raw_extrusion_role flow_role);
 /*

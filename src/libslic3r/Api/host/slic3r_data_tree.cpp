@@ -192,6 +192,18 @@ static c_flow to_c_flow(const Flow &flow)
     return out;
 }
 
+// Use object support settings at this layer's height; bridge flow uses that height as diameter, and normal bed-contact flow uses first-layer settings.
+static Flow support_layer_flow(const Layer &layer, FlowRole role, bool bridge)
+{
+    const PrintObject *object = layer.object();
+    const float height = float(layer.unscaled_height());
+    if (!bridge && layer.id() == 0 && layer.scaled_bottom_z() <= 0)
+        return support_material_1st_layer_flow(object, height);
+    const Flow flow = role == frSupportMaterialInterface ? support_material_interface_flow(object, height) :
+                                                         support_material_flow(object, height);
+    return bridge ? Flow::bridging_flow(height, flow.nozzle_diameter()) : flow;
+}
+
 static FlowRole to_flow_role(raw_extrusion_role role)
 {
     if ((role & RAW_EXTRUSION_ROLE_SUPPORT) != 0)
@@ -541,20 +553,40 @@ plugin_property_container_handle *layer_region_get_properties_mutable(layer_regi
     return me == nullptr ? nullptr : Slic3r::to_mutable_property_handle(Slic3r::to_layer_region(me));
 }
 
+// Compute normal region or support flow at the layer height; null or unusable settings return zero rather than throwing through the C API.
 c_flow layer_region_get_flow(const layer_region_handle *me, raw_extrusion_role flow_role)
 {
-    c_flow out = {};
     if (me == nullptr)
-        return out;
-    return Slic3r::to_c_flow(Slic3r::to_layer_region(me)->flow(Slic3r::to_flow_role(flow_role)));
+        return {};
+    try {
+        const Slic3r::LayerRegion &region = *Slic3r::to_layer_region(me);
+        const Slic3r::Layer *layer = region.layer();
+        if (layer == nullptr || layer->object() == nullptr || layer->object()->print() == nullptr)
+            return {};
+        const Slic3r::FlowRole role = Slic3r::to_flow_role(flow_role);
+        return Slic3r::to_c_flow(role == Slic3r::frSupportMaterial || role == Slic3r::frSupportMaterialInterface ?
+                                   Slic3r::support_layer_flow(*layer, role, false) : region.flow(role));
+    } catch (...) {
+        return {};
+    }
 }
 
+// Compute bridge flow, using support-layer height for support contacts; null or unusable settings return zero rather than throwing through the C API.
 c_flow layer_region_get_bridging_flow(const layer_region_handle *me, raw_extrusion_role flow_role)
 {
-    c_flow out = {};
     if (me == nullptr)
-        return out;
-    return Slic3r::to_c_flow(Slic3r::to_layer_region(me)->bridging_flow(Slic3r::to_flow_role(flow_role)));
+        return {};
+    try {
+        const Slic3r::LayerRegion &region = *Slic3r::to_layer_region(me);
+        const Slic3r::Layer *layer = region.layer();
+        if (layer == nullptr || layer->object() == nullptr || layer->object()->print() == nullptr)
+            return {};
+        const Slic3r::FlowRole role = Slic3r::to_flow_role(flow_role);
+        return Slic3r::to_c_flow(role == Slic3r::frSupportMaterial || role == Slic3r::frSupportMaterialInterface ?
+                                   Slic3r::support_layer_flow(*layer, role, true) : region.bridging_flow(role));
+    } catch (...) {
+        return {};
+    }
 }
 
 const expolygon_collection_handle *layer_region_get_slices(const layer_region_handle *me)
