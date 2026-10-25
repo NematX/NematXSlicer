@@ -1,3 +1,6 @@
+// These tests build perimeter and surface geometry, then check how infill settings
+// split one island into region groups. A region group owns its fill surfaces;
+// island-wide validation checks their overlap and coverage in scaled coordinates.
 #include <catch2/catch.hpp>
 
 #include "perimeter_test_helpers.hpp"
@@ -302,4 +305,123 @@ TEST_CASE("InfillRegionCompatibilitySplitter splits sparse surfaces by common in
     const ExPolygons expected_right = intersection_ex(island.infill_areas(), layer.region(1).get_raw_slices());
     require_region_island_area(*left, expected_left);
     require_region_island_area(*right, expected_right);
+}
+
+// Build a real two-group island, replace its surfaces with clipped halves, and
+// check boundary rounding versus geometric defects. The print owns all modified
+// surfaces; failed validation reports an error without changing the geometry.
+TEST_CASE("Surface partition validation removes only locally thin rounding dust",
+          "[plugins][surface][surface-generation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedPerimeterPrint prepared;
+    prepare_cube_print(prepared, perimeter_config({{"perimeters", "0"}}));
+    PrintObject &object = prepared.print.object(0);
+    Layer &layer = object.layer(object.layer_count() / 2);
+    replace_layer_island_with_two_regions(prepared, layer, {{"region_gcode", "G4 P1"}});
+    rebuild_island_overlap_graph(object);
+    run_surface_splitter_pipeline(prepared.print);
+
+    LayerSliceIsland &island = layer.island(0);
+    REQUIRE(non_empty_region_island_count(island) == 2);
+    LayerRegionIsland *left = nullptr;
+    LayerRegionIsland *right = nullptr;
+    for (LayerRegionIsland &region_island : island.regions_islands()) {
+        if (region_island.regions() == region_set(layer.region(0)))
+            left = &region_island;
+        if (region_island.regions() == region_set(layer.region(1)))
+            right = &region_island;
+    }
+    REQUIRE(left != nullptr);
+    REQUIRE(right != nullptr);
+
+    coord_t overlap_width = 0;
+    bool expect_overlap = false;
+    bool expect_missing = false;
+    bool expect_slit = false;
+    SECTION("A two hundred scaled units overlap is accepted") {
+        overlap_width = 200;
+    }
+    SECTION("A three hundred scaled units overlap is accepted") {
+        // The StepSurfaceGeneration.cpp header explains the approximately
+        // three-epsilon cutoff: Clipper cleans away the thin eroded core.
+        overlap_width = 300;
+    }
+    SECTION("A four hundred twenty scaled units overlap is rejected") {
+        overlap_width = 420;
+        expect_overlap = true;
+    }
+    SECTION("A half millimetre overlap is rejected") {
+        overlap_width = scale_i(0.5);
+        expect_overlap = true;
+    }
+    SECTION("A two hundred scaled units missing slit is accepted") {
+        overlap_width = -200;
+        expect_slit = true;
+    }
+    SECTION("A square millimetre hole is rejected") {
+        expect_missing = true;
+    }
+
+    // Integer vertices make each band width explicit in scaled units. Clipping each
+    // half to infill_areas preserves the perimeter-generated outer boundary.
+    const coord_t extent = scale_i(20.);
+    const ExPolygon left_clip(Polygon(Points{
+        Point(-extent, -extent), Point(overlap_width, -extent),
+        Point(overlap_width, extent), Point(-extent, extent)}));
+    ExPolygons left_areas = intersection_ex(island.infill_areas(), ExPolygons{left_clip});
+    ExPolygons right_areas = intersection_ex(island.infill_areas(),
+                                            ExPolygons{rectangle_expolygon(0., -20., 20., 20.)});
+    if (expect_missing)
+        right_areas = diff_ex(right_areas, ExPolygons{rectangle_expolygon(4.5, -0.5, 5.5, 0.5)});
+    left->set_fill_surfaces().set(left_areas, stPosInternal | stDensSparse);
+    right->set_fill_surfaces().set(right_areas, stPosInternal | stDensSparse);
+
+    ExPolygons surfaces = left_areas;
+    surfaces.insert(surfaces.end(), right_areas.begin(), right_areas.end());
+    const ExPolygons surface_union = union_ex(surfaces);
+    const ExPolygons overlap = union_ex(intersection_ex(left_areas, right_areas));
+    const ExPolygons missing = diff_ex(island.infill_areas(), surface_union);
+    const ExPolygons extra = diff_ex(surface_union, island.infill_areas());
+    const double raw_extra_area = area_sum(extra);
+    // Measure the actual clipping results before opening so the accepted bands
+    // prove that opening, rather than ExPolygon clipping, removes their area.
+    const double raw_overlap_area = area_sum(overlap);
+    const double raw_missing_area = area_sum(missing);
+    const double overlap_area = area_sum(opening_ex(overlap, SCALED_EPSILON));
+    const double missing_area = area_sum(opening_ex(missing, SCALED_EPSILON));
+    const double extra_area = area_sum(opening_ex(extra, SCALED_EPSILON));
+    const double epsilon_squared = double(SCALED_EPSILON) * double(SCALED_EPSILON);
+    INFO("Overlap raw area=" << raw_overlap_area << ", opened area=" << overlap_area
+         << ", epsilon squared=" << epsilon_squared);
+    INFO("Missing raw area=" << raw_missing_area << ", opened area=" << missing_area
+         << "; extra raw area=" << raw_extra_area << ", opened area=" << extra_area);
+    std::string validation_error;
+    const bool valid = Steps::StepSurfaceGeneration::validate_post(prepared.print, &validation_error);
+    INFO("Surface-generation post validation: " << validation_error);
+    REQUIRE(raw_extra_area == 0.);
+    REQUIRE(extra_area == 0.);
+    if (overlap_width > 0)
+        REQUIRE(raw_overlap_area == double(overlap_width) * double(scale_i(20.)));
+    else if (expect_slit)
+        REQUIRE(raw_missing_area == double(-overlap_width) * double(scale_i(20.)));
+    if (expect_overlap) {
+        REQUIRE(overlap_area > epsilon_squared);
+        REQUIRE_FALSE(valid);
+        REQUIRE(validation_error.find("overlap") != std::string::npos);
+    } else if (expect_missing) {
+        REQUIRE(missing_area > epsilon_squared);
+        REQUIRE_FALSE(valid);
+        REQUIRE(validation_error.find("Missing area") != std::string::npos);
+    } else if (expect_slit) {
+        REQUIRE(raw_missing_area > 0.);
+        REQUIRE(raw_missing_area > epsilon_squared);
+        REQUIRE(missing_area == 0.);
+        REQUIRE(valid);
+    } else {
+        REQUIRE(raw_overlap_area > 0.);
+        REQUIRE(raw_overlap_area > epsilon_squared);
+        REQUIRE(overlap_area == 0.);
+        REQUIRE(valid);
+    }
 }

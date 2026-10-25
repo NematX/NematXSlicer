@@ -3,6 +3,15 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+// Surface generation runs plugins that partition each island's fillable area
+// into typed surfaces. Validation opens overlap and coverage defects by shrinking
+// then expanding them by SCALED_EPSILON. Bands narrower than approximately three
+// times that distance disappear: opening removes twice epsilon from their width,
+// and Clipper cleans away eroded cores thinner than epsilon. Thicker areas are
+// geometric defects checked against epsilon squared. ExPolygon clipping can
+// already discard bands narrower than approximately epsilon. One scaled unit
+// is SCALING_FACTOR mm, or 1 nm in the default 64-bit configuration.
+
 #include "StepSurfaceGeneration.hpp"
 
 #include <algorithm>
@@ -32,6 +41,15 @@
 namespace Slic3r::Steps::StepSurfaceGeneration {
 namespace {
 
+// Check borrowed island surfaces without mutation; return false and optionally write the first geometric error.
+bool validate_island_surface_partition(const LayerSliceIsland &island,
+                                       const size_t object_idx,
+                                       const size_t layer_idx,
+                                       const size_t island_idx,
+                                       std::string *error);
+// Return the area left after opening borrowed, non-overlapping defect polygons by SCALED_EPSILON.
+double opened_defect_area(const ExPolygons &areas);
+
 LayerRegionIsland *to_layer_region_island(layer_region_island_handle *handle)
 {
     return reinterpret_cast<LayerRegionIsland *>(handle);
@@ -60,17 +78,16 @@ double area_sum(const ExPolygons &areas)
     return out;
 }
 
-double surface_area_sum(const ExPolygons &surfaces)
+// Shrink then expand borrowed, non-overlapping polygons by SCALED_EPSILON in
+// scaled units and sum the remaining area. Bands narrower than approximately
+// three times epsilon disappear: opening removes twice epsilon from their width
+// and Clipper cleans the eroded core at distance epsilon. Thicker areas remain
+// defects; empty input returns zero. Geometry is not mutated and temporary
+// results are owned locally.
+double opened_defect_area(const ExPolygons &areas)
 {
-    double out = 0.;
-    for (const ExPolygon &surface : surfaces)
-        out += std::abs(surface.area());
-    return out;
-}
-
-double validation_area_tolerance()
-{
-    return double(SCALED_EPSILON) * double(SCALED_EPSILON);
+    const ExPolygons opened = opening_ex(areas, SCALED_EPSILON);
+    return area_sum(opened);
 }
 
 void append_island_surfaces(ExPolygons &out, const LayerSliceIsland &island)
@@ -85,6 +102,10 @@ void append_island_surfaces(ExPolygons &out, const LayerSliceIsland &island)
                 out.push_back(surface.expolygon);
 }
 
+// Accumulate surface intersections and compare their union with the island's
+// fillable area, opening defects to remove thin rounding bands. Borrow geometry
+// without mutation; return false when remaining defect area exceeds epsilon
+// squared, writing context indices and areas to error when non-null.
 bool validate_island_surface_partition(const LayerSliceIsland &island,
                                        const size_t object_idx,
                                        const size_t layer_idx,
@@ -94,22 +115,29 @@ bool validate_island_surface_partition(const LayerSliceIsland &island,
     ExPolygons surfaces;
     append_island_surfaces(surfaces, island);
 
-    const double tolerance = validation_area_tolerance();
-    const double raw_surface_area = surface_area_sum(surfaces);
-    const ExPolygons surface_union = union_ex(surfaces);
-    const double union_area = area_sum(surface_union);
-
-    // If surfaces overlap, the sum of their individual areas becomes larger
-    // than their union. Boundary-only contact may create tiny numerical dust;
-    // the epsilon-squared tolerance accepts only that dust, not real overlap.
-    if (raw_surface_area - union_area > tolerance) {
+    const double tolerance = double(SCALED_EPSILON) * double(SCALED_EPSILON);
+    ExPolygons surface_union;
+    ExPolygons overlap_pieces;
+    // Intersect each surface with the union of earlier surfaces so every shared
+    // area is collected. Union the pieces before opening: opening requires
+    // non-overlapping polygons, even where three or more surfaces meet.
+    for (const ExPolygon &surface : surfaces) {
+        const ExPolygons overlap = intersection_ex(surface, surface_union);
+        overlap_pieces.insert(overlap_pieces.end(), overlap.begin(), overlap.end());
+        surface_union = union_ex(surface_union, surface);
+    }
+    const ExPolygons overlap_union = union_ex(overlap_pieces);
+    const double raw_overlap_area = area_sum(overlap_union);
+    const double overlap_area = opened_defect_area(overlap_union);
+    if (overlap_area > tolerance) {
         if (error != nullptr) {
             std::ostringstream stream;
             stream << "Surface-generation post-condition failed for object " << object_idx
                    << ", layer " << layer_idx
                    << ", island " << island_idx
-                   << ": fill surfaces overlap by area " << raw_surface_area - union_area
-                   << " scaled^2, tolerance " << tolerance << ".";
+                   << ": fill surfaces overlap by area " << overlap_area
+                   << " scaled^2 (raw area " << raw_overlap_area
+                   << " scaled^2), tolerance " << tolerance << ".";
             *error = stream.str();
         }
         return false;
@@ -117,12 +145,13 @@ bool validate_island_surface_partition(const LayerSliceIsland &island,
 
     const ExPolygons missing = diff_ex(island.infill_areas(), surface_union);
     const ExPolygons extra = diff_ex(surface_union, island.infill_areas());
-    const double missing_area = area_sum(missing);
-    const double extra_area = area_sum(extra);
+    const double missing_area = opened_defect_area(missing);
+    const double extra_area = opened_defect_area(extra);
 
     // The surface partition should cover exactly the fillable area produced by
     // perimeter generation. Missing area would leave holes for infill, while
     // extra area would make infill escape the island or reuse perimeter space.
+    // Differences are non-overlapping polygons; opening removes only thin bands.
     if (missing_area > tolerance || extra_area > tolerance) {
         if (error != nullptr) {
             std::ostringstream stream;
@@ -130,8 +159,10 @@ bool validate_island_surface_partition(const LayerSliceIsland &island,
                    << ", layer " << layer_idx
                    << ", island " << island_idx
                    << ": fill surfaces do not match infill_areas. Missing area "
-                   << missing_area << " scaled^2, extra area " << extra_area
-                   << " scaled^2, tolerance " << tolerance << ".";
+                   << missing_area << " scaled^2 (raw area " << area_sum(missing)
+                   << " scaled^2), extra area " << extra_area
+                   << " scaled^2 (raw area " << area_sum(extra)
+                   << " scaled^2), tolerance " << tolerance << ".";
             *error = stream.str();
         }
         return false;
