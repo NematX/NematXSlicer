@@ -5,9 +5,11 @@ import importlib
 import importlib.util
 import math
 from pathlib import Path
+import random
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -71,12 +73,6 @@ class VolumeHost:
     def triangle_mesh_slice_to_polygons_with_params(self, mesh, params, z_values, output, count):
         self._record_slice("polygons_with_params", mesh, params, z_values, output, count)
 
-    def triangle_mesh_slice_to_expolygons(self, mesh, transform, z_values, output, count):
-        self._record_slice("expolygons", mesh, transform, z_values, output, count)
-
-    def triangle_mesh_slice_to_expolygons_with_params(self, mesh, params, z_values, output, count):
-        self._record_slice("expolygons_with_params", mesh, params, z_values, output, count)
-
     def volume_get_type(self, volume):
         return self.volume_types[address(volume)]
 
@@ -101,6 +97,165 @@ class VolumeHost:
     def storage_free(self, storage, handle):
         self.freed.append((address(storage), address(handle)))
         return 1
+
+
+class SlicingPipelineHost(VolumeHost):
+    """
+    Host with in-memory polygons and expolygons: it records the calls of the post-processing of the
+    slices (ensure_valid, collinear points, union, offsets, largest contour) in order, and gives the
+    raw rings, the union result and the signed area of each contour from the test.
+    """
+
+    def __init__(self, generated):
+        super().__init__(generated)
+        self.calls = []
+        # Raw rings of each layer, as lists of (x, y); set by the test before the call.
+        self.raw_layers = []
+        # Areas of the expolygons returned by the union, set by the test.
+        self.union_areas = []
+        self.rings = {}              # polygon handle -> points
+        self.polygon_lists = {}      # polygon collection handle -> polygon handles
+        self.expolygon_lists = {}    # expolygon collection handle -> expolygon handles
+        self.areas = {}              # expolygon handle (also its contour handle) -> signed area
+
+    def _new(self):
+        self.next_handle += 1
+        return self.next_handle
+
+    def storage_new_expolygon(self, storage):
+        handle = self._new()
+        self.areas[handle] = 0.0
+        return handle
+
+    def triangle_mesh_slice_to_polygons_with_params(self, mesh, params, z_values, output, count):
+        super().triangle_mesh_slice_to_polygons_with_params(mesh, params, z_values, output, count)
+        self.calls.append(("raw_slice", int(params._obj.mode), int(params._obj.mode_below)))
+        for layer in range(int(count)):
+            polygons = []
+            for ring in self.raw_layers[layer]:
+                handle = self._new()
+                self.rings[handle] = list(ring)
+                polygons.append(handle)
+            self.polygon_lists[address(output[layer])] = polygons
+
+    def polygons_ensure_valid(self, polygons, resolution):
+        self.calls.append(("polygons_ensure_valid", int(resolution)))
+
+    def polygons_size(self, polygons):
+        return len(self.polygon_lists[address(polygons)])
+
+    def polygons_at(self, polygons, idx):
+        return self.polygon_lists[address(polygons)][int(idx)]
+
+    def polygon_as_multipoint(self, polygon):
+        return address(polygon)
+
+    def multipoint_view_const(self, multipoint):
+        points = self.rings[address(multipoint)]
+        array = [self.generated.CPoint(x, y) for x, y in points]
+        return SimpleNamespace(size=len(points), array=array)
+
+    def multipoint_clear(self, multipoint):
+        self.rings[address(multipoint)] = []
+
+    def multipoint_insert_array(self, multipoint, idx, array, count):
+        self.rings[address(multipoint)][int(idx):int(idx)] = [
+            (int(array[item].x), int(array[item].y)) for item in range(int(count))
+        ]
+
+    def _expolygons_result(self, name, *arguments):
+        self.calls.append((name, *arguments))
+        handle = self._new()
+        self.expolygon_lists[handle] = []
+        return handle
+
+    def clipper_union_ex(self, storage, polygons, fill_rule):
+        handle = self._expolygons_result("union_ex", int(fill_rule))
+        for area in self.union_areas:
+            expolygon = self._new()
+            self.areas[expolygon] = area
+            self.expolygon_lists[handle].append(expolygon)
+        return handle
+
+    def _copy_expolygons(self, handle, source):
+        self.expolygon_lists[handle] = list(self.expolygon_lists[address(source)])
+        return handle
+
+    def clipper_offset_ex(self, storage, src, delta, join_type, miter_limit):
+        handle = self._expolygons_result("offset_ex", float(delta), int(join_type), float(miter_limit))
+        return self._copy_expolygons(handle, src)
+
+    def clipper_offset2_ex(self, storage, src, delta1, delta2, join_type, miter_limit):
+        handle = self._expolygons_result(
+            "offset2_ex", float(delta1), float(delta2), int(join_type), float(miter_limit)
+        )
+        return self._copy_expolygons(handle, src)
+
+    def expolygons_ensure_valid(self, expolygons, resolution):
+        self.calls.append(("expolygons_ensure_valid", int(resolution)))
+
+    def expolygons_size(self, expolygons):
+        return len(self.expolygon_lists[address(expolygons)])
+
+    def expolygons_at_const(self, expolygons, idx):
+        return self.expolygon_lists[address(expolygons)][int(idx)]
+
+    def expolygons_at(self, expolygons, idx):
+        return self.expolygon_lists[address(expolygons)][int(idx)]
+
+    def expolygon_contour_const(self, expolygon):
+        return address(expolygon)
+
+    def polygon_area(self, polygon):
+        return self.areas[address(polygon)]
+
+    def expolygon_move(self, destination, source):
+        self.areas[address(destination)] = self.areas[address(source)]
+
+    def expolygons_erase(self, expolygons, begin, size):
+        del self.expolygon_lists[address(expolygons)][int(begin):int(begin) + int(size)]
+
+    def expolygons_clear(self, expolygons):
+        self.expolygon_lists[address(expolygons)] = []
+
+    def expolygons_insert_move(self, expolygons, idx, expolygon):
+        self.expolygon_lists[address(expolygons)].insert(int(idx), address(expolygon))
+
+
+def native_squared_distance(a, b, point):
+    """Line::distance_to_squared_abp (Line.cpp) written with 2D vectors, as the native code does."""
+    v = (float(b[0] - a[0]), float(b[1] - a[1]))
+    va = (float(point[0] - a[0]), float(point[1] - a[1]))
+    l2 = v[0] * v[0] + v[1] * v[1]
+    if l2 == 0.0:
+        return va[0] * va[0] + va[1] * va[1]
+    t = va[0] * v[0] + va[1] * v[1]
+    if t <= 0.0:
+        return va[0] * va[0] + va[1] * va[1]
+    if t >= l2:
+        d = (float(point[0] - b[0]), float(point[1] - b[1]))
+        return d[0] * d[0] + d[1] * d[1]
+    w = ((t / l2) * v[0], (t / l2) * v[1])
+    return (w[0] - va[0]) * (w[0] - va[0]) + (w[1] - va[1]) * (w[1] - va[1])
+
+
+def native_remove_collinear(points, max_offset):
+    """Transcription of Polygon::remove_collinear (Polygon.cpp), with a list erase in place of the vector one."""
+    pts = list(points)
+    if len(pts) < 3:
+        return pts
+    min_dist_sq = float(max_offset) * max_offset
+    while len(pts) > 2 and native_squared_distance(pts[-1], pts[1], pts[0]) < min_dist_sq:
+        del pts[0]
+    idx = 1
+    while idx < len(pts) - 1:
+        if native_squared_distance(pts[idx - 1], pts[idx + 1], pts[idx]) < min_dist_sq:
+            del pts[idx]
+        else:
+            idx += 1
+    while len(pts) > 2 and native_squared_distance(pts[-2], pts[0], pts[-1]) < min_dist_sq:
+        del pts[-1]
+    return pts
 
 
 class PythonVolumeViewTests(unittest.TestCase):
@@ -129,7 +284,8 @@ class PythonVolumeViewTests(unittest.TestCase):
         return api
 
     def test_mesh_empty_and_slicing_ownership(self):
-        api = self.make_api()
+        api = self.make_pipeline_api()
+        api.host.raw_layers = [[]]
         self.assertTrue(self.views.TriangleMesh(api, 11).empty())
         mesh = self.views.TriangleMesh(api, 12)
         self.assertFalse(mesh.empty())
@@ -146,9 +302,10 @@ class PythonVolumeViewTests(unittest.TestCase):
             for item in polygons
         ))
         self.assertIsInstance(expolygons[0], self.geometry.StoredExPolygonCollection)
+        # The ExPolygons are made from the raw rings of the host: the post-processing runs in Python.
         self.assertEqual([call["name"] for call in api.host.slice_calls], [
             "polygons",
-            "expolygons_with_params",
+            "polygons_with_params",
         ])
         self.assertEqual(api.host.slice_calls[0]["z"], [
             ctypes.c_float(0.2).value,
@@ -243,6 +400,168 @@ class PythonVolumeViewTests(unittest.TestCase):
                 self.generated.RAW_FACET_PAINTING_SEAM,
                 self.generated.RAW_FACET_PAINTING_ENFORCER,
             )
+
+    def make_pipeline_api(self):
+        api = self.api_module.Slic3rAPI.__new__(self.api_module.Slic3rAPI)
+        api.host = SlicingPipelineHost(self.generated)
+        return api
+
+    def slice_pipeline(self, api, params, layers=1):
+        mesh = self.views.TriangleMesh(api, 12)
+        return mesh.slice_to_expolygons(7, params.transform, [0.1 * (idx + 1) for idx in range(layers)], params)
+
+    def test_expolygon_slicing_replays_the_native_post_processing(self):
+        api = self.make_pipeline_api()
+        host = api.host
+        generated = self.generated
+        params = generated.CMeshSlicingParams()
+        params.mode = generated.RAW_MESH_SLICING_MODE_EVEN_ODD
+        params.mode_below = generated.RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR
+        params.slicing_mode_normal_below_layer = 1
+        params.closing_radius = 0.3
+        params.extra_offset = 0.1
+        params.model_resolution = 0.0000019   # 1 scaled unit once truncated (2 once rounded)
+        params.resolution = 0.0125
+        host.raw_layers = [[[(0, 0), (10, 0), (20, 0), (20, 20)]], [[(0, 0), (10, 0), (20, 0), (20, 20)]]]
+        host.union_areas = [10.0, 30.0, 20.0, 30.0]
+
+        result = self.slice_pipeline(api, params, layers=2)
+
+        scale = generated.UNSCALING_FACTOR
+        closing = int(float(ctypes.c_float(0.3).value) * scale)
+        extra = int(float(ctypes.c_float(0.1).value) * scale)
+        resolution = int(0.0125 * scale)
+        mitre = generated.CLIPPER_JOIN_MITER
+        offsets = [
+            ("offset2_ex", float(closing), -float(closing - extra), mitre, 3.0),
+            ("offset_ex", 10.0, mitre, 3.0),
+        ]
+        valid = [("expolygons_ensure_valid", resolution), ("expolygons_ensure_valid", resolution)]
+        # Layer 0 is below slicing_mode_normal_below_layer: PositiveLargestContour for it (fill positive, largest contour only).
+        # Layer 1 is EvenOdd. The raw slicing never sees PositiveLargestContour.
+        expected = [
+            ("raw_slice", generated.RAW_MESH_SLICING_MODE_EVEN_ODD, generated.RAW_MESH_SLICING_MODE_POSITIVE),
+            ("polygons_ensure_valid", generated.SCALED_EPSILON),
+            ("union_ex", generated.CLIPPER_FILL_POSITIVE),
+            offsets[0], offsets[1], valid[0], valid[1],
+            ("polygons_ensure_valid", generated.SCALED_EPSILON),
+            ("union_ex", generated.CLIPPER_FILL_EVENODD),
+            offsets[0], offsets[1], valid[0], valid[1],
+        ]
+        self.assertEqual(host.calls, expected)
+        # Both rings lose the collinear point (10, 0) at the model resolution of 1 unit (1.9 truncates to 1).
+        self.assertEqual([ring for ring in host.rings.values()], [[(0, 0), (20, 0), (20, 20)]] * 2)
+        self.assertEqual(len(result), 2)
+        self.assertEqual(len(host.expolygon_lists[result[0].handle()]), 1)
+        self.assertEqual(host.areas[host.expolygon_lists[result[0].handle()][0]], 30.0)
+        self.assertEqual(len(host.expolygon_lists[result[1].handle()]), 4)
+        for item in result:
+            self.assertTrue(item.free_from_storage())
+
+    def test_expolygon_slicing_without_cleaning_distance_skips_offsets(self):
+        api = self.make_pipeline_api()
+        host = api.host
+        params = self.generated.CMeshSlicingParams()
+        host.raw_layers = [[]]
+        host.union_areas = []
+
+        result = self.slice_pipeline(api, params)
+
+        self.assertEqual(host.calls, [
+            ("raw_slice", 0, 0),
+            ("polygons_ensure_valid", self.generated.SCALED_EPSILON),
+            ("union_ex", self.generated.CLIPPER_FILL_NONZERO),
+            ("expolygons_ensure_valid", self.generated.SCALED_EPSILON),
+            ("expolygons_ensure_valid", 0),
+        ])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].storage(), 7)
+        self.assertTrue(result[0].free_from_storage())
+
+    def test_expolygon_slicing_offset_branches_follow_the_truncated_integers(self):
+        generated = self.generated
+        mitre = generated.CLIPPER_JOIN_MITER
+        cases = [
+            # (closing, extra) in millimeters -> expected offsets in scaled units
+            (0.0000019, 0.0, [("offset2_ex", 1.0, -1.0, mitre, 3.0)]),   # 1.9 truncates to 1, never 2
+            (0.0, 0.0000019, [("offset_ex", 1.0, mitre, 3.0)]),          # the extra offset alone
+            (0.0, -0.0000019, [("offset_ex", -1.0, mitre, 3.0)]),        # a negative extra offset shrinks
+            (0.0000009, 0.0, []),                                          # below one unit: nothing to do
+            (0.0000019, 0.0000013, [("offset_ex", 1.0, mitre, 3.0)]),    # equal after truncation: grow only
+        ]
+        for closing, extra, expected in cases:
+            with self.subTest(closing=closing, extra=extra):
+                api = self.make_pipeline_api()
+                params = generated.CMeshSlicingParams()
+                params.closing_radius = closing
+                params.extra_offset = extra
+                api.host.raw_layers = [[]]
+                result = self.slice_pipeline(api, params)
+                offsets = [call for call in api.host.calls if call[0] in ("offset_ex", "offset2_ex")]
+                self.assertEqual(offsets, expected)
+                for item in result:
+                    item.free_from_storage()
+
+    def test_remove_collinear_points_on_the_case_where_a_removal_hides_the_next_one(self):
+        ring = [(0, 0), (1000, 99), (1100, -9), (2000, 0), (0, 1000)]
+        # The native function deletes (1100,-9) and keeps (1000,99).
+        self.assertEqual(self.views._remove_collinear_points(ring, 100), [(0, 0), (1000, 99), (2000, 0), (0, 1000)])
+        self.assertEqual(native_remove_collinear(ring, 100), [(0, 0), (1000, 99), (2000, 0), (0, 1000)])
+
+    def test_remove_collinear_points_matches_the_native_algorithm(self):
+        listed = [
+            [], [(0, 0)], [(0, 0), (10, 10)], [(0, 0), (10, 0), (20, 0)],
+            [(0, 0), (10, 0), (20, 0), (30, 0), (40, 0)],
+            [(0, 0), (10, 0), (20, 0), (30, 0), (30, 40)],
+            [(0, 0), (0, 40), (10, 40), (20, 40), (30, 40)],
+            [(0, 0), (5, 0), (10, 0), (10, 10), (10, 20), (0, 20), (0, 10)],
+            [(0, 0), (0, 0), (10, 0), (10, 0), (10, 10), (0, 10)],
+            [(0, 0), (0, 0), (0, 0), (0, 0)],
+            [(0, 0), (100, 0), (50, 1), (200, 0), (0, 100)],
+            [(0, 0), (100, 0), (-50, 1), (200, 0), (0, 100)],
+            [(0, 0), (10, 0), (0, 0), (10, 0), (0, 0)],
+        ]
+        generator = random.Random(20261019)
+        rings = list(listed)
+        for _unused in range(3000):
+            count = generator.randint(0, 14)
+            rings.append([(generator.randint(-60, 60), generator.randint(-60, 60)) for _item in range(count)])
+            walk = (0, 0)
+            ring = []
+            for _item in range(count):
+                walk = (walk[0] + generator.randint(-2, 2) * 20 + generator.randint(-1, 1),
+                        walk[1] + generator.randint(-2, 2) * 20 + generator.randint(-1, 1))
+                ring.append(walk)
+            rings.append(ring)
+        removed = 0
+        for ring in rings:
+            for offset in (0, 1, 2, 5, 40, 300):
+                kept = self.views._remove_collinear_points(ring, offset)
+                self.assertEqual(kept, native_remove_collinear(ring, offset), (ring, offset))
+                removed += len(ring) - len(kept)
+        self.assertGreater(removed, 1000)
+
+    def test_slicing_pipeline_rewrites_only_the_rings_that_lose_a_point(self):
+        api = self.make_pipeline_api()
+        host = api.host
+        params = self.generated.CMeshSlicingParams()
+        params.model_resolution = 0.000001 * 100
+        host.raw_layers = [[
+            [(0, 0), (1000, 99), (1100, -9), (2000, 0), (0, 1000)],
+            [(0, 0), (1000, 0), (1000, 1000), (0, 1000)],
+        ]]
+        rewritten = []
+        original = host.multipoint_clear
+        host.multipoint_clear = lambda multipoint: (rewritten.append(address(multipoint)), original(multipoint))
+
+        result = self.slice_pipeline(api, params)
+
+        first, second = host.polygon_lists[next(iter(host.polygon_lists))]
+        self.assertEqual(host.rings[first], [(0, 0), (1000, 99), (2000, 0), (0, 1000)])
+        self.assertEqual(host.rings[second], [(0, 0), (1000, 0), (1000, 1000), (0, 1000)])
+        self.assertEqual(rewritten, [first])
+        for item in result:
+            item.free_from_storage()
 
 
 if __name__ == "__main__":

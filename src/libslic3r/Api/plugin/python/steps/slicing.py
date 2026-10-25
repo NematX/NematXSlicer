@@ -195,6 +195,7 @@ class SlicingContext(PluginRunContextView):
         for idx in range(self.layer_range_count()):
             yield self.layer_range(idx)
 
+    @abi_requires_headers("slic3r_volume.h", "slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
     def slice_volume_to_expolygons(
         self,
         volume: Volume,
@@ -205,35 +206,17 @@ class SlicingContext(PluginRunContextView):
         Slice one volume mesh to storage-owned ExPolygonCollections.
 
         z_mm_by_layer uses unscaled object-local millimeters. If params is not
-        provided, the volume matrix is used with the low-level default slicer.
-        Passing CMeshSlicingParams lets a plugin reproduce host slicing modes.
-        """
-        z_values = [float(value) for value in z_mm_by_layer]
-        if not z_values:
-            return []
+        provided, the volume matrix is used with a regular slicing and no cleaning
+        distance. Passing CMeshSlicingParams lets a plugin reproduce the native object
+        slicing: the closing radius, extra offset, model resolution, resolution and
+        slicing modes are applied through the API (see TriangleMesh.slice_to_expolygons()).
 
-        storage = self.plugin_storage()
-        out = [StoredExPolygonCollection(self.api, storage) for _ in z_values]
-        z_array = (ctypes.c_float * len(z_values))(*z_values)
-        out_array = (ctypes.c_void_p * len(out))(*[collection.c_handle() for collection in out])
-        mesh = volume.mesh()
-        if params is None:
-            self.api.host.triangle_mesh_slice_to_expolygons(
-                mesh.c_handle(),
-                volume.matrix(),
-                z_array,
-                out_array,
-                len(out),
-            )
-        else:
-            self.api.host.triangle_mesh_slice_to_expolygons_with_params(
-                mesh.c_handle(),
-                ctypes.byref(params),
-                z_array,
-                out_array,
-                len(out),
-            )
-        return out
+        The heights are validated: a value that is not finite, or smaller than the one
+        before it, raises ValueError before anything is allocated.
+        """
+        return volume.mesh().slice_to_expolygons(
+            self.plugin_storage(), volume.matrix(), z_mm_by_layer, params
+        )
 
 __all__ = [
     "SlicingContext",

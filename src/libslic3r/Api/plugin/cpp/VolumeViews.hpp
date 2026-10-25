@@ -5,14 +5,138 @@
 #ifndef slic3r_Api_plugin_cpp_VolumeViews_hpp_
 #define slic3r_Api_plugin_cpp_VolumeViews_hpp_
 
+#include <atomic>
 #include <cassert>
+#include <exception>
+#include <mutex>
 #include <stdexcept>
 #include <vector>
 
+#include "libslic3r/Api/plugin/c/slic3r_utils.h"
 #include "libslic3r/Api/plugin/c/slic3r_volume.h"
+#include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
+#include "libslic3r/Api/plugin/cpp/PolygonOps.hpp"
 
 namespace slic3r_api {
+
+namespace detail {
+
+// Settings of the post-processing of the raw slices (see TriangleMesh::slice_to_expolygons), converted once:
+// the distances are scaled units truncated like the native scale_i(), and every branch tests these integers.
+struct SliceFinishSettings {
+    coord_t closing_radius = 0;
+    coord_t model_resolution = 0;
+    coord_t extra_offset = 0;
+    coord_t resolution = 0;
+    raw_mesh_slicing_mode mode = RAW_MESH_SLICING_MODE_REGULAR;
+    raw_mesh_slicing_mode mode_below = RAW_MESH_SLICING_MODE_REGULAR;
+    uint32_t normal_below_layer = 0;
+};
+
+// Shared state of the parallel loop that finishes the layers. A job never lets an exception escape: it keeps the
+// first one here, because the loop runs inside C frames of the host.
+struct SliceFinishJobs {
+    SliceFinishSettings settings;
+    std::vector<StoredPolygonCollection> *rings = nullptr;
+    std::vector<StoredExPolygonCollection> *out = nullptr;
+    const plugin_run_context *context = nullptr;
+    std::atomic<uint32_t> finished{0};
+    std::atomic<bool> failed{false};
+    std::mutex error_mutex;
+    std::exception_ptr error;
+};
+
+// Turns the raw rings of one layer into its final ExPolygons, as the native slice_mesh_ex() followed by the
+// final ensure_valid() of the host do (TriangleMeshSlicer.cpp slice_mesh_ex / make_expolygons). rings is
+// modified in place; temporary collections are made in scratch; the result is moved into out.
+inline void finish_slice_layer(const SliceFinishSettings &settings,
+                               StoredPolygonCollection &rings,
+                               StoredExPolygonCollection &out,
+                               uint32_t layer,
+                               storage_handle *scratch)
+{
+    // The mode of the layer decides the fill rule and the largest-contour filter, not the raw slicing.
+    const raw_mesh_slicing_mode mode = layer < settings.normal_below_layer ? settings.mode_below : settings.mode;
+
+    rings.ensure_valid(SCALED_EPSILON);
+    if (settings.model_resolution > 0)
+        remove_collinear(rings, settings.model_resolution);
+
+    const clipper_fill_rule_t fill_rule = mode == RAW_MESH_SLICING_MODE_EVEN_ODD ? CLIPPER_FILL_EVENODD :
+        mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR ? CLIPPER_FILL_POSITIVE : CLIPPER_FILL_NONZERO;
+    StoredExPolygonCollection slices = clipper_union_ex(scratch, rings, fill_rule);
+
+    // Closing (grow then shrink) and extra offset, in one or two offsets as the native make_expolygons() does.
+    double offset_out = 0.;
+    double offset_in = 0.;
+    if (settings.closing_radius >= settings.extra_offset) {
+        offset_out = +(settings.closing_radius);
+        offset_in = -(settings.closing_radius - settings.extra_offset);
+    } else {
+        offset_out = +(settings.extra_offset);
+        offset_in = 0.;
+    }
+    if (offset_out > 0 && offset_in < 0)
+        slices = clipper_offset2_ex(scratch, slices, offset_out, offset_in, CLIPPER_JOIN_MITER, 3.);
+    else if (offset_out > 0)
+        slices = clipper_offset_ex(scratch, slices, offset_out, CLIPPER_JOIN_MITER, 3.);
+    else if (offset_in < 0)
+        slices = clipper_offset_ex(scratch, slices, offset_in, CLIPPER_JOIN_MITER, 3.);
+
+    // keep_largest_contour_only(): the island whose contour has the largest signed area, the first one on a tie.
+    if (mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR && slices.size() > 1) {
+        double max_area = 0.;
+        uint32_t largest = 0;
+        bool found = false;
+        for (uint32_t idx = 0; idx < slices.size(); ++idx) {
+            const double area = slices.at(idx).contour().area();
+            if (area > max_area) {
+                max_area = area;
+                largest = idx;
+                found = true;
+            }
+        }
+        // found is false only when no contour has a positive area, where the native code dereferences a null pointer;
+        // the union and the offsets give counter-clockwise contours, so this case does not occur.
+        if (found) {
+            StoredExPolygon kept = slices.extract(largest);
+            slices.clear();
+            slices.push_back_move(std::move(kept));
+        }
+    }
+
+    if (settings.resolution != 0) {
+        // The safety offset (native union_safety_offset_ex) merges the islands that touch, then the simplification.
+        slices = clipper_offset_ex(scratch, slices, 10., CLIPPER_JOIN_MITER, 3.);
+        slices.ensure_valid(settings.resolution);
+    } else {
+        slices.ensure_valid(SCALED_EPSILON);
+    }
+    // The host applied one more simplification to the result, with a resolution that can be 0.
+    slices.ensure_valid(settings.resolution);
+    out.move_from(slices);
+}
+
+// Callback of slic3r_parallel_for_storage(): one layer. It must not throw, nor leave anything allocated in scratch.
+inline void slice_finish_job(uint32_t layer, storage_handle *scratch, void *user_data)
+{
+    SliceFinishJobs &jobs = *static_cast<SliceFinishJobs *>(user_data);
+    try {
+        if (jobs.failed.load() || is_cancelled(jobs.context))
+            return;
+        finish_slice_layer(jobs.settings, (*jobs.rings)[layer], (*jobs.out)[layer], layer, scratch);
+        jobs.finished.fetch_add(1);
+    } catch (...) {
+        jobs.failed.store(true);
+        std::lock_guard<std::mutex> lock(jobs.error_mutex);
+        if (!jobs.error)
+            jobs.error = std::current_exception();
+    }
+}
+
+} // namespace detail
 
 /*
 Read-only helpers over Volume and TriangleMesh.
@@ -101,27 +225,91 @@ public:
     }
 
     /*
-    Native-equivalent ExPolygon slicing path. Use this from slicing plugins when
-    reproducing PrintObjectSlice.cpp: it applies closing radius, extra offset,
-    contour simplification and slicing mode inside the host.
+    Same as the overload above, but with the slicing parameters of c_mesh_slicing_params. The host reads only
+    mode, slicing_mode_normal_below_layer, mode_below and transform (triangle_mesh_slice_to_polygons_with_params()
+    passes the base MeshSlicingParams to the slicer): closing_radius, extra_offset, resolution and model_resolution are
+    ignored here, and the polygons are the raw loops of the slicer. transform must be set (for example with
+    matrix4d_identity()): a zeroed struct holds a null matrix, which crushes the mesh. slice_zs are in millimeters and
+    must be increasing. The storage must outlive the returned collections.
+    */
+    std::vector<StoredPolygonCollection> slice_to_polygons(storage_handle *storage,
+                                                           const c_mesh_slicing_params &params,
+                                                           const std::vector<float> &slice_zs) const
+    {
+        std::vector<StoredPolygonCollection> out;
+        out.reserve(slice_zs.size());
+        for (size_t idx = 0; idx < slice_zs.size(); ++idx)
+            out.emplace_back(storage);
+
+        std::vector<polygon_collection_handle *> out_handles;
+        out_handles.reserve(out.size());
+        for (StoredPolygonCollection &polygons : out)
+            out_handles.push_back(polygons.mutable_handle());
+
+        triangle_mesh_slice_to_polygons_with_params(handle(), &params, slice_zs.data(), out_handles.data(),
+                                                    static_cast<uint32_t>(slice_zs.size()));
+        return out;
+    }
+
+    /*
+    ExPolygon slicing path, byte-identical to the native slice_mesh_ex() followed by the final ensure_valid() that the
+    host function triangle_mesh_slice_to_expolygons_with_params() of the volume ABI 1.2 (slic3r_volume.cpp) applied. Use it from slicing plugins that reproduce the native slicing. The raw loops come from
+    the host (with PositiveLargestContour replaced by Positive), and the rest is done here through the plugin API, layer
+    by layer in parallel:
+      1. polygons_ensure_valid at SCALED_EPSILON;
+      2. remove_collinear(model_resolution) on every ring when model_resolution > 0;
+      3. clipper_union_ex with the fill rule of the layer mode (EvenOdd: even-odd, PositiveLargestContour: positive,
+         else non-zero), where the layer mode is mode_below under slicing_mode_normal_below_layer;
+      4. the closing / extra offset (clipper_offset2_ex or clipper_offset_ex);
+      5. only the largest contour for PositiveLargestContour;
+      6. with a resolution: a safety offset and ensure_valid(resolution), else ensure_valid at SCALED_EPSILON;
+      7. a last ensure_valid(resolution), also when it is 0.
+    closing_radius, extra_offset, model_resolution and resolution are millimeters, truncated to scaled units like
+    scale_i(). transform must be set, as for slice_to_polygons(). The result is one collection per Z, in the
+    storage, which must outlive it.
+    A cancelled context, or a cancellation of the surrounding parallel group, throws PluginCancelled and returns
+    nothing; an error of a layer is rethrown. context may be null (never cancelled).
     */
     std::vector<StoredExPolygonCollection> slice_to_expolygons(storage_handle *storage,
                                                                const c_mesh_slicing_params &params,
-                                                               const std::vector<float> &slice_zs) const
+                                                               const std::vector<float> &slice_zs,
+                                                               const plugin_run_context *context) const
     {
+        throw_if_cancelled(context);
+
+        // The raw slicing keeps the polygons of PositiveLargestContour as they are for the fill rule below.
+        c_mesh_slicing_params raw_params = params;
+        if (raw_params.mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR)
+            raw_params.mode = RAW_MESH_SLICING_MODE_POSITIVE;
+        if (raw_params.mode_below == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR)
+            raw_params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE;
+        std::vector<StoredPolygonCollection> rings = slice_to_polygons(storage, raw_params, slice_zs);
+        throw_if_cancelled(context);
+
+        // The outputs exist before the loop, so the jobs only fill them.
         std::vector<StoredExPolygonCollection> out;
         out.reserve(slice_zs.size());
         for (size_t idx = 0; idx < slice_zs.size(); ++idx)
             out.emplace_back(storage);
 
-        std::vector<expolygon_collection_handle *> out_handles;
-        out_handles.reserve(out.size());
-        for (StoredExPolygonCollection &expolygons : out)
-            out_handles.push_back(expolygons.mutable_handle());
+        detail::SliceFinishJobs jobs;
+        jobs.settings.closing_radius = scale_i(params.closing_radius);
+        jobs.settings.model_resolution = scale_i(params.model_resolution);
+        jobs.settings.extra_offset = scale_i(params.extra_offset);
+        jobs.settings.resolution = scale_i(params.resolution);
+        jobs.settings.mode = params.mode;
+        jobs.settings.mode_below = params.mode_below;
+        jobs.settings.normal_below_layer = params.slicing_mode_normal_below_layer;
+        jobs.rings = &rings;
+        jobs.out = &out;
+        jobs.context = context;
+        slic3r_parallel_for_storage(0, static_cast<uint32_t>(slice_zs.size()), &jobs, &detail::slice_finish_job);
 
-        assert(slice_zs.size() == out_handles.size());
-        triangle_mesh_slice_to_expolygons_with_params(handle(), &params, slice_zs.data(), out_handles.data(),
-                                                      static_cast<uint32_t>(slice_zs.size()));
+        // A layer that did not run (cancelled context, or a cancelled surrounding group) leaves the count short.
+        if (jobs.error)
+            std::rethrow_exception(jobs.error);
+        if (jobs.finished.load() != slice_zs.size() || is_cancelled(context))
+            throw PluginCancelled();
         return out;
     }
 };

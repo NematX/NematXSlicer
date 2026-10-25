@@ -87,11 +87,23 @@ from slic3r_api_generated import (
     RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE_CENTER,
     RAW_VOLUME_TYPE_SUPPORT_BLOCKER,
     RAW_VOLUME_TYPE_SUPPORT_ENFORCER,
+    CLIPPER_FILL_EVENODD,
+    CLIPPER_FILL_NONZERO,
+    CLIPPER_FILL_POSITIVE,
+    CLIPPER_JOIN_MITER,
+    RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR,
     EPSILON,
+    SCALED_EPSILON,
     SCALING_FACTOR,
+    UNSCALING_FACTOR,
 )
 
-from slic3r_clipper_views import ClipperContext
+from slic3r_clipper_views import (
+    ClipperContext,
+    clipper_offset2_ex,
+    clipper_offset_ex,
+    clipper_union_ex,
+)
 from slic3r_extrusion_views import ExtrusionEntity, MutableExtrusionEntity
 from slic3r_geometry_views import (
     CPoint,
@@ -1006,6 +1018,234 @@ def _validated_mesh_slice_z_values(z_mm_by_layer: Iterable[float]) -> list[float
     return z_values
 
 
+def _truncated_scaled(value: float) -> int:
+    """
+    Convert millimeters to scaled units by truncation toward zero, like the native
+    ``scale_i()``. The Python ``scale_i()`` rounds, which is not the same for a distance
+    that is not a whole number of scaled units.
+    """
+    return int(float(value) * UNSCALING_FACTOR)
+
+
+def _squared_distance_to_segment(ax: int, ay: int, bx: int, by: int, px: int, py: int) -> float:
+    """
+    Squared distance from the point ``p`` to the segment ``[a, b]``, with the floating
+    point operations of the native ``Line::distance_to_squared_abp(a, b, p)``: the
+    differences are made on integers then converted, ``x * x`` is a product (never ``**``
+    or ``hypot``), and ``s = t / l2`` is applied to ``v`` before the subtraction.
+    """
+    vx = float(bx - ax)
+    vy = float(by - ay)
+    vax = float(px - ax)
+    vay = float(py - ay)
+    l2 = vx * vx + vy * vy
+    if l2 == 0.0:
+        return vax * vax + vay * vay
+    t = vax * vx + vay * vy
+    if t <= 0.0:
+        return vax * vax + vay * vay
+    if t >= l2:
+        dx = float(px - bx)
+        dy = float(py - by)
+        return dx * dx + dy * dy
+    s = t / l2
+    wx = s * vx - vax
+    wy = s * vy - vay
+    return wx * wx + wy * wy
+
+
+def _remove_collinear_points(points: Sequence[tuple[int, int]], max_offset: int) -> list[tuple[int, int]]:
+    """
+    Port of the native ``Polygon::remove_collinear(max_offset)``: the points of a closed ring
+    that are within ``max_offset`` (scaled units) of the segment joining their neighbours are
+    deleted. The result is the same points in the same order as the native function, because
+    its three passes are reproduced as they are:
+
+    1. while more than 2 points remain, the first point goes if it is closer than
+       ``max_offset`` to the segment (last point, second point);
+    2. one pass over the remaining points: a point goes if it is closer than ``max_offset``
+       to the segment (last point kept, next ORIGINAL point). The last point kept is not
+       examined again after a deletion, and the first and last points are never examined;
+    3. while more than 2 points remain, the last point goes if it is closer than
+       ``max_offset`` to the segment (point before it, first point).
+
+    ``points`` is a sequence of ``(x, y)`` integers; a new list is returned and ``points`` is
+    not changed. Rings of fewer than 3 points are returned as they are.
+    """
+    count = len(points)
+    if count < 3:
+        return list(points)
+    threshold = float(max_offset) * float(max_offset)
+    last_x, last_y = points[count - 1]
+
+    first = 0
+    while count - first > 2 and _squared_distance_to_segment(
+        last_x, last_y, points[first + 1][0], points[first + 1][1], points[first][0], points[first][1]
+    ) < threshold:
+        first += 1
+
+    kept = [points[first]]
+    for idx in range(first + 1, count - 1):
+        previous = kept[-1]
+        following = points[idx + 1]
+        candidate = points[idx]
+        if not _squared_distance_to_segment(
+            previous[0], previous[1], following[0], following[1], candidate[0], candidate[1]
+        ) < threshold:
+            kept.append(candidate)
+    kept.append(points[count - 1])
+
+    while len(kept) > 2 and _squared_distance_to_segment(
+        kept[-2][0], kept[-2][1], kept[0][0], kept[0][1], kept[-1][0], kept[-1][1]
+    ) < threshold:
+        kept.pop()
+    return kept
+
+
+@abi_requires_headers("slic3r_geometry.h")
+def _remove_collinear_rings(api, rings: StoredPolygonCollection, max_offset: int) -> int:
+    """Apply ``_remove_collinear_points`` to every ring of the collection; return the deleted point count."""
+    removed_total = 0
+    for idx in range(rings.size()):
+        polygon = api.host.polygons_at(rings.mutable_c_handle(), idx)
+        multipoint = _void_p(api.host.polygon_as_multipoint(_void_p(polygon)))
+        view = api.host.multipoint_view_const(multipoint)
+        count = int(view.size)
+        if count < 3:
+            continue
+        array = view.array
+        points = [(int(array[point].x), int(array[point].y)) for point in range(count)]
+        kept = _remove_collinear_points(points, max_offset)
+        if len(kept) == count:
+            continue
+        # The ring is rewritten only when a point was deleted.
+        api.host.multipoint_clear(multipoint)
+        kept_array = (CPoint * len(kept))(*[CPoint(x, y) for x, y in kept])
+        api.host.multipoint_insert_array(multipoint, 0, kept_array, len(kept))
+        removed_total += count - len(kept)
+    return removed_total
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def _finish_sliced_layer(
+    api,
+    storage_address: int,
+    params: CMeshSlicingParams,
+    layer: int,
+    rings: StoredPolygonCollection,
+) -> StoredExPolygonCollection:
+    """
+    Turn the raw rings of one layer into its final ExPolygons, like the native
+    ``slice_mesh_ex()`` followed by the final ``ensure_valid()`` of the host
+    (``TriangleMeshSlicer.cpp``): the same steps, in the same order, through the plugin API.
+    ``rings`` is modified; intermediate collections are freed, also when an error is raised.
+    """
+    # Distances in scaled units, truncated like the native scale_i(); every branch tests these integers.
+    closing_radius = _truncated_scaled(params.closing_radius)
+    extra_offset = _truncated_scaled(params.extra_offset)
+    model_resolution = _truncated_scaled(params.model_resolution)
+    resolution = _truncated_scaled(params.resolution)
+    # The mode of the layer decides the fill rule and the largest-contour filter.
+    mode = params.mode_below if layer < params.slicing_mode_normal_below_layer else params.mode
+
+    rings.ensure_valid(SCALED_EPSILON)
+    if model_resolution > 0:
+        _remove_collinear_rings(api, rings, model_resolution)
+
+    if mode == RAW_MESH_SLICING_MODE_EVEN_ODD:
+        fill_rule = CLIPPER_FILL_EVENODD
+    elif mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR:
+        fill_rule = CLIPPER_FILL_POSITIVE
+    else:
+        fill_rule = CLIPPER_FILL_NONZERO
+    slices = clipper_union_ex(storage_address, rings, fill_rule)
+    try:
+        # Closing (grow then shrink) and extra offset, in one or two offsets as the native make_expolygons() does.
+        if closing_radius >= extra_offset:
+            offset_out = float(closing_radius)
+            offset_in = -float(closing_radius - extra_offset)
+        else:
+            offset_out = float(extra_offset)
+            offset_in = 0.0
+        if offset_out > 0 and offset_in < 0:
+            slices = _replace_expolygons(
+                slices, clipper_offset2_ex(storage_address, slices, offset_out, offset_in, CLIPPER_JOIN_MITER, 3.0)
+            )
+        elif offset_out > 0:
+            slices = _replace_expolygons(
+                slices, clipper_offset_ex(storage_address, slices, offset_out, CLIPPER_JOIN_MITER, 3.0)
+            )
+        elif offset_in < 0:
+            slices = _replace_expolygons(
+                slices, clipper_offset_ex(storage_address, slices, offset_in, CLIPPER_JOIN_MITER, 3.0)
+            )
+
+        # keep_largest_contour_only(): the island whose contour has the largest signed area, the first on a tie.
+        if mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR and slices.size() > 1:
+            max_area = 0.0
+            largest = -1
+            for idx in range(slices.size()):
+                area = slices.at(idx).contour().area()
+                if area > max_area:
+                    max_area = area
+                    largest = idx
+            if largest >= 0:
+                with slices.extract(largest) as kept:
+                    slices.clear()
+                    slices.insert_move(kept, 0)
+
+        if resolution != 0:
+            # The safety offset (native union_safety_offset_ex) merges the islands that touch.
+            slices = _replace_expolygons(
+                slices, clipper_offset_ex(storage_address, slices, 10.0, CLIPPER_JOIN_MITER, 3.0)
+            )
+            slices.ensure_valid(resolution)
+        else:
+            slices.ensure_valid(SCALED_EPSILON)
+        # The host applied one more simplification to the result, with a resolution that can be 0.
+        slices.ensure_valid(resolution)
+    except BaseException:
+        slices.free_from_storage()
+        raise
+    return slices
+
+
+def _replace_expolygons(old: StoredExPolygonCollection, new: StoredExPolygonCollection) -> StoredExPolygonCollection:
+    """Free the collection that was just replaced by its offset and return the new one."""
+    old.free_from_storage()
+    return new
+
+
+@abi_requires_headers("slic3r_volume.h", "slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def _slice_mesh_to_expolygons(
+    mesh: "TriangleMesh",
+    storage_address: int,
+    params: CMeshSlicingParams,
+    z_values: list[float],
+) -> list[StoredExPolygonCollection]:
+    """
+    Slice a mesh to one ExPolygonCollection per Z with the result of the native object slicing.
+    The host gives the raw loops (``PositiveLargestContour`` replaced by ``Positive``, as the native
+    slicer does) and the rest of the post-processing runs here, layer by layer, through the API.
+    """
+    raw_params = CMeshSlicingParams.from_buffer_copy(params)
+    if raw_params.mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR:
+        raw_params.mode = RAW_MESH_SLICING_MODE_POSITIVE
+    if raw_params.mode_below == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR:
+        raw_params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE
+    raw = mesh.slice_to_polygons(storage_address, params.transform, z_values, raw_params)
+    out: list[StoredExPolygonCollection] = []
+    try:
+        for layer, rings in enumerate(raw):
+            out.append(_finish_sliced_layer(mesh.api, storage_address, params, layer, rings))
+            rings.free_from_storage()
+    except BaseException:
+        for collection in (*raw, *out):
+            collection.free_from_storage()
+        raise
+    return out
+
+
 @abi_requires_headers("slic3r_volume.h")
 class TriangleMesh(DataTreeView):
     """
@@ -1111,28 +1351,22 @@ class TriangleMesh(DataTreeView):
         ``free_from_storage()``, or managed with a ``with`` block, before that
         storage is cleared. This read-only operation never changes the borrowed
         mesh.
+
+        The result is the one of the native object slicing: the host gives the
+        raw loops and the closing radius, extra offset, model resolution,
+        resolution and slicing modes of ``params`` are applied here, through the
+        API, layer by layer (the collinear point removal is a port of the native ``Polygon::remove_collinear``). Without
+        ``params``, the slicing is regular with ``transform`` and no cleaning
+        distance.
         """
         z_values = _validated_mesh_slice_z_values(z_mm_by_layer)
         if not z_values:
             return []
 
-        output = [
-            StoredExPolygonCollection(self.api, storage_address)
-            for _unused in z_values
-        ]
-        z_array = (ctypes.c_float * len(z_values))(*z_values)
-        output_array = (ctypes.c_void_p * len(output))(
-            *[collection.c_handle() for collection in output]
-        )
         if params is None:
-            self.api.host.triangle_mesh_slice_to_expolygons(
-                self.c_handle(), transform, z_array, output_array, len(output)
-            )
-        else:
-            self.api.host.triangle_mesh_slice_to_expolygons_with_params(
-                self.c_handle(), ctypes.byref(params), z_array, output_array, len(output)
-            )
-        return output
+            params = CMeshSlicingParams()
+            params.transform = transform
+        return _slice_mesh_to_expolygons(self, storage_address, params, z_values)
 
 
 @abi_requires_headers("slic3r_volume.h")

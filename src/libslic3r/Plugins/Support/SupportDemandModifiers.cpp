@@ -127,7 +127,7 @@ std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volum
     c_mesh_slicing_params params = base_params;
     params.transform = matrix4d_mul(base_params.transform, volume.matrix());
     throw_if_cancelled(run_ctx);
-    out = volume.mesh().slice_to_expolygons(storage, params, slice_zs);
+    out = volume.mesh().slice_to_expolygons(storage, params, slice_zs, run_ctx);
     throw_if_cancelled(run_ctx);
     for (StoredExPolygonCollection &layer_polygons : out) {
         throw_if_cancelled(run_ctx);

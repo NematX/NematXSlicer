@@ -357,3 +357,166 @@ TEST_CASE("polygons_simplify edge cases", "[plugins][polygon-simplify]")
         CHECK(input == copy);
     }
 }
+
+// ---- slic3r_api::remove_collinear: identity with the native Polygon::remove_collinear ----
+
+namespace {
+// The points of a ring, in the C layout of the API.
+using Ring = std::vector<c_point>;
+
+// Run the native Polygon::remove_collinear on a copy of the ring; removed receives its return value.
+Ring remove_collinear_native(const Ring &ring, coord_t max_offset, size_t &removed)
+{
+    Polygon polygon;
+    for (const c_point &point : ring)
+        polygon.points.emplace_back(point.x, point.y);
+    removed = polygon.remove_collinear(max_offset);
+    Ring out;
+    for (const Point &point : polygon.points)
+        out.push_back(c_point{point.x(), point.y()});
+    return out;
+}
+
+// Run the API port on a ring stored in a storage; removed receives the number of deleted points.
+Ring remove_collinear_api(const Ring &ring, coord_t max_offset, size_t &removed)
+{
+    PluginStorage storage;
+    slic3r_api::StoredPolygon polygon(reinterpret_cast<storage_handle *>(&storage));
+    if (!ring.empty())
+        polygon.insert_array(0, ring.data(), uint32_t(ring.size()));
+    removed = slic3r_api::remove_collinear(polygon, max_offset);
+    return polygon.points();
+}
+
+// True when the API port and the native function give the same points, in the same order, and the same count.
+bool remove_collinear_same(const Ring &ring, coord_t max_offset)
+{
+    size_t native_removed = 0, api_removed = 0;
+    const Ring native = remove_collinear_native(ring, max_offset, native_removed);
+    const Ring api = remove_collinear_api(ring, max_offset, api_removed);
+    return native_removed == api_removed && native.size() == api.size() &&
+           std::equal(native.begin(), native.end(), api.begin(), [](const c_point &a, const c_point &b) { return a.x == b.x && a.y == b.y; });
+}
+
+c_point cp(coord_t x, coord_t y) { return c_point{x, y}; }
+} // namespace
+
+TEST_CASE("remove_collinear matches the native function on the listed cases", "[plugins][polygon-ops][remove-collinear]")
+{
+    const std::vector<coord_t> offsets{0, 1, 3, 100, 5000};
+    const std::vector<Ring> rings{
+        {},                                                      // empty
+        {cp(0, 0)},                                              // one point
+        {cp(0, 0), cp(10, 10)},                                  // two points
+        {cp(0, 0), cp(10, 0), cp(20, 0)},                        // three aligned points
+        {cp(0, 0), cp(10, 0), cp(20, 0), cp(30, 0), cp(40, 0)},  // all aligned: reduces to two points
+        {cp(0, 0), cp(10, 0), cp(20, 0), cp(30, 0), cp(30, 40)}, // several removals at the head side
+        {cp(0, 0), cp(0, 40), cp(10, 40), cp(20, 40), cp(30, 40)}, // several removals at the tail side
+        {cp(0, 0), cp(5, 0), cp(10, 0), cp(10, 10), cp(10, 20), cp(0, 20), cp(0, 10)}, // head, middle and tail
+        {cp(0, 0), cp(0, 0), cp(10, 0), cp(10, 0), cp(10, 10), cp(0, 10)},             // consecutive duplicates
+        {cp(0, 0), cp(0, 0), cp(0, 0), cp(0, 0)},                                       // only duplicates
+        {cp(0, 0), cp(100, 0), cp(50, 1), cp(200, 0), cp(0, 100)},                      // projection beyond the segment end
+        {cp(0, 0), cp(100, 0), cp(-50, 1), cp(200, 0), cp(0, 100)},                     // projection before the segment start
+        {cp(0, 0), cp(1000, 99), cp(1100, -9), cp(2000, 0), cp(0, 1000)},               // a removal changes the next test
+        {cp(0, 0), cp(10, 0), cp(10, 10), cp(0, 10)},                                   // a square: nothing to remove
+        {cp(0, 0), cp(10, 0), cp(0, 0), cp(10, 0), cp(0, 0)},                           // a back and forth stick
+    };
+    for (const Ring &ring : rings)
+        for (const coord_t offset : offsets)
+            CHECK(remove_collinear_same(ring, offset));
+}
+
+TEST_CASE("remove_collinear on the case where a removal hides the next one", "[plugins][polygon-ops][remove-collinear]")
+{
+    // With max_offset 100, the native function removes (1100,-9) and keeps (1000,99): the point kept is not
+    // examined again after the removal, and (1100,-9) is compared with the next ORIGINAL point.
+    const Ring ring{cp(0, 0), cp(1000, 99), cp(1100, -9), cp(2000, 0), cp(0, 1000)};
+    size_t native_removed = 0, api_removed = 0;
+    const Ring native = remove_collinear_native(ring, 100, native_removed);
+    const Ring api = remove_collinear_api(ring, 100, api_removed);
+    const Ring expected{cp(0, 0), cp(1000, 99), cp(2000, 0), cp(0, 1000)};
+    REQUIRE(native.size() == expected.size());
+    REQUIRE(api.size() == expected.size());
+    for (size_t idx = 0; idx < expected.size(); ++idx) {
+        CHECK(native[idx].x == expected[idx].x);
+        CHECK(native[idx].y == expected[idx].y);
+        CHECK(api[idx].x == expected[idx].x);
+        CHECK(api[idx].y == expected[idx].y);
+    }
+    CHECK(native_removed == 1);
+    CHECK(api_removed == 1);
+}
+
+TEST_CASE("remove_collinear matches the native function on random rings", "[plugins][polygon-ops][remove-collinear]")
+{
+    std::mt19937 random(20261019);
+    auto uniform = [&random](int low, int high) { return std::uniform_int_distribution<int>(low, high)(random); };
+    // The coordinates are small so that many points are aligned, repeated or within a few units of a line.
+    const std::vector<coord_t> offsets{0, 1, 2, 5, 40, 300};
+    size_t compared = 0, with_removal = 0;
+    for (int test = 0; test < 6000; ++test) {
+        Ring ring;
+        const int count = uniform(0, 14);
+        const int style = test % 3;
+        c_point current = cp(uniform(-60, 60), uniform(-60, 60));
+        for (int idx = 0; idx < count; ++idx) {
+            if (style == 0) {
+                ring.push_back(cp(uniform(-60, 60), uniform(-60, 60)));
+            } else if (style == 1) {
+                // A walk along a few directions, with a small jitter: near aligned points.
+                current = cp(current.x + uniform(-2, 2) * 20 + uniform(-1, 1), current.y + uniform(-2, 2) * 20 + uniform(-1, 1));
+                ring.push_back(current);
+            } else {
+                // Points on the sides of a square, plus some duplicates and far outliers.
+                const int side = uniform(0, 3), along = uniform(0, 10) * 10, jitter = uniform(-2, 2);
+                ring.push_back(side == 0 ? cp(along, jitter) : side == 1 ? cp(100 + jitter, along) :
+                               side == 2 ? cp(100 - along, 100 + jitter) : cp(jitter, 100 - along));
+                if (uniform(0, 5) == 0)
+                    ring.push_back(ring.back());
+                if (uniform(0, 9) == 0)
+                    ring.push_back(cp(uniform(-500, 500), uniform(-500, 500)));
+            }
+        }
+        for (const coord_t offset : offsets) {
+            size_t native_removed = 0;
+            remove_collinear_native(ring, offset, native_removed);
+            with_removal += native_removed > 0 ? 1 : 0;
+            ++compared;
+            REQUIRE(remove_collinear_same(ring, offset));
+        }
+    }
+    // The random rings must exercise the removals, or the comparison would prove nothing.
+    CHECK(with_removal > compared / 10);
+}
+
+TEST_CASE("remove_collinear of a collection and of real slices", "[plugins][polygon-ops][remove-collinear]")
+{
+    // The sliced layers of the test meshes, with the model precision of the slicer: every ring of the collection.
+    for (const Test::TestMesh mesh : {Test::TestMesh::A, Test::TestMesh::sloping_hole, Test::TestMesh::overhang}) {
+        const std::vector<Polygons> layers = sliced_layers(mesh);
+        for (const Polygons &layer : layers) {
+            for (const coord_t offset : {coord_t(1), coord_t(100), coord_t(scale_i(0.01))}) {
+                PluginStorage storage;
+                slic3r_api::StoredPolygonCollection rings(reinterpret_cast<storage_handle *>(&storage));
+                for (const Polygon &polygon : layer) {
+                    slic3r_api::StoredPolygon ring(reinterpret_cast<storage_handle *>(&storage));
+                    for (const Point &point : polygon.points)
+                        ring.push_back(c_point{point.x(), point.y()});
+                    rings.push_back_move(std::move(ring));
+                }
+                Polygons native = layer;
+                size_t native_removed = 0;
+                for (Polygon &polygon : native)
+                    native_removed += polygon.remove_collinear(offset);
+                CHECK(slic3r_api::remove_collinear(rings, offset) == native_removed);
+                REQUIRE(rings.size() == native.size());
+                for (uint32_t idx = 0; idx < rings.size(); ++idx) {
+                    const std::vector<c_point> points = rings.at(idx).points();
+                    REQUIRE(points.size() == native[idx].points.size());
+                    for (size_t point = 0; point < points.size(); ++point)
+                        REQUIRE((points[point].x == native[idx].points[point].x() && points[point].y == native[idx].points[point].y()));
+                }
+            }
+        }
+    }
+}

@@ -140,8 +140,9 @@ StoredExPolygonCollection slice_volume_mask(storage_handle *storage,
     // subject.
     const c_mesh_slicing_params params = mask_slicing_params(print, object);
     const std::vector<float> zs{float(z_mm)};
+    // No run context here: the helper slices one Z of one volume, so it has nothing worth cancelling.
     std::vector<StoredExPolygonCollection> slices =
-        volume.mesh().slice_to_expolygons(storage, params, zs);
+        volume.mesh().slice_to_expolygons(storage, params, zs, nullptr);
     if (slices.empty() || slices.front().empty())
         return empty;
 

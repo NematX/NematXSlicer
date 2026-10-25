@@ -78,7 +78,7 @@ TEST_CASE("Storage-owned triangle mesh reads back arrays and slices through ever
     const c_mesh_slicing_params positive = positive_params();
 
     const std::vector<slic3r_api::StoredExPolygonCollection> expolygons =
-        mesh.slice_to_expolygons(handle, positive, zs);
+        mesh.slice_to_expolygons(handle, positive, zs, nullptr);
     REQUIRE(expolygons.size() == zs.size());
     for (size_t idx = 0; idx + 1 < zs.size(); ++idx) {
         REQUIRE(expolygons[idx].size() == 1);

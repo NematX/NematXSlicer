@@ -194,7 +194,7 @@ std::vector<StoredExPolygonCollection> slice_volume(const Volume &volume,
     volume_params.transform = matrix4d_mul(params.transform, volume.matrix());
     throw_if_cancelled(run_ctx);
     std::vector<StoredExPolygonCollection> out =
-        volume.mesh().slice_to_expolygons(storage, volume_params, slice_zs);
+        volume.mesh().slice_to_expolygons(storage, volume_params, slice_zs, run_ctx);
     throw_if_cancelled(run_ctx);
     for (StoredExPolygonCollection &expolygons : out) {
         throw_if_cancelled(run_ctx);

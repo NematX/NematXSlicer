@@ -186,6 +186,14 @@ class AbiPackagingTests(unittest.TestCase):
                 with self.subTest(method=method):
                     self.assertIn("slic3r_volume.h", bindings.methods[method])
 
+            # The ExPolygon slicing runs its post-processing through the Clipper and geometry API.
+            for headers in (
+                bindings.methods["slice_to_expolygons"],
+                bindings.class_methods[("SlicingContext", "slice_volume_to_expolygons")],
+            ):
+                for header in ("slic3r_volume.h", "slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h"):
+                    self.assertIn(header, headers)
+
             self.assertIn(
                 "slic3r_volume.h",
                 bindings.symbols["project_painting_to_polygons"],
