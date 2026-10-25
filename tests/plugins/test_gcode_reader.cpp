@@ -1375,6 +1375,8 @@ TEST_CASE("Klipper G-code reader resolves configured tool names conservatively",
     const raw_gcode_reader_state initial = initial_state(initial_items);
     Print print;
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
+    config.filament_diameter.set(std::vector<double>{1.75, 1.75});
     config.tool_name.set(std::vector<std::string>{"left_hotend", "right_hotend"});
     config.tool_name.set_enabled(true);
 
@@ -1411,6 +1413,38 @@ TEST_CASE("Klipper G-code reader resolves configured tool names conservatively",
     CHECK(unknown_probe.observed[0].diagnostic ==
           RAW_GCODE_READER_DIAGNOSTIC_UNKNOWN_TOOL);
 
+    Print default_names_print;
+    PrintConfig &default_names_config = const_cast<PrintConfig &>(
+        default_names_print.config());
+    default_names_config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
+    default_names_config.filament_diameter.set(std::vector<double>{1.75, 1.75});
+    default_names_config.extrusion_multiplier.set(std::vector<double>{1.0, 1.0});
+    default_names_config.tool_name.set(std::vector<std::string>{"", ""});
+    default_names_config.tool_name.set_enabled(true);
+
+    ReaderProbe default_heater_probe;
+    default_heater_probe.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=extruder1 TARGET=210\n"
+        "TEMPERATURE_WAIT SENSOR=extruder1 MINIMUM=210\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", default_heater_probe, initial,
+        &default_names_print) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(default_heater_probe.final_state);
+    CHECK(default_heater_probe.final_state->tool_temperature(1) == Approx(210.0));
+    CHECK(default_heater_probe.final_state->known(
+        RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, 1));
+
+    ReaderProbe default_activate_probe;
+    default_activate_probe.chunks = {
+        "ACTIVATE_EXTRUDER EXTRUDER=extruder1\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", default_activate_probe, initial,
+        &default_names_print) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(default_activate_probe.final_state);
+    CHECK(default_activate_probe.final_state->active_tool() == 1u);
+
     config.tool_name.set(std::vector<std::string>{"duplicate", "duplicate"});
     ReaderProbe ambiguous_probe;
     ambiguous_probe.chunks = {"ACTIVATE_EXTRUDER EXTRUDER=duplicate\n"};
@@ -1440,6 +1474,205 @@ TEST_CASE("Klipper G-code reader resolves configured tool names conservatively",
     REQUIRE(unsupported_effect_probe.observed.size() == 1);
     CHECK(unsupported_effect_probe.observed[0].diagnostic ==
           RAW_GCODE_READER_DIAGNOSTIC_UNSUPPORTED_STATE_EFFECT);
+}
+
+TEST_CASE("Klipper heater commands round-trip through named Reader events",
+          "[plugins][gcode][reader][dialects][klipper][heater]")
+{
+    ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    Print print;
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
+    config.filament_diameter.set(std::vector<double>{1.75, 1.75});
+    config.tool_name.set(std::vector<std::string>{"left_hotend", "right_hotend"});
+    config.tool_name.set_enabled(true);
+
+    ReaderProbe round_trip;
+    round_trip.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=right_hotend TARGET=210\n"
+        "TEMPERATURE_WAIT SENSOR=right_hotend MINIMUM=210\n"
+        "SET_HEATER_TEMPERATURE HEATER=heater_bed TARGET=60\n"
+        "TEMPERATURE_WAIT SENSOR=heater_bed MINIMUM=60\n"
+    };
+    REQUIRE(execute_reader("gcode.reader.klipper", round_trip, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(round_trip.final_state);
+    CHECK(round_trip.final_state->tool_temperature(1) == Approx(210.0));
+    CHECK_FALSE(round_trip.final_state->tool_temperature(0));
+    CHECK(round_trip.final_state->known(
+        RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, 1));
+    CHECK(round_trip.final_state->value(RAW_GCODE_READER_ITEM_BED_TEMPERATURE) ==
+          Approx(60.0));
+    CHECK(round_trip.final_state->known(
+        RAW_GCODE_READER_ITEM_BED_TEMPERATURE_REACHED));
+    CHECK(observed_event_count(round_trip, RAW_GCODE_READER_EVENT_DIAGNOSTIC) == 0);
+    CHECK(observed_event_count(round_trip, RAW_GCODE_READER_EVENT_INVALIDATE) == 0);
+
+    ReaderProbe unknown;
+    unknown.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=unknown_hotend TARGET=210\n"
+    };
+    REQUIRE(execute_reader("gcode.reader.klipper", unknown, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(unknown.observed.size() == 2);
+    CHECK(unknown.observed.front().diagnostic ==
+          RAW_GCODE_READER_DIAGNOSTIC_UNKNOWN_TOOL);
+    CHECK(observed_event_count(unknown, RAW_GCODE_READER_EVENT_INVALIDATE) == 1);
+}
+
+TEST_CASE("Klipper temperature waits preserve targets and classify parameters",
+          "[plugins][gcode][reader][dialects][klipper][heater]")
+{
+    ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    Print print;
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
+    config.filament_diameter.set(std::vector<double>{1.75, 1.75});
+    config.tool_name.set(std::vector<std::string>{"left_hotend", "right_hotend"});
+    config.tool_name.set_enabled(true);
+
+    ReaderProbe different_threshold;
+    different_threshold.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=215\n"
+        "TEMPERATURE_WAIT SENSOR=left_hotend MINIMUM=210\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", different_threshold, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(different_threshold.final_state);
+    CHECK(different_threshold.final_state->tool_temperature(0) == Approx(215.0));
+    CHECK_FALSE(different_threshold.final_state->known(
+        RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, 0));
+    CHECK(observed_event_count(
+        different_threshold, RAW_GCODE_READER_EVENT_WAIT_TEMPERATURE) == 0);
+
+    ReaderProbe proven_threshold;
+    proven_threshold.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=215\n"
+        "TEMPERATURE_WAIT SENSOR=left_hotend MINIMUM=220\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", proven_threshold, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(proven_threshold.final_state);
+    CHECK(proven_threshold.final_state->tool_temperature(0) == Approx(215.0));
+    CHECK(proven_threshold.final_state->known(
+        RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, 0));
+    REQUIRE(proven_threshold.observed.size() == 2);
+    CHECK(proven_threshold.observed[1].kind ==
+          RAW_GCODE_READER_EVENT_WAIT_TEMPERATURE);
+    CHECK(observed_item_value(
+        proven_threshold.observed[1], RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE) ==
+          Approx(215.0));
+
+    ReaderProbe proven_maximum;
+    proven_maximum.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=170\n"
+        "TEMPERATURE_WAIT SENSOR=left_hotend MAXIMUM=170\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", proven_maximum, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(proven_maximum.final_state);
+    CHECK(proven_maximum.final_state->tool_temperature(0) == Approx(170.0));
+    CHECK(proven_maximum.final_state->known(
+        RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, 0));
+    REQUIRE(proven_maximum.observed.size() == 2);
+    CHECK(proven_maximum.observed[1].kind ==
+          RAW_GCODE_READER_EVENT_WAIT_TEMPERATURE);
+    CHECK(observed_item_value(
+        proven_maximum.observed[1], RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE) ==
+          Approx(170.0));
+
+    ReaderProbe unproven_maximum;
+    unproven_maximum.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=170\n"
+        "TEMPERATURE_WAIT SENSOR=left_hotend MAXIMUM=175\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", unproven_maximum, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(unproven_maximum.final_state);
+    CHECK(unproven_maximum.final_state->tool_temperature(0) == Approx(170.0));
+    CHECK_FALSE(unproven_maximum.final_state->known(
+        RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, 0));
+    CHECK(observed_event_count(
+        unproven_maximum, RAW_GCODE_READER_EVENT_WAIT_TEMPERATURE) == 0);
+    REQUIRE(unproven_maximum.observed.size() == 2);
+    CHECK(unproven_maximum.observed[1].kind ==
+          RAW_GCODE_READER_EVENT_STATE_UPDATE);
+
+    ReaderProbe unknown_target;
+    unknown_target.chunks = {
+        "TEMPERATURE_WAIT SENSOR=right_hotend MINIMUM=200\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", unknown_target, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(unknown_target.final_state);
+    CHECK_FALSE(unknown_target.final_state->tool_temperature(1));
+    CHECK_FALSE(unknown_target.final_state->known(
+        RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, 1));
+    CHECK(observed_event_count(
+        unknown_target, RAW_GCODE_READER_EVENT_DIAGNOSTIC) == 0);
+    REQUIRE(unknown_target.observed.size() == 1);
+    CHECK(unknown_target.observed.front().kind ==
+          RAW_GCODE_READER_EVENT_STATE_UPDATE);
+
+    ReaderProbe missing_sensor;
+    missing_sensor.chunks = {"TEMPERATURE_WAIT MINIMUM=210\n"};
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", missing_sensor, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(missing_sensor.observed.size() == 2);
+    CHECK(missing_sensor.observed.front().diagnostic ==
+          RAW_GCODE_READER_DIAGNOSTIC_INVALID_COMMAND_PARAMETERS);
+
+    Print ambiguous_print;
+    PrintConfig &ambiguous_config = const_cast<PrintConfig &>(
+        ambiguous_print.config());
+    ambiguous_config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
+    ambiguous_config.filament_diameter.set(std::vector<double>{1.75, 1.75});
+    ambiguous_config.tool_name.set(std::vector<std::string>{"duplicate", "duplicate"});
+    ambiguous_config.tool_name.set_enabled(true);
+    ReaderProbe ambiguous_sensor;
+    ambiguous_sensor.chunks = {
+        "TEMPERATURE_WAIT SENSOR=duplicate MINIMUM=210\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", ambiguous_sensor, initial,
+        &ambiguous_print) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(ambiguous_sensor.observed.size() == 2);
+    CHECK(ambiguous_sensor.observed.front().diagnostic ==
+          RAW_GCODE_READER_DIAGNOSTIC_AMBIGUOUS_TOOL);
+
+    ReaderProbe missing_threshold;
+    missing_threshold.chunks = {
+        "TEMPERATURE_WAIT SENSOR=left_hotend\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", missing_threshold, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(missing_threshold.observed.size() == 2);
+    CHECK(missing_threshold.observed.front().diagnostic ==
+          RAW_GCODE_READER_DIAGNOSTIC_INVALID_COMMAND_PARAMETERS);
+
+    ReaderProbe invalid_target;
+    invalid_target.chunks = {
+        "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=not-a-number\n"
+    };
+    REQUIRE(execute_reader(
+        "gcode.reader.klipper", invalid_target, initial, &print) ==
+            RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(invalid_target.observed.size() == 2);
+    CHECK(invalid_target.observed.front().diagnostic ==
+          RAW_GCODE_READER_DIAGNOSTIC_INVALID_COMMAND_PARAMETERS);
 }
 
 TEST_CASE("Dialect G-code readers preserve state across recognized control commands",

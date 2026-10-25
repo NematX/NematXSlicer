@@ -156,14 +156,6 @@ public:
         m_encoded_with_wait = source.m_encoded_with_wait;
     }
 
-    // Import only what external output established. The pending request stays
-    // owned by the PrintingPlan; absence clears both acknowledgements.
-    void synchronize_encoded(std::optional<T> value, bool waited)
-    {
-        m_encoding.synchronize_encoded(value);
-        m_encoded_with_wait = waited ? value : std::optional<T>();
-    }
-
 private:
     EncodableState<T> m_encoding;
     // Last effective target included in an explicit wait instruction.

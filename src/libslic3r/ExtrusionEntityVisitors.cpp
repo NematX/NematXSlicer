@@ -125,7 +125,8 @@ bool ExtrusionPrinter::print_properties(const ExtrusionEntity &entity, const cha
         entity.get_property<ExtrusionPropertyZOffset>() != nullptr ||
         entity.get_property<ExtrusionPropertyLoopRole>() != nullptr ||
         entity.get_property<ExtrusionPropertyInfill>() != nullptr ||
-        entity.get_property<ExtrusionPropertyExtrusionAxis>() != nullptr;
+        entity.get_property<ExtrusionPropertyExtrusionAxis>() != nullptr ||
+        entity.get_property<ExtrusionPropertyHeater>() != nullptr;
     if (!has_known_property)
         return false;
 
@@ -162,8 +163,27 @@ bool ExtrusionPrinter::print_properties(const ExtrusionEntity &entity, const cha
         ss << property->pressure_adv;
         this->begin_property_field(first_field, "fan_speed_percent");
         ss << property->fan_speed_percent;
+        ss << "}";
+    }
+
+    if (const ExtrusionPropertyHeater *property = entity.get_property<ExtrusionPropertyHeater>()) {
+        const char *heater_name = "unknown";
+        switch (property->heater) {
+        case C_EXTRUSION_HEATER_TOOL: heater_name = "tool"; break;
+        case C_EXTRUSION_HEATER_BED: heater_name = "bed"; break;
+        case C_EXTRUSION_HEATER_CHAMBER: heater_name = "chamber"; break;
+        default: break;
+        }
+        bool first_field = true;
+        this->begin_property(first_property, "heater");
+        this->begin_property_field(first_field, "heater");
+        this->print_string_value(heater_name);
+        this->begin_property_field(first_field, "tool");
+        ss << property->tool;
         this->begin_property_field(first_field, "temperature_C");
         ss << property->temperature_C;
+        this->begin_property_field(first_field, "wait");
+        this->print_bool_value(property->wait != 0);
         ss << "}";
     }
 

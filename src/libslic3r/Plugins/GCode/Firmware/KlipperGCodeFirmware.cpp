@@ -33,7 +33,8 @@ The main specialization flow is:
 
     encode state changes
     |-- select a tool with `ACTIVATE_EXTRUDER`, or a SEMM filament with `T`
-    |-- set temperature with `M104` or `M109`
+    |-- set active/SEMM temperature with `M104` or `M109`, or a named
+        non-active heater with `SET_HEATER_TEMPERATURE` and `TEMPERATURE_WAIT`
     |-- set pressure advance with `SET_PRESSURE_ADVANCE`
     |-- encode shared acceleration with `M204`
     `-- report unsupported machine operations through the common fallback
@@ -83,6 +84,7 @@ void KlipperGCodeFirmwareSession::setup_firmware(const Config &config)
     SingleAccelerationRegisterGCodeFirmwareSession::setup_firmware(config);
     m_tool_names.clear();
     m_tool_names.reserve(extruders().size());
+    // KlipperGCodeReader::klipper_tool_id reproduces this tool count and empty-name fallback; keep both implementations synchronized.
     for (size_t tool_idx = 0; tool_idx < extruders().size(); ++tool_idx) {
         std::string name = config.vector_string_or_default("tool_name", tool_idx, std::string());
         if (name.empty())
@@ -98,7 +100,8 @@ void KlipperGCodeFirmwareSession::synchronize_selected_extruder_state(
     DefaultExtruder &selected)
 {
     // The current Klipper encoder emits one global M106 fan command. Heater
-    // commands target the activated extruder with per-tool histories outside SEMM.
+    // commands retain per-tool histories, and non-active targets use named
+    // Klipper heater commands outside SEMM.
     if (previous != nullptr)
         selected.fan().synchronize_runtime_from(previous->fan());
 }
@@ -120,12 +123,29 @@ std::string KlipperGCodeFirmwareSession::encode_tool_change(extruder_index_t too
     return "ACTIVATE_EXTRUDER EXTRUDER=" + tool_name(tool_id) + "\n";
 }
 
+// Format a Klipper heater command without changing state; active and SEMM tools use M104/M109, while a non-active named tool uses SET_HEATER_TEMPERATURE and positive waits use TEMPERATURE_WAIT with MAXIMUM for cooling or MINIMUM otherwise; no earlier target means MINIMUM and non-positive targets never emit a wait, whose omission remains acknowledged because waiting for a non-positive target is without effect.
 std::string KlipperGCodeFirmwareSession::encode_tool_temperature(
-    extruder_index_t,
+    extruder_index_t tool_id,
     int16_t temperature,
     bool wait) const
 {
-    return std::string(wait ? "M109" : "M104") + " S" + std::to_string(temperature) + "\n";
+    const bool emit_wait = wait && temperature > 0;
+    if (single_extruder_multi_material() ||
+        (current_extruder_id() && *current_extruder_id() == tool_id))
+        return std::string(emit_wait ? "M109" : "M104") + " S" + std::to_string(temperature) + "\n";
+
+    const std::string &name = tool_name(tool_id);
+    std::string output = "SET_HEATER_TEMPERATURE HEATER=" + name +
+        " TARGET=" + std::to_string(temperature) + "\n";
+    if (emit_wait) {
+        const std::optional<int16_t> encoded =
+            extruders()[tool_id].heater().encoded_temperature();
+        const bool cooling_wait = encoded && temperature < *encoded;
+        output += "TEMPERATURE_WAIT SENSOR=" + name +
+            (cooling_wait ? " MAXIMUM=" : " MINIMUM=") +
+            std::to_string(temperature) + "\n";
+    }
+    return output;
 }
 
 std::string KlipperGCodeFirmwareSession::encode_chamber_temperature(int16_t, bool) const

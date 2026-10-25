@@ -133,7 +133,7 @@ std::unique_ptr<ExtrusionPath> make_movement(const ExtrusionRole role,
         nullptr,
         true);
     if (add_process_property)
-        path->add_property(ExtrusionPropertySpeed(speed, acceleration, 0.12f, 37.f, 215.f));
+        path->add_property(ExtrusionPropertySpeed(speed, acceleration, 0.12f, 37.f));
     return path;
 }
 
@@ -840,7 +840,6 @@ TEST_CASE("Travel deceleration splits a travel into ordered acceleration phases"
     REQUIRE(common_process != nullptr);
     CHECK(common_process->pressure_adv == Approx(0.12f));
     CHECK(common_process->fan_speed_percent == Approx(37.f));
-    CHECK(common_process->temperature_C == Approx(215.f));
 }
 
 TEST_CASE("Travel deceleration projects one virtual run onto its leaf polylines",
@@ -1001,7 +1000,7 @@ TEST_CASE("Travel deceleration overrides an inherited Travel acceleration locall
 
     std::unique_ptr<ExtrusionEntityCollection> travel_root =
         std::make_unique<ExtrusionEntityCollection>(false, false);
-    travel_root->add_property(ExtrusionPropertySpeed(100.f, 2000.f, 0.12f, 37.f, 215.f));
+    travel_root->add_property(ExtrusionPropertySpeed(100.f, 2000.f, 0.12f, 37.f));
     travel_root->append(make_movement(
         ExtrusionRole::Travel, 10., 11., -1.f, -1.f, false));
     ExtrusionEntity &stored_root = append_movement(

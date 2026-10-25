@@ -94,6 +94,7 @@ void append_empty_extrusion(Printing::PrintingToolGroup &tool_group,
     tool_group.extrusions.push_back(std::move(extrusion));
 }
 
+// Build a path carrying four inherited process values and, for a nonnegative temperature, a non-waiting heater event addressed to the active tool; the returned path owns all added properties.
 std::unique_ptr<ExtrusionPath> make_firmware_path(const ArcPolyline &polyline,
                                                   float speed,
                                                   float acceleration,
@@ -106,7 +107,10 @@ std::unique_ptr<ExtrusionPath> make_firmware_path(const ArcPolyline &polyline,
     std::unique_ptr<ExtrusionPath> path(
         new ExtrusionPath(polyline, attributes, nullptr, true));
     path->add_property(ExtrusionPropertySpeed(
-        speed, acceleration, pressure_advance, fan_speed, temperature));
+        speed, acceleration, pressure_advance, fan_speed));
+    if (temperature >= 0.f)
+        path->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, int16_t(temperature), false));
     return path;
 }
 

@@ -1077,7 +1077,7 @@ void WipeTowerLayer::toolchange_load(ExtrusionEntityCollection &collection,
     collection.append(ExtrusionNop(ExtrusionPropertyCustomGcodeText("; CP TOOLCHANGE LOAD END\n")));
 }
 
-// Ram the hot material out of the melt zone, retract the filament into the cooling tubes and let it cool.
+// Build the legacy unload sequence, including any positive non-waiting heater event on SEMM cooling moves; append owned extrusion nodes to the supplied collection and return whether ramming entered the tower, while invalid geometry or configuration failures propagate.
 bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
                                        const Polyline &ramming_lines,
                                        extruder_index_t tool_id,
@@ -1120,8 +1120,10 @@ bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
         // TODO:m_filpar
         // if ((m_filpar[tool_id].filament_enable_toolchange_temp == true) &&
         //    (m_filpar[tool_id].filament_use_fast_skinnydip == false)) {
-        //    ExtrusionPropertySpeed &prop_temp = coll_retractions.add_property(ExtrusionPropertySpeed());
-        //    prop_temp.temperature(m_config->filament_toolchange_part_fan_speed.get_at(tool_id));
+        //    coll_retractions.add_property(ExtrusionPropertyHeater(
+        //        C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN,
+        //        int16_t(m_config->filament_toolchange_part_fan_speed.get_at(tool_id)),
+        //        false));
         //    wait_for_temp_with_fan(coll_retractions, m_config->filament_enable_toolchange_part_fan.get_at(tool_id),
         //                           m_config->filament_toolchange_part_fan_speed.get_at(tool_id));
         //}
@@ -1177,8 +1179,6 @@ bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
 
     if (m_config->single_extruder_multi_material.value) {
         ExtrusionEntityCollection cooling_moves(false, false);
-        ExtrusionPropertySpeed &prop_temp = (ExtrusionPropertySpeed &) cooling_moves.add_property(
-            ExtrusionPropertySpeed());
 
         // Wipe tower should only change temperature with single extruder MM. Otherwise, all temperatures should
         // be already set and there is no need to change anything. Also, the temperature could be changed
@@ -1190,7 +1190,9 @@ bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
         // if (m_config->single_extruder_multi_material.value && (m_filpar[tool_id].filament_enable_toolchange_temp ==
         // false)) {
         //    if (new_temperature != 0) { // Set the extruder temperature, but don't wait.
-        //        prop_temp.temperature(m_config->filament_toolchange_part_fan_speed.get_at(tool_id));
+        //        cooling_moves.add_property(ExtrusionPropertyHeater(
+        //            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN,
+        //            new_temperature, false));
         //    }
         //}
         // otherwise, if toolchange temperature changes are on and in normal mode, return to the previously set temperature
@@ -1200,7 +1202,9 @@ bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
         // TODO: m_filpar
         // if (m_filpar[tool_id].filament_enable_toolchange_temp == true) {
         //    if (m_filpar[tool_id].filament_use_fast_skinnydip == true) {
-        //        prop_temp.temperature(m_config->filament_toolchange_temp.get_at(tool_id));
+        //        cooling_moves.add_property(ExtrusionPropertyHeater(
+        //            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN,
+        //            int16_t(m_config->filament_toolchange_temp.get_at(tool_id)), false));
         //    }
         //} else
         {
@@ -1209,7 +1213,8 @@ bool WipeTowerLayer::toolchange_Unload(ExtrusionEntityCollection &collection,
             // first_layer ? m_filpar[tool_id].first_layer_temperature :
             // m_filpar[tool_id].temperature;
             if (new_temp > 0) {
-                prop_temp.temperature(new_temp);
+                cooling_moves.add_property(ExtrusionPropertyHeater(
+                    C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, int16_t(new_temp), false));
             }
         }
 

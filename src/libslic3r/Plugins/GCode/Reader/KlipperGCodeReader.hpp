@@ -18,8 +18,12 @@ Klipper G-code reader
 
 Klipper combines standard G/M commands with named textual commands. Both
 dispatchers call their parent first, then route only Klipper additions to
-virtual handlers. Configured extruder names use the Print when available;
-external files accept only conventional names.
+virtual handlers. Print-backed extruder names follow the tool count and enabled
+tool_name fallback used by KlipperGCodeFirmwareSession::setup_firmware;
+external files accept only conventional names. Named heater targets use the
+same portable temperature events as M104/M109 and M140/M190. A temperature
+wait publishes the known target only when MINIMUM or MAXIMUM proves it;
+otherwise it publishes a state update without changing the target.
 
 Klipper names objects with strings while the portable Reader state exposes a
 numeric object ID. A registry scoped to one read assigns those IDs in DEFINE
@@ -71,6 +75,18 @@ protected:
         const run_ctx_gcode_reader &context,
         GCodeStateTracker &state,
         const GCodeLineParser::GCodeLine &line) const;
+    // Resolve a named Klipper heater target and publish a non-waiting temperature event.
+    virtual void process_SET_HEATER_TEMPERATURE(
+        const plugin_run_context &run_context,
+        const run_ctx_gcode_reader &context,
+        GCodeStateTracker &state,
+        const GCodeLineParser::GCodeLine &line) const;
+    // Resolve a named heater threshold and publish a wait with the known target only when the threshold proves it; otherwise publish an unchanged state update.
+    virtual void process_TEMPERATURE_WAIT(
+        const plugin_run_context &run_context,
+        const run_ctx_gcode_reader &context,
+        GCodeStateTracker &state,
+        const GCodeLineParser::GCodeLine &line) const;
     // Publish Klipper PAUSE as a timeline marker.
     virtual void process_PAUSE(const plugin_run_context &run_context,
                                const run_ctx_gcode_reader &context,
@@ -111,6 +127,15 @@ private:
         uint32_t next_id = 0;
     };
 
+    // Resolve a named bed or tool heater and publish its target, proven wait, or state-only event.
+    void publish_named_heater_event(
+        const plugin_run_context &run_context,
+        const run_ctx_gcode_reader &context,
+        GCodeStateTracker &state,
+        std::string_view name,
+        raw_gcode_reader_event_kind kind,
+        double value,
+        bool minimum_wait) const;
     // Return the existing canonical ID for a Klipper object name, or allocate
     // the next one when DEFINE/START encounters that exact name for the first
     // time in this run.

@@ -344,6 +344,8 @@ private:
 
     void apply_properties(const ExtrusionEntity &entity);
     void apply_property(const ExtrusionPropertySpeed &speed_override);
+    // Apply an active-tool heater event and save its previous target for entity exit.
+    void apply_property(const ExtrusionPropertyHeater &heater_event);
     void apply_property(const ExtrusionEntity &entity, const ExtrusionPropertyCustomGcode &custom_gcode);
     void apply_property(const ExtrusionPropertyModifier &modifier_override);
     void apply_property(const ExtrusionPropertySpecialCommand &command);
@@ -530,6 +532,8 @@ private:
     // from extrusion properties.
     std::vector<const ExtrusionEntity*> m_current_entity;
     std::vector<std::pair<const ExtrusionEntity*, const ExtrusionPropertySpeed*>> m_speed_override;
+    // Active-tool heater events are restored at the end of their owning entity for legacy output compatibility.
+    std::vector<std::pair<const ExtrusionEntity*, const ExtrusionPropertyHeater*>> m_heater_override;
     std::vector<std::pair<const ExtrusionEntity*, const ExtrusionPropertyModifier*>> m_modifier_override;
     std::vector<std::pair<const ExtrusionEntity*, coord_t>> m_z_override;
     std::vector<int16_t>                m_saved_temp;

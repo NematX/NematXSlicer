@@ -52,11 +52,14 @@ struct EPropertyAttributes :
 struct EPropertySpeed :
     EPropertyPayload<EPropertySpeed, c_extrusion_property_speed, EXTRUSION_PROPERTY_TYPE_SPEED>
 {
+    /* Set the inherited speed in millimeters per second. */
     EPropertySpeed &speed(float value) { speed_mm_per_s = value; return *this; }
+    /* Set the inherited acceleration in millimeters per second squared. */
     EPropertySpeed &acceleration(float value) { accel_mm_per_s2 = value; return *this; }
+    /* Set the inherited pressure-advance value. */
     EPropertySpeed &pressure_advance(float value) { pressure_adv = value; return *this; }
+    /* Set the inherited fan percentage. */
     EPropertySpeed &fan_speed(float value) { fan_speed_percent = value; return *this; }
-    EPropertySpeed &temperature(float value) { temperature_C = value; return *this; }
 };
 
 /* Travel, retraction, lift, and tool-change movement modifiers. */
@@ -109,6 +112,37 @@ struct EPropertySpecialCommand :
     EPropertySpecialCommand &set(c_extrusion_special_command value, double data = 0.) {
         code = value;
         extra_data = data;
+        return *this;
+    }
+};
+
+/* Entry event that sets one heater target, optionally waiting for it. */
+struct EPropertyHeater :
+    EPropertyPayload<EPropertyHeater, c_extrusion_property_heater, EXTRUSION_PROPERTY_TYPE_HEATER>
+{
+    /* Set a tool target, optionally addressing a selected tool. */
+    EPropertyHeater &set_tool(int16_t temperature, extruder_index_t tool_id = EXTRUDER_ID_UNKNOWN,
+                               bool wait_for_it = false) {
+        heater = C_EXTRUSION_HEATER_TOOL;
+        tool = tool_id;
+        temperature_C = temperature;
+        wait = wait_for_it ? 1 : 0;
+        return *this;
+    }
+    /* Set the bed target and optional wait policy. */
+    EPropertyHeater &set_bed(int16_t temperature, bool wait_for_it = false) {
+        heater = C_EXTRUSION_HEATER_BED;
+        tool = EXTRUDER_ID_UNKNOWN;
+        temperature_C = temperature;
+        wait = wait_for_it ? 1 : 0;
+        return *this;
+    }
+    /* Set the chamber target and optional wait policy. */
+    EPropertyHeater &set_chamber(int16_t temperature, bool wait_for_it = false) {
+        heater = C_EXTRUSION_HEATER_CHAMBER;
+        tool = EXTRUDER_ID_UNKNOWN;
+        temperature_C = temperature;
+        wait = wait_for_it ? 1 : 0;
         return *this;
     }
 };
@@ -231,6 +265,7 @@ static_assert(sizeof(EPropertyZOffset) == sizeof(c_extrusion_property_z_offset),
 static_assert(sizeof(EPropertyPerimeter) == sizeof(c_extrusion_property_perimeter), "ABI payload mismatch");
 static_assert(sizeof(EPropertyInfill) == sizeof(c_extrusion_property_infill), "ABI payload mismatch");
 static_assert(sizeof(EPropertyExtrusionAxis) == sizeof(c_extrusion_property_extrusion_axis), "ABI payload mismatch");
+static_assert(sizeof(EPropertyHeater) == sizeof(c_extrusion_property_heater), "ABI payload mismatch");
 
 } // namespace slic3r_api
 

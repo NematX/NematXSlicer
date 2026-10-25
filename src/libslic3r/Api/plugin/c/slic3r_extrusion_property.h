@@ -5,9 +5,9 @@
 #ifndef slic3r_extrusion_property_h_
 #define slic3r_extrusion_property_h_
 
-#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MAJOR 2u
-/* Minor 2 appends the stationary-volume DEPOSIT special command. */
-#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MINOR 2u
+/* Major 3 removes the speed temperature (heater events replace it); it keeps the DEPOSIT special command of 2.2. */
+#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MAJOR 3u
+#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MINOR 0u
 
 #include <stdint.h>
 
@@ -24,7 +24,8 @@ Extrusion properties describe how an extrusion entity should be interpreted.
 
 Each extrusion entity may contain at most one property of a given type. A
 property inherited from a parent entity applies to its descendants until a child
-defines another property of the same type.
+defines another property of the same type, unless the property's payload
+documentation describes an entry event with different lifetime rules.
 
 Property payloads are plain C byte records. The built-in property structures
 below are stable ABI records. Custom properties registered by plugins follow the
@@ -58,6 +59,7 @@ typedef slic3r_property_type extrusion_property_type;
 #define EXTRUSION_PROPERTY_TYPE_PERIMETER       ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_PERIMETER)
 #define EXTRUSION_PROPERTY_TYPE_INFILL          ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_INFILL)
 #define EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS  ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_AXIS)
+#define EXTRUSION_PROPERTY_TYPE_HEATER           ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_HEATER)
 
 typedef uint32_t extrusion_data_id;
 
@@ -247,13 +249,18 @@ typedef struct c_extrusion_property_attributes {
     uint8_t no_seam;
 } c_extrusion_property_attributes;
 
-/* Property type: EXTRUSION_PROPERTY_TYPE_SPEED. */
+/*
+Property type: EXTRUSION_PROPERTY_TYPE_SPEED.
+
+Process values inherited by descendants. The firmware requests them from the
+active tool on node entry and restores them on node exit. A value of -1 means
+that the corresponding process value is not requested.
+*/
 typedef struct c_extrusion_property_speed {
     float speed_mm_per_s;
     float accel_mm_per_s2;
     float pressure_adv;
     float fan_speed_percent;
-    float temperature_C;
 } c_extrusion_property_speed;
 
 /* Property type: EXTRUSION_PROPERTY_TYPE_MODIFIER. */
@@ -319,7 +326,7 @@ typedef enum c_extrusion_special_command {
     C_EXTRUSION_SPECIAL_COMMAND_RETRACT = 5,
     /* Pause the print for extra_data milliseconds when no custom pause G-code is configured. */
     C_EXTRUSION_SPECIAL_COMMAND_PAUSE = 6,
-    /* Wait for the active extruder temperature; the temperature is carried by speed metadata. */
+    /* Wait until the active tool reaches its current target, set by a heater event or by G-code. */
     C_EXTRUSION_SPECIAL_COMMAND_WAIT_FOR_TEMP = 7,
     /* Stop emitting preview/G-code viewer tags for following generated G-code. */
     C_EXTRUSION_SPECIAL_COMMAND_DISABLE_PREVIEW = 8,
@@ -343,6 +350,37 @@ typedef struct c_extrusion_property_special_command {
     c_extrusion_special_command code;
     double extra_data;
 } c_extrusion_property_special_command;
+
+/* Heater addressed by c_extrusion_property_heater. */
+typedef enum c_extrusion_heater_kind {
+    C_EXTRUSION_HEATER_TOOL = 0,
+    C_EXTRUSION_HEATER_BED = 1,
+    C_EXTRUSION_HEATER_CHAMBER = 2
+} c_extrusion_heater_kind;
+
+/*
+Property type: EXTRUSION_PROPERTY_TYPE_HEATER.
+
+This is an entry event, like a special command: the firmware applies it once
+when entering the node, before that node's custom G-code and special command.
+Descendants do not inherit it and nothing is restored when the node is left.
+The target remains in place until another heater event or external G-code
+changes it. `tool` is used only for C_EXTRUSION_HEATER_TOOL: it selects the
+target tool, or EXTRUDER_ID_UNKNOWN for the active tool. In SEMM only the
+active tool may be selected because logical tools share one nozzle. The
+temperature is a nonnegative target before correction. Tool heaters add their
+extruder_temperature_offset; bed and chamber heaters currently use zero offset.
+The effective target is limited to [0,2000] degrees Celsius; a corrected sum
+of zero or less turns the heater off. A nonzero `wait` makes
+the firmware wait for the target. Host-created defaults select the active
+tool, use -1 for the not-yet-set temperature, and use zero for `wait`.
+*/
+typedef struct c_extrusion_property_heater {
+    c_extrusion_heater_kind heater;
+    extruder_index_t tool;
+    int16_t temperature_C;
+    uint8_t wait;
+} c_extrusion_property_heater;
 
 /* Property type: EXTRUSION_PROPERTY_TYPE_OVERHANG. */
 typedef struct c_extrusion_property_overhang {

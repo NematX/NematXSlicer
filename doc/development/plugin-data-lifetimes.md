@@ -492,7 +492,7 @@ All follow the window of the node carrying them. Field lists group values having
 | C payload | Members |
 |---|---|
 | `c_extrusion_property_attributes` | `mm3_per_mm`, `width`, `height`, `role`, `no_seam` |
-| `c_extrusion_property_speed` | `speed_mm_per_s`, `accel_mm_per_s2`, `pressure_adv`, `fan_speed_percent`, `temperature_C` |
+| `c_extrusion_property_speed` | `speed_mm_per_s`, `accel_mm_per_s2`, `pressure_adv`, `fan_speed_percent` |
 | `c_extrusion_property_modifier` | `enforce_travel`, `enforce_retraction`, `enforce_unlift`, `disable_retraction`, `disable_lift`, `toolchange_retraction` |
 | `c_extrusion_property_custom_gcode` | `kind`, `script_type`, `processing_extruder_id`; `text_id`, `config_id` reference buffers local to the entity, not live Config handles |
 | `c_extrusion_property_special_command` | `code`, `extra_data` |
@@ -501,6 +501,7 @@ All follow the window of the node carrying them. Field lists group values having
 | `c_extrusion_property_perimeter` | `perimeter_idx`, `reserved`, `perimeter_flags` |
 | `c_extrusion_property_infill` | `source_surface_id`, numeric reference without ownership of the Surface |
 | `c_extrusion_property_extrusion_axis` | `operation`, `value`, `restart_extra`, `toolchange` |
+| `c_extrusion_property_heater` | `heater`, `tool`, `temperature_C`, `wait`; entry event, not inherited |
 
 Plugin-registered payloads are open: copying them preserves all bytes, not only the known built-in fields. Examples used in the plan: time (`duration_seconds`, `origin`), input (`x`, `y`, `z`, `state`, and tool payload `extruder_id`), endpoints (`entry`, `exit`), scope marker (`flags`). They follow the plan's freeze; they are not new geometry owners.
 

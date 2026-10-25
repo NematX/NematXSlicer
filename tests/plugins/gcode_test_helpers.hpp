@@ -75,6 +75,7 @@ void append_empty_extrusion(
     ExtrusionRole role = ExtrusionRole::None,
     uint32_t printing_catalog_id = Printing::PRINTING_OBJECT_INSTANCE_ID_NONE,
     const LayerRegionIsland *region_island = nullptr);
+// Build one firmware-test path with inherited process values and an optional active-tool heater entry event.
 std::unique_ptr<ExtrusionPath> make_firmware_path(
     const ArcPolyline &polyline,
     float speed,

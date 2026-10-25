@@ -43,6 +43,7 @@ class ExtrusionPropertyZProfile;
 class ExtrusionPropertyLoopRole;
 class ExtrusionPropertyInfill;
 class ExtrusionPropertyExtrusionAxis;
+class ExtrusionPropertyHeater;
 namespace ApiInternal { struct ExtrusionPropertyAccess; }
 
 using ExtrusionPropertyUPtr = std::unique_ptr<PropertySlot>;
@@ -64,6 +65,7 @@ enum : extrusion_property_type {
     extrusion_property_type_loop_role       = EXTRUSION_PROPERTY_TYPE_PERIMETER,
     extrusion_property_type_infill          = EXTRUSION_PROPERTY_TYPE_INFILL,
     extrusion_property_type_extrusion_axis  = EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS,
+    extrusion_property_type_heater          = EXTRUSION_PROPERTY_TYPE_HEATER,
 };
 
 struct ExtrusionFlow : c_extrusion_flow
@@ -112,22 +114,27 @@ inline bool operator==(const ExtrusionAttributes &lhs, const ExtrusionAttributes
            lhs.role == rhs.role;
 }
 
-// These are a state. They are used for all children if it's not overriden.
-// After the end of this entity, it's reverted to previous state.
+// These are inherited process values. They apply to descendants when present
+// and are restored after the entity ends; heater targets use an entry event.
 class ExtrusionPropertySpeed : public c_extrusion_property_speed
 {
 public:
     static constexpr extrusion_property_type property_type = extrusion_property_type_speed;
 
-    ExtrusionPropertySpeed(float speed = -1, float accel = -1, float pa = -1, float fan = -1, float temp = -1)
-        : c_extrusion_property_speed{ speed, accel, pa, fan, temp } {}
+    // Initialize inherited process values; negative values mean that a value is not requested.
+    ExtrusionPropertySpeed(float speed = -1, float accel = -1, float pa = -1, float fan = -1)
+        : c_extrusion_property_speed{ speed, accel, pa, fan } {}
 
+    // Set the inherited speed in millimeters per second.
     ExtrusionPropertySpeed& speed(float speed) { speed_mm_per_s = speed; return *this; }
+    // Set the inherited acceleration in millimeters per second squared.
     ExtrusionPropertySpeed& acceleration(float accel) { accel_mm_per_s2 = accel; return *this; }
+    // Set the inherited pressure-advance value.
     ExtrusionPropertySpeed& presure_advance(float pa) { pressure_adv = pa; return *this; }
+    // Set the inherited fan percentage, constrained to -1 through 100.
     ExtrusionPropertySpeed& fan_speed(float fspeed) { assert(fspeed >= -1 && fspeed <= 100); fan_speed_percent = fspeed; return *this; }
-    ExtrusionPropertySpeed& temperature(float temp) { temperature_C = temp; return *this; }
 
+    // Clone this C-layout process payload into an owned property slot.
     ExtrusionPropertyUPtr clone() const;
 };
 
@@ -293,6 +300,30 @@ public:
     ExtrusionPropertyUPtr clone() const;
 };
 
+/*
+An entry event that sets one heater target. The target persists after the
+entity and is not inherited by descendants; external G-code may replace it.
+*/
+class ExtrusionPropertyHeater : public c_extrusion_property_heater
+{
+public:
+    static constexpr extrusion_property_type property_type = extrusion_property_type_heater;
+
+    // Create an unset tool-heater event addressed to the active tool.
+    ExtrusionPropertyHeater() :
+        c_extrusion_property_heater{ C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, -1, 0 } {}
+
+    // Create a heater event for one element, tool selector, target and wait policy.
+    ExtrusionPropertyHeater(c_extrusion_heater_kind heater,
+                            extruder_index_t tool,
+                            int16_t temperature,
+                            bool wait = false) :
+        c_extrusion_property_heater{ heater, tool, temperature, uint8_t(wait ? 1 : 0) } {}
+
+    // Clone this C-layout heater event into an owned property slot.
+    ExtrusionPropertyUPtr clone() const;
+};
+
 template<typename PropertyType>
 struct ExtrusionPropertyTraits
 {
@@ -310,6 +341,7 @@ static_assert(sizeof(ExtrusionPropertyZOffset) == sizeof(c_extrusion_property_z_
 static_assert(sizeof(ExtrusionPropertyLoopRole) == sizeof(c_extrusion_property_perimeter), "ExtrusionPropertyLoopRole must keep the C ABI layout");
 static_assert(sizeof(ExtrusionPropertyInfill) == sizeof(c_extrusion_property_infill), "ExtrusionPropertyInfill must keep the C ABI layout");
 static_assert(sizeof(ExtrusionPropertyExtrusionAxis) == sizeof(c_extrusion_property_extrusion_axis), "ExtrusionPropertyExtrusionAxis must keep the C ABI layout");
+static_assert(sizeof(ExtrusionPropertyHeater) == sizeof(c_extrusion_property_heater), "ExtrusionPropertyHeater must keep the C ABI layout");
 
 static_assert(alignof(ExtrusionFlow) == alignof(c_extrusion_flow), "ExtrusionFlow must keep the C ABI alignment");
 static_assert(alignof(ExtrusionAttributes) == alignof(c_extrusion_property_attributes), "ExtrusionAttributes must keep the C ABI alignment");
@@ -322,6 +354,7 @@ static_assert(alignof(ExtrusionPropertyZOffset) == alignof(c_extrusion_property_
 static_assert(alignof(ExtrusionPropertyLoopRole) == alignof(c_extrusion_property_perimeter), "ExtrusionPropertyLoopRole must keep the C ABI alignment");
 static_assert(alignof(ExtrusionPropertyInfill) == alignof(c_extrusion_property_infill), "ExtrusionPropertyInfill must keep the C ABI alignment");
 static_assert(alignof(ExtrusionPropertyExtrusionAxis) == alignof(c_extrusion_property_extrusion_axis), "ExtrusionPropertyExtrusionAxis must keep the C ABI alignment");
+static_assert(alignof(ExtrusionPropertyHeater) == alignof(c_extrusion_property_heater), "ExtrusionPropertyHeater must keep the C ABI alignment");
 
 static_assert(std::is_standard_layout<ExtrusionFlow>::value, "ExtrusionFlow must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionAttributes>::value, "ExtrusionAttributes must keep the C ABI layout");
@@ -334,6 +367,7 @@ static_assert(std::is_standard_layout<ExtrusionPropertyZOffset>::value, "Extrusi
 static_assert(std::is_standard_layout<ExtrusionPropertyLoopRole>::value, "ExtrusionPropertyLoopRole must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionPropertyInfill>::value, "ExtrusionPropertyInfill must keep the C ABI layout");
 static_assert(std::is_standard_layout<ExtrusionPropertyExtrusionAxis>::value, "ExtrusionPropertyExtrusionAxis must keep the C ABI layout");
+static_assert(std::is_standard_layout<ExtrusionPropertyHeater>::value, "ExtrusionPropertyHeater must keep the C ABI layout");
 
 static_assert(std::is_trivially_copyable<ExtrusionAttributes>::value, "Stored extrusion properties must be trivially copyable");
 static_assert(std::is_trivially_copyable<ExtrusionPropertySpeed>::value, "Stored extrusion properties must be trivially copyable");
@@ -345,6 +379,7 @@ static_assert(std::is_trivially_copyable<ExtrusionPropertyZOffset>::value, "Stor
 static_assert(std::is_trivially_copyable<ExtrusionPropertyLoopRole>::value, "Stored extrusion properties must be trivially copyable");
 static_assert(std::is_trivially_copyable<ExtrusionPropertyInfill>::value, "Stored extrusion properties must be trivially copyable");
 static_assert(std::is_trivially_copyable<ExtrusionPropertyExtrusionAxis>::value, "Stored extrusion properties must be trivially copyable");
+static_assert(std::is_trivially_copyable<ExtrusionPropertyHeater>::value, "Stored extrusion properties must be trivially copyable");
 
 // Type-tagged raw storage for one extrusion property.
 // Built-in extrusion properties and generic plugin properties now use the same
@@ -370,6 +405,7 @@ inline ExtrusionPropertyUPtr ExtrusionPropertyZOffset::clone() const { return cl
 inline ExtrusionPropertyUPtr ExtrusionPropertyLoopRole::clone() const { return clone_property_to_slot(*this); }
 inline ExtrusionPropertyUPtr ExtrusionPropertyInfill::clone() const { return clone_property_to_slot(*this); }
 inline ExtrusionPropertyUPtr ExtrusionPropertyExtrusionAxis::clone() const { return clone_property_to_slot(*this); }
+inline ExtrusionPropertyUPtr ExtrusionPropertyHeater::clone() const { return clone_property_to_slot(*this); }
 
 // Small typed property bag for extrusion interpretation modifiers.
 // Most entities have no property, and the few that do usually carry one or two;

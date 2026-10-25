@@ -203,7 +203,7 @@ void append_inside_end(MutableExtrusionEntity wipe,
                        const WipeLeaf &source,
                        coord_t depth);
 
-/* Turn the target's semantic Unretract into an inside-to-seam approach. */
+/* Add an inside-to-seam approach and initialize its inherited process fields on the borrowed target; invalid geometry or offsets throw and ownership remains with the target tree. */
 void add_inside_start(
     const ScopeEntity &target,
     const Config &print_config,
@@ -216,7 +216,7 @@ void set_wipe_attributes(MutableExtrusionEntity entity,
 /* Return the configured wipe speed or its travel-speed fallback. */
 double wipe_speed(const Config &print_config, extruder_index_t extruder_id);
 
-/* Convert one source Retract into initial E, wipe motion and residual E. */
+/* Convert a borrowed source retract into initial E motion, wipe geometry and residual E; the scope tree is changed in place, invalid geometry throws, and no caller ownership is transferred. */
 void add_outgoing_wipe(
     const ScopeEntity &source,
     const ScopeEntity *target,
@@ -657,8 +657,7 @@ void add_inside_start(
         .speed(float(wipe_speed(print_config, extruder_id)))
         .acceleration(-1.f)
         .pressure_advance(-1.f)
-        .fan_speed(-1.f)
-        .temperature(-1.f);
+        .fan_speed(-1.f);
 }
 
 void set_wipe_attributes(MutableExtrusionEntity entity,
@@ -852,8 +851,7 @@ void add_outgoing_wipe(
         .speed(float(speed))
         .acceleration(-1.f)
         .pressure_advance(-1.f)
-        .fan_speed(-1.f)
-        .temperature(-1.f);
+        .fan_speed(-1.f);
 
     // Structural insertion may have moved the original event into a child.
     // Reacquire it before changing the initial E-only target.

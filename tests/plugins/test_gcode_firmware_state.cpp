@@ -148,18 +148,20 @@ TEST_CASE("Reusable heater and fan states preserve destination configuration",
     source_heater.request_temperature(200);
     source_heater.mark_encoded_with_wait();
     source_heater.request_temperature(210);
-    source_heater.mark_encoded();
-    CHECK(source_heater.encoded_temperature() == 215);
+    CHECK(source_heater.requested_temperature() == 210);
+    source_heater.clear_encoded();
+    CHECK_FALSE(source_heater.encoded_temperature());
     CHECK(source_heater.encoded_temperature_with_wait() == 205);
 
     HeaterState destination_heater;
     destination_heater.setup(-5);
     destination_heater.synchronize_runtime_from(source_heater);
     CHECK(destination_heater.requested_temperature() == 210);
-    CHECK(destination_heater.encoded_temperature() == 215);
+    CHECK_FALSE(destination_heater.encoded_temperature());
     CHECK(destination_heater.encoded_temperature_with_wait() == 205);
     CHECK(destination_heater.effective_temperature() == 205);
     CHECK(destination_heater.needs_encoding());
+    CHECK(destination_heater.needs_wait_encoding());
 
     FanState source_fan;
     source_fan.setup(10.0);
@@ -190,13 +192,13 @@ TEST_CASE("Generic firmware state distinguishes normal and wait temperature enco
     first_tool.heater().mark_encoded_with_wait();
     CHECK_FALSE(first_tool.heater().needs_wait_encoding());
 
-    // A later non-blocking target changes the requested and encoded values
-    // while preserving the previous target encoded with a wait instruction.
+    // A later non-blocking target changes the requested and encoded values and
+    // invalidates the previous wait acknowledgement for the old target.
     first_tool.heater().request_temperature(210);
     first_tool.heater().mark_encoded();
     CHECK(first_tool.heater().requested_temperature() == 210);
     CHECK(first_tool.heater().encoded_temperature() == 210);
-    CHECK(first_tool.heater().encoded_temperature_with_wait() == 200);
+    CHECK_FALSE(first_tool.heater().encoded_temperature_with_wait());
     CHECK(first_tool.heater().needs_wait_encoding());
     CHECK_FALSE(second_tool.heater().requested_temperature());
 
@@ -213,7 +215,7 @@ TEST_CASE("Generic firmware state distinguishes normal and wait temperature enco
     CHECK_FALSE(printer.bed_heater().needs_wait_encoding());
     printer.bed_heater().request_temperature(70);
     printer.bed_heater().mark_encoded();
-    CHECK(printer.bed_heater().encoded_temperature_with_wait() == 60);
+    CHECK_FALSE(printer.bed_heater().encoded_temperature_with_wait());
     CHECK(printer.bed_heater().needs_wait_encoding());
 
     printer.chamber_heater().request_temperature(40);
@@ -257,7 +259,10 @@ TEST_CASE("High-level firmware states synchronize their complete runtime snapsho
     source_printer.bed_heater().request_temperature(60);
     source_printer.bed_heater().mark_encoded_with_wait();
     source_printer.bed_heater().request_temperature(70);
-    source_printer.bed_heater().mark_encoded();
+    source_printer.bed_heater().clear_encoded();
+    CHECK(source_printer.bed_heater().requested_temperature() == 70);
+    CHECK_FALSE(source_printer.bed_heater().encoded_temperature());
+    CHECK(source_printer.bed_heater().encoded_temperature_with_wait() == 60);
     source_printer.chamber_heater().request_temperature(40);
     source_printer.chamber_heater().mark_encoded_with_wait();
     source_printer.chamber_fan().request_speed_percent(35.0);
@@ -267,7 +272,7 @@ TEST_CASE("High-level firmware states synchronize their complete runtime snapsho
     Printer destination_printer;
     destination_printer.synchronize_runtime_from(source_printer);
     CHECK(destination_printer.bed_heater().requested_temperature() == 70);
-    CHECK(destination_printer.bed_heater().encoded_temperature() == 70);
+    CHECK_FALSE(destination_printer.bed_heater().encoded_temperature());
     CHECK(destination_printer.bed_heater().encoded_temperature_with_wait() == 60);
     CHECK(destination_printer.chamber_heater().encoded_temperature_with_wait() == 40);
     CHECK(destination_printer.chamber_fan().encoded_speed_percent() == 35.0);
@@ -277,7 +282,10 @@ TEST_CASE("High-level firmware states synchronize their complete runtime snapsho
     source_tool.heater().request_temperature(200);
     source_tool.heater().mark_encoded_with_wait();
     source_tool.heater().request_temperature(210);
-    source_tool.heater().mark_encoded();
+    source_tool.heater().clear_encoded();
+    CHECK(source_tool.heater().requested_temperature() == 210);
+    CHECK_FALSE(source_tool.heater().encoded_temperature());
+    CHECK(source_tool.heater().encoded_temperature_with_wait() == 200);
     source_tool.fan().request_speed_percent(30.0);
     source_tool.fan().mark_encoded();
     source_tool.fan().request_speed_percent(40.0);
@@ -291,7 +299,7 @@ TEST_CASE("High-level firmware states synchronize their complete runtime snapsho
     destination_tool.synchronize_runtime_from(source_tool);
     CHECK(destination_tool.id() == 1);
     CHECK(destination_tool.heater().requested_temperature() == 210);
-    CHECK(destination_tool.heater().encoded_temperature() == 210);
+    CHECK_FALSE(destination_tool.heater().encoded_temperature());
     CHECK(destination_tool.heater().encoded_temperature_with_wait() == 200);
     CHECK(destination_tool.fan().requested_speed_percent() == 40.0);
     CHECK(destination_tool.fan().encoded_speed_percent() == 30.0);

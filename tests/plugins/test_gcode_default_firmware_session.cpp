@@ -2846,9 +2846,9 @@ TEST_CASE("Default firmware shares complete extruder runtime state only in SEMM"
     CHECK(second.extrusion_axis().retract_speed() == Approx(55.0));
     CHECK(second.extrusion_axis().deretract_speed() == Approx(23.0));
     if (semm) {
-        // Leaving the event clears lexical requests, but encoded physical
-        // history survives. New filament requests use destination corrections.
-        CHECK_FALSE(second.heater().requested_temperature());
+        // Selecting another SEMM filament copies the persistent heater request;
+        // only inherited process values are cleared at the end of a node.
+        CHECK(second.heater().requested_temperature() == 200);
         CHECK(second.heater().encoded_temperature() == 200);
         CHECK(second.heater().encoded_temperature_with_wait() == 200);
         second.heater().request_temperature(200);
@@ -2867,7 +2867,8 @@ TEST_CASE("Default firmware shares complete extruder runtime state only in SEMM"
         CHECK(second.extrusion_axis().used_filament() == first.extrusion_axis().used_filament());
 
         std::unique_ptr<ExtrusionEntity> full = marker_test_retraction(false);
-        full->add_property(ExtrusionPropertySpeed(-1.f, -1.f, -1.f, -1.f, 200.f));
+        full->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 200, false));
         full->get_or_add_property<slic3r_api::EPropertyExtrusionAxis>().unretract(0.1);
         const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
             reinterpret_cast<const extrusion_entity_handle *>(full.get())));
@@ -3584,7 +3585,9 @@ TEST_CASE("Default firmware restores inherited requests between sibling nodes",
         -1.f));
     std::unique_ptr<ExtrusionEntity> root(
         new ExtrusionEntity(std::move(children), false, true, true));
-    root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f, 50.f, 210.f));
+    root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f, 50.f));
+    root->add_property(ExtrusionPropertyHeater(
+        C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 210, false));
     append_path_extrusion(tool_group, std::move(root));
 
     const boost::filesystem::path output_path = temporary_gcode_path();
@@ -3596,12 +3599,10 @@ TEST_CASE("Default firmware restores inherited requests between sibling nodes",
 
         const size_t first_temperature = output.find("M104 S210 T0\n");
         const size_t child_temperature = output.find("M104 S220 T0\n");
-        const size_t restored_temperature = output.find("M104 S210 T0\n", first_temperature + 1);
         REQUIRE(first_temperature != std::string::npos);
         REQUIRE(child_temperature != std::string::npos);
-        REQUIRE(restored_temperature != std::string::npos);
         CHECK(first_temperature < child_temperature);
-        CHECK(child_temperature < restored_temperature);
+        CHECK(count_occurrences(output, "M104 S210 T0\n") == 1);
         CHECK(count_occurrences(output, "M204 P500\n") == 2);
         CHECK(count_occurrences(output, "M204 P700\n") == 1);
         CHECK(count_occurrences(output, " F1200") == 2);
@@ -3614,6 +3615,385 @@ TEST_CASE("Default firmware restores inherited requests between sibling nodes",
     }
     remove_output_pair(output_path);
 }
+
+// Verify that heater entry events emit once, persist across descendants and can address every supported heater.
+TEST_CASE("Heater events set targets once and persist", "[plugins][gcode][firmware][heater]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    SECTION("an active-tool event is emitted before its first movement") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize("filament_diameter", "1.75,1.75");
+        config.set_deserialize("extrusion_multiplier", "1,1");
+        ScriptStateFirmwareProbe firmware;
+        firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+        std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 1.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+
+        ExtrusionEntity::Children children;
+        children.push_back(make_firmware_path(
+            ArcPolyline(Points{Point(scale_i(0.0), scale_i(0.0)), Point(scale_i(1.0), scale_i(0.0))}),
+            20.f, 500.f));
+        children.push_back(make_firmware_path(
+            ArcPolyline(Points{Point(scale_i(1.0), scale_i(0.0)), Point(scale_i(2.0), scale_i(0.0))}),
+            20.f, 500.f));
+        std::unique_ptr<ExtrusionEntity> root(
+            new ExtrusionEntity(std::move(children), false, true, true));
+        root->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 205, false));
+
+        const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(root.get())));
+        const size_t temperature_pos = output.find("M104 S205 T1\n");
+        const size_t movement_pos = first_printable_move_offset(output);
+        REQUIRE(temperature_pos != std::string::npos);
+        REQUIRE(movement_pos != std::string::npos);
+        CHECK(temperature_pos < movement_pos);
+        CHECK(count_occurrences(output, "M104 S205 T1\n") == 1);
+        CHECK(count_occurrences(output, "M104 ") == 1);
+        CHECK(count_occurrences(output, "M109 ") == 0);
+        CHECK(firmware.machine_extruder(1).heater().requested_temperature() == 205);
+        CHECK(firmware.machine_extruder(1).heater().encoded_temperature() == 205);
+    }
+
+    SECTION("an identical wait event is acknowledged only once") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize("filament_diameter", "1.75,1.75");
+        config.set_deserialize("extrusion_multiplier", "1,1");
+        ScriptStateFirmwareProbe firmware;
+        firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+        std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 1.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+
+        std::unique_ptr<ExtrusionNop> first(new ExtrusionNop());
+        first->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 210, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(first.get()))) == "M109 S210 T1\n");
+
+        std::unique_ptr<ExtrusionNop> second(new ExtrusionNop());
+        second->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 210, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(second.get()))).empty());
+    }
+
+    SECTION("a non-active Marlin tool keeps its own target after selection") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize("filament_diameter", "1.75,1.75");
+        config.set_deserialize("extrusion_multiplier", "1,1");
+        ScriptStateFirmwareProbe firmware;
+        firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+        std::unique_ptr<ExtrusionEntity> select_one = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 1.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select_one.get())));
+
+        std::unique_ptr<ExtrusionNop> active_target(new ExtrusionNop());
+        active_target->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 205, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(active_target.get()))) == "M104 S205 T1\n");
+
+        std::unique_ptr<ExtrusionNop> event(new ExtrusionNop());
+        event->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 180, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(event.get()))) == "M104 S180 T0\n");
+        CHECK(firmware.machine_extruder(1).heater().requested_temperature() == 205);
+        CHECK(firmware.machine_extruder(1).heater().encoded_temperature() == 205);
+
+        std::unique_ptr<ExtrusionEntity> select_zero = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+        const std::string selection = firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select_zero.get())));
+        CHECK(selection.find("M104 S180") == std::string::npos);
+        CHECK(count_occurrences(selection, "M104 ") == 0);
+        CHECK(firmware.machine_extruder(0).heater().requested_temperature() == 180);
+        CHECK(firmware.machine_extruder(0).heater().encoded_temperature() == 180);
+
+        std::unique_ptr<ExtrusionPath> path = make_firmware_path(
+            ArcPolyline(Points{Point(scale_i(0.0), scale_i(0.0)),
+                               Point(scale_i(1.0), scale_i(0.0))}),
+            20.f, 500.f);
+        const std::string extrusion = firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(path.get())));
+        CHECK(extrusion.find("M104") == std::string::npos);
+    }
+
+    SECTION("bed and chamber targets have separate wait encodings") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        ScriptStateFirmwareProbe firmware;
+        firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+
+        std::unique_ptr<ExtrusionNop> bed(new ExtrusionNop());
+        bed->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_BED, EXTRUDER_ID_UNKNOWN, 60, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(bed.get()))) == "M140 S60\n");
+        std::unique_ptr<ExtrusionNop> bed_wait(new ExtrusionNop());
+        bed_wait->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_BED, EXTRUDER_ID_UNKNOWN, 60, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(bed_wait.get()))) == "M190 S60\n");
+
+        std::unique_ptr<ExtrusionNop> chamber(new ExtrusionNop());
+        chamber->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_CHAMBER, EXTRUDER_ID_UNKNOWN, 40, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(chamber.get()))) == "M141 S40\n");
+        std::unique_ptr<ExtrusionNop> chamber_wait(new ExtrusionNop());
+        chamber_wait->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_CHAMBER, EXTRUDER_ID_UNKNOWN, 40, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(chamber_wait.get()))) == "M191 S40\n");
+        CHECK(firmware.machine_printer().bed_heater().requested_temperature() == 60);
+        CHECK(firmware.machine_printer().chamber_heater().requested_temperature() == 40);
+
+        slic3r_api::GCodeGeneration::Firmware::KlipperGCodeFirmwareSession klipper;
+        klipper.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+        std::unique_ptr<ExtrusionNop> klipper_chamber(new ExtrusionNop());
+        klipper_chamber->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_CHAMBER, EXTRUDER_ID_UNKNOWN, 40, true));
+        const std::string klipper_output = klipper.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(klipper_chamber.get())));
+        CHECK(klipper_output.find("M141") == std::string::npos);
+        CHECK(klipper_output.find("M191") == std::string::npos);
+    }
+
+    SECTION("invalid heater events are rejected") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize("filament_diameter", "1.75,1.75");
+        config.set_deserialize("extrusion_multiplier", "1,1");
+        ScriptStateFirmwareProbe firmware;
+        firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+        std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 1.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+
+        std::unique_ptr<ExtrusionNop> negative(new ExtrusionNop());
+        negative->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, -1, false));
+        CHECK_THROWS_AS(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(negative.get()))), std::invalid_argument);
+
+        std::unique_ptr<ExtrusionNop> out_of_range(new ExtrusionNop());
+        out_of_range->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(2), 180, false));
+        CHECK_THROWS_AS(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(out_of_range.get()))), std::out_of_range);
+
+        DynamicPrintConfig no_active_config = DynamicPrintConfig::full_print_config();
+        ScriptStateFirmwareProbe no_active;
+        no_active.setup(slic3r_api::Config(ApiHost::to_config_handle(&no_active_config)));
+        std::unique_ptr<ExtrusionNop> active_without_selection(new ExtrusionNop());
+        active_without_selection->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 180, false));
+        CHECK_THROWS_AS(no_active.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(active_without_selection.get()))), std::invalid_argument);
+
+        DynamicPrintConfig semm_config = DynamicPrintConfig::full_print_config();
+        semm_config.set_deserialize("single_extruder_multi_material", "1");
+        semm_config.set_deserialize("filament_diameter", "1.75,1.75");
+        semm_config.set_deserialize("extrusion_multiplier", "1,1");
+        ScriptStateFirmwareProbe semm;
+        semm.setup(slic3r_api::Config(ApiHost::to_config_handle(&semm_config)));
+        std::unique_ptr<ExtrusionEntity> semm_select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 1.0);
+        semm.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(semm_select.get())));
+        std::unique_ptr<ExtrusionNop> non_active_semm(new ExtrusionNop());
+        non_active_semm->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 180, false));
+        CHECK_THROWS_AS(semm.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(non_active_semm.get()))), std::invalid_argument);
+
+        std::unique_ptr<ExtrusionNop> unknown(new ExtrusionNop());
+        ExtrusionPropertyHeater &unknown_property =
+            unknown->get_or_add_property<ExtrusionPropertyHeater>();
+        unknown_property.heater = static_cast<c_extrusion_heater_kind>(99);
+        unknown_property.temperature_C = 180;
+        CHECK_THROWS_AS(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(unknown.get()))), std::invalid_argument);
+    }
+
+    SECTION("external G-code remains in force until a new heater event") {
+        Print print;
+        configure_standard_firmware(print);
+        GCodeScriptProcessor processor(print, Orchestrator::instance());
+        ScriptStateFirmwareProbe firmware(slic3r_api::GCodeGeneration::GCodeScriptProcessorView(
+            processor.c_processor()));
+        firmware.set_gcode_reader_context(
+            reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+            reinterpret_cast<const print_handle *>(&print));
+        firmware.setup(slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)).config());
+        std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+
+        std::unique_ptr<ExtrusionNop> initial(new ExtrusionNop());
+        initial->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 200, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(initial.get()))) == "M104 S200 T0\n");
+
+        std::unique_ptr<ExtrusionNop> script(new ExtrusionNop());
+        script->add_property(ExtrusionPropertyCustomGcodeText("M104 S215"));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(script.get()))) == "M104 S215\n");
+
+        std::unique_ptr<ExtrusionPath> path = make_firmware_path(
+            ArcPolyline(Points{Point(scale_i(0.0), scale_i(0.0)), Point(scale_i(1.0), scale_i(0.0))}),
+            20.f, 500.f);
+        const std::string extrusion = firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(path.get())));
+        CHECK(extrusion.find("M104 S200") == std::string::npos);
+        CHECK(count_occurrences(extrusion, "M104 ") == 0);
+        CHECK(firmware.machine_extruder(0).heater().requested_temperature() == 215);
+        CHECK(firmware.machine_extruder(0).heater().encoded_temperature() == 215);
+        CHECK_FALSE(firmware.machine_extruder(0).heater().encoded_temperature_with_wait());
+
+        std::unique_ptr<ExtrusionNop> replacement(new ExtrusionNop());
+        replacement->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 205, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(replacement.get()))) == "M104 S205 T0\n");
+    }
+
+    SECTION("reader invalidates a wait acknowledgement after a different non-waiting target") {
+        Print print;
+        configure_standard_firmware(print);
+        GCodeScriptProcessor processor(print, Orchestrator::instance());
+        ScriptStateFirmwareProbe firmware(slic3r_api::GCodeGeneration::GCodeScriptProcessorView(
+            processor.c_processor()));
+        firmware.set_gcode_reader_context(
+            reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+            reinterpret_cast<const print_handle *>(&print));
+        firmware.setup(slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)).config());
+        std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+
+        std::unique_ptr<ExtrusionNop> waited(new ExtrusionNop());
+        waited->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 180, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(waited.get()))) == "M109 S180 T0\n");
+
+        std::unique_ptr<ExtrusionNop> script(new ExtrusionNop());
+        script->add_property(ExtrusionPropertyCustomGcodeText("M104 S200"));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(script.get()))) == "M104 S200\n");
+        CHECK_FALSE(firmware.machine_extruder(0).heater().encoded_temperature_with_wait());
+
+        std::unique_ptr<ExtrusionNop> normal(new ExtrusionNop());
+        normal->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 180, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(normal.get()))) == "M104 S180 T0\n");
+
+        std::unique_ptr<ExtrusionEntity> wait_again = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP);
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(wait_again.get()))) == "M109 S180 T0\n");
+    }
+
+    SECTION("reader preserves a wait acknowledgement after the same non-waiting target") {
+        Print print;
+        configure_standard_firmware(print);
+        GCodeScriptProcessor processor(print, Orchestrator::instance());
+        ScriptStateFirmwareProbe firmware(slic3r_api::GCodeGeneration::GCodeScriptProcessorView(
+            processor.c_processor()));
+        firmware.set_gcode_reader_context(
+            reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+            reinterpret_cast<const print_handle *>(&print));
+        firmware.setup(slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)).config());
+        std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+
+        std::unique_ptr<ExtrusionNop> waited(new ExtrusionNop());
+        waited->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 180, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(waited.get()))) == "M109 S180 T0\n");
+
+        std::unique_ptr<ExtrusionNop> script(new ExtrusionNop());
+        script->add_property(ExtrusionPropertyCustomGcodeText("M104 S180"));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(script.get()))) == "M104 S180\n");
+        CHECK(firmware.machine_extruder(0).heater().encoded_temperature_with_wait() == 180);
+
+        std::unique_ptr<ExtrusionEntity> wait_again = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP);
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(wait_again.get()))).empty());
+    }
+
+    SECTION("Klipper addresses active and non-active tools explicitly") {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize("filament_diameter", "1.75,1.75");
+        config.set_deserialize("extrusion_multiplier", "1,1");
+        config.set_deserialize("tool_name", "left_hotend,right_hotend");
+        slic3r_api::GCodeGeneration::Firmware::KlipperGCodeFirmwareSession firmware;
+        firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+        std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 1.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+
+        std::unique_ptr<ExtrusionNop> active(new ExtrusionNop());
+        active->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 205, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(active.get()))) == "M104 S205\n");
+        std::unique_ptr<ExtrusionNop> first_wait(new ExtrusionNop());
+        first_wait->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 190, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(first_wait.get()))) ==
+              "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=190\n"
+              "TEMPERATURE_WAIT SENSOR=left_hotend MINIMUM=190\n");
+        std::unique_ptr<ExtrusionNop> other(new ExtrusionNop());
+        other->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 180, false));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(other.get()))) ==
+              "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=180\n");
+
+        std::unique_ptr<ExtrusionNop> other_wait(new ExtrusionNop());
+        other_wait->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 180, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(other_wait.get()))) ==
+              "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=180\n"
+              "TEMPERATURE_WAIT SENSOR=left_hotend MINIMUM=180\n");
+
+        std::unique_ptr<ExtrusionNop> cooling(new ExtrusionNop());
+        cooling->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 170, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(cooling.get()))) ==
+              "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=170\n"
+              "TEMPERATURE_WAIT SENSOR=left_hotend MAXIMUM=170\n");
+
+        std::unique_ptr<ExtrusionNop> off_wait(new ExtrusionNop());
+        off_wait->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, extruder_index_t(0), 0, true));
+        CHECK(firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(off_wait.get()))) ==
+              "SET_HEATER_TEMPERATURE HEATER=left_hotend TARGET=0\n");
+    }
+}
+
 // Ordered events retain their command sequence, including coordinate resets after emitted selections.
 TEST_CASE("Default firmware handles ordered special commands and custom G-code",
           "[plugins][gcode][firmware]")
@@ -3662,7 +4042,9 @@ TEST_CASE("Default firmware handles ordered special commands and custom G-code",
 
     std::unique_ptr<ExtrusionEntity> root(
         new ExtrusionEntity(std::move(children), false, true, true));
-    root->add_property(ExtrusionPropertySpeed(12.f, 300.f, 0.02f, 30.f, 205.f));
+    root->add_property(ExtrusionPropertySpeed(12.f, 300.f, 0.02f, 30.f));
+    root->add_property(ExtrusionPropertyHeater(
+        C_EXTRUSION_HEATER_TOOL, 1, 205, false));
     append_path_extrusion(tool_group, std::move(root));
 
     FirmwareInstanceOwner firmware(slic3r_api::make_gcode_firmware_instance(
@@ -3673,7 +4055,7 @@ TEST_CASE("Default firmware handles ordered special commands and custom G-code",
         run_file_writer_with_firmware(print, output_path, firmware.instance());
         const std::string output = read_text_file(output_path);
         INFO(output);
-        CHECK(output.find("T0\nG92 E0\nT1\nG92 E0\n") != std::string::npos);
+        CHECK(output.find("T0\nG92 E0\nM104 S205 T1\nT1\nG92 E0\n") != std::string::npos);
         CHECK(output.find("M220 S80\nM220 S100\n") != std::string::npos);
         CHECK(output.find("M220 B\n") == std::string::npos);
         CHECK(output.find("M220 R\n") == std::string::npos);
@@ -4199,8 +4581,8 @@ TEST_CASE("Preamble heats physical tools but only one MMU nozzle",
         "ACTIVATE_EXTRUDER EXTRUDER=extruder1\n" : "T1\n";
     CHECK(text.find(initial_selection + "G92 E0\n") != std::string::npos);
     if (std::string(firmware_id) == "gcode.firmware.klipper") {
-        // M109 has no tool selector in this dialect: the intended physical
-        // heater must be active before each request.
+        // The active Klipper tool remains unaddressed; preamble requests select
+        // a non-active physical tool before emitting its heater command.
         const std::string selection = mmu ? "T1\n" : "ACTIVATE_EXTRUDER EXTRUDER=extruder1\n";
         CHECK(text.find(selection) < text.find("M109 S220"));
         if (!mmu) CHECK(text.find("ACTIVATE_EXTRUDER EXTRUDER=extruder\n") < text.find("M109 S205"));

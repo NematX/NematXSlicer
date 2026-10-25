@@ -238,6 +238,7 @@ void* ExtrusionPropertyContainer::property_data_mutable(extrusion_property_type 
     return slot != nullptr ? slot->data_mutable() : nullptr;
 }
 
+// Return mutable storage for a requested payload, creating a default built-in object or aligned zeroed raw storage for a valid unknown type; invalid type, size or alignment returns nullptr and allocation failures propagate.
 void* ExtrusionPropertyContainer::get_or_add_property_data_mutable(extrusion_property_type type, size_t byte_count, size_t alignment)
 {
     if (PropertySlot *slot = this->find_slot(type))
@@ -262,6 +263,8 @@ void* ExtrusionPropertyContainer::get_or_add_property_data_mutable(extrusion_pro
         return &this->get_or_add_property<ExtrusionPropertyInfill>().source_surface_id;
     case ExtrusionPropertyExtrusionAxis::property_type:
         return &this->get_or_add_property<ExtrusionPropertyExtrusionAxis>().operation;
+    case ExtrusionPropertyHeater::property_type:
+        return &this->get_or_add_property<ExtrusionPropertyHeater>().heater;
     case ExtrusionPropertyCustomGcode::property_type:
         return &this->get_or_add_property<ExtrusionPropertyCustomGcode>();
     default:

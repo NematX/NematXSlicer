@@ -76,6 +76,7 @@ add_executable(${_TEST_NAME}_tests
     test_gui_rule_explanations.cpp
     test_gui_rule_helpers.cpp
     test_gyroid_pattern.cpp
+    test_heater_temperature.cpp
     test_infill_pattern_init.cpp
     test_infill_pattern_lists.cpp
     test_layer_extrusion_edit_entry_state.cpp

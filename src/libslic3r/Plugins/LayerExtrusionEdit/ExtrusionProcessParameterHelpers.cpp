@@ -238,9 +238,10 @@ float &EPropertySpeedFieldEditor::field(EPropertySpeed &process) const
     return process.speed_mm_per_s;
 }
 
+// Return the entity's mutable speed payload or create one with all four fields unset; the entity remains the owner, no output is produced, and allocation failures propagate.
 EPropertySpeed &EPropertySpeedFieldEditor::ensure_property(MutableExtrusionEntity entity)
 {
-    // Reuse pre-existing metadata so pressure, fan, temperature, and the other
+    // Reuse pre-existing metadata so pressure, fan, and the other
     // process field survive when this editor writes its selected field.
     if (EPropertySpeed *existing = entity.get_mutable(EPropertySpeed::key))
         return *existing;
@@ -252,7 +253,6 @@ EPropertySpeed &EPropertySpeedFieldEditor::ensure_property(MutableExtrusionEntit
     created.accel_mm_per_s2 = -1.f;
     created.pressure_adv = -1.f;
     created.fan_speed_percent = -1.f;
-    created.temperature_C = -1.f;
     m_created_properties.insert(entity.mutable_handle());
     return created;
 }
@@ -285,6 +285,7 @@ EPropertySpeedFieldEditor::FieldSummary EPropertySpeedFieldEditor::merge_fields(
     return merged;
 }
 
+// Clear a direct field that matches the inherited value and remove an empty payload only when this editor created it; the entity is borrowed, changes are in place, and absent fields are ignored.
 void EPropertySpeedFieldEditor::clear_redundant_field(MutableExtrusionEntity entity,
                                                       float inherited_value)
 {
@@ -308,7 +309,7 @@ void EPropertySpeedFieldEditor::clear_redundant_field(MutableExtrusionEntity ent
     // Delete an empty payload only when this editor created it. Pre-existing
     // payloads remain owned by the plugin or producer that supplied them.
     const bool empty = process->speed_mm_per_s < 0.f && process->accel_mm_per_s2 < 0.f &&
-        process->pressure_adv < 0.f && process->fan_speed_percent < 0.f && process->temperature_C < 0.f;
+        process->pressure_adv < 0.f && process->fan_speed_percent < 0.f;
     if (empty && m_created_properties.erase(entity.mutable_handle()) > 0)
         entity.remove(EPropertySpeed::key);
 }
