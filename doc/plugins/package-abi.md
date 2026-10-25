@@ -14,6 +14,7 @@ slic3r_slicing_step.h = 2.3
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
 steps/slic3r_step_gcode_export.h = 2.1
+slic3r_gcode_thumbnail.h = 2.0
 ```
 
 The slicer version records the build environment, not compatibility. It remains
@@ -31,6 +32,12 @@ orchestrator 3.5 interface supplies activation-independent registration lookup
 and application-side logging. Package manifests and native version tables use
 these public header macros; generated Python bindings derive their callback
 return types and requirements from the same headers.
+A contract whose structure is validated against its own `sizeof` (a vtable or
+a result checked by `struct_size >= sizeof`) cannot gain a member in a minor
+version: a table built before the change would be refused. Growing such a
+structure is a major version. The G-code thumbnail service
+(`slic3r_gcode_thumbnail.h`) is at 2.0 for this reason: its encoder table
+gained the optional `encode_image` callback.
 
 Plugin-types 4.1 includes the support-toolpath header identity
 `SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH` (58), naming

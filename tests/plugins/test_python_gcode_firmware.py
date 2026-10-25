@@ -530,6 +530,84 @@ class PythonGCodeFirmwareTests(unittest.TestCase):
             self.thumbnail.GCodeThumbnailEncoder(Orchestrator(), object(), None, "missing.encoder")
         self.assertEqual(str(raised.exception), "Unknown GCODE_THUMBNAIL provider: missing.encoder")
         self.assertEqual(calls, ["missing.encoder"])
+    def test_thumbnail_encoder_with_encode_image_publishes_format_and_bytes(self):
+        thumbnail = self.thumbnail
+        generated = self.generated
+
+        class Session(thumbnail.GCodeThumbnailEncoderSession):
+            def encode(self, request):
+                return b"text"
+
+            def encode_image(self, request):
+                if request.width == 7:
+                    raise RuntimeError("python image codec failed")
+                if request.width == 8:
+                    return thumbnail.GCodeThumbnailEncodedImage(generated.RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG, 8, 3, b"")
+                if request.width == 9:
+                    return thumbnail.GCodeThumbnailEncodedImage(generated.RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET, 9, 3, b"x")
+                if request.width == 10:
+                    return thumbnail.GCodeThumbnailEncodedImage(generated.RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI, 3, 3, b"x")
+                return thumbnail.GCodeThumbnailEncodedImage(
+                    generated.RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI, request.width, request.height,
+                    bytes((request.width, 1, request.height)))
+
+        instance = thumbnail.make_gcode_thumbnail_encoder_instance(Session())
+        table = ctypes.cast(instance.vtable, ctypes.POINTER(thumbnail.RawGcodeThumbnailEncoderVTable))
+        self.assertTrue(table.contents.encode_image)
+        view = thumbnail.GCodeThumbnailEncoderView(ctypes.pointer(instance))
+        self.assertTrue(view.supports_images())
+        raw = generated.RawGcodeThumbnailRenderRequest()
+        raw.struct_size = ctypes.sizeof(raw)
+        raw.width = 4
+        raw.height = 3
+        raw.custom_scale = 1.0
+        image = view.encode_image(thumbnail.GCodeThumbnailRequest(raw))
+        self.assertEqual(
+            image, thumbnail.GCodeThumbnailEncodedImage(generated.RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI, 4, 3, b"\x04\x01\x03"))
+        raw.width = 7
+        with self.assertRaisesRegex(RuntimeError, "python image codec failed"):
+            view.encode_image(thumbnail.GCodeThumbnailRequest(raw))
+        raw.width = 8
+        self.assertIsNone(view.encode_image(thumbnail.GCodeThumbnailRequest(raw)))
+        raw.width = 9
+        with self.assertRaisesRegex(RuntimeError, "unknown image format"):
+            view.encode_image(thumbnail.GCodeThumbnailRequest(raw))
+        raw.width = 10
+        with self.assertRaisesRegex(RuntimeError, "unexpected dimensions"):
+            view.encode_image(thumbnail.GCodeThumbnailRequest(raw))
+
+        # The bytes behind the pointer stay valid while the Python side collects garbage, until the next call.
+        raw.width = 4
+        request = thumbnail.GCodeThumbnailRequest(raw)
+        result = generated.RawGcodeThumbnailEncodedImageResult()
+        result.struct_size = ctypes.sizeof(result)
+        table.contents.encode_image(instance.session, ctypes.byref(request.raw), ctypes.byref(result))
+        gc.collect()
+        self.assertEqual(int(result.status), int(generated.RAW_GCODE_THUMBNAIL_STATUS_SUCCESS))
+        self.assertEqual(int(result.format), int(generated.RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI))
+        self.assertEqual(ctypes.string_at(thumbnail._raw_pointer(result, "bytes"), int(result.bytes_size)), b"\x04\x01\x03")
+        table.contents.destroy(instance.session)
+
+    def test_thumbnail_encoder_without_encode_image_publishes_a_null_callback(self):
+        thumbnail = self.thumbnail
+
+        class Session(thumbnail.GCodeThumbnailEncoderSession):
+            def encode(self, request):
+                return b"text"
+
+        instance = thumbnail.make_gcode_thumbnail_encoder_instance(Session())
+        table = ctypes.cast(instance.vtable, ctypes.POINTER(thumbnail.RawGcodeThumbnailEncoderVTable))
+        self.assertFalse(table.contents.encode_image)
+        view = thumbnail.GCodeThumbnailEncoderView(ctypes.pointer(instance))
+        self.assertFalse(view.supports_images())
+        raw = self.generated.RawGcodeThumbnailRenderRequest()
+        raw.struct_size = ctypes.sizeof(raw)
+        raw.width = 4
+        raw.height = 3
+        raw.custom_scale = 1.0
+        with self.assertRaisesRegex(RuntimeError, "does not support raw images"):
+            view.encode_image(thumbnail.GCodeThumbnailRequest(raw))
+        table.contents.destroy(instance.session)
 
     def test_owned_encoder_uses_orchestrator_and_cleans_failed_publication(self):
         import copy
@@ -563,11 +641,15 @@ class PythonGCodeFirmwareTests(unittest.TestCase):
         with thumbnail.GCodeThumbnailEncoder(orch, print_view, None, "JPG") as encoder:
             self.assertEqual(orch.identifier, "JPG")
             self.assertEqual(encoder.encode(request), b"copied")
+            self.assertFalse(encoder.supports_images())
+            with self.assertRaisesRegex(RuntimeError, "does not support raw images"): encoder.encode_image(request)
             with self.assertRaises(TypeError): copy.copy(encoder)
             with self.assertRaises(TypeError): copy.deepcopy(encoder)
         encoder.close()
         self.assertEqual(len(destroyed), 1)
         with self.assertRaises(RuntimeError): encoder.encode(request)
+        with self.assertRaises(RuntimeError): encoder.supports_images()
+        with self.assertRaises(RuntimeError): encoder.encode_image(request)
         orch.status = generated.RAW_PLUGIN_EXECUTION_PLUGIN_ERROR
         with self.assertRaises(RuntimeError): thumbnail.GCodeThumbnailEncoder(orch, print_view, None)
         gc.collect()

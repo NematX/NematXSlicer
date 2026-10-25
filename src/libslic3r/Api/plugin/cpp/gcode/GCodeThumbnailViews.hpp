@@ -41,8 +41,10 @@ G-code thumbnail C++ adapters
 
 The renderer view borrows host-owned RGBA8 pixels for one synchronous call.
 The encoder adapter owns one provider session per export and retains its last
-byte block and diagnostic until the next call. The writer-facing view copies
-neither ownership nor allocations across the C ABI.
+byte block, its last compressed image (returned by the optional encode_image
+callback) and its diagnostic. Each buffer is invalidated by the next call of
+its own callback. The writer-facing view copies neither ownership nor
+allocations across the C ABI.
 */
 
 namespace slic3r_api {
@@ -150,6 +152,15 @@ private:
     const raw_gcode_thumbnail_renderer *m_renderer = nullptr;
 };
 
+// One compressed image: the bytes of a file in `format`, with the size of the image they hold.
+struct GCodeThumbnailEncodedImage
+{
+    raw_gcode_thumbnail_encoded_format format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::vector<uint8_t> bytes;
+};
+
 class GCodeThumbnailEncoderSession
 {
 public:
@@ -158,6 +169,18 @@ public:
     /* Return a complete file block. An empty vector means that the host had no
        renderer and this optional image was skipped. */
     virtual std::vector<uint8_t> encode(const raw_gcode_thumbnail_render_request &request) = 0;
+
+    /* Tell whether encode_image() is implemented. The adapter reads it once, when it builds the
+       C instance: a session that returns false publishes no encode_image callback. */
+    virtual bool supports_image() const noexcept { return false; }
+
+    /* Return the compressed image of the request, upright and without framing. Empty bytes mean that the host had
+       no renderer and this optional image was skipped. Only called when supports_image() is true. */
+    virtual GCodeThumbnailEncodedImage encode_image(const raw_gcode_thumbnail_render_request &request)
+    {
+        (void)request;
+        throw std::logic_error("This G-code thumbnail encoder cannot produce a raw image.");
+    }
 };
 
 namespace detail {
@@ -166,6 +189,8 @@ struct GCodeThumbnailEncoderHolder
 {
     std::unique_ptr<GCodeThumbnailEncoderSession> session;
     std::vector<uint8_t> bytes;
+    // The last compressed image; its bytes back the pointer returned by encode_image until the next call.
+    GCodeThumbnailEncodedImage image;
     std::string error;
     std::mutex mutex;
 };
@@ -216,14 +241,74 @@ inline void encode_thumbnail(void *opaque,
         result->error_message = holder.error.c_str();
 }
 
-inline const raw_gcode_thumbnail_encoder_vtable &thumbnail_encoder_vtable()
+// C callback of encode_image: same containment of exceptions as encode_thumbnail(). Bytes and diagnostic stay in the holder
+// (valid until the next call on the session); a session that returns no byte reports SKIPPED.
+inline void encode_thumbnail_image(void *opaque,
+                                   const raw_gcode_thumbnail_render_request *request,
+                                   raw_gcode_thumbnail_encoded_image_result *result) noexcept
 {
-    static const raw_gcode_thumbnail_encoder_vtable vtable = {
+    if (result == nullptr || result->struct_size < sizeof(raw_gcode_thumbnail_encoded_image_result))
+        return;
+    result->status = RAW_GCODE_THUMBNAIL_STATUS_UNSET;
+    result->format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET;
+    result->width = 0;
+    result->height = 0;
+    result->bytes = nullptr;
+    result->bytes_size = 0;
+    result->error_message = nullptr;
+    if (opaque == nullptr || request == nullptr ||
+        request->struct_size < sizeof(raw_gcode_thumbnail_render_request)) {
+        result->status = RAW_GCODE_THUMBNAIL_STATUS_INVALID_ARGUMENT;
+        return;
+    }
+
+    GCodeThumbnailEncoderHolder &holder = *static_cast<GCodeThumbnailEncoderHolder *>(opaque);
+    std::lock_guard<std::mutex> lock(holder.mutex);
+    holder.image = GCodeThumbnailEncodedImage();
+    holder.error.clear();
+    try {
+        holder.image = holder.session->encode_image(*request);
+        if (holder.image.bytes.empty()) {
+            result->status = RAW_GCODE_THUMBNAIL_STATUS_SKIPPED;
+        } else {
+            result->format = holder.image.format;
+            result->width = holder.image.width;
+            result->height = holder.image.height;
+            result->bytes = holder.image.bytes.data();
+            result->bytes_size = holder.image.bytes.size();
+            result->status = RAW_GCODE_THUMBNAIL_STATUS_SUCCESS;
+        }
+    } catch (const std::invalid_argument &error) {
+        holder.error = error.what();
+        result->status = RAW_GCODE_THUMBNAIL_STATUS_INVALID_ARGUMENT;
+    } catch (const std::exception &error) {
+        holder.error = error.what();
+        result->status = RAW_GCODE_THUMBNAIL_STATUS_ERROR;
+    } catch (...) {
+        holder.error = "The thumbnail encoder failed with an unknown exception.";
+        result->status = RAW_GCODE_THUMBNAIL_STATUS_ERROR;
+    }
+    if (result->status != RAW_GCODE_THUMBNAIL_STATUS_SUCCESS &&
+        result->status != RAW_GCODE_THUMBNAIL_STATUS_SKIPPED)
+        result->error_message = holder.error.c_str();
+}
+
+// The vtable of a session that implements encode_image() and the one of a session that does not (null callback).
+inline const raw_gcode_thumbnail_encoder_vtable &thumbnail_encoder_vtable(bool with_image)
+{
+    static const raw_gcode_thumbnail_encoder_vtable with_image_vtable = {
         sizeof(raw_gcode_thumbnail_encoder_vtable),
         &destroy_thumbnail_encoder,
-        &encode_thumbnail
+        &encode_thumbnail,
+        &encode_thumbnail_image
     };
-    return vtable;
+    static const raw_gcode_thumbnail_encoder_vtable text_only_vtable = {
+        sizeof(raw_gcode_thumbnail_encoder_vtable),
+        &destroy_thumbnail_encoder,
+        &encode_thumbnail,
+        nullptr
+    };
+    return with_image ? with_image_vtable : text_only_vtable;
 }
 
 } // namespace detail
@@ -233,15 +318,26 @@ inline raw_gcode_thumbnail_encoder_instance make_gcode_thumbnail_encoder_instanc
 {
     if (!session)
         throw std::invalid_argument("A G-code thumbnail encoder session is required.");
+    const bool with_image = session->supports_image();
     detail::GCodeThumbnailEncoderHolder *holder = new detail::GCodeThumbnailEncoderHolder();
     holder->session = std::move(session);
     return {sizeof(raw_gcode_thumbnail_encoder_instance), holder,
-            &detail::thumbnail_encoder_vtable()};
+            &detail::thumbnail_encoder_vtable(with_image)};
 }
 
 struct GCodeThumbnailEncodedBlock
 {
     raw_gcode_thumbnail_status status = RAW_GCODE_THUMBNAIL_STATUS_UNSET;
+    std::string_view bytes;
+};
+
+// A compressed image borrowed from an encoder until its next call; `bytes` is empty when the optional image was skipped.
+struct GCodeThumbnailEncodedImageBlock
+{
+    raw_gcode_thumbnail_status status = RAW_GCODE_THUMBNAIL_STATUS_UNSET;
+    raw_gcode_thumbnail_encoded_format format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET;
+    uint32_t width = 0;
+    uint32_t height = 0;
     std::string_view bytes;
 };
 
@@ -256,6 +352,43 @@ public:
     }
 
     bool valid() const { return m_instance != nullptr; }
+
+    // Tell whether the encoder can return compressed images (its vtable carries a non-null encode_image).
+    bool supports_images() const
+    {
+        return m_instance != nullptr && m_instance->vtable->encode_image != nullptr;
+    }
+
+    // Ask the encoder for the compressed image of the request. A missing encoder or a skipped image give SKIPPED. An
+    // encoder without encode_image throws. A successful answer is checked: known format, non-empty bytes, and the
+    // size of the request; anything else throws, whatever the provider.
+    GCodeThumbnailEncodedImageBlock encode_image(
+        const raw_gcode_thumbnail_render_request &request) const
+    {
+        validate_gcode_thumbnail_render_request(request);
+        if (m_instance == nullptr)
+            return {RAW_GCODE_THUMBNAIL_STATUS_SKIPPED, RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET, 0, 0, {}};
+        if (!supports_images())
+            throw std::runtime_error("The G-code thumbnail encoder does not support raw images.");
+        raw_gcode_thumbnail_encoded_image_result result = {};
+        result.struct_size = sizeof(result);
+        m_instance->vtable->encode_image(m_instance->session, &request, &result);
+        if (result.status == RAW_GCODE_THUMBNAIL_STATUS_SKIPPED)
+            return {result.status, RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET, 0, 0, {}};
+        if (result.status != RAW_GCODE_THUMBNAIL_STATUS_SUCCESS)
+            throw std::runtime_error(result.error_message != nullptr ? result.error_message :
+                                     "The G-code thumbnail encoder failed.");
+        if (result.format != RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_PNG &&
+            result.format != RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG &&
+            result.format != RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI)
+            throw std::runtime_error("The G-code thumbnail encoder returned an unknown image format.");
+        if (result.bytes == nullptr || result.bytes_size == 0)
+            throw std::runtime_error("The G-code thumbnail encoder returned no image bytes.");
+        if (result.width != request.width || result.height != request.height)
+            throw std::runtime_error("The G-code thumbnail encoder returned an image of unexpected dimensions.");
+        return {result.status, result.format, result.width, result.height,
+                std::string_view(reinterpret_cast<const char *>(result.bytes), size_t(result.bytes_size))};
+    }
 
     GCodeThumbnailEncodedBlock encode(
         const raw_gcode_thumbnail_render_request &request) const
@@ -309,6 +442,7 @@ struct GCodeThumbnailRequest {
 // owner's instance record.
 class GCodeThumbnailEncoder {
 public:
+    // Acquire an owned service session using borrowed host/Print/config/renderer inputs; report missing providers or execution failures by throwing.
     GCodeThumbnailEncoder(const OrchestratorView &, const Print &, const Config &config,
                           const raw_gcode_thumbnail_renderer *, const std::string &provider_id = {});
     ~GCodeThumbnailEncoder();
@@ -331,6 +465,16 @@ std::vector<GCodeThumbnailRequest> default_gcode_thumbnail_requests(const Config
 std::array<std::string, 3> encode_gcode_thumbnails(
     const OrchestratorView &, const Print &, const Config &config,
     const raw_gcode_thumbnail_renderer *, const std::vector<GCodeThumbnailRequest> &requests);
+
+// Render requested thumbnails as compressed images and return owned bytes; unsupported providers and required skipped requests throw.
+std::vector<GCodeThumbnailEncodedImage> encode_gcode_thumbnail_images(
+    const OrchestratorView &, const Print &, const Config &config,
+    const raw_gcode_thumbnail_renderer *, const std::vector<GCodeThumbnailRequest> &requests);
+
+// Return an owned encoder without rendering and set incompatibility to empty for raw-image support or its diagnostic otherwise; borrowed host, Print, config and renderer inputs must outlive the session, and acquisition failures throw.
+std::unique_ptr<GCodeThumbnailEncoder> acquire_gcode_thumbnail_image_encoder(
+    const OrchestratorView &, const Print &, const Config &config,
+    const raw_gcode_thumbnail_renderer *, const std::string &provider_id, std::string &incompatibility);
 
 // Header-only definitions keep external consumers on the public C ABI.
 namespace detail {
@@ -407,7 +551,7 @@ inline std::vector<GCodeThumbnailRequest> default_gcode_thumbnail_requests(const
 }
 
 
-// The plugin manager, print and renderer must outlive this session; rejected choices throw std::invalid_argument.
+// Select a provider from the borrowed config or explicit ID and own its session until destruction; borrowed host, Print, config and renderer must outlive the session, and missing providers or failed execution throw without retaining a partial session.
 inline GCodeThumbnailEncoder::GCodeThumbnailEncoder(const OrchestratorView &orchestrator,
     const Print &print, const Config &config, const raw_gcode_thumbnail_renderer *renderer,
     const std::string &provider_id)
@@ -424,7 +568,7 @@ inline GCodeThumbnailEncoder::GCodeThumbnailEncoder(const OrchestratorView &orch
     if (provider_id.empty() && !plugin.valid() && !requested_id.empty())
         throw std::invalid_argument("GCODE_THUMBNAIL provider '" + requested_id + "' is not active");
     if (!plugin.valid() || plugin.step() != GCODE_THUMBNAIL)
-        throw std::invalid_argument(requested_id.empty() ? "Invalid GCODE_THUMBNAIL provider selection" :
+        throw std::invalid_argument(requested_id.empty() ? "No active G-code thumbnail encoder." :
                                     "Unknown GCODE_THUMBNAIL provider: " + requested_id);
     run_ctx_gcode_thumbnail payload = {};
     payload.print = print.handle();
@@ -466,6 +610,65 @@ inline std::array<std::string, 3> encode_gcode_thumbnails(const OrchestratorView
         }
     }
     return blocks;
+}
+
+// Return an owned encoder after inspecting its capability without rendering; set incompatibility to empty for raw-image support or its diagnostic otherwise, and borrow host, Print, config and renderer for the session lifetime; acquisition failures throw.
+inline std::unique_ptr<GCodeThumbnailEncoder> acquire_gcode_thumbnail_image_encoder(
+    const OrchestratorView &orchestrator, const Print &print, const Config &config,
+    const raw_gcode_thumbnail_renderer *renderer, const std::string &provider_id, std::string &incompatibility)
+{
+    std::unique_ptr<GCodeThumbnailEncoder> encoder(new GCodeThumbnailEncoder(orchestrator, print, config, renderer, provider_id));
+    incompatibility.clear();
+    if (!encoder->view().supports_images()) {
+        const std::string provider = provider_id.empty() ?
+            (config.has("thumbnails_format") ? config.get("thumbnails_format").serialize() : "PNG") : provider_id;
+        incompatibility = "Thumbnail provider '" + provider + "' does not support raw images.";
+    }
+    return encoder;
+}
+
+// Validate and acquire each requested provider before rendering any image, then copy successful borrowed bytes into owned results; unsupported providers and required skipped requests throw.
+inline std::vector<GCodeThumbnailEncodedImage> encode_gcode_thumbnail_images(
+    const OrchestratorView &orchestrator, const Print &print, const Config &config,
+    const raw_gcode_thumbnail_renderer *renderer,
+    const std::vector<GCodeThumbnailRequest> &requests)
+{
+    std::vector<GCodeThumbnailEncodedImage> images;
+    if (requests.empty())
+        return images;
+
+    std::map<std::string, std::unique_ptr<GCodeThumbnailEncoder>> encoders;
+    for (const GCodeThumbnailRequest &request : requests) {
+        validate_gcode_thumbnail_render_request(request.render);
+        std::map<std::string, std::unique_ptr<GCodeThumbnailEncoder>>::iterator encoder =
+            encoders.find(request.provider_id);
+        if (encoder == encoders.end()) {
+            std::string incompatibility;
+            std::unique_ptr<GCodeThumbnailEncoder> acquired = acquire_gcode_thumbnail_image_encoder(
+                orchestrator, print, config, renderer, request.provider_id, incompatibility);
+            if (!incompatibility.empty())
+                throw std::runtime_error(incompatibility);
+            encoder = encoders.emplace(request.provider_id, std::move(acquired)).first;
+        }
+    }
+
+    for (const GCodeThumbnailRequest &request : requests) {
+        const GCodeThumbnailEncodedImageBlock block = encoders.find(request.provider_id)->second->view().encode_image(request.render);
+        if (block.status == RAW_GCODE_THUMBNAIL_STATUS_SKIPPED) {
+            if (request.required)
+                throw std::runtime_error("A required raw G-code thumbnail was skipped.");
+            continue;
+        }
+
+        GCodeThumbnailEncodedImage image;
+        image.format = block.format;
+        image.width = block.width;
+        image.height = block.height;
+        image.bytes.assign(reinterpret_cast<const uint8_t *>(block.bytes.data()),
+                           reinterpret_cast<const uint8_t *>(block.bytes.data()) + block.bytes.size());
+        images.push_back(std::move(image));
+    }
+    return images;
 }
 
 } // namespace slic3r_api

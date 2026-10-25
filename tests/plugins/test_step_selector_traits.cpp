@@ -702,7 +702,7 @@ TEST_CASE("Thumbnail selection errors name the inactive stored encoder",
     config.optptr("thumbnails_format")->set_int(1000000);
     REQUIRE(config.option("thumbnails_format")->serialize().empty());
     CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr),
-                      "Invalid GCODE_THUMBNAIL provider selection");
+                      "No active G-code thumbnail encoder.");
 }
 
 // Check explicit lookup with invalid Print and configuration views; reading either would assert in Debug.

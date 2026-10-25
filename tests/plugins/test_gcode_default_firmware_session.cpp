@@ -14,6 +14,7 @@
 #include <type_traits>
 #include <vector>
 
+#include <boost/beast/core/detail/base64.hpp>
 #include <boost/filesystem.hpp>
 
 #include "plugin_test_helpers.hpp"
@@ -4809,6 +4810,302 @@ TEST_CASE("Thumbnail encoder adapter contains errors and owns its session once",
     raw_gcode_thumbnail_encoder_instance incomplete = {};
     incomplete.struct_size = sizeof(incomplete);
     CHECK_THROWS(slic3r_api::GCodeThumbnailEncoderView(&incomplete));
+}
+
+namespace {
+
+// Build an RGBA image whose top and bottom halves differ, so that any vertical flip changes the compressed bytes.
+Slic3r::ThumbnailData asymmetric_thumbnail(uint32_t width, uint32_t height)
+{
+    Slic3r::ThumbnailData data;
+    data.set(width, height);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            unsigned char *pixel = data.pixels.data() + (size_t(y) * width + x) * 4;
+            pixel[0] = y < height / 2 ? 255 : 0;
+            pixel[1] = uint8_t(x * 20);
+            pixel[2] = y < height / 2 ? 0 : 255;
+            pixel[3] = 255;
+        }
+    }
+    return data;
+}
+
+// Return the decoded payload of the base64 lines ("; <data>") of one framed thumbnail text block.
+std::string decoded_framed_payload(const std::string &block)
+{
+    std::string encoded;
+    std::istringstream lines(block);
+    std::string line;
+    while (std::getline(lines, line)) {
+        if (line.size() > 2 && line[0] == ';' && line[1] == ' ' && line.find(' ', 2) == std::string::npos)
+            encoded += line.substr(2);
+    }
+    std::string decoded(boost::beast::detail::base64::decoded_size(encoded.size()), '\0');
+    const std::pair<std::size_t, std::size_t> sizes =
+        boost::beast::detail::base64::decode(&decoded[0], encoded.data(), encoded.size());
+    decoded.resize(sizes.first);
+    return decoded;
+}
+
+// A render request of the given size with every other field at its neutral value.
+raw_gcode_thumbnail_render_request raw_image_request(uint32_t width, uint32_t height)
+{
+    raw_gcode_thumbnail_render_request request = {};
+    request.struct_size = sizeof(request);
+    request.width = width;
+    request.height = height;
+    request.custom_scale = 1.0;
+    return request;
+}
+
+} // namespace
+
+// For PNG, JPG and QOI, the raw image is the compressed file of the rendered image: equal to the payload of the framed
+// block of the same request and to a direct compression of the renderer's image (which fixes the orientation), with the
+// signature, the format and the size of the request.
+TEST_CASE("Built-in encoders return the compressed image without framing",
+          "[plugins][gcode][thumbnails][raw-image]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    struct Codec { const char *id; Slic3r::GCodeThumbnailsFormat format; raw_gcode_thumbnail_encoded_format encoded; std::string signature; };
+    const Codec codec = GENERATE(
+        Codec{"PNG", Slic3r::GCodeThumbnailsFormat::PNG, RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_PNG, std::string("\x89PNG", 4)},
+        Codec{"JPG", Slic3r::GCodeThumbnailsFormat::JPG, RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG, std::string("\xFF\xD8", 2)},
+        Codec{"QOI", Slic3r::GCodeThumbnailsFormat::QOI, RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI, std::string("qoif", 4)});
+    INFO(codec.id);
+
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::Config config_view(ApiHost::to_config_handle(&config));
+    const slic3r_api::OrchestratorView orch(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    GCodeThumbnailRenderer renderer(print, [](const ThumbnailsParams &params) {
+        return ThumbnailsList{asymmetric_thumbnail(uint32_t(params.sizes.front().x()), uint32_t(params.sizes.front().y()))};
+    });
+    const slic3r_api::GCodeThumbnailEncoder encoder(orch, print_view, config_view, renderer.c_renderer(), codec.id);
+    const slic3r_api::GCodeThumbnailEncoderView view = encoder.view();
+    REQUIRE(view.supports_images());
+
+    // A realistic thumbnail size.
+    const raw_gcode_thumbnail_render_request request = raw_image_request(64, 48);
+    const slic3r_api::GCodeThumbnailEncodedBlock framed = view.encode(request);
+    REQUIRE(framed.status == RAW_GCODE_THUMBNAIL_STATUS_SUCCESS);
+    const std::string framed_payload = decoded_framed_payload(std::string(framed.bytes));
+    const slic3r_api::GCodeThumbnailEncodedImageBlock image = view.encode_image(request);
+    REQUIRE(image.status == RAW_GCODE_THUMBNAIL_STATUS_SUCCESS);
+
+    const std::string raw(image.bytes);
+    const std::unique_ptr<GCodeThumbnails::CompressedImageBuffer> expected =
+        GCodeThumbnails::compress_thumbnail(asymmetric_thumbnail(64, 48), codec.format);
+    REQUIRE(expected->data != nullptr);
+    CHECK(raw == std::string(static_cast<const char *>(expected->data), expected->size));
+    CHECK(raw == framed_payload);
+    CHECK(image.format == codec.encoded);
+    CHECK(raw.compare(0, codec.signature.size(), codec.signature) == 0);
+    CHECK(image.width == 64);
+    CHECK(image.height == 48);
+}
+
+// A very small image compresses to more JPEG bytes than it has raw pixels, so the codec outgrows its first output buffer: two
+// compressions still give the same complete file (start and end markers).
+TEST_CASE("JPEG compression of a very small image is complete and repeatable",
+          "[plugins][gcode][thumbnails]")
+{
+    const Slic3r::ThumbnailData image = asymmetric_thumbnail(8, 6);
+    const std::unique_ptr<GCodeThumbnails::CompressedImageBuffer> first =
+        GCodeThumbnails::compress_thumbnail(image, Slic3r::GCodeThumbnailsFormat::JPG);
+    const std::unique_ptr<GCodeThumbnails::CompressedImageBuffer> second =
+        GCodeThumbnails::compress_thumbnail(image, Slic3r::GCodeThumbnailsFormat::JPG);
+    REQUIRE(first->data != nullptr);
+    REQUIRE(second->data != nullptr);
+    const std::string first_bytes(static_cast<const char *>(first->data), first->size);
+    const std::string second_bytes(static_cast<const char *>(second->data), second->size);
+    CHECK(first_bytes.size() > image.pixels.size());
+    CHECK(first_bytes == second_bytes);
+    CHECK(first_bytes.compare(0, 2, "\xFF\xD8", 2) == 0);
+    REQUIRE(first_bytes.size() >= 2);
+    CHECK(first_bytes.compare(first_bytes.size() - 2, 2, "\xFF\xD9", 2) == 0);
+}
+
+// BIQU is text only: its vtable has no raw-image callback and the view refuses to ask; a missing renderer skips the
+// optional image of an encoder that supports them.
+TEST_CASE("Raw images are unavailable for BIQU and skipped without a renderer",
+          "[plugins][gcode][thumbnails][raw-image]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::Config config_view(ApiHost::to_config_handle(&config));
+    const slic3r_api::OrchestratorView orch(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    const raw_gcode_thumbnail_render_request request = raw_image_request(8, 6);
+
+    const slic3r_api::GCodeThumbnailEncoder biqu(orch, print_view, config_view, nullptr, "BIQU");
+    CHECK_FALSE(biqu.view().supports_images());
+    CHECK_THROWS_WITH(biqu.view().encode_image(request), "The G-code thumbnail encoder does not support raw images.");
+
+    const slic3r_api::GCodeThumbnailEncoder jpg(orch, print_view, config_view, nullptr, "JPG");
+    REQUIRE(jpg.view().supports_images());
+    CHECK(jpg.view().encode_image(request).status == RAW_GCODE_THUMBNAIL_STATUS_SKIPPED);
+}
+
+namespace {
+
+// Answer of a hand-written C encoder: whatever the test asks encode_image to return.
+struct HandImageAnswer
+{
+    raw_gcode_thumbnail_status status = RAW_GCODE_THUMBNAIL_STATUS_SUCCESS;
+    raw_gcode_thumbnail_encoded_format format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG;
+    uint32_t width = 4;
+    uint32_t height = 3;
+    std::vector<uint8_t> bytes = {1, 2, 3};
+    const char *error = nullptr;
+};
+
+void hand_destroy(void *) {}
+
+void hand_encode(void *, const raw_gcode_thumbnail_render_request *, raw_gcode_thumbnail_encode_result *result)
+{
+    result->status = RAW_GCODE_THUMBNAIL_STATUS_SKIPPED;
+}
+
+void hand_encode_image(void *session, const raw_gcode_thumbnail_render_request *,
+                       raw_gcode_thumbnail_encoded_image_result *result)
+{
+    const HandImageAnswer &answer = *static_cast<const HandImageAnswer *>(session);
+    result->status = answer.status;
+    result->format = answer.format;
+    result->width = answer.width;
+    result->height = answer.height;
+    result->bytes = answer.bytes.empty() ? nullptr : answer.bytes.data();
+    result->bytes_size = answer.bytes.size();
+    result->error_message = answer.error;
+}
+
+// A session that implements encode_image and fails or skips according to the width of the request.
+class RecordingImageSession final : public slic3r_api::GCodeThumbnailEncoderSession
+{
+public:
+    explicit RecordingImageSession(uint32_t &destroyed) : m_destroyed(destroyed) {}
+    ~RecordingImageSession() override { ++m_destroyed; }
+
+    std::vector<uint8_t> encode(const raw_gcode_thumbnail_render_request &) override { return {1}; }
+    bool supports_image() const noexcept override { return true; }
+    slic3r_api::GCodeThumbnailEncodedImage encode_image(const raw_gcode_thumbnail_render_request &request) override
+    {
+        if (request.width == 7)
+            throw std::invalid_argument("bad image request");
+        if (request.width == 8)
+            throw std::runtime_error("image codec failed");
+        slic3r_api::GCodeThumbnailEncodedImage image;
+        if (request.width == 9)
+            return image;
+        image.format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI;
+        image.width = request.width;
+        image.height = request.height;
+        image.bytes = {uint8_t(request.width), 9, uint8_t(request.height)};
+        return image;
+    }
+
+private:
+    uint32_t &m_destroyed;
+};
+
+// A session that keeps the default: no raw image.
+class TextOnlySession final : public slic3r_api::GCodeThumbnailEncoderSession
+{
+public:
+    std::vector<uint8_t> encode(const raw_gcode_thumbnail_render_request &) override { return {1}; }
+};
+
+} // namespace
+
+// The C++ adapter turns a session's answers and exceptions into statuses and the view into results or clear errors: a
+// session without raw images publishes a null callback, and the view checks any provider's successful answer.
+TEST_CASE("The thumbnail adapter and view check raw image answers",
+          "[plugins][gcode][thumbnails][raw-image][adapter]")
+{
+    SECTION("a session that implements encode_image")
+    {
+        uint32_t destroyed = 0;
+        raw_gcode_thumbnail_encoder_instance instance = slic3r_api::make_gcode_thumbnail_encoder_instance(
+            std::unique_ptr<slic3r_api::GCodeThumbnailEncoderSession>(new RecordingImageSession(destroyed)));
+        REQUIRE(instance.vtable->encode_image != nullptr);
+        {
+            const slic3r_api::GCodeThumbnailEncoderView view(&instance);
+            REQUIRE(view.supports_images());
+            const slic3r_api::GCodeThumbnailEncodedImageBlock image = view.encode_image(raw_image_request(4, 3));
+            CHECK(image.status == RAW_GCODE_THUMBNAIL_STATUS_SUCCESS);
+            CHECK(image.format == RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI);
+            CHECK(image.width == 4);
+            CHECK(image.height == 3);
+            CHECK(std::vector<uint8_t>(image.bytes.begin(), image.bytes.end()) == std::vector<uint8_t>{4, 9, 3});
+
+            CHECK_THROWS_WITH(view.encode_image(raw_image_request(7, 3)), "bad image request");
+            CHECK_THROWS_WITH(view.encode_image(raw_image_request(8, 3)), "image codec failed");
+            const slic3r_api::GCodeThumbnailEncodedImageBlock skipped = view.encode_image(raw_image_request(9, 3));
+            CHECK(skipped.status == RAW_GCODE_THUMBNAIL_STATUS_SKIPPED);
+            CHECK(skipped.bytes.empty());
+        }
+        instance.vtable->destroy(instance.session);
+        CHECK(destroyed == 1);
+    }
+
+    SECTION("a session without raw images publishes a null callback")
+    {
+        raw_gcode_thumbnail_encoder_instance instance = slic3r_api::make_gcode_thumbnail_encoder_instance(
+            std::unique_ptr<slic3r_api::GCodeThumbnailEncoderSession>(new TextOnlySession()));
+        CHECK(instance.vtable->encode_image == nullptr);
+        {
+            const slic3r_api::GCodeThumbnailEncoderView view(&instance);
+            CHECK_FALSE(view.supports_images());
+            CHECK_THROWS_WITH(view.encode_image(raw_image_request(4, 3)),
+                              "The G-code thumbnail encoder does not support raw images.");
+        }
+        instance.vtable->destroy(instance.session);
+    }
+
+    SECTION("the view checks the answer of any encoder")
+    {
+        HandImageAnswer answer;
+        raw_gcode_thumbnail_encoder_vtable vtable = {sizeof(vtable), &hand_destroy, &hand_encode, &hand_encode_image};
+        raw_gcode_thumbnail_encoder_instance instance = {sizeof(instance), &answer, &vtable};
+        const slic3r_api::GCodeThumbnailEncoderView view(&instance);
+        const raw_gcode_thumbnail_render_request request = raw_image_request(4, 3);
+
+        CHECK(view.encode_image(request).format == RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG);
+        answer.format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET;
+        CHECK_THROWS_WITH(view.encode_image(request), "The G-code thumbnail encoder returned an unknown image format.");
+        answer.format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI;
+        answer.bytes.clear();
+        CHECK_THROWS_WITH(view.encode_image(request), "The G-code thumbnail encoder returned no image bytes.");
+        answer.bytes = {1};
+        answer.width = 5;
+        CHECK_THROWS_WITH(view.encode_image(request),
+                          "The G-code thumbnail encoder returned an image of unexpected dimensions.");
+        answer.width = 4;
+        answer.height = 2;
+        CHECK_THROWS_WITH(view.encode_image(request),
+                          "The G-code thumbnail encoder returned an image of unexpected dimensions.");
+        answer.height = 3;
+        answer.status = RAW_GCODE_THUMBNAIL_STATUS_ERROR;
+        answer.error = "provider failed";
+        CHECK_THROWS_WITH(view.encode_image(request), "provider failed");
+    }
+
+    SECTION("a null encode_image is accepted, a vtable of the version 1 size is refused")
+    {
+        HandImageAnswer answer;
+        raw_gcode_thumbnail_encoder_vtable vtable = {sizeof(vtable), &hand_destroy, &hand_encode, nullptr};
+        raw_gcode_thumbnail_encoder_instance instance = {sizeof(instance), &answer, &vtable};
+        const slic3r_api::GCodeThumbnailEncoderView view(&instance);
+        CHECK_FALSE(view.supports_images());
+        CHECK_THROWS(view.encode_image(raw_image_request(4, 3)));
+
+        vtable.struct_size = uint32_t(offsetof(raw_gcode_thumbnail_encoder_vtable, encode_image));
+        CHECK_THROWS(slic3r_api::GCodeThumbnailEncoderView(&instance));
+    }
 }
 
 // The firmware preamble selects only the initial tool and leaves automatic heating to the temperature plugin.

@@ -34,6 +34,9 @@ to the existing GCodeThumbnails::compress_thumbnail() function. A session asks
 the host for one RGBA8 image, normalizes strided/top-origin input to the legacy
 ThumbnailData layout, compresses it, and creates the complete textual block.
 The writer receives opaque bytes and therefore contains no format branches.
+The session also returns the compressed image alone (encode_image(): bytes, format, size) for PNG, JPG and
+QOI, which share the render, orientation and compression steps with the framed text block. BIQU is text only and
+publishes no image callback.
 
 Representative direct calls (branches are not a timeline):
 
@@ -152,8 +155,15 @@ public:
 
     std::vector<uint8_t> encode(const raw_gcode_thumbnail_render_request &request) override;
 
+    // Every codec except BIQU (text lines, not an image file) can return its compressed image.
+    bool supports_image() const noexcept override { return m_format != Slic3r::GCodeThumbnailsFormat::BIQU; }
+    GCodeThumbnailEncodedImage encode_image(const raw_gcode_thumbnail_render_request &request) override;
+
 private:
     Slic3r::ThumbnailData copy_image(const GCodeThumbnailImageView &image) const;
+    // Compress with the codec of this session; throw when the codec returns nothing.
+    std::unique_ptr<Slic3r::GCodeThumbnails::CompressedImageBuffer> compress_image(
+        const Slic3r::ThumbnailData &image) const;
     std::vector<uint8_t> frame_image(const Slic3r::ThumbnailData &image,
                                      bool with_format_tag) const;
 
@@ -176,15 +186,22 @@ Slic3r::ThumbnailData BuiltinThumbnailEncoderSession::copy_image(
     return copy;
 }
 
+std::unique_ptr<Slic3r::GCodeThumbnails::CompressedImageBuffer> BuiltinThumbnailEncoderSession::compress_image(
+    const Slic3r::ThumbnailData &image) const
+{
+    std::unique_ptr<Slic3r::GCodeThumbnails::CompressedImageBuffer> compressed =
+        Slic3r::GCodeThumbnails::compress_thumbnail(image, m_format);
+    if (!compressed || compressed->data == nullptr || compressed->size == 0)
+        throw std::runtime_error("The thumbnail codec returned no data.");
+    return compressed;
+}
+
 std::vector<uint8_t> BuiltinThumbnailEncoderSession::frame_image(
     const Slic3r::ThumbnailData &image,
     bool with_format_tag) const
 {
     static constexpr size_t MaximumBase64RowLength = 78;
-    std::unique_ptr<Slic3r::GCodeThumbnails::CompressedImageBuffer> compressed =
-        Slic3r::GCodeThumbnails::compress_thumbnail(image, m_format);
-    if (!compressed || compressed->data == nullptr || compressed->size == 0)
-        throw std::runtime_error("The thumbnail codec returned no data.");
+    std::unique_ptr<Slic3r::GCodeThumbnails::CompressedImageBuffer> compressed = compress_image(image);
 
     std::string output;
     const std::string tag = with_format_tag && !compressed->tag().empty() ?
@@ -225,6 +242,32 @@ std::vector<uint8_t> BuiltinThumbnailEncoderSession::encode(
     if (rendered.status == RAW_GCODE_THUMBNAIL_STATUS_SKIPPED)
         return {};
     return frame_image(copy_image(rendered.image), request.with_format_tag != 0);
+}
+
+// Render the image, compress it with the session's codec and return the file bytes without any text framing; an
+// optional image without renderer gives an empty result. The format is the codec's (never BIQU: see supports_image()).
+GCodeThumbnailEncodedImage BuiltinThumbnailEncoderSession::encode_image(
+    const raw_gcode_thumbnail_render_request &request)
+{
+    validate_gcode_thumbnail_render_request(request);
+
+    const GCodeThumbnailRenderResult rendered = m_renderer.render(request);
+    if (rendered.status == RAW_GCODE_THUMBNAIL_STATUS_SKIPPED)
+        return {};
+    const Slic3r::ThumbnailData image = copy_image(rendered.image);
+    const std::unique_ptr<Slic3r::GCodeThumbnails::CompressedImageBuffer> compressed = compress_image(image);
+
+    GCodeThumbnailEncodedImage result;
+    switch (m_format) {
+    case Slic3r::GCodeThumbnailsFormat::JPG: result.format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG; break;
+    case Slic3r::GCodeThumbnailsFormat::QOI: result.format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI; break;
+    default: result.format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_PNG; break;
+    }
+    result.width = image.width;
+    result.height = image.height;
+    const uint8_t *data = static_cast<const uint8_t *>(compressed->data);
+    result.bytes.assign(data, data + compressed->size);
+    return result;
 }
 
 // Common provider behavior: settings, group membership and session ownership.

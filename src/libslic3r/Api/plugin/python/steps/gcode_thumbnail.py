@@ -9,6 +9,13 @@ The host renderer owns its RGBA8 memory. :class:`GCodeThumbnailRendererView`
 therefore copies pixels before returning to plugin code. Encoder sessions own
 their latest bytes and diagnostics until the next callback; the acquiring
 consumer destroys the published instance exactly once when it closes the service.
+
+A provider creates one encoder session and publishes it through the thumbnail
+context. A consumer requests an encoded result, consumes or copies its bytes,
+then closes the acquired session. The renderer view copies the host pixels into
+a Python-owned image; that copy does not transfer ownership of the host buffer.
+Use encode() for a file-ready block and encode_image() for an unframed compressed
+image when the selected provider offers that operation.
 """
 
 from __future__ import annotations
@@ -21,8 +28,13 @@ from slic3r_abi import abi_requires_headers
 from slic3r_api_generated import (
     GCODE_THUMBNAIL,
     GCODE_THUMBNAIL_ENCODE,
+    GCODE_THUMBNAIL_ENCODE_IMAGE,
     GCODE_THUMBNAIL_ENCODER_DESTROY,
     PluginRunContext,
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG,
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_PNG,
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI,
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET,
     RAW_GCODE_THUMBNAIL_STATUS_ERROR,
     RAW_GCODE_THUMBNAIL_STATUS_INVALID_ARGUMENT,
     RAW_GCODE_THUMBNAIL_STATUS_SKIPPED,
@@ -36,6 +48,7 @@ from slic3r_api_generated import (
     RAW_GCODE_THUMBNAIL_PIXEL_FORMAT_RGBA8,
     RAW_GCODE_THUMBNAIL_PROJECTION_PERSPECTIVE,
     RawGcodeThumbnailEncodeResult,
+    RawGcodeThumbnailEncodedImageResult,
     RawGcodeThumbnailEncoderInstance,
     RawGcodeThumbnailImage,
     RawGcodeThumbnailRenderRequest,
@@ -118,6 +131,17 @@ class GCodeThumbnailImage:
     origin: int
 
 
+@dataclass(frozen=True)
+class GCodeThumbnailEncodedImage:
+    """One compressed image: ``format`` is a ``RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_*`` value other than UNSET,
+    ``data`` the bytes of a file of that format, ``width`` and ``height`` the size of the image they hold."""
+
+    format: int
+    width: int
+    height: int
+    data: bytes
+
+
 @abi_requires_headers("slic3r_gcode_thumbnail.h")
 class GCodeThumbnailRendererView:
     """Borrow a renderer while copying every returned image immediately."""
@@ -189,12 +213,18 @@ class GCodeThumbnailEncoderSession:
         """Return one complete file block; ``b''`` skips an optional image."""
         raise NotImplementedError
 
+    # A session that can also return a compressed image defines
+    #     def encode_image(self, request: GCodeThumbnailRequest) -> GCodeThumbnailEncodedImage
+    # (empty ``data`` skips an optional image). The base class does not define it: a session without that method
+    # publishes no raw-image callback.
+
 
 class RawGcodeThumbnailEncoderVTable(ctypes.Structure):
     _fields_ = [
         ("struct_size", ctypes.c_uint32),
         ("destroy", GCODE_THUMBNAIL_ENCODER_DESTROY),
         ("encode", GCODE_THUMBNAIL_ENCODE),
+        ("encode_image", GCODE_THUMBNAIL_ENCODE_IMAGE),
     ]
 
 
@@ -203,6 +233,7 @@ class _PublishedEncoder:
         self.session = session
         self.lock = threading.RLock()
         self.bytes = None
+        self.image_bytes = None
         self.error = None
 
 
@@ -260,12 +291,70 @@ def _encode(session_address, request_pointer, result_pointer) -> None:
         return
 
 
+def _encode_image(session_address, request_pointer, result_pointer) -> None:
+    """C callback of ``encode_image``: contain every exception and keep the bytes alive in the published owner."""
+    if not result_pointer:
+        return
+    try:
+        result = result_pointer.contents
+        if int(result.struct_size) < ctypes.sizeof(RawGcodeThumbnailEncodedImageResult):
+            return
+        result.status = RAW_GCODE_THUMBNAIL_STATUS_UNSET
+        result.format = RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET
+        result.width = 0
+        result.height = 0
+        result.bytes = None
+        result.bytes_size = 0
+        result.error_message = None
+        with _published_lock:
+            owner = _published.get(_address(session_address))
+        if owner is None or not request_pointer:
+            result.status = RAW_GCODE_THUMBNAIL_STATUS_INVALID_ARGUMENT
+            return
+        with owner.lock:
+            owner.image_bytes = None
+            owner.error = None
+            try:
+                if int(request_pointer.contents.struct_size) < ctypes.sizeof(RawGcodeThumbnailRenderRequest):
+                    raise ValueError("the thumbnail request is truncated")
+                image = owner.session.encode_image(GCodeThumbnailRequest(request_pointer.contents))
+                if not isinstance(image, GCodeThumbnailEncodedImage) or not isinstance(image.data, bytes):
+                    raise TypeError("thumbnail encode_image() must return a GCodeThumbnailEncodedImage with bytes")
+                if not image.data:
+                    result.status = RAW_GCODE_THUMBNAIL_STATUS_SKIPPED
+                    return
+                owner.image_bytes = (ctypes.c_uint8 * len(image.data)).from_buffer_copy(image.data)
+                result.format = int(image.format)
+                result.width = int(image.width)
+                result.height = int(image.height)
+                result.bytes = ctypes.cast(owner.image_bytes, ctypes.POINTER(ctypes.c_uint8))
+                result.bytes_size = len(image.data)
+                result.status = RAW_GCODE_THUMBNAIL_STATUS_SUCCESS
+            except BaseException as exc:
+                owner.error = ctypes.create_string_buffer(
+                    (str(exc) or exc.__class__.__name__).encode("utf-8", errors="replace")
+                )
+                result.status = RAW_GCODE_THUMBNAIL_STATUS_ERROR
+                result.error_message = ctypes.cast(owner.error, ctypes.c_char_p)
+    except BaseException:
+        return
+
+
 _destroy_callback = GCODE_THUMBNAIL_ENCODER_DESTROY(_destroy_encoder)
 _encode_callback = GCODE_THUMBNAIL_ENCODE(_encode)
+_encode_image_callback = GCODE_THUMBNAIL_ENCODE_IMAGE(_encode_image)
+# Two static vtables: a session that defines encode_image() publishes the callback, the others leave it null.
 _vtable = RawGcodeThumbnailEncoderVTable(
     ctypes.sizeof(RawGcodeThumbnailEncoderVTable),
     _destroy_callback,
     _encode_callback,
+    GCODE_THUMBNAIL_ENCODE_IMAGE(),
+)
+_vtable_with_image = RawGcodeThumbnailEncoderVTable(
+    ctypes.sizeof(RawGcodeThumbnailEncoderVTable),
+    _destroy_callback,
+    _encode_callback,
+    _encode_image_callback,
 )
 
 
@@ -282,10 +371,11 @@ def make_gcode_thumbnail_encoder_instance(
     key = id(owner)
     with _published_lock:
         _published[key] = owner
+    vtable = _vtable_with_image if getattr(type(session), "encode_image", None) is not None else _vtable
     return RawGcodeThumbnailEncoderInstance(
         ctypes.sizeof(RawGcodeThumbnailEncoderInstance),
         ctypes.c_void_p(key),
-        ctypes.cast(ctypes.pointer(_vtable), ctypes.c_void_p),
+        ctypes.cast(ctypes.pointer(vtable), ctypes.c_void_p),
     )
 
 
@@ -340,6 +430,49 @@ class GCodeThumbnailEncoderView:
             raise RuntimeError("the thumbnail encoder returned missing bytes")
         return ctypes.string_at(address, int(result.bytes_size)) if address else b""
 
+    def supports_images(self) -> bool:
+        """Tell whether the encoder can return compressed images (its vtable carries ``encode_image``)."""
+        table = self._vtable()
+        return table is not None and bool(table.contents.encode_image)
+
+    def encode_image(self, request: GCodeThumbnailRequest) -> GCodeThumbnailEncodedImage | None:
+        """Return the compressed image of the request, copied before the next call, or ``None`` when skipped.
+
+        An encoder without ``encode_image`` raises, and so does a successful answer with an unknown format,
+        no byte or an image size different from the request."""
+        if not self.valid():
+            return None
+        table = self._vtable()
+        if not table.contents.encode_image:
+            raise RuntimeError("the G-code thumbnail encoder does not support raw images")
+        result = RawGcodeThumbnailEncodedImageResult()
+        result.struct_size = ctypes.sizeof(result)
+        table.contents.encode_image(
+            self._instance.contents.session,
+            ctypes.byref(request.raw),
+            ctypes.byref(result),
+        )
+        if int(result.status) == int(RAW_GCODE_THUMBNAIL_STATUS_SKIPPED):
+            return None
+        if int(result.status) != int(RAW_GCODE_THUMBNAIL_STATUS_SUCCESS):
+            message = result.error_message.decode("utf-8", errors="replace") if result.error_message else "thumbnail encoding failed"
+            raise RuntimeError(message)
+        if int(result.format) not in (
+            int(RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_PNG),
+            int(RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG),
+            int(RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI),
+        ):
+            raise RuntimeError("the thumbnail encoder returned an unknown image format")
+        address = _raw_pointer(result, "bytes")
+        if not address or not int(result.bytes_size):
+            raise RuntimeError("the thumbnail encoder returned no image bytes")
+        if int(result.width) != request.width or int(result.height) != request.height:
+            raise RuntimeError("the thumbnail encoder returned an image of unexpected dimensions")
+        return GCodeThumbnailEncodedImage(
+            int(result.format), int(result.width), int(result.height),
+            ctypes.string_at(address, int(result.bytes_size)),
+        )
+
 
 @abi_requires_headers("steps/slic3r_step_gcode_thumbnail.h")
 class GCodeThumbnailContext:
@@ -377,6 +510,7 @@ class GCodeThumbnailContext:
 
 __all__ = [
     "GCodeThumbnailContext",
+    "GCodeThumbnailEncodedImage",
     "GCodeThumbnailEncoderSession",
     "GCodeThumbnailEncoderView",
     "GCodeThumbnailImage",
@@ -429,6 +563,16 @@ class GCodeThumbnailEncoder:
         if self._instance is None:
             raise RuntimeError("thumbnail encoder is closed")
         return GCodeThumbnailEncoderView(ctypes.pointer(self._instance)).encode(request)
+
+    def supports_images(self):
+        if self._instance is None:
+            raise RuntimeError("thumbnail encoder is closed")
+        return GCodeThumbnailEncoderView(ctypes.pointer(self._instance)).supports_images()
+
+    def encode_image(self, request):
+        if self._instance is None:
+            raise RuntimeError("thumbnail encoder is closed")
+        return GCodeThumbnailEncoderView(ctypes.pointer(self._instance)).encode_image(request)
 
     def close(self):
         instance, self._instance = self._instance, None

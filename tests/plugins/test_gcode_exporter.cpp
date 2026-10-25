@@ -59,6 +59,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Api/plugin/c/slic3r_gcode_firmware.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_export.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_thumbnail.h"
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeExportMetadataViews.hpp"
@@ -943,6 +944,25 @@ TEST_CASE("G-code exporter header is part of the plugin ABI registry", "[plugins
     CHECK(manifest_is_compatible("slic3r_gcode_firmware.h=6.0\n"));
     CHECK(manifest_is_compatible("slic3r_gcode_firmware.h=6.1\n"));
     CHECK_FALSE(manifest_is_compatible("slic3r_gcode_firmware.h=7.0\n"));
+}
+
+// The thumbnail service is at 2.0 because its encoder table grew after a size check that refuses shorter tables: a package built
+// against 1.0 is refused, while the context header, whose layout did not change, stays at 1.0.
+TEST_CASE("The thumbnail service header is at 2.0 in the plugin ABI registry",
+          "[plugins][gcode][thumbnails][abi][raw-image]")
+{
+    const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
+    REQUIRE(host.size() > size_t(SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL));
+    CHECK(host[SLIC3R_PLUGIN_API_GCODE_THUMBNAIL].header == "slic3r_gcode_thumbnail.h");
+    CHECK(host[SLIC3R_PLUGIN_API_GCODE_THUMBNAIL].version.major == 2);
+    CHECK(host[SLIC3R_PLUGIN_API_GCODE_THUMBNAIL].version.minor == 0);
+    CHECK(manifest_is_compatible("slic3r_gcode_thumbnail.h=2.0\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_gcode_thumbnail.h=2.1\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_gcode_thumbnail.h=1.0\n"));
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL].header == "steps/slic3r_step_gcode_thumbnail.h");
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL].version.major == 1);
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL].version.minor == 0);
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_thumbnail.h=1.0\n"));
 }
 
 // Construct short, extended, empty, and malformed ABI 2.1 and 2.2 records; assertions verify borrowed views accept the prefix and reject invalid sizes, lists, and strings without taking ownership.
