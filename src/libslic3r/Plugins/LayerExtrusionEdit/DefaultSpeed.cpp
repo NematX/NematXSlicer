@@ -65,7 +65,6 @@ const raw_used_config_key k_used_config_keys[] = {
     {"external_perimeter_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"filament_max_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"filament_max_volumetric_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"first_layer_flow_ratio", RAW_CO_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"first_layer_infill_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"first_layer_min_speed", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"first_layer_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -94,7 +93,6 @@ const char *const k_defined_config_keys[] = {
     "external_perimeter_speed",
     "filament_max_speed",
     "filament_max_volumetric_speed",
-    "first_layer_flow_ratio",
     "first_layer_infill_speed",
     "first_layer_min_speed",
     "first_layer_speed",
@@ -246,26 +244,6 @@ void initialize_default_speed_settings(orchestrator_handle *orchestrator)
     def.precision = 6;
     def.mode = RAW_CONFIG_OPTION_MODE_ADVANCED | RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_PRUSA;
     def.default_serialized_value = "0";
-    orchestrator_create_option_def(orchestrator, &def);
-
-    // ---- first_layer_flow_ratio | preset=RAW_PRESET_TYPE_FFF_PRINT ----
-    def = raw_config_option_def_init();
-    def.opt_key = "first_layer_flow_ratio";
-    def.type = RAW_CO_PERCENT;
-    def.container_type = RAW_CONTAINER_TYPE_REGION;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_GCODE;
-    def.category = RAW_OPTION_CATEGORY_WIDTH;
-    def.label = "First layer";
-    def.full_label = "First layer flow ratio";
-    def.tooltip = "You can increase this to over-extrude on the first layer if there is not enough plastic because your bed isn't levelled.\nNote: DON'T USE THIS if your only problem is bed leveling, LEVEL YOUR BED! Use this setting only as last resort after all calibrations failed.";
-    def.sidetext = "%";
-    def.has_min = 1;
-    def.min_value = 0;
-    def.precision = 6;
-    def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.default_serialized_value = "100%";
     orchestrator_create_option_def(orchestrator, &def);
 
     // ---- first_layer_infill_speed | preset=RAW_PRESET_TYPE_FFF_PRINT ----
@@ -918,11 +896,9 @@ double finalize_speed(const ExtrusionSettingsContext &context,
             speed = std::min(speed, first_layer_speed);
         }
 
-        // The minimum follows the cap. The flow ratio affects only the
-        // volumetric ceilings converted below.
+        // The minimum follows the cap. First-layer flow ratios are already in
+        // mm3_per_mm: the first-layer flow plugin runs before this one.
         speed = std::max(speed, context.object_config.float_or_default("first_layer_min_speed", 0.0));
-        if (has_volumetric_flow)
-            mm3_per_mm *= effective_value(context.object_config, "first_layer_flow_ratio", 1.0);
     }
 
     // Apply each independent linear or volumetric ceiling without ever raising

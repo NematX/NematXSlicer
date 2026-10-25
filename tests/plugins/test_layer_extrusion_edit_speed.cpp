@@ -3,12 +3,14 @@
 #include "gcode_test_helpers.hpp"
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+#include "plugin_e2e_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 
 #include "test_data.hpp"
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
@@ -149,12 +151,14 @@ float resolved_brim_acceleration(std::initializer_list<ConfigBase::SetDeserializ
 class ScopedActivePlugins
 {
 public:
-    explicit ScopedActivePlugins(std::initializer_list<const char *> plugin_ids)
+    // Retain the full pipeline for export tests, or isolate the supplied editors.
+    explicit ScopedActivePlugins(std::initializer_list<const char *> plugin_ids, bool keep_existing = false)
         : m_orchestrator(Orchestrator::instance())
     {
         for (Plugin *plugin : m_orchestrator.active_plugins())
             m_previous.push_back(plugin);
-        m_orchestrator.clear_active_plugins();
+        if (!keep_existing)
+            m_orchestrator.clear_active_plugins();
         for (const char *plugin_id : plugin_ids)
             REQUIRE(m_orchestrator.set_plugin_active(plugin_id, true));
     }
@@ -278,7 +282,8 @@ void prepare_regional_process_plan(
     std::initializer_list<ConfigBase::SetDeserializeItem> modifier_overrides,
     const char *region_setting_key,
     const std::vector<ExtrusionSpec> &specs,
-    bool path_inside_modifier = false)
+    bool path_inside_modifier = false,
+    std::initializer_list<ConfigBase::SetDeserializeItem> part_overrides = {})
 {
     ModelObject *model_object = prepared.model.add_object();
     model_object->name = "regional_process_parameter.stl";
@@ -286,6 +291,9 @@ void prepare_regional_process_plan(
     ModelVolume *part = model_object->add_volume(
         Slic3r::make_cube(20., 20., 10.), ModelVolumeType::MODEL_PART, false);
     part->set_type(ModelVolumeType::MODEL_PART);
+    DynamicPrintConfig part_config;
+    part_config.set_deserialize_strict(part_overrides);
+    part->config.assign_config(part_config);
 
     TriangleMesh modifier_mesh = Slic3r::make_cube(4., 20., 10.);
     modifier_mesh.translate(Vec3f(8.f, 0.f, 0.f));
@@ -661,6 +669,55 @@ Obtain the timing contract id from the same orchestrator used by the plugins.
 The id is deliberately looked up by name instead of cached process-wide so the
 test follows the contract required by independent orchestrator instances.
 */
+constexpr const char *FIRST_LAYER_FLOW_PLUGIN = "layer_extrusion_edit.first_layer_flow";
+
+// One printed leaf of the plan with its effective flow and length in mm.
+// layer_idx counts the plan's layer groups from the bottom.
+struct ObservedFlow
+{
+    size_t layer_idx = 0;
+    ExtrusionRole role = ExtrusionRole::None;
+    double mm3_per_mm = 0.;
+    double length = 0.;
+};
+
+// Walk one cloned tree, passing the parent's attributes down to its children.
+void collect_flows(const ExtrusionEntity &entity,
+                   const ExtrusionAttributes *inherited,
+                   size_t layer_idx,
+                   std::vector<ObservedFlow> &out)
+{
+    const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+    if (attributes == nullptr)
+        attributes = inherited;
+    if (entity.child_count() > 0) {
+        for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
+            collect_flows(entity.child(child_idx), attributes, layer_idx, out);
+        return;
+    }
+    if (attributes != nullptr && entity.has_polyline())
+        out.push_back(ObservedFlow{ layer_idx, attributes->extrusion_role(), attributes->mm3_per_mm,
+                                    unscaled(entity.length()) });
+}
+
+// Collect the effective flow of every printed leaf of the plan.
+std::vector<ObservedFlow> observed_plan_flows(const Print &print)
+{
+    std::vector<ObservedFlow> out;
+    REQUIRE(print.printing_plan() != nullptr);
+    size_t layer_idx = 0;
+    for (const PrintingGroup &group : print.printing_plan()->groups)
+        for (const PrintingLayerGroup &layer : group.layers) {
+            for (const PrintingToolGroup &tool : layer.tool_groups)
+                for (const PrintingExtrusion &extrusion : tool.extrusions) {
+                    REQUIRE(extrusion.root != nullptr);
+                    collect_flows(*extrusion.root, nullptr, layer_idx, out);
+                }
+            ++layer_idx;
+        }
+    return out;
+}
+
 PluginPropertyKey<PrintingLayerTimeProperty> registered_layer_time_property_key()
 {
     orchestrator_handle *orchestrator =
@@ -741,11 +798,13 @@ TEST_CASE("Layer extrusion editors expose independent config contracts",
     std::vector<std::string> speed_defined;
     for (const Plugin::DefinedConfigKey &key : speed_plugin->get_defined_config_keys())
         speed_defined.push_back(key.key);
-    CHECK(speed_defined.size() == 21);
+    CHECK(speed_defined.size() == 20);
     for (const char *expected : { "perimeter_speed", "bridge_speed", "max_print_speed",
-                                  "filament_max_speed", "first_layer_flow_ratio", "milling_speed" })
+                                  "filament_max_speed", "milling_speed" })
         CHECK(std::find(speed_defined.begin(), speed_defined.end(), expected) != speed_defined.end());
     CHECK(std::find(speed_defined.begin(), speed_defined.end(), "travel_speed") == speed_defined.end());
+    // The first-layer flow plugin owns this ratio and applies it to the flow itself.
+    CHECK(std::find(speed_defined.begin(), speed_defined.end(), "first_layer_flow_ratio") == speed_defined.end());
 
     // Keys the acceleration step reads; the plugin publishes exactly this set.
     std::vector<std::string> acceleration_defined;
@@ -2656,11 +2715,6 @@ TEST_CASE("Speed plugin owns its settings and activation rules",
     CHECK(def->invalidates_step == STEP_LAYER_EXTRUSION_EDIT);
     CHECK(def->default_value->serialize() == "60%");
 
-    def = PrintConfigDef::instance().get("first_layer_flow_ratio");
-    REQUIRE(def != nullptr);
-    CHECK(def->type == coPercent);
-    CHECK(def->default_value->serialize() == "100%");
-
     def = PrintConfigDef::instance().get("filament_max_speed");
     REQUIRE(def != nullptr);
     CHECK(def->type == coFloats);
@@ -2717,4 +2771,271 @@ TEST_CASE("Speed plugin owns its settings and activation rules",
 
     CHECK_FALSE(enabled(speed_config({{"max_volumetric_speed", "0"}}), "max_print_speed"));
     CHECK(enabled(speed_config({{"max_volumetric_speed", "5"}}), "max_print_speed"));
+}
+
+
+TEST_CASE("First-layer flow plugin owns the first-layer flow ratio",
+          "[plugins][layer-extrusion-edit][first-layer-flow][api]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Plugin *flow_plugin = orchestrator.get_plugin(FIRST_LAYER_FLOW_PLUGIN);
+    Plugin *speed_plugin = orchestrator.get_plugin(DEFAULT_SPEED_PLUGIN);
+    REQUIRE(flow_plugin != nullptr);
+    REQUIRE(speed_plugin != nullptr);
+    CHECK(flow_plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
+    // The speed plugin must see the final flow.
+    CHECK(flow_plugin->get_priority() < speed_plugin->get_priority());
+
+    std::vector<std::string> defined;
+    for (const Plugin::DefinedConfigKey &key : flow_plugin->get_defined_config_keys())
+        defined.push_back(key.key);
+    CHECK(defined == std::vector<std::string>{ "first_layer_flow_ratio" });
+
+    const ConfigOptionDef *def = PrintConfigDef::instance().get("first_layer_flow_ratio");
+    REQUIRE(def != nullptr);
+    CHECK(def->type == coPercent);
+    CHECK(def->default_value->serialize() == "100%");
+    CHECK(def->invalidates_step == STEP_LAYER_EXTRUSION_EDIT);
+}
+
+TEST_CASE("First-layer flow scales deposited paths of the first layer only",
+          "[plugins][layer-extrusion-edit][first-layer-flow]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"first_layer_flow_ratio", "125%"}, {"filament_first_layer_flow_ratio", "120%"}
+    });
+    ExtrusionSpec force_e{ExtrusionRole::Perimeter, 0.05};
+    force_e.force_e_per_mm = true;
+    prepare_ordered_plan(prepared, config, {
+        { ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}, ExtrusionSpec{ExtrusionRole::Skirt, 0.2},
+          ExtrusionSpec{ExtrusionRole::SolidInfill, 0.1}, force_e },
+        { ExtrusionSpec{ExtrusionRole::Perimeter, 0.2} }
+    });
+
+    run_editors(prepared, {FIRST_LAYER_FLOW_PLUGIN});
+    size_t first_layer_leaves = 0;
+    size_t upper_layer_leaves = 0;
+    for (const ObservedFlow &leaf : observed_plan_flows(prepared.print)) {
+        INFO("layer " << leaf.layer_idx << ", role " << uint16_t(leaf.role()) << ", flow " << leaf.mm3_per_mm);
+        if (leaf.layer_idx > 0) {
+            ++upper_layer_leaves;
+            CHECK(leaf.mm3_per_mm == Approx(0.2));
+            continue;
+        }
+        ++first_layer_leaves;
+        if (leaf.role == ExtrusionRole::SolidInfill)
+            CHECK(leaf.mm3_per_mm == Approx(0.1 * 1.25 * 1.2));
+        else if (leaf.mm3_per_mm < 0.1)
+            CHECK(leaf.mm3_per_mm == Approx(0.05)); // already E per mm: untouched
+        else
+            CHECK(leaf.mm3_per_mm == Approx(0.2 * 1.25 * 1.2));
+    }
+    CHECK(first_layer_leaves == 4);
+    CHECK(upper_layer_leaves == 1);
+}
+
+TEST_CASE("First-layer flow leaves paths untouched at 100%",
+          "[plugins][layer-extrusion-edit][first-layer-flow]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, speed_config({}), {{ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}}});
+    run_editors(prepared, {FIRST_LAYER_FLOW_PLUGIN});
+    const std::vector<ObservedFlow> leaves = observed_plan_flows(prepared.print);
+    REQUIRE(leaves.size() == 1);
+    CHECK(leaves.front().mm3_per_mm == 0.2);
+}
+
+TEST_CASE("First-layer flow splits a path at the border of regions with different ratios",
+          "[plugins][layer-extrusion-edit][first-layer-flow][regional]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    // The path crosses base / modifier / base; only the 4 mm wide modifier uses 200%.
+    // Support and skirt are printed outside the region masks: they are not split
+    // and use the object's default region (the base part, 100%), whatever the
+    // order of the source regions.
+    prepare_regional_process_plan(prepared, speed_config({}), {{"first_layer_flow_ratio", "200%"}},
+                                  "first_layer_flow_ratio",
+                                  {ExtrusionSpec{ExtrusionRole::Perimeter, 0.2},
+                                   ExtrusionSpec{ExtrusionRole::SupportMaterial, 0.1},
+                                   ExtrusionSpec{ExtrusionRole::Skirt, 0.05}});
+    run_editors(prepared, {FIRST_LAYER_FLOW_PLUGIN});
+
+    double base_length = 0.;
+    double modifier_length = 0.;
+    size_t outside_leaves = 0;
+    for (const ObservedFlow &leaf : observed_plan_flows(prepared.print)) {
+        INFO("flow " << leaf.mm3_per_mm << ", length " << leaf.length);
+        if (leaf.role == ExtrusionRole::SupportMaterial || leaf.role == ExtrusionRole::Skirt) {
+            ++outside_leaves;
+            CHECK(leaf.mm3_per_mm == Approx(leaf.role == ExtrusionRole::Skirt ? 0.05 : 0.1));
+            CHECK(leaf.length == Approx(17.).margin(0.01));
+        } else if (leaf.mm3_per_mm == Approx(0.4))
+            modifier_length += leaf.length;
+        else {
+            CHECK(leaf.mm3_per_mm == Approx(0.2));
+            base_length += leaf.length;
+        }
+    }
+    CHECK(outside_leaves == 2);
+    CHECK(modifier_length == Approx(4.).margin(0.01));
+    CHECK(base_length == Approx(13.).margin(0.01));
+}
+
+TEST_CASE("First-layer exterior flow uses object defaults even for a uniform material partition",
+          "[plugins][layer-extrusion-edit][first-layer-flow][regional]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *material_ratio = GENERATE("100%", "200%");
+    PreparedSpeedPrint prepared;
+    prepare_regional_process_plan(prepared,
+        speed_config({{"first_layer_flow_ratio", "150%"}, {"perimeter_speed", "70"}}),
+        {{"first_layer_flow_ratio", material_ratio}, {"perimeter_speed", "30"}}, "perimeter_speed",
+        {ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}, ExtrusionSpec{ExtrusionRole::SupportMaterial, 0.1},
+         ExtrusionSpec{ExtrusionRole::Skirt, 0.05}}, false, {{"first_layer_flow_ratio", material_ratio}});
+    run_editors(prepared, {FIRST_LAYER_FLOW_PLUGIN});
+    const std::vector<ObservedFlow> flows = observed_plan_flows(prepared.print);
+    REQUIRE(flows.size() == 3);
+    for (const ObservedFlow &flow : flows) {
+        if (flow.role == ExtrusionRole::SupportMaterial)
+            CHECK(flow.mm3_per_mm == Approx(0.15));
+        else if (flow.role == ExtrusionRole::Skirt)
+            CHECK(flow.mm3_per_mm == Approx(0.075));
+        else
+            CHECK(flow.mm3_per_mm == Approx(material_ratio[0] == '1' ? 0.2 : 0.4));
+    }
+}
+
+TEST_CASE("First-layer flow selects one regional value for a deposit without duplicating its command",
+          "[plugins][layer-extrusion-edit][first-layer-flow][regional][deposit]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool inside_modifier = GENERATE(false, true);
+    PreparedSpeedPrint prepared;
+    prepare_regional_process_plan(prepared,
+        speed_config({{"first_layer_flow_ratio", "125%"}, {"filament_first_layer_flow_ratio", "120%"}}),
+        {{"first_layer_flow_ratio", "200%"}}, "first_layer_flow_ratio", {ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}});
+    ExtrusionEntity &root = single_plan_root(prepared.print);
+    REQUIRE(root.child_count() == 1);
+    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(root.child(0));
+    Point point = (deposit.first_point() + deposit.last_point()) / 2;
+    if (!inside_modifier)
+        point.x() -= scale_i(5.);
+    deposit.polyline() = ArcPolyline();
+    deposit.polyline().append(point);
+    deposit.add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    run_editors(prepared, {FIRST_LAYER_FLOW_PLUGIN});
+    const std::vector<ObservedFlow> flows = observed_plan_flows(prepared.print);
+    REQUIRE(flows.size() == 1);
+    CHECK(flows.front().mm3_per_mm == Approx(0.2 * (inside_modifier ? 2. : 1.25) * 1.2));
+    CHECK(deposit.child_count() == 0);
+    CHECK(deposit.polyline().size() == 1);
+    CHECK(deposit.first_point() == point);
+    REQUIRE(deposit.get_property<ExtrusionPropertySpecialCommand>() != nullptr);
+    CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
+}
+
+TEST_CASE("First-layer flow declared settings pass a linear STL export matrix",
+          "[plugins][plugin-e2e][first-layer-flow][first-layer-flow-e2e]")
+{
+    namespace E2E = Test::PluginE2E;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedActivePlugins active({FIRST_LAYER_FLOW_PLUGIN, "ordering.extrusion_tree.advanced"}, true);
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"first_layer_flow_ratio", "125%"}, {"filament_first_layer_flow_ratio", "120%"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
+    REQUIRE_FALSE(ordering_key.empty());
+    baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");
+    const std::vector<E2E::Domain> domains = {
+        {{"first_layer_flow_ratio"}, {{"region 50%", {{"first_layer_flow_ratio", "50%"}}},
+            {"region 100%", {{"first_layer_flow_ratio", "100%"}}}, {"region 150%", {{"first_layer_flow_ratio", "150%"}}}}},
+        {{"filament_first_layer_flow_ratio"}, {{"filament 50%", {{"filament_first_layer_flow_ratio", "50%"}}},
+            {"filament 100%", {{"filament_first_layer_flow_ratio", "100%"}}},
+            {"filament 150%", {{"filament_first_layer_flow_ratio", "150%"}}}}}
+    };
+    const std::vector<E2E::Case> cases = E2E::linear_cases(host, {FIRST_LAYER_FLOW_PLUGIN}, baseline, domains);
+    const TriangleMesh mesh = E2E::stl_fixture(false);
+    for (const E2E::Case &test : cases) {
+        INFO(test.name);
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, E2E::apply_case(baseline, test));
+        print.process();
+        const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+        std::string code;
+        try {
+            const std::string exported = host.export_gcode_cli(print, path.string());
+            code = Test::GCode::read_text_file(exported);
+            Test::GCode::remove_output_pair(path);
+        } catch (...) {
+            Test::GCode::remove_output_pair(path);
+            throw;
+        }
+        CHECK(code.find("G1 ") != std::string::npos);
+        CHECK(code.find(" E") != std::string::npos);
+        size_t material_leaves = 0;
+        for (const ObservedFlow &flow : observed_plan_flows(print))
+            if (flow.role == ExtrusionRole::Perimeter || flow.role == ExtrusionRole::ExternalPerimeter ||
+                flow.role == ExtrusionRole::SolidInfill || flow.role == ExtrusionRole::InternalInfill) {
+                ++material_leaves;
+                CHECK(std::isfinite(flow.mm3_per_mm));
+                CHECK(flow.mm3_per_mm > 0.);
+            }
+        CHECK(material_leaves > 0);
+    }
+}
+
+TEST_CASE("First-layer flow rejects a zero ratio",
+          "[plugins][layer-extrusion-edit][first-layer-flow][validation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, speed_config({{"first_layer_flow_ratio", "0%"}}),
+                         {{ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}}});
+
+    ScopedActivePlugins active({FIRST_LAYER_FLOW_PLUGIN});
+    Orchestrator &orchestrator = Orchestrator::instance();
+    orchestrator.reset_plugin_cancel();
+    (void)orchestrator.consume_plugin_messages();
+    CHECK_THROWS_AS(Steps::StepLayerExtrusionEdition::run_step(orchestrator, prepared.print), RuntimeError);
+    bool found_ratio_error = false;
+    for (const Orchestrator::PluginMessage &message : orchestrator.consume_plugin_messages())
+        found_ratio_error = found_ratio_error || message.message.find("first_layer_flow_ratio") != std::string::npos;
+    CHECK(found_ratio_error);
+    orchestrator.reset_plugin_cancel();
+}
+
+TEST_CASE("First-layer flow feeds the volumetric speed limit",
+          "[plugins][layer-extrusion-edit][first-layer-flow][speed]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // 12 mm3/s over 0.2 mm3/mm gives 60 mm/s; at 200% the flow is 0.4 mm3/mm: 30 mm/s.
+    const DynamicPrintConfig config = speed_config({
+        {"perimeter_speed", "100"}, {"first_layer_speed", "100%"}, {"first_layer_flow_ratio", "200%"},
+        {"max_print_speed", "0"}, {"max_volumetric_speed", "0"}, {"filament_max_speed", "0"},
+        {"filament_max_volumetric_speed", "12"}
+    });
+    SECTION("with the first-layer flow plugin") {
+        PreparedSpeedPrint prepared;
+        prepare_ordered_plan(prepared, config, {{ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}}});
+        run_editors(prepared, {FIRST_LAYER_FLOW_PLUGIN, DEFAULT_SPEED_PLUGIN});
+        const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+        REQUIRE(leaves.size() == 1);
+        CHECK(leaves.front().speed == Approx(30.f));
+    }
+    SECTION("the speed plugin no longer applies the ratio itself") {
+        PreparedSpeedPrint prepared;
+        prepare_ordered_plan(prepared, config, {{ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}}});
+        run_editors(prepared, {DEFAULT_SPEED_PLUGIN});
+        const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+        REQUIRE(leaves.size() == 1);
+        CHECK(leaves.front().speed == Approx(60.f));
+    }
 }

@@ -85,6 +85,11 @@ struct RegionalProcessPartition
 using RegionalValueResolver = std::function<float(const Config &)>;
 using RegionalValuePredicate = std::function<bool(float)>;
 
+// Read a deposit's single point in the immutable partition. Return the matching
+// value, or the first-region fallback for missing/conflicting masks. No split or
+// ownership transfer occurs; invalid point access propagates.
+float deposit_value(const ExtrusionEntity &leaf, const RegionalProcessPartition &partition);
+
 // Build one raw configuration partition in PrintingPlan instance coordinates.
 RegionalSettingsPartition build_regional_settings_partition(
     storage_handle *storage,
