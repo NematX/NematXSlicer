@@ -655,6 +655,15 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
     return out;
 }
 
+/*
+Resolve providers by serialized enum ID because activation may reorder entries in the registered
+table. The group, configuration, and plugin list are borrowed and unchanged; the returned plugin is
+borrowed. An empty list returns null, while missing configuration, a missing option, or one
+non-thumbnail provider returns the first provider. A matching ID returns its provider. Unknown
+regional seam or thumbnail IDs return null so a stale seam choice cannot silently move seam
+placement; other unknown IDs retain the first-provider fallback. An out-of-table enum serializes to
+an empty string and follows this same unknown-ID path.
+*/
 Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
                                    const std::vector<Plugin *> &plugins,
                                    const ConfigBase *config)
@@ -668,27 +677,15 @@ Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
     if (option == nullptr)
         return plugins.front();
 
-    // Resolve dynamic provider ids against the active set without assuming
-    // that activation preserves the original enum positions.
-    if (group.step == GCODE_THUMBNAIL && group.group_id == "thumbnail_encoder_plugin") {
-        const std::string id = option->serialize();
-        for (Plugin *plugin : plugins)
-            if (plugin->get_id() == id) return plugin;
+    const std::string selected_id = option->serialize();
+    for (Plugin *plugin : plugins)
+        if (plugin->get_id() == selected_id)
+            return plugin;
+
+    if ((group.step == SEAM_PLACER && group.group_id == "seam_placer_plugin") ||
+        (group.step == GCODE_THUMBNAIL && group.group_id == "thumbnail_encoder_plugin"))
         return nullptr;
-    }
-
-    const int32_t selected_idx = option->get_int();
-    if (selected_idx < 0 || size_t(selected_idx) >= plugins.size()) {
-        // Regional seam selection is part of the printed geometry contract: an
-        // explicit stale value must fail instead of silently changing where a
-        // seam is placed. Preserve the historical fallback for other groups.
-        if (group.step == SEAM_PLACER &&
-            group.group_id == "seam_placer_plugin")
-            return nullptr;
-        return plugins.front();
-    }
-
-    return plugins[size_t(selected_idx)];
+    return plugins.front();
 }
 
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,

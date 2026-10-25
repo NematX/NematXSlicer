@@ -323,6 +323,12 @@ const PrintRegion *replace_region_config(LayerRegion &layer_region, const PrintR
 
 struct RegionalRouterFixture
 {
+    /*
+    Build a two-region print and one marked closed plan loop; selector identifiers
+    are decoded through the registered enum, and include_fixed_candidate controls
+    the source-region set. The helper owns its print, object, and source island;
+    preparation or enum failures reach Catch2.
+    */
     explicit RegionalRouterFixture(const bool include_fixed_candidate)
     {
         prepare_cube_print(prepared, perimeter_config({{k_direction_key, "rear"}}));
@@ -341,12 +347,12 @@ struct RegionalRouterFixture
         fixed_config.add_plugin_option(
             *const_cast<ConfigOptionDef *>(selector_definition));
         REQUIRE(fixed_config.opt<ConfigOptionInt>(selector_key) != nullptr);
-        fixed_config.opt<ConfigOptionInt>(selector_key)->set_int(0);
+        fixed_config.set_deserialize_strict(selector_key, k_fixed_plugin);
         fixed_print_region = replace_region_config(*fixed_region, fixed_config);
 
         PrintRegionConfig routed_config = fixed_print_region->config();
         REQUIRE(routed_config.opt<ConfigOptionInt>(selector_key) != nullptr);
-        routed_config.opt<ConfigOptionInt>(selector_key)->set_int(1);
+        routed_config.set_deserialize_strict(selector_key, k_routing_plugin);
         PrintObjectRegions *shared_regions =
             const_cast<PrintObjectRegions *>(object.shared_regions());
         shared_regions->all_regions.emplace_back(
@@ -575,6 +581,11 @@ TEST_CASE("Fixed-direction seam placer registers its regional contract",
         }));
 }
 
+/*
+Route marked loops through their configured regional providers and verify priority, initialization,
+and selector diagnostics. Scoped activation restores prior providers, each local print owns its
+regions, and unresolved providers throw for the diagnostic assertions.
+*/
 TEST_CASE("Regional seam routing initializes providers and ranks overlapping regions",
           "[plugins][seam-placer][router]")
 {
@@ -694,7 +705,26 @@ TEST_CASE("Regional seam routing initializes providers and ranks overlapping reg
                 fixture.print_view(), fixture.plan_view(),
                 reinterpret_cast<storage_handle *>(&fixture.scratch_storage)),
             Catch::Matchers::Contains(
-                "exclusive_group_10250_seam_placer_plugin_plugin' = '99'"));
+                "exclusive_group_10250_seam_placer_plugin_plugin' = '#99'"));
+    }
+
+    SECTION("an inactive provider identifier is named in the error")
+    {
+        Plugin *cost = orchestrator.get_plugin("seam_placer.cost");
+        REQUIRE(cost != nullptr);
+        CHECK_FALSE(orchestrator.is_plugin_active(cost));
+        RegionalRouterFixture fixture(false);
+        const std::string selector_key = Slic3r::Steps::plugin_exclusive_group_option_key(
+            orchestrator, SEAM_PLACER, k_seam_group);
+        PrintRegionConfig config = fixture.routed_print_region->config();
+        config.set_deserialize_strict(selector_key, "seam_placer.cost");
+        fixture.routed_print_region = replace_region_config(*fixture.routed_region, config);
+        CHECK_THROWS_WITH(
+            slic3r_api::SeamPlacement::SeamPlacerRouter(
+                reinterpret_cast<orchestrator_handle *>(&orchestrator),
+                fixture.print_view(), fixture.plan_view(),
+                reinterpret_cast<storage_handle *>(&fixture.scratch_storage)),
+            Catch::Matchers::Contains(selector_key + "' = 'seam_placer.cost'"));
     }
 }
 
@@ -1865,6 +1895,12 @@ TEST_CASE("Random curve utilities handle degenerate segments and clockwise major
 }
 
 
+/*
+Select Random by its registered enum identifier for one marked plan loop and compare the routed
+seam with the direct session's point. The provider guard restores activation, the copied region
+configuration is replaced in the owned print, and router views borrow that print until completion.
+Missing enum values or provider selection errors fail the Catch2 test.
+*/
 TEST_CASE("Regional seam router selects the configured Random provider", "[plugins][seam-placer][random][router]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1874,7 +1910,7 @@ TEST_CASE("Regional seam router selects the configured Random provider", "[plugi
     const std::string selector=Slic3r::Steps::plugin_exclusive_group_option_key(Orchestrator::instance(),SEAM_PLACER,"seam_placer_plugin");
     PrintRegionConfig config=fixture.region->region().config();
     REQUIRE(config.opt<ConfigOptionInt>(selector) != nullptr);
-    config.opt<ConfigOptionInt>(selector)->set_int(1);
+    config.set_deserialize_strict(selector, "seam_placer.random");
     replace_region_config(*fixture.region, config);
     const slic3r_api::ExtrusionEntity loop=fixture.add(square_loop()).root();
     slic3r_api::SeamPlacer reference=create_fixed_session(fixture.prepared.print,"seam_placer.random");

@@ -81,9 +81,11 @@ std::vector<PrintRegion> collect_print_regions(const Print &print, const Printin
 
 /*
 Resolve the configured SEAM_PLACER provider for each region and group regions
-selecting the same provider into one initialization batch. An invalid selector
-is reported with the option key and stored integer value so the caller can
-distinguish configuration failure from provider execution failure.
+selecting the same provider into one initialization batch. The orchestrator and
+region views are borrowed; returned batches own their storage and retain borrowed
+provider and region handles. An unresolved choice is a configuration error, reported
+with its region index, selector key, and ID, "#<rank>", or "<missing>" so it is distinct
+from a provider-session execution failure.
 */
 std::vector<ProviderBatch> group_regions_by_provider(
     orchestrator_handle *orchestrator,
@@ -183,6 +185,7 @@ std::vector<PrintRegion> collect_print_regions(const Print &print, const Printin
     return result;
 }
 
+/* Group borrowed region views by provider handle; the returned vector owns only its batch storage. */
 std::vector<ProviderBatch> group_regions_by_provider(
     orchestrator_handle *orchestrator,
     const std::vector<PrintRegion> &regions)
@@ -198,16 +201,17 @@ std::vector<ProviderBatch> group_regions_by_provider(
         const PluginView provider = orchestrator_view.select_plugin(
             region.config().handle(), SEAM_PLACER, k_seam_placer_group);
         if (!provider.valid()) {
-
-            // Include the actual selector in the diagnostic. A missing or
-            // stale exclusive-group value is a configuration error, not a
-            // provider-session error.
+            // An absent or stale choice is a configuration error, not a provider-session error.
             const std::string option_key = Slic3r::Steps::plugin_exclusive_group_option_key(
                 *reinterpret_cast<const Slic3r::Orchestrator *>(orchestrator),
                 SEAM_PLACER, k_seam_placer_group);
             const ConfigOption option = region.config().get(option_key.c_str());
-            const std::string selected = option.valid() ?
-                std::to_string(option.get_int()) : "<missing>";
+            std::string selected = "<missing>";
+            if (option.valid()) {
+                selected = option.serialize();
+                if (selected.empty())
+                    selected = "#" + std::to_string(option.get_int());
+            }
             throw std::runtime_error(
                 "PrintRegion #" + std::to_string(region_idx) + " has selector '" +
                 option_key + "' = '" + selected +

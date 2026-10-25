@@ -642,6 +642,11 @@ TEST_CASE("Solidarity and dependencies reach one non-mutating activation proposa
     CHECK_FALSE(orchestrator.is_plugin_active(ids[5]));
 }
 
+/*
+Exercise service lookup and group selection through the C and C++ host APIs using the high-priority
+provider's serialized ID. ActivePluginGuard restores Orchestrator activation, the local config owns
+its selector, and missing registrations or selections fail Catch2 assertions.
+*/
 TEST_CASE("The orchestrator finds and selects generic service plugins",
           "[plugins][orchestrator][service-plugin]")
 {
@@ -667,7 +672,7 @@ TEST_CASE("The orchestrator finds and selects generic service plugins",
     DynamicConfig config;
     const std::string selector_key =
         "exclusive_group_slic3r_test_generic_service_slic3r_test_generic_service_provider_plugin";
-    config.set_key_value(selector_key, new ConfigOptionInt(1));
+    config.set_key_value(selector_key, new ConfigOptionString(g_service_high.id));
     const orchestrator_plugin_handle *selected = orchestrator_select_plugin(
         handle, ApiHost::to_config_handle(&config), g_service_low.step, ServiceGroup);
     REQUIRE(selected != nullptr);

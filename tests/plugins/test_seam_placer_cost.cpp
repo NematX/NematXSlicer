@@ -23,6 +23,7 @@
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/SeamPlacerViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
+#include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -56,6 +57,9 @@ using namespace Slic3r::Test::PerimeterPluginTests;
 const char *const k_cost_plugin = "seam_placer.cost";
 const char *const k_aligned_plugin = "seam_placer.aligned";
 const char *const k_contiguous_plugin = "seam_placer.contiguous";
+const char *const k_fixed_plugin = "seam_placer.fixed";
+const char *const k_random_plugin = "seam_placer.random";
+const char *const k_regional_seam_plugin = "slic3r.test.seam_placer.regional";
 
 struct CancellationProbe {
     size_t checks = 0;
@@ -517,7 +521,158 @@ slic3r_api::PrintingExtrusion append_aligned_loop(
     return extrusion;
 }
 
+/*
+Set a registered plugin to the requested state for one test scope and restore its
+previous state when the guard is destroyed, including exception unwinding. The
+Orchestrator and Plugin are borrowed; missing plugins or failed activation fail
+the Catch2 test, while a failed restoration is ignored. The guard is noncopyable.
+*/
+class ScopedPluginActivation
+{
+public:
+    // Activate the registered plugin and remember its previous state.
+    ScopedPluginActivation(Orchestrator &orchestrator, const char *plugin_id, bool active = true) :
+        m_orchestrator(orchestrator), m_plugin(orchestrator.get_plugin(plugin_id))
+    {
+        REQUIRE(m_plugin != nullptr);
+        m_was_active = orchestrator.is_plugin_active(m_plugin);
+        REQUIRE(m_orchestrator.set_plugin_active(m_plugin, active));
+    }
+
+    // Restore the activation saved during construction.
+    ~ScopedPluginActivation()
+    {
+        m_orchestrator.set_plugin_active(m_plugin, m_was_active);
+    }
+
+    ScopedPluginActivation(const ScopedPluginActivation &) = delete;
+    ScopedPluginActivation &operator=(const ScopedPluginActivation &) = delete;
+
+private:
+    Orchestrator &m_orchestrator;
+    Plugin *m_plugin;
+    bool m_was_active = false;
+};
+
 } // namespace
+
+/*
+Resolve seam and perimeter providers by enum ID in separate Catch2 sections. Scoped guards restore
+provider activation, each DynamicPrintConfig owns its options, and selected Plugin pointers are
+borrowed; empty provider results or unexpected IDs fail assertions without changing registration.
+*/
+TEST_CASE("Exclusive selectors resolve active providers by identifier",
+          "[plugins][config][seam-placer]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+
+    SECTION("seam provider identifiers")
+    {
+        std::vector<std::unique_ptr<ScopedPluginActivation>> seam_activation;
+        for (Plugin *plugin : orchestrator.registered_plugins()) {
+            if (plugin == nullptr || plugin->get_step() != SEAM_PLACER ||
+                plugin->get_exclusive_group() != "seam_placer_plugin")
+                continue;
+            const std::string &id = plugin->get_id();
+            const bool should_be_active = id == k_contiguous_plugin ||
+                id == k_fixed_plugin || id == k_random_plugin;
+            seam_activation.emplace_back(std::make_unique<ScopedPluginActivation>(
+                orchestrator, id.c_str(), should_be_active));
+        }
+
+        std::vector<Plugin *> active_seam_providers;
+        for (Plugin *plugin : orchestrator.get_active_plugins_for_step(SEAM_PLACER))
+            if (plugin->get_exclusive_group() == "seam_placer_plugin")
+                active_seam_providers.push_back(plugin);
+        REQUIRE(active_seam_providers.size() == 3);
+        CHECK(active_seam_providers[0]->get_id() == k_contiguous_plugin);
+        CHECK(active_seam_providers[0]->get_priority() == 800);
+        CHECK(active_seam_providers[1]->get_id() == k_fixed_plugin);
+        CHECK(active_seam_providers[1]->get_priority() == 900);
+        CHECK(active_seam_providers[2]->get_id() == k_random_plugin);
+        CHECK(active_seam_providers[2]->get_priority() == 1000);
+        Plugin *regional_test_provider = orchestrator.get_plugin(k_regional_seam_plugin);
+        REQUIRE(regional_test_provider != nullptr);
+        CHECK(regional_test_provider->get_step() == SEAM_PLACER);
+        CHECK(regional_test_provider->get_exclusive_group() == "seam_placer_plugin");
+        CHECK_FALSE(orchestrator.is_plugin_active(regional_test_provider));
+
+        const std::string seam_selector = Steps::plugin_exclusive_group_option_key(
+            orchestrator, SEAM_PLACER, "seam_placer_plugin");
+        DynamicPrintConfig seam_config;
+        seam_config.set_deserialize_strict(seam_selector, k_contiguous_plugin);
+        Plugin *selected_seam = Steps::selected_active_plugin_from_group(
+            orchestrator, SEAM_PLACER, "seam_placer_plugin", &seam_config);
+        REQUIRE(selected_seam != nullptr);
+        CHECK(selected_seam->get_id() == k_contiguous_plugin);
+
+        seam_config.set_deserialize_strict(seam_selector, k_random_plugin);
+        selected_seam = Steps::selected_active_plugin_from_group(
+            orchestrator, SEAM_PLACER, "seam_placer_plugin", &seam_config);
+        REQUIRE(selected_seam != nullptr);
+        CHECK(selected_seam->get_id() == k_random_plugin);
+
+        seam_config.set_deserialize_strict(seam_selector, k_cost_plugin);
+        CHECK(Steps::selected_active_plugin_from_group(
+                  orchestrator, SEAM_PLACER, "seam_placer_plugin", &seam_config) == nullptr);
+    }
+
+    SECTION("perimeter provider identifiers")
+    {
+        Plugin *simple = orchestrator.get_plugin("perimeter.generator.simple");
+        Plugin *classic = orchestrator.get_plugin("perimeter.generator.classic");
+        Plugin *arachne = orchestrator.get_plugin("perimeter.generator.arachne");
+        REQUIRE(simple != nullptr);
+        REQUIRE(classic != nullptr);
+        REQUIRE(arachne != nullptr);
+        CHECK(simple->get_step() == STEP_PERIMETER);
+        CHECK(simple->get_priority() == 0);
+        CHECK(classic->get_step() == STEP_PERIMETER);
+        CHECK(classic->get_priority() == 5);
+        CHECK(arachne->get_step() == STEP_PERIMETER);
+        CHECK(arachne->get_priority() == 10);
+
+        std::vector<std::unique_ptr<ScopedPluginActivation>> perimeter_activation;
+        for (Plugin *plugin : orchestrator.registered_plugins()) {
+            if (plugin == nullptr || plugin->get_step() != STEP_PERIMETER)
+                continue;
+            const std::string &id = plugin->get_id();
+            const bool should_be_active = id == classic->get_id() || id == arachne->get_id();
+            perimeter_activation.emplace_back(std::make_unique<ScopedPluginActivation>(
+                orchestrator, id.c_str(), should_be_active));
+        }
+
+        const std::map<slicing_step_t, Steps::StepExclusiveGroup> &exclusive_steps =
+            Steps::get_exclusive_steps();
+        const std::map<slicing_step_t, Steps::StepExclusiveGroup>::const_iterator perimeter_group =
+            exclusive_steps.find(STEP_PERIMETER);
+        REQUIRE(perimeter_group != exclusive_steps.end());
+        CHECK(perimeter_group->second.group_id == "step_perimeter_plugin");
+        CHECK(perimeter_group->second.option_key_storage == "step_perimeter_plugin");
+
+        const std::vector<Plugin *> active_generators =
+            orchestrator.get_active_plugins_for_step(STEP_PERIMETER);
+        REQUIRE(active_generators.size() == 2);
+        CHECK(active_generators[0]->get_id() == classic->get_id());
+        CHECK(active_generators[1]->get_id() == arachne->get_id());
+
+        DynamicPrintConfig perimeter_config;
+        perimeter_config.set_deserialize_strict(
+            perimeter_group->second.option_key_storage, arachne->get_id());
+        std::vector<Plugin *> selected_generators = Steps::selected_or_active_plugins_for_step(
+            orchestrator, STEP_PERIMETER, &perimeter_config);
+        REQUIRE(selected_generators.size() == 1);
+        CHECK(selected_generators.front()->get_id() == arachne->get_id());
+
+        perimeter_config.set_deserialize_strict(
+            perimeter_group->second.option_key_storage, simple->get_id());
+        selected_generators = Steps::selected_or_active_plugins_for_step(
+            orchestrator, STEP_PERIMETER, &perimeter_config);
+        REQUIRE(selected_generators.size() == 1);
+        CHECK(selected_generators.front()->get_id() == classic->get_id());
+    }
+}
 
 TEST_CASE("Cost seam metadata is the default regional provider",
           "[plugins][seam-placer][cost]")
