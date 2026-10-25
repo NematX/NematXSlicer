@@ -17,6 +17,7 @@
 
 #include "plugin_test_helpers.hpp"
 #include "gcode_test_helpers.hpp"
+#include "layer_extrusion_edit_transition_test_helpers.hpp"
 #include "perimeter_test_helpers.hpp"
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
@@ -33,6 +34,7 @@
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFirmwareViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeScriptProcessorViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/MachineEnvelope.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config/ConfigSnapshotSerialization.hpp"
@@ -60,6 +62,7 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
+#include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
@@ -1787,7 +1790,9 @@ TEST_CASE("Default firmware layer change describes mixed-height print Z groups",
     CHECK(semantic_marker_lines(output) == expected);
 }
 
-// Slice two owned objects without support, borrow their real by-layer plan, and check its maximum source-height marker; failures in slicing, grouping or firmware initialization are reported by the assertions.
+// Slice two owned objects on different tools, reverse the mixed group's source
+// list, and compare before-layer and tool-change scripts with ordered source
+// heights; slicing, plugin and firmware failures remain visible.
 TEST_CASE("Default firmware accepts different object layer heights in the by-layer plan",
           "[plugins][gcode][firmware][markers]")
 {
@@ -1797,27 +1802,31 @@ TEST_CASE("Default firmware accepts different object layer heights in the by-lay
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"first_layer_height", "0.2"},
                                    {"support_material", "0"}});
-    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
-                     print, model, config);
-    model.objects()[0].config.set_deserialize_strict("layer_height", "0.2");
-    model.objects()[1].config.set_deserialize_strict("layer_height", "0.3");
-    print.apply(model, config);
+    initialize_mixed_height_cube_print(print, model, config, 1, 2);
     Orchestrator &orchestrator = Orchestrator::instance();
-    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
-    Steps::StepSlicing::run_step(orchestrator, print);
-    configure_standard_firmware(print);
-    PrintingPlan plan = build_printing_plan_by_layer(print);
-    PluginStorage storage;
-    slic3r_api::Ordering::ObjectInstanceCatalogPlugin::populate_object_instance_catalog(
-        reinterpret_cast<const print_handle *>(&print),
-        reinterpret_cast<printing_plan_handle *>(&plan),
-        reinterpret_cast<storage_handle *>(&storage));
+    print.process();
+    configure_standard_firmware(print, 2);
+    PrintConfig &script_config = const_cast<PrintConfig &>(print.config());
+    script_config.option<ConfigOptionString>("start_gcode")->value.clear();
+    script_config.option<ConfigOptionString>("end_gcode")->value.clear();
+    script_config.before_layer_gcode.value = "; MIXED_BEFORE H{layer_current_height}";
+    script_config.layer_gcode.value.clear();
+    script_config.option<ConfigOptionString>("toolchange_gcode")->value =
+        "; MIXED_TOOL H{layer_current_height}";
+    script_config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    script_config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    Steps::StepExtrusionOrdering::clear(print);
+    Steps::StepExtrusionOrdering::prepare(print);
+    Steps::StepExtrusionOrdering::run_step(orchestrator, print);
+    PrintingPlan &plan = print.mutable_printing_plan();
     REQUIRE(plan.groups.size() == 1);
 
     // The builder merges only exactly equal scaled Z values stored as coord_t.
     // Keep the plan and print alive while this non-owning pointer is used.
-    const PrintingLayerGroup *mixed_layer = nullptr;
-    for (const PrintingLayerGroup &layer : plan.groups.front().layers) {
+    PrintingLayerGroup *mixed_layer = nullptr;
+    for (PrintingLayerGroup &layer : plan.groups.front().layers) {
         if (layer.layers.size() == 2 &&
             layer.layers[0]->scaled_height() != layer.layers[1]->scaled_height()) {
             mixed_layer = &layer;
@@ -1826,20 +1835,95 @@ TEST_CASE("Default firmware accepts different object layer heights in the by-lay
     }
     REQUIRE(mixed_layer != nullptr);
     REQUIRE(mixed_layer->print_z == scale_i(0.8));
+    std::swap(mixed_layer->layers[0], mixed_layer->layers[1]);
     const Layer &first_layer = *mixed_layer->layers[0];
     const Layer &second_layer = *mixed_layer->layers[1];
     INFO("shared scaled Z: " << mixed_layer->print_z << "; heights: "
          << first_layer.scaled_height() << ", " << second_layer.scaled_height());
     REQUIRE(first_layer.scaled_print_z() == second_layer.scaled_print_z());
     REQUIRE(first_layer.scaled_print_z() == mixed_layer->print_z);
-    REQUIRE(first_layer.scaled_height() == scale_i(0.2));
-    REQUIRE(second_layer.scaled_height() == scale_i(0.3));
+    REQUIRE(first_layer.scaled_height() == scale_i(0.3));
+    REQUIRE(second_layer.scaled_height() == scale_i(0.2));
+
+    Steps::StepExtrusionEdition::clear(print);
+    Slic3r::Test::TransitionPipeline::run_layer_plugins(
+        print, {Slic3r::Test::TransitionPipeline::TOOLCHANGE_PLUGIN});
+    Steps::StepExtrusionEdition::run_step(orchestrator, print);
+    PrintingPlan &installed_plan = print.mutable_printing_plan();
+    mixed_layer = nullptr;
+    size_t mixed_layer_idx = 0;
+    for (size_t layer_idx = 0; layer_idx < installed_plan.groups.front().layers.size(); ++layer_idx) {
+        PrintingLayerGroup &layer = installed_plan.groups.front().layers[layer_idx];
+        if (layer.print_z == scale_i(0.8)) {
+            mixed_layer = &layer;
+            mixed_layer_idx = layer_idx;
+            break;
+        }
+    }
+    REQUIRE(mixed_layer != nullptr);
+    REQUIRE(mixed_layer_idx > 0);
+    const PrintingLayerGroup &previous_layer =
+        installed_plan.groups.front().layers[mixed_layer_idx - 1];
+    REQUIRE(previous_layer.events.after().child_count() == 1);
+    const ExtrusionEntity &before_script = previous_layer.events.after().child(0);
+    const ExtrusionPropertyCustomGcode *before_property =
+        before_script.get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(before_property != nullptr);
+    REQUIRE(before_property->script_type == GCODE_SCRIPT_TYPE_BEFORE_LAYER_GCODE);
+
+    GCodeScriptProcessor host_processor(print, orchestrator);
+    const slic3r_api::GCodeGeneration::GCodeScriptProcessorView scripts(
+        host_processor.c_processor());
+    PluginStorage script_storage;
+    storage_handle *script_storage_handle =
+        reinterpret_cast<storage_handle *>(&script_storage);
+    ScriptStateFirmwareProbe script_firmware(scripts, script_storage_handle);
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::PrintingPlan plan_view = printing_plan_view(print);
+    script_firmware.begin_print(print_view, plan_view);
+    script_firmware.begin_layer(slic3r_api::ConstPrintingLayerGroup(
+        reinterpret_cast<const printing_layer_group_handle *>(&previous_layer)));
+    CHECK(script_firmware.write_event(slic3r_api::ExtrusionEntity(
+              reinterpret_cast<const extrusion_entity_handle *>(&before_script))) ==
+          "; MIXED_BEFORE H0.2\n");
+    script_firmware.begin_layer(slic3r_api::ConstPrintingLayerGroup(
+        reinterpret_cast<const printing_layer_group_handle *>(mixed_layer)));
+    CHECK(script_firmware.process_script(
+              GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM,
+              "; MIXED_FIRMWARE H{layer_current_height}") ==
+          "; MIXED_FIRMWARE H0.2\n");
+    const PrintingToolGroup *thick_tool = nullptr;
+    std::ostringstream ordered_tool_groups;
+    for (const PrintingToolGroup &tool_group : mixed_layer->tool_groups)
+    {
+        const std::optional<coord_t> source_height = slic3r_api::first_source_layer_height(
+            slic3r_api::ConstPrintingToolGroup(
+                reinterpret_cast<const printing_tool_group_handle *>(&tool_group)));
+        ordered_tool_groups << tool_group.extruder_id << ':'
+                            << (source_height ? unscaled(*source_height) : -1.0) << '/'
+                            << tool_group.events.before().child_count() << ' ';
+        if (tool_group.extruder_id == 1)
+            thick_tool = &tool_group;
+    }
+    INFO("Ordered tools, source heights and before-events: " << ordered_tool_groups.str());
+    REQUIRE(thick_tool != nullptr);
+    script_firmware.begin_tool_group(slic3r_api::ConstPrintingToolGroup(
+        reinterpret_cast<const printing_tool_group_handle *>(thick_tool)));
+    REQUIRE(thick_tool->events.before().child_count() == 1);
+    const ExtrusionEntity &toolchange_script = thick_tool->events.before().child(0);
+    const ExtrusionPropertyCustomGcode *toolchange_property =
+        toolchange_script.get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(toolchange_property != nullptr);
+    REQUIRE(toolchange_property->script_type == GCODE_SCRIPT_TYPE_TOOLCHANGE_GCODE);
+    CHECK(script_firmware.write_event(slic3r_api::ExtrusionEntity(
+              reinterpret_cast<const extrusion_entity_handle *>(&toolchange_script))) ==
+          "; MIXED_TOOL H0.3\nG92 E0\n");
 
     slic3r_api::GCodeGeneration::Firmware::Marlin2GCodeFirmwareSession session;
     session.begin_print(
         slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
         slic3r_api::ConstPrintingPlan(
-            reinterpret_cast<const printing_plan_handle *>(&plan)));
+            reinterpret_cast<const printing_plan_handle *>(&installed_plan)));
     std::string output;
     REQUIRE_NOTHROW(output = session.begin_layer(slic3r_api::ConstPrintingLayerGroup(
         reinterpret_cast<const printing_layer_group_handle *>(mixed_layer))));

@@ -91,9 +91,11 @@ public:
     std::string reader_plugin_id() const override { return "gcode.reader.default"; }
     // Advance the sequential object index for later real groups and return any group-start travel.
     std::string begin_group(const ConstPrintingGroup &group) override;
-    // Emit layer, Z and maximum-height markers, clear the cached extrusion height, and advance plan-layer state.
+    // Emit layer markers, forget cached ;HEIGHT: for the next printable extrusion, and set script height from the first source or Z gap.
     std::string begin_layer(const ConstPrintingLayerGroup &layer) override;
+    // Set script height to the first source extrusion for this tool when one exists.
     std::string begin_tool_group(const ConstPrintingToolGroup &tool_group) override;
+    // Set script height from the extrusion's source layer before visiting its tree.
     std::string write_extrusion(const ConstPrintingExtrusion &extrusion) override;
     std::string write_event(const ExtrusionEntity &event_root) override;
     std::string end_tool_group() override;

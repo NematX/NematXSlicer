@@ -4,6 +4,7 @@
 
 #include <fstream>
 #include <stdexcept>
+#include <vector>
 
 #include <boost/filesystem.hpp>
 
@@ -14,6 +15,7 @@
 #include "libslic3r/Config/ConfigSnapshotSerialization.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
+#include "test_data.hpp"
 
 namespace Slic3r::Test::GCode {
 
@@ -172,6 +174,28 @@ void configure_standard_firmware(Print &print, uint16_t extruder_count)
         print_config.filament_diameter.set(std::vector<double>{1.75, 1.75});
         print_config.extrusion_multiplier.set(std::vector<double>{1.0, 1.0});
     }
+}
+
+// Set the shared two-extruder cube geometry and object tool assignments, apply the caller's configuration, and leave slicing to the caller. The caller retains Print and Model ownership; test initialization and Print::apply failures propagate.
+void initialize_mixed_height_cube_print(Print &print,
+                                        Model &model,
+                                        DynamicPrintConfig &config,
+                                        const int32_t first_tool,
+                                        const int32_t second_tool)
+{
+    config.set_num_extruders(2);
+    Slic3r::Test::init_print({TestMesh::cube_20x20x20, TestMesh::cube_20x20x20},
+                             print, model, config);
+    model.objects()[0].config.set_deserialize_strict("layer_height", "0.2");
+    model.objects()[1].config.set_deserialize_strict("layer_height", "0.3");
+    const char *const tool_settings[] = {
+        "perimeter_extruder", "infill_extruder", "solid_infill_extruder"
+    };
+    for (const char *key : tool_settings) {
+        model.objects()[0].config.set_deserialize_strict(key, std::to_string(first_tool));
+        model.objects()[1].config.set_deserialize_strict(key, std::to_string(second_tool));
+    }
+    print.apply(model, config);
 }
 
 void configure_machine_envelope(Print &print)

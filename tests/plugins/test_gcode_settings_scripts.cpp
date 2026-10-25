@@ -6,6 +6,7 @@
 #include <fstream>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -29,9 +30,11 @@
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFirmwareViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeScriptProcessorViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/MachineEnvelope.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config/ConfigSnapshotSerialization.hpp"
+#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/GCode.hpp"
@@ -51,19 +54,98 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
+#include "libslic3r/Steps/StepLayerExtrusionEdition.hpp"
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
+#include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "test_data.hpp"
 
 /*
 Settings script tests verify how configured user scripts are inserted into the final PrintingPlan scopes.
 Shared plan construction and output helpers live in gcode_test_helpers so this file keeps only component-specific behavior.
+The source layer height belongs to an extrusion's linked regional island; path attributes remain separate printable-geometry values.
 */
 
 namespace {
 using namespace Slic3r;
 using namespace Slic3r::Printing;
 using namespace Slic3r::Test::GCode;
+
+// Apply the script-test settings to shared mixed-height cubes, configure firmware before processing, and propagate pipeline failures; Print and Model remain caller-owned.
+void prepare_mixed_height_print(Print &print,
+                                Model &model,
+                                const int32_t first_tool = 1,
+                                const int32_t second_tool = 1)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        {"first_layer_height", "0.2"},
+        {"support_material", "0"},
+        {"complete_objects", "0"},
+        {"parallel_objects_step", "0"},
+        {"seam_visibility", "0"}
+    });
+    initialize_mixed_height_cube_print(print, model, config, first_tool, second_tool);
+    configure_standard_firmware(print, 2);
+    print.process();
+}
+
+// Run STEP_ORDERING to build Print's source-linked layer, tool and extrusion
+// groups; return a borrowed reference to the print-owned plan and propagate failures.
+PrintingPlan &install_mixed_height_plan(Print &print)
+{
+    Steps::StepExtrusionOrdering::clear(print);
+    Steps::StepExtrusionOrdering::prepare(print);
+    Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+    return print.mutable_printing_plan();
+}
+
+// Apply the selected layer and script editors to the Print-owned ordered plan;
+// edits remain in that plan and plugin or cancellation failures propagate.
+void prepare_mixed_height_gcode_plan(Print &print)
+{
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerExtrusionEdition::run_step(orchestrator, print);
+    Steps::StepExtrusionEdition::clear(print);
+    Steps::StepExtrusionEdition::run_step(orchestrator, print);
+}
+
+// Find the by-layer group at print_z with two distinct source-layer heights;
+// return a borrowed pointer or null, without mutating the plan or taking ownership.
+PrintingLayerGroup *find_mixed_height_layer(PrintingPlan &plan, const coord_t print_z)
+{
+    for (PrintingGroup &group : plan.groups)
+        for (PrintingLayerGroup &layer : group.layers)
+            if (layer.print_z == print_z && layer.layers.size() == 2 &&
+                layer.layers[0] != nullptr && layer.layers[1] != nullptr &&
+                layer.layers[0]->scaled_height() != layer.layers[1]->scaled_height())
+                return &layer;
+    return nullptr;
+}
+
+// Publish one color-change row with the supplied scaled Z and one-based tool
+// number; Print owns the allocated options, and allocation or insertion failures
+// propagate.
+void publish_color_change_record(Print &print, const coord_t print_z, const int32_t extruder)
+{
+    DynamicConfig &record = print.records().get_or_add(CustomGCode::PrintRecordChannel);
+    record.clear();
+    record.set_key_value(CustomGCode::PrintRecordSizeKey, new ConfigOptionInt(1));
+    record.set_key_value(CustomGCode::PrintRecordModeKey,
+                         new ConfigOptionInt(int32_t(CustomGCode::MultiExtruder)));
+    record.set_key_value(CustomGCode::PrintRecordPrintZKey,
+                         new ConfigOptionFloats({unscaled(print_z)}));
+    ConfigOptionInts *types = new ConfigOptionInts();
+    types->set(std::vector<int32_t>{int32_t(CustomGCode::ColorChange)});
+    record.set_key_value(CustomGCode::PrintRecordTypeKey, types);
+    ConfigOptionInts *extruders = new ConfigOptionInts();
+    extruders->set(std::vector<int32_t>{extruder});
+    record.set_key_value(CustomGCode::PrintRecordExtruderKey, extruders);
+    record.set_key_value(CustomGCode::PrintRecordColorKey,
+                         new ConfigOptionStrings({"#123456"}));
+    record.set_key_value(CustomGCode::PrintRecordExtraKey,
+                         new ConfigOptionStrings({""}));
+}
 
 } // namespace
 
@@ -102,6 +184,7 @@ TEST_CASE("Configured G-code scripts become typed global plan events",
     CHECK_FALSE(plan.events.has_before());
     CHECK_FALSE(plan.events.has_after());
 }
+// Build a local PrintingPlan, place configured scripts in their ordered scopes, and verify stored values and cleanup; plugin failures surface through Catch assertions and the plan remains print-owned.
 TEST_CASE("Configured layer and filament scripts become scoped plan events",
           "[plugins][gcode][script-type][extrusion-edit]")
 {
@@ -204,8 +287,9 @@ TEST_CASE("Configured layer and filament scripts become scoped plan events",
     CHECK(final_tool_one->processing_extruder_id == 1);
     CHECK(end_print->script_type == GCODE_SCRIPT_TYPE_END_GCODE);
     CHECK(end_print->processing_extruder_id == 0);
-    CHECK(stored_script_int(
-              plan.events.after().child(2), *end_print, "layer_num") == 1);
+    const DynamicConfig end_arguments = stored_script_config(
+        plan.events.after().child(2), *end_print);
+    CHECK(end_arguments.option<ConfigOptionInt>("layer_num") == nullptr);
     CHECK(stored_script_float(
               plan.events.after().child(2), *end_print, "previous_layer_z") == Approx(0.2));
 
@@ -345,6 +429,7 @@ TEST_CASE("Single-extruder multimaterial finalizes only the active logical tool"
     REQUIRE(property != nullptr);
     CHECK(property->processing_extruder_id == 1);
 }
+// Export a local plan after inserting configured scripts, then check script values and event order; export exceptions fail the case and all temporary output files are removed.
 TEST_CASE("Configured scripts use ordered plan tools and final layer state",
           "[plugins][gcode][script-type][firmware][integration]") {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -391,8 +476,8 @@ TEST_CASE("Configured scripts use ordered plan tools and final layer state",
         print, {Slic3r::Test::TransitionPipeline::TOOLCHANGE_PLUGIN});
     Steps::StepExtrusionEdition::run_step(Orchestrator::instance(), print);
 
-    // Structural values belong to the event and remain unchanged if a later
-    // plugin edits the plan without rebuilding the configured scripts.
+    // Only producer-frozen values stay attached to their events; end_gcode
+    // reads live layer state after these Z edits.
     group.layers[0].print_z = scale_i(0.25);
     group.layers[1].print_z = scale_i(0.75);
 
@@ -415,7 +500,7 @@ TEST_CASE("Configured scripts use ordered plan tools and final layer state",
         const std::string second_start_filament = "; START_FILAMENT F0 P1 N0\n";
         const std::string final_end_filament_zero = "; END_FILAMENT F0 P0 N-1\n";
         const std::string final_end_filament_one = "; END_FILAMENT F1 P0 N-1\n";
-        const std::string end = "; SCRIPT_END L1 Z0.6 M0.6 F0 P0 N-1\n";
+        const std::string end = "; SCRIPT_END L1 Z0.75 M0.6 F0 P0 N-1\n";
         const size_t start_position = output.find(start);
         const size_t first_before_layer_position = output.find(first_before_layer);
         const size_t first_tool_position = output.find("T1\n");
@@ -720,6 +805,427 @@ TEST_CASE("Scripts read the firmware layer and z-hop unless the producer froze t
     CHECK(firmware.process_script(
               GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, "{layer_height}") == "0.25\n");
 }
+// Put the 0.3 mm source first in the mixed layer list while its first ordered
+// source extrusion remains 0.2 mm; check the pre-layer script before its marker.
+// Print owns the plan through export, and slicing or export failures fail the case.
+TEST_CASE("Before-layer scripts use the first source extrusion of the upcoming mixed group",
+          "[plugins][gcode][settings-scripts][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model, 2, 1);
+    PrintingPlan &plan = install_mixed_height_plan(print);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    config.before_layer_gcode.value = "; UPCOMING H{layer_current_height}";
+    config.layer_gcode.value.clear();
+    config.option<ConfigOptionString>("toolchange_gcode")->value.clear();
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    PrintingLayerGroup *mixed_layer = find_mixed_height_layer(plan, scale_i(0.8));
+    REQUIRE(mixed_layer != nullptr);
+    REQUIRE(mixed_layer->layers[0]->scaled_height() == scale_i(0.2));
+    std::swap(mixed_layer->layers[0], mixed_layer->layers[1]);
+    REQUIRE(mixed_layer->layers[0]->scaled_height() == scale_i(0.3));
+    REQUIRE_FALSE(mixed_layer->tool_groups.empty());
+    REQUIRE_FALSE(mixed_layer->tool_groups.front().extrusions.empty());
+    REQUIRE(slic3r_api::first_source_layer_height(
+                slic3r_api::ConstPrintingToolGroup(reinterpret_cast<const printing_tool_group_handle *>(
+                    &mixed_layer->tool_groups.front()))) == scale_i(0.2));
+    prepare_mixed_height_gcode_plan(print);
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const size_t layer_position = output.find(";LAYER_CHANGE\n;Z:0.8\n");
+    REQUIRE(layer_position != std::string::npos);
+    const std::string expected_script = "; UPCOMING H0.2\n";
+    const size_t script_position = output.rfind("; UPCOMING H", layer_position);
+    REQUIRE(script_position != std::string::npos);
+    CHECK(output.compare(script_position, expected_script.size(), expected_script) == 0);
+    CHECK(script_position < layer_position);
+}
+
+// Publish a one-based tool-2 color marker before ordering so that tool becomes
+// the first visit; export must use its 0.3 mm source height, while Print and
+// Model stay test-owned and setup or export failures remain visible.
+TEST_CASE("Color-change producer uses its tool group's source height",
+          "[plugins][gcode][settings-scripts][custom-per-print-z][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model, 1, 2);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    config.option<ConfigOptionString>("color_change_gcode")->value =
+        "; COLOR_TOOL H{layer_current_height}";
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    Steps::StepExtrusionOrdering::clear(print);
+    Steps::StepExtrusionOrdering::prepare(print);
+    publish_color_change_record(print, scale_i(0.8), 2);
+    Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+    PrintingPlan &plan = print.mutable_printing_plan();
+    PrintingLayerGroup *mixed_layer = find_mixed_height_layer(plan, scale_i(0.8));
+    REQUIRE(mixed_layer != nullptr);
+    prepare_mixed_height_gcode_plan(print);
+    mixed_layer = find_mixed_height_layer(plan, scale_i(0.8));
+    REQUIRE(mixed_layer != nullptr);
+    REQUIRE(slic3r_api::first_source_layer_height(
+                slic3r_api::ConstPrintingLayerGroup(reinterpret_cast<const printing_layer_group_handle *>(
+                mixed_layer))) == scale_i(0.3));
+    const PrintingToolGroup *thick_tool = nullptr;
+    for (const PrintingToolGroup &tool_group : mixed_layer->tool_groups)
+        if (tool_group.extruder_id == 1)
+            thick_tool = &tool_group;
+    REQUIRE(thick_tool != nullptr);
+    REQUIRE(slic3r_api::first_source_layer_height(
+                slic3r_api::ConstPrintingToolGroup(reinterpret_cast<const printing_tool_group_handle *>(
+                    thick_tool))) == scale_i(0.3));
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    CHECK(output.find("; COLOR_TOOL H0.3\n") != std::string::npos);
+}
+
+// Export two distinct tool visits in one mixed layer and check the outgoing
+// filament script's live layer state, its frozen destination Z and its position
+// before the next layer marker; writer and script failures fail the assertions.
+TEST_CASE("End-filament scripts at layer transitions describe the outgoing layer",
+          "[plugins][gcode][settings-scripts][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model, 1, 2);
+    PrintingPlan &plan = install_mixed_height_plan(print);
+    REQUIRE(plan.groups.size() == 1);
+    std::vector<PrintingLayerGroup> &layers = plan.groups.front().layers;
+    size_t transition_layer = layers.size();
+    for (size_t layer_idx = 0; layer_idx < layers.size(); ++layer_idx)
+        if (layers[layer_idx].print_z == scale_i(0.8))
+            transition_layer = layer_idx;
+    REQUIRE(transition_layer < layers.size());
+    size_t next_tool_layer = transition_layer + 1;
+    while (next_tool_layer < layers.size()) {
+        bool has_next_tool = false;
+        for (const PrintingToolGroup &tool_group : layers[next_tool_layer].tool_groups)
+            has_next_tool = has_next_tool || tool_group.extruder_id == 1;
+        if (has_next_tool)
+            break;
+        ++next_tool_layer;
+    }
+    REQUIRE(next_tool_layer < layers.size());
+    const coord_t next_print_z = layers[next_tool_layer].print_z;
+    std::ostringstream next_z_text;
+    next_z_text << unscaled(next_print_z);
+    for (size_t tool_idx = 0; tool_idx < layers[transition_layer].tool_groups.size();) {
+        if (layers[transition_layer].tool_groups[tool_idx].extruder_id != 0)
+            layers[transition_layer].tool_groups.erase(
+                layers[transition_layer].tool_groups.begin() + tool_idx);
+        else
+            ++tool_idx;
+    }
+    for (size_t layer_idx = transition_layer + 1; layer_idx < next_tool_layer; ++layer_idx)
+        layers[layer_idx].tool_groups.clear();
+    for (size_t tool_idx = 0; tool_idx < layers[next_tool_layer].tool_groups.size();) {
+        if (layers[next_tool_layer].tool_groups[tool_idx].extruder_id != 1)
+            layers[next_tool_layer].tool_groups.erase(
+                layers[next_tool_layer].tool_groups.begin() + tool_idx);
+        else
+            ++tool_idx;
+    }
+    REQUIRE(layers[transition_layer].tool_groups.size() == 1);
+    REQUIRE(layers[transition_layer].tool_groups.front().extruder_id == 0);
+    REQUIRE(layers[next_tool_layer].tool_groups.size() == 1);
+    REQUIRE(layers[next_tool_layer].tool_groups.front().extruder_id == 1);
+
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    config.before_layer_gcode.value.clear();
+    config.layer_gcode.value.clear();
+    config.option<ConfigOptionString>("toolchange_gcode")->value.clear();
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{
+            "; BETWEEN L[layer_num] Z{layer_z} H{layer_current_height} T{toolchange_z}",
+            ""
+        });
+    prepare_mixed_height_gcode_plan(print);
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string expected = "; BETWEEN L" + std::to_string(transition_layer) +
+        " Z0.8 H0.2 T" + next_z_text.str() + "\n";
+    const size_t script_position = output.find(expected);
+    const size_t next_layer_position = output.find(
+        ";LAYER_CHANGE\n;Z:" + next_z_text.str() + "\n");
+    REQUIRE(script_position != std::string::npos);
+    REQUIRE(next_layer_position != std::string::npos);
+    CHECK(script_position < next_layer_position);
+}
+
+// Export the first start-filament script on the 0.3 mm tool group of a mixed
+// layer; layer number and Z stay producer snapshots while the emitted height is
+// read from firmware state, and export errors remain visible.
+TEST_CASE("Start-filament scripts use the source height of their mixed tool group",
+          "[plugins][gcode][settings-scripts][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model, 1, 2);
+    PrintingPlan &plan = install_mixed_height_plan(print);
+    PrintingLayerGroup *mixed_layer = find_mixed_height_layer(plan, scale_i(0.8));
+    REQUIRE(mixed_layer != nullptr);
+    const size_t mixed_layer_idx = size_t(mixed_layer - plan.groups.front().layers.data());
+    const PrintingToolGroup *thick_tool = nullptr;
+    for (const PrintingToolGroup &tool_group : mixed_layer->tool_groups)
+        if (tool_group.extruder_id == 1)
+            thick_tool = &tool_group;
+    REQUIRE(thick_tool != nullptr);
+    REQUIRE(slic3r_api::first_source_layer_height(
+                slic3r_api::ConstPrintingToolGroup(reinterpret_cast<const printing_tool_group_handle *>(
+                    thick_tool))) == scale_i(0.3));
+
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    config.before_layer_gcode.value.clear();
+    config.layer_gcode.value.clear();
+    config.option<ConfigOptionString>("toolchange_gcode")->value.clear();
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{"", "; START L[layer_num] Z{layer_z} H{layer_current_height}"});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    prepare_mixed_height_gcode_plan(print);
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    CHECK(output.find("; START L" + std::to_string(mixed_layer_idx) +
+                       " Z0.8 H0.3\n") != std::string::npos);
+}
+
+// Trim the local plan after a mixed layer whose final ordered extrusion is from
+// the 0.3 mm object, then export end_gcode; it must observe that final extrusion
+// rather than the group's first source; Print owns the altered plan, and setup
+// or export failures remain visible as failed assertions.
+TEST_CASE("End G-code uses the last source extrusion of a final mixed layer",
+          "[plugins][gcode][settings-scripts][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model);
+    PrintingPlan &plan = install_mixed_height_plan(print);
+    PrintingLayerGroup *mixed_layer = find_mixed_height_layer(plan, scale_i(0.8));
+    REQUIRE(mixed_layer != nullptr);
+    REQUIRE(mixed_layer->tool_groups.size() == 1);
+    PrintingToolGroup &tool_group = mixed_layer->tool_groups.front();
+    size_t thick_extrusion_idx = tool_group.extrusions.size();
+    for (size_t extrusion_idx = 0; extrusion_idx < tool_group.extrusions.size(); ++extrusion_idx) {
+        const std::optional<coord_t> height = slic3r_api::source_layer_height(
+            slic3r_api::ConstPrintingExtrusion(reinterpret_cast<const printing_extrusion_handle *>(
+                &tool_group.extrusions[extrusion_idx])));
+        if (height && *height == scale_i(0.3)) {
+            thick_extrusion_idx = extrusion_idx;
+            break;
+        }
+    }
+    REQUIRE(thick_extrusion_idx < tool_group.extrusions.size());
+    std::swap(tool_group.extrusions[thick_extrusion_idx], tool_group.extrusions.back());
+    REQUIRE(slic3r_api::first_source_layer_height(
+                slic3r_api::ConstPrintingLayerGroup(reinterpret_cast<const printing_layer_group_handle *>(
+                    mixed_layer))) == scale_i(0.2));
+    REQUIRE(slic3r_api::source_layer_height(
+                slic3r_api::ConstPrintingExtrusion(reinterpret_cast<const printing_extrusion_handle *>(
+                    &tool_group.extrusions.back()))) == scale_i(0.3));
+    const size_t mixed_layer_idx = size_t(mixed_layer - plan.groups.front().layers.data());
+    plan.groups.front().layers.erase(
+        plan.groups.front().layers.begin() + mixed_layer_idx + 1,
+        plan.groups.front().layers.end());
+
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value =
+        "; LAST L[layer_num] Z{layer_z} H{layer_current_height}";
+    config.before_layer_gcode.value.clear();
+    config.layer_gcode.value.clear();
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{""});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{""});
+    prepare_mixed_height_gcode_plan(print);
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    CHECK(output.find("; LAST L" + std::to_string(mixed_layer_idx) +
+                       " Z0.8 H0.3\n") != std::string::npos);
+}
+
+// Export a Print-owned mixed-height plan with a final end-filament placeholder;
+// verify its toolchange_z is the last plan Z, while Print and Model stay alive.
+// Pipeline and export failures remain visible as failed assertions.
+TEST_CASE("Final end-filament scripts use the last layer Z for toolchange_z",
+          "[plugins][gcode][settings-scripts][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model);
+    PrintingPlan &plan = install_mixed_height_plan(print);
+    REQUIRE(plan.groups.size() == 1);
+    REQUIRE_FALSE(plan.groups.front().layers.empty());
+    const coord_t last_layer_z = plan.groups.front().layers.back().print_z;
+    REQUIRE(last_layer_z > 0);
+
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    config.before_layer_gcode.value.clear();
+    config.layer_gcode.value.clear();
+    config.option<ConfigOptionString>("toolchange_gcode")->value.clear();
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{"; FINAL_FILAMENT Z{toolchange_z}", ""});
+    prepare_mixed_height_gcode_plan(print);
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const std::string marker = "; FINAL_FILAMENT Z";
+    const size_t script_position = output.rfind(marker);
+    REQUIRE(script_position != std::string::npos);
+    const size_t value_begin = script_position + marker.size();
+    const size_t line_end = output.find('\n', value_begin);
+    REQUIRE(line_end != std::string::npos);
+    CHECK(std::stod(output.substr(value_begin, line_end - value_begin)) ==
+          Approx(unscaled(last_layer_z)));
+}
+
+// Insert a script before a later source extrusion of the same tool and give its
+// paths a different HEIGHT attribute; export must use the linked layer height
+// for script expansion while geometry retains its own attributes, with failures
+// propagated through the normal plan writer. Print owns the plan nodes through
+// export, and the script and geometry remain in that plan tree.
+TEST_CASE("Inline extrusion scripts use source height rather than path attributes",
+          "[plugins][gcode][settings-scripts][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model);
+    PrintingPlan &plan = install_mixed_height_plan(print);
+
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    config.before_layer_gcode.value.clear();
+    config.layer_gcode.value.clear();
+    config.option<ConfigOptionString>("toolchange_gcode")->value.clear();
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{""});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{""});
+    prepare_mixed_height_gcode_plan(print);
+
+    PrintingLayerGroup *mixed_layer = find_mixed_height_layer(plan, scale_i(0.8));
+    REQUIRE(mixed_layer != nullptr);
+    REQUIRE(mixed_layer->tool_groups.size() == 1);
+    PrintingToolGroup &tool_group = mixed_layer->tool_groups.front();
+    size_t target_extrusion_idx = tool_group.extrusions.size();
+    bool saw_thin_source = false;
+    for (size_t extrusion_idx = 0; extrusion_idx < tool_group.extrusions.size(); ++extrusion_idx) {
+        const std::optional<coord_t> height = slic3r_api::source_layer_height(
+            slic3r_api::ConstPrintingExtrusion(reinterpret_cast<const printing_extrusion_handle *>(
+                &tool_group.extrusions[extrusion_idx])));
+        if (height && *height == scale_i(0.2))
+            saw_thin_source = true;
+        else if (height && *height == scale_i(0.3) && saw_thin_source) {
+            target_extrusion_idx = extrusion_idx;
+            break;
+        }
+    }
+    REQUIRE(target_extrusion_idx < tool_group.extrusions.size());
+    PrintingExtrusion &target_extrusion = tool_group.extrusions[target_extrusion_idx];
+    REQUIRE(target_extrusion.root != nullptr);
+    REQUIRE(slic3r_api::source_layer_height(
+                slic3r_api::ConstPrintingExtrusion(reinterpret_cast<const printing_extrusion_handle *>(
+                    &target_extrusion))) == scale_i(0.3));
+
+    std::vector<ExtrusionEntity *> pending{target_extrusion.root.get()};
+    bool saw_path_attributes = false;
+    while (!pending.empty()) {
+        ExtrusionEntity *entity = pending.back();
+        pending.pop_back();
+        ExtrusionAttributes *attributes = entity->get_property<ExtrusionAttributes>();
+        if (attributes != nullptr) {
+            attributes->height = 0.17f;
+            if (entity->has_polyline())
+                saw_path_attributes = true;
+        }
+        for (size_t child_idx = 0; child_idx < entity->child_count(); ++child_idx)
+            pending.push_back(&entity->child(child_idx));
+    }
+    REQUIRE(saw_path_attributes);
+    ExtrusionEntity *script = target_extrusion.root->emplace_ordered_leaf(
+        OrderedLeafPosition::Before, ExistingPropertyPlacement::MoveWithExistingContent);
+    REQUIRE(script != nullptr);
+    script->add_property(ExtrusionPropertyCustomGcodeText(
+        ExtrusionPropertyCustomGcodeText::Code::SCRIPT,
+        "; INLINE_SOURCE H{layer_current_height}",
+        GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM));
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const size_t script_position = output.find("; INLINE_SOURCE H0.3\n");
+    REQUIRE(script_position != std::string::npos);
+    const size_t attribute_position = output.find(";HEIGHT:0.17\n", script_position);
+    REQUIRE(attribute_position != std::string::npos);
+    CHECK(script_position < attribute_position);
+}
+
+// Export a tool change between visits in one mixed layer and verify the outgoing
+// filament event remains between its tool's extrusion and the next tool select;
+// Print owns the plan, while writer or export failures remain visible as failed
+// assertions and generated output stays local to the test.
+TEST_CASE("End-filament scripts inside a mixed layer retain their scope position",
+          "[plugins][gcode][settings-scripts][firmware]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_mixed_height_print(print, model, 1, 2);
+    PrintingPlan &plan = install_mixed_height_plan(print);
+    PrintingLayerGroup *mixed_layer = find_mixed_height_layer(plan, scale_i(0.8));
+    REQUIRE(mixed_layer != nullptr);
+    const size_t mixed_layer_idx = size_t(mixed_layer - plan.groups.front().layers.data());
+
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("start_gcode")->value.clear();
+    config.option<ConfigOptionString>("end_gcode")->value.clear();
+    config.before_layer_gcode.value.clear();
+    config.layer_gcode.value.clear();
+    config.option<ConfigOptionString>("toolchange_gcode")->value.clear();
+    config.option<ConfigOptionStrings>("start_filament_gcode")->set(
+        std::vector<std::string>{"", ""});
+    config.option<ConfigOptionStrings>("end_filament_gcode")->set(
+        std::vector<std::string>{
+            "; INNER_END L[layer_num] Z{layer_z} H{layer_current_height}", ""
+        });
+    prepare_mixed_height_gcode_plan(print);
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    const size_t end_position = output.find(
+        "; INNER_END L" + std::to_string(mixed_layer_idx) + " Z0.8 H0.2\n");
+    REQUIRE(end_position != std::string::npos);
+    const size_t next_tool_position = output.find("T1\n", end_position);
+    REQUIRE(next_tool_position != std::string::npos);
+    CHECK(end_position < next_tool_position);
+}
+
 TEST_CASE("First layer bed temperature follows used tools unless overridden",
           "[plugins][gcode][script-type][temperature]") {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();

@@ -57,11 +57,18 @@ beginning of that scope, or in the tool group's before-events when no scope is
 available. This preserves the required order relative to tool selection and
 the restoration of extrusion state.
 
-Placeholder values are copied into a Config snapshot for every event. They
-include layer number, Z, actual layer height, previous and maximum layer Z,
-object IDs, and previous/next or filament extruder IDs. The plan hierarchy is
-not resized while scripts are appended, so borrowed event roots remain valid
-during the pass.
+Each event snapshots only values that its producer fixes. Start, before-layer,
+and layer scripts snapshot layer number, Z, and source height; start-filament
+scripts snapshot layer number and Z; end-filament and end scripts keep layer
+state live in firmware. The separate tool-change producer snapshots layer
+number, Z, and maximum layer Z, while firmware supplies the source height.
+Other snapshots carry previous layer Z, object IDs, and previous/next or
+filament extruder IDs as needed. The plan hierarchy is not resized while scripts
+are appended, so borrowed event roots remain valid.
+
+A source layer height is read through the first source extrusion in plan order;
+when a layer has no source extrusion, scripts use its Z gap from the preceding
+plan layer.
 Empty scripts produce no event. A plan with no tool group still receives
 plan- and layer-level scripts, but cannot receive a tool-specific start script
 until a tool group and its transition scope exist. In single-extruder
@@ -91,7 +98,7 @@ struct LayerContext
 {
     int32_t number = -1;
     coord_t print_z = 0;
-    // Actual thickness shared with the firmware for this finalized layer group.
+    // First ordered source-extrusion height, or the finalized group's Z gap.
     coord_t height = 0;
 };
 
@@ -105,7 +112,9 @@ struct PlanSummary
     std::optional<LayerContext> last_layer;
 };
 
-// Read global layer, height and tool facts once before scripts are inserted; the returned summary owns no plan data and cancellation or invalid views propagate.
+// Read first-source heights in plan order plus global Z and tool facts; return
+// scalar summary data without owning plan data, and propagate cancellation or
+// invalid-view failures.
 PlanSummary summarize_plan(const ConstPrintingPlan &plan,
                            const plugin_run_context *run_ctx);
 // Resolve a single real-object catalog group to its stable placeholder object index.
@@ -156,6 +165,9 @@ void append_start_filament_script(
     extruder_index_t processing_extruder_id,
     const plugin_run_context *run_ctx);
 
+// Scan borrowed plan groups and layers in print order, recording each layer's
+// first source height or Z gap. Return scalar summary data without mutating or
+// retaining the plan, and propagate cancellation or invalid-view failures.
 PlanSummary summarize_plan(const ConstPrintingPlan &plan,
                            const plugin_run_context *run_ctx)
 {
@@ -172,8 +184,10 @@ PlanSummary summarize_plan(const ConstPrintingPlan &plan,
             const ConstPrintingLayerGroup layer = group.layer_group(layer_idx);
             summary.max_print_z = std::max(summary.max_print_z, layer.print_z());
             const coord_t previous_print_z = summary.last_layer ? summary.last_layer->print_z : 0;
+            const std::optional<coord_t> source_height = first_source_layer_height(layer);
             const LayerContext current_layer{
-                layer_number++, layer.print_z(), printing_layer_height(layer, previous_print_z)};
+                layer_number++, layer.print_z(),
+                source_height.value_or(layer.print_z() - previous_print_z)};
             if (!summary.first_layer)
                 summary.first_layer = current_layer;
             summary.previous_layer = summary.last_layer;
@@ -564,7 +578,10 @@ private:
     void inilialize_impl(storage_handle *) const override {
         initialize_settings_gcode_scripts_settings(m_orchestrator);
     }
-    // Append configured scripts to borrowed plan scopes without resizing the plan hierarchy.
+    // Read print, plan and storage from the run context and append owned events
+    // to fixed scopes. Incomplete contexts leave the plan unchanged; cancellation
+    // or storage/plan failures propagate without rolling back earlier appends,
+    // and borrowed views are not retained.
     void run_impl(const plugin_run_context *run_context) const override {
         throw_if_cancelled(run_context);
         const run_ctx_extrusion_edition *context = plugin_ctx_as_extrusion_edition(run_context);
@@ -648,9 +665,11 @@ private:
                 PrintingLayerGroup layer = group.layer_group(layer_idx);
                 PrintingScopeEvents layer_events = layer.events();
                 const coord_t previous_print_z = previous_layer ? previous_layer->print_z : 0;
+                const std::optional<coord_t> source_height = first_source_layer_height(
+                    ConstPrintingLayerGroup(layer));
                 const LayerContext current_layer{
-                    layer_number++, layer.print_z(), printing_layer_height(
-                        ConstPrintingLayerGroup(layer), previous_print_z)};
+                    layer_number++, layer.print_z(),
+                    source_height.value_or(layer.print_z() - previous_print_z)};
                 const StoredConfig current_layer_arguments = layer_arguments(
                     run_context->plugin_storage, current_layer, previous_layer, summary.max_print_z);
 
@@ -680,8 +699,11 @@ private:
                         continue;
                     }
 
-                    StoredConfig tool_arguments = copy_arguments(
-                        run_context->plugin_storage, current_layer_arguments);
+                    StoredConfig tool_arguments(run_context->plugin_storage);
+                    set_float_argument(tool_arguments, "previous_layer_z",
+                                       previous_layer ? unscaled(previous_layer->print_z) : 0.0);
+                    set_float_argument(tool_arguments, "max_layer_z",
+                                       unscaled(summary.max_print_z));
                     set_int_argument(tool_arguments, "previous_extruder", current_tool);
                     set_int_argument(tool_arguments, "next_extruder", int32_t(target_tool));
                     set_float_argument(tool_arguments, "toolchange_z", unscaled(current_layer.print_z));
@@ -701,6 +723,9 @@ private:
                         MutableExtrusionEntity();
                     StoredConfig start_filament_arguments = copy_arguments(
                         run_context->plugin_storage, tool_arguments);
+                    set_int_argument(start_filament_arguments, "layer_num", current_layer.number);
+                    set_float_argument(start_filament_arguments, "layer_z",
+                                       unscaled(current_layer.print_z));
                     set_int_argument(start_filament_arguments, "filament_extruder_id", int32_t(target_tool));
                     const std::string start_filament =
                         config.vector_string_or_default(
@@ -732,10 +757,13 @@ private:
             for (extruder_index_t tool_id : final_tools) {
                 throw_if_cancelled(run_context);
                 StoredConfig arguments(run_context->plugin_storage);
-                if (summary.last_layer)
-                    arguments.deserialize_all(layer_arguments(
-                        run_context->plugin_storage, *summary.last_layer,
-                        summary.previous_layer, summary.max_print_z).serialize_all());
+                set_float_argument(arguments, "previous_layer_z",
+                                   summary.previous_layer ?
+                                       unscaled(summary.previous_layer->print_z) : 0.0);
+                set_float_argument(arguments, "max_layer_z", unscaled(summary.max_print_z));
+                set_float_argument(arguments, "toolchange_z",
+                                   summary.last_layer ?
+                                       unscaled(summary.last_layer->print_z) : 0.0);
                 set_int_argument(arguments, "filament_extruder_id", int32_t(tool_id));
                 set_int_argument(arguments, "previous_extruder", current_tool);
                 set_int_argument(arguments, "next_extruder", -1);
@@ -747,9 +775,11 @@ private:
             }
         }
 
-        const LayerContext last_layer = summary.last_layer.value_or(LayerContext{});
-        StoredConfig end_arguments = layer_arguments(
-            run_context->plugin_storage, last_layer, summary.previous_layer, summary.max_print_z);
+        StoredConfig end_arguments(run_context->plugin_storage);
+        set_float_argument(end_arguments, "previous_layer_z",
+                           summary.previous_layer ?
+                               unscaled(summary.previous_layer->print_z) : 0.0);
+        set_float_argument(end_arguments, "max_layer_z", unscaled(summary.max_print_z));
         set_int_argument(end_arguments, "previous_extruder",
                          summary.last_extruder ? int32_t(*summary.last_extruder) : -1);
         set_int_argument(end_arguments, "next_extruder", -1);
