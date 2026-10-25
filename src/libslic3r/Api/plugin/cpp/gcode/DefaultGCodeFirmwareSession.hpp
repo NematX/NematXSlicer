@@ -91,7 +91,7 @@ public:
     std::string reader_plugin_id() const override { return "gcode.reader.default"; }
     // Advance the sequential object index for later real groups and return any group-start travel.
     std::string begin_group(const ConstPrintingGroup &group) override;
-    // Emit layer markers and record the current plan layer number, Z and actual height.
+    // Emit layer, Z and maximum-height markers, clear the cached extrusion height, and advance plan-layer state.
     std::string begin_layer(const ConstPrintingLayerGroup &layer) override;
     std::string begin_tool_group(const ConstPrintingToolGroup &tool_group) override;
     std::string write_extrusion(const ConstPrintingExtrusion &extrusion) override;
@@ -274,8 +274,6 @@ private:
     std::string select_extruder(extruder_index_t tool_id, bool emit_command = true);
     std::string move_to_group_start(const ConstPrintingGroup &group);
     std::string write_extrusion_tree(const ExtrusionEntity &root);
-    // Select the first object height or smallest source height, rejecting invalid sources; without sources, find the first printable extrusion height or return nullopt, without mutating the group.
-    std::optional<float> reliable_layer_height(const ConstPrintingLayerGroup &layer) const;
     // Emit changed role/dimension tags, permitting zero dimensions for fixed-E paths.
     std::string write_printable_markers(const EPropertyAttributes &attributes, bool fixed_e = false);
     std::string write_seam_marker(const ExtrusionEntity &loop) const;

@@ -850,7 +850,7 @@ TEST_CASE("Settings scripts plugin owns the configured script settings",
         CHECK(rule.owner != "gcode.settings_scripts");
 }
 
-// Export two real objects in parallel and sequential modes, then compare every script value with the finalized plan and produced layer markers.
+// Export two real objects in parallel and sequential modes, compare script Z with layer markers, and derive script height from this test setup's equal source heights. Both cubes share layer_height and the skirt uses first-layer height, so this equality is test-specific, not a printing-plan invariant; export or parsing failures are reported by assertions.
 TEST_CASE("Exported scripts read the legacy export variables",
           "[plugins][gcode][script-type][integration][script-globals]")
 {
@@ -937,8 +937,23 @@ TEST_CASE("Exported scripts read the legacy export variables",
 
             const PrintingPlan *plan = print.printing_plan();
             REQUIRE(plan != nullptr);
+            std::vector<double> expected_layer_heights;
             for (const PrintingGroup &group : plan->groups)
                 for (const PrintingLayerGroup &layer : group.layers) {
+                    REQUIRE_FALSE(layer.layers.empty());
+                    REQUIRE(layer.layers.front() != nullptr);
+                    // This test setup has equal source heights because both cubes
+                    // share layer_height and the skirt uses first-layer height.
+                    // Mixed groups are valid; see "Default firmware layer change describes mixed-height print Z groups",
+                    // "Default firmware accepts different object layer heights in the by-layer plan", and
+                    // "Default firmware exports different object layer heights in the by-layer plan".
+                    const coord_t source_height = layer.layers.front()->scaled_height();
+                    for (const Layer *source_layer : layer.layers) {
+                        REQUIRE(source_layer != nullptr);
+                        REQUIRE(source_layer->scaled_height() == source_height);
+                    }
+                    expected_layer_heights.push_back(
+                        layer.layers.front()->unscaled_height());
                     ++expected_all_layer_count;
                     expected_max_print_z = std::max(expected_max_print_z, layer.print_z);
                     for (const PrintingToolGroup &tool : layer.tool_groups) {
@@ -965,7 +980,6 @@ TEST_CASE("Exported scripts read the legacy export variables",
             size_t feature_count = 0;
             std::set<int32_t> feature_layers;
             double last_layer_z = 0.0;
-            double last_layer_height = 0.0;
             std::istringstream output_lines(output);
             std::string line;
             while (std::getline(output_lines, line)) {
@@ -975,8 +989,6 @@ TEST_CASE("Exported scripts read the legacy export variables",
                     ++layer_change_count;
                 else if (line.rfind(";Z:", 0) == 0)
                     last_layer_z = std::stod(line.substr(3));
-                else if (line.rfind(";HEIGHT:", 0) == 0)
-                    last_layer_height = std::stod(line.substr(8));
                 else if (line.rfind("; GS ", 0) == 0)
                     start_line = line;
                 else if (line.rfind("; GB ", 0) == 0)
@@ -998,9 +1010,14 @@ TEST_CASE("Exported scripts read the legacy export variables",
                                                            feature_z >> feature_height >> feature_max_z);
                     REQUIRE(parsed);
                     REQUIRE(layer_change_count > 0);
+                    REQUIRE(feature_layer >= 0);
+                    REQUIRE(static_cast<size_t>(feature_layer) <
+                            expected_layer_heights.size());
                     CHECK(feature_layer == int32_t(layer_change_count - 1));
                     CHECK(feature_z == Approx(last_layer_z).margin(1e-6));
-                    CHECK(feature_height == Approx(last_layer_height).margin(1e-6));
+                    CHECK(feature_height ==
+                          Approx(expected_layer_heights[
+                              static_cast<size_t>(feature_layer)]).margin(1e-6));
                     CHECK(feature_max_z == Approx(expected_max_layer_z).margin(1e-6));
                     feature_layers.insert(feature_layer);
                 }

@@ -579,7 +579,7 @@ TEST_CASE("Derived firmware completes a script context immediately before parsin
           "M117 Z12.5\n");
     CHECK(firmware.completion_count() == 1);
 }
-// Script-owned selection keeps its stored tool context, suppresses selection-time output and resets E afterwards.
+// Script-owned selection keeps its stored tool context while layer entry emits Z and maximum height; selection-time output stays suppressed and E resets after the script.
 TEST_CASE("Toolchange scripts use the structural Config stored at insertion",
           "[plugins][gcode][firmware][custom-gcode][printing-plan]")
 {
@@ -634,7 +634,8 @@ TEST_CASE("Toolchange scripts use the structural Config stored at insertion",
 
     firmware.setup(print_view.config());
     REQUIRE(firmware.begin_group(group_view).empty());
-    REQUIRE(firmware.begin_layer(layer_view) == ";LAYER_CHANGE\n;Z:0.2\n");
+    REQUIRE(firmware.begin_layer(layer_view) ==
+            ";LAYER_CHANGE\n;Z:0.2\n;MAX_LAYER_HEIGHT:0.2\n");
     CHECK(firmware.begin_tool_group(first_tool) == "T1\nG92 E0\n");
     REQUIRE(firmware.end_tool_group().empty());
     // Suppressed selection leaves the coordinate alone: the script owns the

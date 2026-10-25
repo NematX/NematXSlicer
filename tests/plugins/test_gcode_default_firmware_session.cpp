@@ -20,6 +20,7 @@
 #include "perimeter_test_helpers.hpp"
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Api/host/GCodeReaderService.hpp"
 #include "libslic3r/Api/host/GCodeScriptProcessor.hpp"
 #include "libslic3r/Api/host/GCodeReaderService.hpp"
 #include "libslic3r/Api/host/GCodeThumbnailRenderer.hpp"
@@ -247,7 +248,7 @@ PrintingLayerGroup &append_marker_test_layer(Print &print, coord_t print_z)
     return layer;
 }
 
-/* Keep assertions focused on the five semantic marker families in this milestone. */
+/* Read a G-code string line by line, copy layer, Z, maximum-height and printable marker lines into an owned vector, and leave the input unchanged; allocation failures propagate. */
 std::vector<std::string> semantic_marker_lines(const std::string &gcode)
 {
     std::vector<std::string> markers;
@@ -255,6 +256,7 @@ std::vector<std::string> semantic_marker_lines(const std::string &gcode)
     std::string line;
     while (std::getline(stream, line)) {
         if (line == ";LAYER_CHANGE" || line.rfind(";Z:", 0) == 0 ||
+            line.rfind(";MAX_LAYER_HEIGHT:", 0) == 0 ||
             line.rfind(";HEIGHT:", 0) == 0 || line.rfind(";TYPE:", 0) == 0 ||
             line.rfind(";WIDTH:", 0) == 0)
             markers.push_back(line);
@@ -1618,6 +1620,7 @@ TEST_CASE("Default firmware emits inherited process state and ordered linear mov
     remove_output_pair(output_path);
 }
 
+// Export two source-free layers and check that each maximum-height marker precedes the forced extrusion-height tag.
 TEST_CASE("Default firmware emits ordered semantic marker triplets for layers",
           "[plugins][gcode][firmware][markers]")
 {
@@ -1638,19 +1641,102 @@ TEST_CASE("Default firmware emits ordered semantic marker triplets for layers",
         print, "gcode.firmware.marlin2");
     INFO(output);
     const std::vector<std::string> expected{
-        ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
-        ";TYPE:Perimeter", ";WIDTH:0.4",
-        ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.25"
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:Perimeter", ";WIDTH:0.4", ";HEIGHT:0.2",
+        ";LAYER_CHANGE", ";Z:0.4", ";MAX_LAYER_HEIGHT:0.2",
+        ";HEIGHT:0.25"
     };
     CHECK(semantic_marker_lines(output) == expected);
 }
 
+// Export two source-free layers of equal extrusion height and verify each first positive-E XY move follows a fresh HEIGHT marker.
+TEST_CASE("Default firmware rewrites HEIGHT before same-height layer extrusions",
+          "[plugins][gcode][firmware][markers]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    Print print;
+    configure_standard_firmware(print);
+    PrintingLayerGroup &first_layer = append_marker_test_layer(print, scale_i(0.2));
+    append_path_extrusion(
+        first_layer.tool_groups.front(),
+        marker_test_path(0.0, 1.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
+    PrintingLayerGroup &second_layer = append_marker_test_layer(print, scale_i(0.4));
+    append_path_extrusion(
+        second_layer.tool_groups.front(),
+        marker_test_path(1.0, 2.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    INFO(output);
+    CHECK(semantic_marker_lines(output) == std::vector<std::string>{
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:Perimeter", ";WIDTH:0.4", ";HEIGHT:0.2",
+        ";LAYER_CHANGE", ";Z:0.4", ";MAX_LAYER_HEIGHT:0.2",
+        ";HEIGHT:0.2"
+    });
+
+    GCodeReader reader;
+    int32_t current_layer = -1;
+    bool height_seen = false;
+    bool first_layer_extrusion_checked = false;
+    bool second_layer_extrusion_checked = false;
+    reader.parse_buffer(output, [&current_layer, &height_seen,
+                                 &first_layer_extrusion_checked,
+                                 &second_layer_extrusion_checked](
+        GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (line.comment() == "LAYER_CHANGE") {
+            ++current_layer;
+            height_seen = false;
+        } else if (line.comment().rfind("HEIGHT:", 0) == 0) {
+            height_seen = true;
+        }
+        if (line.extruding(state) && line.dist_XY(state) > 0.) {
+            if (current_layer == 0 && !first_layer_extrusion_checked) {
+                CHECK(height_seen);
+                first_layer_extrusion_checked = true;
+            } else if (current_layer == 1 && !second_layer_extrusion_checked) {
+                CHECK(height_seen);
+                second_layer_extrusion_checked = true;
+            }
+        }
+    });
+    CHECK(first_layer_extrusion_checked);
+    CHECK(second_layer_extrusion_checked);
+}
+
+// Export source-free layers at distinct Z gaps and verify MAX_LAYER_HEIGHT follows each gap instead of the extrusion height.
+TEST_CASE("Default firmware uses the Z gap when a layer group has no source layers",
+          "[plugins][gcode][firmware][markers]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    Print print;
+    configure_standard_firmware(print);
+    PrintingLayerGroup &first_layer = append_marker_test_layer(print, scale_i(0.2));
+    append_path_extrusion(
+        first_layer.tool_groups.front(),
+        marker_test_path(0.0, 1.0, ExtrusionRole::Perimeter, 0.4f, 0.3f));
+    PrintingLayerGroup &second_layer = append_marker_test_layer(print, scale_i(0.45));
+    append_path_extrusion(
+        second_layer.tool_groups.front(),
+        marker_test_path(1.0, 2.0, ExtrusionRole::Perimeter, 0.4f, 0.3f));
+
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    INFO(output);
+    CHECK(semantic_marker_lines(output) == std::vector<std::string>{
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:Perimeter", ";WIDTH:0.4", ";HEIGHT:0.3",
+        ";LAYER_CHANGE", ";Z:0.45", ";MAX_LAYER_HEIGHT:0.25",
+        ";HEIGHT:0.3"
+    });
+}
+
+// Borrow object/support sources and an auxiliary-only group in a manual plan, then export and assert maximum markers separately from extrusion heights; pipeline or output mismatches fail assertions.
 TEST_CASE("Default firmware layer change describes mixed-height print Z groups",
           "[plugins][gcode][firmware][markers]")
 {
-    // A print Z may group layers of different heights. The layer change uses
-    // the object layer height when the group has one, otherwise the smallest
-    // height; each extrusion still writes its own height when it differs.
+    // A print Z may group object and auxiliary layers of different heights.
+    // The layer marker describes their maximum; each extrusion keeps its own height.
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Model model;
     Print print;
@@ -1692,18 +1778,16 @@ TEST_CASE("Default firmware layer change describes mixed-height print Z groups",
         print, "gcode.firmware.marlin2");
     INFO(output);
     const std::vector<std::string> expected{
-        ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2",
+        ";LAYER_CHANGE", ";Z:0.4", ";MAX_LAYER_HEIGHT:0.2",
         ";TYPE:Support material", ";WIDTH:0.4", ";HEIGHT:0.1",
         ";TYPE:Perimeter", ";HEIGHT:0.2",
-        ";LAYER_CHANGE", ";Z:1.4", ";HEIGHT:0.15",
+        ";LAYER_CHANGE", ";Z:1.4", ";MAX_LAYER_HEIGHT:0.3",
         ";TYPE:Support material", ";HEIGHT:0.3"
     };
     CHECK(semantic_marker_lines(output) == expected);
 }
 
-// Slice two owned objects without support, borrow their real by-layer plan, and check
-// that a shared scaled Z with unequal heights uses the height of the first object layer of the group;
-// failures in slicing, grouping or firmware initialization are reported by the assertions.
+// Slice two owned objects without support, borrow their real by-layer plan, and check its maximum source-height marker; failures in slicing, grouping or firmware initialization are reported by the assertions.
 TEST_CASE("Default firmware accepts different object layer heights in the by-layer plan",
           "[plugins][gcode][firmware][markers]")
 {
@@ -1741,6 +1825,7 @@ TEST_CASE("Default firmware accepts different object layer heights in the by-lay
         }
     }
     REQUIRE(mixed_layer != nullptr);
+    REQUIRE(mixed_layer->print_z == scale_i(0.8));
     const Layer &first_layer = *mixed_layer->layers[0];
     const Layer &second_layer = *mixed_layer->layers[1];
     INFO("shared scaled Z: " << mixed_layer->print_z << "; heights: "
@@ -1759,14 +1844,13 @@ TEST_CASE("Default firmware accepts different object layer heights in the by-lay
     REQUIRE_NOTHROW(output = session.begin_layer(slic3r_api::ConstPrintingLayerGroup(
         reinterpret_cast<const printing_layer_group_handle *>(mixed_layer))));
     const std::vector<std::string> markers = semantic_marker_lines(output);
-    REQUIRE(markers.size() == 3);
-    CHECK(markers[0] == ";LAYER_CHANGE");
-    CHECK(markers[2] == ";HEIGHT:0.2");
+    CHECK(output == ";LAYER_CHANGE\n;Z:0.8\n;MAX_LAYER_HEIGHT:0.3\n");
+    CHECK(markers == std::vector<std::string>{
+        ";LAYER_CHANGE", ";Z:0.8", ";MAX_LAYER_HEIGHT:0.3"
+    });
 }
 
-// Process two owned cubes with different layer heights through production ordering,
-// then export with the plugin writer and parse its owned G-code to check the shared
-// Z markers and positive-E XY extrusion; pipeline and export failures propagate.
+// Export two owned cubes with different layer heights, verify each object's first extrusion marker, and read the output with the plugin reader; pipeline, export and parsing failures propagate.
 TEST_CASE("Default firmware exports different object layer heights in the by-layer plan",
           "[plugins][gcode][firmware][markers]")
 {
@@ -1784,6 +1868,8 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
     model.objects()[0].config.set_deserialize_strict("layer_height", "0.2");
     model.objects()[1].config.set_deserialize_strict("layer_height", "0.3");
     print.apply(model, config);
+    const_cast<PrintConfig &>(print.config()).gcode_label_objects.value =
+        LabelObjectsStyle::Both;
     REQUIRE_NOTHROW(print.process());
 
     // Export resumes the slicing pipeline through production ordering and the
@@ -1819,12 +1905,71 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
     REQUIRE(mixed_layer->layers[0]->scaled_height() == scale_i(0.2));
     REQUIRE(mixed_layer->layers[1]->scaled_height() == scale_i(0.3));
 
-    const std::string layer_start = ";LAYER_CHANGE\n;Z:0.8\n;HEIGHT:0.2\n";
+    GCodeReaderService reader_service(Orchestrator::instance(), nullptr);
+    const GCodeProcessorResult read_result = reader_service.read_for_viewer(
+        "gcode.reader.default", output);
+    bool max_height_at_target_z = false;
+    for (const GCodeProcessorResult::MoveVertex &move : read_result.moves) {
+        if (move.position.z() == Approx(0.8) &&
+            move.layer_id < read_result.layers_max_height.size() &&
+            read_result.layers_max_height[move.layer_id] == Approx(0.3)) {
+            max_height_at_target_z = true;
+            break;
+        }
+    }
+    CHECK(max_height_at_target_z);
+
+    const std::string layer_start =
+        ";LAYER_CHANGE\n;Z:0.8\n;MAX_LAYER_HEIGHT:0.3\n";
     const size_t begin = output.find(layer_start);
     REQUIRE(begin != std::string::npos);
     const size_t end = output.find(";LAYER_CHANGE\n", begin + layer_start.size());
     REQUIRE(end != std::string::npos);
-    REQUIRE(output.find(";HEIGHT:0.3\n", begin + layer_start.size()) < end);
+    CHECK(output.find(";HEIGHT:0.2\n", begin + layer_start.size()) < end);
+    CHECK(output.find(";HEIGHT:0.3\n", begin + layer_start.size()) < end);
+
+    // Object labels identify which first positive-E XY movement must follow
+    // its own extrusion-height marker within the shared print-Z group.
+    GCodeReader object_reader;
+    int32_t current_object = -1;
+    double current_height = 0.0;
+    bool first_object_height_seen = false;
+    bool second_object_height_seen = false;
+    bool first_object_extrusion_seen = false;
+    bool second_object_extrusion_seen = false;
+    object_reader.parse_buffer(output, [&current_object, &current_height,
+                                        &first_object_height_seen,
+                                        &second_object_height_seen,
+                                        &first_object_extrusion_seen,
+                                        &second_object_extrusion_seen](
+        GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        const std::string comment(line.comment());
+        const size_t object_marker = comment.find("SLIC3R_OBJECT_INSTANCE_ID=");
+        if (object_marker != std::string::npos)
+            current_object = std::stoi(comment.substr(object_marker + 26));
+        else if (comment.rfind("HEIGHT:", 0) == 0) {
+            current_height = std::stod(comment.substr(7));
+            if (current_object == 0 && !first_object_extrusion_seen)
+                first_object_height_seen = true;
+            if (current_object == 1 && !second_object_extrusion_seen)
+                second_object_height_seen = true;
+        }
+        if (line.extruding(state) && line.dist_XY(state) > 0.) {
+            if (current_object == 0 && !first_object_extrusion_seen &&
+                state.z() == Approx(0.8)) {
+                CHECK(first_object_height_seen);
+                CHECK(current_height == Approx(0.2));
+                first_object_extrusion_seen = true;
+            } else if (current_object == 1 && !second_object_extrusion_seen &&
+                       state.z() == Approx(0.8)) {
+                CHECK(second_object_height_seen);
+                CHECK(current_height == Approx(0.3));
+                second_object_extrusion_seen = true;
+            }
+        }
+    });
+    CHECK(first_object_extrusion_seen);
+    CHECK(second_object_extrusion_seen);
 
     // Parse the whole file to retain absolute-E state and resets. Inside the
     // target layer, require XY motion with increasing E while height is 0.3;
@@ -1849,6 +1994,7 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
     CHECK(thick_extrusion);
 }
 
+// Export one source-free layer and verify its maximum-height tag and extrusion attributes all precede the first printable move.
 TEST_CASE("Default firmware emits TYPE WIDTH and HEIGHT before printable geometry",
           "[plugins][gcode][firmware][markers]")
 {
@@ -1865,8 +2011,8 @@ TEST_CASE("Default firmware emits TYPE WIDTH and HEIGHT before printable geometr
         print, "gcode.firmware.marlin2");
     INFO(output);
     const std::vector<std::string> expected{
-        ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
-        ";TYPE:Perimeter", ";WIDTH:0.45"
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:Perimeter", ";WIDTH:0.45", ";HEIGHT:0.2"
     };
     CHECK(semantic_marker_lines(output) == expected);
 
@@ -1881,6 +2027,7 @@ TEST_CASE("Default firmware emits TYPE WIDTH and HEIGHT before printable geometr
     }
 }
 
+// Export adjacent equal paths and verify role, width and height remain deduplicated after the layer maximum marker.
 TEST_CASE("Default firmware deduplicates identical consecutive printable markers",
           "[plugins][gcode][firmware][markers]")
 {
@@ -1901,8 +2048,8 @@ TEST_CASE("Default firmware deduplicates identical consecutive printable markers
         print, "gcode.firmware.marlin2");
     INFO(output);
     const std::vector<std::string> expected{
-        ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
-        ";TYPE:Perimeter", ";WIDTH:0.4"
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:Perimeter", ";WIDTH:0.4", ";HEIGHT:0.2"
     };
     CHECK(semantic_marker_lines(output) == expected);
     CHECK(count_occurrences(output, ";TYPE:Perimeter\n") == 1);
@@ -1935,6 +2082,7 @@ TEST_CASE("Default firmware maps raw extrusion roles to G-code labels")
     CHECK(slic3r_api::extrusion_role_to_string(RAW_EXTRUSION_ROLE_TRAVEL) == "Travel");
 }
 
+// Export paths with role, width and height changes and check only changed extrusion tags follow the layer maximum.
 TEST_CASE("Default firmware emits only required intra-layer marker transitions",
           "[plugins][gcode][firmware][markers]")
 {
@@ -1965,9 +2113,9 @@ TEST_CASE("Default firmware emits only required intra-layer marker transitions",
         print, "gcode.firmware.marlin2");
     INFO(output);
     const std::vector<std::string> expected{
-        ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
-        ";TYPE:External perimeter", ";WIDTH:0.4", ";WIDTH:0.45",
-        ";TYPE:Internal infill", ";HEIGHT:0.25"
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:External perimeter", ";WIDTH:0.4", ";HEIGHT:0.2",
+        ";WIDTH:0.45", ";TYPE:Internal infill", ";HEIGHT:0.25"
     };
     CHECK(semantic_marker_lines(output) == expected);
     CHECK(count_occurrences(output, ";TYPE:External perimeter\n") == 1);
@@ -1978,6 +2126,7 @@ TEST_CASE("Default firmware emits only required intra-layer marker transitions",
     CHECK(count_occurrences(output, ";HEIGHT:0.25\n") == 1);
 }
 
+// Export printable geometry around travel and E-only transitions and check the layer's first HEIGHT remains before geometry.
 TEST_CASE("Default firmware retains printable markers across travel and E transitions",
           "[plugins][gcode][firmware][markers]")
 {
@@ -2009,8 +2158,8 @@ TEST_CASE("Default firmware retains printable markers across travel and E transi
         print, "gcode.firmware.marlin2");
     INFO(output);
     const std::vector<std::string> expected{
-        ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
-        ";TYPE:Perimeter", ";WIDTH:0.4"
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:Perimeter", ";WIDTH:0.4", ";HEIGHT:0.2"
     };
     CHECK(semantic_marker_lines(output) == expected);
     CHECK(count_occurrences(output, ";TYPE:Perimeter\n") == 1);
@@ -2018,14 +2167,15 @@ TEST_CASE("Default firmware retains printable markers across travel and E transi
     CHECK(count_occurrences(output, ";HEIGHT:0.2\n") == 1);
 }
 
+// Export one layer with and without human comments and require identical semantic marker sequences.
 TEST_CASE("Default firmware semantic markers ignore gcode_comments",
           "[plugins][gcode][firmware][markers]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     const std::vector<std::string> expected{
-        ";LAYER_CHANGE", ";Z:0.2", ";HEIGHT:0.2",
-        ";TYPE:Perimeter", ";WIDTH:0.4"
+        ";LAYER_CHANGE", ";Z:0.2", ";MAX_LAYER_HEIGHT:0.2",
+        ";TYPE:Perimeter", ";WIDTH:0.4", ";HEIGHT:0.2"
     };
     const std::string comments_disabled = export_marker_comment_fixture(false);
     const std::string comments_enabled = export_marker_comment_fixture(true);

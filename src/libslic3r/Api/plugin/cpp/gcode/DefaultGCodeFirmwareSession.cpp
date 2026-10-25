@@ -124,57 +124,6 @@ bool extrusion_tree_has_segments(const ExtrusionEntity &root)
     return false;
 }
 
-// Return true when the layer is one of its object's sliced layers, false for
-// an auxiliary layer (support, brim, ...). Object layers are sorted by
-// print_z with one layer per Z, so a binary search finds the only candidate.
-bool is_object_layer(const Layer &layer)
-{
-    const Object object = layer.object();
-    if (!object.valid())
-        return false;
-    uint32_t first = 0;
-    uint32_t count = object.layer_count();
-    while (count > 0) {
-        const uint32_t step = count / 2;
-        if (object.layer(first + step).print_z() < layer.print_z()) {
-            first += step + 1;
-            count -= step + 1;
-        } else {
-            count = step;
-        }
-    }
-    return first < object.layer_count() && object.layer(first).handle() == layer.handle();
-}
-
-class FirstPrintableHeightVisitor final : public ExtrusionTreeConstVisitor<>
-{
-public:
-    std::optional<float> find(const ExtrusionEntity &root)
-    {
-        m_height.reset();
-        traverse(root);
-        return m_height;
-    }
-
-protected:
-    // Borrow a leaf and resolve its inherited height without changing geometry;
-    // deposits count as printable despite having no segments, and invalid heights are ignored.
-    void visit_leaf(ExtrusionEntity entity) override
-    {
-        if (m_height || (entity.segment_count() == 0 && !entity.is_deposit()))
-            return;
-        const EPropertyAttributes *attributes = current_property(EPropertyAttributes::key);
-        if (attributes == nullptr || !is_printable_role(attributes->extrusion_role()))
-            return;
-        const float height = attributes->c_extrusion_property_attributes::height;
-        if (std::isfinite(height) && height > 0.f)
-            m_height = height;
-    }
-
-private:
-    std::optional<float> m_height;
-};
-
 // Convert an optional process acceleration into the integer unit accepted by
 // firmware commands. Absence is meaningful: it leaves the printer's current
 // acceleration unchanged instead of inventing a host-side default.
@@ -553,71 +502,36 @@ std::string DefaultGCodeFirmwareSession::begin_group(const ConstPrintingGroup &g
     return move_to_group_start(group);
 }
 
-// Emit markers for a borrowed plan layer, advance the zero-based script layer counter, and store the layer height (first source layer height, or the Z gap from the previous plan layer without source layers) before changing print Z; an uninitialized session or invalid source height throws and no ownership is retained.
+// Borrow one plan layer, validate positive source heights, and return an owned layer-change string with its Z and maximum-height markers; source groups use their greatest height, source-free groups use the Z gap, the cached extrusion height is cleared, and script-layer state advances without retaining the borrowed view.
+// An uninitialized session or invalid source height throws before layer state changes; without a source layer, the Z gap from the previous layer is written unchanged. If Z does not rise, the gap may be <= 0 and G-code readers report it with a diagnostic.
 std::string DefaultGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGroup &layer)
 {
     if (!m_is_setup)
         throw std::logic_error("The firmware session was not initialized by begin_print().");
-    const std::optional<float> height = reliable_layer_height(layer);
+    coord_t max_source_height = 0;
+    if (layer.layer_count() > 0) {
+        for (uint32_t layer_idx = 0; layer_idx < layer.layer_count(); ++layer_idx) {
+            const Layer source_layer = layer.layer(layer_idx);
+            if (!source_layer.valid() || source_layer.height() <= 0)
+                throw std::invalid_argument("A source layer needs a positive height.");
+            max_source_height = std::max(max_source_height, source_layer.height());
+        }
+    } else {
+        max_source_height = layer.print_z() - m_layer_print_z;
+    }
     std::string output = ";LAYER_CHANGE\n;Z:" +
-        format_number(unscaled(layer.print_z())) + "\n";
-    if (height)
-        output += ";HEIGHT:" + format_number(*height) + "\n";
+        format_number(unscaled(layer.print_z())) + "\n;MAX_LAYER_HEIGHT:" +
+        format_number(unscaled(max_source_height)) + "\n";
 
     m_layer_height = printing_layer_height(layer, m_layer_print_z);
     ++m_layer_num;
+    m_marker_height.reset();
     m_layer_print_z = layer.print_z();
-    if (height)
-        m_marker_height = *height;
     // A layer boundary is structural, not a machine movement. Explicit travel
     // geometry may first finish a wipe at the preceding Z and then apply a
     // ramped lift. When no such geometry exists, write_leaf_geometry() still
     // provides the legacy straight fallback to the first point at this Z.
     return output;
-}
-
-// Inspect a borrowed group without mutation and return its marker height in mm; invalid
-// or non-positive source layers throw invalid_argument. Without sources, search for the
-// first printable extrusion height, returning nullopt when none is available.
-std::optional<float> DefaultGCodeFirmwareSession::reliable_layer_height(
-    const ConstPrintingLayerGroup &layer) const
-{
-    // One print Z may group objects with different layer heights, an object
-    // layer with an unsynchronized support layer, or several support slabs
-    // published at the same Z. This height only feeds the ;HEIGHT: marker of the layer
-    // change, and write_printable_markers() still writes the exact height before
-    // every extrusion whose height differs from it. The first object layer
-    // describes the layer change; without one, the thinnest layer is used.
-    if (layer.layer_count() > 0) {
-        std::optional<coord_t> object_height;
-        std::optional<coord_t> smallest_height;
-        for (uint32_t layer_idx = 0; layer_idx < layer.layer_count(); ++layer_idx) {
-            const Layer source_layer = layer.layer(layer_idx);
-            if (!source_layer.valid() || source_layer.height() <= 0)
-                throw std::invalid_argument("A source layer needs a positive height.");
-            const coord_t height = source_layer.height();
-            if (!object_height && is_object_layer(source_layer))
-                object_height = height;
-            if (!smallest_height || height < *smallest_height)
-                smallest_height = height;
-        }
-        return float(unscaled(object_height ? *object_height : *smallest_height));
-    }
-
-    FirstPrintableHeightVisitor visitor;
-    for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
-        const ConstPrintingToolGroup tool_group = layer.tool_group(tool_idx);
-        for (uint32_t extrusion_idx = 0;
-             extrusion_idx < tool_group.extrusion_count(); ++extrusion_idx) {
-            const ExtrusionEntity root = tool_group.extrusion(extrusion_idx).root();
-            if (root.empty())
-                continue;
-            const std::optional<float> height = visitor.find(root);
-            if (height)
-                return height;
-        }
-    }
-    return std::nullopt;
 }
 
 // Borrow attributes, validate dimensions and update marker caches while returning
