@@ -766,9 +766,9 @@ Sources: `src/libslic3r/Api/host/steps/LayerHeightStep.hpp:20`, `src/libslic3r/S
 | `SurfaceInfillRecipe::raw` | Recipe by value, modified in place by successive recipe modifiers | Const view for the pattern; destroyed with the recipe |
 | `SurfaceInfillRecipe::no_overlap_areas` | Computed local geometry, passed const | Lifetime of generate_surface |
 | `generate_surface()::output` | Local root initially empty, filled by the pattern | Content published by move; local handle not transferred |
-| `InfillStepHostContext::pattern_runtime_ids_by_plugin_id`, `pattern_plugins_by_runtime_id` | Local name ↔ ID/plugin registries | Lifetime of this step call, non-persistent IDs |
+| `InfillPatternService::m_runtime_ids_by_plugin_id`, `m_patterns` | Local name ↔ ID/plugin registries, built once by the constructor and read-only afterwards | Lifetime of the step call that owns the service (`STEP_INFILL`), non-persistent IDs |
 | `InfillStepHostContext::recipe_modifier_plugins` | List of borrowed providers | Step context lifetime |
-| `InfillStepHostContext::pattern_host_contexts`, `recipe_modifier_host_contexts` | Owned contexts for the callbacks | Lifetime of the step call |
+| `InfillPatternService::Pattern::{host_context,execution_error,run_context}`, `InfillStepHostContext::recipe_modifier_host_contexts` | Owned contexts for the callbacks; pattern contexts and plugin storage entries are created before any call, so calls may run concurrently | Lifetime of the step call |
 | `StepSupportDemand::State::m_demands` | Map borrowed object → owned SupportDemandSet | Reset/destroyed in the pipeline; not a Print member |
 | `SupportDemandSet::m_entries` | Vector of Entry by value | Addition/erasure may invalidate views |
 | `SupportDemandSet::Entry::island` | Source borrow | The set does not own the island |

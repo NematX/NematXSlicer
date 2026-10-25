@@ -21,12 +21,31 @@
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Steps/InfillPatternService.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/Surface.hpp"
 
 namespace Slic3r::Steps::StepGenerateInfill {
 namespace {
+
+bool surface_needs_infill(const Surface &surface)
+{
+    return !surface.empty() && !surface.has_fill_void();
+}
+
+size_t count_candidate_surfaces(const Print &print)
+{
+    size_t count = 0;
+    for (const PrintObject &object : print.objects())
+        for (const Layer &layer : object.layers())
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region_island : island.regions_islands())
+                    for (const Surface &surface : region_island.fill_surfaces())
+                        if (surface_needs_infill(surface))
+                            ++count;
+    return count;
+}
 
 // STEP_INFILL has three kinds of plugins involved in one run:
 // - one exclusive STEP_INFILL generator, selected by the step setting;
@@ -38,16 +57,20 @@ namespace {
 // the step run and is reached through run_ctx_generate_infill::host_context.
 struct InfillStepHostContext
 {
+    // Build the pattern service before any generator callback can run.
+    InfillStepHostContext(Orchestrator &orchestrator, Print &print)
+        : orchestrator(&orchestrator), print(&print),
+          patterns(orchestrator, print, count_candidate_surfaces(print), InfillPatternService::SetupPatterns::Allow)
+    {}
+
     Orchestrator *orchestrator = nullptr;
     Print *print = nullptr;
 
-    // Runtime pattern ids are compact numbers valid only for this step run.
-    // Config still stores stable string plugin ids; the generator resolves
-    // those strings through resolve_pattern_id_callback() before filling each
+    // Runtime pattern ids, per-pattern host contexts and error flags. Config
+    // still stores stable string plugin ids; the generator resolves those
+    // strings through resolve_pattern_id_callback() before filling each
     // surface.
-    std::map<std::string, infill_pattern_runtime_id> pattern_runtime_ids_by_plugin_id;
-    std::map<infill_pattern_runtime_id, Plugin *> pattern_plugins_by_runtime_id;
-    std::map<Plugin *, plugin_host_context> pattern_host_contexts;
+    InfillPatternService patterns;
 
     // Discovery result reported by the generator during its setup_run() phase.
     // The host owns a copy of every group so the arrays stay valid until the
@@ -75,7 +98,6 @@ struct InfillStepHostContext
     // modifier sees the changes made by the previous one.
     std::vector<Plugin *> recipe_modifier_plugins;
     std::map<Plugin *, plugin_host_context> recipe_modifier_host_contexts;
-    std::map<Plugin *, std::unique_ptr<std::atomic_bool>> pattern_execution_errors;
     std::map<Plugin *, std::unique_ptr<std::atomic_bool>> recipe_modifier_execution_errors;
 };
 
@@ -107,37 +129,7 @@ infill_pattern_runtime_id resolve_pattern_id_callback(const run_ctx_generate_inf
     InfillStepHostContext *host = host_from_context(ctx);
     if (host == nullptr)
         return INFILL_PATTERN_RUNTIME_ID_INVALID;
-
-    const std::string requested_id = pattern_plugin_id != nullptr ? pattern_plugin_id : "";
-    const std::map<std::string, infill_pattern_runtime_id>::const_iterator selected =
-        host->pattern_runtime_ids_by_plugin_id.find(requested_id);
-    if (selected != host->pattern_runtime_ids_by_plugin_id.end())
-        return selected->second;
-
-    // The monotoniclines pattern was removed because it was identical to
-    // monotonic. Presets may still store its id; resolve it to monotonic so
-    // they keep slicing with the same result instead of the generic fallback.
-    if (requested_id == "monotoniclines")
-        return resolve_pattern_id_callback(ctx, "monotonic");
-
-    // Presets can outlive plugin activation changes. Falling back keeps the
-    // slice usable, while the warning tells the user that the selected pattern
-    // id is no longer available in the active plugin set.
-    if (!host->pattern_plugins_by_runtime_id.empty()) {
-        const std::map<infill_pattern_runtime_id, Plugin *>::const_iterator fallback_it =
-            host->pattern_plugins_by_runtime_id.begin();
-        Plugin *fallback = fallback_it->second;
-        const std::string fallback_id = fallback != nullptr ? fallback->get_id() : "";
-        const std::string message = "Infill pattern '" + requested_id + "' is not active; using '" +
-                                    fallback_id + "' instead.";
-        host->orchestrator->add_plugin_message(Orchestrator::PluginMessageLevel::Warning,
-                                               fallback,
-                                               INFILL_PATTERN,
-                                               message.c_str());
-        return fallback_it->first;
-    }
-
-    return INFILL_PATTERN_RUNTIME_ID_INVALID;
+    return host->patterns.resolve_pattern_id(pattern_plugin_id);
 }
 
 // Reverse lookup used mostly by diagnostics and recipe modifiers that want to
@@ -149,13 +141,7 @@ const char *pattern_plugin_id_callback(const run_ctx_generate_infill *ctx,
     InfillStepHostContext *host = host_from_context(ctx);
     if (host == nullptr)
         return "";
-
-    const std::map<infill_pattern_runtime_id, Plugin *>::const_iterator found =
-        host->pattern_plugins_by_runtime_id.find(pattern_id);
-    if (found == host->pattern_plugins_by_runtime_id.end() || found->second == nullptr)
-        return "";
-
-    return found->second->get_id().c_str();
+    return host->patterns.pattern_plugin_id(pattern_id);
 }
 
 // Collect the work groups the generator discovered for one pattern plugin in
@@ -192,33 +178,8 @@ int32_t report_pattern_assignments_callback(const run_ctx_generate_infill *ctx,
     return 1;
 }
 
-// Convert the runtime id present in raw_infill_pattern_params back to the
-// active plugin object. This is the last validation gate before executing a
-// pattern plugin.
-Plugin *pattern_plugin_for_runtime_id(InfillStepHostContext &host,
-                                      infill_pattern_runtime_id pattern_id)
-{
-    if (pattern_id == INFILL_PATTERN_RUNTIME_ID_INVALID)
-        return nullptr;
-
-    const std::map<infill_pattern_runtime_id, Plugin *>::const_iterator selected =
-        host.pattern_plugins_by_runtime_id.find(pattern_id);
-    if (selected != host.pattern_plugins_by_runtime_id.end())
-        return selected->second;
-
-    // A runtime id is created only by this host wrapper for the current run. If
-    // it cannot be found here, a generator or recipe modifier kept an id past
-    // its valid lifetime or wrote an arbitrary value. Do not guess a pattern:
-    // emitting no extrusion is safer than silently using the wrong algorithm.
-    const std::string message =
-        "Unknown runtime infill pattern id '" + std::to_string(pattern_id) + "'.";
-    host.orchestrator->add_plugin_message(Orchestrator::PluginMessageLevel::Warning,
-                                          nullptr,
-                                          INFILL_PATTERN,
-                                          message.c_str());
-    return nullptr;
-}
-
+// Run the pattern selected by pattern_id on one surface of the current object.
+// The shared service validates the id and guards the plugin phases.
 int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
                                   infill_pattern_runtime_id pattern_id,
                                   const layer_handle *layer,
@@ -234,21 +195,6 @@ int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
         return 0;
 
     InfillStepHostContext &host = *reinterpret_cast<InfillStepHostContext *>(ctx->host_context);
-    Plugin *plugin = pattern_plugin_for_runtime_id(host, pattern_id);
-    if (plugin == nullptr)
-        return 0;
-
-    std::map<Plugin *, plugin_host_context>::iterator host_context = host.pattern_host_contexts.find(plugin);
-    assert(host_context != host.pattern_host_contexts.end());
-    if (host_context == host.pattern_host_contexts.end())
-        return 0;
-
-    plugin_run_context run_context =
-        host.orchestrator->prepare_plugin_run_context(INFILL_PATTERN, plugin, &host_context->second);
-
-    // The pattern plugin receives the exact surface recipe and an empty output
-    // extrusion root. It does not know how it was selected; that remains the
-    // responsibility of STEP_INFILL and the runtime pattern registry above.
     run_ctx_infill_pattern payload = {};
     payload.print = ctx->print;
     payload.object = ctx->object;
@@ -260,17 +206,7 @@ int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
     payload.no_overlap_areas = no_overlap_areas;
     payload.params = params;
     payload.output = output;
-    run_context.data = &payload;
-
-    plugin->setup_run(run_context);
-    Detail::throw_if_plugin_stopped(
-        *host.orchestrator, *host.print, INFILL_PATTERN, *plugin,
-        execution_error_for(host.pattern_execution_errors, *plugin), "setup_run");
-    plugin->run(run_context);
-    Detail::throw_if_plugin_stopped(
-        *host.orchestrator, *host.print, INFILL_PATTERN, *plugin,
-        execution_error_for(host.pattern_execution_errors, *plugin), "run");
-    return 1;
+    return host.patterns.generate_pattern(pattern_id, payload);
 }
 
 int32_t modify_surface_recipe_callback(const run_ctx_generate_infill *ctx,
@@ -404,55 +340,6 @@ int32_t append_region_island_extrusion_callback(layer_region_island_handle *regi
     return 1;
 }
 
-bool surface_needs_infill(const Surface &surface)
-{
-    return !surface.empty() && !surface.has_fill_void();
-}
-
-size_t count_candidate_surfaces(const Print &print)
-{
-    size_t count = 0;
-    for (const PrintObject &object : print.objects())
-        for (const Layer &layer : object.layers())
-            for (const LayerSliceIsland &island : layer.islands())
-                for (const LayerRegionIsland &region_island : island.regions_islands())
-                    for (const Surface &surface : region_island.fill_surfaces())
-                        if (surface_needs_infill(surface))
-                            ++count;
-    return count;
-}
-
-void prepare_pattern_plugins(InfillStepHostContext &host)
-{
-    assert(host.orchestrator != nullptr);
-    assert(host.print != nullptr);
-
-    // INFILL_PATTERN plugins are service plugins, not standalone slicing
-    // steps. The generator reports the work groups it discovered during its
-    // setup_run() phase, and initialize_pattern_plugins() calls setup() once
-    // per used pattern with that payload. This function only assigns runtime
-    // ids and prepares the per-pattern host contexts.
-    const size_t run_count = count_candidate_surfaces(*host.print);
-    infill_pattern_runtime_id next_runtime_id = 1;
-    for (Plugin *plugin : host.orchestrator->get_active_plugins_for_step(INFILL_PATTERN)) {
-        if (plugin == nullptr)
-            continue;
-
-        // Runtime ids are one-based so 0 can remain the invalid value exposed
-        // by the C ABI. They are deliberately rebuilt for each run; plugin
-        // config and UI must keep using plugin->get_id().
-        const infill_pattern_runtime_id runtime_id = next_runtime_id++;
-        host.pattern_runtime_ids_by_plugin_id.emplace(plugin->get_id(), runtime_id);
-        host.pattern_plugins_by_runtime_id.emplace(runtime_id, plugin);
-        std::atomic_bool &execution_error = execution_error_for(host.pattern_execution_errors, *plugin);
-        plugin_host_context plugin_host =
-            Detail::prepare_guarded_plugin_host_context(
-                *host.orchestrator, INFILL_PATTERN, *plugin, *host.print, execution_error);
-        plugin_host.object_count = run_count;
-        host.pattern_host_contexts.emplace(plugin, plugin_host);
-    }
-}
-
 // Call setup() once per pattern plugin that the generator actually uses. The
 // payload lists every object of the print and the work groups discovered for
 // that pattern, so the plugin can precompute per-object state and parallelize
@@ -464,12 +351,6 @@ void initialize_pattern_plugins(InfillStepHostContext &host)
 
     for (std::pair<const infill_pattern_runtime_id, std::vector<InfillStepHostContext::HostObjectInit>> &entry :
          host.pattern_assignments) {
-        const std::map<infill_pattern_runtime_id, Plugin *>::const_iterator selected =
-            host.pattern_plugins_by_runtime_id.find(entry.first);
-        if (selected == host.pattern_plugins_by_runtime_id.end() || selected->second == nullptr)
-            continue;
-        Plugin *plugin = selected->second;
-
         uint32_t surface_count = 0;
         for (InfillStepHostContext::HostObjectInit &object : entry.second) {
             object.raw_assignments.clear();
@@ -500,19 +381,7 @@ void initialize_pattern_plugins(InfillStepHostContext &host)
         payload.print = reinterpret_cast<const print_handle *>(host.print);
         payload.objects = objects.empty() ? nullptr : objects.data();
         payload.object_count = uint32_t(objects.size());
-
-        std::map<Plugin *, plugin_host_context>::iterator host_context = host.pattern_host_contexts.find(plugin);
-        assert(host_context != host.pattern_host_contexts.end());
-        if (host_context == host.pattern_host_contexts.end())
-            continue;
-
-        std::atomic_bool &execution_error = execution_error_for(host.pattern_execution_errors, *plugin);
-        plugin_run_context setup_context =
-            host.orchestrator->prepare_plugin_run_context(INFILL_PATTERN, plugin, &host_context->second);
-        setup_context.data = &payload;
-        plugin->setup(setup_context, surface_count);
-        Detail::throw_if_plugin_stopped(
-            *host.orchestrator, *host.print, INFILL_PATTERN, *plugin, execution_error, "initialize_object");
+        host.patterns.initialize_pattern(entry.first, payload, surface_count);
     }
 }
 
@@ -648,12 +517,9 @@ void run_step(Orchestrator &orchestrator, Print &print)
         return;
     }
 
-    InfillStepHostContext infill_context;
-    infill_context.orchestrator = &orchestrator;
-    infill_context.print = &print;
-    prepare_pattern_plugins(infill_context);
+    InfillStepHostContext infill_context(orchestrator, print);
     prepare_recipe_modifier_plugins(infill_context);
-    if (infill_context.pattern_plugins_by_runtime_id.empty()) {
+    if (infill_context.patterns.empty()) {
         orchestrator.add_plugin_message(Orchestrator::PluginMessageLevel::Error,
                                         plugin,
                                         INFILL_PATTERN,

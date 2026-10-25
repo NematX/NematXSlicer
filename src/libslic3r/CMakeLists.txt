@@ -523,6 +523,8 @@ set(SLIC3R_SOURCES
 	Steps/StepFinalizeSlicing.hpp
 	Steps/StepGenerateGcode.cpp
 	Steps/StepGenerateGcode.hpp
+	Steps/InfillPatternService.cpp
+	Steps/InfillPatternService.hpp
 	Steps/StepGenerateInfill.cpp
 	Steps/StepGenerateInfill.hpp
 	Steps/StepGeneratePerimeter.cpp
