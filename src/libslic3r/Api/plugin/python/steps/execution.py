@@ -462,16 +462,35 @@ class InfillContext(_PrintObjectContext):
         return self._object()
 
     def infill_resolve_pattern_id(self, plugin_id: str) -> int:
+        """Resolve a configured pattern id for this run, using the host fallback when it is inactive.
+
+        Returns 0 when the step is stopping or a host failure is contained. The
+        failure is reported to the host, which stops STEP_INFILL after the
+        generator returns; a normal inactive id may resolve to a fallback.
+        """
         return int(self.payload.resolve_pattern_id(self._payload_ptr, plugin_id.encode("utf-8")))
 
     def infill_pattern_plugin_id(self, pattern_id: int) -> str | None:
+        """Return the stable pattern id.
+
+        The host returns ``""`` (never NULL) for an unknown id or a stopping step;
+        this wrapper maps that value to ``None``.
+        """
         value = self.payload.pattern_plugin_id(self._payload_ptr, int(pattern_id))
         return None if not value else value.decode("utf-8")
 
     def infill_modify_surface_recipe(
         self, layer, island, region_island, primary_region, surface, no_overlap_areas, params
     ) -> bool:
-        """Run recipe modifiers synchronously; ``params`` is edited in place."""
+        """Run recipe modifiers in priority order against the same mutable ``params``.
+
+        If a modifier fails, later modifiers do not run and earlier edits remain.
+        The call adds no diagnostic of its own; the failing modifier's error is
+        the plugin message. Plugin cancellation is requested, the call returns
+        ``False`` and the runner stops STEP_INFILL after ``setup_run()``
+        returns. Print cancellation is rethrown by the runner instead of
+        becoming a plugin error.
+        """
         params_ptr = ctypes.byref(params) if isinstance(params, RawInfillPatternParams) else params
         return bool(self.payload.modify_surface_recipe(
             self._payload_ptr, _void_p(layer), _void_p(island), _void_p(region_island),
@@ -482,7 +501,13 @@ class InfillContext(_PrintObjectContext):
         self, pattern_id: int, layer, island, region_island, primary_region,
         surface, no_overlap_areas, params, output: MutableExtrusionEntity,
     ) -> bool:
-        """Generate into borrowed/plugin-owned ``output`` without transferring it."""
+        """Generate one surface into caller-owned ``output`` without transferring it.
+
+        An ordinary refusal returns ``False`` and leaves output unchanged. A
+        contained failure returns ``False``, empties output and asks the runner
+        to stop STEP_INFILL after the generator returns. Print cancellation is
+        left for the runner to rethrow.
+        """
         params_ptr = ctypes.byref(params) if isinstance(params, RawInfillPatternParams) else params
         return bool(self.payload.generate_pattern(
             self._payload_ptr, int(pattern_id), _void_p(layer), _void_p(island),
@@ -493,7 +518,13 @@ class InfillContext(_PrintObjectContext):
     def infill_append_region_island_extrusion(
         self, region_island: LayerRegionIsland, role: int, extrusion: MutableExtrusionEntity
     ) -> bool:
-        """Move extrusion children to the host; ``extrusion`` remains valid but emptied."""
+        """Append extrusion children to the host bucket selected by ``role``.
+
+        On success the host owns the moved paths and ``extrusion`` remains a
+        valid, emptied wrapper. If preparation fails, earlier destination paths
+        stay published, the source may be partly consumed, and the host requests
+        plugin cancellation; print cancellation is handled by the runner.
+        """
         return bool(self.payload.append_region_island_extrusion(
             _void_p(region_island), int(role), _void_p(extrusion)
         ))
@@ -565,6 +596,11 @@ class InfillSurfaceRecipeModifierContext(_InfillSurfaceContext):
         return int(self.payload.resolve_pattern_id(self.payload.generate_infill_ctx, plugin_id.encode("utf-8")))
 
     def infill_recipe_pattern_plugin_id(self, pattern_id: int) -> str | None:
+        """Return the stable pattern id.
+
+        The host returns ``""`` (never NULL) for an unknown id or a stopping step;
+        this wrapper maps that value to ``None``.
+        """
         value = self.payload.pattern_plugin_id(self.payload.generate_infill_ctx, int(pattern_id))
         return None if not value else value.decode("utf-8")
 

@@ -14,6 +14,18 @@
 extern "C" {
 #endif
 
+/*
+STEP_INFILL plugin interface
+============================
+
+The host runs one selected generator over the print's fill surfaces. The
+generator resolves a recipe and applies surface modifiers during setup_run(),
+reports grouped work to the host, and calls the selected INFILL_PATTERN plugin
+during run(). The host owns pattern selection, plugin contexts and extrusion
+publication. Payload handles borrow print data for the current callback; the
+recipe modifier edits the generator-owned recipe before the pattern consumes it.
+*/
+
 /* Declare the payload tag here so C callback prototypes do not introduce distinct prototype-scope types. */
 struct run_ctx_generate_infill;
 
@@ -147,7 +159,13 @@ may report a warning and return a fallback pattern so slicing can continue.
 The ctx argument is the parent run_ctx_generate_infill. The callback needs it
 because this is a C ABI: function pointers do not capture the host registry
 state by themselves.
+
+The callback never lets a C++ exception cross the ABI. It returns INVALID when
+the step is already stopping or when a failure is contained; an inactive id may
+still produce the documented warning and fallback. The runner observes the
+requested stop after setup_run() returns.
 */
+// Resolve a configured pattern id to the runtime id used by the current step run.
 typedef infill_pattern_runtime_id (*infill_resolve_pattern_id_fn)(
     const struct run_ctx_generate_infill *ctx,
     const char *pattern_plugin_id);
@@ -158,8 +176,11 @@ Return the stable plugin id behind a runtime INFILL_PATTERN id.
 This is mostly for diagnostics and tests. The returned pointer is borrowed from
 the host plugin registry and must not be stored beyond the current callback.
 As with resolve_pattern_id(), ctx is the parent run_ctx_generate_infill used to
-reach the host-side runtime registry.
+reach the host-side runtime registry. The result is never NULL and is "" for an
+unknown runtime id or a step that is already stopping. The host lookup does not
+allocate and never throws.
 */
+// Return the borrowed stable plugin id for a runtime pattern id.
 typedef const char *(*infill_pattern_plugin_id_fn)(
     const struct run_ctx_generate_infill *ctx,
     infill_pattern_runtime_id pattern_id);
@@ -171,8 +192,14 @@ STEP_INFILL plugins should call this instead of directly looking up pattern
 plugins. The host owns plugin selection, stale-pattern fallback, per-pattern
 setup_run(), progress plumbing and error reporting. output must be an empty
 mutable extrusion entity owned by the caller for the duration of the call; the
-selected pattern writes its generated paths into it.
+selected pattern writes its generated paths into it. An ordinary refusal
+returns 0 with output unchanged. A C++ failure returns 0 with output empty;
+except for print cancellation, the host records the exception and requests
+plugin cancellation. An already requested stop returns 0 with output empty and
+no new message. CanceledException is left for the runner to rethrow as print
+cancellation.
 */
+// Generate paths for one surface into the caller-owned output entity.
 typedef int32_t (*infill_generate_pattern_fn)(
     const struct run_ctx_generate_infill *ctx,
     infill_pattern_runtime_id pattern_id,
@@ -192,7 +219,12 @@ STEP_INFILL generators should call this after creating the default
 raw_infill_pattern_params and before calling generate_pattern(). The host calls
 the active recipe modifiers in plugin priority order. Each modifier receives the
 same mutable params, so later modifiers see changes made by earlier modifiers.
+The chain stops at its first contained failure and returns 0; edits made by
+earlier modifiers remain in params. The step requests plugin cancellation and
+does not consume the recipe. An already requested stop returns 0 without another
+message, and print cancellation is rethrown by the runner.
 */
+// Apply the active recipe modifiers to one mutable surface recipe.
 typedef int32_t (*infill_modify_surface_recipe_fn)(
     const struct run_ctx_generate_infill *ctx,
     const layer_handle *layer,
@@ -208,8 +240,14 @@ Move generated extrusion into the LayerRegionIsland bucket matching role.
 
 The host receives ownership by moving children out of extrusion. The caller may
 reuse or destroy extrusion after the function returns, but must not expect it to
-still contain the moved paths.
+still contain the moved paths. The host stages children before publication; if
+staging fails, the callback returns 0, previously published destination paths
+remain unchanged, and the source may be partly consumed. The failure is
+reported and requests plugin cancellation. Null inputs or an existing plugin
+stop return 0 without publication. This callback has no print handle; the
+generator and runner handle print cancellation.
 */
+// Append the source extrusion's generated children to its role bucket.
 typedef int32_t (*infill_append_region_island_extrusion_fn)(
     layer_region_island_handle *region_island,
     raw_extrusion_role role,
@@ -269,8 +307,12 @@ plugin in one object.
 Generators call this once per used pattern during their setup_run() phase. The
 host copies the groups into its own storage, so the arrays only need to be valid
 for the duration of the call. Unused patterns are never reported and therefore
-do not receive an initialization call.
+do not receive an initialization call. Null or invalid inputs and an existing
+stop return 0 without another message. A contained C++ failure returns 0,
+records the failure and requests plugin cancellation; the runner sees the stop
+after setup_run() and before pattern initialization.
 */
+// Copy this object's discovered groups for one pattern into host-owned storage.
 typedef int32_t (*infill_report_pattern_assignments_fn)(
     const struct run_ctx_generate_infill *ctx,
     infill_pattern_runtime_id pattern_id,

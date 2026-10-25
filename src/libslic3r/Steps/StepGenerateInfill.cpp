@@ -3,6 +3,14 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/* STEP_INFILL runs the selected generator over fill surfaces. Its C callbacks
+   resolve pattern ids, collect discovery groups, apply recipe modifiers, run
+   INFILL_PATTERN plugins and publish extrusion into region-island buckets. The
+   host keeps the C++ step state behind the opaque payload context and contains
+   callback failures before control returns through the C ABI. Discovery ends
+   before pattern initialization, and the runner checks a requested stop at each
+   plugin phase boundary. */
+
 #include "StepGenerateInfill.hpp"
 
 #include <atomic>
@@ -101,6 +109,52 @@ struct InfillStepHostContext
     std::map<Plugin *, std::unique_ptr<std::atomic_bool>> recipe_modifier_execution_errors;
 };
 
+// Check whether the plugin runner or the current print has requested a stop.
+bool step_is_stopping(const InfillStepHostContext &host) noexcept;
+// Resolve a stable pattern id, returning INVALID for refusal, cancellation or a contained failure.
+infill_pattern_runtime_id resolve_pattern_id_callback(const run_ctx_generate_infill *ctx,
+                                                      const char *pattern_plugin_id) noexcept;
+// Return the stable plugin id, never NULL, or "" when the runtime id is unknown or the step is stopping.
+const char *pattern_plugin_id_callback(const run_ctx_generate_infill *ctx,
+                                       infill_pattern_runtime_id pattern_id) noexcept;
+// Copy discovery assignments and return 0 when the call is refused or contained.
+int32_t report_pattern_assignments_callback(const run_ctx_generate_infill *ctx,
+                                            infill_pattern_runtime_id pattern_id,
+                                            const raw_infill_pattern_assignment *assignments,
+                                            uint32_t assignment_count) noexcept;
+// Run the selected pattern and return 0 with empty output after a stop or failure.
+int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
+                                  infill_pattern_runtime_id pattern_id,
+                                  const layer_handle *layer,
+                                  const layer_island_handle *island,
+                                  const layer_region_island_handle *region_island,
+                                  const layer_region_handle *primary_region,
+                                  const surface_handle *surface,
+                                  const expolygon_collection_handle *no_overlap_areas,
+                                  const raw_infill_pattern_params *params,
+                                  extrusion_entity_handle *output) noexcept;
+// Run recipe modifiers in priority order and return 0 when the step is stopping (including after a modifier call) or
+// at the first contained failure.
+int32_t modify_surface_recipe_callback(const run_ctx_generate_infill *ctx,
+                                       const layer_handle *layer,
+                                       const layer_island_handle *island,
+                                       const layer_region_island_handle *region_island,
+                                       const layer_region_handle *primary_region,
+                                       const surface_handle *surface,
+                                       const expolygon_collection_handle *no_overlap_areas,
+                                       raw_infill_pattern_params *params) noexcept;
+// Stage generated children before publishing them into their infill bucket.
+int32_t append_region_island_extrusion_callback(layer_region_island_handle *region_island_handle,
+                                                raw_extrusion_role role,
+                                                extrusion_entity_handle *extrusion_handle) noexcept;
+
+// Check host-owned stop flags without changing the print, plugin state or callback data.
+bool step_is_stopping(const InfillStepHostContext &host) noexcept
+{
+    return (host.orchestrator != nullptr && host.orchestrator->is_plugin_cancelled()) ||
+           (host.print != nullptr && host.print->canceled());
+}
+
 std::atomic_bool &execution_error_for(std::map<Plugin *, std::unique_ptr<std::atomic_bool>> &errors,
                                       Plugin &plugin)
 {
@@ -119,67 +173,81 @@ InfillStepHostContext *host_from_context(const run_ctx_generate_infill *ctx)
     return reinterpret_cast<InfillStepHostContext *>(ctx->host_context);
 }
 
-// Translate the stable pattern id stored in configuration into the compact
-// runtime id used by raw_infill_pattern_params. Keeping this translation in
-// the host lets recipe modifiers switch patterns without depending on string
-// buffer ownership or active-plugin ordering details.
+// Resolve the borrowed plugin-id string through the step-owned pattern registry. Null contexts return INVALID;
+// unknown ids keep the service's normal fallback behavior. A C++ failure is contained, recorded and requests a
+// plugin stop, while an existing plugin or print stop adds no message. The callback owns no input strings.
 infill_pattern_runtime_id resolve_pattern_id_callback(const run_ctx_generate_infill *ctx,
-                                                      const char *pattern_plugin_id)
+                                                      const char *pattern_plugin_id) noexcept
 {
     InfillStepHostContext *host = host_from_context(ctx);
     if (host == nullptr)
         return INFILL_PATTERN_RUNTIME_ID_INVALID;
-    return host->patterns.resolve_pattern_id(pattern_plugin_id);
+    try {
+        if (step_is_stopping(*host))
+            return INFILL_PATTERN_RUNTIME_ID_INVALID;
+        return host->patterns.resolve_pattern_id(pattern_plugin_id);
+    } catch (...) {
+        contain_pattern_callback_failure(*host->orchestrator, STEP_INFILL, nullptr);
+        return INFILL_PATTERN_RUNTIME_ID_INVALID;
+    }
 }
 
-// Reverse lookup used mostly by diagnostics and recipe modifiers that want to
-// inspect the current recipe. The returned string is owned by Plugin and stays
-// valid while the plugin registry exists; callers should treat it as borrowed.
+// Return the registry-owned plugin id for a runtime id. Null contexts and stopped steps return ""; unknown ids
+// also return "". Map lookup and c_str() do not allocate, and the returned pointer remains borrowed from Plugin.
 const char *pattern_plugin_id_callback(const run_ctx_generate_infill *ctx,
-                                       infill_pattern_runtime_id pattern_id)
+                                       infill_pattern_runtime_id pattern_id) noexcept
 {
     InfillStepHostContext *host = host_from_context(ctx);
-    if (host == nullptr)
+    if (host == nullptr || step_is_stopping(*host))
         return "";
     return host->patterns.pattern_plugin_id(pattern_id);
 }
 
-// Collect the work groups the generator discovered for one pattern plugin in
-// the object currently processed by setup_run(). The host copies everything it
-// needs, so the generator keeps ownership of its own arrays.
+// Copy borrowed discovery arrays into step-owned vectors. Invalid payloads return 0 without mutation; an existing
+// stop returns 0 without a message. Allocation failure is contained and requests cancellation, and any partial
+// copy remains private to this step because pattern initialization follows the generator's setup_run() check.
 int32_t report_pattern_assignments_callback(const run_ctx_generate_infill *ctx,
                                             infill_pattern_runtime_id pattern_id,
                                             const raw_infill_pattern_assignment *assignments,
-                                            uint32_t assignment_count)
+                                            uint32_t assignment_count) noexcept
 {
     InfillStepHostContext *host = host_from_context(ctx);
     if (host == nullptr || ctx->object == nullptr || pattern_id == INFILL_PATTERN_RUNTIME_ID_INVALID ||
         (assignment_count != 0 && assignments == nullptr))
         return 0;
 
-    std::vector<InfillStepHostContext::HostObjectInit> &objects = host->pattern_assignments[pattern_id];
-    if (objects.empty() || objects.back().object != ctx->object) {
-        objects.emplace_back();
-        objects.back().object = ctx->object;
-    }
-    InfillStepHostContext::HostObjectInit &target = objects.back();
+    try {
+        if (step_is_stopping(*host))
+            return 0;
 
-    for (uint32_t index = 0; index < assignment_count; ++index) {
-        const raw_infill_pattern_assignment &source = assignments[index];
-        InfillStepHostContext::HostAssignment assignment;
-        assignment.layer_island = source.layer_island;
-        assignment.region_island = source.region_island;
-        if (source.params != nullptr)
-            assignment.params = *source.params;
-        if (source.surfaces != nullptr)
-            assignment.surfaces.assign(source.surfaces, source.surfaces + source.surface_count);
-        target.assignments.emplace_back(std::move(assignment));
+        std::vector<InfillStepHostContext::HostObjectInit> &objects = host->pattern_assignments[pattern_id];
+        if (objects.empty() || objects.back().object != ctx->object) {
+            objects.emplace_back();
+            objects.back().object = ctx->object;
+        }
+        InfillStepHostContext::HostObjectInit &target = objects.back();
+
+        for (uint32_t index = 0; index < assignment_count; ++index) {
+            const raw_infill_pattern_assignment &source = assignments[index];
+            InfillStepHostContext::HostAssignment assignment;
+            assignment.layer_island = source.layer_island;
+            assignment.region_island = source.region_island;
+            if (source.params != nullptr)
+                assignment.params = *source.params;
+            if (source.surfaces != nullptr)
+                assignment.surfaces.assign(source.surfaces, source.surfaces + source.surface_count);
+            target.assignments.emplace_back(std::move(assignment));
+        }
+        return 1;
+    } catch (...) {
+        contain_pattern_callback_failure(*host->orchestrator, STEP_INFILL, nullptr);
+        return 0;
     }
-    return 1;
 }
 
-// Run the pattern selected by pattern_id on one surface of the current object.
-// The shared service validates the id and guards the plugin phases.
+// Build a borrowed pattern payload and run it through the step-owned service. Null required inputs are ordinary
+// refusals; a pending stop returns 0 after emptying output. Other C++ failures empty output, record the exception
+// unless the print was cancelled, and request a plugin stop. The service owns its contexts; output stays caller-owned.
 int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
                                   infill_pattern_runtime_id pattern_id,
                                   const layer_handle *layer,
@@ -189,66 +257,21 @@ int32_t generate_pattern_callback(const run_ctx_generate_infill *ctx,
                                   const surface_handle *surface,
                                   const expolygon_collection_handle *no_overlap_areas,
                                   const raw_infill_pattern_params *params,
-                                  extrusion_entity_handle *output)
+                                  extrusion_entity_handle *output) noexcept
 {
-    if (ctx == nullptr || ctx->host_context == nullptr || params == nullptr || output == nullptr)
+    if (ctx == nullptr || ctx->host_context == nullptr || output == nullptr)
         return 0;
 
     InfillStepHostContext &host = *reinterpret_cast<InfillStepHostContext *>(ctx->host_context);
-    run_ctx_infill_pattern payload = {};
-    payload.print = ctx->print;
-    payload.object = ctx->object;
-    payload.layer = layer;
-    payload.island = island;
-    payload.region_island = region_island;
-    payload.primary_region = primary_region;
-    payload.surface = surface;
-    payload.no_overlap_areas = no_overlap_areas;
-    payload.params = params;
-    payload.output = output;
-    return host.patterns.generate_pattern(pattern_id, payload);
-}
+    try {
+        if (step_is_stopping(host)) {
+            empty_output(output);
+            return 0;
+        }
+        if (params == nullptr)
+            return 0;
 
-int32_t modify_surface_recipe_callback(const run_ctx_generate_infill *ctx,
-                                       const layer_handle *layer,
-                                       const layer_island_handle *island,
-                                       const layer_region_island_handle *region_island,
-                                       const layer_region_handle *primary_region,
-                                       const surface_handle *surface,
-                                       const expolygon_collection_handle *no_overlap_areas,
-                                       raw_infill_pattern_params *params)
-{
-    if (ctx == nullptr || ctx->host_context == nullptr || params == nullptr) {
-        return 0;
-    }
-
-    InfillStepHostContext &host = *reinterpret_cast<InfillStepHostContext *>(ctx->host_context);
-    if (host.recipe_modifier_plugins.empty())
-        return 1;
-
-    // Recipe modifiers are a small service chain. Each plugin receives the
-    // recipe produced by the generator and any changes made by earlier
-    // modifiers. This makes independent tweaks composable: one plugin can
-    // adjust density while another changes priority or pattern id.
-    for (Plugin *plugin : host.recipe_modifier_plugins) {
-        if (plugin == nullptr)
-            continue;
-
-        std::map<Plugin *, plugin_host_context>::iterator host_context =
-            host.recipe_modifier_host_contexts.find(plugin);
-        assert(host_context != host.recipe_modifier_host_contexts.end());
-        if (host_context == host.recipe_modifier_host_contexts.end())
-            continue;
-
-        plugin_run_context run_context =
-            host.orchestrator->prepare_plugin_run_context(
-                INFILL_SURFACE_RECIPE_MODIFIER, plugin, &host_context->second);
-
-        // A recipe modifier edits only raw_infill_pattern_params. It gets the
-        // same layer/surface context as the generator plus resolver callbacks
-        // so it can switch to another active INFILL_PATTERN without touching
-        // string buffers owned by the generator.
-        run_ctx_infill_surface_recipe_modifier payload = {};
+        run_ctx_infill_pattern payload = {};
         payload.print = ctx->print;
         payload.object = ctx->object;
         payload.layer = layer;
@@ -257,23 +280,88 @@ int32_t modify_surface_recipe_callback(const run_ctx_generate_infill *ctx,
         payload.primary_region = primary_region;
         payload.surface = surface;
         payload.no_overlap_areas = no_overlap_areas;
-        payload.generate_infill_ctx = ctx;
-        payload.resolve_pattern_id = &resolve_pattern_id_callback;
-        payload.pattern_plugin_id = &pattern_plugin_id_callback;
         payload.params = params;
-        run_context.data = &payload;
+        payload.output = output;
+        return host.patterns.generate_pattern(pattern_id, payload);
+    } catch (...) {
+        contain_pattern_callback_failure(*host.orchestrator, STEP_INFILL, output);
+        return 0;
+    }
+}
 
-        plugin->setup_run(run_context);
-        Detail::throw_if_plugin_stopped(
-            *host.orchestrator, *host.print, INFILL_SURFACE_RECIPE_MODIFIER, *plugin,
-            execution_error_for(host.recipe_modifier_execution_errors, *plugin), "setup_run");
-        plugin->run(run_context);
-        Detail::throw_if_plugin_stopped(
-            *host.orchestrator, *host.print, INFILL_SURFACE_RECIPE_MODIFIER, *plugin,
-            execution_error_for(host.recipe_modifier_execution_errors, *plugin), "run");
+// Run borrowed modifiers in priority order against one mutable recipe. Invalid inputs and a pending stop are refused;
+// plugin failures are contained without rolling back earlier edits. Each plugin keeps its own host context, while the
+// generator retains recipe ownership. A plugin stop or print cancellation observed after a modifier phase returns 0
+// without another diagnostic: whoever requested the stop has already reported it, and the runner rethrows a print
+// cancellation.
+int32_t modify_surface_recipe_callback(const run_ctx_generate_infill *ctx,
+                                       const layer_handle *layer,
+                                       const layer_island_handle *island,
+                                       const layer_region_island_handle *region_island,
+                                       const layer_region_handle *primary_region,
+                                       const surface_handle *surface,
+                                       const expolygon_collection_handle *no_overlap_areas,
+                                       raw_infill_pattern_params *params) noexcept
+{
+    if (ctx == nullptr || ctx->host_context == nullptr || params == nullptr) {
+        return 0;
     }
 
-    return 1;
+    InfillStepHostContext &host = *reinterpret_cast<InfillStepHostContext *>(ctx->host_context);
+    try {
+        if (step_is_stopping(host))
+            return 0;
+        if (host.recipe_modifier_plugins.empty())
+            return 1;
+
+        for (Plugin *plugin : host.recipe_modifier_plugins) {
+            if (plugin == nullptr)
+                continue;
+
+            std::map<Plugin *, plugin_host_context>::iterator host_context =
+                host.recipe_modifier_host_contexts.find(plugin);
+            assert(host_context != host.recipe_modifier_host_contexts.end());
+            if (host_context == host.recipe_modifier_host_contexts.end())
+                continue;
+
+            plugin_run_context run_context =
+                host.orchestrator->prepare_plugin_run_context(
+                    INFILL_SURFACE_RECIPE_MODIFIER, plugin, &host_context->second);
+
+            run_ctx_infill_surface_recipe_modifier payload = {};
+            payload.print = ctx->print;
+            payload.object = ctx->object;
+            payload.layer = layer;
+            payload.island = island;
+            payload.region_island = region_island;
+            payload.primary_region = primary_region;
+            payload.surface = surface;
+            payload.no_overlap_areas = no_overlap_areas;
+            payload.generate_infill_ctx = ctx;
+            payload.resolve_pattern_id = &resolve_pattern_id_callback;
+            payload.pattern_plugin_id = &pattern_plugin_id_callback;
+            payload.params = params;
+            run_context.data = &payload;
+
+            plugin->setup_run(run_context);
+            if (step_is_stopping(host))
+                return 0;
+            Detail::throw_if_plugin_stopped(
+                *host.orchestrator, *host.print, INFILL_SURFACE_RECIPE_MODIFIER, *plugin,
+                execution_error_for(host.recipe_modifier_execution_errors, *plugin), "setup_run");
+            plugin->run(run_context);
+            if (step_is_stopping(host))
+                return 0;
+            Detail::throw_if_plugin_stopped(
+                *host.orchestrator, *host.print, INFILL_SURFACE_RECIPE_MODIFIER, *plugin,
+                execution_error_for(host.recipe_modifier_execution_errors, *plugin), "run");
+        }
+
+        return 1;
+    } catch (...) {
+        contain_pattern_callback_failure(*host.orchestrator, STEP_INFILL, nullptr);
+        return 0;
+    }
 }
 
 ExtrusionRole bucket_role_from_raw(raw_extrusion_role role)
@@ -322,22 +410,47 @@ void append_extrusion_children(ExtrusionEntityCollection &dst, ExtrusionEntity &
     }
 }
 
+// Stage moved source children before changing the region island. Destination paths remain unchanged on failure;
+// staging can partially consume the caller-owned source. A pending plugin stop refuses publication; this callback
+// has no print handle, so the generator and runner handle print cancellation. Any C++ failure is recorded through
+// the singleton orchestrator before the callback returns 0.
 int32_t append_region_island_extrusion_callback(layer_region_island_handle *region_island_handle,
                                                 raw_extrusion_role role,
-                                                extrusion_entity_handle *extrusion_handle)
+                                                extrusion_entity_handle *extrusion_handle) noexcept
 {
-    LayerRegionIsland *region_island = reinterpret_cast<LayerRegionIsland *>(region_island_handle);
-    ExtrusionEntity *extrusion = reinterpret_cast<ExtrusionEntity *>(extrusion_handle);
-    if (region_island == nullptr || extrusion == nullptr)
+    if (region_island_handle == nullptr || extrusion_handle == nullptr)
         return 0;
 
-    // Publication is append-only for this step. The generator may call the
-    // callback several times for one LayerRegionIsland, once per surface, and
-    // all generated paths must stay under the same infill bucket.
-    ExtrusionEntityCollection &dst = region_island->mutable_extrusion(bucket_role_from_raw(role));
-    append_extrusion_children(dst, *extrusion);
-    region_island->remove_empty_extrusions();
-    return 1;
+    Orchestrator &orchestrator = Orchestrator::instance();
+    if (orchestrator.is_plugin_cancelled())
+        return 0;
+
+    try {
+        LayerRegionIsland *region_island = reinterpret_cast<LayerRegionIsland *>(region_island_handle);
+        ExtrusionEntity *extrusion = reinterpret_cast<ExtrusionEntity *>(extrusion_handle);
+        if (region_island == nullptr || extrusion == nullptr)
+            return 0;
+
+        ExtrusionEntityCollection prepared;
+        append_extrusion_children(prepared, *extrusion);
+        region_island->remove_empty_extrusions();
+        if (prepared.child_count() == 0)
+            return 1;
+
+        const ExtrusionRole bucket_role = bucket_role_from_raw(role);
+        if (region_island->has_extrusion(bucket_role)) {
+            ExtrusionEntityCollection &dst = region_island->mutable_extrusion(bucket_role);
+            dst.children().reserve(dst.child_count() + prepared.child_count());
+            dst.append_move_from(prepared);
+        } else {
+            ExtrusionEntityCollection &dst = region_island->mutable_extrusion(bucket_role);
+            dst.swap(prepared);
+        }
+        return 1;
+    } catch (...) {
+        contain_pattern_callback_failure(orchestrator, STEP_INFILL, nullptr);
+        return 0;
+    }
 }
 
 // Call setup() once per pattern plugin that the generator actually uses. The

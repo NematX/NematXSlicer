@@ -10,6 +10,7 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <exception>
 #include <string>
 #include <vector>
 
@@ -81,6 +82,46 @@ inline std::string step_name_for_diagnostic(Orchestrator &orchestrator, slicing_
     if (const Orchestrator::DynamicStepInfo *step_info = orchestrator.step_info(step))
         return step_info->name;
     return "step " + std::to_string(int(step));
+}
+
+// Contain the exception being handled by the calling catch block at a host callback boundary.
+// Host callbacks are called through the C ABI, so no C++ exception may escape them. The callback
+// catches everything and calls this function from its catch block: `throw;` rethrows the active
+// exception into the local handlers, which sort it. A CanceledException is dropped (the runner rethrows
+// the cancellation at the next phase boundary, see throw_if_plugin_stopped); every other exception is
+// logged, added as an error message of the step with its what() text (or an unknown-exception text), and
+// the plugin cancellation is requested so that the runner stops the step. Nothing escapes: building
+// the text is itself guarded, and the plugin cancellation is requested in the worst case.
+// Must only be called from an active catch block.
+inline void contain_callback_failure(Orchestrator &orchestrator, slicing_step_t step) noexcept
+{
+    // Request the cancellation first, it cannot fail; logging and message creation allocate, so their
+    // failure is swallowed: it must neither escape nor undo the cancellation request.
+    const auto record = [&orchestrator, step](const char *message) noexcept {
+        orchestrator.request_plugin_cancel();
+        try {
+            const char *step_name = builtin_step_name(step);
+            BOOST_LOG_TRIVIAL(error) << (step_name != nullptr ? step_name : "step") << " host callback error: " << message;
+            orchestrator.add_plugin_message(Orchestrator::PluginMessageLevel::Error, nullptr, step, message);
+        } catch (...) {
+        }
+    };
+    try {
+        throw;
+    } catch (const CanceledException &) {
+    } catch (const std::exception &error) {
+        record(error.what());
+    } catch (...) {
+        try {
+            const char *step_name = builtin_step_name(step);
+            const std::string message = std::string("Unknown C++ exception in a host callback called from ") +
+                                        (step_name != nullptr ? step_name : "a step");
+            record(message.c_str());
+        } catch (...) {
+            // Building the text failed: still stop the step.
+            orchestrator.request_plugin_cancel();
+        }
+    }
 }
 
 inline plugin_host_context prepare_guarded_plugin_host_context(Orchestrator &orchestrator,

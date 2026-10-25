@@ -4,13 +4,19 @@
 ///|/
 
 /* Implementation of the shared INFILL_PATTERN service (see the header for the
-   usage sequence and the concurrency contract).
+   usage sequence and the concurrency rules).
 
    The constructor is the only writer: it walks the active pattern plugins once
    and stores, per plugin, the runtime id, the guarded host context, the error
    flag and a ready-made plugin_run_context. Every later call only reads those
    entries and copies the run context, so no map insertion can happen while
-   step plugins call patterns from several threads. */
+   step plugins call patterns from several threads.
+
+   The file also holds failure containment for the host payload callbacks of
+   steps that offer the pattern callbacks, and for the STEP_INFILL assignment,
+   recipe-modifier and extrusion publication callbacks, which use it even
+   though they do not forward to the service. These callbacks cross the C ABI,
+   so no C++ exception escapes them. */
 #include "InfillPatternService.hpp"
 
 #include <cassert>
@@ -18,6 +24,7 @@
 #include <string>
 
 #include "libslic3r/Api/host/Plugin.hpp"
+#include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 
@@ -27,7 +34,6 @@ namespace {
 // True for pattern plugins that build their state in setup() from the
 // discovery payload of STEP_INFILL and fail without it.
 bool pattern_requires_setup(const Plugin &plugin);
-
 // The C ABI has no flag telling that a pattern needs setup-time
 // initialization, so the known ones are listed by stable id. A pattern added to
 // this family must be added here to get a clear refusal outside STEP_INFILL.
@@ -110,7 +116,9 @@ infill_pattern_runtime_id InfillPatternService::resolve_pattern_id(const char *p
     return INFILL_PATTERN_RUNTIME_ID_INVALID;
 }
 
-const char *InfillPatternService::pattern_plugin_id(infill_pattern_runtime_id pattern_id) const
+// Look up the stable plugin id by runtime id. The map lookup and c_str() do not allocate; the returned pointer is
+// borrowed from the registered Plugin, never NULL, and empty for an unknown id.
+const char *InfillPatternService::pattern_plugin_id(infill_pattern_runtime_id pattern_id) const noexcept
 {
     // The returned string is owned by Plugin and stays valid while the plugin
     // registry exists; callers treat it as borrowed.
@@ -189,6 +197,37 @@ InfillPatternService::Pattern *InfillPatternService::pattern_for_generation(infi
                                       INFILL_PATTERN,
                                       message.c_str());
     return nullptr;
+}
+
+// Called from a catch block of a step callback. The failure is handled by Detail::contain_callback_failure
+// (StepRunner.hpp), which rethrows the active exception internally: a CanceledException is left to the
+// runner; any other exception is logged, added as an error message of the step, and the plugin stop is
+// requested. output is then emptied in all cases, because a failed fill may have written part of its
+// result into it. Nothing escapes.
+void contain_pattern_callback_failure(Orchestrator &orchestrator,
+                                      slicing_step_t step,
+                                      extrusion_entity_handle *output) noexcept
+{
+    Detail::contain_callback_failure(orchestrator, step);
+    if (output != nullptr)
+        empty_output(output);
+}
+
+// output is an ExtrusionEntity of the host (the C++ API is used on purpose: the extrusion_entity_* C
+// functions are extern "C" and must not be relied on to propagate exceptions under /EHsc). A leaf, a path
+// written directly on output, first becomes a collection with that path as a child, because clearing its
+// content instead would leave an entity that collection code rejects; then every child is removed. An
+// allocation failure while doing so is swallowed: nothing more can be done for such an output.
+void empty_output(extrusion_entity_handle *output) noexcept
+{
+    try {
+        ExtrusionEntity &entity = *reinterpret_cast<ExtrusionEntity *>(output);
+        if (entity.is_leaf())
+            entity.append_child(ExtrusionEntity(true));
+        while (entity.child_count() > 0)
+            entity.remove_child(entity.child_count() - 1);
+    } catch (...) {
+    }
 }
 
 } // namespace Slic3r::Steps
