@@ -771,6 +771,70 @@ TEST_CASE("triangle_mesh_slice_to_polygons reports done, cancelled and internal 
     CHECK(fixture.storage.size() == objects_before);
 }
 
+// A closed double-sided wall of zero thickness: its slice is a loop of two coincident segments, a loop without area.
+// PositiveLargestContour has no area to keep, so the layer is empty (the native slicer used to dereference a null pointer).
+TEST_CASE("triangle_mesh_slice_to_polygons gives an empty layer when PositiveLargestContour finds only zero-area loops",
+          "[plugins][slice-volume][slicing-helper][triangle-mesh]")
+{
+    indexed_triangle_set its;
+    its.vertices = {Vec3f(0.f, 0.f, 0.f), Vec3f(10.f, 0.f, 0.f), Vec3f(10.f, 0.f, 10.f), Vec3f(0.f, 0.f, 10.f)};
+    // The two triangles of the wall, then the same two with the opposite orientation.
+    its.indices = {Vec3i32(0, 1, 2), Vec3i32(0, 2, 3), Vec3i32(0, 2, 1), Vec3i32(0, 3, 2)};
+    const TriangleMesh mesh(std::move(its));
+    const triangle_mesh_handle *mesh_handle = reinterpret_cast<const triangle_mesh_handle *>(&mesh);
+    const std::vector<float> zs{5.f};
+
+    PluginStorage storage;
+    slic3r_api::StoredPolygonCollection layer(reinterpret_cast<storage_handle *>(&storage));
+    polygon_collection_handle *handles[1] = {layer.mutable_handle()};
+    c_mesh_slicing_params params = {};
+    params.transform = helper_transform(false);
+    // Control: the other modes keep the zero-area loops, so the slicer does produce them.
+    params.mode = RAW_MESH_SLICING_MODE_POSITIVE;
+    params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE;
+    REQUIRE(triangle_mesh_slice_to_polygons(mesh_handle, &params, zs.data(), handles, 1, nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+    REQUIRE_FALSE(layer.empty());
+    // Fixture precondition: every loop of the wall has a zero area.
+    for (uint32_t idx = 0; idx < layer.size(); ++idx)
+        REQUIRE(layer.at(idx).area() == 0.);
+
+    params.mode = RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR;
+    params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR;
+
+    REQUIRE(triangle_mesh_slice_to_polygons(mesh_handle, &params, zs.data(), handles, 1, nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+    CHECK(layer.empty());
+}
+
+// keep_largest_contour_only() keeps the contour of largest positive area, and leaves the islands untouched when there
+// is none (all contours of zero area or clockwise): the native code used to dereference a null pointer there.
+TEST_CASE("keep_largest_contour_only keeps the largest positive contour and tolerates a layer without one",
+          "[plugins][slice-volume][slicing-helper]")
+{
+    // Coordinates are in scaled units: closer points would be merged by the Polygon constructor.
+    const Polygon square(Points{Point(0, 0), Point(scale_i(10.), 0), Point(scale_i(10.), scale_i(10.)), Point(0, scale_i(10.))});
+    const Polygon large(Points{Point(scale_i(20.), 0), Point(scale_i(50.), 0), Point(scale_i(50.), scale_i(30.)),
+                               Point(scale_i(20.), scale_i(30.))});
+    ExPolygons expolys{ExPolygon(square), ExPolygon(large)};
+    keep_largest_contour_only(expolys);
+    REQUIRE(expolys.size() == 1);
+    CHECK(expolys.front().contour == large);
+
+    // A zero-area (collinear) contour and a clockwise contour: there is no largest positive contour to keep.
+    const Polygon collinear(Points{Point(0, 0), Point(scale_i(5.), 0), Point(scale_i(10.), 0)});
+    const Polygon clockwise_square(Points{Point(0, 0), Point(0, scale_i(10.)), Point(scale_i(10.), scale_i(10.)), Point(scale_i(10.), 0)});
+    const ExPolygons original{ExPolygon(collinear), ExPolygon(clockwise_square)};
+    REQUIRE(original[0].contour.area() == 0.);
+    REQUIRE(original[1].contour.area() < 0.);
+    REQUIRE(original[1].contour.points.size() == 4);
+    ExPolygons no_positive = original;
+    keep_largest_contour_only(no_positive);
+    CHECK(no_positive == original);
+
+    ExPolygons zero_area{original[0], original[0]};
+    keep_largest_contour_only(zero_area);
+    CHECK(zero_area == ExPolygons{original[0], original[0]});
+}
+
 TEST_CASE("triangle_mesh_slice_to_polygons rejects invalid arguments and clears the outputs",
           "[plugins][slice-volume][slicing-helper][cancel]")
 {

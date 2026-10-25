@@ -1185,6 +1185,7 @@ def _finish_sliced_layer(
             )
 
         # keep_largest_contour_only(): the island whose contour has the largest signed area, the first on a tie.
+        # With no positive contour the islands are left unchanged, as in the native code.
         if mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR and slices.size() > 1:
             max_area = 0.0
             largest = -1

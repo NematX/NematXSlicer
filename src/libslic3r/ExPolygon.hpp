@@ -208,6 +208,8 @@ inline void assert_valid(const ExPolygons &expolygons) {}
 bool remove_same_neighbor(ExPolygons &expolys);
 
 bool remove_sticks(ExPolygon &poly);
+// Keeps only the ExPolygon whose contour has the largest positive signed area (the first one on a tie).
+// Leaves the polygons unchanged when none has a positive area; does nothing for 0 or 1 polygon.
 void keep_largest_contour_only(ExPolygons &polygons);
 
 double      area(const ExPolygon &poly);

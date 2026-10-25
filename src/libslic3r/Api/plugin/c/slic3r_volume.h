@@ -259,7 +259,8 @@ the low-level slicer of the host (slice_mesh): no union, offset or simplificatio
 is applied to the loops. The triangles are flipped when the determinant of the
 transform is negative, so a mirroring transform keeps outward-facing triangles.
 RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR keeps its native raw meaning
-here (the largest raw loop of each layer).
+here (the largest raw loop of each layer by absolute area, made counter-clockwise; a
+layer whose loops all have a zero area is empty).
 
 params must be fully set: a zeroed c_mesh_slicing_params has a null transform
 matrix, which crushes the mesh. Mode 0 is RAW_MESH_SLICING_MODE_REGULAR.

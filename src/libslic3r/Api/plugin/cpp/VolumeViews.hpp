@@ -98,8 +98,8 @@ inline void finish_slice_layer(const SliceFinishSettings &settings,
                 found = true;
             }
         }
-        // found is false only when no contour has a positive area, where the native code dereferences a null pointer;
-        // the union and the offsets give counter-clockwise contours, so this case does not occur.
+        // found is false only when no contour has a positive area: the islands are then left unchanged, as the native
+        // keep_largest_contour_only() does. The union and the offsets give counter-clockwise contours, so this does not occur.
         if (found) {
             StoredExPolygon kept = slices.extract(largest);
             slices.clear();

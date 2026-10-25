@@ -27,7 +27,8 @@ struct MeshSlicingParams
         // Maintain all contours, orient all contours CCW.
         // slice_mesh_ex() applies ClipperLib::pftNonZero rule, thus holes will be closed.
         Positive,
-        // Orient all contours CCW and keep only the contour with the largest area.
+        // Orient all contours CCW and keep only the contour with the largest (absolute) area;
+        // the layer is empty when every contour has a zero area.
         // This mode is useful for slicing complex objects in vase mode.
         PositiveLargestContour,
     };

@@ -1211,10 +1211,12 @@ void keep_largest_contour_only(ExPolygons &polygons)
 	            max_area_polygon = &p;
 	        }
 	    }
-	    assert(max_area_polygon != nullptr);
-	    ExPolygon p(std::move(*max_area_polygon));
-	    polygons.clear();
-	    polygons.emplace_back(std::move(p));
+	    // No contour with a positive area (all zero or clockwise): there is no largest one, keep the polygons as they are.
+	    if (max_area_polygon != nullptr) {
+	        ExPolygon p(std::move(*max_area_polygon));
+	        polygons.clear();
+	        polygons.emplace_back(std::move(p));
+	    }
 	}
 }
 

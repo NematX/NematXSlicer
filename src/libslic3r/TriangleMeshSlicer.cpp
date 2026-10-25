@@ -1412,6 +1412,9 @@ static Polygons make_loops(
     return loops;
 }
 
+// Chains the lines of each layer into loops, in parallel over the layers. Positive reorients all loops CCW.
+// PositiveLargestContour keeps only the loop with the largest absolute area, made CCW, and leaves the layer
+// empty when every loop has a zero area. throw_on_cancel is called at layer 0 and every 65,536th layer.
 template<typename ThrowOnCancel>
 static std::vector<Polygons> make_loops(
     // Lines will have their flags modified.
@@ -1449,12 +1452,16 @@ static std::vector<Polygons> make_loops(
                                 max_area_polygon = &p;
                             }
                         }
-                        assert(max_area_polygon != nullptr);
-                        if (max_area < 0.)
-                            max_area_polygon->reverse();
-                        Polygon p(std::move(*max_area_polygon));
-                        polygons.clear();
-                        polygons.emplace_back(std::move(p));
+                        if (max_area_polygon == nullptr) {
+                            // Only degenerate zero-area loops: there is no area to keep, so the layer stays empty.
+                            polygons.clear();
+                        } else {
+                            if (max_area < 0.)
+                                max_area_polygon->reverse();
+                            Polygon p(std::move(*max_area_polygon));
+                            polygons.clear();
+                            polygons.emplace_back(std::move(p));
+                        }
                     }
                 }
             }
