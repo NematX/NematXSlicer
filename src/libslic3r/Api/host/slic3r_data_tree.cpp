@@ -4,6 +4,7 @@
 ///|/
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <string>
@@ -193,15 +194,44 @@ static c_flow to_c_flow(const Flow &flow)
 }
 
 // Use object support settings at this layer's height; bridge flow uses that height as diameter, and normal bed-contact flow uses first-layer settings.
+// The bed test reads the bottom only: an auxiliary layer's id is its creation rank, not its position.
 static Flow support_layer_flow(const Layer &layer, FlowRole role, bool bridge)
 {
     const PrintObject *object = layer.object();
     const float height = float(layer.unscaled_height());
-    if (!bridge && layer.id() == 0 && layer.scaled_bottom_z() <= 0)
+    if (!bridge && layer.scaled_bottom_z() <= 0)
         return support_material_1st_layer_flow(object, height);
     const Flow flow = role == frSupportMaterialInterface ? support_material_interface_flow(object, height) :
                                                          support_material_flow(object, height);
     return bridge ? Flow::bridging_flow(height, flow.nozzle_diameter()) : flow;
+}
+
+// Build an object support flow like the legacy support generator: the native
+// base, interface or first-layer flow, then the optional bottom-contact
+// conversion, then a bridge thread or a new printed height. See
+// object_get_support_flow() in slic3r_data_tree.h for the meaning of each flag.
+static Flow object_support_flow(const PrintObject &object, FlowRole role, double flow_height, double print_height,
+                                uint32_t flags)
+{
+    const float height = float(std::max(0., flow_height));
+    Flow flow = (flags & OBJECT_SUPPORT_FLOW_FIRST_LAYER) != 0 ? support_material_1st_layer_flow(&object, height) :
+                role == frSupportMaterialInterface                ? support_material_interface_flow(&object, height) :
+                                                                    support_material_flow(&object, height);
+    if ((flags & OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT) != 0) {
+        // Same averaged ratio and soluble test as the legacy support parameters.
+        double bridge_ratio = 0;
+        for (size_t region_idx = 0; region_idx < object.num_printing_regions(); ++region_idx)
+            bridge_ratio += object.printing_region(region_idx).config().bridge_flow_ratio.get_effective_value(1.);
+        bridge_ratio /= object.num_printing_regions();
+        const bool soluble = object.config().support_material_contact_distance_type.value == zdNone;
+        flow = soluble ? flow.with_flow_ratio(bridge_ratio) :
+                         Flow::bridging_flow(std::sqrt(bridge_ratio) * flow.nozzle_diameter(), flow.nozzle_diameter());
+    }
+    if ((flags & OBJECT_SUPPORT_FLOW_BRIDGE) != 0)
+        return Flow::bridging_flow(float(print_height), flow.nozzle_diameter());
+    if (print_height > 0 && !flow.bridge())
+        flow = flow.with_height(float(print_height));
+    return flow;
 }
 
 static FlowRole to_flow_role(raw_extrusion_role role)
@@ -1104,6 +1134,43 @@ const print_region_handle *object_get_print_region(const object_handle *me, uint
     if (me == nullptr || idx >= Slic3r::to_object(me)->num_printing_regions())
         return nullptr;
     return reinterpret_cast<const print_region_handle*>(&Slic3r::to_object(me)->printing_region(idx));
+}
+
+// Compute a support flow from the object settings at any height; unusable input or settings return zero rather than throwing through the C API.
+c_flow object_get_support_flow(const object_handle *me, raw_extrusion_role flow_role, double flow_height_mm,
+                               double print_height_mm, uint32_t flags)
+{
+    if (me == nullptr || (flow_role & RAW_EXTRUSION_ROLE_SUPPORT) == 0 ||
+        ((flags & OBJECT_SUPPORT_FLOW_BRIDGE) != 0 && print_height_mm <= 0))
+        return {};
+    try {
+        const Slic3r::PrintObject &object = *Slic3r::to_object(me);
+        // The bottom-contact ratio is an average over the regions, undefined without any.
+        if (object.print() == nullptr ||
+            ((flags & OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT) != 0 && object.num_printing_regions() == 0))
+            return {};
+        return Slic3r::to_c_flow(Slic3r::object_support_flow(object, Slic3r::to_flow_role(flow_role), flow_height_mm,
+                                                             print_height_mm, flags));
+    } catch (...) {
+        return {};
+    }
+}
+
+// Compute a regional perimeter or infill flow at any height and layer id; unusable input or settings return zero rather than throwing through the C API.
+c_flow object_get_region_flow(const object_handle *me, uint32_t region_idx, raw_extrusion_role flow_role,
+                              double height_mm, uint32_t layer_id)
+{
+    if (me == nullptr || height_mm <= 0 || (flow_role & RAW_EXTRUSION_ROLE_SUPPORT) != 0)
+        return {};
+    try {
+        const Slic3r::PrintObject &object = *Slic3r::to_object(me);
+        if (object.print() == nullptr || region_idx >= object.num_printing_regions())
+            return {};
+        return Slic3r::to_c_flow(object.printing_region(region_idx).flow(object, Slic3r::to_flow_role(flow_role),
+                                                                         height_mm, layer_id));
+    } catch (...) {
+        return {};
+    }
 }
 
 // Copy and validate before publishing; no C++ exception may cross the C ABI.

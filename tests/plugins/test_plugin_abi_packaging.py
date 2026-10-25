@@ -453,13 +453,16 @@ class AbiPackagingTests(unittest.TestCase):
             self.assertIn(seam_header, bindings.methods["place_seam"])
 
     def test_auxiliary_fill_surface_mutator_abi(self):
-        """The auxiliary mutator is exported by data tree 4.1 and its Python method declares that header."""
+        """The auxiliary mutator (data tree 4.1) and the object flows (4.2) declare the data-tree header."""
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
-            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [4, 1])
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [4, 2])
             self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
+            for function in ("object_get_support_flow", "object_get_region_flow"):
+                self.assertIn("slic3r_data_tree.h", catalog.c_functions[function])
             bindings = self.analyzer.build_binding_index(ROOT / "src/libslic3r/Api/plugin/python", catalog)
-            self.assertIn("slic3r_data_tree.h", bindings.methods["set_fill_surfaces"])
+            for method in ("set_fill_surfaces", "support_flow", "region_flow"):
+                self.assertIn("slic3r_data_tree.h", bindings.methods[method])
 
     def _write_catalog(self, root):
         catalog_path = root / "catalog.json"

@@ -609,6 +609,16 @@ public:
         return PrintRegion(object_get_print_region(handle(), idx));
     }
 
+    // Support flow at any height, computed by the host; flags are OBJECT_SUPPORT_FLOW_* (see object_get_support_flow()).
+    c_flow support_flow(raw_extrusion_role role, double flow_height_mm, double print_height_mm = 0.,
+                        uint32_t flags = 0) const {
+        return object_get_support_flow(handle(), role, flow_height_mm, print_height_mm, flags);
+    }
+    // Perimeter or infill flow of one print region at any height and layer id (see object_get_region_flow()).
+    c_flow region_flow(uint32_t region_idx, raw_extrusion_role role, double height_mm, uint32_t layer_id) const {
+        return object_get_region_flow(handle(), region_idx, role, height_mm, layer_id);
+    }
+
     uint32_t volume_count() const;
     Volume volume(uint32_t idx) const;
 };

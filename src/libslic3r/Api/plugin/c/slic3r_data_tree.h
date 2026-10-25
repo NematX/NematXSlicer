@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 4u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 1u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 2u
 
 /*
 Data-tree access for a sliced Print.
@@ -442,7 +442,8 @@ SLIC3R_HOST_API plugin_property_container_handle *layer_region_get_properties_mu
 /*
 Compute normal flow at this LayerRegion's layer height. Support and support
 interface use the object's support flow settings; both use first-layer support
-flow when layer id is zero and its bottom touches the bed. Other recognized
+flow when the layer's bottom touches the bed, whatever its id (an auxiliary
+layer's id is its creation rank). Other recognized
 flags select perimeter, top or solid flow; remaining values select infill.
 The result needs no release. A null region or a flow that cannot be calculated
 returns all zero fields; no exception crosses this C function. Use
@@ -853,6 +854,83 @@ Print::clear()/destruction, even if their local associations are replaced.
 */
 SLIC3R_HOST_API uint32_t object_count_region(const object_handle *me);
 SLIC3R_HOST_API const print_region_handle *object_get_print_region(const object_handle *me, uint32_t idx);
+
+/*
+Flags of object_get_support_flow(). They are applied in this order: the base
+flow, the bottom-contact conversion, then the bridge or the print height.
+*/
+/*
+Use the support first-layer flow settings for the base flow, whether the role
+asks for base or interface. The role must still carry the support bit.
+*/
+#define OBJECT_SUPPORT_FLOW_FIRST_LAYER ((uint32_t)(1u << 0))
+/*
+Convert the base flow into the flow of a bottom contact, which rests on the
+object. The bridge flow ratio is the average bridge_flow_ratio of the object's
+regions. With soluble support (support_material_contact_distance_type "none")
+the base flow keeps its spacing and its cross section is multiplied by that
+ratio. Otherwise the result is a round bridge thread of diameter
+sqrt(ratio) * nozzle, so its height is the bottom-contact thickness.
+*/
+#define OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT ((uint32_t)(1u << 1))
+/*
+Return a round bridge thread whose diameter is print_height_mm, extruded by the
+nozzle of the base flow. This is how a contact bridging over air is printed at
+the height of its own layer.
+*/
+#define OBJECT_SUPPORT_FLOW_BRIDGE ((uint32_t)(1u << 2))
+
+/*
+Compute a support flow of this Object at any height, natively, from the same
+settings and functions as the legacy support generator. Use it when the flow is
+needed before a support layer exists or at another height than the layer's own,
+for example the nominal support layer height. layer_region_get_flow() remains
+the flow of an existing layer at its own height.
+
+flow_role selects the base flow: RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE
+(support bit plus external bit) for the interface flow, any other role with the
+support bit for the support base flow; other roles return a zero flow.
+flow_height_mm is the height the base flow is computed for, in millimeters; a
+value <= 0 uses the native default (the configured support layer height, or
+the object's first layer height with OBJECT_SUPPORT_FLOW_FIRST_LAYER). These
+defaults are not rounded to the machine Z step, whereas the legacy support
+parameters round their first layer and support heights (check_z_step()):
+callers needing exact parity pass the height they computed themselves. Like
+the native functions, the base and interface heights are capped at the
+extrusion width.
+
+After the flags above, a print_height_mm > 0 keeps the width and recomputes the
+spacing and section for that printed height (Flow::with_height()), as when a
+nominal flow prints a thinner or thicker layer. It is ignored for bridge
+threads; it is required with OBJECT_SUPPORT_FLOW_BRIDGE.
+
+A null Object, an unknown role, a bridge without print height or settings the
+host cannot compute return a flow with all fields zero; no exception crosses
+this C function. The result is a value and needs no release.
+*/
+SLIC3R_HOST_API c_flow object_get_support_flow(const object_handle *me,
+                                               raw_extrusion_role flow_role,
+                                               double flow_height_mm,
+                                               double print_height_mm,
+                                               uint32_t flags);
+
+/*
+Compute the flow of one of this Object's PrintRegions (index as for
+object_get_print_region()) for a perimeter or infill role at any height, with
+the native PrintRegion::flow() rules. layer_id selects the per-layer width
+rules: 0 is the first layer (first-layer widths), an odd id applies the
+"change on odd layers" settings, and an even id >= 2 gives the ordinary width.
+The support generator, for example, reads the external perimeter width with
+layer_id 2. Role flags map as in layer_region_get_flow(); support roles are not
+regional and return a zero flow. A null Object, an invalid index, a height
+<= 0 or settings the host cannot compute also return a zero flow; no exception
+crosses this C function.
+*/
+SLIC3R_HOST_API c_flow object_get_region_flow(const object_handle *me,
+                                              uint32_t region_idx,
+                                              raw_extrusion_role flow_role,
+                                              double height_mm,
+                                              uint32_t layer_id);
 
 /* ========================= PRINT ========================= */
 

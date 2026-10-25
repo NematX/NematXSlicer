@@ -1,18 +1,29 @@
 /* LayerRegion flow tests compare the C API with the native support helpers.
    A first auxiliary layer can touch the bed or start higher: only the bed
-   contact uses first-layer width. Support base and interface use separate
-   nozzle settings, and bridge contacts use layer height as their diameter.
-   Invalid support extruder ids exercise the C boundary's zero-flow result. */
+   contact uses first-layer width, and a later auxiliary layer at the bed does
+   too because the rule reads the bottom, not the id. Support base and
+   interface use separate nozzle settings, and bridge contacts use layer height
+   as their diameter. Invalid support extruder ids exercise the C boundary's
+   zero-flow result.
+   The object-level flows (object_get_support_flow, object_get_region_flow) are
+   compared with the native calls of the legacy grid support at several
+   heights, soluble or not. A modifier volume gives a second region, to check
+   that the bottom contact uses the bridge flow ratio averaged over regions. */
 #include <catch2/catch.hpp>
+
+#include <cmath>
 
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
+#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/PrintRegion.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "libslic3r/TriangleMesh.hpp"
@@ -106,4 +117,153 @@ TEST_CASE("Uncalculable layer-region support flows return zero without crossing 
                 CHECK(flow.mm3_per_mm == 0);
             }
         }
+}
+
+TEST_CASE("A later auxiliary layer at the bed uses the first-layer support flow", "[plugins][support-flow]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"support_material_extrusion_width", "0.5"}, {"first_layer_extrusion_width", "0.7"}});
+    Print print;
+    Model model;
+    Test::init_print({make_cube(4., 4., 0.4)}, print, model, config);
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+    PrintObject &object = print.object(0);
+    const object_handle *object_handle_value = reinterpret_cast<const object_handle *>(&object);
+    const coord_t height = scale_i(0.2);
+    // Created first but above the bed, then created second but at the bed.
+    REQUIRE(object_add_auxiliary_layer(object_handle_value, height, scale_i(0.8), scale_i(0.7)) != nullptr);
+    layer_handle *bed_layer = object_add_auxiliary_layer(object_handle_value, height, height, scale_i(0.1));
+    REQUIRE(bed_layer != nullptr);
+    CHECK(reinterpret_cast<const Layer *>(bed_layer)->id() == 1);
+    const layer_region_handle *region = layer_get_region(bed_layer, 0);
+    REQUIRE(region != nullptr);
+    check_flow(layer_region_get_flow(region, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL),
+               support_material_1st_layer_flow(&object, 0.2f));
+}
+
+TEST_CASE("Object support and region flows match the native flows at any height", "[plugins][support-flow]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool soluble = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.6"}, {"support_material_extruder", "1"},
+                                   {"support_material_interface_extruder", "2"},
+                                   {"support_material_extrusion_width", "0.5"}, {"first_layer_extrusion_width", "0.7"},
+                                   {"external_perimeter_extrusion_change_odd_layers", "110%"},
+                                   {"support_material_contact_distance_type", soluble ? "none" : "plane"}});
+    config.set_deserialize_strict({{"bridge_flow_ratio", "80%"}});
+    Print print;
+    Model model;
+    Test::init_print({make_cube(4., 4., 0.4)}, print, model, config);
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+    const PrintObject &object = print.object(0);
+    const object_handle *handle = reinterpret_cast<const object_handle *>(&object);
+    const raw_extrusion_role base_role = RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL;
+    const raw_extrusion_role interface_role = RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
+    const double bridge_ratio = object.printing_region(0).config().bridge_flow_ratio.get_effective_value(1.);
+    REQUIRE(object.num_printing_regions() == 1);
+    REQUIRE(bridge_ratio == Approx(0.8));
+
+    for (const double height : {0., 0.15, 0.2, 0.3}) {
+        INFO("height " << height);
+        const float native_height = float(height);
+        const Flow base_flow = support_material_flow(&object, native_height);
+        const Flow interface_flow = support_material_interface_flow(&object, native_height);
+        check_flow(object_get_support_flow(handle, base_role, height, 0., 0), base_flow);
+        check_flow(object_get_support_flow(handle, interface_role, height, 0., 0), interface_flow);
+        check_flow(object_get_support_flow(handle, base_role, height, 0., OBJECT_SUPPORT_FLOW_FIRST_LAYER),
+                   support_material_1st_layer_flow(&object, native_height));
+        // Bottom contact, as the native support generator derives it from the interface flow.
+        const Flow bottom = soluble ? interface_flow.with_flow_ratio(bridge_ratio) :
+            Flow::bridging_flow(std::sqrt(bridge_ratio) * interface_flow.nozzle_diameter(), interface_flow.nozzle_diameter());
+        check_flow(object_get_support_flow(handle, interface_role, height, 0., OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), bottom);
+        if (height <= 0.)
+            continue;
+        // A bridge thread at the printed height and a nominal flow printed at another height.
+        check_flow(object_get_support_flow(handle, interface_role, 0.2, height, OBJECT_SUPPORT_FLOW_BRIDGE),
+                   Flow::bridging_flow(native_height, support_material_interface_flow(&object, 0.2f).nozzle_diameter()));
+        check_flow(object_get_support_flow(handle, base_role, 0.2, height, 0), support_material_flow(&object, 0.2f).with_height(native_height));
+        if (soluble)
+            check_flow(object_get_support_flow(handle, interface_role, 0.2, height, OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT),
+                       support_material_interface_flow(&object, 0.2f).with_flow_ratio(bridge_ratio).with_height(native_height));
+        // The external perimeter width the grid support reads with layer id 2, and the first and odd layer rules.
+        for (const uint32_t layer_id : {0u, 1u, 2u})
+            check_flow(object_get_region_flow(handle, 0, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, height, layer_id),
+                       object.printing_region(0).flow(object, frExternalPerimeter, height, layer_id));
+        check_flow(object_get_region_flow(handle, 0, RAW_EXTRUSION_ROLE_INFILL, height, 2),
+                   object.printing_region(0).flow(object, frInfill, height, 2));
+    }
+
+    // Inputs the host cannot turn into a flow give a zero flow without throwing.
+    const c_flow zero_flows[] = {
+        object_get_support_flow(nullptr, base_role, 0.2, 0., 0),
+        object_get_support_flow(handle, RAW_EXTRUSION_ROLE_INFILL, 0.2, 0., 0),
+        object_get_support_flow(handle, base_role, 0.2, 0., OBJECT_SUPPORT_FLOW_BRIDGE),
+        object_get_region_flow(nullptr, 0, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0.2, 2),
+        object_get_region_flow(handle, 1, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0.2, 2),
+        object_get_region_flow(handle, 0, base_role, 0.2, 2),
+        object_get_region_flow(handle, 0, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0., 2),
+    };
+    for (const c_flow &flow : zero_flows) {
+        CHECK(flow.width == 0);
+        CHECK(flow.spacing == 0);
+        CHECK(flow.height == 0);
+        CHECK(flow.nozzle_diameter == 0);
+        CHECK(flow.mm3_per_mm == 0);
+    }
+}
+
+TEST_CASE("Object bottom-contact support flow averages the bridge flow ratio of every region", "[plugins][support-flow]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool soluble = GENERATE(false, true);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"nozzle_diameter", "0.4,0.6"}, {"support_material_extruder", "1"},
+                                   {"support_material_interface_extruder", "2"},
+                                   {"support_material_extrusion_width", "0.5"}, {"bridge_flow_ratio", "80%"},
+                                   {"support_material_contact_distance_type", soluble ? "none" : "plane"}});
+    // A modifier volume over part of the cube gives a second printing region with its own bridge flow ratio.
+    Print print;
+    Model model;
+    ModelObject *model_object = model.add_object();
+    model_object->add_volume(make_cube(20., 20., 2.), ModelVolumeType::MODEL_PART, false)->set_type(ModelVolumeType::MODEL_PART);
+    TriangleMesh modifier_mesh = make_cube(5., 20., 2.);
+    modifier_mesh.translate(Vec3f(15.f, 0.f, 0.f));
+    ModelVolume *modifier = model_object->add_volume(std::move(modifier_mesh), ModelVolumeType::PARAMETER_MODIFIER, false);
+    modifier->set_type(ModelVolumeType::PARAMETER_MODIFIER);
+    DynamicPrintConfig modifier_config;
+    modifier_config.set_deserialize_strict({{"bridge_flow_ratio", "50%"}});
+    modifier->config.assign_config(modifier_config);
+    model_object->add_instance();
+    model.center_instances_around_point({100., 100.});
+    model_object->ensure_on_bed();
+    print.auto_assign_extruders(model_object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+
+    const PrintObject &object = print.object(0);
+    REQUIRE(object.num_printing_regions() == 2);
+    const double first_ratio = object.printing_region(0).config().bridge_flow_ratio.get_effective_value(1.);
+    const double second_ratio = object.printing_region(1).config().bridge_flow_ratio.get_effective_value(1.);
+    REQUIRE(first_ratio != Approx(second_ratio));
+    const double average = (first_ratio + second_ratio) / 2.;
+    const Flow interface_flow = support_material_interface_flow(&object, 0.2f);
+    const Flow expected = soluble ? interface_flow.with_flow_ratio(average) :
+        Flow::bridging_flow(std::sqrt(average) * interface_flow.nozzle_diameter(), interface_flow.nozzle_diameter());
+
+    const object_handle *handle = reinterpret_cast<const object_handle *>(&object);
+    check_flow(object_get_support_flow(handle, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, 0.2, 0.,
+                                       OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), expected);
+    // The C++ view forwards the same request.
+    check_flow(slic3r_api::Object(handle).support_flow(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, 0.2, 0.,
+                                                       OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), expected);
 }

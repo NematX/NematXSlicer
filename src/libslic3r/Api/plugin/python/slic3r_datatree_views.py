@@ -1724,6 +1724,34 @@ class Object(DataTreeView):
         for idx in range(self.print_region_count()):
             yield self.print_region(idx)
 
+    @abi_requires_headers("slic3r_data_tree.h")
+    def support_flow(
+        self, role: int, flow_height_mm: float, print_height_mm: float = 0.0, flags: int = 0
+    ) -> CFlow:
+        """
+        Return a support flow of this object at any height, computed by the host.
+
+        ``flags`` combines the ``OBJECT_SUPPORT_FLOW_*`` constants; see
+        ``object_get_support_flow()`` in the C header for the rules. A flow
+        the host cannot compute has all fields zero. The ``CFlow`` is a copy.
+        """
+        return self.api.host.object_get_support_flow(
+            self.c_handle(), int(role), float(flow_height_mm), float(print_height_mm), int(flags)
+        )
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def region_flow(self, region_idx: int, role: int, height_mm: float, layer_id: int) -> CFlow:
+        """
+        Return the perimeter or infill flow of one print region at any height.
+
+        ``layer_id`` selects the per-layer width rules of the native region
+        flow (0 first layer, odd ids the odd-layer change). Invalid input
+        gives a zero flow. The ``CFlow`` is a copy.
+        """
+        return self.api.host.object_get_region_flow(
+            self.c_handle(), int(region_idx), int(role), float(height_mm), int(layer_id)
+        )
+
 
 @abi_requires_headers("slic3r_volume.h")
 def project_painting_to_polygons(

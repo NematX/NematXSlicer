@@ -250,6 +250,36 @@ class PythonDataTreeViewTests(unittest.TestCase):
         with self.assertRaises(IndexError):
             obj.instance_shift(2)
 
+    def test_object_support_and_region_flows_forward_their_arguments(self):
+        api = self.make_api()
+        calls = []
+
+        def support_flow(obj, role, flow_height, print_height, flags):
+            calls.append(("support", address(obj), int(role), flow_height, print_height, int(flags)))
+            return self.generated.CFlow(width=440)
+
+        def region_flow(obj, region_idx, role, height, layer_id):
+            calls.append(("region", address(obj), int(region_idx), int(role), height, int(layer_id)))
+            return self.generated.CFlow(width=450)
+
+        api.host.object_get_support_flow = support_flow
+        api.host.object_get_region_flow = region_flow
+        obj = self.views.Object(api, 50)
+        flags = self.generated.OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT | self.generated.OBJECT_SUPPORT_FLOW_BRIDGE
+        self.assertEqual(obj.support_flow(7, 0.2, 0.15, flags).width, 440)
+        self.assertEqual(obj.support_flow(7, 0.2).width, 440)
+        self.assertEqual(obj.region_flow(1, 9, 0.2, 2).width, 450)
+        self.assertEqual(calls, [
+            ("support", 50, 7, 0.2, 0.15, flags),
+            ("support", 50, 7, 0.2, 0.0, 0),
+            ("region", 50, 1, 9, 0.2, 2),
+        ])
+        self.assertEqual(
+            (self.generated.OBJECT_SUPPORT_FLOW_FIRST_LAYER, self.generated.OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT,
+             self.generated.OBJECT_SUPPORT_FLOW_BRIDGE),
+            (1, 2, 4),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
