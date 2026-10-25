@@ -5,8 +5,8 @@
 #ifndef slic3r_clipper_h_
 #define slic3r_clipper_h_
 
-#define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 1u
-#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 3u
+#define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 2u
+#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 0u
 
 #include "slic3r_def.h"
 #include "slic3r_geometry.h"
@@ -56,6 +56,13 @@ typedef enum clipper_end_type_t {
     CLIPPER_END_OPEN_ROUND = 4
 } clipper_end_type_t;
 
+/* Clipper polygon fill rule, the ClipperLib::PolyFillType of the native code. */
+typedef enum clipper_fill_rule_t {
+    CLIPPER_FILL_NONZERO = 0,
+    CLIPPER_FILL_EVENODD = 1,
+    CLIPPER_FILL_POSITIVE = 2
+} clipper_fill_rule_t;
+
 /* ---- Shape adapters -------------------------------------------------
 Create a Clipper input adapter from an existing geometry handle.
 
@@ -87,8 +94,9 @@ used as input to another Clipper operation, converted to Polygons/ExPolygons, or
 released with storage_free().
 
 clip may be NULL for operations that accept a single subject, such as union.
-All boolean operations currently use pftNonZero for subject and clip fill types,
-matching the common Slic3r ClipperUtils behaviour.
+The boolean operations use pftNonZero for subject and clip fill types, matching the
+common Slic3r ClipperUtils behaviour, except clipper_union(), which takes the fill
+rule as an argument.
 */
 SLIC3R_HOST_API clipper_shapes_handle *clipper_execute(storage_handle *storage,
                                                        clipper_operation_t operation,
@@ -135,7 +143,15 @@ SLIC3R_HOST_API clipper_shapes_handle *clipper_diff_with_safety_offset(storage_h
 SLIC3R_HOST_API clipper_shapes_handle *clipper_intersection_with_safety_offset(storage_handle *storage,
                                                                               const clipper_shapes_handle *subject,
                                                                               const clipper_shapes_handle *clip);
-SLIC3R_HOST_API clipper_shapes_handle *clipper_union(storage_handle *storage, const clipper_shapes_handle *subject);
+/*
+Union of subject, with fill_rule applied to its paths (CLIPPER_FILL_NONZERO is the
+usual Slic3r union). Returns NULL when storage or subject is NULL or fill_rule is
+not one of the clipper_fill_rule_t values. The result is a new storage-owned shape
+(release it with storage_free()).
+*/
+SLIC3R_HOST_API clipper_shapes_handle *clipper_union(storage_handle *storage,
+                                                     const clipper_shapes_handle *subject,
+                                                     clipper_fill_rule_t fill_rule);
 SLIC3R_HOST_API clipper_shapes_handle *clipper_union_with_safety_offset(storage_handle *storage, const clipper_shapes_handle *subject);
 SLIC3R_HOST_API clipper_shapes_handle *clipper_union2(storage_handle *storage,
                                                       const clipper_shapes_handle *subject1,
@@ -225,6 +241,65 @@ SLIC3R_HOST_API clipper_shapes_handle *clipper_offset_polylines(storage_handle *
                                                                 clipper_join_type_t join_type,
                                                                 double miter_limit,
                                                                 clipper_end_type_t end_type);
+
+/* ---- Native ExPolygon results -----------------------------------------
+The three functions below call the native ClipperUtils code and return its result
+as is: a new expolygon collection owned by storage (release it with
+storage_free()), with the native order of expolygons, contours and holes, and no
+extra cleaning. They return NULL when storage or an input handle is NULL, when an
+enum value is unknown, or when a double argument is not finite, and also on an
+internal error (for example ClipperLib rejecting coordinates outside its allowed
+range, or an allocation failure), with nothing added to the storage. Prefer them over
+the clipper_shapes_handle pipeline when the result must match the native code
+exactly (same rings, same order, same start points).
+
+delta, delta1 and delta2 are in scaled units. The native defaults are
+CLIPPER_JOIN_MITER with miter_limit 3.0 (DefaultJoinType and DefaultMiterLimit of
+ClipperUtils.hpp). For CLIPPER_JOIN_ROUND, miter_limit is the ArcTolerance, as in
+the native code. Negative offsets assume normalised input, as in the native code:
+no overlap or intersection between the input expolygons (ClipperUtils.hpp, shrink()
+and offset2()).
+*/
+
+/*
+Native union_ex(Polygons, fill_type): two passes with small-area removal, the
+polygon tree converted with each contour before its islands. The conversion also
+drops degenerate contours (clockwise artifacts, 3-point contours with coinciding
+points; ClipperUtils.cpp PolyTreeToExPolygons), not only small areas.
+Returns NULL for a NULL argument or an unknown rule, and also on an internal error
+(for example ClipperLib rejecting coordinates outside its allowed range, or an
+allocation failure); nothing is added to the storage in that case.
+*/
+SLIC3R_HOST_API expolygon_collection_handle *clipper_union_ex(storage_handle *storage,
+                                                              const polygon_collection_handle *polygons,
+                                                              clipper_fill_rule_t fill_rule);
+
+/*
+Native offset_ex(ExPolygons, delta, join_type, miter_limit). The Slic3r safety
+offset, the native union_safety_offset_ex(ExPolygons), is
+clipper_offset_ex(storage, src, 10.0 (ClipperSafetyOffset), CLIPPER_JOIN_MITER, 3.0).
+delta == 0 is accepted (the native offset_ex does not assert on it for ExPolygons).
+Returns NULL for invalid arguments and also on an internal error (see clipper_union_ex()).
+*/
+SLIC3R_HOST_API expolygon_collection_handle *clipper_offset_ex(storage_handle *storage,
+                                                               const expolygon_collection_handle *src,
+                                                               double delta,
+                                                               clipper_join_type_t join_type,
+                                                               double miter_limit);
+
+/*
+Native offset2_ex(ExPolygons, delta1, delta2, join_type, miter_limit): offset by
+delta1, then by delta2. Closing is delta1 > 0 then delta2 = -delta1; opening is the
+reverse. delta2 must not be 0 (the native code asserts it; NULL is returned): use
+clipper_offset_ex() for a single offset. delta1 == 0 is accepted.
+Also returns NULL on an internal error (see clipper_union_ex()).
+*/
+SLIC3R_HOST_API expolygon_collection_handle *clipper_offset2_ex(storage_handle *storage,
+                                                                const expolygon_collection_handle *src,
+                                                                double delta1,
+                                                                double delta2,
+                                                                clipper_join_type_t join_type,
+                                                                double miter_limit);
 
 /* ---- Conversion back to ABI collections ------------------------------
 Materialize a Clipper shape into a new storage-owned collection.

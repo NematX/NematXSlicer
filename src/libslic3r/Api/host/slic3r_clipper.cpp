@@ -146,12 +146,29 @@ static ClipperLib::ClipType to_clip_type(clipper_operation_t operation) {
     }
 }
 
-static ClipperLib::JoinType to_join_type(clipper_join_type_t join_type) {
+// Strict conversions: return false for an unknown ABI value instead of defaulting.
+static bool to_known_join_type(clipper_join_type_t join_type, ClipperLib::JoinType &out) {
     switch (join_type) {
-    case CLIPPER_JOIN_SQUARE: return ClipperLib::jtSquare;
-    case CLIPPER_JOIN_ROUND:  return ClipperLib::jtRound;
-    case CLIPPER_JOIN_MITER:  return ClipperLib::jtMiter;
-    default:                  return ClipperLib::jtMiter;
+    case CLIPPER_JOIN_SQUARE: out = ClipperLib::jtSquare; return true;
+    case CLIPPER_JOIN_ROUND:  out = ClipperLib::jtRound;  return true;
+    case CLIPPER_JOIN_MITER:  out = ClipperLib::jtMiter;  return true;
+    default:                  return false;
+    }
+}
+
+// Permissive variant for the older functions: an unknown value falls back to a miter join.
+static ClipperLib::JoinType to_join_type(clipper_join_type_t join_type) {
+    ClipperLib::JoinType native_join = ClipperLib::jtMiter;
+    to_known_join_type(join_type, native_join);
+    return native_join;
+}
+
+static bool to_fill_type(clipper_fill_rule_t fill_rule, ClipperLib::PolyFillType &out) {
+    switch (fill_rule) {
+    case CLIPPER_FILL_NONZERO:  out = ClipperLib::pftNonZero;  return true;
+    case CLIPPER_FILL_EVENODD:  out = ClipperLib::pftEvenOdd;  return true;
+    case CLIPPER_FILL_POSITIVE: out = ClipperLib::pftPositive; return true;
+    default:                    return false;
     }
 }
 
@@ -353,7 +370,8 @@ static clipper_shapes_handle *clipper_execute_impl(storage_handle *storage,
                                                    clipper_operation_t operation,
                                                    const clipper_shapes_handle *subject,
                                                    const clipper_shapes_handle *clip,
-                                                   bool apply_safety_offset)
+                                                   bool apply_safety_offset,
+                                                   Slic3r::ClipperLib::PolyFillType fill_type)
 {
     const Slic3r::ApiClipper::ClipperShapes *subject_shapes = Slic3r::to_shapes(subject);
     const Slic3r::ApiClipper::ClipperShapes *clip_shapes = Slic3r::to_shapes(clip);
@@ -375,7 +393,7 @@ static clipper_shapes_handle *clipper_execute_impl(storage_handle *storage,
 
     // PolyTree keeps the contour/hole hierarchy needed by to_expolygons().
     Slic3r::ClipperLib::PolyTree result;
-    clipper.Execute(Slic3r::to_clip_type(operation), result, Slic3r::ClipperLib::pftNonZero, Slic3r::ClipperLib::pftNonZero);
+    clipper.Execute(Slic3r::to_clip_type(operation), result, fill_type, fill_type);
     return Slic3r::store_shape(storage, Slic3r::ApiClipper::make_polytree_shapes(std::move(result)));
 }
 
@@ -384,7 +402,7 @@ clipper_shapes_handle *clipper_execute(storage_handle *storage,
                                        const clipper_shapes_handle *subject,
                                        const clipper_shapes_handle *clip)
 {
-    return clipper_execute_impl(storage, operation, subject, clip, false);
+    return clipper_execute_impl(storage, operation, subject, clip, false, Slic3r::ClipperLib::pftNonZero);
 }
 
 clipper_shapes_handle *clipper_diff(storage_handle *storage,
@@ -433,18 +451,98 @@ clipper_shapes_handle *clipper_diff_with_safety_offset(storage_handle *storage,
                                                        const clipper_shapes_handle *subject,
                                                        const clipper_shapes_handle *clip)
 {
-    return clipper_execute_impl(storage, CLIPPER_OPERATION_DIFFERENCE, subject, clip, true);
+    return clipper_execute_impl(storage, CLIPPER_OPERATION_DIFFERENCE, subject, clip, true, Slic3r::ClipperLib::pftNonZero);
 }
 
 clipper_shapes_handle *clipper_intersection_with_safety_offset(storage_handle *storage,
                                                               const clipper_shapes_handle *subject,
                                                               const clipper_shapes_handle *clip)
 {
-    return clipper_execute_impl(storage, CLIPPER_OPERATION_INTERSECTION, subject, clip, true);
+    return clipper_execute_impl(storage, CLIPPER_OPERATION_INTERSECTION, subject, clip, true, Slic3r::ClipperLib::pftNonZero);
 }
 
-clipper_shapes_handle *clipper_union(storage_handle *storage, const clipper_shapes_handle *subject) {
-    return clipper_execute(storage, CLIPPER_OPERATION_UNION, subject, nullptr);
+// Union of the subject paths with the given fill rule; an unknown rule returns NULL.
+clipper_shapes_handle *clipper_union(storage_handle *storage,
+                                     const clipper_shapes_handle *subject,
+                                     clipper_fill_rule_t fill_rule)
+{
+    // Validate the rule, then run the same path as every other boolean operation with that fill type
+    // for the subject and the (absent) clip.
+    Slic3r::ClipperLib::PolyFillType fill_type;
+    if (!Slic3r::to_fill_type(fill_rule, fill_type))
+        return nullptr;
+    return clipper_execute_impl(storage, CLIPPER_OPERATION_UNION, subject, nullptr, false, fill_type);
+}
+
+// Stores the result in a new storage-owned collection through the C++ PluginStorage (not the extern "C"
+// storage_new_expolygons(), which MSVC assumes never throws), so an allocation failure reaches the caller try/catch.
+namespace Slic3r {
+static expolygon_collection_handle *store_expolygons(storage_handle *storage, ExPolygons &&result) {
+    return reinterpret_cast<expolygon_collection_handle *>(
+        to_storage(storage)->store(std::make_unique<ExPolygons>(std::move(result))));
+}
+} // namespace Slic3r
+
+// Native union_ex(Polygons, fill_type), stored as is in a new storage-owned collection.
+expolygon_collection_handle *clipper_union_ex(storage_handle *storage,
+                                              const polygon_collection_handle *polygons,
+                                              clipper_fill_rule_t fill_rule)
+{
+    Slic3r::ClipperLib::PolyFillType fill_type;
+    if (storage == nullptr || polygons == nullptr || !Slic3r::to_fill_type(fill_rule, fill_type))
+        return nullptr;
+    // The native result is computed first: an exception (bad_alloc, ClipperLib range error) must not cross the
+    // C boundary nor leave an empty collection in the storage.
+    try {
+        Slic3r::ExPolygons result = Slic3r::union_ex(*Slic3r::to_polygons(polygons), fill_type);
+        return Slic3r::store_expolygons(storage, std::move(result));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+// Native offset_ex(ExPolygons, ...), stored as is. A zero delta is accepted: native does not assert on it here.
+// Non-finite values are rejected because ClipperLib throws on them, and no exception may cross the C boundary.
+expolygon_collection_handle *clipper_offset_ex(storage_handle *storage,
+                                               const expolygon_collection_handle *src,
+                                               double delta,
+                                               clipper_join_type_t join_type,
+                                               double miter_limit)
+{
+    Slic3r::ClipperLib::JoinType native_join;
+    if (storage == nullptr || src == nullptr || !std::isfinite(delta) || !std::isfinite(miter_limit) ||
+        !Slic3r::to_known_join_type(join_type, native_join))
+        return nullptr;
+    // Compute first, then store; an internal error returns NULL with nothing added to the storage.
+    try {
+        Slic3r::ExPolygons result = Slic3r::offset_ex(*Slic3r::to_expolygons(src), delta, native_join, miter_limit);
+        return Slic3r::store_expolygons(storage, std::move(result));
+    } catch (...) {
+        return nullptr;
+    }
+}
+
+// Native offset2_ex(ExPolygons, ...), stored as is. delta2 == 0 is rejected: native offset_paths asserts
+// offset != 0 for the second pass. Non-finite values are rejected as in clipper_offset_ex().
+expolygon_collection_handle *clipper_offset2_ex(storage_handle *storage,
+                                                const expolygon_collection_handle *src,
+                                                double delta1,
+                                                double delta2,
+                                                clipper_join_type_t join_type,
+                                                double miter_limit)
+{
+    Slic3r::ClipperLib::JoinType native_join;
+    if (storage == nullptr || src == nullptr || !std::isfinite(delta1) || !std::isfinite(delta2) ||
+        !std::isfinite(miter_limit) || delta2 == 0. || !Slic3r::to_known_join_type(join_type, native_join))
+        return nullptr;
+    // Compute first, then store; an internal error returns NULL with nothing added to the storage.
+    try {
+        Slic3r::ExPolygons result =
+            Slic3r::offset2_ex(*Slic3r::to_expolygons(src), delta1, delta2, native_join, miter_limit);
+        return Slic3r::store_expolygons(storage, std::move(result));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 clipper_shapes_handle *clipper_union_with_safety_offset(storage_handle *storage,

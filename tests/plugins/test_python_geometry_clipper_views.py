@@ -93,6 +93,31 @@ class GeometryClipperHost:
         self.next_handle += 1
         return self.next_handle
 
+    def clipper_union(self, storage, subject, fill_rule):
+        # Only the three known rules are accepted, like the real host.
+        if fill_rule not in (0, 1, 2):
+            return 0
+        return self._result("union", storage, subject, fill_rule)
+
+    def clipper_union_ex(self, storage, polygons, fill_rule):
+        if fill_rule not in (0, 1, 2):
+            return 0
+        return self._result("union_ex", storage, polygons, fill_rule)
+
+    def clipper_offset_ex(self, storage, src, delta, join_type, miter_limit):
+        if join_type not in (0, 1, 2):
+            return 0
+        result = self._result("offset_ex", storage, src, join_type)
+        self.calls[-1] += ((delta, miter_limit),)
+        return result
+
+    def clipper_offset2_ex(self, storage, src, delta1, delta2, join_type, miter_limit):
+        if join_type not in (0, 1, 2):
+            return 0
+        result = self._result("offset2_ex", storage, src, join_type)
+        self.calls[-1] += ((delta1, delta2, miter_limit),)
+        return result
+
     def polyline_as_multipoint_const(self, polyline):
         return address(polyline)
 
@@ -205,6 +230,22 @@ class PythonGeometryClipperViewTests(unittest.TestCase):
         self.assertTrue(distancer_copy.empty())
         self.assertEqual(api.host.freed, [])
 
+    def test_native_expolygon_functions_reject_a_released_source_before_the_host(self):
+        api = self.make_api()
+        polygons = self.geometry.PolygonCollection(api, 61)
+        expolygons = self.geometry.ExPolygonCollection(api, 62)
+        # A released collection has handle 0: an argument error (ValueError), not a host internal error.
+        polygons._handle = 0
+        expolygons._handle = 0
+        for call in (
+            lambda: self.clipper.clipper_union_ex(9, polygons, self.clipper.CLIPPER_FILL_NONZERO),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, 1.0),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, -1.0),
+        ):
+            with self.assertRaises(ValueError):
+                call()
+        self.assertEqual(api.host.calls, [])
+
     def test_clipper_operand_has_unique_ownership(self):
         api = self.make_api()
         operand = self.clipper.ClipperOperand.adopt_owned(api, 8, 601)
@@ -213,6 +254,22 @@ class PythonGeometryClipperViewTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "ClipperOperand.*unique native resource"):
                 copier(operand)
         self.assertEqual(api.host.freed, [])
+
+    def test_native_expolygon_functions_reject_a_released_source_before_the_host(self):
+        api = self.make_api()
+        polygons = self.geometry.PolygonCollection(api, 61)
+        expolygons = self.geometry.ExPolygonCollection(api, 62)
+        # A released collection has handle 0: an argument error (ValueError), not a host internal error.
+        polygons._handle = 0
+        expolygons._handle = 0
+        for call in (
+            lambda: self.clipper.clipper_union_ex(9, polygons, self.clipper.CLIPPER_FILL_NONZERO),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, 1.0),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, -1.0),
+        ):
+            with self.assertRaises(ValueError):
+                call()
+        self.assertEqual(api.host.calls, [])
         self.assertTrue(operand)
         self.assertTrue(operand.free_from_storage())
         self.assertEqual(api.host.freed, [(8, 601)])
@@ -274,6 +331,102 @@ class PythonGeometryClipperViewTests(unittest.TestCase):
             self.assertIsInstance(result, self.clipper.ClipperOperand)
             self.assertEqual(result.storage(), 9)
         self.assertNotEqual(inside.handle(), outside.handle())
+
+    def test_union_keeps_nonzero_and_fill_rule_twin_forwards_the_rule(self):
+        api = self.make_api()
+        subject = self.clipper.ClipperOperand.adopt_owned(api, 9, 41)
+
+        plain = self.clipper.clipper_union(subject)
+        ruled = self.clipper.clipper_union_with_fill_rule(subject, self.clipper.CLIPPER_FILL_EVENODD)
+        explicit = self.clipper.clipper_union_with_fill_rule(9, subject, self.clipper.CLIPPER_FILL_POSITIVE)
+
+        self.assertEqual(api.host.calls, [("union", (9, 41, 0)), ("union", (9, 41, 1)), ("union", (9, 41, 2))])
+        self.assertEqual([self.clipper.CLIPPER_FILL_NONZERO, self.clipper.CLIPPER_FILL_EVENODD,
+                          self.clipper.CLIPPER_FILL_POSITIVE], [0, 1, 2])
+        for result in (plain, ruled, explicit):
+            self.assertIsInstance(result, self.clipper.ClipperOperand)
+        with self.assertRaises(ValueError):
+            self.clipper.clipper_union_with_fill_rule(subject, 7)
+
+    def test_native_expolygon_functions_forward_arguments_and_own_results(self):
+        api = self.make_api()
+        polygons = self.geometry.PolygonCollection(api, 61)
+        expolygons = self.geometry.ExPolygonCollection(api, 62)
+        context = api.clipper(9)
+
+        united = context.union_ex(polygons, self.clipper.CLIPPER_FILL_EVENODD)
+        offset = self.clipper.clipper_offset_ex(9, expolygons, 10.0)
+        offset2 = context.offset2_ex(expolygons, 5.0, -5.0, self.clipper.CLIPPER_JOIN_ROUND, 2.5)
+
+        self.assertEqual(api.host.calls, [
+            ("union_ex", (9, 61, 1)),
+            ("offset_ex", (9, 62, self.clipper.CLIPPER_JOIN_MITER), (10.0, 3.0)),
+            ("offset2_ex", (9, 62, self.clipper.CLIPPER_JOIN_ROUND), (5.0, -5.0, 2.5)),
+        ])
+        for result in (united, offset, offset2):
+            self.assertIsInstance(result, self.geometry.StoredExPolygonCollection)
+            self.assertEqual(result.storage(), 9)
+            self.assertTrue(result.free_from_storage())
+        for call in (
+            lambda: self.clipper.clipper_union_ex(9, polygons, 7),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, 1.0, 7),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, -1.0, 7),
+            lambda: self.clipper.clipper_union_ex(9, polygons, 99),
+            lambda: self.clipper.clipper_union_ex(9, polygons, -1),
+            # delta2 == 0 and non-finite numbers are rejected before the host is called.
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, 0.0),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, float("nan"), -1.0),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, float("inf")),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, -1.0, miter_limit=float("nan")),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, float("nan")),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, float("-inf")),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, 1.0, miter_limit=float("inf")),
+        ):
+            with self.assertRaises(ValueError):
+                call()
+        # None of the rejected calls reached the host.
+        self.assertEqual(len(api.host.calls), 3)
+        # A zero delta is valid for the single offset.
+        self.clipper.clipper_offset_ex(9, expolygons, 0.0).free_from_storage()
+        self.assertEqual(api.host.calls[-1][0], "offset_ex")
+        # The twin validates the rule before the host too.
+        with self.assertRaises(ValueError):
+            self.clipper.clipper_union_with_fill_rule(
+                self.clipper.ClipperOperand.adopt_owned(api, 9, 41), 99
+            )
+        self.assertEqual(len(api.host.calls), 4)
+
+    def test_native_expolygon_functions_map_a_host_null_to_runtime_error(self):
+        api = self.make_api()
+        polygons = self.geometry.PolygonCollection(api, 61)
+        expolygons = self.geometry.ExPolygonCollection(api, 62)
+        # Valid arguments but a NULL from the host: an internal error, not an argument error.
+        for call in (
+            lambda: self.clipper.clipper_union_ex(9, polygons, self.clipper.CLIPPER_FILL_NONZERO),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, 1.0),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, -1.0),
+        ):
+            api.host.fail_next = True
+            with self.assertRaises(RuntimeError):
+                call()
+        self.assertEqual([call[0] for call in api.host.calls], ["union_ex", "offset_ex", "offset2_ex"])
+        self.assertEqual(api.host.freed, [])
+
+    def test_native_expolygon_functions_reject_a_released_source_before_the_host(self):
+        api = self.make_api()
+        polygons = self.geometry.PolygonCollection(api, 61)
+        expolygons = self.geometry.ExPolygonCollection(api, 62)
+        # A released collection has handle 0: an argument error (ValueError), not a host internal error.
+        polygons._handle = 0
+        expolygons._handle = 0
+        for call in (
+            lambda: self.clipper.clipper_union_ex(9, polygons, self.clipper.CLIPPER_FILL_NONZERO),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, 1.0),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, -1.0),
+        ):
+            with self.assertRaises(ValueError):
+                call()
+        self.assertEqual(api.host.calls, [])
 
     def test_helpers_reject_invalid_storage_api_and_native_results(self):
         api = self.make_api()
@@ -359,6 +512,22 @@ class PythonGeometryClipperViewTests(unittest.TestCase):
                     function(9, subject, clip)
                 self.assertEqual(api.host.freed, [])
 
+    def test_native_expolygon_functions_reject_a_released_source_before_the_host(self):
+        api = self.make_api()
+        polygons = self.geometry.PolygonCollection(api, 61)
+        expolygons = self.geometry.ExPolygonCollection(api, 62)
+        # A released collection has handle 0: an argument error (ValueError), not a host internal error.
+        polygons._handle = 0
+        expolygons._handle = 0
+        for call in (
+            lambda: self.clipper.clipper_union_ex(9, polygons, self.clipper.CLIPPER_FILL_NONZERO),
+            lambda: self.clipper.clipper_offset_ex(9, expolygons, 1.0),
+            lambda: self.clipper.clipper_offset2_ex(9, expolygons, 1.0, -1.0),
+        ):
+            with self.assertRaises(ValueError):
+                call()
+        self.assertEqual(api.host.calls, [])
+
     def test_generated_bindings_include_batch_clipping_signatures(self):
         signatures = {name: (result, arguments) for name, result, arguments in self.generated.C_FUNCTION_SIGNATURES}
         for operation in ("diff", "intersection"):
@@ -368,7 +537,26 @@ class PythonGeometryClipperViewTests(unittest.TestCase):
                 self.assertEqual(signatures[name], (ctypes.c_void_p, [ctypes.c_void_p] * 3))
                 self.assertIn(name, self.clipper.__all__)
                 self.assertTrue(callable(getattr(self.api_module, name)))
-        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_CLIPPER_MINOR, 3)
+        header = (RUNTIME.parent / "c/slic3r_clipper.h").read_text(encoding="utf-8")
+        self.assertIn("#define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 2u", header)
+        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_CLIPPER_MINOR, 0)
+        self.assertEqual(
+            signatures["clipper_union"], (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int])
+        )
+        self.assertEqual(
+            signatures["clipper_union_ex"], (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int])
+        )
+        self.assertEqual(
+            signatures["clipper_offset_ex"],
+            (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double, ctypes.c_int, ctypes.c_double]),
+        )
+        self.assertEqual(
+            signatures["clipper_offset2_ex"],
+            (
+                ctypes.c_void_p,
+                [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double, ctypes.c_double, ctypes.c_int, ctypes.c_double],
+            ),
+        )
 
     def test_collection_cleanups_and_polyline_offset_forward_to_the_host(self):
         api = self.make_api()

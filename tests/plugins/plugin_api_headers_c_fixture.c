@@ -31,7 +31,15 @@ typedef char slicing_step_custom_above_builtin[SLICING_STEP_CUSTOM_BEGIN > WIPE_
 /* Returns 1 when the declarations of the three headers are usable from C. */
 int test_plugin_api_headers_c(void)
 {
-    clipper_shapes_handle *(*union_fn)(storage_handle *, const clipper_shapes_handle *) = clipper_union;
+    clipper_shapes_handle *(*union_fn)(storage_handle *, const clipper_shapes_handle *, clipper_fill_rule_t) =
+        clipper_union;
+    expolygon_collection_handle *(*union_ex_fn)(storage_handle *, const polygon_collection_handle *,
+                                                clipper_fill_rule_t) = clipper_union_ex;
+    expolygon_collection_handle *(*offset_ex_fn)(storage_handle *, const expolygon_collection_handle *, double,
+                                                 clipper_join_type_t, double) = clipper_offset_ex;
+    expolygon_collection_handle *(*offset2_ex_fn)(storage_handle *, const expolygon_collection_handle *, double,
+                                                  double, clipper_join_type_t, double) = clipper_offset2_ex;
+    clipper_fill_rule_t fill_rules[3] = {CLIPPER_FILL_NONZERO, CLIPPER_FILL_EVENODD, CLIPPER_FILL_POSITIVE};
     void (*slice_fn)(const triangle_mesh_handle *, const c_mesh_slicing_params *, const float *,
                      polygon_collection_handle **, uint32_t) = triangle_mesh_slice_to_polygons_with_params;
     c_surface surface;
@@ -42,5 +50,6 @@ int test_plugin_api_headers_c(void)
     surface.type = (raw_surface_type)0;
     surface.id = 0;
     context.step = step;
-    return union_fn != 0 && slice_fn != 0 && context.step == STEP_SLICING && surface.id == 0;
+    return union_fn != 0 && union_ex_fn != 0 && offset_ex_fn != 0 && offset2_ex_fn != 0 &&
+           fill_rules[0] == 0 && fill_rules[1] == 1 && fill_rules[2] == 2 && slice_fn != 0 && context.step == STEP_SLICING && surface.id == 0;
 }

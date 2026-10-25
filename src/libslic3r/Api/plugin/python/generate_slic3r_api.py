@@ -91,6 +91,7 @@ TYPE_ALIASES = {
     "c_extrusion_axis_operation": "int",
     "c_extrusion_special_command": "int",
     "clipper_end_type_t": "int",
+    "clipper_fill_rule_t": "int",
     "clipper_join_type_t": "int",
     "clipper_operation_t": "int",
     "config_option_type": "int",

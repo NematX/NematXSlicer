@@ -76,6 +76,32 @@ TEST_CASE("Package ABI rejects missing invalid and conflicting requirements", "[
     CHECK_FALSE(metadata.compatibility.message().empty());
 }
 
+TEST_CASE("Package requiring slic3r_clipper.h 1.x is rejected by the 2.0 host", "[plugins][abi][clipper]")
+{
+    // The host exposes slic3r_clipper.h 2.0 (clipper_union gained a fill rule argument).
+    const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
+    const std::vector<PluginApiRequirement>::const_iterator clipper = std::find_if(host.begin(), host.end(),
+        [](const PluginApiRequirement &contract) { return contract.header == "slic3r_clipper.h"; });
+    REQUIRE(clipper != host.end());
+    CHECK(clipper->version.major == 2);
+    CHECK(clipper->version.minor == 0);
+
+    for (const char *version : {"1.0", "1.3", "1.65535"}) {
+        PluginPackageMetadata metadata;
+        std::string error;
+        parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
+            "[abi]\nslic3r_plugin_types.h=3.0\nslic3r_clipper.h=") + version + "\n", metadata, error);
+        CHECK(metadata.compatibility.status == PluginApiCompatibilityStatus::Incompatible);
+        CHECK(metadata.compatibility.message().find("slic3r_clipper.h") != std::string::npos);
+    }
+    // The current major is still accepted.
+    PluginPackageMetadata current;
+    std::string error;
+    REQUIRE(parse_plugin_package_metadata("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
+        "[abi]\nslic3r_plugin_types.h=3.0\nslic3r_clipper.h=2.0\n", current, error));
+    CHECK(current.compatibility.compatible());
+}
+
 TEST_CASE("DLL and package validators share the same contract registry", "[plugins][abi][loader]")
 {
     const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();

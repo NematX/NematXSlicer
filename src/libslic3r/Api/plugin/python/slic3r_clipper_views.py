@@ -33,6 +33,16 @@ Write a result into an already-owned destination collection:
     result = clip.offset(clip(input_polygons), scale_i(0.2))
     result.write_expolygons_to(output_expolygons)
 
+Byte-exact native results
+-------------------------
+``clipper_union_ex()``, ``clipper_offset_ex()`` and ``clipper_offset2_ex()`` do not
+use the ClipperOperand pipeline: they call the native ``union_ex`` / ``offset_ex`` /
+``offset2_ex`` and return their ExPolygons unchanged (same order, same points) in a
+storage-owned collection. Prefer them when parity with the native code matters.
+They raise ``ValueError`` for an unknown enum value, a non-finite number, or
+``delta2 == 0`` in ``clipper_offset2_ex()``. A NULL result from the host after the
+arguments were accepted is an internal error and raises ``RuntimeError``.
+
 Lifetime model
 --------------
 - ClipperOperand objects returned by this module own their handle unless they
@@ -49,6 +59,7 @@ Lifetime model
 from __future__ import annotations
 
 import ctypes
+import math
 from typing import Callable
 
 from slic3r_api_generated import (
@@ -58,6 +69,9 @@ from slic3r_api_generated import (
     CLIPPER_END_OPEN_BUTT,
     CLIPPER_END_OPEN_ROUND,
     CLIPPER_END_OPEN_SQUARE,
+    CLIPPER_FILL_EVENODD,
+    CLIPPER_FILL_NONZERO,
+    CLIPPER_FILL_POSITIVE,
     CLIPPER_JOIN_MITER,
     CLIPPER_JOIN_ROUND,
     CLIPPER_JOIN_SQUARE,
@@ -101,6 +115,14 @@ def _require_handle(handle, name: str = "handle") -> int:
     return address
 
 
+def _require_host_result(handle, name: str) -> int:
+    """A NULL result of a host call that already accepted its arguments is an internal host error."""
+    address = _address(handle)
+    if not address:
+        raise RuntimeError(f"{name}: internal error")
+    return address
+
+
 def _same_storage(lhs: "ClipperOperand", rhs: "ClipperOperand") -> bool:
     return lhs.storage() == rhs.storage()
 
@@ -132,6 +154,28 @@ def _unary_args(storage_or_subject, subject=None):
     if subject.storage() != storage:
         raise ValueError("explicit storage must match the clipper operand")
     return subject.api, storage, subject
+
+
+def _checked_fill_rule(rule) -> int:
+    value = int(rule)
+    if value not in (CLIPPER_FILL_NONZERO, CLIPPER_FILL_EVENODD, CLIPPER_FILL_POSITIVE):
+        raise ValueError(f"unknown Clipper fill rule: {value}")
+    return value
+
+
+def _checked_join_type(join_type) -> int:
+    value = int(join_type)
+    if value not in (CLIPPER_JOIN_SQUARE, CLIPPER_JOIN_ROUND, CLIPPER_JOIN_MITER):
+        raise ValueError(f"unknown Clipper join type: {value}")
+    return value
+
+
+def _checked_finite(*numbers) -> tuple:
+    """Convert to float; the native Clipper code throws on NaN and infinity."""
+    values = tuple(float(number) for number in numbers)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError("Clipper offsets and limits must be finite numbers")
+    return values
 
 
 @abi_requires_headers("slic3r_clipper.h")
@@ -402,9 +446,99 @@ def clipper_intersection_with_safety_offset(storage_or_subject, subject_or_clip,
 
 
 def clipper_union(storage_or_subject, subject=None) -> ClipperOperand:
+    """Union with the usual Slic3r ``CLIPPER_FILL_NONZERO`` rule."""
     api, storage, operand = _unary_args(storage_or_subject, subject)
-    handle = api.host.clipper_union(_void_p(storage), operand.c_handle())
+    handle = api.host.clipper_union(_void_p(storage), operand.c_handle(), CLIPPER_FILL_NONZERO)
     return ClipperOperand.adopt_owned(api, storage, handle)
+
+
+def clipper_union_with_fill_rule(storage_or_subject, subject_or_fill_rule, fill_rule=None) -> ClipperOperand:
+    """
+    Union with an explicit fill rule (``CLIPPER_FILL_NONZERO``, ``CLIPPER_FILL_EVENODD``
+    or ``CLIPPER_FILL_POSITIVE``). Accepts ``(storage, subject, fill_rule)`` or
+    ``(subject, fill_rule)``. An unknown rule raises ``ValueError``.
+    """
+    if isinstance(storage_or_subject, ClipperOperand):
+        api, storage, operand = _unary_args(storage_or_subject)
+        rule = subject_or_fill_rule
+    else:
+        api, storage, operand = _unary_args(storage_or_subject, subject_or_fill_rule)
+        rule = fill_rule
+    rule = _checked_fill_rule(rule)
+    handle = api.host.clipper_union(_void_p(storage), operand.c_handle(), rule)
+    if not _address(handle):
+        raise ValueError("clipper_union_with_fill_rule: the host rejected the arguments")
+    return ClipperOperand.adopt_owned(api, storage, handle)
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_union_ex(storage, polygons: PolygonCollection, fill_rule: int) -> StoredExPolygonCollection:
+    """
+    Native ``union_ex(polygons, fill_rule)``: the ExPolygons exactly as the native code
+    returns them (same order, no extra cleaning). The result is owned by ``storage``.
+    An unknown rule raises ``ValueError``; a host internal error (NULL result, e.g. coordinates
+    outside the ClipperLib range) raises ``RuntimeError``. The conversion also drops degenerate
+    contours, not only small areas, as the native code does.
+    """
+    storage_address = _require_handle(storage, "storage")
+    rule = _checked_fill_rule(fill_rule)
+    polygons_address = _require_handle(polygons.handle(), "polygons")
+    handle = polygons.api.host.clipper_union_ex(_void_p(storage_address), _void_p(polygons_address), rule)
+    return StoredExPolygonCollection.adopt_owned(
+        polygons.api, storage_address, _require_host_result(handle, "clipper_union_ex")
+    )
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_offset_ex(storage,
+                      src: ExPolygonCollection,
+                      delta: float,
+                      join_type: int = CLIPPER_JOIN_MITER,
+                      miter_limit: float = 3.0) -> StoredExPolygonCollection:
+    """
+    Native ``offset_ex(src, delta, join_type, miter_limit)``; ``delta`` is in scaled units.
+    ``clipper_offset_ex(storage, ex, 10.0, CLIPPER_JOIN_MITER, 3.0)`` is the native
+    ``union_safety_offset_ex(ex)``. ``delta == 0`` is accepted; for round joins
+    ``miter_limit`` is the arc tolerance. The result is owned by ``storage``; an unknown
+    join type, a non-finite number or a released source raises ``ValueError``; a host
+    internal error raises ``RuntimeError``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    join = _checked_join_type(join_type)
+    delta, miter_limit = _checked_finite(delta, miter_limit)
+    src_address = _require_handle(src.handle(), "src")
+    handle = src.api.host.clipper_offset_ex(_void_p(storage_address), _void_p(src_address), delta, join, miter_limit)
+    return StoredExPolygonCollection.adopt_owned(
+        src.api, storage_address, _require_host_result(handle, "clipper_offset_ex")
+    )
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_offset2_ex(storage,
+                       src: ExPolygonCollection,
+                       delta1: float,
+                       delta2: float,
+                       join_type: int = CLIPPER_JOIN_MITER,
+                       miter_limit: float = 3.0) -> StoredExPolygonCollection:
+    """
+    Native ``offset2_ex(src, delta1, delta2, join_type, miter_limit)``; deltas are in
+    scaled units. ``delta2`` must not be 0 (use ``clipper_offset_ex`` for a single offset).
+    The result is owned by ``storage``; an unknown join type, a non-finite number,
+    ``delta2 == 0`` or a released source raises ``ValueError``; a host internal error
+    raises ``RuntimeError``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    join = _checked_join_type(join_type)
+    delta1, delta2, miter_limit = _checked_finite(delta1, delta2, miter_limit)
+    if delta2 == 0.0:
+        raise ValueError("clipper_offset2_ex: delta2 must not be 0; use clipper_offset_ex")
+    src_address = _require_handle(src.handle(), "src")
+    handle = src.api.host.clipper_offset2_ex(
+        _void_p(storage_address), _void_p(src_address), delta1, delta2, join, miter_limit
+    )
+    return StoredExPolygonCollection.adopt_owned(
+        src.api, storage_address, _require_host_result(handle, "clipper_offset2_ex")
+    )
 
 
 def clipper_union_with_safety_offset(storage_or_subject, subject=None) -> ClipperOperand:
@@ -745,6 +879,23 @@ class ClipperContext:
     def union(self, subject: ClipperOperand) -> ClipperOperand:
         return clipper_union(self.storage(), subject)
 
+    def union_with_fill_rule(self, subject: ClipperOperand, fill_rule: int) -> ClipperOperand:
+        return clipper_union_with_fill_rule(self.storage(), subject, fill_rule)
+
+    def union_ex(self, polygons: PolygonCollection, fill_rule: int) -> StoredExPolygonCollection:
+        """Native union_ex(polygons, fill_rule), owned by this context's storage."""
+        return clipper_union_ex(self.storage(), polygons, fill_rule)
+
+    def offset_ex(self, src: ExPolygonCollection, delta: float,
+                  join_type: int = CLIPPER_JOIN_MITER, miter_limit: float = 3.0) -> StoredExPolygonCollection:
+        """Native offset_ex(src, ...), owned by this context's storage."""
+        return clipper_offset_ex(self.storage(), src, delta, join_type, miter_limit)
+
+    def offset2_ex(self, src: ExPolygonCollection, delta1: float, delta2: float,
+                   join_type: int = CLIPPER_JOIN_MITER, miter_limit: float = 3.0) -> StoredExPolygonCollection:
+        """Native offset2_ex(src, ...), owned by this context's storage."""
+        return clipper_offset2_ex(self.storage(), src, delta1, delta2, join_type, miter_limit)
+
     def union_with_safety_offset(self, subject: ClipperOperand) -> ClipperOperand:
         return clipper_union_with_safety_offset(self.storage(), subject)
 
@@ -842,6 +993,9 @@ __all__ = [
     "CLIPPER_END_OPEN_BUTT",
     "CLIPPER_END_OPEN_ROUND",
     "CLIPPER_END_OPEN_SQUARE",
+    "CLIPPER_FILL_EVENODD",
+    "CLIPPER_FILL_NONZERO",
+    "CLIPPER_FILL_POSITIVE",
     "CLIPPER_JOIN_MITER",
     "CLIPPER_JOIN_ROUND",
     "CLIPPER_JOIN_SQUARE",
@@ -865,10 +1019,14 @@ __all__ = [
     "clipper_intersection_with_safety_offset",
     "clipper_offset",
     "clipper_offset2",
+    "clipper_offset2_ex",
+    "clipper_offset_ex",
     "clipper_offset_polylines",
     "clipper_split",
     "clipper_split_polyline_expolygons",
     "clipper_union",
     "clipper_union2",
+    "clipper_union_ex",
+    "clipper_union_with_fill_rule",
     "clipper_union_with_safety_offset",
 ]

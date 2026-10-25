@@ -5,11 +5,13 @@
 #include <chrono>
 #include <future>
 #include <iostream>
+#include <limits>
 #include <random>
 #include <set>
 #include <algorithm>
 #include "libslic3r/Api/plugin/cpp/LineDistancer.hpp"
 
+#include "libslic3r/Api/host/ClipperShapes.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/BoundingBox.hpp"
@@ -656,6 +658,454 @@ TEST_CASE("Clipper offset grows a polygon list of clockwise rings like ClipperOf
 }
 
 
+// ---- Native ExPolygon functions of slic3r_clipper.h 2.0 -------------------------------------------
+// clipper_union_ex, clipper_offset_ex and clipper_offset2_ex must return exactly what the native
+// ClipperUtils returns: same sizes, same order of expolygons, same order of contour and holes, same
+// points (no rotation, no sorting, no canonicalisation).
+namespace {
+
+const polygon_collection_handle *polygons_handle(const Polygons &polygons)
+{
+    return reinterpret_cast<const polygon_collection_handle *>(&polygons);
+}
+
+const expolygon_collection_handle *expolygons_handle(const ExPolygons &expolygons)
+{
+    return reinterpret_cast<const expolygon_collection_handle *>(&expolygons);
+}
+
+const ExPolygons &native_expolygons(const expolygon_collection_handle *handle)
+{
+    REQUIRE(handle != nullptr);
+    return *reinterpret_cast<const ExPolygons *>(handle);
+}
+
+// Strict equality: every size, every order and every point.
+void check_identical(const ExPolygons &actual, const ExPolygons &expected)
+{
+    REQUIRE(actual.size() == expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        INFO("expolygon " << i);
+        CHECK(actual[i].contour.points == expected[i].contour.points);
+        REQUIRE(actual[i].holes.size() == expected[i].holes.size());
+        for (size_t h = 0; h < expected[i].holes.size(); ++h)
+            CHECK(actual[i].holes[h].points == expected[i].holes[h].points);
+    }
+}
+
+ClipperLib::PolyFillType native_fill(const clipper_fill_rule_t rule)
+{
+    switch (rule) {
+    case CLIPPER_FILL_EVENODD:  return ClipperLib::pftEvenOdd;
+    case CLIPPER_FILL_POSITIVE: return ClipperLib::pftPositive;
+    default:                    return ClipperLib::pftNonZero;
+    }
+}
+
+ClipperLib::JoinType native_join_type(const clipper_join_type_t join)
+{
+    switch (join) {
+    case CLIPPER_JOIN_SQUARE: return ClipperLib::jtSquare;
+    case CLIPPER_JOIN_ROUND:  return ClipperLib::jtRound;
+    default:                  return ClipperLib::jtMiter;
+    }
+}
+
+// A single Clipper pass over the polygons, fill rule applied to subject and clip, converted by the same
+// ClipperShapes code the host uses for clipper_union(): the reference of the shapes pipeline.
+ExPolygons single_pass_union(const Polygons &polygons, const ClipperLib::PolyFillType fill)
+{
+    ClipperLib::Paths paths;
+    for (const Polygon &polygon : polygons)
+        paths.emplace_back(polygon.points);
+    ClipperLib::Clipper clipper;
+    clipper.AddPaths(paths, ClipperLib::ptSubject, true);
+    ClipperLib::PolyTree tree;
+    clipper.Execute(ClipperLib::ctUnion, tree, fill, fill);
+    return ApiClipper::make_polytree_shapes(std::move(tree))->to_expolygons();
+}
+
+Polygon clockwise(Polygon polygon)
+{
+    polygon.make_clockwise();
+    return polygon;
+}
+
+const clipper_fill_rule_t all_fill_rules[] = {CLIPPER_FILL_NONZERO, CLIPPER_FILL_EVENODD, CLIPPER_FILL_POSITIVE};
+
+struct NamedPolygons {
+    const char *name;
+    Polygons    polygons;
+};
+
+std::vector<NamedPolygons> union_inputs()
+{
+    // A thin sliver and a tiny square, both touching the first rectangle: the union itself may absorb them,
+    // and the native conversion drops what remains degenerate. The isolated small ring that only
+    // remove_small_areas can drop has its own test.
+    const Polygon sliver({Point(0, 0), Point(scale_i(30.), 0), Point(scale_i(30.), 2), Point(0, 2)});
+    const Polygon tiny({Point(0, 0), Point(20, 0), Point(20, 20), Point(0, 20)});
+    return {
+        {"overlapping rings", {rectangle_mm(0., 0., 10., 10.), rectangle_mm(5., 5., 15., 15.), rectangle_mm(12., 0., 20., 8.)}},
+        {"nested rings of the same orientation", {rectangle_mm(0., 0., 20., 20.), rectangle_mm(5., 5., 15., 15.)}},
+        {"clockwise rings", {clockwise(rectangle_mm(0., 0., 10., 10.)), clockwise(rectangle_mm(5., 5., 15., 15.)),
+                             clockwise(rectangle_mm(30., 0., 40., 10.))}},
+        {"nested clockwise rings", {clockwise(rectangle_mm(0., 0., 20., 20.)), clockwise(rectangle_mm(5., 5., 15., 15.))}},
+        {"tiny and thin rings", {rectangle_mm(0., 0., 10., 10.), sliver, tiny, rectangle_mm(50., 50., 60., 60.)}},
+        {"contour, hole and island", {rectangle_mm(0., 0., 30., 30.), clockwise(rectangle_mm(5., 5., 25., 25.)),
+                                      rectangle_mm(10., 10., 20., 20.)}},
+        {"mixed orientations", {rectangle_mm(0., 0., 10., 10.), clockwise(rectangle_mm(5., 5., 15., 15.)),
+                                rectangle_mm(20., 0., 30., 10.), rectangle_mm(25., 5., 35., 15.)}},
+        {"empty", {}},
+    };
+}
+
+ExPolygon l_shape()
+{
+    return ExPolygon(Polygon({point_mm(0., 0.), point_mm(20., 0.), point_mm(20., 8.), point_mm(8., 8.),
+                              point_mm(8., 20.), point_mm(0., 20.)}));
+}
+
+struct NamedExPolygons {
+    const char *name;
+    ExPolygons  expolygons;
+};
+
+std::vector<NamedExPolygons> offset_inputs()
+{
+    ExPolygon nested(rectangle_mm(0., 0., 40., 40.));
+    nested.holes.push_back(clockwise(rectangle_mm(8., 8., 32., 32.)));
+    ExPolygon island(rectangle_mm(14., 14., 26., 26.));
+    return {
+        {"square", {ExPolygon(rectangle_mm(0., 0., 20., 20.))}},
+        {"rectangle with two holes", {rectangle_with_two_holes()}},
+        {"l shape", {l_shape()}},
+        {"touching expolygons", {ExPolygon(rectangle_mm(0., 0., 10., 10.)), ExPolygon(rectangle_mm(10., 0., 20., 10.))}},
+        {"expolygons 0.5 mm apart", {ExPolygon(rectangle_mm(0., 0., 10., 10.)), ExPolygon(rectangle_mm(10.5, 0., 20., 10.))}},
+        {"expolygon and its island", {nested, ExPolygon(island)}},
+        {"empty", {}},
+    };
+}
+
+} // namespace
+
+TEST_CASE("clipper_union_ex returns the native union_ex for every fill rule", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    for (const NamedPolygons &input : union_inputs()) {
+        for (const clipper_fill_rule_t rule : all_fill_rules) {
+            INFO(input.name << ", fill rule " << int(rule));
+            const ExPolygons expected = union_ex(input.polygons, native_fill(rule));
+            check_identical(native_expolygons(clipper_union_ex(storage, polygons_handle(input.polygons), rule)), expected);
+        }
+    }
+}
+
+TEST_CASE("clipper_offset_ex returns the native offset_ex", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const struct { clipper_join_type_t join; double miter; } joins[] = {
+        {CLIPPER_JOIN_MITER, 3.}, {CLIPPER_JOIN_SQUARE, 3.}, {CLIPPER_JOIN_ROUND, scale_d(0.01)}};
+    const double deltas[] = {scale_d(1.), scale_d(-1.), scale_d(2.5), scale_d(-3.), scale_d(0.0013), scale_d(-0.0007)};
+    for (const NamedExPolygons &input : offset_inputs()) {
+        for (const auto &join : joins) {
+            for (const double delta : deltas) {
+                INFO(input.name << ", join " << int(join.join) << ", delta " << delta);
+                check_identical(native_expolygons(clipper_offset_ex(storage, expolygons_handle(input.expolygons), delta,
+                                                                    join.join, join.miter)),
+                                offset_ex(input.expolygons, delta, native_join_type(join.join), join.miter));
+            }
+        }
+        // The native defaults and the safety offset.
+        INFO(input.name << ", safety offset");
+        check_identical(native_expolygons(clipper_offset_ex(storage, expolygons_handle(input.expolygons), ClipperSafetyOffset,
+                                                            CLIPPER_JOIN_MITER, 3.0)),
+                        union_safety_offset_ex(input.expolygons));
+        check_identical(native_expolygons(clipper_offset_ex(storage, expolygons_handle(input.expolygons), scale_d(1.),
+                                                            CLIPPER_JOIN_MITER, 3.0)),
+                        offset_ex(input.expolygons, scale_d(1.)));
+    }
+}
+
+TEST_CASE("clipper_offset2_ex returns the native offset2_ex for closing and opening", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const struct { double delta1; double delta2; } passes[] = {
+        {scale_d(1.), scale_d(-1.)},      // closing
+        {scale_d(-1.), scale_d(1.)},      // opening
+        {scale_d(3.), scale_d(-3.)},      // closing that merges the 0.5 mm gap
+        {scale_d(-4.), scale_d(4.)},      // opening that removes the thin parts
+        {scale_d(2.), scale_d(-1.)},      // unbalanced
+        {scale_d(0.0013), scale_d(-0.0007)}};
+    const clipper_join_type_t joins[] = {CLIPPER_JOIN_MITER, CLIPPER_JOIN_SQUARE, CLIPPER_JOIN_ROUND};
+    for (const NamedExPolygons &input : offset_inputs()) {
+        for (const clipper_join_type_t join : joins) {
+            const double miter = join == CLIPPER_JOIN_ROUND ? scale_d(0.01) : 3.;
+            for (const auto &pass : passes) {
+                INFO(input.name << ", join " << int(join) << ", deltas " << pass.delta1 << " " << pass.delta2);
+                check_identical(native_expolygons(clipper_offset2_ex(storage, expolygons_handle(input.expolygons),
+                                                                     pass.delta1, pass.delta2, join, miter)),
+                                offset2_ex(input.expolygons, pass.delta1, pass.delta2, native_join_type(join), miter));
+            }
+        }
+        INFO(input.name << ", default join");
+        check_identical(native_expolygons(clipper_offset2_ex(storage, expolygons_handle(input.expolygons), scale_d(1.),
+                                                             scale_d(-1.), CLIPPER_JOIN_MITER, 3.0)),
+                        offset2_ex(input.expolygons, scale_d(1.), scale_d(-1.)));
+    }
+}
+
+TEST_CASE("clipper_union applies the fill rule and NONZERO keeps the previous behaviour", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    for (const NamedPolygons &input : union_inputs()) {
+        const clipper_shapes_handle *subject = clipper_shapes_from_polygons(storage, polygons_handle(input.polygons));
+        REQUIRE(subject != nullptr);
+        for (const clipper_fill_rule_t rule : all_fill_rules) {
+            INFO(input.name << ", fill rule " << int(rule));
+            clipper_shapes_handle *united = clipper_union(storage, subject, rule);
+            REQUIRE(united != nullptr);
+            check_identical(native_expolygons(clipper_shapes_to_expolygons(storage, united)),
+                            single_pass_union(input.polygons, native_fill(rule)));
+        }
+        // NONZERO is the rule of the C++ clipper_union(), exactly as before the rule argument existed.
+        clipper_shapes_handle *explicit_rule = clipper_union(storage, subject, CLIPPER_FILL_NONZERO);
+        clipper_shapes_handle *old_behaviour = clipper_execute(storage, CLIPPER_OPERATION_UNION, subject, nullptr);
+        REQUIRE(explicit_rule != nullptr);
+        REQUIRE(old_behaviour != nullptr);
+        INFO(input.name << ", NONZERO against clipper_execute");
+        check_identical(native_expolygons(clipper_shapes_to_expolygons(storage, explicit_rule)),
+                        native_expolygons(clipper_shapes_to_expolygons(storage, old_behaviour)));
+    }
+}
+
+TEST_CASE("clipper_union fill rules give different results where the rules differ", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    slic3r_api::ClipperContext clipper(storage);
+    // Two nested counter-clockwise squares: NONZERO and POSITIVE fill both, EVENODD leaves a hole.
+    const Polygons nested{rectangle_mm(0., 0., 20., 20.), rectangle_mm(5., 5., 15., 15.)};
+    const slic3r_api::PolygonCollection view_nested(polygons_handle(nested));
+    const slic3r_api::ClipperOperand operand = clipper(view_nested);
+    CHECK(slic3r_api::clipper_union(operand).to_expolygon_collection().size() == 1);
+    CHECK(slic3r_api::clipper_union_with_fill_rule(operand, CLIPPER_FILL_NONZERO).path_count() == 1);
+    CHECK(slic3r_api::clipper_union_with_fill_rule(operand, CLIPPER_FILL_POSITIVE).path_count() == 1);
+    CHECK(slic3r_api::clipper_union_with_fill_rule(operand, CLIPPER_FILL_EVENODD).path_count() == 2);
+
+    // The C++ twins give the native result too.
+    const slic3r_api::StoredExPolygonCollection evenodd = slic3r_api::clipper_union_ex(storage, view_nested, CLIPPER_FILL_EVENODD);
+    check_identical(native_expolygons(evenodd.handle()), union_ex(nested, ClipperLib::pftEvenOdd));
+}
+
+TEST_CASE("clipper_union_ex drops an isolated small ring that a single pass keeps", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    // An equilateral triangle of side 150 units, far from the other ring. Every vertex is farther than
+    // SCALED_EPSILON from the line through its neighbours, so the clean-up of the Clipper pass keeps the ring,
+    // but its area (~9700) is below 2 * SCALED_EPSILON * its radius (~17000): the native remove_small_areas
+    // drops it.
+    const coord_t x0 = scale_i(50.), y0 = scale_i(50.);
+    const Polygon small_ring({Point(x0, y0), Point(x0 + 150, y0), Point(x0 + 75, y0 + 130)});
+    REQUIRE(small_ring.is_counter_clockwise());
+    const Polygons polygons{rectangle_mm(0., 0., 10., 10.), small_ring};
+    for (const clipper_fill_rule_t rule : all_fill_rules) {
+        INFO("fill rule " << int(rule));
+        // A raw single Clipper pass (no ClipperShapes conversion, which cleans its output) keeps both rings.
+        ClipperLib::Paths raw_paths;
+        for (const Polygon &polygon : polygons)
+            raw_paths.emplace_back(polygon.points);
+        ClipperLib::Clipper raw_clipper;
+        raw_clipper.AddPaths(raw_paths, ClipperLib::ptSubject, true);
+        ClipperLib::Paths single_pass;
+        raw_clipper.Execute(ClipperLib::ctUnion, single_pass, native_fill(rule), native_fill(rule));
+        CHECK(single_pass.size() == 2);
+        const ExPolygons &united = native_expolygons(clipper_union_ex(storage, polygons_handle(polygons), rule));
+        REQUIRE(united.size() == 1);
+        CHECK(united.front().contour.bounding_box().size().x() == scale_i(10.));
+        check_identical(united, union_ex(polygons, native_fill(rule)));
+    }
+}
+
+TEST_CASE("clipper_offset_ex handles zero delta, acute corners and every join like the native code", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    // A triangle with a 4 degree corner: the join type and the miter limit change the result.
+    const ExPolygons acute{ExPolygon(Polygon({Point(0, 0), Point(scale_i(20.), 0), Point(scale_i(20.), scale_i(1.5))}))};
+    const struct { clipper_join_type_t join; double miter; } joins[] = {
+        {CLIPPER_JOIN_MITER, 3.}, {CLIPPER_JOIN_MITER, 100.}, {CLIPPER_JOIN_SQUARE, 3.},
+        {CLIPPER_JOIN_ROUND, scale_d(0.01)}, {CLIPPER_JOIN_ROUND, scale_d(0.2)}};
+    std::vector<BoundingBox> boxes;
+    for (const auto &join : joins) {
+        INFO("join " << int(join.join) << ", limit " << join.miter);
+        const ExPolygons &actual = native_expolygons(clipper_offset_ex(storage, expolygons_handle(acute), scale_d(1.),
+                                                                       join.join, join.miter));
+        check_identical(actual, offset_ex(acute, scale_d(1.), native_join_type(join.join), join.miter));
+        check_identical(native_expolygons(clipper_offset2_ex(storage, expolygons_handle(acute), scale_d(1.), -scale_d(0.5),
+                                                             join.join, join.miter)),
+                        offset2_ex(acute, scale_d(1.), -scale_d(0.5), native_join_type(join.join), join.miter));
+        REQUIRE(actual.size() == 1);
+        boxes.push_back(get_extents(actual.front()));
+    }
+    // The miter limit squares the sharp corner at 3 but not at 100, and a round join differs too.
+    CHECK(boxes[0].min.x() > boxes[1].min.x());
+    CHECK(boxes[0].min != boxes[3].min);
+
+    // A zero delta is accepted, as by the native offset_ex.
+    for (const NamedExPolygons &input : offset_inputs()) {
+        INFO(input.name << ", delta 0");
+        check_identical(native_expolygons(clipper_offset_ex(storage, expolygons_handle(input.expolygons), 0.,
+                                                            CLIPPER_JOIN_MITER, 3.)),
+                        offset_ex(input.expolygons, 0., ClipperLib::jtMiter, 3.));
+    }
+}
+
+TEST_CASE("clipper_union_ex, clipper_offset2_ex and clipper_offset_ex chain like the native slicing post-processing",
+          "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const struct { double closing; double extra; } settings[] = {
+        {scale_d(1.), scale_d(0.3)}, {scale_d(1.), scale_d(-0.3)}, {-scale_d(1.), scale_d(0.3)}, {-scale_d(1.), scale_d(-0.3)}};
+    for (const NamedPolygons &input : union_inputs()) {
+        for (const clipper_fill_rule_t rule : all_fill_rules) {
+            for (const auto &setting : settings) {
+                INFO(input.name << ", fill rule " << int(rule) << ", closing " << setting.closing << ", extra " << setting.extra);
+                // As make_expolygons of the slicer: union, then offset2 (closing or opening), then offset.
+                const ExPolygons expected = offset_ex(
+                    offset2_ex(union_ex(input.polygons, native_fill(rule)), setting.closing, -setting.closing),
+                    setting.extra);
+                const expolygon_collection_handle *united = clipper_union_ex(storage, polygons_handle(input.polygons), rule);
+                REQUIRE(united != nullptr);
+                const expolygon_collection_handle *closed =
+                    clipper_offset2_ex(storage, united, setting.closing, -setting.closing, CLIPPER_JOIN_MITER, 3.);
+                REQUIRE(closed != nullptr);
+                const expolygon_collection_handle *grown = clipper_offset_ex(storage, closed, setting.extra, CLIPPER_JOIN_MITER, 3.);
+                check_identical(native_expolygons(grown), expected);
+            }
+        }
+    }
+}
+
+TEST_CASE("Native ExPolygon results are storage-owned and can be released", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const Polygons polygons{rectangle_mm(0., 0., 10., 10.)};
+    const ExPolygons expolygons{ExPolygon(rectangle_mm(0., 0., 10., 10.))};
+    expolygon_collection_handle *results[] = {
+        clipper_union_ex(storage, polygons_handle(polygons), CLIPPER_FILL_NONZERO),
+        clipper_offset_ex(storage, expolygons_handle(expolygons), scale_d(1.), CLIPPER_JOIN_MITER, 3.),
+        clipper_offset2_ex(storage, expolygons_handle(expolygons), scale_d(1.), -scale_d(1.), CLIPPER_JOIN_MITER, 3.)};
+    for (expolygon_collection_handle *result : results) {
+        REQUIRE(result != nullptr);
+        CHECK(storage_free(storage, result) != 0);
+    }
+}
+
+TEST_CASE("Native ExPolygon clipper functions reject NULL inputs and unknown enums", "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const Polygons polygons{rectangle_mm(0., 0., 10., 10.)};
+    const ExPolygons expolygons{ExPolygon(rectangle_mm(0., 0., 10., 10.))};
+    const clipper_shapes_handle *subject = clipper_shapes_from_polygons(storage, polygons_handle(polygons));
+    REQUIRE(subject != nullptr);
+    // 3 is inside the value range of the enums but is not an enumerator.
+    const clipper_fill_rule_t unknown_rule = static_cast<clipper_fill_rule_t>(3);
+    const clipper_join_type_t unknown_join = static_cast<clipper_join_type_t>(3);
+    const double nan = std::numeric_limits<double>::quiet_NaN();
+    const double inf = std::numeric_limits<double>::infinity();
+
+    // C: NULL.
+    CHECK(clipper_union(nullptr, subject, CLIPPER_FILL_NONZERO) == nullptr);
+    CHECK(clipper_union(storage, nullptr, CLIPPER_FILL_NONZERO) == nullptr);
+    CHECK(clipper_union(storage, subject, unknown_rule) == nullptr);
+    CHECK(clipper_union_ex(nullptr, polygons_handle(polygons), CLIPPER_FILL_NONZERO) == nullptr);
+    CHECK(clipper_union_ex(storage, nullptr, CLIPPER_FILL_NONZERO) == nullptr);
+    CHECK(clipper_union_ex(storage, polygons_handle(polygons), unknown_rule) == nullptr);
+    CHECK(clipper_offset_ex(nullptr, expolygons_handle(expolygons), 1., CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(clipper_offset_ex(storage, nullptr, 1., CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(clipper_offset_ex(storage, expolygons_handle(expolygons), 1., unknown_join, 3.) == nullptr);
+    CHECK(clipper_offset2_ex(nullptr, expolygons_handle(expolygons), 1., -1., CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(clipper_offset2_ex(storage, nullptr, 1., -1., CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(clipper_offset2_ex(storage, expolygons_handle(expolygons), 1., -1., unknown_join, 3.) == nullptr);
+
+    // C: non-finite numbers, and delta2 == 0 for offset2 only.
+    for (const double bad : {nan, inf, -inf}) {
+        CHECK(clipper_offset_ex(storage, expolygons_handle(expolygons), bad, CLIPPER_JOIN_MITER, 3.) == nullptr);
+        CHECK(clipper_offset_ex(storage, expolygons_handle(expolygons), 1., CLIPPER_JOIN_MITER, bad) == nullptr);
+        CHECK(clipper_offset2_ex(storage, expolygons_handle(expolygons), bad, -1., CLIPPER_JOIN_MITER, 3.) == nullptr);
+        CHECK(clipper_offset2_ex(storage, expolygons_handle(expolygons), 1., bad, CLIPPER_JOIN_MITER, 3.) == nullptr);
+        CHECK(clipper_offset2_ex(storage, expolygons_handle(expolygons), 1., -1., CLIPPER_JOIN_MITER, bad) == nullptr);
+    }
+    CHECK(clipper_offset2_ex(storage, expolygons_handle(expolygons), 1., 0., CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(clipper_offset2_ex(storage, expolygons_handle(expolygons), 1., -0., CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(clipper_offset_ex(storage, expolygons_handle(expolygons), 0., CLIPPER_JOIN_MITER, 3.) != nullptr);
+
+    // C++: std::invalid_argument, never an adopted NULL.
+    const slic3r_api::PolygonCollection polygon_view(polygons_handle(polygons));
+    const slic3r_api::ExPolygonCollection expolygon_view(expolygons_handle(expolygons));
+    slic3r_api::ClipperContext clipper(storage);
+    const slic3r_api::ClipperOperand operand = clipper(polygon_view);
+    CHECK_THROWS_AS(slic3r_api::clipper_union_with_fill_rule(operand, unknown_rule), std::invalid_argument);
+    // A NULL storage throws even for an empty subject (no create_empty(nullptr)).
+    const slic3r_api::ClipperOperand empty_operand = slic3r_api::ClipperOperand::create_empty(storage);
+    CHECK_THROWS_AS(slic3r_api::clipper_union_with_fill_rule(nullptr, empty_operand, CLIPPER_FILL_NONZERO), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_union_with_fill_rule(nullptr, operand, CLIPPER_FILL_NONZERO), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_union_with_fill_rule(storage, empty_operand, unknown_rule), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_union_ex(storage, polygon_view, unknown_rule), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_union_ex(nullptr, polygon_view, CLIPPER_FILL_NONZERO), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset_ex(storage, expolygon_view, 1., unknown_join), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset_ex(nullptr, expolygon_view, 1.), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset_ex(storage, expolygon_view, nan), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset_ex(storage, expolygon_view, inf), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset2_ex(storage, expolygon_view, 1., -1., unknown_join), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset2_ex(nullptr, expolygon_view, 1., -1.), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset2_ex(storage, expolygon_view, 1., 0.), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset2_ex(storage, expolygon_view, nan, -1.), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset2_ex(storage, expolygon_view, 1., inf), std::invalid_argument);
+}
+// A coordinate beyond ClipperLib::hiRange makes ClipperLib throw "Coordinate outside allowed range". The native _ex
+// functions must turn it into a NULL result, without leaving anything in the storage.
+TEST_CASE("Native ExPolygon clipper functions return NULL on a native exception and leave the storage unchanged",
+          "[plugins][clipper][clipper-native]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    const coord_t out_of_range = coord_t(0x4000000000000000LL);
+    static_assert(sizeof(coord_t) == 8, "the test needs 64-bit coordinates");
+    REQUIRE(out_of_range > ClipperLib::hiRange);
+    const Polygon huge({Point(0, 0), Point(out_of_range, 0), Point(0, out_of_range)});
+    const Polygons polygons{huge};
+    const ExPolygons expolygons{ExPolygon(huge)};
+    const size_t count_before = plugin_storage.size();
+
+    // The native functions themselves throw the range exception: it is the origin of the NULL results below.
+    CHECK_THROWS_WITH(union_ex(polygons, ClipperLib::pftNonZero), "Coordinate outside allowed range");
+    CHECK_THROWS_WITH(offset_ex(expolygons, scale_d(1.), ClipperLib::jtMiter, 3.), "Coordinate outside allowed range");
+    CHECK_THROWS_WITH(offset2_ex(expolygons, scale_d(1.), -scale_d(1.), ClipperLib::jtMiter, 3.), "Coordinate outside allowed range");
+    CHECK(clipper_union_ex(storage, polygons_handle(polygons), CLIPPER_FILL_NONZERO) == nullptr);
+    CHECK(clipper_offset_ex(storage, expolygons_handle(expolygons), scale_d(1.), CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(clipper_offset2_ex(storage, expolygons_handle(expolygons), scale_d(1.), -scale_d(1.), CLIPPER_JOIN_MITER, 3.) == nullptr);
+    CHECK(plugin_storage.size() == count_before);
+
+    // C++ wrappers: an internal error is a runtime_error, an argument error stays an invalid_argument.
+    const slic3r_api::PolygonCollection polygon_view(polygons_handle(polygons));
+    const slic3r_api::ExPolygonCollection expolygon_view(expolygons_handle(expolygons));
+    CHECK_THROWS_AS(slic3r_api::clipper_union_ex(storage, polygon_view, CLIPPER_FILL_NONZERO), std::runtime_error);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset_ex(storage, expolygon_view, scale_d(1.)), std::runtime_error);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset2_ex(storage, expolygon_view, scale_d(1.), -scale_d(1.)), std::runtime_error);
+    CHECK_THROWS_AS(slic3r_api::clipper_offset2_ex(storage, expolygon_view, scale_d(1.), 0.), std::invalid_argument);
+    CHECK_THROWS_AS(slic3r_api::clipper_union_ex(nullptr, polygon_view, CLIPPER_FILL_NONZERO), std::invalid_argument);
+    CHECK(plugin_storage.size() == count_before);
+}
 TEST_CASE("Public LineDistancer index matches exhaustive queries and owns its data", "[plugins][line-distancer]")
 {
     slic3r_api::LineDistancer reference;

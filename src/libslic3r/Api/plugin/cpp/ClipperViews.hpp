@@ -5,6 +5,8 @@
 #ifndef slic3r_Api_plugin_cpp_ClipperViews_hpp_
 #define slic3r_Api_plugin_cpp_ClipperViews_hpp_
 
+#include <cmath>
+#include <stdexcept>
 #include <tuple>
 
 #include "libslic3r/Api/plugin/c/slic3r_clipper.h"
@@ -74,6 +76,18 @@ Rings meeting exactly along an edge after the offset are split as the native
 per-ring offset_ex() splits them, without zero-width bridges.
 clipper_offset_polylines(storage, polylines, delta) turns a whole
 PolylineCollection into areas exactly like the native offset(Polylines).
+
+Byte-exact native results
+-------------------------
+clipper_union_ex(), clipper_offset_ex() and clipper_offset2_ex() do not use the
+ClipperOperand pipeline: they call the native union_ex / offset_ex / offset2_ex and
+return their result unchanged (same expolygons, same order, same points) as a
+StoredExPolygonCollection. Prefer them when parity with the native code matters.
+They throw std::invalid_argument for a NULL storage or input, an unknown enum value, a
+non-finite number, or delta2 == 0 in clipper_offset2_ex(); they check these themselves
+before calling the host. A NULL from the host after that is an internal error (for
+example ClipperLib rejecting coordinates outside its allowed range) and throws
+std::runtime_error; nothing is added to the storage in that case.
 
 Choosing output form
 --------------------
@@ -420,7 +434,7 @@ inline ClipperOperand clipper_diff(storage_handle *storage, const ClipperOperand
     if (subject.empty())
         return ClipperOperand::create_empty(storage);
     if (clip.empty())
-        return ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle()));
+        return ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle(), CLIPPER_FILL_NONZERO));
     return ClipperOperand::adopt(storage, ::clipper_diff(storage, subject.handle(), clip.handle()));
 }
 
@@ -440,7 +454,7 @@ inline std::tuple<ClipperOperand, ClipperOperand> clipper_split(storage_handle *
         return std::make_tuple(ClipperOperand::create_empty(storage), ClipperOperand::create_empty(storage));
     if (clip.empty())
         return std::make_tuple(ClipperOperand::create_empty(storage),
-                               ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle())));
+                               ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle(), CLIPPER_FILL_NONZERO)));
     clipper_shapes_handle *inside = nullptr;
     clipper_shapes_handle *outside = nullptr;
     const int32_t split = ::clipper_split(storage, subject.handle(), clip.handle(), &inside, &outside);
@@ -476,7 +490,7 @@ inline ClipperOperand clipper_diff_with_safety_offset(storage_handle *storage,
     if (subject.empty())
         return ClipperOperand::create_empty(storage);
     if (clip.empty())
-        return ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle()));
+        return ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle(), CLIPPER_FILL_NONZERO));
     return ClipperOperand::adopt(storage, ::clipper_diff_with_safety_offset(storage, subject.handle(), clip.handle()));
 }
 
@@ -514,14 +528,101 @@ inline ClipperOperand clipper_union_with_safety_offset(const ClipperOperand &sub
     return clipper_union_with_safety_offset(subject.storage(), subject);
 }
 
+// Union with an explicit fill rule. A NULL storage or an unknown rule throws std::invalid_argument,
+// including for an empty subject.
+inline ClipperOperand clipper_union_with_fill_rule(storage_handle *storage,
+                                                   const ClipperOperand &subject,
+                                                   clipper_fill_rule_t fill_rule) {
+    if (storage == nullptr)
+        throw std::invalid_argument("clipper_union_with_fill_rule: null storage");
+    if (fill_rule != CLIPPER_FILL_NONZERO && fill_rule != CLIPPER_FILL_EVENODD && fill_rule != CLIPPER_FILL_POSITIVE)
+        throw std::invalid_argument("clipper_union_with_fill_rule: unknown fill rule");
+    if (subject.empty())
+        return ClipperOperand::create_empty(storage);
+    clipper_shapes_handle *handle = ::clipper_union(storage, subject.handle(), fill_rule);
+    if (handle == nullptr)
+        throw std::invalid_argument("clipper_union_with_fill_rule: the host rejected the arguments");
+    return ClipperOperand::adopt(storage, handle);
+}
+
+// Same, using the storage of the subject operand.
+inline ClipperOperand clipper_union_with_fill_rule(const ClipperOperand &subject, clipper_fill_rule_t fill_rule) {
+    return clipper_union_with_fill_rule(subject.storage(), subject, fill_rule);
+}
+
+// Union with the usual Slic3r CLIPPER_FILL_NONZERO rule.
 inline ClipperOperand clipper_union(storage_handle *storage, const ClipperOperand &subject) {
     if (subject.empty())
         return ClipperOperand::create_empty(storage);
-    return ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle()));
+    return ClipperOperand::adopt(storage, ::clipper_union(storage, subject.handle(), CLIPPER_FILL_NONZERO));
 }
 
 inline ClipperOperand clipper_union(const ClipperOperand &subject) {
     return clipper_union(subject.storage(), subject);
+}
+
+namespace detail {
+// True for the three fill rules the host knows.
+inline bool clipper_is_known_fill_rule(clipper_fill_rule_t fill_rule) {
+    return fill_rule == CLIPPER_FILL_NONZERO || fill_rule == CLIPPER_FILL_EVENODD || fill_rule == CLIPPER_FILL_POSITIVE;
+}
+
+// True for the three join types the host knows.
+inline bool clipper_is_known_join_type(clipper_join_type_t join_type) {
+    return join_type == CLIPPER_JOIN_SQUARE || join_type == CLIPPER_JOIN_ROUND || join_type == CLIPPER_JOIN_MITER;
+}
+} // namespace detail
+
+// The three functions below return the native ClipperUtils result directly (same order, no extra cleaning),
+// as a storage-owned collection. Invalid arguments (NULL storage or input, unknown enum, non-finite value,
+// or delta2 == 0 for clipper_offset2_ex) throw std::invalid_argument before the host is called. A NULL from
+// the host is then an internal error and throws std::runtime_error; it is never adopted.
+
+// Native union_ex(polygons, fill_rule).
+inline StoredExPolygonCollection clipper_union_ex(storage_handle *storage,
+                                                  const PolygonCollection &polygons,
+                                                  clipper_fill_rule_t fill_rule) {
+    if (storage == nullptr || polygons.handle() == nullptr || !detail::clipper_is_known_fill_rule(fill_rule))
+        throw std::invalid_argument("clipper_union_ex: invalid arguments");
+    expolygon_collection_handle *handle = ::clipper_union_ex(storage, polygons.handle(), fill_rule);
+    if (handle == nullptr)
+        throw std::runtime_error("clipper_union_ex: internal error");
+    return StoredExPolygonCollection::adopt(storage, handle);
+}
+
+// Native offset_ex(src, delta, join_type, miter_limit); delta is in scaled units. The native
+// union_safety_offset_ex(src) is clipper_offset_ex(storage, src, 10.0, CLIPPER_JOIN_MITER, 3.0).
+// delta == 0 is accepted; for CLIPPER_JOIN_ROUND, miter_limit is the ArcTolerance.
+inline StoredExPolygonCollection clipper_offset_ex(storage_handle *storage,
+                                                   const ExPolygonCollection &src,
+                                                   double delta,
+                                                   clipper_join_type_t join_type = CLIPPER_JOIN_MITER,
+                                                   double miter_limit = 3.0) {
+    if (storage == nullptr || src.handle() == nullptr || !std::isfinite(delta) || !std::isfinite(miter_limit) ||
+        !detail::clipper_is_known_join_type(join_type))
+        throw std::invalid_argument("clipper_offset_ex: invalid arguments");
+    expolygon_collection_handle *handle = ::clipper_offset_ex(storage, src.handle(), delta, join_type, miter_limit);
+    if (handle == nullptr)
+        throw std::runtime_error("clipper_offset_ex: internal error");
+    return StoredExPolygonCollection::adopt(storage, handle);
+}
+
+// Native offset2_ex(src, delta1, delta2, join_type, miter_limit); deltas are in scaled units.
+// delta2 must not be 0 (use clipper_offset_ex for a single offset).
+inline StoredExPolygonCollection clipper_offset2_ex(storage_handle *storage,
+                                                    const ExPolygonCollection &src,
+                                                    double delta1,
+                                                    double delta2,
+                                                    clipper_join_type_t join_type = CLIPPER_JOIN_MITER,
+                                                    double miter_limit = 3.0) {
+    if (storage == nullptr || src.handle() == nullptr || !std::isfinite(delta1) || !std::isfinite(delta2) ||
+        !std::isfinite(miter_limit) || delta2 == 0. || !detail::clipper_is_known_join_type(join_type))
+        throw std::invalid_argument("clipper_offset2_ex: invalid arguments");
+    expolygon_collection_handle *handle =
+        ::clipper_offset2_ex(storage, src.handle(), delta1, delta2, join_type, miter_limit);
+    if (handle == nullptr)
+        throw std::runtime_error("clipper_offset2_ex: internal error");
+    return StoredExPolygonCollection::adopt(storage, handle);
 }
 
 inline ClipperOperand clipper_union2(storage_handle *storage,
