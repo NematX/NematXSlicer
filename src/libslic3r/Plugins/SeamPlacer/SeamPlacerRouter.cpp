@@ -424,6 +424,11 @@ void build_entity_routes(
             marked_loops, sessions, routes);
 }
 
+/*
+Build the immutable route table by walking all plan extrusions with valid
+scratch storage and provider sessions; plan-owned loop handles are borrowed map
+keys, unmarked loops have no session, and route-resolution failures propagate.
+*/
 std::map<const extrusion_entity_handle *, LoopRoute> build_plan_routes(
     storage_handle *scratch_storage,
     PrintingPlan &plan,
@@ -491,6 +496,13 @@ SeamPlacerRouter::SeamPlacerRouter(orchestrator_handle *orchestrator,
 
 SeamPlacerRouter::~SeamPlacerRouter() = default;
 
+/*
+Return the selected provider's seam for a routed marked loop, or project the
+approach position onto a routed unmarked loop. The loop is borrowed and must be
+a non-empty closed loop in this plan, while start_position is a coordinate value;
+the method does not mutate routing state and returns a point value. Invalid,
+absent, or unprojectable loops raise exceptions, as do provider failures.
+*/
 c_point SeamPlacerRouter::place_seam(const ExtrusionEntity &loop,
                                      const c_point start_position) const
 {
