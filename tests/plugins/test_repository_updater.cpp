@@ -2401,6 +2401,8 @@ TEST_CASE_METHOD(PluginUpdaterFunctionalFixture,
 
 TEST_CASE("PluginUpdater selects comparable versions and caches their changelogs", "[plugins][updater]")
 {
+    // Load reports are process-wide, and a report kept by the package manager can add a model row.
+    Slic3r::Orchestrator::instance().clear_plugin_package_load_reports();
     FakeUpdaterHttpTransport http;
     TemporaryDirectory temporary;
     const boost::filesystem::path resources_directory = temporary.path() / "resources";
