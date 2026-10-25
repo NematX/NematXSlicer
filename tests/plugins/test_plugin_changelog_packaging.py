@@ -117,11 +117,17 @@ slic3r_package_python_plugin(script script plugin.py VERSION 1.0.0 CHANGELOG not
             self.assertIn(str(source), result.stderr)
             self.assertEqual(output.read_bytes(), contents)
 
-    def test_all_ten_release_files(self):
+    def test_every_bundled_plugin_has_a_release_file(self):
+        # A native plugin is a src/plugins_cpp directory with its CMakeLists.txt; a Python
+        # plugin is a module under src/plugins_python. Each one has exactly one changelog.
+        native_plugins = {path.parent for path in (ROOT / "src/plugins_cpp").glob("*/CMakeLists.txt")}
         native = list((ROOT / "src/plugins_cpp").glob("*/changelog.json"))
+        python_plugins = {path.with_suffix("") for path in (ROOT / "src/plugins_python").rglob("*.py")}
         python = list((ROOT / "src/plugins_python").rglob("*.changelog.json"))
-        self.assertEqual(len(native), 4)
-        self.assertEqual(len(python), 6)
+        self.assertTrue(native_plugins)
+        self.assertTrue(python_plugins)
+        self.assertEqual({path.parent for path in native}, native_plugins)
+        self.assertEqual({path.with_name(path.name[:-len(".changelog.json")]) for path in python}, python_plugins)
         for path in native + python:
             self.assertTrue(changelog.validate(path.read_bytes())["versions"])
 
