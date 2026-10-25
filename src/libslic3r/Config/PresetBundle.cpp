@@ -5,11 +5,16 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// Implementation of PresetBundle: loading the presets from the profile directories, config bundles and external
+// configurations, selecting them, and composing the full configuration of the selected presets. The profile sections of a
+// project are written by project_profile_sections() and read by load_config_file_config(): each section holds the preset
+// metadata of one profile and is applied to a copy of the configuration of the matching preset before it is created.
 #include "PresetBundle.hpp"
 
 #include <cassert>
 #include <fstream>
 #include <set>
+#include <sstream>
 #include <unordered_set>
 
 #include <boost/algorithm/clamp.hpp>
@@ -44,6 +49,18 @@ static std::vector<std::string> s_project_options {
     "wiping_volumes_extruders",
     "wiping_volumes_matrix"
 };
+
+// Append to out the "[<type>:<name>]" section of one profile: the keys of its configuration that the project file
+// accepts and the G-code refuses (the preset metadata). A profile without a name has no section.
+static void append_profile_section(std::string &out, const PresetCollection &presets, const std::string &name, const DynamicPrintConfig &config);
+// Parse the text of the project profile sections. A text that cannot be parsed is logged and gives an empty tree,
+// so the sections bring no metadata: the presets keep the values found in the flat configuration, if any, like those of an old project.
+static boost::property_tree::ptree parse_profile_sections(const std::string &text);
+// Apply to cfg the section of the profile called original_name, when the tree has one. Only the keys that the section
+// writer could have produced are applied (accepted by the project and refused by the G-code); anything else in the
+// section, such as a post-processing script, is ignored. The preset loading then keeps only the keys of its own type.
+static void apply_profile_section(DynamicPrintConfig &cfg, const PresetCollection &presets, const boost::property_tree::ptree &sections,
+                                  const std::string &original_name, ConfigSubstitutionContext &substitutions);
 
 PresetBundle::PresetBundle()
     : fff_prints(Preset::TYPE_FFF_PRINT,
@@ -740,18 +757,8 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
 
     auto   *nozzle_diameter = dynamic_cast<const ConfigOptionFloats*>(out.option("nozzle_diameter"));
     size_t  num_extruders   = nozzle_diameter->size();
-    // Collect the "compatible_printers_condition" and "inherits" values over all presets (print, filaments, printers) into a single vector.
-    std::vector<std::string> compatible_printers_condition;
-    std::vector<std::string> compatible_prints_condition;
-    std::vector<std::string> inherits;
-    compatible_printers_condition.emplace_back(this->fff_prints.get_edited_preset().compatible_printers_condition());
-    inherits                     .emplace_back(this->fff_prints.get_edited_preset().inherits());
-
     if (num_extruders <= 1) {
         out.apply(this->filaments.get_edited_preset().config);
-        compatible_printers_condition.emplace_back(this->filaments.get_edited_preset().compatible_printers_condition());
-        compatible_prints_condition  .emplace_back(this->filaments.get_edited_preset().compatible_prints_condition());
-        inherits                     .emplace_back(this->filaments.get_edited_preset().inherits());
     } else {
         // Retrieve filament presets and build a single config object for them.
         // First collect the filament configurations based on the user selection of this->filament_presets.
@@ -761,13 +768,7 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
             filament_configs.emplace_back(&this->filaments.find_preset(extr_filaments.get_selected_preset_name(), true)->config);
 		while (filament_configs.size() < num_extruders)
             filament_configs.emplace_back(&this->filaments.first_visible().config);
-        for (const DynamicPrintConfig *cfg : filament_configs) {
-            // The compatible_prints/printers_condition() returns a reference to configuration key, which may not yet exist.
-            DynamicPrintConfig &cfg_rw = *const_cast<DynamicPrintConfig*>(cfg);
-            compatible_printers_condition.emplace_back(Preset::compatible_printers_condition(cfg_rw));
-            compatible_prints_condition  .emplace_back(Preset::compatible_prints_condition(cfg_rw));
-            inherits                     .emplace_back(Preset::inherits(cfg_rw));
-        }
+
         // Option values to set a ConfigOptionVector from.
         std::vector<const ConfigOption*> filament_opts(num_extruders, nullptr);
         // loop through options and apply them to the resulting config.
@@ -791,8 +792,6 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
         }
     }
 
-	// Don't store the "compatible_printers_condition" for the printer profile, there is none.
-    inherits.emplace_back(this->printers.get_edited_preset().inherits());
 
     // These value types clash between the print and filament profiles. They should be renamed.
     out.erase("compatible_prints");
@@ -826,22 +825,6 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
     out.option<ConfigOptionBools>("filament_settings_modified", true)->set(filament_settings_modifieds);
     out.option<ConfigOptionBool >("printer_settings_modified",  true)->value  = this->printers.get_selected_preset().is_dirty;
 
-    // Serialize the collected "compatible_printers_condition" and "inherits" fields.
-    // There will be 1 + num_exturders fields for "inherits" and 2 + num_extruders for "compatible_printers_condition" stored.
-    // The vector will not be stored if all fields are empty strings.
-    auto add_if_some_non_empty = [&out](std::vector<std::string> &&values, const std::string &key) {
-        bool nonempty = false;
-        for (const std::string &v : values)
-            if (! v.empty()) {
-                nonempty = true;
-                break;
-            }
-        if (nonempty)
-            out.set_key_value(key, new ConfigOptionStrings(std::move(values)));
-    };
-    add_if_some_non_empty(std::move(compatible_printers_condition), "compatible_printers_condition_cummulative");
-    add_if_some_non_empty(std::move(compatible_prints_condition),   "compatible_prints_condition_cummulative");
-    add_if_some_non_empty(std::move(inherits),                      "inherits_cummulative");
 
 	out.option<ConfigOptionEnumGeneric>("printer_technology", true)->value = ptFFF;
     return out;
@@ -857,16 +840,6 @@ DynamicPrintConfig PresetBundle::full_sla_config() const
     // There are no project configuration values as of now, the project_config is reserved for FFF printers.
 //    out.apply(this->project_config);
 
-    // Collect the "compatible_printers_condition" and "inherits" values over all presets (sla_prints, sla_materials, printers) into a single vector.
-    std::vector<std::string> compatible_printers_condition;
-	std::vector<std::string> compatible_prints_condition;
-    std::vector<std::string> inherits;
-    compatible_printers_condition.emplace_back(this->sla_prints.get_edited_preset().compatible_printers_condition());
-	inherits					 .emplace_back(this->sla_prints.get_edited_preset().inherits());
-    compatible_printers_condition.emplace_back(this->sla_materials.get_edited_preset().compatible_printers_condition());
-	compatible_prints_condition  .emplace_back(this->sla_materials.get_edited_preset().compatible_prints_condition());
-    inherits                     .emplace_back(this->sla_materials.get_edited_preset().inherits());
-    inherits                     .emplace_back(this->printers.get_edited_preset().inherits());
 
     // These two value types clash between the print and filament profiles. They should be renamed.
     out.erase("compatible_printers");
@@ -882,25 +855,72 @@ DynamicPrintConfig PresetBundle::full_sla_config() const
     out.option<ConfigOptionBool >("sla_material_settings_modified",   true)->value  = this->sla_materials.get_selected_preset().is_dirty;
     out.option<ConfigOptionBool >("printer_settings_modified",        true)->value  = this->printers.get_selected_preset().is_dirty;
 
-    // Serialize the collected "compatible_printers_condition" and "inherits" fields.
-    // There will be 1 + num_exturders fields for "inherits" and 2 + num_extruders for "compatible_printers_condition" stored.
-    // The vector will not be stored if all fields are empty strings.
-    auto add_if_some_non_empty = [&out](std::vector<std::string> &&values, const std::string &key) {
-        bool nonempty = false;
-        for (const std::string &v : values)
-            if (! v.empty()) {
-                nonempty = true;
-                break;
-            }
-        if (nonempty)
-            out.set_key_value(key, new ConfigOptionStrings(std::move(values)));
-    };
-    add_if_some_non_empty(std::move(compatible_printers_condition), "compatible_printers_condition_cummulative");
-    add_if_some_non_empty(std::move(compatible_prints_condition),   "compatible_prints_condition_cummulative");
-    add_if_some_non_empty(std::move(inherits),                      "inherits_cummulative");
 
 	out.option<ConfigOptionEnumGeneric>("printer_technology", true)->value = ptSLA;
 	return out;
+}
+
+// The sections describe the same edited presets as full_config(), but only with their preset metadata, which the flat
+// configuration of a project does not carry.
+std::string PresetBundle::project_profile_sections() const
+{
+    std::string out;
+    if (this->printers.get_edited_preset().printer_technology() == ptFFF) {
+        append_profile_section(out, this->fff_prints, this->fff_prints.get_selected_preset_name(), this->fff_prints.get_edited_preset().config);
+        // Two extruders that use the same filament share one section.
+        std::set<std::string> filament_names;
+        for (const ExtruderFilaments &extruder_filaments : this->extruders_filaments) {
+            const std::string name = extruder_filaments.get_selected_preset_name();
+            const Preset     *filament = this->filaments.find_preset(name, true);
+            if (filament != nullptr && filament_names.insert(name).second)
+                append_profile_section(out, this->filaments, name, filament->config);
+        }
+    } else {
+        append_profile_section(out, this->sla_prints, this->sla_prints.get_selected_preset_name(), this->sla_prints.get_edited_preset().config);
+        append_profile_section(out, this->sla_materials, this->sla_materials.get_selected_preset_name(), this->sla_materials.get_edited_preset().config);
+    }
+    append_profile_section(out, this->printers, this->printers.get_selected_preset_name(), this->printers.get_edited_preset().config);
+    return out;
+}
+
+static void append_profile_section(std::string &out, const PresetCollection &presets, const std::string &name, const DynamicPrintConfig &config)
+{
+    if (name.empty())
+        return;
+    out += "[" + presets.section_name() + ":" + name + "]\n";
+    for (const std::string &key : config.keys())
+        if (config.writes_key(key, ConfigWriteTarget::Project) && !config.writes_key(key, ConfigWriteTarget::GCode))
+            out += key + " = " + config.opt_serialize(key) + "\n";
+    out += "\n";
+}
+
+static boost::property_tree::ptree parse_profile_sections(const std::string &text)
+{
+    boost::property_tree::ptree tree;
+    if (text.empty())
+        return tree;
+    try {
+        std::istringstream stream(text);
+        boost::property_tree::read_ini(stream, tree);
+    } catch (const boost::property_tree::ini_parser::ini_parser_error &err) {
+        BOOST_LOG_TRIVIAL(error) << "The profile sections of the project cannot be read, the profiles are loaded without them: " << err.what();
+        tree.clear();
+    }
+    return tree;
+}
+
+static void apply_profile_section(DynamicPrintConfig &cfg, const PresetCollection &presets, const boost::property_tree::ptree &sections,
+                                  const std::string &original_name, ConfigSubstitutionContext &substitutions)
+{
+    if (original_name.empty())
+        return;
+    // find() looks for a direct child by its exact name: the name of a profile may contain dots.
+    const boost::property_tree::ptree::const_assoc_iterator section = sections.find(presets.section_name() + ":" + original_name);
+    if (section == sections.not_found())
+        return;
+    for (const boost::property_tree::ptree::value_type &entry : section->second)
+        if (cfg.writes_key(entry.first, ConfigWriteTarget::Project) && !cfg.writes_key(entry.first, ConfigWriteTarget::GCode))
+            cfg.set_deserialize(entry.first, entry.second.data(), substitutions);
 }
 
 // Load an external config file containing the print, filament and printer presets.
@@ -976,9 +996,11 @@ ConfigSubstitutions PresetBundle::load_config_file(const std::string &path, Forw
     return ConfigSubstitutions{};
 }
 
-// Load a config file from a boost property_tree. This is a private method called from load_config_file.
+// Create the print, filament and printer presets from a configuration holding all their values (a project, a config file
+// or a G-code). Private method called from load_config_file, load_config_model and load_config_from_wizard.
+// profile_sections is the profile sections text of a project; the section of each profile gives its preset metadata.
 // is_external == false on if called from ConfigWizard
-void PresetBundle::load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config)
+void PresetBundle::load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config, const std::string &profile_sections)
 {
     PrinterTechnology printer_technology = Preset::printer_technology(config);
 
@@ -1000,18 +1022,12 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
                  config.option<ConfigOptionFloats>("filament_diameter")->size()) :
 		// 1 SLA material
         1;
-    // Make a copy of the "compatible_printers_condition_cummulative" and "inherits_cummulative" vectors, which 
-    // accumulate values over all presets (print, filaments, printers).
-    // These values will be distributed into their particular presets when loading.
-    std::vector<std::string> compatible_printers_condition_values   = std::move(config.option<ConfigOptionStrings>("compatible_printers_condition_cummulative", true)->get_values());
-    std::vector<std::string> compatible_prints_condition_values     = std::move(config.option<ConfigOptionStrings>("compatible_prints_condition_cummulative",   true)->get_values());
-    std::vector<std::string> inherits_values                        = std::move(config.option<ConfigOptionStrings>("inherits_cummulative", true)->get_values());
-    std::string &compatible_printers_condition  = Preset::compatible_printers_condition(config);
-    std::string &compatible_prints_condition    = Preset::compatible_prints_condition(config);
-    std::string &inherits                       = Preset::inherits(config);
-    compatible_printers_condition_values.resize(num_extruders + 2, std::string());
-    compatible_prints_condition_values.resize(num_extruders, std::string());
-    inherits_values.resize(num_extruders + 2, std::string());
+    // The current format writes the preset metadata (inherits, compatible_*, default_*_profile) in the profile sections of
+    // the project, not in the flat configuration (older flat values are still read). The section of each profile is applied
+    // to a copy of the configuration for each preset, so that no profile receives the metadata of another one.
+    const boost::property_tree::ptree sections = parse_profile_sections(profile_sections);
+    // The sections are written by this version, so there is nothing to report for their values.
+    ConfigSubstitutionContext         section_substitutions{ ForwardCompatibilitySubstitutionRule::EnableSilent };
     // The "default_filament_profile" will be later extracted into the printer profile.
 	switch (printer_technology) {
 	case ptFFF:
@@ -1036,30 +1052,26 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
 
     std::set<std::string>& tmp_installed_presets_ref = tmp_installed_presets;
 	auto load_preset = 
-		[&config, &inherits, &inherits_values, 
-         &compatible_printers_condition, &compatible_printers_condition_values, 
-         &compatible_prints_condition, &compatible_prints_condition_values, 
-         is_external, &name, &name_or_path, &tmp_installed_presets_ref]
-		(PresetCollection &presets, size_t idx, const std::string &key) {
-		// Split the "compatible_printers_condition" and "inherits" values one by one from a single vector to the print & printer profiles.
-		inherits = inherits_values[idx];
-		compatible_printers_condition = compatible_printers_condition_values[idx];
-        if (idx > 0 && idx - 1 < compatible_prints_condition_values.size())
-            compatible_prints_condition = compatible_prints_condition_values[idx - 1];
+		[&config, &sections, &section_substitutions, is_external, &name, &name_or_path, &tmp_installed_presets_ref]
+		(PresetCollection &presets, const std::string &key) {
+		// The section of this profile is applied on a copy of the configuration, named by the original profile name.
+		const std::string original_name = config.opt_string(key, true);
+		DynamicPrintConfig preset_config = config;
+		apply_profile_section(preset_config, presets, sections, original_name, section_substitutions);
 		if (is_external) {
-			ExternalPreset ext_preset = presets.load_external_preset(name_or_path, name, config.opt_string(key, true), config);
+			ExternalPreset ext_preset = presets.load_external_preset(name_or_path, name, original_name, preset_config);
 			if (ext_preset.is_installed)
 				tmp_installed_presets_ref.emplace(ext_preset.preset->name);
 		}
 		else
-			presets.load_preset(presets.path_from_name(name), name, config).save();
+			presets.load_preset(presets.path_from_name(name), name, preset_config).save();
 	};
 
     switch (Preset::printer_technology(config)) {
     case ptFFF:
     {
-        load_preset(this->fff_prints, 0, "print_settings_id");
-        load_preset(this->printers, num_extruders + 1, "printer_settings_id");
+        load_preset(this->fff_prints, "print_settings_id");
+        load_preset(this->printers, "printer_settings_id");
 
         // 3) Now load the filaments. If there are multiple filament presets, split them and load them.
         auto old_filament_profile_names = config.option<ConfigOptionStrings>("filament_settings_id", true);
@@ -1067,20 +1079,19 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
 
         this->extruders_filaments.clear();
         if (num_extruders <= 1) {
-            // Split the "compatible_printers_condition" and "inherits" from the cummulative vectors to separate filament presets.
-            inherits                      = inherits_values[1];
-            compatible_printers_condition = compatible_printers_condition_values[1];
-			compatible_prints_condition   = compatible_prints_condition_values.front();
+            DynamicPrintConfig filament_config = config;
+            apply_profile_section(filament_config, this->filaments, sections,
+                                  old_filament_profile_names->empty() ? std::string() : old_filament_profile_names->get_at(0), section_substitutions);
 			Preset                *loaded = nullptr;
             if (is_external) {
                 assert(!old_filament_profile_names->empty());
-                ExternalPreset ext_preset = this->filaments.load_external_preset(name_or_path, name, old_filament_profile_names->get_at(0), config);
+                ExternalPreset ext_preset = this->filaments.load_external_preset(name_or_path, name, old_filament_profile_names->get_at(0), filament_config);
                 loaded = ext_preset.preset;
                 if (ext_preset.is_installed)
                     tmp_installed_presets.emplace(ext_preset.preset->name);
             } else {
                 // called from Config Wizard.
-				loaded= &this->filaments.load_preset(this->filaments.path_from_name(name), name, config);
+				loaded= &this->filaments.load_preset(this->filaments.path_from_name(name), name, filament_config);
 				loaded->save();
 			}
 			this->extruders_filaments.emplace_back(ExtruderFilaments(&filaments));
@@ -1106,13 +1117,12 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
             bool any_modified = false;
             for (int i = 0; i < (int)configs.size(); i++) {
                 DynamicPrintConfig &cfg = configs[i];
-                // Split the "compatible_printers_condition" and "inherits" from the cummulative vectors to separate filament presets.
-                cfg.opt_string("compatible_printers_condition", true) = compatible_printers_condition_values[i + 1];
-                cfg.opt_string("compatible_prints_condition",   true) = compatible_prints_condition_values[i];
-                cfg.opt_string("inherits", true)                      = inherits_values[i + 1];
+                // Two extruders that use the same filament profile read the same section.
+                const std::string original_name = (i < int(old_filament_profile_names->size())) ? old_filament_profile_names->get_at(i) : "";
+                apply_profile_section(cfg, this->filaments, sections, original_name, section_substitutions);
                 // Load all filament presets, but only select the first one in the preset dialog.
                 auto [loaded, modified, installed] = this->filaments.load_external_preset(name_or_path, name,
-                    (i < int(old_filament_profile_names->size())) ? old_filament_profile_names->get_at(i) : "",
+                    original_name,
                     std::move(cfg),
                     any_modified ? PresetCollection::LoadAndSelect::Never : 
                         PresetCollection::LoadAndSelect::OnlyIfModified);
@@ -1138,9 +1148,9 @@ void PresetBundle::load_config_file_config(const std::string &name_or_path, bool
         break;
     }
     case ptSLA:
-        load_preset(this->sla_prints,    0, "sla_print_settings_id");
-        load_preset(this->sla_materials, 1, "sla_material_settings_id");
-        load_preset(this->printers,      2, "printer_settings_id");
+        load_preset(this->sla_prints,    "sla_print_settings_id");
+        load_preset(this->sla_materials, "sla_material_settings_id");
+        load_preset(this->printers,      "printer_settings_id");
         break;
     default:
         break;

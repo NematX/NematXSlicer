@@ -1828,19 +1828,6 @@ void init_fff_params(PrintConfigDef &definition)
     def->set_default_value(new ConfigOptionString());
     def->cli = ConfigOptionDef::nocli;
 
-    // The following value is to be stored into the project file (AMF, 3MF, Config ...)
-    // and it contains a sum of "compatible_printers_condition" values over the print and filament profiles.
-    def = definition.add("compatible_printers_condition_cummulative", coStrings, ptFFF);
-    def->nature = ConfigOptionNature::PresetMeta;
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-    def->mode = comNone | comPrusa; // note: hidden setting
-    def = definition.add("compatible_prints_condition_cummulative", coStrings, ptFFF);
-    def->nature = ConfigOptionNature::PresetMeta;
-    def->set_default_value(new ConfigOptionStrings());
-    def->cli = ConfigOptionDef::nocli;
-    def->mode = comNone | comPrusa; // note: hidden setting
-
     def = definition.add("complete_objects", coBool, ptFFF);
     def->label = L("Complete individual objects");
     def->category = OptionCategory::output;
@@ -3998,14 +3985,6 @@ void init_fff_params(PrintConfigDef &definition)
     def->full_width = true;
     def->height = 5;
     def->set_default_value(new ConfigOptionString());
-    def->cli = ConfigOptionDef::nocli;
-
-    // The following value is to be stored into the project file (AMF, 3MF, Config ...)
-    // and it contains a sum of "inherits" values over the print and filament profiles.
-    def = definition.add("inherits_cummulative", coStrings, ptFFF);
-    def->nature = ConfigOptionNature::PresetMeta;
-    def->set_default_value(new ConfigOptionStrings());
-    def->mode = comPrusa;
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("interface_shells", coBool, ptFFF);

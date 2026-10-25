@@ -64,6 +64,8 @@ const unsigned int VERSION_AMF_COMPATIBLE = 3;
 const char* SLIC3RPE_AMF_VERSION = "slic3rpe_amf_version";
 
 const char* SLIC3R_CONFIG_TYPE = "slic3rpe_config";
+// Metadata type of the profile sections. It is compared exactly: it must not start with SLIC3R_CONFIG_TYPE, which is compared as a prefix.
+const char* SLIC3R_PROFILES_TYPE = "slic3r_profiles";
 
 namespace Slic3r
 {
@@ -71,11 +73,12 @@ namespace Slic3r
 
 struct AMFParserContext
 {
-    AMFParserContext(XML_Parser parser, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model) :
+    AMFParserContext(XML_Parser parser, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, std::string* profile_sections = nullptr) :
         m_parser(parser),
         m_model(*model), 
         m_config(config),
-        m_config_substitutions(config_substitutions)
+        m_config_substitutions(config_substitutions),
+        m_profile_sections(profile_sections)
     {
         m_path.reserve(12);
     }
@@ -276,6 +279,8 @@ struct AMFParserContext
     DynamicPrintConfig      *m_config { nullptr };
     // Config substitution rules and collected config substitution log.
     ConfigSubstitutionContext *m_config_substitutions { nullptr };
+    // Receives the text of the profile sections metadata, if the file has it.
+    std::string             *m_profile_sections { nullptr };
 
 private:
     AMFParserContext& operator=(AMFParserContext&);
@@ -745,6 +750,9 @@ void AMFParserContext::endElement(const char * /* name */)
             ConfigBase::load_from_gcode_string_legacy(*m_config, std::move(m_value[1].c_str()), *m_config_substitutions);
             //deserialize_maybe_from_prusa(ConfigBase::load_gcode_string_legacy(m_value[1].c_str()), *m_config, *config_substitutions, true, true);
         }
+        else if (m_profile_sections != nullptr && m_value[0] == SLIC3R_PROFILES_TYPE) {
+            *m_profile_sections = m_value[1];
+        }
         else if (strncmp(m_value[0].c_str(), "slic3r.", 7) == 0) {
             const char *key = m_value[0].c_str() + 7;
             if (PrintConfigDef::instance().options.find(key) != PrintConfigDef::instance().options.end()) {
@@ -907,7 +915,7 @@ void AMFParserContext::endDocument()
 }
 
 // Load an AMF file into a provided model.
-bool load_amf_file(const char *path, DynamicPrintConfig *config, ConfigSubstitutionContext *config_substitutions, Model *model)
+bool load_amf_file(const char *path, DynamicPrintConfig *config, ConfigSubstitutionContext *config_substitutions, Model *model, std::string *profile_sections)
 {
     if ((path == nullptr) || (model == nullptr))
         return false;
@@ -924,7 +932,7 @@ bool load_amf_file(const char *path, DynamicPrintConfig *config, ConfigSubstitut
         return false;
     }
 
-    AMFParserContext ctx(parser, config, config_substitutions, model);
+    AMFParserContext ctx(parser, config, config_substitutions, model, profile_sections);
     XML_SetUserData(parser, (void*)&ctx);
     XML_SetElementHandler(parser, AMFParserContext::startElement, AMFParserContext::endElement);
     XML_SetCharacterDataHandler(parser, AMFParserContext::characters);
@@ -972,7 +980,7 @@ bool load_amf_file(const char *path, DynamicPrintConfig *config, ConfigSubstitut
     return result;
 }
 
-bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version)
+bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version, std::string* profile_sections)
 {
     if (stat.m_uncomp_size == 0)
     {
@@ -988,7 +996,7 @@ bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_fi
         return false;
     }
 
-    AMFParserContext ctx(parser, config, config_substitutions, model);
+    AMFParserContext ctx(parser, config, config_substitutions, model, profile_sections);
     XML_SetUserData(parser, (void*)&ctx);
     XML_SetElementHandler(parser, AMFParserContext::startElement, AMFParserContext::endElement);
     XML_SetCharacterDataHandler(parser, AMFParserContext::characters);
@@ -1049,7 +1057,7 @@ bool extract_model_from_archive(mz_zip_archive& archive, const mz_zip_archive_fi
 }
 
 // Load an AMF archive into a provided model.
-bool load_amf_archive(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version)
+bool load_amf_archive(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version, std::string* profile_sections)
 {
     if ((path == nullptr) || (model == nullptr))
         return false;
@@ -1075,7 +1083,7 @@ bool load_amf_archive(const char* path, DynamicPrintConfig* config, ConfigSubsti
             {
                 try
                 {
-                    if (!extract_model_from_archive(archive, stat, config, config_substitutions, model, check_version))
+                    if (!extract_model_from_archive(archive, stat, config, config_substitutions, model, check_version, profile_sections))
                     {
                         close_zip_reader(&archive);
                         BOOST_LOG_TRIVIAL(error) << "Archive does not contain a valid model";
@@ -1119,13 +1127,14 @@ bool load_amf_archive(const char* path, DynamicPrintConfig* config, ConfigSubsti
 
 // Load an AMF file into a provided model.
 // If config is not a null pointer, updates it if the amf file/archive contains config data
-bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version)
+// If profile_sections is not a null pointer, receives the profile sections text if the file contains it.
+bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version, std::string* profile_sections)
 {
     CNumericLocalesSetter locales_setter; // use "C" locales and point as a decimal separator
 
     if (boost::iends_with(path, ".amf.xml"))
         // backward compatibility with older slic3r output
-        return load_amf_file(path, config, config_substitutions, model);
+        return load_amf_file(path, config, config_substitutions, model, profile_sections);
     else if (boost::iends_with(path, ".amf"))
     {
         boost::nowide::ifstream file(path, boost::nowide::ifstream::binary);
@@ -1136,7 +1145,7 @@ bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionCo
         file.read(zip_mask.data(), 2);
         file.close();
 
-        return (zip_mask == "PK") ? load_amf_archive(path, config, config_substitutions, model, check_version) : load_amf_file(path, config, config_substitutions, model);
+        return (zip_mask == "PK") ? load_amf_archive(path, config, config_substitutions, model, check_version, profile_sections) : load_amf_file(path, config, config_substitutions, model, profile_sections);
     }
     else
         return false;
@@ -1170,10 +1179,13 @@ bool store_amf(std::string &path, Model *model, const DynamicPrintConfig *config
     if (config && options.export_config)
     {
         std::string str_config = "\n";
+        // The flat configuration carries the keys of the G-code; the preset metadata, refused by the G-code, is in the profile sections.
         for (const std::string &key : config->keys())
-            if (config->writes_key(key, ConfigWriteTarget::Project))
+            if (config->writes_key(key, ConfigWriteTarget::GCode))
                 str_config += "; " + key + " = " + config->opt_serialize(key) + "\n";
         stream << "<metadata type=\"" << SLIC3R_CONFIG_TYPE << "\">" << xml_escape(str_config) << "</metadata>\n";
+        if (!options.profile_sections.empty())
+            stream << "<metadata type=\"" << SLIC3R_PROFILES_TYPE << "\">" << xml_escape(options.profile_sections) << "</metadata>\n";
     }
 
     for (const auto &material : model->materials) {

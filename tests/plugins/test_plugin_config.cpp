@@ -67,6 +67,8 @@ the host log, independently of the returned registration status.
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Config/Preset.hpp"
+#include "libslic3r/Config/PresetBundle.hpp"
+#include "libslic3r/SLA/SLAPrintConfig.hpp"
 #include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Format/AMF.hpp"
 #include "libslic3r/miniz_extension.hpp"
@@ -168,7 +170,6 @@ const NatureKeyExpectation k_nature_keys[] = {
     {"print_settings_id", "bookkeeping_sentinel", true, true, true},
     {"test_config_nature_bookkeeping", "13", true, true, true},
     {"inherits", "inherits_sentinel", true, true, false},
-    {"inherits_cummulative", "cumulative_sentinel", true, true, false},
     {"compatible_printers", "compatible_sentinel", true, true, false},
     {"default_print_profile", "default_profile_sentinel", true, true, false},
     {"test_config_nature_preset_meta", "14", true, true, false},
@@ -1817,9 +1818,6 @@ TEST_CASE("Persistent settings have the literal nature of their classification",
         {"compatible_printers_condition", ConfigOptionNature::PresetMeta},
         {"compatible_prints", ConfigOptionNature::PresetMeta},
         {"compatible_prints_condition", ConfigOptionNature::PresetMeta},
-        {"compatible_printers_condition_cummulative", ConfigOptionNature::PresetMeta},
-        {"compatible_prints_condition_cummulative", ConfigOptionNature::PresetMeta},
-        {"inherits_cummulative", ConfigOptionNature::PresetMeta},
         {"default_print_profile", ConfigOptionNature::PresetMeta},
         {"default_filament_profile", ConfigOptionNature::PresetMeta},
         {"default_sla_print_profile", ConfigOptionNature::PresetMeta},
@@ -1878,10 +1876,14 @@ TEST_CASE("Preset save keeps the local keys and drops the volatile ones",
     CHECK_FALSE(has_config_key(text, "", {"test_config_nature_volatile", "15", true, true, true}));
 }
 
-// Export a project: the project files keep PRESET_META and BOOKKEEPING keys and drop LOCAL ones, and the file read by
-// PrusaSlicer follows the G-code destination, so it drops PRESET_META too, with its own LOCAL filter applied before the conversion.
+// Text of two profile sections, as PresetBundle::project_profile_sections() would write them.
+const char *const k_profile_sections_text =
+    "[print:Test print]\ninherits = Parent print\n\n[printer:Test printer]\ndefault_print_profile = Test print\ninherits = Parent printer\n\n";
+
+// Export a project: the flat project files carry the keys of the G-code (no PRESET_META, no LOCAL), the file read by PrusaSlicer
+// has its own LOCAL filter applied before the conversion, and the profile sections text is stored in its own entry and read back.
 TEST_CASE("3MF project configuration files follow their destination",
-          "[plugins][config][nature]")
+          "[plugins][config][nature][project]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ScopedNatureDirectory directory;
@@ -1892,7 +1894,8 @@ TEST_CASE("3MF project configuration files follow their destination",
     Slic3r::DynamicPrintConfig config;
     set_nature_sentinels(config);
     const boost::filesystem::path archive = directory.path() / "project.3mf";
-    REQUIRE(Slic3r::store_3mf(archive.string().c_str(), &model, &config, Slic3r::OptionStore3mf{}));
+    REQUIRE(Slic3r::store_3mf(archive.string().c_str(), &model, &config,
+                              Slic3r::OptionStore3mf{}.set_profile_sections(k_profile_sections_text)));
 
     const std::string project_texts[] = {read_archive_entry(archive, "Metadata/Slic3r.config"),
                                          read_archive_entry(archive, "Metadata/SuperSlicer.config")};
@@ -1900,8 +1903,8 @@ TEST_CASE("3MF project configuration files follow their destination",
         REQUIRE_FALSE(text.empty());
         for (const NatureKeyExpectation &expectation : k_nature_keys) {
             CAPTURE(expectation.key);
-            CHECK(has_config_line(text, "; ", expectation) == expectation.in_project);
-            CHECK(has_config_key(text, "; ", expectation) == expectation.in_project);
+            CHECK(has_config_line(text, "; ", expectation) == expectation.in_gcode);
+            CHECK(has_config_key(text, "; ", expectation) == expectation.in_gcode);
         }
     }
 
@@ -1916,11 +1919,37 @@ TEST_CASE("3MF project configuration files follow their destination",
         else
             CHECK(has_config_key(prusa_text, "; ", expectation) == expectation.in_gcode);
     }
+
+    CHECK(read_archive_entry(archive, "Metadata/Slic3r_profiles.ini") == k_profile_sections_text);
+    Slic3r::Model loaded_model;
+    Slic3r::DynamicPrintConfig loaded_config;
+    Slic3r::ConfigSubstitutionContext substitutions{Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent};
+    std::string loaded_sections;
+    REQUIRE(Slic3r::load_3mf(archive.string().c_str(), loaded_config, substitutions, &loaded_model, false, false, &loaded_sections));
+    CHECK(loaded_sections == k_profile_sections_text);
 }
 
-// Export an AMF: its configuration block follows the project destination, like the project files of a 3MF.
+// The profile sections go with the configuration: no configuration, no sections entry.
+TEST_CASE("3MF without exported configuration has no profile sections",
+          "[plugins][config][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    Slic3r::Model model;
+    Slic3r::Print print;
+    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, model);
+    Slic3r::DynamicPrintConfig config;
+    set_nature_sentinels(config);
+    const boost::filesystem::path archive = directory.path() / "project.3mf";
+    REQUIRE(Slic3r::store_3mf(archive.string().c_str(), &model, &config,
+                              Slic3r::OptionStore3mf{}.set_export_config(false).set_profile_sections(k_profile_sections_text)));
+    CHECK(read_archive_entry(archive, "Metadata/Slic3r_profiles.ini").empty());
+    CHECK(read_archive_entry(archive, "Metadata/Slic3r.config").empty());
+}
+
+// Export an AMF: its flat configuration block follows the G-code destination, and the profile sections have their own metadata.
 TEST_CASE("AMF configuration block follows the project destination",
-          "[plugins][config][nature]")
+          "[plugins][config][nature][project]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ScopedNatureDirectory directory;
@@ -1932,18 +1961,291 @@ TEST_CASE("AMF configuration block follows the project destination",
     config.set_deserialize_strict("print_host", "local_host_sentinel");
     // store_amf forces the ".zip.amf" suffix and reports the final path through its argument.
     std::string path = (directory.path() / "project.amf").string();
-    REQUIRE(Slic3r::store_amf(path, &model, &config, Slic3r::OptionStoreAmf{}));
+    REQUIRE(Slic3r::store_amf(path, &model, &config, Slic3r::OptionStoreAmf{}.set_profile_sections(k_profile_sections_text)));
     const std::string text = read_archive_entry(path);
     REQUIRE_FALSE(text.empty());
     for (const NatureKeyExpectation &expectation : k_nature_keys) {
         CAPTURE(expectation.key);
-        CHECK(has_config_line(text, "; ", expectation) == expectation.in_project);
-        CHECK(has_config_key(text, "; ", expectation) == expectation.in_project);
+        CHECK(has_config_line(text, "; ", expectation) == expectation.in_gcode);
+        CHECK(has_config_key(text, "; ", expectation) == expectation.in_gcode);
     }
-    CHECK(has_config_line(text, "; ", {"compatible_printers", "compatible_sentinel", true, true, false}));
     CHECK_FALSE(has_config_key(text, "; ", {"print_host", "local_host_sentinel", true, false, false}));
+
+    Slic3r::Model loaded_model;
+    Slic3r::DynamicPrintConfig loaded_config;
+    Slic3r::ConfigSubstitutionContext substitutions{Slic3r::ForwardCompatibilitySubstitutionRule::EnableSilent};
+    std::string loaded_sections;
+    REQUIRE(Slic3r::load_amf(path.c_str(), &loaded_config, &substitutions, &loaded_model, false, &loaded_sections));
+    CHECK(loaded_sections == k_profile_sections_text);
+    // The sections are not read as flat configuration.
+    CHECK_FALSE(loaded_config.has("inherits"));
+
+    // Without exported configuration, the sections are not written either.
+    std::string path_without_config = (directory.path() / "no_config.amf").string();
+    REQUIRE(Slic3r::store_amf(path_without_config, &model, &config,
+                              Slic3r::OptionStoreAmf{}.set_export_config(false).set_profile_sections(k_profile_sections_text)));
+    CHECK(read_archive_entry(path_without_config).find("slic3r_profiles") == std::string::npos);
+}
+// Select the filament preset of one extruder of a bundle, after the filament presets are loaded.
+static void add_extruder_filament(Slic3r::PresetBundle &bundle, size_t extruder, const char *name)
+{
+    bundle.extruders_filaments.emplace_back(Slic3r::ExtruderFilaments(&bundle.filaments, extruder, name));
 }
 
+// The sections hold the metadata of the edited presets: the print, each distinct filament once, the printer.
+TEST_CASE("Project profile sections hold the preset metadata of each selected profile",
+          "[plugins][config][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Slic3r::PresetBundle bundle;
+
+    Slic3r::DynamicPrintConfig print_config = bundle.fff_prints.default_preset().config;
+    print_config.opt_string("inherits", true) = "Parent print";
+    print_config.opt_string("compatible_printers_condition", true) = "nozzle_diameter[0]==0.4";
+    print_config.set_deserialize_strict("layer_height", "0.27");
+    bundle.fff_prints.load_preset("", "Test print", print_config);
+
+    Slic3r::DynamicPrintConfig filament_a = bundle.filaments.default_preset().config;
+    filament_a.opt_string("inherits", true) = "Parent A";
+    filament_a.opt_string("compatible_printers_condition", true) = "nozzle_diameter[0]==0.6";
+    bundle.filaments.load_preset("", "Filament A", filament_a);
+    Slic3r::DynamicPrintConfig filament_b = bundle.filaments.default_preset().config;
+    filament_b.opt_string("inherits", true) = "Parent B";
+    filament_b.opt_string("compatible_prints_condition", true) = "layer_height>0.1";
+    bundle.filaments.load_preset("", "Filament B", filament_b);
+    // Three extruders; the first and the third use the same filament.
+    add_extruder_filament(bundle, 0, "Filament A");
+    add_extruder_filament(bundle, 1, "Filament B");
+    add_extruder_filament(bundle, 2, "Filament A");
+
+    Slic3r::DynamicPrintConfig printer_config = bundle.printers.default_preset().config;
+    printer_config.opt_string("inherits", true) = "Parent printer";
+    printer_config.opt_string("default_print_profile", true) = "Test print";
+    printer_config.set_deserialize_strict("printhost_apikey", "local_secret_sentinel");
+    printer_config.set_deserialize_strict("printer_notes", "notes_sentinel");
+    bundle.printers.load_preset("", "Test printer", printer_config);
+    // One key of a plugin of each kind that matters: PRESET_META must be written, VOLATILE must not.
+    bundle.printers.get_edited_preset().config.set_deserialize_strict("test_config_nature_preset_meta", "14");
+    bundle.printers.get_edited_preset().config.set_deserialize_strict("test_config_nature_volatile", "15");
+
+    const std::string expected =
+        "[print:Test print]\n"
+        "compatible_printers = \n"
+        "compatible_printers_condition = nozzle_diameter[0]==0.4\n"
+        "inherits = Parent print\n"
+        "\n"
+        "[filament:Filament A]\n"
+        "compatible_printers = \n"
+        "compatible_printers_condition = nozzle_diameter[0]==0.6\n"
+        "compatible_prints = \n"
+        "compatible_prints_condition = \n"
+        "inherits = Parent A\n"
+        "\n"
+        "[filament:Filament B]\n"
+        "compatible_printers = \n"
+        "compatible_printers_condition = \n"
+        "compatible_prints = \n"
+        "compatible_prints_condition = layer_height>0.1\n"
+        "inherits = Parent B\n"
+        "\n"
+        "[printer:Test printer]\n"
+        "default_filament_profile = \n"
+        "default_print_profile = Test print\n"
+        "inherits = Parent printer\n"
+        "\n";
+    const std::string sections = bundle.project_profile_sections();
+    CHECK(has_config_line(sections, "", {"test_config_nature_preset_meta", "14", true, true, false}));
+    CHECK_FALSE(has_config_key(sections, "", {"test_config_nature_volatile", "15", false, false, false}));
+    // The other options registered by plugins (the test keys) are part of the presets; only the real keys are compared.
+    std::string actual;
+    for (const std::string &line : split_lines(sections))
+        if (line.rfind("test_config_", 0) != 0)
+            actual += line + "\n";
+    CHECK(actual == expected);
+}
+
+// With an SLA printer, the sections are those of the SLA print, the SLA material and the printer.
+TEST_CASE("Project profile sections hold the preset metadata of the SLA profiles",
+          "[plugins][config][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Slic3r::PresetBundle bundle;
+
+    Slic3r::DynamicPrintConfig print_config = bundle.sla_prints.default_preset().config;
+    print_config.opt_string("inherits", true) = "Parent SLA print";
+    print_config.opt_string("default_sla_print_profile", true) = "SlaPrintProfile";
+    bundle.sla_prints.load_preset("", "SLA print", print_config);
+
+    Slic3r::DynamicPrintConfig material_config = bundle.sla_materials.default_preset().config;
+    material_config.opt_string("inherits", true) = "Parent material";
+    material_config.opt_string("default_sla_material_profile", true) = "SlaMaterialProfile";
+    material_config.opt_string("compatible_prints_condition", true) = "layer_height>0.1";
+    bundle.sla_materials.load_preset("", "SLA material", material_config);
+
+    Slic3r::DynamicPrintConfig printer_config = bundle.printers.default_preset(1).config;
+    printer_config.opt_string("inherits", true) = "Parent SLA printer";
+    printer_config.opt_string("default_sla_print_profile", true) = "SlaPrintProfile";
+    printer_config.opt_string("default_sla_material_profile", true) = "SlaMaterialProfile";
+    // load_external_preset chooses the SLA default preset from the technology of the configuration, load_preset would not.
+    bundle.printers.load_external_preset("", "SLA printer", "", printer_config);
+    REQUIRE(bundle.printers.get_edited_preset().printer_technology() == Slic3r::ptSLA);
+
+    const std::string expected =
+        "[sla_print:SLA print]\n"
+        "compatible_printers = \n"
+        "compatible_printers_condition = \n"
+        "default_sla_print_profile = SlaPrintProfile\n"
+        "inherits = Parent SLA print\n"
+        "\n"
+        "[sla_material:SLA material]\n"
+        "compatible_printers = \n"
+        "compatible_printers_condition = \n"
+        "compatible_prints = \n"
+        "compatible_prints_condition = layer_height>0.1\n"
+        "default_sla_material_profile = SlaMaterialProfile\n"
+        "inherits = Parent material\n"
+        "\n"
+        "[printer:SLA printer]\n"
+        "default_sla_material_profile = SlaMaterialProfile\n"
+        "default_sla_print_profile = SlaPrintProfile\n"
+        "inherits = Parent SLA printer\n"
+        "\n";
+    std::string actual;
+    for (const std::string &line : split_lines(bundle.project_profile_sections()))
+        if (line.rfind("test_config_", 0) != 0)
+            actual += line + "\n";
+    CHECK(actual == expected);
+}
+// Each reconstructed preset receives the metadata of the section named after its original profile, and nothing from another profile.
+TEST_CASE("Loading a project applies each profile section to its own preset",
+          "[plugins][config][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Slic3r::DynamicPrintConfig config;
+    config.apply(Slic3r::FullPrintConfig::defaults());
+    config.set_deserialize_strict({{"printer_technology", "FFF"},
+                                   {"nozzle_diameter", "0.4,0.4"},
+                                   {"filament_diameter", "1.75,1.75"},
+                                   {"print_settings_id", "PrintX"},
+                                   {"filament_settings_id", "FilA;FilB"},
+                                   {"printer_settings_id", "PrinterX"}});
+    Slic3r::Preset::normalize(config);
+    const std::string sections =
+        "[print:PrintX]\ninherits = Parent print\ncompatible_printers_condition = nozzle_diameter[0]==0.4\ncompatible_printers = PrinterA\n\n"
+        "[filament:FilA]\ninherits = Parent A\ncompatible_printers_condition = nozzle_diameter[0]==0.6\n\n"
+        "[filament:FilB]\ninherits = Parent B\ncompatible_prints_condition = layer_height>0.1\ncompatible_prints = PrintY\n\n"
+        "[printer:PrinterX]\ninherits = Parent printer\ndefault_print_profile = PrintX\ndefault_filament_profile = FilA\n\n";
+
+    SECTION("every profile reads its own section")
+    {
+        Slic3r::PresetBundle bundle;
+        bundle.load_config_model("project.3mf", config, sections);
+        const Slic3r::Preset *print = bundle.fff_prints.find_preset("project.3mf (PrintX)");
+        const Slic3r::Preset *printer = bundle.printers.find_preset("project.3mf (PrinterX)");
+        const Slic3r::Preset *filament_a = bundle.filaments.find_preset("project.3mf (FilA)");
+        const Slic3r::Preset *filament_b = bundle.filaments.find_preset("project.3mf (FilB)");
+        REQUIRE(print != nullptr);
+        REQUIRE(printer != nullptr);
+        REQUIRE(filament_a != nullptr);
+        REQUIRE(filament_b != nullptr);
+        CHECK(print->inherits() == "Parent print");
+        CHECK(print->compatible_printers_condition() == "nozzle_diameter[0]==0.4");
+        CHECK(print->config.opt<Slic3r::ConfigOptionStrings>("compatible_printers")->get_values() == std::vector<std::string>{"PrinterA"});
+        CHECK(filament_a->inherits() == "Parent A");
+        CHECK(filament_a->compatible_printers_condition() == "nozzle_diameter[0]==0.6");
+        CHECK(filament_a->compatible_prints_condition().empty());
+        CHECK(filament_b->inherits() == "Parent B");
+        CHECK(filament_b->compatible_printers_condition().empty());
+        CHECK(filament_b->compatible_prints_condition() == "layer_height>0.1");
+        CHECK(filament_b->config.opt<Slic3r::ConfigOptionStrings>("compatible_prints")->get_values() == std::vector<std::string>{"PrintY"});
+        CHECK(filament_a->config.opt<Slic3r::ConfigOptionStrings>("compatible_prints")->get_values().empty());
+        CHECK(printer->inherits() == "Parent printer");
+        CHECK(printer->config.opt_string("default_print_profile") == "PrintX");
+        CHECK(printer->config.opt<Slic3r::ConfigOptionStrings>("default_filament_profile")->get_values() == std::vector<std::string>{"FilA"});
+    }
+
+    SECTION("a profile without section keeps no metadata of another one")
+    {
+        Slic3r::PresetBundle bundle;
+        bundle.load_config_model("project.3mf", config, "[filament:FilA]\ninherits = Parent A\ncompatible_printers_condition = nozzle_diameter[0]==0.6\n\n");
+        const Slic3r::Preset *filament_a = bundle.filaments.find_preset("project.3mf (FilA)");
+        const Slic3r::Preset *filament_b = bundle.filaments.find_preset("project.3mf (FilB)");
+        REQUIRE(filament_a != nullptr);
+        REQUIRE(filament_b != nullptr);
+        CHECK(filament_a->inherits() == "Parent A");
+        CHECK(filament_b->inherits().empty());
+        CHECK(filament_b->compatible_printers_condition().empty());
+        CHECK(bundle.fff_prints.find_preset("project.3mf (PrintX)")->inherits().empty());
+    }
+
+    SECTION("a section only applies the keys that the project accepts and the G-code refuses")
+    {
+        Slic3r::PresetBundle bundle;
+        bundle.load_config_model("project.3mf", config,
+                                 "[print:PrintX]\ninherits = Parent print\npost_process = injected_script\nlayer_height = 0.9\n\n");
+        const Slic3r::Preset *print = bundle.fff_prints.find_preset("project.3mf (PrintX)");
+        REQUIRE(print != nullptr);
+        CHECK(print->inherits() == "Parent print");
+        CHECK(print->config.opt<Slic3r::ConfigOptionStrings>("post_process")->get_values().empty());
+        CHECK(print->config.opt_float("layer_height") != Approx(0.9));
+    }
+    SECTION("an SLA project applies the sections of its print, material and printer")
+    {
+        Slic3r::DynamicPrintConfig sla_config;
+        sla_config.apply(Slic3r::SLAFullPrintConfig::defaults());
+        sla_config.set_deserialize_strict({{"printer_technology", "SLA"},
+                                           {"sla_print_settings_id", "SlaPrintX"},
+                                           {"sla_material_settings_id", "SlaMaterialX"},
+                                           {"printer_settings_id", "SlaPrinterX"}});
+        Slic3r::Preset::normalize(sla_config);
+        Slic3r::PresetBundle bundle;
+        bundle.load_config_model("project.3mf", sla_config,
+                                 "[sla_print:SlaPrintX]\ninherits = Parent SLA print\ndefault_sla_print_profile = SlaPrintProfile\n\n"
+                                 "[sla_material:SlaMaterialX]\ninherits = Parent material\ndefault_sla_material_profile = SlaMaterialProfile\n\n"
+                                 "[printer:SlaPrinterX]\ninherits = Parent SLA printer\ndefault_sla_print_profile = SlaPrintProfile\n"
+                                 "default_sla_material_profile = SlaMaterialProfile\n\n");
+        const Slic3r::Preset *print = bundle.sla_prints.find_preset("project.3mf (SlaPrintX)");
+        const Slic3r::Preset *material = bundle.sla_materials.find_preset("project.3mf (SlaMaterialX)");
+        const Slic3r::Preset *printer = bundle.printers.find_preset("project.3mf (SlaPrinterX)");
+        REQUIRE(print != nullptr);
+        REQUIRE(material != nullptr);
+        REQUIRE(printer != nullptr);
+        CHECK(print->inherits() == "Parent SLA print");
+        CHECK(print->config.opt_string("default_sla_print_profile") == "SlaPrintProfile");
+        CHECK(material->inherits() == "Parent material");
+        CHECK(material->config.opt_string("default_sla_material_profile") == "SlaMaterialProfile");
+        CHECK(printer->inherits() == "Parent SLA printer");
+        CHECK(printer->config.opt_string("default_sla_print_profile") == "SlaPrintProfile");
+        CHECK(printer->config.opt_string("default_sla_material_profile") == "SlaMaterialProfile");
+    }}
+
+// The three accumulated metadata keys of older projects are obsolete: a plain configuration file reads them silently
+// and does not keep them, while the 3MF reader reports them as obsolete keys.
+TEST_CASE("The obsolete accumulated metadata keys are ignored",
+          "[plugins][config][project]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *const keys[] = {"compatible_printers_condition_cummulative", "compatible_prints_condition_cummulative", "inherits_cummulative"};
+
+    Slic3r::DynamicPrintConfig ini_config;
+    const Slic3r::ConfigSubstitutions ini_substitutions = ini_config.load_from_ini_string(
+        "compatible_printers_condition_cummulative = a\ncompatible_prints_condition_cummulative = b\ninherits_cummulative = c\n",
+        Slic3r::ForwardCompatibilitySubstitutionRule::Enable);
+    CHECK(ini_substitutions.empty());
+    for (const char *key : keys) {
+        CAPTURE(key);
+        CHECK_FALSE(ini_config.has(key));
+    }
+
+    Slic3r::DynamicPrintConfig project_config;
+    Slic3r::ConfigSubstitutionContext substitutions{Slic3r::ForwardCompatibilitySubstitutionRule::Enable};
+    Slic3r::deserialize_maybe_from_prusa({{keys[0], "a"}, {keys[1], "b"}, {keys[2], "c"}}, project_config, substitutions, true, false);
+    CHECK(substitutions.get().size() == 3);
+    for (const char *key : keys) {
+        CAPTURE(key);
+        CHECK_FALSE(project_config.has(key));
+    }
+}
 // A key without definition has no policy: it is written to every destination, by a configuration with a definition
 // that does not know the key, and by a configuration that has no definition at all.
 TEST_CASE("ConfigBase save writes the keys that have no definition",

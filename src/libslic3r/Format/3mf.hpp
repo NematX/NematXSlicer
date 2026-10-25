@@ -42,12 +42,14 @@ namespace Slic3r {
     extern bool is_project_3mf(const std::string& filename);
 
     // Load the content of a 3mf file into the given model and preset bundle.
+    // When profile_sections is not null, it receives the text of the profile sections entry (untouched when the file has none).
     extern bool load_3mf(const char *path,
                          DynamicPrintConfig &config,
                          ConfigSubstitutionContext &config_substitutions,
                          Model *model,
                          bool check_version,
-                         bool unbake_transformation);
+                         bool unbake_transformation,
+                         std::string *profile_sections = nullptr);
 
     struct OptionStore3mf {
         bool fullpath_sources = true;
@@ -56,12 +58,15 @@ namespace Slic3r {
         bool export_modifiers = true;
         int bake_transformation_in_mesh = -1;
         const ThumbnailData* thumbnail_data = nullptr;
+        // Text of the profile sections entry (PresetBundle::project_profile_sections()); not written when empty or when the config is not exported.
+        std::string profile_sections;
         OptionStore3mf set_fullpath_sources(bool use_fullpath_sources) { fullpath_sources = use_fullpath_sources; return *this; }
         OptionStore3mf set_zip64(bool use_zip64) { zip64 = use_zip64; return *this; }
         OptionStore3mf set_export_config(bool use_export_config) { export_config = use_export_config; return *this; }
         OptionStore3mf set_export_modifiers(bool use_export_modifiers) { export_modifiers = use_export_modifiers; return *this; }
         OptionStore3mf set_thumbnail_data(const ThumbnailData* thumbnail) { thumbnail_data = thumbnail; return *this; }
         OptionStore3mf set_bake_transformation_in_mesh(bool use_bake_transformation_in_mesh) { this->bake_transformation_in_mesh = use_bake_transformation_in_mesh ? 1 : 0; return *this; }
+        OptionStore3mf set_profile_sections(std::string text) { profile_sections = std::move(text); return *this; }
     };
 
     // Save the given model and the config data contained in the given Print into a 3mf file.

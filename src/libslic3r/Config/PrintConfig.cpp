@@ -523,6 +523,8 @@ static std::set<t_config_option_key> PrintConfigDef_ignore = {
     "enable_dynamic_overhang_speeds", "overhang_speed_0", "overhang_speed_1", "overhang_speed_2", "overhang_speed_3", // converted in composite_legacy
     "travel_max_lift", "filament_travel_max_lift", // removed, using retract_lift also for rampping lift instead.
     "small_area_infill_flow_compensation",
+    // Profile metadata of a project is now stored in per-profile sections of the project file.
+    "compatible_printers_condition_cummulative", "compatible_prints_condition_cummulative", "inherits_cummulative",
 };
 namespace Handle_legacy_tools {
 

@@ -94,6 +94,8 @@ const std::string SLIC3R_PRINT_CONFIG_FILE = "Metadata/Slic3r.config"; // gcode-
 const std::string SUPER_PRINT_CONFIG_FILE = "Metadata/SuperSlicer.config"; // gcode-style
 const std::string PRUSA_PRINT_CONFIG_FILE = "Metadata/Slic3r_PE.config"; // gcode-style
 const std::string BBS_PROJECT_CONFIG_FILE = "Metadata/project_settings.config"; // json
+// Preset metadata of the selected profiles, one "[type:name]" ini section per profile (see PresetBundle::project_profile_sections()).
+const std::string SLIC3R_PROFILES_FILE = "Metadata/Slic3r_profiles.ini"; // ini
 
 const std::string SLIC3R_MODEL_CONFIG_FILE = "Metadata/Slic3r_model.config"; // xml
 const std::string SUPER_MODEL_CONFIG_FILE = "Metadata/SuperSlicer_model.config"; // xml
@@ -541,6 +543,8 @@ namespace Slic3r {
 
     public:
         bool unbake_transformation = false;
+        // Receives the text of the profile sections entry, when not null and when the archive has this entry.
+        std::string *profile_sections = nullptr;
 
         _3MF_Importer();
         ~_3MF_Importer();
@@ -570,6 +574,7 @@ namespace Slic3r {
         void _extract_layer_config_ranges_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat, ConfigSubstitutionContext& config_substitutions);
         void _extract_sla_support_points_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
         void _extract_sla_drain_holes_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
+        void _extract_profile_sections_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
         void _extract_custom_gcode_per_print_z_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat);
 
@@ -865,6 +870,10 @@ namespace Slic3r {
                     // extract slic3r print config file
                     _extract_print_config_from_archive(archive, stat, config, config_substitutions, filename);
                     print_config_parsed = true;
+                }
+                else if (boost::algorithm::iequals(name, SLIC3R_PROFILES_FILE)) {
+                    // extract the preset metadata of the profiles
+                    _extract_profile_sections_from_archive(archive, stat);
                 }
                 else if (boost::algorithm::iequals(name, CUSTOM_GCODE_PER_PRINT_Z_FILE)) {
                     // extract slic3r layer config ranges file
@@ -1289,6 +1298,19 @@ namespace Slic3r {
             //ConfigBase::load_from_gcode_string_legacy(config, buffer.data(), config_substitutions);
             deserialize_maybe_from_prusa(ConfigBase::load_gcode_string_legacy(buffer.data()), config, config_substitutions, true, m_trying_read_prusa);
         }
+    }
+
+    // The text is kept as it is: PresetBundle parses and filters it.
+    void _3MF_Importer::_extract_profile_sections_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
+    {
+        if (profile_sections == nullptr || stat.m_uncomp_size == 0)
+            return;
+        std::string buffer((size_t)stat.m_uncomp_size, 0);
+        if (mz_zip_reader_extract_to_mem(&archive, stat.m_file_index, (void*)buffer.data(), (size_t)stat.m_uncomp_size, 0) == 0) {
+            add_error("Error while reading profile sections data to buffer");
+            return;
+        }
+        *profile_sections = std::move(buffer);
     }
 
     void _3MF_Importer::_extract_layer_heights_profile_config_from_archive(mz_zip_archive& archive, const mz_zip_archive_file_stat& stat)
@@ -2764,6 +2786,7 @@ namespace Slic3r {
         bool _add_sla_support_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_drain_holes_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, const std::string &file_path, ConfigWriteTarget target);
+        bool _add_profile_sections_file_to_archive(mz_zip_archive& archive);
         bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, const DynamicPrintConfig& print_config, const IdToObjectDataMap &objects_data, const std::string &file_path);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig& config);
     };
@@ -2887,10 +2910,12 @@ namespace Slic3r {
         // This file contains the content of FullPrintConfing / SLAFullPrintConfig.
         if (config && m_options.export_config) {
             // also add prusa (& superslicer for backward comp, just for some version from 2.3.56) print config
-            // The Prusa-compatible file carries the same keys as the G-code, the others the keys of the project.
-            bool error = !_add_print_config_file_to_archive(archive, *config, SLIC3R_PRINT_CONFIG_FILE, ConfigWriteTarget::Project);
+            // The three files carry the keys of the G-code; the Prusa-compatible one is converted to the Prusa key names.
+            // The preset metadata, refused by the G-code, is stored apart in the profile sections file.
+            bool error = !_add_print_config_file_to_archive(archive, *config, SLIC3R_PRINT_CONFIG_FILE, ConfigWriteTarget::GCode);
             error = error || !_add_print_config_file_to_archive(archive, *config, PRUSA_PRINT_CONFIG_FILE, ConfigWriteTarget::GCode);
-            error = error || !_add_print_config_file_to_archive(archive, *config, SUPER_PRINT_CONFIG_FILE, ConfigWriteTarget::Project);
+            error = error || !_add_print_config_file_to_archive(archive, *config, SUPER_PRINT_CONFIG_FILE, ConfigWriteTarget::GCode);
+            error = error || !_add_profile_sections_file_to_archive(archive);
             if(error) {
                 close_zip_writer(&archive);
                 boost::filesystem::remove(filename);
@@ -3676,6 +3701,18 @@ namespace Slic3r {
         return true;
     }
 
+    // Write the profile sections text given in the options, as it is; no entry is written when there is no text.
+    bool _3MF_Exporter::_add_profile_sections_file_to_archive(mz_zip_archive& archive)
+    {
+        if (m_options.profile_sections.empty())
+            return true;
+        if (!mz_zip_writer_add_mem(&archive, SLIC3R_PROFILES_FILE.c_str(), (const void*)m_options.profile_sections.data(), m_options.profile_sections.length(), MZ_DEFAULT_COMPRESSION)) {
+            add_error("Unable to add profile sections file to archive");
+            return false;
+        }
+        return true;
+    }
+
     // Only the keys whose nature allows the destination are written; the filter runs before the Prusa conversion.
     bool _3MF_Exporter::_add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig& config, const std::string &config_name, ConfigWriteTarget target)
     {
@@ -4133,7 +4170,8 @@ bool load_3mf(const char *path,
               ConfigSubstitutionContext &config_substitutions,
               Model *model,
               bool check_version,
-              bool unbake_transformation) {
+              bool unbake_transformation,
+              std::string *profile_sections) {
     if (path == nullptr || model == nullptr)
         return false;
 
@@ -4141,6 +4179,7 @@ bool load_3mf(const char *path,
     CNumericLocalesSetter locales_setter;
     _3MF_Importer         importer;
     importer.unbake_transformation = unbake_transformation;
+    importer.profile_sections = profile_sections;
     bool res = importer.load_model_from_file(path, *model, config, config_substitutions, check_version);
     importer.log_errors();
     handle_legacy_project_loaded(importer.version(), config, importer.prusaslicer_generator_version());

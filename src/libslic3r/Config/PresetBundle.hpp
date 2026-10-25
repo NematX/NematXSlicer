@@ -5,6 +5,11 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// PresetBundle owns the preset collections (print, filament, printer, SLA print and material, physical printers) and the
+// project configuration. It loads the presets from the user and vendor profiles, from config bundles, and from the
+// configuration of a project, a config file or a G-code (load_config_model, load_config_file). It also builds the full
+// configuration of the selected presets (full_config) and, for the project files, the text of the profile sections that
+// carry the preset metadata of each selected profile (project_profile_sections).
 #ifndef slic3r_PresetBundle_hpp_
 #define slic3r_PresetBundle_hpp_
 
@@ -95,6 +100,12 @@ public:
 
     DynamicPrintConfig          full_config() const;
 
+    // Return the ini text of the project profile sections: one "[<type>:<name>]" section per selected profile
+    // (print, each distinct filament, printer; or the SLA equivalents), holding the preset metadata (inherits,
+    // compatible_*, default_*_profile) of the selected preset (its edited copy when it is the active one). Meant for the project files (3MF, AMF), whose flat
+    // configuration does not carry these keys.
+    std::string                 project_profile_sections() const;
+
     // Load user configuration and store it into the user profiles.
     // This method is called by the configuration wizard.
     void                        load_config_from_wizard(const std::string &name, DynamicPrintConfig config)
@@ -102,8 +113,11 @@ public:
 
     // Load configuration that comes from a model file containing configuration, such as 3MF et al.
     // This method is called by the Plater.
-    void                        load_config_model(const std::string &name, DynamicPrintConfig config)
-        { this->load_config_file_config(name, true, std::move(config)); }
+    // profile_sections is the text written by project_profile_sections(); each loaded preset receives the metadata
+    // of the section named after its original profile name. An empty text brings no metadata: the presets keep the
+    // metadata values found in the configuration itself, if any.
+    void                        load_config_model(const std::string &name, DynamicPrintConfig config, const std::string &profile_sections = std::string())
+        { this->load_config_file_config(name, true, std::move(config), profile_sections); }
 
     // Load an external config file containing the print, filament and printer presets.
     // Instead of a config file, a G-code may be loaded containing the full set of parameters.
@@ -200,7 +214,8 @@ private:
     // Load print, filament & printer presets from a config. If it is an external config, then the name is extracted from the external path.
     // and the external config is just referenced, not stored into user profile directory.
     // If it is not an external config, then the config will be stored into the user profile directory.
-    void                        load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config);
+    void                        load_config_file_config(const std::string &name_or_path, bool is_external, DynamicPrintConfig &&config,
+                                                        const std::string &profile_sections = std::string());
     ConfigSubstitutions         load_config_file_config_bundle_dont_save(
         const std::string &path, const boost::property_tree::ptree &tree, ForwardCompatibilitySubstitutionRule compatibility_rule, bool from_prusa = false);
 

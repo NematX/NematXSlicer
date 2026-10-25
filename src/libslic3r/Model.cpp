@@ -225,11 +225,14 @@ Model Model::read_from_file(const std::string& input_file,
 }
 
 // Loading model from a file (3MF or AMF), not from a simple geometry file (STL or OBJ).
+// Outputs: the returned model, the configuration (config, then handle_legacy_sla and the custom G-code per print z of the
+// model), the substitutions and, when not null, the profile sections text. An unknown extension or a failed load throws
+// a RuntimeError; an archive without objects is accepted, as it may hold only the configuration.
 Model Model::read_from_archive(const std::string& input_file,
                                DynamicPrintConfig* config,
                                ConfigSubstitutionContext* config_substitutions,
-                               LoadAttributes options
-                               )
+                               LoadAttributes options,
+                               std::string* profile_sections)
 {
     assert(config != nullptr);
     assert(config_substitutions != nullptr);
@@ -238,9 +241,9 @@ Model Model::read_from_archive(const std::string& input_file,
 
     bool result = false;
     if (boost::algorithm::iends_with(input_file, ".3mf") || boost::algorithm::iends_with(input_file, ".zip"))
-        result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, options & LoadAttribute::CheckVersion, options & LoadAttribute::UnbakeTransformation);
+        result = load_3mf(input_file.c_str(), *config, *config_substitutions, &model, options & LoadAttribute::CheckVersion, options & LoadAttribute::UnbakeTransformation, profile_sections);
     else if (boost::algorithm::iends_with(input_file, ".zip.amf"))
-        result = load_amf(input_file.c_str(), config, config_substitutions, &model, options & LoadAttribute::CheckVersion);
+        result = load_amf(input_file.c_str(), config, config_substitutions, &model, options & LoadAttribute::CheckVersion, profile_sections);
     else
         throw Slic3r::RuntimeError("Unknown file format. Input file must have .3mf or .zip.amf extension.");
 

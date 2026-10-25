@@ -91,7 +91,9 @@ enum class ConfigOptionNature : uint8_t {
 enum class ConfigWriteTarget : uint8_t {
     // Each destination intentionally equals its corresponding withdrawal flag.
     Local = static_cast<uint8_t>(ConfigOptionNature::NotLocal),     // The setting owner's file.
-    Project = static_cast<uint8_t>(ConfigOptionNature::NotProject), // The complete project, including profile sections.
+    // Used with GCode to select the keys of the project profile sections: the keys that the project accepts and the
+    // G-code refuses (the preset metadata). The flat configuration of a project is written with the GCode target.
+    Project = static_cast<uint8_t>(ConfigOptionNature::NotProject),
     GCode = static_cast<uint8_t>(ConfigOptionNature::NotGCode),     // Embedded configuration or an export of the same contents.
 };
 

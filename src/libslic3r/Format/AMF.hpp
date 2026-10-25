@@ -21,12 +21,17 @@ class DynamicPrintConfig;
 struct ConfigSubstitutionContext;
 
 // Load the content of an amf file into the given model and configuration.
-extern bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version);
+// When profile_sections is not null, it receives the text of the profile sections metadata (untouched when the file has none).
+extern bool load_amf(const char* path, DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions, Model* model, bool check_version,
+                     std::string* profile_sections = nullptr);
 
 struct OptionStoreAmf {
     bool fullpath_sources = true;
     bool export_config = true;
     bool export_modifiers = true;
+    // Text of the profile sections metadata (PresetBundle::project_profile_sections()); not written when empty or when the config is not exported.
+    std::string profile_sections;
+    OptionStoreAmf& set_profile_sections(std::string text) { profile_sections = std::move(text); return *this; }
     OptionStoreAmf& set_fullpath_sources(bool use_fullpath_sources) { fullpath_sources = use_fullpath_sources; return *this; }
     OptionStoreAmf& set_export_config(bool use_export_config) { export_config = use_export_config; return *this; }
     OptionStoreAmf& set_export_modifiers(bool use_export_modifiers) { export_modifiers = use_export_modifiers; return *this; }

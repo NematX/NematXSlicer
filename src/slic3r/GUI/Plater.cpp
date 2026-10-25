@@ -2786,13 +2786,16 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
                 }
 #endif
                 DynamicPrintConfig config;
+                // Preset metadata of the profiles of the project, applied by the preset bundle when it loads the presets.
+                std::string profile_sections;
                 PrinterTechnology loaded_printer_technology {ptFFF};
                 {
                     DynamicPrintConfig config_loaded;
                     ConfigSubstitutionContext config_substitutions{ ForwardCompatibilitySubstitutionRule::Enable };
                     loaded_model = Slic3r::Model::read_from_archive(path.string(), &config_loaded, &config_substitutions,
                                                              only_if(load_config, Model::LoadAttribute::CheckVersion) |
-                                                             only_if(unbake_trsf, Model::LoadAttribute::UnbakeTransformation));
+                                                             only_if(unbake_trsf, Model::LoadAttribute::UnbakeTransformation),
+                                                             &profile_sections);
                     if (load_config && !config_loaded.empty()) {
                         // loaded: allow to ask again for support_material_overhangs
                         wxGetApp().get_tab(Preset::TYPE_FFF_PRINT)->get_config_manipulation().initialize_support_material_overhangs_queried(false);
@@ -2852,7 +2855,7 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path>& input_
 
                         Preset::normalize(config);
                         PresetBundle* preset_bundle = wxGetApp().preset_bundle.get();
-                        preset_bundle->load_config_model(filename.string(), std::move(config));
+                        preset_bundle->load_config_model(filename.string(), std::move(config), profile_sections);
                         q->notify_about_installed_presets();
 
                         if (loaded_printer_technology == ptFFF)
@@ -7610,6 +7613,8 @@ void Plater::export_platter()
                 .set_export_config(extra_options->with_config())
                 .set_export_modifiers(extra_options->with_modifers())
                 .set_bake_transformation_in_mesh(extra_options->with_bake_transformation())
+                // The metadata of the profiles goes with the configuration, only when it is exported.
+                .set_profile_sections(extra_options->with_config() ? wxGetApp().preset_bundle->project_profile_sections() : std::string())
             );
         } else if (dlg.GetFilterIndex() == 2) {
             //store amf
@@ -7620,6 +7625,7 @@ void Plater::export_platter()
                 .set_fullpath_sources(wxGetApp().app_config->get("export_sources_full_pathnames") == "1")
                 .set_export_config(true) // no effect extra_options->with_config())
                 .set_export_modifiers(extra_options->with_modifers())
+                .set_profile_sections(wxGetApp().preset_bundle->project_profile_sections())
             );
         }
     }
@@ -7969,7 +7975,8 @@ bool Plater::export_3mf(const boost::filesystem::path& output_path)
                                 OptionStore3mf{}
                                     .set_fullpath_sources(full_pathnames)
                                     .set_thumbnail_data(&thumbnail_data)
-                                    .set_bake_transformation_in_mesh(merge_transformation));
+                                    .set_bake_transformation_in_mesh(merge_transformation)
+                                    .set_profile_sections(wxGetApp().preset_bundle->project_profile_sections()));
     }
     catch (boost::filesystem::filesystem_error& e)
     {

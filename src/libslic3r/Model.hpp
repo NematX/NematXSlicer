@@ -1341,10 +1341,16 @@ public:
         DynamicPrintConfig* config = nullptr, ConfigSubstitutionContext* config_substitutions = nullptr,
         LoadAttributes options = LoadAttribute::AddDefaultInstances, std::optional<std::pair<double, double>> step_deflections = std::nullopt);
         
+    // Read a project archive (3MF or ".zip.amf") and return its model. The configuration found in the archive is added to
+    // config and the substituted values are recorded in config_substitutions; both must not be null.
+    // profile_sections, when not null, receives the text of the profile sections of the project (see
+    // PresetBundle::project_profile_sections()); it is left untouched when the archive has none.
+    // Throws a RuntimeError when the file extension is unknown or when the archive cannot be loaded.
     static Model read_from_archive(
         const std::string& input_file, 
         DynamicPrintConfig* config, ConfigSubstitutionContext* config_substitutions,
-        LoadAttributes options = LoadAttribute::AddDefaultInstances);
+        LoadAttributes options = LoadAttribute::AddDefaultInstances,
+        std::string* profile_sections = nullptr);
 
     bool equals(const Model& rhs) const;
 
