@@ -37,6 +37,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityVisitors.hpp"
 #include "libslic3r/GCode.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
@@ -58,7 +59,9 @@
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
+#include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
+#include "libslic3r/Steps/StepSlicing.hpp"
 #include "test_data.hpp"
 
 /*
@@ -1617,6 +1620,210 @@ TEST_CASE("Default firmware emits ordered semantic marker triplets for layers",
         ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.25"
     };
     CHECK(semantic_marker_lines(output) == expected);
+}
+
+TEST_CASE("Default firmware layer change describes mixed-height print Z groups",
+          "[plugins][gcode][firmware][markers]")
+{
+    // A print Z may group layers of different heights. The layer change uses
+    // the object layer height when the group has one, otherwise the smallest
+    // height; each extrusion still writes its own height when it differs.
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model,
+                     {{"layer_height", "0.2"}, {"first_layer_height", "0.2"}});
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+    PrintObject &object = print.object(0);
+    REQUIRE(object.layer_count() > 1);
+    const Layer &object_layer = object.layer(1);
+    REQUIRE(object_layer.scaled_print_z() == scale_i(0.4));
+    REQUIRE(object_layer.scaled_height() == scale_i(0.2));
+
+    // A thinner support layer at the object Z, listed before the object layer
+    // so the choice cannot depend on the group order, then two support layers
+    // alone at a higher Z.
+    const coord_t support_z = scale_i(1.4);
+    const Layer &thin_support = object.add_auxiliary_layer(0, scale_i(0.1), object_layer.scaled_print_z());
+    const Layer &thick_support = object.add_auxiliary_layer(1, scale_i(0.3), support_z);
+    const Layer &middle_support = object.add_auxiliary_layer(2, scale_i(0.15), support_z);
+
+    configure_standard_firmware(print);
+    PrintingLayerGroup &mixed_layer = append_marker_test_layer(print, object_layer.scaled_print_z());
+    mixed_layer.layers = {&thin_support, &object_layer};
+    append_path_extrusion(
+        mixed_layer.tool_groups.front(),
+        marker_test_path(0.0, 1.0, ExtrusionRole::SupportMaterial, 0.4f, 0.1f));
+    append_path_extrusion(
+        mixed_layer.tool_groups.front(),
+        marker_test_path(1.0, 2.0, ExtrusionRole::Perimeter, 0.4f, 0.2f));
+    PrintingLayerGroup &support_layer = append_marker_test_layer(print, support_z);
+    support_layer.layers = {&thick_support, &middle_support};
+    append_path_extrusion(
+        support_layer.tool_groups.front(),
+        marker_test_path(2.0, 3.0, ExtrusionRole::SupportMaterial, 0.4f, 0.3f));
+
+    const std::string output = export_with_firmware(
+        print, "gcode.firmware.marlin2");
+    INFO(output);
+    const std::vector<std::string> expected{
+        ";LAYER_CHANGE", ";Z:0.4", ";HEIGHT:0.2",
+        ";TYPE:Support material", ";WIDTH:0.4", ";HEIGHT:0.1",
+        ";TYPE:Perimeter", ";HEIGHT:0.2",
+        ";LAYER_CHANGE", ";Z:1.4", ";HEIGHT:0.15",
+        ";TYPE:Support material", ";HEIGHT:0.3"
+    };
+    CHECK(semantic_marker_lines(output) == expected);
+}
+
+// Slice two owned objects without support, borrow their real by-layer plan, and check
+// that a shared scaled Z with unequal heights uses the height of the first object layer of the group;
+// failures in slicing, grouping or firmware initialization are reported by the assertions.
+TEST_CASE("Default firmware accepts different object layer heights in the by-layer plan",
+          "[plugins][gcode][firmware][markers]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"first_layer_height", "0.2"},
+                                   {"support_material", "0"}});
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
+                     print, model, config);
+    model.objects()[0].config.set_deserialize_strict("layer_height", "0.2");
+    model.objects()[1].config.set_deserialize_strict("layer_height", "0.3");
+    print.apply(model, config);
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Steps::StepLayerHeightGeneration::run_step(orchestrator, print);
+    Steps::StepSlicing::run_step(orchestrator, print);
+    configure_standard_firmware(print);
+    PrintingPlan plan = build_printing_plan_by_layer(print);
+    PluginStorage storage;
+    slic3r_api::Ordering::ObjectInstanceCatalogPlugin::populate_object_instance_catalog(
+        reinterpret_cast<const print_handle *>(&print),
+        reinterpret_cast<printing_plan_handle *>(&plan),
+        reinterpret_cast<storage_handle *>(&storage));
+    REQUIRE(plan.groups.size() == 1);
+
+    // The builder merges only exactly equal scaled Z values stored as coord_t.
+    // Keep the plan and print alive while this non-owning pointer is used.
+    const PrintingLayerGroup *mixed_layer = nullptr;
+    for (const PrintingLayerGroup &layer : plan.groups.front().layers) {
+        if (layer.layers.size() == 2 &&
+            layer.layers[0]->scaled_height() != layer.layers[1]->scaled_height()) {
+            mixed_layer = &layer;
+            break;
+        }
+    }
+    REQUIRE(mixed_layer != nullptr);
+    const Layer &first_layer = *mixed_layer->layers[0];
+    const Layer &second_layer = *mixed_layer->layers[1];
+    INFO("shared scaled Z: " << mixed_layer->print_z << "; heights: "
+         << first_layer.scaled_height() << ", " << second_layer.scaled_height());
+    REQUIRE(first_layer.scaled_print_z() == second_layer.scaled_print_z());
+    REQUIRE(first_layer.scaled_print_z() == mixed_layer->print_z);
+    REQUIRE(first_layer.scaled_height() == scale_i(0.2));
+    REQUIRE(second_layer.scaled_height() == scale_i(0.3));
+
+    slic3r_api::GCodeGeneration::Firmware::Marlin2GCodeFirmwareSession session;
+    session.begin_print(
+        slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
+        slic3r_api::ConstPrintingPlan(
+            reinterpret_cast<const printing_plan_handle *>(&plan)));
+    std::string output;
+    REQUIRE_NOTHROW(output = session.begin_layer(slic3r_api::ConstPrintingLayerGroup(
+        reinterpret_cast<const printing_layer_group_handle *>(mixed_layer))));
+    const std::vector<std::string> markers = semantic_marker_lines(output);
+    REQUIRE(markers.size() == 3);
+    CHECK(markers[0] == ";LAYER_CHANGE");
+    CHECK(markers[2] == ";HEIGHT:0.2");
+}
+
+// Process two owned cubes with different layer heights through production ordering,
+// then export with the plugin writer and parse its owned G-code to check the shared
+// Z markers and positive-E XY extrusion; pipeline and export failures propagate.
+TEST_CASE("Default firmware exports different object layer heights in the by-layer plan",
+          "[plugins][gcode][firmware][markers]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"first_layer_height", "0.2"},
+                                   {"support_material", "0"},
+                                   {"complete_objects", "0"},
+                                   {"parallel_objects_step", "0"},
+                                   {"seam_visibility", "0"}});
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20},
+                     print, model, config);
+    model.objects()[0].config.set_deserialize_strict("layer_height", "0.2");
+    model.objects()[1].config.set_deserialize_strict("layer_height", "0.3");
+    print.apply(model, config);
+    REQUIRE_NOTHROW(print.process());
+
+    // Export resumes the slicing pipeline through production ordering and the
+    // selected plugin writer. Always remove both output files, including on failure.
+    select_printing_plan_writer(print, "gcode.firmware.marlin2");
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    std::string output;
+    try {
+        Orchestrator::instance().export_gcode(print, output_path.string(), nullptr);
+        output = read_text_file(output_path);
+    } catch (...) {
+        remove_output_pair(output_path);
+        throw;
+    }
+    remove_output_pair(output_path);
+
+    // Inspect the production plan after exporting: both sources must occupy
+    // exactly the same scaled Z, with their different sliced heights intact.
+    REQUIRE(print.printing_plan() != nullptr);
+    const PrintingPlan &plan = *print.printing_plan();
+    REQUIRE(plan.groups.size() == 1);
+    const PrintingLayerGroup *mixed_layer = nullptr;
+    for (const PrintingLayerGroup &layer : plan.groups.front().layers)
+        if (layer.print_z == scale_i(0.8)) {
+            mixed_layer = &layer;
+            break;
+        }
+    REQUIRE(mixed_layer != nullptr);
+    REQUIRE(mixed_layer->layers.size() == 2);
+    REQUIRE(mixed_layer->layers[0]->scaled_print_z() == scale_i(0.8));
+    REQUIRE(mixed_layer->layers[1]->scaled_print_z() == scale_i(0.8));
+    REQUIRE(mixed_layer->layers[0]->scaled_height() == scale_i(0.2));
+    REQUIRE(mixed_layer->layers[1]->scaled_height() == scale_i(0.3));
+
+    const std::string layer_start = ";LAYER_CHANGE\n;Z:0.8\n;HEIGHT:0.2\n";
+    const size_t begin = output.find(layer_start);
+    REQUIRE(begin != std::string::npos);
+    const size_t end = output.find(";LAYER_CHANGE\n", begin + layer_start.size());
+    REQUIRE(end != std::string::npos);
+    REQUIRE(output.find(";HEIGHT:0.3\n", begin + layer_start.size()) < end);
+
+    // Parse the whole file to retain absolute-E state and resets. Inside the
+    // target layer, require XY motion with increasing E while height is 0.3;
+    // travel and E-only unretraction cannot satisfy this check.
+    GCodeReader reader;
+    bool target_layer = false;
+    bool thick_height = false;
+    bool thick_extrusion = false;
+    reader.parse_buffer(output, [&target_layer, &thick_height, &thick_extrusion](
+        GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (line.comment() == "LAYER_CHANGE") {
+            target_layer = false;
+            thick_height = false;
+        } else if (line.comment() == "Z:0.8") {
+            target_layer = true;
+        } else if (line.comment().substr(0, 7) == "HEIGHT:") {
+            thick_height = line.comment() == "HEIGHT:0.3";
+        }
+        if (target_layer && thick_height && line.extruding(state) && line.dist_XY(state) > 0.)
+            thick_extrusion = true;
+    });
+    CHECK(thick_extrusion);
 }
 
 TEST_CASE("Default firmware emits TYPE WIDTH and HEIGHT before printable geometry",

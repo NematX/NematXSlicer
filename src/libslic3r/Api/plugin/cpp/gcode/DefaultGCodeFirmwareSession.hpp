@@ -262,6 +262,7 @@ private:
     std::string select_extruder(extruder_index_t tool_id, bool emit_command = true);
     std::string move_to_group_start(const ConstPrintingGroup &group);
     std::string write_extrusion_tree(const ExtrusionEntity &root);
+    // Select the first object height or smallest source height, rejecting invalid sources; without sources, find the first printable extrusion height or return nullopt, without mutating the group.
     std::optional<float> reliable_layer_height(const ConstPrintingLayerGroup &layer) const;
     // Emit changed role/dimension tags, permitting zero dimensions for fixed-E paths.
     std::string write_printable_markers(const EPropertyAttributes &attributes, bool fixed_e = false);

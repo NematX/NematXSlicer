@@ -120,6 +120,28 @@ bool extrusion_tree_has_segments(const ExtrusionEntity &root)
     return false;
 }
 
+// Return true when the layer is one of its object's sliced layers, false for
+// an auxiliary layer (support, brim, ...). Object layers are sorted by
+// print_z with one layer per Z, so a binary search finds the only candidate.
+bool is_object_layer(const Layer &layer)
+{
+    const Object object = layer.object();
+    if (!object.valid())
+        return false;
+    uint32_t first = 0;
+    uint32_t count = object.layer_count();
+    while (count > 0) {
+        const uint32_t step = count / 2;
+        if (object.layer(first + step).print_z() < layer.print_z()) {
+            first += step + 1;
+            count -= step + 1;
+        } else {
+            count = step;
+        }
+    }
+    return first < object.layer_count() && object.layer(first).handle() == layer.handle();
+}
+
 class FirstPrintableHeightVisitor final : public ExtrusionTreeConstVisitor<>
 {
 public:
@@ -529,21 +551,32 @@ std::string DefaultGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGro
     return output;
 }
 
+// Inspect a borrowed group without mutation and return its marker height in mm; invalid
+// or non-positive source layers throw invalid_argument. Without sources, search for the
+// first printable extrusion height, returning nullopt when none is available.
 std::optional<float> DefaultGCodeFirmwareSession::reliable_layer_height(
     const ConstPrintingLayerGroup &layer) const
 {
+    // One print Z may group objects with different layer heights, an object
+    // layer with an unsynchronized support layer, or several support slabs
+    // published at the same Z. This height only feeds the ;HEIGHT: marker of the layer
+    // change, and write_printable_markers() still writes the exact height before
+    // every extrusion whose height differs from it. The first object layer
+    // describes the layer change; without one, the thinnest layer is used.
     if (layer.layer_count() > 0) {
-        const Layer first_layer = layer.layer(0);
-        if (!first_layer.valid() || first_layer.height() <= 0)
-            throw std::invalid_argument("A source layer needs a positive height.");
-        const coord_t height = first_layer.height();
-        for (uint32_t layer_idx = 1; layer_idx < layer.layer_count(); ++layer_idx) {
+        std::optional<coord_t> object_height;
+        std::optional<coord_t> smallest_height;
+        for (uint32_t layer_idx = 0; layer_idx < layer.layer_count(); ++layer_idx) {
             const Layer source_layer = layer.layer(layer_idx);
-            if (!source_layer.valid() || source_layer.height() != height)
-                throw std::invalid_argument(
-                    "Layers grouped at one print Z must have the same height.");
+            if (!source_layer.valid() || source_layer.height() <= 0)
+                throw std::invalid_argument("A source layer needs a positive height.");
+            const coord_t height = source_layer.height();
+            if (!object_height && is_object_layer(source_layer))
+                object_height = height;
+            if (!smallest_height || height < *smallest_height)
+                smallest_height = height;
         }
-        return float(unscaled(height));
+        return float(unscaled(object_height ? *object_height : *smallest_height));
     }
 
     FirstPrintableHeightVisitor visitor;
