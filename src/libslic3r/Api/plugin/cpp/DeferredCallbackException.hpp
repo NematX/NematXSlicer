@@ -38,9 +38,16 @@ Typical use:
 
 capture_current() must be called from a catch handler. The first exception is
 retained so a later cleanup failure cannot hide the operation's primary cause.
+
+The object is thread-safe, so the jobs of a parallel loop can share one instance.
+captured() is a lock-free atomic read for the early return at the top of each
+job; the exception_ptr itself is guarded by a mutex that is only held to store
+or copy the pointer, never while a job runs or while the exception is rethrown.
 */
 
+#include <atomic>
 #include <exception>
+#include <mutex>
 #include <utility>
 
 namespace slic3r_api {
@@ -48,34 +55,70 @@ namespace slic3r_api {
 class DeferredCallbackException
 {
 public:
+    DeferredCallbackException() = default;
+
+    // Copies the state of `other` (the captured exception, if any), so the class stays a copyable value of the
+    // public plugin API although it owns a mutex. The source is locked while it is read.
+    DeferredCallbackException(const DeferredCallbackException &other)
+    {
+        std::lock_guard<std::mutex> lock(other.m_mutex);
+        m_exception = other.m_exception;
+        m_captured.store(other.m_exception != nullptr, std::memory_order_release);
+    }
+
+    // Both mutexes are locked together (std::scoped_lock avoids a deadlock between two threads assigning in
+    // opposite directions); a self-assignment does nothing.
+    DeferredCallbackException &operator=(const DeferredCallbackException &other)
+    {
+        if (this == &other)
+            return *this;
+        std::scoped_lock lock(m_mutex, other.m_mutex);
+        m_exception = other.m_exception;
+        m_captured.store(m_exception != nullptr, std::memory_order_release);
+        return *this;
+    }
+
     // Capture the exception currently handled by the caller. Return true only
     // when this call stored the first exception; false means that an earlier
     // exception already owns the outcome or that no exception is being handled.
+    // Safe to call from several threads: exactly one call returns true.
     bool capture_current() noexcept
     {
-        if (m_exception != nullptr)
-            return false;
-
         std::exception_ptr current = std::current_exception();
         if (current == nullptr)
             return false;
 
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (m_exception != nullptr)
+            return false;
+
         m_exception = std::move(current);
+        m_captured.store(true, std::memory_order_release);
         return true;
     }
 
-    bool captured() const noexcept { return m_exception != nullptr; }
+    // True once an exception was stored; a cheap check for a job's early return.
+    bool captured() const noexcept { return m_captured.load(std::memory_order_acquire); }
 
     // Call this only after the foreign invocation has returned. Rethrowing
     // while still inside the C callback would violate the boundary this class
     // is intended to protect.
     void rethrow_if_captured() const
     {
-        if (m_exception != nullptr)
-            std::rethrow_exception(m_exception);
+        if (! captured())
+            return;
+        // Copy under the lock, rethrow after releasing it.
+        std::exception_ptr stored;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            stored = m_exception;
+        }
+        std::rethrow_exception(stored);
     }
 
 private:
+    std::atomic<bool> m_captured{ false };
+    mutable std::mutex m_mutex;
     std::exception_ptr m_exception;
 };
 

@@ -41,7 +41,29 @@ typedef struct const_strings_t {
 } const_strings_t;
 
 
-/* tbb */
+/*
+Parallel loops (tbb)
+====================
+
+Exception contract, valid for slic3r_parallel_for() and slic3r_parallel_for_storage():
+the callback must not let any exception out. The host loops are C functions,
+and the compiler may assume that no C++ exception unwinds through them: the
+cleanup of their frames can be skipped, which corrupts the thread pool state
+(a crash that appears later, in Release builds). A callback that does let an
+exception out ends the process (the host logs the failure, then calls
+std::terminate()). A C++ plugin catches everything in the callback, keeps the
+first exception and rethrows it after the loop returned, in its own C++ code:
+slic3r_api::DeferredCallbackException does this, and
+slic3r_api::parallel_for_storage_with_progress() (ParallelFor.hpp) wraps a whole
+job that way. A cooperative cancellation raised in a nested parallel loop
+behaves like any other exception: it is deferred until that loop joins, so the
+job that contains it runs on until then. When the TBB group that runs the caller
+is cancelled (a sibling task failed), the loop may skip some or all of its
+callbacks and still return normally, so a caller cannot take a normal return
+for "every index ran". A null fn makes the call return at once.
+
+slic3r_parallel_for(): calls fn(index, user_data) for every index in [begin, end).
+*/
 SLIC3R_HOST_API void slic3r_parallel_for(uint32_t begin, uint32_t end, void *user_data, void (*fn)(uint32_t index, void *user_data));
 
 /*
@@ -70,6 +92,8 @@ destroys it as soon as fn() returns for that item. Therefore, never keep a
 handle allocated from scratch_storage in user_data, in a global/static variable,
 or in the host data tree unless a callback has copied or moved the data
 immediately.
+
+The callback must not let any exception out (see above).
 */
 typedef void (*slic3r_parallel_for_storage_fn)(uint32_t index, storage_handle *scratch_storage, void *user_data);
 SLIC3R_HOST_API void slic3r_parallel_for_storage(uint32_t begin,

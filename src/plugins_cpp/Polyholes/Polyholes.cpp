@@ -18,6 +18,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_post_slicing.h"
+#include "libslic3r/Api/plugin/cpp/DeferredCallbackException.hpp"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
 
 namespace slic3r_api { namespace PolyholesPlugin {
@@ -177,89 +178,99 @@ void Polyholes::run_impl(const plugin_run_context *run_ctx) const
         uint32_t extruder_count;
         std::vector<std::vector<HoleData>> layerid2center;
         PluginProgress *progress;
+        // First exception of a layer job; slic3r_parallel_for is an extern "C" host function, so no exception may leave a job.
+        DeferredCallbackException failure;
     } thread_data{run_ctx, ctx, Object(ctx->object),
-                  Print(ctx->print).config().get("nozzle_diameter").size(), {}, &progress()};
+                  Print(ctx->print).config().get("nozzle_diameter").size(), {}, &progress(), {}};
 
     thread_data.layerid2center.resize(thread_data.object.layer_count());
 
     slic3r_parallel_for(0, thread_data.object.layer_count(), &thread_data, [](uint32_t layer_idx, void *user_data) {
         ThreadData *data = static_cast<ThreadData *>(user_data);
-        if (is_cancelled(data->run_ctx))
+        if (data->failure.captured())
             return;
-        Layer layer = data->object.layer(layer_idx);
-        // Each worker writes only to the pre-sized layer slot matching its layer,
-        // so no lock is needed during candidate collection.
-        std::vector<HoleData> &layer_center_data = data->layerid2center[layer_idx];
-        for (uint32_t region_idx = 0; region_idx < layer.region_count(); ++region_idx) {
-            if ((region_idx & 63u) == 0u && is_cancelled(data->run_ctx))
+        // Any exception of the job is kept in data->failure; no exception may leave this callback.
+        try {
+            if (is_cancelled(data->run_ctx))
                 return;
-            LayerRegion lregion = layer.region(region_idx);
-            Config region_config = lregion.print_region().config();
-            ConfigOption setting_hole_to_polyhole = region_config.get("hole_to_polyhole");
-            if (setting_hole_to_polyhole.get_bool()) {
-                const std::optional<extruder_index_t> perimeter_extruder =
-                    normalized_perimeter_extruder(
-                        region_config.get("perimeter_extruder").get_int(), data->extruder_count);
-                if (!perimeter_extruder)
-                    continue;
-                bool twist = region_config.get("hole_to_polyhole_twisted").get_bool();
-                ExPolygonCollection region_slices = lregion.slices();
-                uint32_t surface_idx = 0;
-                for (ExPolygon surf_expoly : region_slices) {
-                    if ((surface_idx++ & 63u) == 0u && is_cancelled(data->run_ctx))
-                        return;
-                    uint32_t hole_idx = 0;
-                    for (Polygon hole : surf_expoly.holes()) {
-                        if ((hole_idx++ & 63u) == 0u && is_cancelled(data->run_ctx))
+            Layer layer = data->object.layer(layer_idx);
+            // Each worker writes only to the pre-sized layer slot matching its layer,
+            // so no lock is needed during candidate collection.
+            std::vector<HoleData> &layer_center_data = data->layerid2center[layer_idx];
+            for (uint32_t region_idx = 0; region_idx < layer.region_count(); ++region_idx) {
+                if ((region_idx & 63u) == 0u && is_cancelled(data->run_ctx))
+                    return;
+                LayerRegion lregion = layer.region(region_idx);
+                Config region_config = lregion.print_region().config();
+                ConfigOption setting_hole_to_polyhole = region_config.get("hole_to_polyhole");
+                if (setting_hole_to_polyhole.get_bool()) {
+                    const std::optional<extruder_index_t> perimeter_extruder =
+                        normalized_perimeter_extruder(
+                            region_config.get("perimeter_extruder").get_int(), data->extruder_count);
+                    if (!perimeter_extruder)
+                        continue;
+                    bool twist = region_config.get("hole_to_polyhole_twisted").get_bool();
+                    ExPolygonCollection region_slices = lregion.slices();
+                    uint32_t surface_idx = 0;
+                    for (ExPolygon surf_expoly : region_slices) {
+                        if ((surface_idx++ & 63u) == 0u && is_cancelled(data->run_ctx))
                             return;
-                        // test if convex (as it's clockwise bc it's a hole, we have to do the opposite)
-                        if (hole.convex_points_idx(0, PI).empty() && hole.size() > 8) {
-                            // Estimate circularity from vertex radius and edge-midpoint radius. The midpoint check
-                            // rejects rectangular holes whose vertices alone could look circle-like.
-                            c_point center = hole.centroid();
-                            distf_t diameter_min = std::numeric_limits<float>::max(), diameter_max = 0;
-                            double diameter_sum = 0;
-                            for (uint32_t i = 0; i < hole.size(); ++i) {
-                                if ((i & 63u) == 0u && is_cancelled(data->run_ctx))
-                                    return;
-                                distf_t dist = norm(hole[i] - center);
-                                diameter_min = std::min(diameter_min, dist);
-                                diameter_max = std::max(diameter_max, dist);
-                                diameter_sum += dist;
-                            }
-                            // also use center of lines to check it's not a rectangle
-                            distf_t diameter_line_min = std::numeric_limits<float>::max(), diameter_line_max = 0;
-                            c_point prev = hole.back();
-                            for (uint32_t hole_line_a_idx = 0; hole_line_a_idx < hole.size(); ++hole_line_a_idx) {
-                                if ((hole_line_a_idx & 63u) == 0u && is_cancelled(data->run_ctx))
-                                    return;
-                                c_point midline = (prev + hole[hole_line_a_idx]) / 2;
-                                distf_t dist = norm(center - midline);
-                                diameter_line_min = std::min(diameter_line_min, dist);
-                                diameter_line_max = std::max(diameter_line_max, dist);
-                                prev = hole[hole_line_a_idx];
-                            }
+                        uint32_t hole_idx = 0;
+                        for (Polygon hole : surf_expoly.holes()) {
+                            if ((hole_idx++ & 63u) == 0u && is_cancelled(data->run_ctx))
+                                return;
+                            // test if convex (as it's clockwise bc it's a hole, we have to do the opposite)
+                            if (hole.convex_points_idx(0, PI).empty() && hole.size() > 8) {
+                                // Estimate circularity from vertex radius and edge-midpoint radius. The midpoint check
+                                // rejects rectangular holes whose vertices alone could look circle-like.
+                                c_point center = hole.centroid();
+                                distf_t diameter_min = std::numeric_limits<float>::max(), diameter_max = 0;
+                                double diameter_sum = 0;
+                                for (uint32_t i = 0; i < hole.size(); ++i) {
+                                    if ((i & 63u) == 0u && is_cancelled(data->run_ctx))
+                                        return;
+                                    distf_t dist = norm(hole[i] - center);
+                                    diameter_min = std::min(diameter_min, dist);
+                                    diameter_max = std::max(diameter_max, dist);
+                                    diameter_sum += dist;
+                                }
+                                // also use center of lines to check it's not a rectangle
+                                distf_t diameter_line_min = std::numeric_limits<float>::max(), diameter_line_max = 0;
+                                c_point prev = hole.back();
+                                for (uint32_t hole_line_a_idx = 0; hole_line_a_idx < hole.size(); ++hole_line_a_idx) {
+                                    if ((hole_line_a_idx & 63u) == 0u && is_cancelled(data->run_ctx))
+                                        return;
+                                    c_point midline = (prev + hole[hole_line_a_idx]) / 2;
+                                    distf_t dist = norm(center - midline);
+                                    diameter_line_min = std::min(diameter_line_min, dist);
+                                    diameter_line_max = std::max(diameter_line_max, dist);
+                                    prev = hole[hole_line_a_idx];
+                                }
 
-                            // SCALED_EPSILON was a bit too harsh. Now using a config, as some may want some harsh
-                            // setting and some don't.
-                            ConfigOption setting_hole_to_polyhole_threshold = region_config.get("hole_to_polyhole_threshold");
-                            coord_t max_variation = scale_i(setting_hole_to_polyhole_threshold.get_effective_value(
-                                unscaled(diameter_sum / hole.size())));
-                            max_variation = std::max(SCALED_EPSILON, max_variation);
-                            if (diameter_max - diameter_min < max_variation * 2 &&
-                                diameter_line_max - diameter_line_min < max_variation * 2) {
-                                layer_center_data.push_back(
-                                    HoleData{center, diameter_max,
-                                             *perimeter_extruder,
-                                             max_variation, twist, hole, region_idx});
+                                // SCALED_EPSILON was a bit too harsh. Now using a config, as some may want some harsh
+                                // setting and some don't.
+                                ConfigOption setting_hole_to_polyhole_threshold = region_config.get("hole_to_polyhole_threshold");
+                                coord_t max_variation = scale_i(setting_hole_to_polyhole_threshold.get_effective_value(
+                                    unscaled(diameter_sum / hole.size())));
+                                max_variation = std::max(SCALED_EPSILON, max_variation);
+                                if (diameter_max - diameter_min < max_variation * 2 &&
+                                    diameter_line_max - diameter_line_min < max_variation * 2) {
+                                    layer_center_data.push_back(
+                                        HoleData{center, diameter_max,
+                                                 *perimeter_extruder,
+                                                 max_variation, twist, hole, region_idx});
+                                }
                             }
                         }
                     }
                 }
             }
+            data->progress->increment(ProgressSearchHoles);
+        } catch (...) {
+            data->failure.capture_current();
         }
-        data->progress->increment(ProgressSearchHoles);
     });
+    thread_data.failure.rethrow_if_captured();
     throw_if_cancelled(run_ctx);
     progress().finish_run(ProgressSearchHoles);
     
