@@ -45,6 +45,9 @@ data == NULL in setup and the whole-plan payload in setup_run/run.
 extern "C" {
 #endif
 
+/* Declare the payload tag here so C callback prototypes do not introduce distinct prototype-scope types. */
+struct run_ctx_generate_wipe_tower;
+
 /* Execute one snapshot service synchronously using borrowed ctx/payload; fill host-owned fields and return 1 on success, 0 on failure without transferring ownership. */
 typedef int32_t (*wipe_tower_call_plugin_fn)(
     const struct run_ctx_generate_wipe_tower *ctx,

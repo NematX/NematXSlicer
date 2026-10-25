@@ -14,6 +14,9 @@
 extern "C" {
 #endif
 
+/* Declare the payload tag here so C callback prototypes do not introduce distinct prototype-scope types. */
+struct run_ctx_generate_infill;
+
 /*
 Runtime id for an active INFILL_PATTERN plugin.
 
