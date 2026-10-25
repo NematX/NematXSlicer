@@ -122,9 +122,9 @@ static ApiClipper::ClipperShapes *store_shape(PluginStorage &plugin_storage, std
 /*
 Store a newly created ClipperShapes implementation in plugin temporary storage.
 
-The returned raw pointer is the ABI handle. The unique_ptr stays in
-PluginStorage::clipper_shapes, so the pointer remains valid until storage_free()
-or storage_clear() removes it.
+The returned raw pointer is the ABI handle. The storage registry entry owns the
+shape, so the pointer remains valid until storage_free() or storage_clear()
+removes it.
 */
 static clipper_shapes_handle *store_shape(storage_handle *storage, std::unique_ptr<ApiClipper::ClipperShapes> shape) {
     if (storage == nullptr || !shape)

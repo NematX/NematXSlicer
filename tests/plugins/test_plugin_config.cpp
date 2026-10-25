@@ -178,8 +178,8 @@ TEST_CASE("Plugin storage owns temporary configs", "[plugins][config]")
     CHECK(is_local_storage(storage_api, first) == 1);
     CHECK(storage_size(storage_api) == 1);
 
-    // StableOwnedVector keeps the first ConfigBase subobject at the same address
-    // while later allocations grow the owning vector.
+    // The registry keeps the first ConfigBase subobject at the same address
+    // while later allocations grow it.
     std::vector<config_handle *> configs;
     for (size_t idx = 0; idx < 32; ++idx)
         configs.push_back(storage_new_config(storage_api));

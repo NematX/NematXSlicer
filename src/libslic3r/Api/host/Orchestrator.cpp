@@ -2528,147 +2528,94 @@ void Orchestrator::initialize_plugins() {
 
 // Start with empty plugin-owned storage.
 PluginStorage::PluginStorage() = default;
-// Member containers release their objects when storage is destroyed.
+// Every Entry in the registry destroys its object, so destroying the map releases all allocations.
 PluginStorage::~PluginStorage() = default;
 
-// Lock the containers and destroy all tracked objects; call only when no callback or handle reader can still use them.
+// Move the whole registry out under the lock and let the local map destroy the objects after unlocking;
+// call only when no callback or handle reader can still use them.
 void PluginStorage::clear() {
-    const std::lock_guard<std::mutex> lock(m_mutex);
-    polylines.clear();
-    polygons.clear();
-    expolygons.clear();
-    polyline_collections.clear();
-    polygon_collections.clear();
-    expolygon_collections.clear();
-    surface_collections.clear();
-    extrusions.clear();
-    configs.clear();
-    triangle_meshes.clear();
-    clipper_shapes.clear();
-    generic_storage.clear();
+    std::unordered_map<void *, Entry> released;
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        released.swap(m_entries);
+        m_first_extrusion = nullptr;
+        m_last_extrusion = nullptr;
+    }
 }
 
-// Read the tracking set under the lock; null or untracked exported handles return false without inspecting the object.
+// Read the registry under the lock; null or untracked exported handles return false without inspecting the object.
 bool PluginStorage::contains(void *ptr) const {
     const std::lock_guard<std::mutex> lock(m_mutex);
-    return ptr != nullptr && generic_storage.find(ptr) != generic_storage.end();
+    return ptr != nullptr && m_entries.find(ptr) != m_entries.end();
 }
 
 // Read the tracked allocation count under the lock; the count may change as soon as another callback allocates or frees.
 size_t PluginStorage::size() const {
     const std::lock_guard<std::mutex> lock(m_mutex);
-    return generic_storage.size();
+    return m_entries.size();
 }
 
-// Copy extrusion pointers while holding the registry lock; callers must keep these objects alive during inspection, and vector allocation can throw.
+// Copy extrusion pointers in insertion order while holding the registry lock; callers must keep these objects alive during inspection, and vector allocation can throw.
 std::vector<const ExtrusionEntity *> PluginStorage::stored_extrusions() const
 {
     const std::lock_guard<std::mutex> lock(m_mutex);
     std::vector<const ExtrusionEntity *> result;
-    for (const std::unique_ptr<ExtrusionEntity> &entity : extrusions)
-        result.push_back(entity.get());
+    for (const Entry *entry = m_first_extrusion; entry != nullptr; entry = entry->next_extrusion)
+        result.push_back(static_cast<const ExtrusionEntity *>(entry->object));
     return result;
 }
 
-// Lock the tracking set and containers while releasing one exported handle; its readers must be finished, and unknown handles assert in Debug and return false.
+// Append to the tail of the extrusion chain so iteration follows insertion order.
+// Preconditions: m_mutex is held and the entry is not in the chain (a freshly stored extrusion).
+void PluginStorage::link_extrusion(Entry &entry)
+{
+    entry.is_extrusion = true;
+    entry.prev_extrusion = m_last_extrusion;
+    entry.next_extrusion = nullptr;
+    if (m_last_extrusion != nullptr)
+        m_last_extrusion->next_extrusion = &entry;
+    else
+        m_first_extrusion = &entry;
+    m_last_extrusion = &entry;
+}
+
+// Splice the entry out of the doubly linked extrusion chain, fixing the chain ends when needed.
+// Preconditions: m_mutex is held and the entry is a linked extrusion entry (is_extrusion is true).
+void PluginStorage::unlink_extrusion(Entry &entry)
+{
+    if (entry.prev_extrusion != nullptr)
+        entry.prev_extrusion->next_extrusion = entry.next_extrusion;
+    else
+        m_first_extrusion = entry.next_extrusion;
+    if (entry.next_extrusion != nullptr)
+        entry.next_extrusion->prev_extrusion = entry.prev_extrusion;
+    else
+        m_last_extrusion = entry.prev_extrusion;
+    entry.prev_extrusion = nullptr;
+    entry.next_extrusion = nullptr;
+    entry.is_extrusion = false;
+}
+
+// Look the handle up, detach its entry (and chain link) under the lock, then destroy the object once the
+// lock is released so a destructor never runs under it. The entry is invisible to contains(), size() and
+// stored_extrusions() from the unlock on; a reader still using the object while another callback frees it
+// is not protected (forbidden by the run-context contract).
+// Null, unknown or already freed handles are programming errors: assert in Debug, return false otherwise.
 bool PluginStorage::free(void *ptr) {
-    const std::lock_guard<std::mutex> lock(m_mutex);
-    if (ptr == nullptr || generic_storage.find(ptr) == generic_storage.end()) {
-        assert(false);
-        return false;
-    }
-
-    for (auto it = polygons.begin(); it != polygons.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            polygons.erase(it);
-            generic_storage.erase(ptr);
-            return true;
+    std::unordered_map<void *, Entry>::node_type node;
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        const std::unordered_map<void *, Entry>::iterator found = ptr == nullptr ? m_entries.end() : m_entries.find(ptr);
+        if (found == m_entries.end()) {
+            assert(false);
+            return false;
         }
+        if (found->second.is_extrusion)
+            unlink_extrusion(found->second);
+        node = m_entries.extract(found);
     }
-
-    for (auto it = polylines.begin(); it != polylines.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            polylines.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = expolygons.begin(); it != expolygons.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            expolygons.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = polyline_collections.begin(); it != polyline_collections.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            polyline_collections.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = polygon_collections.begin(); it != polygon_collections.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            polygon_collections.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = expolygon_collections.begin(); it != expolygon_collections.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            expolygon_collections.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = surface_collections.begin(); it != surface_collections.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            surface_collections.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = extrusions.begin(); it != extrusions.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            extrusions.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = configs.begin(); it != configs.end(); ++it) {
-        config_handle *handle = ApiHost::to_config_handle(it->get());
-        if (ptr == static_cast<void *>(handle)) {
-            configs.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = clipper_shapes.begin(); it != clipper_shapes.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            clipper_shapes.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    for (auto it = triangle_meshes.begin(); it != triangle_meshes.end(); ++it) {
-        if (ptr == static_cast<void *>(it->get())) {
-            triangle_meshes.erase(it);
-            generic_storage.erase(ptr);
-            return true;
-        }
-    }
-
-    generic_storage.erase(ptr);
-    return false;
+    // `node` dies here, outside the lock: its Entry destroys the object.
+    return true;
 }
 
 } // namespace Slic3r

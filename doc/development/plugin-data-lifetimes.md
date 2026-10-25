@@ -510,7 +510,7 @@ Sources: `src/libslic3r/Api/plugin/c/slic3r_extrusion_property.h:237`, `src/libs
 
 ### `PluginStorage`
 
-The storage provided per context belongs to `Orchestrator::m_plugin_storage` and survives callbacks. Parallel calls of the same plugin share it. A central mutex protects allocation registration, individual release, membership/count queries and clearing. Object addresses remain stable across container growth; accessing an existing object through its handle does not take the storage lock. Plugins must coordinate edits of the same object and finish reading a handle before freeing it. Do not call `storage_clear()` during `setup_run()` or `run()`, or assert that the shared storage is empty: other callbacks may still have live allocations. Temporary owners release their allocations individually. A worker storage provided by `slic3r_parallel_for_storage`, by contrast, is local to the job and destroyed when it returns.
+The storage provided per context belongs to `Orchestrator::m_plugin_storage` and survives callbacks. Parallel calls of the same plugin share it. A central mutex protects allocation registration, individual release, membership/count queries and clearing. Object addresses remain stable across registry growth; accessing an existing object through its handle does not take the storage lock. Plugins must coordinate edits of the same object and finish reading a handle before freeing it. Do not call `storage_clear()` during `setup_run()` or `run()`, or assert that the shared storage is empty: other callbacks may still have live allocations. Temporary owners release their allocations individually. A worker storage provided by `slic3r_parallel_for_storage`, by contrast, is local to the job and destroyed when it returns.
 
 Plugin instances are singletons: `plugin_ctx` and this storage designate the plugin, not a particular run or a Print. The `plugin_run_context::print` member identifies the Print for setup/setup_run/run; the optional callback `clear(plugin_ctx, print, plugin_storage)` receives the same key directly. A run-dependent cache must be partitioned by this identity, not by the temporary address of the context.
 
@@ -576,25 +576,17 @@ Failed participants remain tracked and the other callbacks continue. No call to 
 
 This return change breaks the ABI: native plugins must be recompiled and manifests regenerated; 2.x versions of the contract are rejected.
 
-| Member / container | Owned allocations | Write / lifetime |
+| Member | Owned allocations | Write / lifetime |
 |---|---|---|
-| `PluginStorage::polygons` | Root Polygons | Mutable scratch, until free/clear/destruction |
-| `PluginStorage::polylines` | Root Polylines | Same rule |
-| `PluginStorage::expolygons` | Root ExPolygons | Same rule |
-| `PluginStorage::polygon_collections` | Polygons | Stable root, by-value elements can be invalidated |
-| `PluginStorage::polyline_collections` | Polylines | Same rule |
-| `PluginStorage::expolygon_collections` | ExPolygons | Same rule |
-| `PluginStorage::surface_collections` | SurfaceCollection | Same rule |
-| `PluginStorage::extrusions` | ExtrusionEntity roots | Children owned by their roots, not separate storage allocations |
-| `PluginStorage::configs` | DynamicConfig | Options destroyed with their config |
-| `PluginStorage::triangle_meshes` | TriangleMesh built by `storage_new_triangle_mesh` | Read-only after creation, until free/clear/destruction |
-| `PluginStorage::clipper_shapes` | Clipper adapters/results | An owned adapter does not mean an owned geometric source |
-| `PluginStorage::generic_storage` | Registry of releasable root pointers | Not a recursive owner nor a reference counter |
-| `StableOwnedVector<T>::m_items` | Vector of unique_ptr | Adding other roots does not move existing ones |
+| `PluginStorage::m_entries` | One `Entry` per allocation, keyed by the exported handle: polylines, polygons, expolygons, their collections, surface collections, extrusion roots, configs (keyed by the adjusted `ConfigBase` handle), triangle meshes built by `storage_new_triangle_mesh`, Clipper adapters/results | Mutable scratch (meshes: read-only after creation), until free/clear/destruction. Not a recursive owner nor a reference counter; an owned Clipper adapter does not mean an owned geometric source; children of an extrusion root are owned by that root, not separate allocations; a config's options are destroyed with the config; the by-value elements of a collection (polygons, polylines, expolygons, surfaces) are invalidated by a structural change of that collection, while the root pointer stays stable |
+| `PluginStorage::Entry` | The object and its type-erased destroy function | Destroying the entry destroys the object, wherever the registry node dies |
+| `PluginStorage::m_first_extrusion` / `m_last_extrusion` | Ends of the insertion-ordered chain of extrusion entries | `stored_extrusions()` walks it; a free unlinks in O(1) |
 
-`storage_free` must only receive roots of this storage, never a child, a contour, an option or a source/plan object. `storage_clear` destroys all allocations; handle copies are not reset to zero. The `Stored*` RAII wrappers carry `m_storage` and `m_handle`: they own the responsibility for releasing the handle, not the storage, which must outlive them. The registry lock protects allocation and release, not simultaneous access to the stored objects.
+The registry bookkeeping of `store`, `contains`, `size` and `free` is average O(1) whatever the type and number of allocations, so releasing N allocations costs O(N) bookkeeping; this excludes the cost of destroying an object itself, which is proportional to its content (an extrusion tree, a PolyTree). `free()` finds the entry under the lock, unlinks it from the extrusion chain, extracts its registry node, and destroys the object after unlocking; a destructor never runs under the storage lock. From the unlock on, `contains()`, `size()` and `stored_extrusions()` no longer report the allocation. This does not protect a reader that still uses the object while another callback frees it, which the run-context contract forbids. `clear()` swaps the whole registry out under the lock and destroys the objects after unlocking. Destruction order between objects is unspecified: no destructor reads another stored object nor the storage. Registering a handle twice is a programming error (asserted).
 
-Sources: `src/libslic3r/Api/host/Orchestrator.hpp:564`, `src/libslic3r/Api/host/Orchestrator.cpp:2428`, `src/libslic3r/Api/host/slic3r_utils.cpp:15`.
+`storage_free` must only receive roots of this storage, never a child, a contour, an option or a source/plan object. A null, unknown or already freed handle asserts in Debug and returns false. `storage_clear` destroys all allocations; handle copies are not reset to zero. The `Stored*` RAII wrappers carry `m_storage` and `m_handle`: they own the responsibility for releasing the handle, not the storage, which must outlive them. The registry lock protects allocation and release, not simultaneous access to the stored objects.
+
+Sources: `src/libslic3r/Api/host/Orchestrator.hpp:629`, `src/libslic3r/Api/host/Orchestrator.cpp:2530`, `src/libslic3r/Api/host/slic3r_utils.cpp:39`.
 
 ### Geometric members
 

@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -609,42 +610,23 @@ private:
     std::string m_initializing_plugin_failure;
 };
 
-// Own plugin-created objects while keeping their addresses stable across vector growth.
-template<class T> class StableOwnedVector
-{
-public:
-    using Storage = std::vector<std::unique_ptr<T>>;
-    using iterator = typename Storage::iterator;
-    using const_iterator = typename Storage::const_iterator;
-
-    // Construct and retain one object; the returned reference is borrowed.
-    template<class... Args> T &emplace_back(Args&&... args) {
-        m_items.emplace_back(std::make_unique<T>(std::forward<Args>(args)...));
-        return *m_items.back();
-    }
-
-    // Insert an already-owned object and return a borrowed reference.
-    T &push_back(std::unique_ptr<T> item) {
-        assert(item != nullptr);
-        m_items.push_back(std::move(item));
-        return *m_items.back();
-    }
-
-    // Iterators follow vector invalidation rules; erase and clear invalidate affected iterators.
-    iterator begin() { return m_items.begin(); }
-    iterator end() { return m_items.end(); }
-    const_iterator begin() const { return m_items.begin(); }
-    const_iterator end() const { return m_items.end(); }
-
-    // Erase one object and return the next iterator.
-    iterator erase(iterator it) { return m_items.erase(it); }
-    // Destroy all objects and invalidate their references.
-    void clear() { m_items.clear(); }
-
-private:
-    Storage m_items;
-};
-
+// Owns every object a plugin creates through the C API (polylines, extrusions, configs, meshes, ...)
+// and hands out stable pointers ("handles") to them.
+//
+// Mechanism: one registry maps each exported handle to an Entry that owns the object. The
+// handle is the object's own address, except for configs, whose handle is the adjusted
+// ConfigBase subobject address (see ApiHost::to_config_handle). Registry bookkeeping (lookup,
+// insertion, removal) is average O(1) whatever the object type and the number of stored objects,
+// so releasing N objects costs O(N) bookkeeping, which matters when a large structure (e.g.
+// thousands of tree volumes) releases all its handles at once. This excludes the cost of destroying
+// an object itself, which is proportional to its content (an extrusion tree, a PolyTree).
+// Addresses stay stable because objects are heap-allocated and the registry nodes never move.
+//
+// Entries of ExtrusionEntity are additionally chained in insertion order so that
+// stored_extrusions() can return them in storage order.
+//
+// Threading: one mutex protects the registry and the extrusion chain. Objects are destroyed
+// after the mutex is released, so a destructor never runs under the lock.
 class PluginStorage
 {
 public:
@@ -653,46 +635,37 @@ public:
     // Release every allocation still owned by this storage.
     ~PluginStorage();
 
-    // Retain an allocation and its exported handle together under the storage lock.
+    // Take ownership of an allocation and register its exported handle under the storage lock.
     // Configs supply their adjusted ConfigBase handle; other objects use their own address.
+    // The handle must not be registered yet (asserted). If registration throws (allocation failure),
+    // the registry is unchanged, the exception propagates and the item parameter, which still owns
+    // the allocation, destroys it. On success item is empty after the move.
     template<class T> T *store(std::unique_ptr<T> item, void *handle = nullptr)
     {
+        static_assert(std::disjunction_v<std::is_same<T, Polyline>, std::is_same<T, Polygon>, std::is_same<T, ExPolygon>,
+                                         std::is_same<T, std::vector<Polyline>>, std::is_same<T, Polygons>,
+                                         std::is_same<T, std::vector<ExPolygon>>, std::is_same<T, SurfaceCollection>,
+                                         std::is_same<T, ExtrusionEntity>, std::is_same<T, DynamicConfig>,
+                                         std::is_same<T, TriangleMesh>, std::is_same<T, ApiClipper::ClipperShapes>>,
+                      "Unsupported plugin storage type");
         if (item == nullptr)
             return nullptr;
         T *object = item.get();
         if (handle == nullptr)
             handle = object;
         const std::lock_guard<std::mutex> lock(m_mutex);
-        generic_storage.insert(handle);
-        try {
-            if constexpr (std::is_same_v<T, Polyline>)
-                polylines.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, Polygon>)
-                polygons.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, ExPolygon>)
-                expolygons.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, std::vector<Polyline>>)
-                polyline_collections.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, Polygons>)
-                polygon_collections.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, std::vector<ExPolygon>>)
-                expolygon_collections.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, SurfaceCollection>)
-                surface_collections.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, ExtrusionEntity>)
-                extrusions.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, DynamicConfig>)
-                configs.push_back(std::move(item));
-            else if constexpr (std::is_same_v<T, TriangleMesh>)
-                triangle_meshes.push_back(std::move(item));
-            else {
-                static_assert(std::is_same_v<T, ApiClipper::ClipperShapes>, "Unsupported plugin storage type");
-                clipper_shapes.push_back(std::move(item));
-            }
-        } catch (...) {
-            generic_storage.erase(handle);
-            throw;
-        }
+        // The only step that can throw. Once the entry exists, ownership moves into it.
+        const std::pair<std::unordered_map<void *, Entry>::iterator, bool> inserted = m_entries.try_emplace(handle);
+        // A duplicated handle would drop this entry and, for an extrusion, link an already linked entry
+        // a second time, corrupting the extrusion chain.
+        assert(inserted.second);
+        Entry &entry = inserted.first->second;
+        // ExtrusionEntity and ClipperShapes have virtual destructors, so deleting through T is correct.
+        // destroy is set before object because ~Entry calls it as soon as object is non-null.
+        entry.destroy = [](void *owned) noexcept { delete static_cast<T *>(owned); };
+        entry.object = item.release();
+        if constexpr (std::is_same_v<T, ExtrusionEntity>)
+            link_extrusion(entry);
         return object;
     }
 
@@ -702,32 +675,59 @@ public:
     size_t size() const;
     // Test whether an exported handle is tracked under the storage lock.
     bool contains(void *ptr) const;
-    // Release one allocation under the storage lock; unknown pointers are rejected.
+    // Release one allocation by its exported handle with average O(1) bookkeeping (the object's own
+    // destruction cost comes on top). The entry is removed from the registry under the lock, then the
+    // object is destroyed after unlocking. contains(), size() and
+    // stored_extrusions() stop reporting it as soon as the lock is released; this does not protect a
+    // reader that still uses the object while another callback frees it, which the run-context
+    // contract forbids. A null, unknown or already freed handle is a programming error: it asserts
+    // in Debug and returns false otherwise.
     bool free(void *ptr);
-    // Copy the stored extrusion pointers under the lock for inspection while their owners remain alive.
+    // Copy the stored extrusion pointers, in storage order, under the lock for inspection while their
+    // owners remain alive.
     std::vector<const ExtrusionEntity *> stored_extrusions() const;
 
 private:
+    // One owned object. Destroying the entry destroys the object, so a registry node that is
+    // extracted or swapped out of the registry releases its object wherever the node dies.
+    struct Entry
+    {
+        // Empty entry; store() fills destroy then object right after the registry node is created.
+        Entry() = default;
+        // Not copyable: two entries must never delete the same object.
+        Entry(const Entry &) = delete;
+        Entry &operator=(const Entry &) = delete;
+        // Delete the owned object through its real type, if any; destroy must be set whenever object is.
+        ~Entry()
+        {
+            if (object != nullptr)
+                destroy(object);
+        }
+
+        // Owned object, deleted through its real type by `destroy`.
+        void *object { nullptr };
+        void (*destroy)(void *) noexcept { nullptr };
+        // Neighbours in the insertion-ordered chain of ExtrusionEntity entries; unused (and
+        // is_extrusion false) for other types. Registry nodes never move, so the pointers stay valid.
+        Entry *prev_extrusion { nullptr };
+        Entry *next_extrusion { nullptr };
+        bool   is_extrusion { false };
+    };
+
+    // Append an entry at the tail of the extrusion chain; call with m_mutex held.
+    void link_extrusion(Entry &entry);
+    // Remove an entry from the extrusion chain in O(1); call with m_mutex held.
+    void unlink_extrusion(Entry &entry);
+
     // TODO: Replace this temporary lock with private storage per object, location or sub-plugin call; keep setup/clear and print-wide storage persistent.
     // See the planned rework in doc/development/plugin-data-lifetimes.md.
     mutable std::mutex m_mutex;
 
-    // Stored objects live behind unique_ptr so their addresses stay stable even
-    // if the owning vector reallocates. Plugins may keep these handles until
-    // storage_free() or clear().
-    StableOwnedVector<Polyline> polylines;
-    StableOwnedVector<Polygon> polygons;
-    StableOwnedVector<ExPolygon> expolygons;
-    StableOwnedVector<std::vector<Polyline>> polyline_collections;
-    StableOwnedVector<Polygons> polygon_collections;
-    StableOwnedVector<std::vector<ExPolygon>> expolygon_collections;
-    StableOwnedVector<SurfaceCollection> surface_collections;
-    StableOwnedVector<ExtrusionEntity> extrusions;
-    StableOwnedVector<DynamicConfig> configs;
-    StableOwnedVector<TriangleMesh> triangle_meshes;
-    std::vector<std::unique_ptr<ApiClipper::ClipperShapes>> clipper_shapes;
-    std::unordered_set<void *> generic_storage;
-
+    // Exported handle -> owning entry. Plugins may keep a handle until storage_free() or clear().
+    std::unordered_map<void *, Entry> m_entries;
+    // Ends of the insertion-ordered chain of ExtrusionEntity entries (both null when empty).
+    Entry *m_first_extrusion { nullptr };
+    Entry *m_last_extrusion { nullptr };
 };
 
 } // namespace Slic3r
