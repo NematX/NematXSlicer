@@ -13,8 +13,6 @@
 #ifndef slic3r_FillHoneycomb_hpp_
 #define slic3r_FillHoneycomb_hpp_
 
-#include <map>
-
 #include "FillBase.hpp"
 
 namespace Slic3r {
@@ -27,6 +25,7 @@ public:
 
 protected:
     Fill* clone() const override { return new FillHoneycomb(*this); };
+	// Append the honeycomb paths of one area to polylines_out; spacing and density must be positive.
 	void _fill_surface_single(
 	    const FillParams                &params, 
 	    unsigned int                     thickness_layers,
@@ -34,19 +33,9 @@ protected:
 	    ExPolygon                        expolygon,
 	    Polylines                       &polylines_out) const override;
 
-	// Caching the 
-	struct CacheID 
-	{
-		CacheID(float adensity, coordf_t aspacing) : 
-			density(adensity), spacing(aspacing) {}
-		float		density;
-		coordf_t	spacing;
-		bool operator<(const CacheID &other) const 
-			{ return (density < other.density) || (density == other.density && spacing < other.spacing); }
-		bool operator==(const CacheID &other) const 
-			{ return density == other.density && spacing == other.spacing; }
-	};
-	struct CacheData
+	// Hexagon dimensions for one density and spacing. They are recomputed on every call: a shared
+	// cache would be read and filled by the fillers of several threads at once.
+	struct HexagonMath
 	{
 		coord_t	distance;
         coord_t hex_side;
@@ -57,8 +46,6 @@ protected:
         coord_t	y_offset;
         Point	hex_center;
     };
-    typedef std::map<CacheID, CacheData> Cache;
-	static Cache cache;
 
     float _layer_angle(size_t idx) const override { return float(M_PI/3.) * (idx % 3); }
 };

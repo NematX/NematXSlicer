@@ -19,8 +19,10 @@
 
 namespace Slic3r {
 
-FillHoneycomb::Cache FillHoneycomb::cache{};
-
+// Draw zigzag columns of hexagons over the rotated bounding box of the area, aligned on a world grid so the
+// pattern matches across layers, clip them to the area, then chain or connect the pieces and append them to
+// polylines_out without clearing it. The hexagon dimensions are computed here from the spacing and the density,
+// which must both be positive.
 void FillHoneycomb::_fill_surface_single(
     const FillParams                &params, 
     unsigned int                     thickness_layers,
@@ -31,12 +33,9 @@ void FillHoneycomb::_fill_surface_single(
     double my_spacing = this->get_spacing();
     if(params.max_sparse_infill_spacing > 0)
         my_spacing = params.max_sparse_infill_spacing;
-    // cache hexagons math
-    CacheID cache_id(params.density, my_spacing);
-    Cache::iterator it_m = FillHoneycomb::cache.find(cache_id);
-    if (it_m == FillHoneycomb::cache.end()) {
-        it_m = FillHoneycomb::cache.insert(it_m, std::pair<CacheID, CacheData>(cache_id, CacheData()));
-        CacheData &m = it_m->second;
+    // hexagons math
+    HexagonMath m;
+    {
         coord_t min_spacing = scale_i(my_spacing);
         m.distance          = coord_t(double(min_spacing) / params.density);
         m.hex_side          = coord_t(double(m.distance) / (sqrt(3)/2));
@@ -48,7 +47,6 @@ void FillHoneycomb::_fill_surface_single(
         m.y_offset          = coord_t(double(m.x_offset) * sqrt(3)/3);
         m.hex_center = Point(m.hex_width/2, m.hex_side);
     }
-    CacheData &m = it_m->second;
 
     Polylines all_polylines;
     {
