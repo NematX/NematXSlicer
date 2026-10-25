@@ -216,12 +216,13 @@ These storages are **inputs for plugins**. Returned transformations are copied v
 | `ModelVolume::m_mesh` | `shared_ptr<const TriangleMesh>`, borrowed C handle | Host replacement; source mesh const | The handle does not retain the shared_ptr |
 | `TriangleMesh::its` | Contains the indexed mesh | Source const | Mesh lifetime |
 | `indexed_triangle_set::{vertices,indices}` | Vertices and triangles read by copy | Source const; separate working copies in §10 | No mutable source buffer provided |
+| `storage_new_triangle_mesh` handle | Owned `TriangleMesh` copied from plugin vertices and triangles, read by the `triangle_mesh_*` functions | Plugin fills the arrays before the call; host read-only afterwards | Until `storage_free()` or `storage_clear()`; the input arrays are not retained |
 | `ModelVolume::{supported_facets,mm_segmentation_facets,m_generic_facets_annotations}` | Annotations queried/projected by key | Host; no annotation editing through this API | Lifetime of the volume's annotations |
 | `FacetsAnnotation::m_data` | Facet encoding consumed by projections | Host; no raw exposure | Projection results copied to a separate destination |
 
 `object_get_max_z` is not always a pure local height: for a model object, it uses the model's transformed max Z; for the auxiliary object without a model, it returns the object's native height.
 
-Sources: `src/libslic3r/Model.hpp:358`, `src/libslic3r/Model.hpp:844`, `src/libslic3r/Model.hpp:994`, `src/libslic3r/Api/host/slic3r_volume.cpp:307`, `src/libslic3r/Api/host/slic3r_data_tree.cpp:781`.
+Sources: `src/libslic3r/Model.hpp:358`, `src/libslic3r/Model.hpp:844`, `src/libslic3r/Model.hpp:994`, `src/libslic3r/Api/host/slic3r_volume.cpp:307`, `src/libslic3r/Api/host/slic3r_volume.cpp:592`, `src/libslic3r/Api/host/slic3r_data_tree.cpp:781`.
 
 ### Canonical regions and associations
 
@@ -586,6 +587,7 @@ This return change breaks the ABI: native plugins must be recompiled and manifes
 | `PluginStorage::surface_collections` | SurfaceCollection | Same rule |
 | `PluginStorage::extrusions` | ExtrusionEntity roots | Children owned by their roots, not separate storage allocations |
 | `PluginStorage::configs` | DynamicConfig | Options destroyed with their config |
+| `PluginStorage::triangle_meshes` | TriangleMesh built by `storage_new_triangle_mesh` | Read-only after creation, until free/clear/destruction |
 | `PluginStorage::clipper_shapes` | Clipper adapters/results | An owned adapter does not mean an owned geometric source |
 | `PluginStorage::generic_storage` | Registry of releasable root pointers | Not a recursive owner nor a reference counter |
 | `StableOwnedVector<T>::m_items` | Vector of unique_ptr | Adding other roots does not move existing ones |

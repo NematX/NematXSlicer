@@ -18,6 +18,7 @@ add_executable(${_TEST_NAME}_tests
     mesh_queries_c_fixture.c
     mesh_query_visibility_reference.cpp
     test_mesh_queries.cpp
+    test_triangle_mesh_storage.cpp
     test_public_kdtree.cpp
     test_clipper_views.cpp
     test_geometry_cleanup_views.cpp

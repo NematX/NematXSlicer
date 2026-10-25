@@ -4,9 +4,11 @@
 ///|/
 #include <cmath>
 #include <cstring>
+#include <memory>
 #include <utility>
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_volume.h"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Layer.hpp"
@@ -213,6 +215,37 @@ static MeshSlicingParamsEx to_mesh_slicing_params(const c_mesh_slicing_params *p
     out.resolution = params->resolution;
     out.model_resolution = params->model_resolution;
     return out;
+}
+
+// Copy plugin arrays into a native mesh; returns false for null arrays, non-finite vertices, out-of-range or repeated indices.
+static bool copy_triangle_mesh_arrays(const c_vec3f *vertices,
+                                      uint32_t vertex_count,
+                                      const c_triangle_indices *triangles,
+                                      uint32_t triangle_count,
+                                      indexed_triangle_set &out)
+{
+    if ((vertices == nullptr && vertex_count > 0) || (triangles == nullptr && triangle_count > 0))
+        return false;
+
+    out.vertices.reserve(vertex_count);
+    for (uint32_t idx = 0; idx < vertex_count; ++idx) {
+        const c_vec3f &vertex = vertices[idx];
+        if (!std::isfinite(vertex.x) || !std::isfinite(vertex.y) || !std::isfinite(vertex.z))
+            return false;
+        out.vertices.emplace_back(vertex.x, vertex.y, vertex.z);
+    }
+
+    out.indices.reserve(triangle_count);
+    for (uint32_t idx = 0; idx < triangle_count; ++idx) {
+        const c_triangle_indices &triangle = triangles[idx];
+        if (triangle.a >= vertex_count || triangle.b >= vertex_count || triangle.c >= vertex_count)
+            return false;
+        // A repeated index creates a zero-length edge, which the slicer asserts on.
+        if (triangle.a == triangle.b || triangle.b == triangle.c || triangle.a == triangle.c)
+            return false;
+        out.indices.emplace_back(int32_t(triangle.a), int32_t(triangle.b), int32_t(triangle.c));
+    }
+    return true;
 }
 
 uint32_t object_volume_count(const object_handle *object)
@@ -553,6 +586,27 @@ void object_project_painting_to_polygons(const object_handle *object,
 const triangle_mesh_handle *volume_get_mesh(const volume_handle *volume)
 {
     return Slic3r::volume_get_mesh(volume);
+}
+
+// Store an owned copy of the arrays in plugin storage; NULL covers invalid arrays and internal failures such as allocation.
+triangle_mesh_handle *storage_new_triangle_mesh(storage_handle *storage,
+                                                const c_vec3f *vertices,
+                                                uint32_t vertex_count,
+                                                const c_triangle_indices *triangles,
+                                                uint32_t triangle_count)
+{
+    if (storage == nullptr)
+        return nullptr;
+    try {
+        indexed_triangle_set its;
+        if (!Slic3r::copy_triangle_mesh_arrays(vertices, vertex_count, triangles, triangle_count, its))
+            return nullptr;
+        Slic3r::PluginStorage *native = reinterpret_cast<Slic3r::PluginStorage *>(storage);
+        return reinterpret_cast<triangle_mesh_handle *>(
+            native->store(std::make_unique<Slic3r::TriangleMesh>(std::move(its))));
+    } catch (...) {
+        return nullptr;
+    }
 }
 
 uint32_t triangle_mesh_vertex_count(const triangle_mesh_handle *mesh)

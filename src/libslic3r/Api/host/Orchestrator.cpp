@@ -2543,6 +2543,7 @@ void PluginStorage::clear() {
     surface_collections.clear();
     extrusions.clear();
     configs.clear();
+    triangle_meshes.clear();
     clipper_shapes.clear();
     generic_storage.clear();
 }
@@ -2653,6 +2654,14 @@ bool PluginStorage::free(void *ptr) {
     for (auto it = clipper_shapes.begin(); it != clipper_shapes.end(); ++it) {
         if (ptr == static_cast<void *>(it->get())) {
             clipper_shapes.erase(it);
+            generic_storage.erase(ptr);
+            return true;
+        }
+    }
+
+    for (auto it = triangle_meshes.begin(); it != triangle_meshes.end(); ++it) {
+        if (ptr == static_cast<void *>(it->get())) {
+            triangle_meshes.erase(it);
             generic_storage.erase(ptr);
             return true;
         }

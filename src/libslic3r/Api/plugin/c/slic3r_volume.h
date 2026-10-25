@@ -6,7 +6,7 @@
 #define slic3r_volume_h_
 
 #define SLIC3R_PLUGIN_API_VOLUME_MAJOR 1u
-#define SLIC3R_PLUGIN_API_VOLUME_MINOR 1u
+#define SLIC3R_PLUGIN_API_VOLUME_MINOR 2u
 
 #include <stdint.h>
 
@@ -206,6 +206,23 @@ SLIC3R_HOST_API void object_project_painting_to_polygons(const object_handle *ob
 SLIC3R_HOST_API const triangle_mesh_handle *volume_get_mesh(const volume_handle *volume);
 
 /* ========================= TRIANGLE MESH ========================= */
+
+/*
+Create a triangle mesh owned by storage from plugin-built arrays; release it with
+storage_free() or storage_clear(). Vertices are unscaled float model coordinates
+and are copied without repair, so readback returns the same vertices and indices.
+Each index must be below vertex_count, each triangle needs three distinct indices,
+and each coordinate must be finite; null arrays are valid only with a zero count.
+Distinct vertices at identical coordinates, or at coordinates that round to the same
+slicer point, are accepted, but no triangle edge may join them: the slicer needs
+edges of non-zero length. NULL reports a creation failure: invalid input or an
+internal exception such as an allocation error.
+*/
+SLIC3R_HOST_API triangle_mesh_handle *storage_new_triangle_mesh(storage_handle *storage,
+                                                                const c_vec3f *vertices,
+                                                                uint32_t vertex_count,
+                                                                const c_triangle_indices *triangles,
+                                                                uint32_t triangle_count);
 
 SLIC3R_HOST_API uint32_t triangle_mesh_vertex_count(const triangle_mesh_handle *mesh);
 SLIC3R_HOST_API uint32_t triangle_mesh_triangle_count(const triangle_mesh_handle *mesh);

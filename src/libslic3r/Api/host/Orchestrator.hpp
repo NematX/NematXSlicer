@@ -42,6 +42,7 @@ class Polygon;
 class ExPolygon;
 class SurfaceCollection;
 class ExtrusionEntity;
+class TriangleMesh;
 class PluginStorage;
 class DynamicConfig;
 class DynamicPrintConfig;
@@ -682,6 +683,8 @@ public:
                 extrusions.push_back(std::move(item));
             else if constexpr (std::is_same_v<T, DynamicConfig>)
                 configs.push_back(std::move(item));
+            else if constexpr (std::is_same_v<T, TriangleMesh>)
+                triangle_meshes.push_back(std::move(item));
             else {
                 static_assert(std::is_same_v<T, ApiClipper::ClipperShapes>, "Unsupported plugin storage type");
                 clipper_shapes.push_back(std::move(item));
@@ -721,6 +724,7 @@ private:
     StableOwnedVector<SurfaceCollection> surface_collections;
     StableOwnedVector<ExtrusionEntity> extrusions;
     StableOwnedVector<DynamicConfig> configs;
+    StableOwnedVector<TriangleMesh> triangle_meshes;
     std::vector<std::unique_ptr<ApiClipper::ClipperShapes>> clipper_shapes;
     std::unordered_set<void *> generic_storage;
 

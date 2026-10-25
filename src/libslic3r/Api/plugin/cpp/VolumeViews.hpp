@@ -17,9 +17,10 @@ namespace slic3r_api {
 /*
 Read-only helpers over Volume and TriangleMesh.
 
-These classes are intentionally borrowed views: they never own or free the
-underlying host objects. They are meant for slicing plugins that need to inspect
-the source model volumes through an Object.
+The views in this file are borrowed: they never own or free the underlying host
+objects. They are meant for slicing plugins that need to inspect the source model
+volumes through an Object. The only owner here is StoredTriangleMesh, which releases
+a mesh that plugin code created in its storage.
 
 Typical use:
     for (uint32_t i = 0; i < object.volume_count(); ++i) {
@@ -123,6 +124,80 @@ public:
                                                       static_cast<uint32_t>(slice_zs.size()));
         return out;
     }
+};
+
+/*
+StoredTriangleMesh owns a mesh created in plugin storage from plugin arrays.
+
+It is a TriangleMesh view, so the read and slice methods apply directly. The
+destructor releases the handle with storage_free(); the storage must outlive the
+wrapper. While the owner is alive, storage_free() on its mesh or storage_clear() on
+its storage must not run, or the destructor would release the mesh twice. The
+wrapper is move-only so exactly one owner releases the mesh.
+*/
+class StoredTriangleMesh : public TriangleMesh
+{
+public:
+    // Allocate the mesh in storage; a failed creation throws std::invalid_argument.
+    StoredTriangleMesh(storage_handle *storage,
+                       const std::vector<c_vec3f> &vertices,
+                       const std::vector<c_triangle_indices> &triangles) :
+        TriangleMesh(create(storage, vertices, triangles)), m_storage(storage) {}
+
+    StoredTriangleMesh(const StoredTriangleMesh &) = delete;
+    StoredTriangleMesh &operator=(const StoredTriangleMesh &) = delete;
+
+    // Take over the allocation; the moved-from wrapper is left empty.
+    StoredTriangleMesh(StoredTriangleMesh &&other) noexcept :
+        TriangleMesh(other), m_storage(other.m_storage) {
+        other.m_handle = nullptr;
+        other.m_storage = nullptr;
+    }
+
+    // Release the current allocation, then take over the source's; the source is left empty.
+    StoredTriangleMesh &operator=(StoredTriangleMesh &&other) noexcept {
+        if (this == &other)
+            return *this;
+        reset();
+        m_handle = other.m_handle;
+        m_storage = other.m_storage;
+        other.m_handle = nullptr;
+        other.m_storage = nullptr;
+        return *this;
+    }
+
+    // Release the owned mesh; the storage must still be alive.
+    ~StoredTriangleMesh() { reset(); }
+
+private:
+    // Allocate the storage mesh; a NULL result (invalid arrays or an internal failure such as allocation) throws.
+    static triangle_mesh_handle *create(storage_handle *storage,
+                                        const std::vector<c_vec3f> &vertices,
+                                        const std::vector<c_triangle_indices> &triangles)
+    {
+        if (storage == nullptr)
+            throw std::invalid_argument("StoredTriangleMesh requires a storage handle.");
+        triangle_mesh_handle *handle = storage_new_triangle_mesh(storage,
+                                                                 vertices.data(),
+                                                                 static_cast<uint32_t>(vertices.size()),
+                                                                 triangles.data(),
+                                                                 static_cast<uint32_t>(triangles.size()));
+        if (handle == nullptr)
+            throw std::invalid_argument("The TriangleMesh could not be created from the given arrays.");
+        return handle;
+    }
+
+    // Release the allocation once; a moved-from wrapper holds no handle and does nothing.
+    void reset() noexcept {
+        if (m_storage == nullptr || m_handle == nullptr)
+            return;
+        const bool freed = storage_free(m_storage, const_cast<triangle_mesh_handle *>(m_handle)) != 0;
+        assert(freed);
+        m_storage = nullptr;
+        m_handle = nullptr;
+    }
+
+    storage_handle *m_storage = nullptr;
 };
 
 class Volume : public ConstDataTreeHandleView<volume_handle>
