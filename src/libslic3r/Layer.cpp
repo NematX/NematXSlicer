@@ -11,6 +11,10 @@
 ///|/ SuperSlicer, PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// This file implements the Layer, LayerSliceIsland and LayerRegion-related data
+// of a print layer (slices, islands, regions), and the ApiInternal access
+// writers (LayerAccess, LayerIslandAccess) that the data-tree API and the
+// steps use to modify them.
 #include "Layer.hpp"
 
 #include <boost/log/trivial.hpp>
@@ -42,22 +46,38 @@ namespace Slic3r {
 
 ExPolygons &ApiInternal::LayerAccess::slices_mutable(Layer &layer) { return layer.m_lslices; }
 
+// Replaces the layer slices and rebuilds one island per slice (same order).
+// Precondition: the islands must not be locked (a debug assert checks it).
+// Transactional: every island is built (each one copies its slice) from the
+// still-intact `new_islands` before anything is published. If an allocation
+// fails, the layer is unchanged and `new_islands` is not moved from. The
+// source is moved only on success, by two non-throwing moves.
 void ApiInternal::LayerAccess::set_islands(Layer &layer, ExPolygons &&new_islands) {
     assert(!layer.m_islands_locked);
-    layer.m_lslices = std::move(new_islands);
-    layer.m_islands.clear();
-    for (size_t i = 0; i < layer.m_lslices.size(); ++i) {
-        layer.m_islands.emplace_back(new LayerSliceIsland(layer.m_lslices[i]));
+    LayerSliceIslandUPtrs islands;
+    islands.reserve(new_islands.size());
+    for (const ExPolygon &slice : new_islands) {
+        islands.push_back(std::make_unique<LayerSliceIsland>(slice));
     }
+    // Publish: vector move assignments do not throw; the old islands are destroyed here.
+    layer.m_lslices = std::move(new_islands);
+    layer.m_islands = std::move(islands);
     assert(layer.lslices().size() == layer.m_islands.size());
 }
 
+// Rebuilds the layer slices from the current islands' slices (same order).
+// It only rebuilds the lslices cache: island bounding boxes and links are not recomputed.
+// Precondition: the islands must not be locked (a debug assert checks it).
+// Transactional: the new slices are built in a local vector and moved in at
+// the end, so if an allocation fails the layer slices are unchanged.
 void ApiInternal::LayerAccess::recompute_slices_from_islands(Layer &layer) {
     assert(!layer.m_islands_locked);
-    layer.m_lslices.clear();
+    ExPolygons slices;
+    slices.reserve(layer.m_islands.size());
     for (LayerSliceIslandUPtr &island : layer.m_islands) {
-        layer.m_lslices.push_back(island->get_slice());
+        slices.push_back(island->get_slice());
     }
+    layer.m_lslices = std::move(slices);
     assert(layer.lslices().size() == layer.m_islands.size());
 }
 
@@ -127,8 +147,13 @@ ExPolygon &ApiInternal::LayerIslandAccess::slice_mutable(LayerSliceIsland &islan
 
 void ApiInternal::LayerIslandAccess::set_infill_areas(LayerSliceIsland &island, ExPolygons &&infill_areas)
 {
+    // Sets the island infill areas and their bounding boxes. Transactional: the
+    // boxes are computed from the incoming areas first (the only step that can
+    // allocate), then both members are moved in, so if an allocation fails the
+    // island is unchanged.
+    BoundingBoxes bboxes = get_extents_vector(infill_areas);
     island.m_infill_areas = std::move(infill_areas);
-    island.m_infill_areas_bboxes = get_extents_vector(island.m_infill_areas);
+    island.m_infill_areas_bboxes = std::move(bboxes);
 }
 
 ExPolygons &ApiInternal::LayerIslandAccess::infill_free_areas_mutable(LayerSliceIsland &island)

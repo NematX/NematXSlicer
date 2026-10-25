@@ -3,6 +3,8 @@
 #include "plugin_test_helpers.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/internal/LayerAccess.hpp"
+#include "libslic3r/Api/internal/LayerIslandAccess.hpp"
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
@@ -491,4 +493,52 @@ TEST_CASE("PrintApply applies every layer height range", "[plugins][regions][lay
     CHECK(densities.count(10) == 1);
     CHECK(densities.count(40) == 1);
     CHECK(densities.count(70) == 1);
+}
+
+TEST_CASE("Layer native island writes publish consistent slices, islands and infill areas",
+          "[plugins][auxiliary-layer][islands]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model = make_auxiliary_region_model(false, false, false);
+    Print print;
+    init_print_from_model(model, print);
+    run_until_sliced(print);
+
+    PrintObject &object = print.object(0);
+    // Main-layer islands are frozen after post-slicing (m_islands_locked), so the native writes would assert; use a fresh auxiliary layer.
+    Layer &layer = object.add_auxiliary_layer(0, scale_i(0.2), scale_i(0.2));
+
+    // set_islands: lslices equals the input and each island matches its input element, in order.
+    const ExPolygons input{
+        rectangle_expolygon(0., 0., 10., 10.),
+        rectangle_expolygon(20., 0., 30., 5.),
+        rectangle_expolygon(40., 0., 45., 15.)
+    };
+    ExPolygons source = input;
+    ApiInternal::LayerAccess::set_islands(layer, std::move(source));
+    REQUIRE(layer.lslices() == input);
+    REQUIRE(layer.islands().size() == input.size());
+    for (size_t idx = 0; idx < input.size(); ++idx) {
+        CHECK(layer.island(idx).get_slice() == input[idx]);
+        CHECK(layer.island(idx).get_bounding_box() == get_extents(input[idx]));
+    }
+
+    // recompute_slices_from_islands: lslices equals the islands' slices, in order.
+    ApiInternal::LayerIslandAccess::slice_mutable(layer.island(1)) = rectangle_expolygon(50., 0., 60., 10.);
+    ApiInternal::LayerAccess::recompute_slices_from_islands(layer);
+    REQUIRE(layer.lslices().size() == input.size());
+    for (size_t idx = 0; idx < input.size(); ++idx)
+        CHECK(layer.lslices()[idx] == layer.island(idx).get_slice());
+    CHECK(layer.lslices()[0] == input[0]);
+    CHECK(layer.lslices()[1] == rectangle_expolygon(50., 0., 60., 10.));
+    CHECK(layer.lslices()[2] == input[2]);
+
+    // set_infill_areas: the areas and their bounding boxes match.
+    const ExPolygons areas{ rectangle_expolygon(1., 1., 4., 4.), rectangle_expolygon(5., 5., 9., 8.) };
+    ExPolygons areas_source = areas;
+    ApiInternal::LayerIslandAccess::set_infill_areas(layer.island(0), std::move(areas_source));
+    CHECK(layer.island(0).infill_areas() == areas);
+    REQUIRE(layer.island(0).infill_areas_bboxes().size() == areas.size());
+    for (size_t idx = 0; idx < areas.size(); ++idx)
+        CHECK(layer.island(0).infill_areas_bboxes()[idx] == get_extents(areas[idx]));
 }

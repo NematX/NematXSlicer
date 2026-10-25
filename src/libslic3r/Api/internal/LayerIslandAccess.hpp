@@ -18,6 +18,7 @@ namespace ApiInternal {
 struct LayerIslandAccess
 {
     static ExPolygon &slice_mutable(LayerSliceIsland &island);
+    // Sets the infill areas and their bounding boxes; transactional.
     static void set_infill_areas(LayerSliceIsland &island, ExPolygons &&infill_areas);
     static ExPolygons &infill_free_areas_mutable(LayerSliceIsland &island);
     static ExPolygons &perimeter_slices_mutable(LayerSliceIsland &island);
