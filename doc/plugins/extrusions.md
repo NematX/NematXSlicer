@@ -1,13 +1,12 @@
 # Using Unified Extrusion Entities
 
-> API snapshot commit: `eb858c6cefbb705042d1f127e906d2afcce35927`
->
 > Plugin ABI version: `50`
+>
+> Extrusion-property ABI: `2.2` (minor 2 appends `DEPOSIT = 11`; payload sizes are unchanged)
 
-The commit above identifies the source-tree state against which this guide and
-its examples were checked. It is not the commit that adds this document: a
-commit cannot contain its own final hash. Update both the snapshot hash and the
-ABI value whenever this guide is revised for a later plugin API.
+The versions above identify the plugin API against which this guide and its
+examples were checked. Update them whenever this guide is revised for a later
+plugin API.
 
 The plugin API represents every printable path, ordered path group, and
 non-geometric event with the same `slic3r_api::ExtrusionEntity` tree model. A
@@ -141,6 +140,45 @@ params.flow_mult = 1.f;
 params.flags = THICK_POLYLINE_EXTRUSION_FLOW_FROM_SPACING | THICK_POLYLINE_EXTRUSION_CAN_REVERSE;
 std::optional<StoredExtrusionEntity> line = thick_polyline_extrusion(storage, points, widths, params);
 ```
+
+### Stationary Deposit Leaves
+
+A stationary deposit is a leaf with exactly one polyline point, flags 0, ordinary
+printable `EPropertyAttributes`, and `EPropertySpecialCommand` set to
+`C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT` (11). Its `extra_data` is a finite positive
+volume in mm3 **before** the extrusion multiplier. `is_deposit()` identifies the
+direct command; consumers validate its point count and process values separately.
+Other one-point leaves are not deposits.
+
+The leaf needs effective positive finite `mm3_per_mm`, width, height and speed,
+an active tool and a printable role, with no `EPropertyExtrusionAxis`. It belongs
+inside a `PrintingExtrusion` root, never a before/after event scope. The default
+firmware session emits role/dimension markers, travels to the quantized point,
+then emits E-only `G1 E F` with print acceleration. The tool converts the volume
+using `delta_E = volume * e_per_mm3()`. Its filament speed is
+`speed * mm3_per_mm * extrusion_multiplier / filament_area` in both classic and
+volumetric E modes. The temporary speed is restored after the move. The plan
+supplies any required unretraction; the deposit itself only repays existing debt.
+
+For support roles, let `s = 10^-gcode_precision_e` and `r` be the carried E
+rounding remainder (filament mm, or mm3 with volumetric E). The writer trials
+`extrude(delta_E)` on a copy of the axis state. If it emits an E word, or
+`delta_E < 0.5*s`, the ordinary result is retained. Otherwise a negative
+remainder swallowed the deposit: the writer extrudes `s-r` instead, emits
+exactly one step, clears the remainder and accounts for the adjusted amount.
+The extra is below one step and is never recovered; absolute E does not decrease.
+A support deposit with no emitted E word carries its remainder and emits
+`G4 P20` at the deposit point. The estimator and reader omit this 20 ms dwell.
+The G-code reader ignores stationary E moves of at most 1e-4 mm of filament, so
+such deposits are missing from read-back statistics while the writer counts them.
+The half-step trigger and dwell are first limits that may be tuned. They are
+named in the default firmware writer header.
+
+The one-point position survives cloning and instance translation. It contains
+no segments, so the pre-G-code preview draws no geometry. The G-code reader
+classifies stationary positive E as unretraction, although deposited volume is
+accounted for after outstanding debt. Raw `EXTRUSION` retains its separate signed
+filament-length meaning and does not apply flow or the extrusion multiplier.
 
 ### Retraction And Wipe Process Leaves
 

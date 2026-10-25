@@ -1,5 +1,7 @@
 #include <catch2/catch.hpp>
 
+#include "gcode_test_helpers.hpp"
+#include "layer_extrusion_edit_transition_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 
@@ -7,6 +9,7 @@
 #include <atomic>
 #include <cstdint>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -17,6 +20,7 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Api/internal/LayerIslandAccess.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
@@ -936,6 +940,216 @@ TEST_CASE("Layer speed follows final values across region boundaries",
     }
 }
 
+TEST_CASE("Deposits select regional process values without splitting their volume",
+          "[plugins][deposit][speed][acceleration][regions][retraction][lift][travel][travel-deceleration]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const int location = GENERATE(0, 1, 2, 3);
+    const bool base_deceleration = GENERATE(false, true);
+    INFO("Deposit location index: " << location);
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"perimeter_speed", "70"}, {"default_acceleration", "700"},
+        {"perimeter_acceleration", "100%"}, {"first_layer_speed", "100%"},
+        {"first_layer_acceleration", "100%"}, {"max_print_speed", "100"},
+        {"max_volumetric_speed", "0"}, {"filament_max_speed", "0"},
+        {"filament_max_volumetric_speed", "0"}, {"retract_before_travel", "0"},
+        {"retract_layer_change", "0"}, {"retract_length", "2"},
+        {"print_retract_length", "1.5"}, {"print_retract_lift", "0.6"},
+        {"travel_deceleration_use_target", base_deceleration ? "1" : "0"},
+        {"avoid_crossing_perimeters", "1"}, {"avoid_crossing_not_first_layer", "0"},
+        {"avoid_crossing_perimeters_max_detour", "0"}, {"machine_limits_usage", "ignore"},
+        {"retract_lift_above", "0"}, {"retract_lift_below", "0"},
+        {"retract_lift_first_layer", "0"}, {"retract_lift_top", "All surfaces"},
+        {"retract_lift_before_travel", "0"}, {"travel_ramping_lift", "1"},
+        {"travel_slope", "0"}, {"wipe", "0"}
+    });
+    prepare_regional_process_plan(prepared, config,
+        {{"perimeter_speed", "30"}, {"default_acceleration", "300"},
+         {"print_retract_length", "0.8"}, {"print_retract_lift", "0.3"},
+         {"travel_deceleration_use_target", base_deceleration ? "0" : "1"},
+         {"avoid_crossing_perimeters", "0"}},
+        "perimeter_speed", {ExtrusionSpec{}, ExtrusionSpec{}, ExtrusionSpec{}});
+    ExtrusionEntity &root = single_plan_root(prepared.print);
+    REQUIRE(root.child_count() == 3);
+    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(root.child(1));
+    const Point center = (deposit.first_point() + deposit.last_point()) / 2;
+    // The modifier is the central four-millimeter strip. Other choices test
+    // the base region, the shared border, and a point outside every source area.
+    Point point = center;
+    if (location == 1)
+        point.x() -= scale_i(5.0);
+    else if (location == 2)
+        point.x() -= scale_i(2.0);
+    else if (location == 3)
+        point.x() -= scale_i(30.0);
+    const slic3r_api::PrintingPlan plan_view(
+        reinterpret_cast<printing_plan_handle *>(&prepared.print.mutable_printing_plan()));
+    const slic3r_api::ConstPrintingExtrusion extrusion =
+        plan_view.group(0).layer_group(0).tool_group(0).extrusion(0);
+    const slic3r_api::Config fallback = extrusion.region_island().region(0).print_region().config();
+    const c_point shift = plan_view.object_instance_shift(extrusion);
+    CHECK((shift.x != 0 || shift.y != 0));
+    if (location == 2) {
+        // Use the sliced modifier's exact edge rather than the nominal mesh
+        // width, which can differ by a scaled coordinate after slicing.
+        for (uint32_t region_idx = 0; region_idx < extrusion.region_island().region_count(); ++region_idx) {
+            const slic3r_api::LayerRegion region = extrusion.region_island().region(region_idx);
+            if (region.print_region().config().float_or_default("perimeter_speed", 0.0) != 30.0)
+                continue;
+            for (const slic3r_api::ExPolygon area : region.slices()) {
+                coord_t min_x = area.contour().at(0).x;
+                for (uint32_t idx = 1; idx < area.contour().size(); ++idx)
+                    min_x = std::min(min_x, area.contour().at(idx).x);
+                point.x() = min_x + shift.x;
+            }
+        }
+        const slic3r_api::RegionSettingsPointResult lookup =
+            slic3r_api::RegionSettings::lookup_at_point(extrusion.region_island(),
+                {"perimeter_speed"}, c_point{point.x() - shift.x, point.y() - shift.y});
+        REQUIRE(lookup.status == slic3r_api::RegionSettingsPointStatus::Ambiguous);
+    }
+    deposit.polyline() = ArcPolyline();
+    deposit.polyline().append(point);
+    deposit.add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+
+    run_default_editors(prepared);
+    const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == 7); // Two crossing paths split into three; the deposit stays one.
+    CHECK(leaves[3].speed == Approx(location == 0 ? 30.0 : location == 1 ? 70.0 :
+                                   fallback.float_or_default("perimeter_speed", 0.0)));
+    CHECK(leaves[3].acceleration == Approx(location == 0 ? 300.0 : location == 1 ? 700.0 :
+                                          fallback.float_or_default("default_acceleration", 0.0)));
+    CHECK(deposit.child_count() == 0);
+    CHECK(deposit.polyline().size() == 1);
+    CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
+    CHECK(deposit.first_point() == point);
+
+    // Perimeter routing sees a hole in the enabled base region. Region masks
+    // stay unchanged so the same source still exercises ambiguous point lookup.
+    Layer &routing_layer = *reinterpret_cast<Layer *>(
+        const_cast<layer_handle *>(extrusion.region_island().region(0).layer().handle()));
+    ExPolygons perimeter = routing_layer.lslices();
+    REQUIRE(perimeter.size() == 1);
+    const Point source_center(center.x() - shift.x, center.y() - shift.y);
+    Polygon obstacle({
+        source_center + Point(scale_i(4.0), scale_i(-1.0)),
+        source_center + Point(scale_i(6.0), scale_i(-1.0)),
+        source_center + Point(scale_i(6.0), scale_i(1.0)),
+        source_center + Point(scale_i(4.0), scale_i(1.0))});
+    obstacle.make_clockwise();
+    perimeter.front().holes.push_back(std::move(obstacle));
+    Slic3r::ApiInternal::LayerIslandAccess::perimeter_slices_mutable(
+        routing_layer.islands().front()) = perimeter;
+    Slic3r::ApiInternal::LayerIslandAccess::slice_mutable(
+        routing_layer.islands().front()) = perimeter.front();
+    const_cast<ExPolygons &>(routing_layer.lslices()) = perimeter;
+    // Auxiliary support-layer routing also reads the nearest object layer's
+    // perimeter boundary; expose the same obstacle in that borrowed layer.
+    Layer *below = const_cast<Layer *>(prepared.print.object(0).get_first_layer_below_printz(
+        routing_layer.scaled_print_z() + SCALED_EPSILON));
+    REQUIRE(below != nullptr);
+    Slic3r::ApiInternal::LayerIslandAccess::perimeter_slices_mutable(
+        below->islands().front()) = perimeter;
+    Slic3r::ApiInternal::LayerIslandAccess::slice_mutable(
+        below->islands().front()) = perimeter.front();
+    const_cast<ExPolygons &>(below->lslices()) = perimeter;
+    PrintingToolGroup &tool = prepared.print.mutable_printing_plan().groups.front()
+        .layers.front().tool_groups.front();
+    const slic3r_api::LayerRegionIsland source_regions = extrusion.region_island();
+    for (int control_idx = 0; control_idx < 2; ++control_idx) {
+        const slic3r_api::RegionSettingsPointResult enabled =
+            slic3r_api::RegionSettings::lookup_at_point(source_regions,
+                {"avoid_crossing_perimeters"}, c_point{
+                    source_center.x() + scale_i(control_idx == 0 ? 3.0 : 8.0), source_center.y()});
+        REQUIRE(enabled.found());
+        REQUIRE(enabled.value.get_bool());
+        ExtrusionSpec control_spec;
+        control_spec.existing_speed = 20.f;
+        control_spec.existing_acceleration = 700.f;
+        std::unique_ptr<ExtrusionPath> path = make_path(control_spec, 0);
+        path->polyline() = ArcPolyline();
+        path->polyline().append(center + Point(scale_i(control_idx == 0 ? 2.0 : 8.0), 0));
+        path->polyline().append(center + Point(scale_i(control_idx == 0 ? 3.0 : 9.0), 0));
+        PrintingExtrusion control;
+        control.region_island = tool.extrusions.back().region_island;
+        control.printing_catalog_id = tool.extrusions.back().printing_catalog_id;
+        control.sregion_island_role = ExtrusionRole::Perimeter;
+        control.root = std::move(path);
+        tool.extrusions.insert(tool.extrusions.begin() + control_idx, std::move(control));
+    }
+
+    // Run the remaining consumers with real non-uniform source provenance.
+    REQUIRE_NOTHROW(run_editors(prepared, {
+        DEFAULT_TRANSITION_SCOPE_PLUGIN, "layer_extrusion_edit.retraction.default",
+        DEFAULT_ENTRY_STATE_PLUGIN, "layer_extrusion_edit.travel.avoid_crossing_perimeters",
+    }));
+    const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope scope(
+        Slic3r::Test::TransitionPipeline::find_scope(
+            Slic3r::Test::TransitionPipeline::entity_view(deposit)),
+        Slic3r::Test::TransitionPipeline::scope_property_key());
+    REQUIRE(scope.content().is_deposit());
+    const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope control(
+        Slic3r::Test::TransitionPipeline::find_scope(
+            Slic3r::Test::TransitionPipeline::entity_view(*tool.extrusions[1].root)),
+        Slic3r::Test::TransitionPipeline::scope_property_key());
+    REQUIRE(control.travel().point_count() > 2);
+    CHECK(control.travel().point(0).x == center.x() + scale_i(3.0));
+    CHECK(control.travel().point(control.travel().point_count() - 1).x == center.x() + scale_i(8.0));
+    const slic3r_api::EPropertyExtrusionAxis *retract =
+        scope.after().get(slic3r_api::EPropertyExtrusionAxis::key);
+    REQUIRE(retract != nullptr);
+    CHECK(retract->value == Approx(location == 0 ? 0.8 : location == 1 ? 1.5 :
+                                  fallback.float_or_default("print_retract_length", 2.0)));
+    if (location >= 2) {
+        // Outside or ambiguous endpoints have no probe, so routing stays straight.
+        REQUIRE(scope.travel().point_count() == 2);
+        CHECK(scope.travel().point(1).x == point.x());
+        CHECK(scope.travel().point(1).y == point.y());
+    }
+    slic3r_api::EPropertySpeed &travel_process = scope.travel().get_or_add(slic3r_api::EPropertySpeed::key);
+    travel_process.speed_mm_per_s = 100.f;
+    travel_process.accel_mm_per_s2 = 2000.f;
+    REQUIRE_NOTHROW(run_editors(prepared, {"layer_extrusion_edit.lift.default"}));
+    const slic3r_api::LayerExtrusionEdit::ExtrusionScope::OrderedExtrusionScope next(
+        Slic3r::Test::TransitionPipeline::find_scope(
+            Slic3r::Test::TransitionPipeline::entity_view(root.child(2))),
+        Slic3r::Test::TransitionPipeline::scope_property_key());
+    REQUIRE(next.travel().child_count() == 2);
+    const slic3r_api::ExtrusionEntity ascending = next.travel().child(0);
+    CHECK(unscaled(ascending.z_offset(ascending.point_count() - 1)) ==
+          Approx(location == 0 ? 0.3 : location == 1 ? 0.6 :
+                 fallback.float_or_default("print_retract_lift", 0.0)).margin(1e-6));
+    REQUIRE_NOTHROW(run_editors(prepared, {"layer_extrusion_edit.travel_deceleration.default"}));
+    if (location >= 2) {
+        const bool use_target = fallback.bool_or_default("travel_deceleration_use_target", false);
+        CHECK(source_regions.region(1).print_region().config().bool_or_default(
+            "travel_deceleration_use_target", false) != use_target);
+        std::vector<ProcessState> travel_values;
+        // Lift and deceleration hoist attributes to wrappers. Resolve process
+        // inheritance without requiring direct attributes on each geometric leaf.
+        const auto collect_travel = [&travel_values](const auto &self,
+            const ExtrusionEntity &entity, ProcessState state) -> void {
+            if (const ExtrusionPropertySpeed *process = entity.get_property<ExtrusionPropertySpeed>()) {
+                if (process->speed_mm_per_s > 0.f)
+                    state.speed = process->speed_mm_per_s;
+                if (process->accel_mm_per_s2 > 0.f)
+                    state.acceleration = process->accel_mm_per_s2;
+            }
+            if (entity.child_count() == 0 && entity.has_polyline())
+                travel_values.push_back(state);
+            for (size_t idx = 0; idx < entity.child_count(); ++idx)
+                self(self, entity.child(idx), state);
+        };
+        collect_travel(collect_travel,
+            *reinterpret_cast<const ExtrusionEntity *>(scope.travel().handle()), ProcessState{});
+        REQUIRE_FALSE(travel_values.empty());
+        CHECK(travel_values.back().acceleration == Approx(use_target ? leaves[3].acceleration : 2000.f));
+        CHECK(travel_values.back().speed == Approx(100.f));
+    }
+}
+
 TEST_CASE("Layer acceleration follows final values across region boundaries",
           "[plugins][layer-extrusion-edit][acceleration][regions]")
 {
@@ -1820,6 +2034,88 @@ TEST_CASE("PrintingPlan time estimator counts geometry and connecting travel",
     // Two 18 mm paths at 20 mm/s plus the 18.027... mm connection at
     // 10 mm/s. The first machine position is intentionally free.
     CHECK(estimates.front().duration_seconds == Approx(3.6027756).margin(1e-5));
+}
+
+TEST_CASE("PrintingPlan time estimator inherits deposit flow and counts both gaps",
+          "[plugins][deposit][fan][time-estimator]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = speed_config({{"travel_speed", "10"}});
+    PrintingPlan plan;
+    plan.groups.emplace_back();
+    plan.groups.back().layers.emplace_back();
+    PrintingLayerGroup &layer = plan.groups.back().layers.back();
+    layer.print_z = scale_i(0.2);
+    layer.tool_groups.emplace_back();
+    PrintingToolGroup &tool = layer.tool_groups.back();
+    tool.extruder_id = 0;
+    std::unique_ptr<ExtrusionEntityCollection> root =
+        std::make_unique<ExtrusionEntityCollection>(false, false);
+    root->add_property(ExtrusionAttributes(ExtrusionRole::SupportMaterial,
+                                         ExtrusionFlow(0.2, 0.4f, 0.2f)));
+    root->add_property(ExtrusionPropertySpeed(20.f));
+    root->append(make_path(ExtrusionSpec{ExtrusionRole::Perimeter, 0.2}, 0));
+    std::unique_ptr<ExtrusionPath> deposit = make_path(ExtrusionSpec{}, 0);
+    deposit->remove_property<ExtrusionAttributes>();
+    deposit->polyline() = ArcPolyline();
+    deposit->polyline().append(Point(scale_i(39.0), scale_i(11.0)));
+    deposit->add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, 1.0));
+    root->append(std::move(deposit));
+    // A non-DEPOSIT point is not a movement and must not change timing or position.
+    std::unique_ptr<ExtrusionPath> ignored = make_path(ExtrusionSpec{}, 0);
+    ignored->polyline() = ArcPolyline();
+    ignored->polyline().append(Point(scale_i(1000.0), 0));
+    root->append(std::move(ignored));
+    std::unique_ptr<ExtrusionPath> last = make_path(ExtrusionSpec{}, 0);
+    last->polyline() = ArcPolyline();
+    last->polyline().append(Point(scale_i(49.0), scale_i(11.0)));
+    last->polyline().append(Point(scale_i(59.0), scale_i(11.0)));
+    root->append(std::move(last));
+    PrintingExtrusion extrusion;
+    extrusion.root = std::move(root);
+    tool.extrusions.push_back(std::move(extrusion));
+    const slic3r_api::Config config_view(Slic3r::ApiHost::to_config_handle(&config));
+    const slic3r_api::ConstPrintingPlan plan_view(
+        reinterpret_cast<const printing_plan_handle *>(&plan));
+    const std::vector<slic3r_api::PrintingLayerTimeEstimate> estimates =
+        slic3r_api::PrintingPlanTimeEstimator(config_view).estimate(plan_view);
+    REQUIRE(estimates.size() == 1);
+    // 18/20 + 10/10 + 1/(20*0.2) + 10/10 + 10/20 seconds.
+    CHECK(estimates.front().duration_seconds == Approx(3.65));
+}
+
+TEST_CASE("PrintingPlan time estimator rejects malformed deposits before timing",
+          "[plugins][deposit][fan][time-estimator]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const int invalid = GENERATE(0, 1, 2, 3, 4, 5);
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({{"travel_speed", "10"}});
+    ExtrusionSpec spec;
+    spec.existing_speed = 20.f;
+    prepare_ordered_plan(prepared, config, {{spec}});
+    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(single_plan_root(prepared.print).child(0));
+    deposit.polyline() = ArcPolyline();
+    if (invalid != 0)
+        deposit.polyline().append(Point(0, 0));
+    if (invalid == 1)
+        deposit.polyline().append(Point(scale_i(1.0), 0));
+    const double volume = invalid == 2 ? 0.0 : invalid == 3 ? -1.0 :
+        invalid == 4 ? std::numeric_limits<double>::quiet_NaN() :
+        invalid == 5 ? std::numeric_limits<double>::infinity() : 0.5;
+    deposit.add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, volume));
+    const slic3r_api::ConstPrintingPlan plan_view(
+        reinterpret_cast<const printing_plan_handle *>(&prepared.print.mutable_printing_plan()));
+    const slic3r_api::PrintingPlanTimeEstimator estimator(
+        slic3r_api::Config(Slic3r::ApiHost::to_config_handle(&config)));
+    CHECK_THROWS_AS(estimator.estimate(plan_view), std::invalid_argument);
+    CHECK_THROWS_WITH(estimator.estimate(plan_view),
+                      "A deposit needs exactly one point and a finite positive volume.");
+    slic3r_api::LayerExtrusionEdit::ExtrusionScope::LeafEndpoints endpoints;
+    CHECK(slic3r_api::LayerExtrusionEdit::ExtrusionScope::leaf_endpoints(
+        Slic3r::Test::TransitionPipeline::entity_view(deposit).readonly(), endpoints) == (invalid >= 2));
 }
 
 TEST_CASE("PrintingPlan time estimator treats sub-epsilon gaps as continuous",

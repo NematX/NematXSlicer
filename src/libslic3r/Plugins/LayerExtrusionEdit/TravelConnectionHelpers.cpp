@@ -171,6 +171,7 @@ PlannedPosition absolute_position(const c_point point, const coord_t print_z,
     return result;
 }
 
+// Traverse borrowed children in order, copying absolute endpoints of segmented leaves or deposits; checked Z arithmetic can throw and the tree is not changed.
 bool find_first_geometry(MutableExtrusionEntity entity, const coord_t print_z,
                          const coord_t inherited_z_offset, GeometricLeaf &result)
 {
@@ -178,15 +179,14 @@ bool find_first_geometry(MutableExtrusionEntity entity, const coord_t print_z,
     if (const EPropertyZOffset *direct = entity.get(EPropertyZOffset::key))
         effective_z_offset = direct->get();
 
-    if (entity.segment_count() != 0) {
-        const c_extrusion_segment first = entity.segment(0);
-        const c_extrusion_segment last = entity.segment(entity.segment_count() - 1);
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (ExtrusionScope::leaf_endpoints(entity.readonly(), endpoints)) {
         result.entity = entity;
         result.effective_z_offset = effective_z_offset;
-        result.first = absolute_position(first.point_a, print_z,
-                                         effective_z_offset, first.z_offset_a);
-        result.last = absolute_position(last.point_b, print_z,
-                                        effective_z_offset, last.z_offset_b);
+        result.first = absolute_position(endpoints.first, print_z,
+                                         effective_z_offset, endpoints.first_z);
+        result.last = absolute_position(endpoints.last, print_z,
+                                        effective_z_offset, endpoints.last_z);
         result.closed = entity.point_count() > 1 &&
             result.first.x == result.last.x && result.first.y == result.last.y &&
             result.first.z == result.last.z;
@@ -200,6 +200,7 @@ bool find_first_geometry(MutableExtrusionEntity entity, const coord_t print_z,
     return false;
 }
 
+// Traverse borrowed children backwards, copying absolute endpoints of segmented leaves or deposits; checked Z arithmetic can throw and ownership stays with the plan.
 bool find_last_geometry(MutableExtrusionEntity entity, const coord_t print_z,
                         const coord_t inherited_z_offset, GeometricLeaf &result)
 {
@@ -207,15 +208,14 @@ bool find_last_geometry(MutableExtrusionEntity entity, const coord_t print_z,
     if (const EPropertyZOffset *direct = entity.get(EPropertyZOffset::key))
         effective_z_offset = direct->get();
 
-    if (entity.segment_count() != 0) {
-        const c_extrusion_segment first = entity.segment(0);
-        const c_extrusion_segment last = entity.segment(entity.segment_count() - 1);
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (ExtrusionScope::leaf_endpoints(entity.readonly(), endpoints)) {
         result.entity = entity;
         result.effective_z_offset = effective_z_offset;
-        result.first = absolute_position(first.point_a, print_z,
-                                         effective_z_offset, first.z_offset_a);
-        result.last = absolute_position(last.point_b, print_z,
-                                        effective_z_offset, last.z_offset_b);
+        result.first = absolute_position(endpoints.first, print_z,
+                                         effective_z_offset, endpoints.first_z);
+        result.last = absolute_position(endpoints.last, print_z,
+                                        effective_z_offset, endpoints.last_z);
         result.closed = entity.point_count() > 1 &&
             result.first.x == result.last.x && result.first.y == result.last.y &&
             result.first.z == result.last.z;
@@ -247,12 +247,20 @@ TravelEndpoint endpoint_from_leaf(const GeometricLeaf &leaf,
     return endpoint;
 }
 
+// Snap borrowed geometry to an absolute position, preserving arcs or the deposit's single point; arithmetic or rejected geometry edits throw without transferring ownership.
 void snap_leaf_start(GeometricLeaf leaf,
                      const PlannedPosition &position, const coord_t print_z)
 {
     const coord_t base_z = checked_add(print_z, leaf.effective_z_offset);
     const coord_t z_offset = checked_subtract(position.z, base_z);
     const c_point point{position.x, position.y};
+    // A stationary deposit has no segment to edit; keep its point-local Z offset.
+    if (leaf.entity.is_deposit()) {
+        if (!leaf.entity.set_points(&point, 1) ||
+            !leaf.entity.set_z_offset(0, z_offset))
+            throw std::runtime_error("Unable to snap a stationary deposit.");
+        return;
+    }
     // Editing segments preserves arc centers, unlike the simpler point setter.
     std::vector<c_extrusion_segment> segments = leaf.entity.segments();
     if (segments.empty())

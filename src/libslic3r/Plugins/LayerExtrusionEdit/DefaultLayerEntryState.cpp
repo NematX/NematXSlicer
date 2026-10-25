@@ -4,6 +4,7 @@
 ///|/
 
 #include "DefaultLayerEntryState.hpp"
+#include "ExtrusionScopeHelpers.hpp"
 
 #include <cstdint>
 #include <limits>
@@ -26,9 +27,9 @@ Default layer entry-state producer
 This plugin publishes two properties on every PrintingLayerGroup:
 
 - position is the planned machine position immediately before the current
-  layer-group starts. It is the endpoint of the last geometric segment visited
-  earlier in PrintingPlan order. The position is unknown before the first
-  geometric segment has been visited.
+   layer-group starts. It is the last printable endpoint, segmented or DEPOSIT,
+   visited earlier in PrintingPlan order. The position is unknown before the
+   first such endpoint. Other leaves without segments do not change it.
 - tool is the extruder selected before the current layer-group is visited.
   UINT16_MAX means that no tool has been selected yet.
 
@@ -61,13 +62,14 @@ const char *k_no_dependencies[] = { nullptr };
 coord_t checked_add(coord_t lhs, coord_t rhs);
 
 /*
-Update the running position with the last geometric segment in one extrusion
+Update the running position with the last segmented or DEPOSIT endpoint in one extrusion
 tree. Children are visited in stored execution order, followed by the entity's
-own segment data. A direct Z-offset property replaces the inherited offset for
+own printable endpoints. A direct Z-offset property replaces the inherited offset for
 the complete subtree; passing the resolved value by copy restores the parent's
-offset automatically for the next sibling. Non-geometric entities do not
+offset automatically for the next sibling. Other leaves without segments do not
 change the running position.
 */
+// Scan borrowed geometry in machine order and update the next layer's absolute entry position, including deposits; checked Z overflow throws and the extrusion tree is unchanged.
 void update_position_from_entity(const ExtrusionEntity &entity,
                                  coord_t print_z,
                                  coord_t inherited_z_offset,
@@ -141,13 +143,13 @@ void update_position_from_entity(const ExtrusionEntity &entity,
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
         update_position_from_entity(entity.child(child_idx), print_z, z_offset, position);
 
-    if (entity.segment_count() == 0)
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (!ExtrusionScope::leaf_endpoints(entity, endpoints))
         return;
 
-    const c_extrusion_segment last_segment = entity.segment(entity.segment_count() - 1);
-    position.x = last_segment.point_b.x;
-    position.y = last_segment.point_b.y;
-    position.z = checked_add(checked_add(print_z, z_offset), last_segment.z_offset_b);
+    position.x = endpoints.last.x;
+    position.y = endpoints.last.y;
+    position.z = checked_add(checked_add(print_z, z_offset), endpoints.last_z);
     position.state = RAW_PRINTING_LAYER_ENTRY_POSITION_KNOWN;
 }
 

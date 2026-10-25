@@ -15,6 +15,8 @@ only borrow those immutable masks when splitting independent extrusion leaves.
 For setup-time questions such as autospeed eligibility, a leaf is deep-cloned
 into PluginStorage and the same splitter is run on the clone. This preserves
 the exact arc-aware clipping behavior without changing PrintingPlan.
+DEPOSIT leaves carry stationary volume at one point; area containment selects
+their value without clipping, with a retained first-region fallback.
 */
 
 #include "RegionalProcessParameterHelpers.hpp"
@@ -35,6 +37,9 @@ LayerIsland owning_layer_island(const LayerRegionIsland &region_island);
 StoredExPolygonCollection translated_area(storage_handle *storage,
                                           const ExPolygonCollection &source,
                                           c_point shift);
+
+// Select a validated deposit's point in projected masks, or return the first-region value when no unique mask contains it.
+float deposit_value(const ExtrusionEntity &leaf, const RegionalProcessPartition &partition);
 
 LayerIsland owning_layer_island(const LayerRegionIsland &region_island)
 {
@@ -84,6 +89,29 @@ StoredExPolygonCollection translated_area(storage_handle *storage,
 
     ClipperContext clipper(storage);
     return clipper_union(clipper(translated_paths.readonly())).to_expolygon_collection();
+}
+
+// Inspect immutable masks using the borrowed one-point deposit; return a copied value, using first-region fallback for missing or conflicting areas, without splitting or transferring ownership.
+float deposit_value(const ExtrusionEntity &leaf, const RegionalProcessPartition &partition)
+{
+    const c_point point = leaf.point(0);
+    float value = partition.fallback_value;
+    bool found = false;
+    for (size_t area_idx = 0; area_idx < partition.areas.size(); ++area_idx) {
+        bool contains = false;
+        for (const ExPolygon area : partition.areas[area_idx].readonly())
+            if (area.contains(point)) {
+                contains = true;
+                break;
+            }
+        if (contains) {
+            if (found)
+                return partition.fallback_value;
+            value = partition.values[area_idx];
+            found = true;
+        }
+    }
+    return value;
 }
 
 } // namespace
@@ -151,6 +179,7 @@ RegionalSettingsPartition build_regional_settings_partition(
     return partition;
 }
 
+// Resolve borrowed raw regional configs into owned immutable masks and scalar values, retaining the first-region fallback; invalid inputs or non-finite values throw before publication.
 RegionalProcessPartition project_regional_process_values(
     storage_handle *storage,
     const RegionalSettingsPartition &settings,
@@ -160,10 +189,11 @@ RegionalProcessPartition project_regional_process_values(
         throw std::invalid_argument("Regional process projection requires storage and a resolver.");
 
     RegionalProcessPartition partition;
+    partition.fallback_value = resolve_value(settings.uniform_config);
+    if (!std::isfinite(partition.fallback_value))
+        throw std::runtime_error("Regional process fallback resolved to a non-finite float.");
     if (settings.is_uniform()) {
-        partition.uniform_value = resolve_value(settings.uniform_config);
-        if (!std::isfinite(partition.uniform_value))
-            throw std::runtime_error("Regional process value resolved to a non-finite float.");
+        partition.uniform_value = partition.fallback_value;
         return partition;
     }
 
@@ -204,6 +234,7 @@ RegionalProcessPartition project_regional_process_values(
     return partition;
 }
 
+// Inspect borrowed geometry via a storage-owned split clone or one deposit point, returning whether a resolved value matches; invalid inputs and split failures throw without changing the plan.
 bool regional_partition_leaf_matches(
     storage_handle *storage,
     const MutableExtrusionEntity &leaf,
@@ -214,6 +245,8 @@ bool regional_partition_leaf_matches(
         throw std::invalid_argument("Regional leaf inspection requires storage, a leaf, and a predicate.");
     if (!partition.requires_split())
         return matches_value(partition.uniform_value);
+    if (leaf.is_deposit())
+        return matches_value(deposit_value(leaf.readonly(), partition));
 
     // Split a deep clone so setup can ask which regional values the exact arc
     // geometry touches without changing the plan before parallel execution.
@@ -234,6 +267,7 @@ bool regional_partition_leaf_matches(
     return false;
 }
 
+// Annotate plan-owned split fragments or the unsplit deposit with the selected regional value; uniform partitions return false, split failures throw, and no geometry is cloned for deposits.
 bool apply_regional_process_partition(
     MutableExtrusionEntity leaf,
     const RegionalProcessPartition &partition,
@@ -241,6 +275,11 @@ bool apply_regional_process_partition(
 {
     if (!partition.requires_split())
         return false;
+    // Stationary volume belongs to one point and must never be duplicated by clipping.
+    if (leaf.is_deposit()) {
+        editor.set_value(leaf, deposit_value(leaf.readonly(), partition));
+        return true;
+    }
 
     // The splitter preserves traversal order and source geometry. Assigning
     // through EPropertySpeedFieldEditor changes only its selected process field.

@@ -379,6 +379,7 @@ ExtrusionPropertyStateDefinition lift_state_definition()
     return definition;
 }
 
+// Copy the last printable endpoint from borrowed children, including deposits without interior probes; missing attributes, process roles, cancellation or Z overflow throw without mutation.
 bool find_last_printable_geometry(
     MutableExtrusionEntity entity,
     const coord_t print_z,
@@ -390,7 +391,8 @@ bool find_last_printable_geometry(
     throw_if_cancelled(run_ctx);
     const EffectiveState state = entity_already_resolved ?
         parent : resolved_state(entity.readonly(), parent);
-    if (entity.segment_count() != 0) {
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (ExtrusionScope::leaf_endpoints(entity.readonly(), endpoints)) {
         if (!state.attributes)
             throw std::runtime_error(
                 "A lift source contains geometry without extrusion attributes.");
@@ -400,12 +402,10 @@ bool find_last_printable_geometry(
             RAW_EXTRUSION_ROLE_IS_UNRETRACT(role))
             throw std::runtime_error("Printable scope content contains process geometry.");
 
-        const c_extrusion_segment segment =
-            entity.segment(entity.segment_count() - 1);
         endpoint.leaf = entity;
-        endpoint.point = segment.point_b;
+        endpoint.point = endpoints.last;
         endpoint.absolute_z = checked_add_z(
-            checked_add_z(print_z, state.z_offset), segment.z_offset_b);
+            checked_add_z(print_z, state.z_offset), endpoints.last_z);
         endpoint.role = role;
         endpoint.modifier = state.modifier.value_or(EPropertyModifier{});
         const distf_t distance = std::min(
@@ -448,6 +448,7 @@ bool contains_semantic_retract(
     return false;
 }
 
+// Scan borrowed children for the final segmented or deposit Z, returning no value without geometry; cancellation and checked Z overflow throw without tree mutation.
 std::optional<coord_t> last_geometric_z(
     MutableExtrusionEntity entity,
     const coord_t print_z,
@@ -464,15 +465,15 @@ std::optional<coord_t> last_geometric_z(
         if (child_result)
             result = child_result;
     }
-    if (entity.segment_count() != 0) {
-        const c_extrusion_segment segment =
-            entity.segment(entity.segment_count() - 1);
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (ExtrusionScope::leaf_endpoints(entity.readonly(), endpoints)) {
         result = checked_add_z(
-            checked_add_z(print_z, state.z_offset), segment.z_offset_b);
+            checked_add_z(print_z, state.z_offset), endpoints.last_z);
     }
     return result;
 }
 
+// Resolve borrowed source-region lift settings, falling back to the first region for unmatched deposits; disabled settings use printer lift, and cancellation or unresolved ordinary geometry throws.
 double source_lift(const ScopeEntity &source,
                    const PrintingPlan &plan,
                    const SourceEndpoint &endpoint,
@@ -504,6 +505,10 @@ double source_lift(const ScopeEntity &source,
         lookup = RegionSettings::lookup_at_point(
             region_island, k_lift_region_keys, lookup_point);
         throw_if_cancelled(run_ctx);
+    }
+    if (!lookup.found() && endpoint.leaf.is_deposit()) {
+        const Config config = region_island.region(0).print_region().config();
+        return config.float_or_default("print_retract_lift", printer_lift);
     }
     if (!lookup.found())
         throw std::runtime_error(

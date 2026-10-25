@@ -347,6 +347,7 @@ ExtrusionPropertyStateDefinition retraction_state_definition()
     return definition;
 }
 
+// Resolve the first segmented or deposit leaf's role through borrowed children; cancellation throws, and an absent role remains absent without tree mutation.
 bool find_first_geometric_role(
     MutableExtrusionEntity entity,
     const std::optional<raw_extrusion_role> inherited_role,
@@ -365,7 +366,7 @@ bool find_first_geometric_role(
 
     // Geometry ends the search even when no effective role exists. A later
     // sibling cannot describe the first leaf's semantic process role.
-    if (entity.segment_count() != 0) {
+    if (entity.segment_count() != 0 || entity.is_deposit()) {
         result = role;
         return true;
     }
@@ -400,6 +401,7 @@ std::optional<raw_extrusion_role> first_content_role(
     return result;
 }
 
+// Resolve borrowed geometry in forward order and copy its endpoint and modifier; deposits have no interior probe, and cancellation or Z overflow throws without mutation.
 bool find_first_geometry(MutableExtrusionEntity entity, const coord_t print_z,
                          const EffectiveState &parent,
                          GeometricEndpoint &endpoint,
@@ -409,13 +411,13 @@ bool find_first_geometry(MutableExtrusionEntity entity, const coord_t print_z,
     throw_if_cancelled(run_ctx);
     const EffectiveState state = entity_already_resolved ?
         parent : resolved_state(entity.readonly(), parent);
-    if (entity.segment_count() != 0) {
-        const c_extrusion_segment segment = entity.segment(0);
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (ExtrusionScope::leaf_endpoints(entity.readonly(), endpoints)) {
         endpoint.leaf = entity;
         endpoint.position = PlannedPosition{
-            segment.point_a.x,
-            segment.point_a.y,
-            checked_add(checked_add(print_z, state.z_offset), segment.z_offset_a)};
+            endpoints.first.x,
+            endpoints.first.y,
+            checked_add(checked_add(print_z, state.z_offset), endpoints.first_z)};
         endpoint.modifier = state.modifier.value_or(EPropertyModifier{});
         const distf_t distance = std::min(
             distf_t(SCALED_EPSILON), entity.local_length() / 2.0);
@@ -434,6 +436,7 @@ bool find_first_geometry(MutableExtrusionEntity entity, const coord_t print_z,
     return false;
 }
 
+// Resolve borrowed geometry backwards and copy its endpoint and modifier; deposits have no interior probe, and cancellation or Z overflow throws without mutation.
 bool find_last_geometry(MutableExtrusionEntity entity, const coord_t print_z,
                         const EffectiveState &parent,
                         GeometricEndpoint &endpoint,
@@ -443,13 +446,13 @@ bool find_last_geometry(MutableExtrusionEntity entity, const coord_t print_z,
     throw_if_cancelled(run_ctx);
     const EffectiveState state = entity_already_resolved ?
         parent : resolved_state(entity.readonly(), parent);
-    if (entity.segment_count() != 0) {
-        const c_extrusion_segment segment = entity.segment(entity.segment_count() - 1);
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (ExtrusionScope::leaf_endpoints(entity.readonly(), endpoints)) {
         endpoint.leaf = entity;
         endpoint.position = PlannedPosition{
-            segment.point_b.x,
-            segment.point_b.y,
-            checked_add(checked_add(print_z, state.z_offset), segment.z_offset_b)};
+            endpoints.last.x,
+            endpoints.last.y,
+            checked_add(checked_add(print_z, state.z_offset), endpoints.last_z)};
         endpoint.modifier = state.modifier.value_or(EPropertyModifier{});
         const distf_t distance = std::min(
             distf_t(SCALED_EPSILON), entity.local_length() / 2.0);
@@ -490,6 +493,7 @@ GeometricEndpoint scope_endpoint(
     return endpoint;
 }
 
+// Read borrowed regional settings at the source point, using the island's first region for unmatched deposits; return printer defaults when disabled, and throw for cancellation or unresolved ordinary geometry.
 double normal_retract_target(const Config &print_config,
                              const PrintingPlan &plan,
                              const ScopeEntity &source,
@@ -520,6 +524,10 @@ double normal_retract_target(const Config &print_config,
         lookup = RegionSettings::lookup_at_point(
             region_island, k_retraction_region_keys, lookup_point);
         throw_if_cancelled(run_ctx);
+    }
+    if (!lookup.found() && endpoint.leaf.is_deposit()) {
+        const Config config = region_island.region(0).print_region().config();
+        return config.float_or_default("print_retract_length", printer_target);
     }
     if (!lookup.found())
         throw std::runtime_error(

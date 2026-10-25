@@ -370,6 +370,41 @@ TEST_CASE("Layer entry state follows geometry tools empty layers and groups",
     CHECK(endpoint.y == scale_i(3.));
 }
 
+TEST_CASE("Layer entry position includes deposits but ignores ordinary one-point leaves",
+          "[plugins][deposit][entry-state]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool is_deposit = GENERATE(false, true);
+    Print print;
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    plan.groups.back().layers.resize(2);
+    PrintingLayerGroup &first = plan.groups.back().layers[0];
+    first.print_z = scale_i(0.2);
+    first.tool_groups.emplace_back();
+    first.tool_groups.back().extruder_id = 0;
+    append_extrusion(first.tool_groups.back(), make_path(
+        Point(0, 0), Point(scale_i(2.0), 0), 0, 0));
+    std::unique_ptr<ExtrusionPath> point = make_path(
+        Point(0, 0), Point(scale_i(1.0), 0), 0, 0);
+    point->polyline() = ArcPolyline();
+    point->polyline().append(Point(scale_i(7.0), scale_i(8.0)));
+    point->polyline().set_z_offset(0, scale_i(0.03));
+    point->add_property(ExtrusionPropertyZOffset(scale_i(0.04)));
+    if (is_deposit)
+        point->add_property(ExtrusionPropertySpecialCommand(
+            ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    append_extrusion(first.tool_groups.back(), std::move(point));
+    run_entry_state(print);
+    const PrintingLayerEntryPositionProperty *position = position_key().get(
+        layer_view(plan.groups.back().layers[1]).properties());
+    REQUIRE(position != nullptr);
+    REQUIRE(position->is_known());
+    CHECK(position->x == scale_i(is_deposit ? 7.0 : 2.0));
+    CHECK(position->y == scale_i(is_deposit ? 8.0 : 0.0));
+    CHECK(position->z == scale_i(is_deposit ? 0.27 : 0.2));
+}
+
 TEST_CASE("Layer entry state is replaced on rerun and visible to later plugins",
           "[plugins][layer-extrusion-edit][entry-state][parallel]")
 {

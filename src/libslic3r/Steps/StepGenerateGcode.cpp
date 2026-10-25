@@ -44,7 +44,9 @@ PrintingPlan, borrowed firmware session, and resolved final output path.
 Before crossing that plugin boundary, the step validates the process speed of
 every geometric leaf and explicit E-only extrusion command, including those in
 before/after scope events. It also rejects printable roles which cannot be
-converted safely to the legacy marker vocabulary. This is the last common
+converted safely to the legacy marker vocabulary. Stationary-volume DEPOSIT
+leaves additionally need exactly one point, positive printable flow and dimensions,
+and no extrusion-axis request. This is the last common
 point where the host can describe an invalid tree with its complete
 PrintingPlan location; a firmware session sees only one borrowed tree at a
 time and cannot recover that context.
@@ -79,6 +81,8 @@ struct SpeedTraversalState
 {
     std::optional<float> effective_speed;
     std::optional<raw_extrusion_role> effective_role;
+    std::optional<ExtrusionAttributes> effective_attributes;
+    bool has_extrusion_axis = false;
     std::vector<SpeedDeclaration> declarations;
     bool has_non_finite_speed = false;
 };
@@ -227,7 +231,11 @@ std::string e_only_extrusion_error(const Print &print,
                                    size_t extruder_count,
                                    double extrusion_delta);
 
-/* Validate one tree recursively while preserving inherited process state. */
+/* Validate inherited speeds, tools and stationary-volume leaf requirements in one tree. */
+// Borrow one plan tree and its source location, carrying lexical attributes and
+// speed into children and persistent tool selection into following roots. Append
+// diagnostics for malformed movements without changing geometry or throwing for
+// validation failures; the caller owns the tree, traversal path and report.
 void validate_extrusion_tree_movements(const Print &print,
                                        const ExtrusionEntity &entity,
                                        const PrintingTreeLocation &location,
@@ -644,6 +652,9 @@ std::string e_only_extrusion_error(const Print &print,
     return out.str();
 }
 
+// Walk the borrowed tree with inherited process state and persistent tool state;
+// append movement diagnostics, including deposits outside extrusion roots, to the
+// caller's report without changing geometry.
 void validate_extrusion_tree_movements(const Print &print,
                                        const ExtrusionEntity &entity,
                                        const PrintingTreeLocation &location,
@@ -662,8 +673,12 @@ void validate_extrusion_tree_movements(const Print &print,
             state.effective_speed = speed->speed_mm_per_s;
         }
     }
-    if (const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>())
+    if (const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>()) {
         state.effective_role = attributes->role;
+        state.effective_attributes = *attributes;
+    }
+    if (entity.get_property<ExtrusionPropertyExtrusionAxis>() != nullptr)
+        state.has_extrusion_axis = true;
 
     const ExtrusionPropertySpecialCommand *special_command =
         entity.get_property<ExtrusionPropertySpecialCommand>();
@@ -702,6 +717,40 @@ void validate_extrusion_tree_movements(const Print &print,
                 report.add_scope_event_error(detail);
             else
                 report.add_extrusion_e_only_error(detail);
+        }
+    }
+
+    if (special_command != nullptr &&
+        special_command->command_code() == ExtrusionPropertySpecialCommand::Code::DEPOSIT) {
+        const ArcPolyline *deposit_point = entity.polyline_or_null();
+        const bool valid_role = state.effective_role &&
+            is_supported_legacy_marker_role(*state.effective_role) &&
+            !RAW_EXTRUSION_ROLE_IS_TRAVEL(*state.effective_role) &&
+            !RAW_EXTRUSION_ROLE_IS_WIPE(*state.effective_role) &&
+            !RAW_EXTRUSION_ROLE_IS_RETRACT(*state.effective_role) &&
+            !RAW_EXTRUSION_ROLE_IS_UNRETRACT(*state.effective_role);
+        const bool valid_flow = state.effective_attributes &&
+            std::isfinite(state.effective_attributes->mm3_per_mm) && state.effective_attributes->mm3_per_mm > 0.0 &&
+            std::isfinite(state.effective_attributes->width) && state.effective_attributes->width > 0.f &&
+            std::isfinite(state.effective_attributes->height) && state.effective_attributes->height > 0.f;
+        if (location.extrusion == nullptr || entity.child_count() != 0 ||
+            deposit_point == nullptr || deposit_point->size() != 1 ||
+            !std::isfinite(special_command->extra_data) || special_command->extra_data <= 0.0 ||
+            !valid_role || !valid_flow || state.has_extrusion_axis ||
+            state.has_non_finite_speed || !state.effective_speed ||
+            !std::isfinite(*state.effective_speed) || *state.effective_speed <= 0.f ||
+            !active_tool.tool_id || *active_tool.tool_id >= extruder_count) {
+            std::ostringstream out;
+            out << "PrintingPlan location: " << extrusion_tree_path(location, child_path) << "\n";
+            append_plan_source_context(out, print, location);
+            out << "DEPOSIT needs one point, no children or extrusion-axis request, finite positive volume, "
+                   "printable flow/width/height, a printable role, positive speed and an active tool, "
+                   "inside a PrintingExtrusion root rather than an event scope.\n";
+            append_speed_declarations(out, location, state);
+            if (location.extrusion == nullptr)
+                report.add_scope_event_error(out.str());
+            else
+                report.add_extrusion_e_only_error(out.str());
         }
     }
 

@@ -28,6 +28,8 @@ if switching from children to a local polyline is intentional.
 The polyline is stored as points, optional arc data between consecutive points,
 and optional Z offsets per point. A segment in this API is a true segment from
 point_a to point_b, so a polyline with N points has N - 1 segments.
+One point is a valid position carrier for a DEPOSIT special command: it has no
+segments, and translation moves that point just like segmented geometry.
 
 Developer guide:
 [Using Unified Extrusion Entities](/doc/plugins/extrusions.md)

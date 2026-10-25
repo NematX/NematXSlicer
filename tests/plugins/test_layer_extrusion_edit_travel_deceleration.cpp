@@ -469,6 +469,70 @@ void run_travel_deceleration(Print &print)
 
 } // namespace
 
+TEST_CASE("Deposits separate travel runs and supply their own target acceleration",
+          "[plugins][deposit][travel-deceleration]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedTravelDecelerationPrint prepared;
+    prepare_source_context(prepared, true, "0");
+    PrintingLayerGroup &layer = prepare_three_movement_plan(prepared);
+    PrintingToolGroup &tool = layer.tool_groups.front();
+    const PrintingObjectInstanceId catalog_id = tool.extrusions.back().printing_catalog_id;
+    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(*tool.extrusions.back().root);
+    deposit.polyline() = ArcPolyline();
+    deposit.polyline().append(Point(scale_i(110.0), 0));
+    deposit.get_or_add_property<ExtrusionAttributes>().set_role(ExtrusionRole::SupportMaterial);
+    deposit.add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    append_movement(tool, *prepared.source_region_island,
+                    make_movement(ExtrusionRole::Travel, 110.0, 210.0, 100.f, 2000.f), catalog_id);
+    append_movement(tool, *prepared.source_region_island,
+                    make_movement(ExtrusionRole::Perimeter, 210.0, 220.0, 30.f, 700.f), catalog_id);
+    run_travel_deceleration(prepared.print);
+    const std::vector<ObservedLeaf> leaves = observed_leaves(layer);
+    REQUIRE(leaves.size() == 7);
+    CHECK(leaves[1].role == ExtrusionRole::Travel);
+    CHECK(leaves[2].role == ExtrusionRole::Travel);
+    CHECK(leaves[2].acceleration == Approx(500.f));
+    CHECK(leaves[3].entity == &deposit);
+    CHECK(leaves[3].role == ExtrusionRole::SupportMaterial);
+    CHECK(leaves[3].speed == Approx(20.f));
+    CHECK(leaves[4].role == ExtrusionRole::Travel);
+    CHECK(leaves[5].role == ExtrusionRole::Travel);
+    CHECK(leaves[5].acceleration == Approx(700.f));
+    CHECK(deposit.polyline().size() == 1);
+    CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
+}
+
+TEST_CASE("Ordinary one-point leaves do not separate compatible travel runs",
+          "[plugins][deposit][travel-deceleration]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedTravelDecelerationPrint prepared;
+    prepare_source_context(prepared, true, "0");
+    PrintingLayerGroup &layer = prepare_travel_run_plan(prepared, {{20.}, {30.}, {50.}});
+    PrintingToolGroup &tool = layer.tool_groups.front();
+    std::unique_ptr<ExtrusionPath> ignored = make_movement(
+        ExtrusionRole::SupportMaterial, 1000.0, 1001.0, 10.f, 100.f);
+    ignored->polyline() = ArcPolyline();
+    ignored->polyline().append(Point(scale_i(1000.0), 0));
+    PrintingExtrusion event;
+    event.region_island = prepared.source_region_island;
+    event.printing_catalog_id = tool.extrusions.front().printing_catalog_id;
+    event.root = std::move(ignored);
+    tool.extrusions.insert(tool.extrusions.begin() + 2, std::move(event));
+    run_travel_deceleration(prepared.print);
+    const std::vector<ObservedLeaf> leaves = observed_leaves(layer);
+    REQUIRE(leaves.size() == 6);
+    CHECK(leaves[1].acceleration == Approx(2000.f));
+    CHECK(leaves[2].role == ExtrusionRole::SupportMaterial);
+    CHECK(leaves[3].acceleration == Approx(2000.f));
+    CHECK(leaves[4].acceleration == Approx(500.f));
+    CHECK(tool.extrusions[1].root->child_count() == 0);
+    CHECK(tool.extrusions[3].root->child_count() == 0);
+    CHECK(tool.extrusions[4].root->child_count() == 0);
+}
+
 TEST_CASE("Travel deceleration plugin exposes an independent post-processing contract",
           "[plugins][layer-extrusion-edit][travel-deceleration][api]")
 {

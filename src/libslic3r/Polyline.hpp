@@ -25,6 +25,11 @@
 #include "MultiPoint.hpp"
 #include "Point.hpp"
 
+/*
+Polyline types store scaled points and expose geometry operations. ArcPolyline
+also retains segment radii and optional point Z offsets; translating its points
+preserves arc geometry and permits a single point used as a deposit position.
+*/
 namespace Slic3r {
 
 class Polyline;
@@ -318,6 +323,7 @@ public:
     void                  clip_start(distf_t dist);
     void                  clip_end(distf_t dist);
     Polyline              to_polyline(coord_t deviation = 0) const;
+    // Shift all stored points and arc centers, including empty and one-point paths.
     void                  translate(const Vector &vector);
     void                  rotate(double angle); // to test for arc, but should be okay
     Point                 get_point_from_begin(distf_t distance) const;

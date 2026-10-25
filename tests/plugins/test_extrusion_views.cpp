@@ -17,9 +17,16 @@ Extrusion view helpers
 These tests cover the mutable polyline API on extrusion entities, in particular
 set_polyline() which transfers points from another API polyline view without
 building a temporary std::vector<c_point>.
+Stationary deposits retain their command, attributes and position through cloning;
+the command distinguishes them from other one-point leaves without changing the ABI payload.
 */
 
 using namespace Slic3r;
+
+static_assert(C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT == 11);
+static_assert(C_EXTRUSION_SPECIAL_COMMAND_EXTRUDER_CURRENT == 10);
+static_assert(SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MAJOR == 2u);
+static_assert(SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MINOR == 2u);
 
 namespace {
 
@@ -57,6 +64,31 @@ bool same_points(const std::vector<c_point> &lhs, const std::vector<c_point> &rh
 }
 
 } // namespace
+
+TEST_CASE("Deposit views preserve one-point position and volume", "[plugins][extrusion][views][deposit]")
+{
+    PluginStorage plugin_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
+    slic3r_api::StoredExtrusionEntity source(storage, points_mm({{1.25, 2.5}}));
+    source.disable_reverse();
+    CHECK_FALSE(source.is_deposit());
+    source.get_or_add(slic3r_api::EPropertySpecialCommand::key).set(C_EXTRUSION_SPECIAL_COMMAND_EXTRUSION, 0.4);
+    CHECK_FALSE(source.is_deposit());
+    source.get_or_add(slic3r_api::EPropertySpecialCommand::key).set(C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT, 0.4);
+    source.get_or_add(slic3r_api::EPropertyAttributes::key)
+        .extrusion_role(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL).mm3_per_mm(0.08).width(0.4f).height(0.2f);
+    REQUIRE(source.is_deposit());
+    CHECK(source.flags() == 0);
+    CHECK(source.segment_count() == 0);
+    slic3r_api::StoredExtrusionEntity clone(storage, source.readonly());
+    REQUIRE(clone.translate(point_mm(10., -3.)));
+    CHECK(clone.is_deposit());
+    CHECK(same_points(clone.points(), points_mm({{11.25, -0.5}})));
+    CHECK(same_points(source.points(), points_mm({{1.25, 2.5}})));
+    REQUIRE(clone.get(slic3r_api::EPropertySpecialCommand::key) != nullptr);
+    CHECK(clone.get(slic3r_api::EPropertySpecialCommand::key)->extra_data == Approx(0.4));
+    CHECK(clone.get(slic3r_api::EPropertyAttributes::key)->mm3_per_mm() == Approx(0.08));
+}
 
 TEST_CASE("set_polyline transfers points from an API polyline view", "[plugins][extrusion][views]")
 {

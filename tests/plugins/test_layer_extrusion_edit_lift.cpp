@@ -165,6 +165,116 @@ TEST_CASE("CreateRetractionLift registers after travel routing",
     CHECK(PrintRegionConfig::defaults().option("print_retract_lift") != nullptr);
 }
 
+TEST_CASE("Stationary deposits keep separate scopes through the transition chain",
+          "[plugins][deposit][lift][retraction][transition-scope][travel][layer-entry]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool ordinary_point = GENERATE(false, true);
+    Print print;
+    Model model;
+    prepare_lift_print(print, model, "1", "1", "0", "0", true);
+    PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+        .layers.front().tool_groups.front();
+    std::unique_ptr<ExtrusionPath> deposit = make_print_path(15.0, 16.0);
+    deposit->polyline() = ArcPolyline();
+    deposit->polyline().append(Point(scale_i(15.0), 0));
+    deposit->get_or_add_property<ExtrusionAttributes>().set_role(ExtrusionRole::SupportMaterial);
+    deposit->add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    PrintingExtrusion middle;
+    middle.root = std::move(deposit);
+    middle.sregion_island_role = ExtrusionRole::SupportMaterial;
+    tool.extrusions.insert(tool.extrusions.begin() + 1, std::move(middle));
+    ExtrusionEntity *ignored = nullptr;
+    if (ordinary_point) {
+        std::unique_ptr<ExtrusionPath> point = make_print_path(12.0, 13.0);
+        point->polyline() = ArcPolyline();
+        point->polyline().append(Point(scale_i(100.0), 0));
+        ignored = point.get();
+        PrintingExtrusion event;
+        event.root = std::move(point);
+        tool.extrusions.insert(tool.extrusions.begin() + 1, std::move(event));
+    }
+
+    run_layer_plugins(print, {
+        TRANSITION_SCOPE_PLUGIN, RETRACTION_PLUGIN, WIPE_PLUGIN,
+        ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN, LIFT_PLUGIN
+    });
+
+    REQUIRE(tool.extrusions.size() == (ordinary_point ? 4 : 3));
+    if (ignored != nullptr) {
+        CHECK_FALSE(find_scope(entity_view(*ignored)).valid());
+        CHECK(ignored->child_count() == 0);
+        CHECK(entity_view(*ignored).point_count() == 1);
+    }
+    const OrderedExtrusionScope scope(find_scope(entity_view(*tool.extrusions[ordinary_point ? 2 : 1].root)),
+                                     scope_property_key());
+    REQUIRE(scope.content().is_deposit());
+    CHECK(scope.content().point_count() == 1);
+    CHECK(scope.content().get(slic3r_api::EPropertySpecialCommand::key)->extra_data == 0.5);
+    std::vector<std::string> before;
+    std::vector<std::string> after;
+    collect_transition_events(scope.before().readonly(), before);
+    collect_transition_events(scope.after().readonly(), after);
+    CHECK(before == std::vector<std::string>{"unretract"});
+    CHECK(after == std::vector<std::string>{"retract"});
+    std::vector<LiftLeaf> incoming;
+    collect_lift_leaves(scope.travel().readonly(), std::nullopt, incoming);
+    REQUIRE_FALSE(incoming.empty());
+    const slic3r_api::ExtrusionEntity last = incoming.back().entity;
+    CHECK(last.point(last.point_count() - 1).x == scale_i(15.0));
+    CHECK(last.z_offset(last.point_count() - 1) == 0);
+    const OrderedExtrusionScope target(find_scope(entity_view(*tool.extrusions[ordinary_point ? 3 : 2].root)),
+                                      scope_property_key());
+    std::vector<LiftLeaf> outgoing;
+    collect_lift_leaves(target.travel().readonly(), std::nullopt, outgoing);
+    REQUIRE(outgoing.size() == 2);
+    CHECK(outgoing.front().entity.point(0).x == scale_i(15.0));
+    CHECK(outgoing.front().entity.z_offset(outgoing.front().entity.point_count() - 1) == scale_i(1.0));
+    CHECK(outgoing.back().entity.point(outgoing.back().entity.point_count() - 1).x == scale_i(20.0));
+    CHECK(outgoing.back().entity.z_offset(outgoing.back().entity.point_count() - 1) == 0);
+    // Neither the stationary source nor its pre-content phase acquires a wipe path.
+    std::vector<LiftLeaf> deposit_after;
+    collect_lift_leaves(scope.after().readonly(), std::nullopt, deposit_after);
+    CHECK(deposit_after.empty());
+    std::vector<LiftLeaf> deposit_before;
+    collect_lift_leaves(scope.before().readonly(), std::nullopt, deposit_before);
+    CHECK(deposit_before.empty());
+    for (const LiftLeaf &leaf : deposit_before)
+        CHECK_FALSE(RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role));
+    for (const LiftLeaf &leaf : deposit_after)
+        CHECK_FALSE(RAW_EXTRUSION_ROLE_IS_WIPE(leaf.role));
+}
+
+TEST_CASE("Travel snapping moves a stationary deposit without creating a segment",
+          "[plugins][deposit][travel][transition-scope]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    prepare_lift_print(print, model, "0", "0", "0");
+    PrintingToolGroup &tool = print.mutable_printing_plan().groups.front()
+        .layers.front().tool_groups.front();
+    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(*tool.extrusions[1].root);
+    deposit.polyline() = ArcPolyline();
+    deposit.polyline().append(Point(scale_i(10.0) + SCALED_EPSILON / 3, 0));
+    deposit.polyline().set_z_offset(0, SCALED_EPSILON / 3);
+    deposit.add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    deposit.get_or_add_property<ExtrusionPropertyModifier>().enforce_retraction = true;
+    run_layer_plugins(print, {TRANSITION_SCOPE_PLUGIN, ENTRY_STATE_PLUGIN, TRAVEL_PLUGIN});
+    const OrderedExtrusionScope scope(find_scope(entity_view(*tool.extrusions[1].root)),
+                                     scope_property_key());
+    REQUIRE(scope.content().is_deposit());
+    CHECK(scope.content().point_count() == 1);
+    CHECK(scope.content().segment_count() == 0);
+    CHECK(scope.content().point(0).x == scale_i(10.0));
+    CHECK(scope.content().point(0).y == 0);
+    CHECK(scope.content().z_offset(0) == 0);
+    CHECK(scope.travel().point_count() == 0);
+    CHECK(scope.content().get(slic3r_api::EPropertySpecialCommand::key)->extra_data == 0.5);
+}
+
 TEST_CASE("CreateRetractionLift creates a symmetric ramped travel",
           "[plugins][layer-extrusion-edit][lift][travel]")
 {

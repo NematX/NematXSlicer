@@ -48,6 +48,13 @@ labels; their plan IDs remain available for extrusion lookup, not cancellation.
 
 namespace slic3r_api { namespace GCodeGeneration {
 
+// First limit for support deposits swallowed by a negative E remainder: force a step
+// at this fraction of E resolution; may be tuned.
+inline constexpr double SUPPORT_DEPOSIT_MIN_STEP_FRACTION = 0.5;
+// First limit for support deposits with no emitted E word: dwell at their point
+// for this many milliseconds; may be tuned.
+inline constexpr double SUPPORT_DEPOSIT_PAUSE_MS = 20.0;
+
 // Owns every state needed to serialize one PrintingPlan export. The session
 // interprets extrusion trees, updates the generic machine-state objects and
 // delegates only command syntax to its protected encode_* methods. Derived
@@ -272,6 +279,10 @@ private:
     std::string write_lines(const PreparedMove &move);
     // Emit planar segments with flow-derived E, a fixed filament delta, or semantic retraction.
     std::string write_leaf_geometry(const ExtrusionEntity &leaf, const RequestedState &state);
+    // Reach a path or deposit start point at travel speed, preserving the requested print speed.
+    std::string approach_leaf_point(c_point point, coord_t z_offset);
+    // Emit a stationary volume, forcing swallowed support steps or dwelling for sub-step deposits.
+    std::string write_deposit(const ExtrusionEntity &leaf, const RequestedState &state);
     // Emit static retraction or full/limited unretraction for the active tool.
     std::string write_extrusion_axis_event(const EPropertyExtrusionAxis &axis,
                                            const RequestedState &state);
@@ -280,6 +291,7 @@ private:
     std::string write_native_retract(double target);
     // Restore the semantic E state and emit the matching native unretract.
     std::string write_native_unretract();
+    // Emit an entry command, rejecting DEPOSIT because it requires a one-point leaf.
     std::string write_special_command(const EPropertySpecialCommand &command,
                                       const RequestedState &state);
     // Emit a script, reconcile machine state and establish its post-toolchange E origin.

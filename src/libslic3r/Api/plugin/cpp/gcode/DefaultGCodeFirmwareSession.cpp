@@ -30,6 +30,9 @@ The implementation has two layers. ExtrusionWriterVisitor resolves inherited
 properties while it walks one extrusion tree. DefaultGCodeFirmwareSession then
 compares those requested values with its persistent machine state and encodes
 only the Marlin output required to represent the requested state.
+Stationary DEPOSIT leaves carry one point and a volume before the tool multiplier.
+They use the same approach travel and marker order as paths, then emit an E-only
+move at the filament speed of a line with their inherited flow and print speed.
 In single-extruder multi-material (SEMM), logical tool IDs select filaments on
 one physical extruder. Tool selection copies runtime state while preserving
 each filament's configured conversions, speeds and device offsets.
@@ -153,9 +156,11 @@ public:
     }
 
 protected:
+    // Borrow a leaf and resolve its inherited height without changing geometry;
+    // deposits count as printable despite having no segments, and invalid heights are ignored.
     void visit_leaf(ExtrusionEntity entity) override
     {
-        if (m_height || entity.segment_count() == 0)
+        if (m_height || (entity.segment_count() == 0 && !entity.is_deposit()))
             return;
         const EPropertyAttributes *attributes = current_property(EPropertyAttributes::key);
         if (attributes == nullptr || !is_printable_role(attributes->extrusion_role()))
@@ -296,8 +301,8 @@ public:
     }
 
 protected:
-    // Borrow the node, save inherited requests and emit entry events; EXTRUSION
-    // on a geometric leaf is deferred to its segments, and conflicting E requests throw.
+    // Borrow the node, save inherited requests and emit entry events; geometric
+    // EXTRUSION and one-point DEPOSIT are deferred, and invalid deposit shapes or E conflicts throw.
     void enter_node(ExtrusionEntity entity) override
     {
         m_output += m_session.write_seam_marker(entity);
@@ -333,12 +338,17 @@ protected:
         if (const EPropertyCustomGcode *custom_gcode = entity.get(EPropertyCustomGcode::key))
             m_output += m_session.write_custom_gcode(entity, *custom_gcode);
         if (const EPropertySpecialCommand *command = entity.get(EPropertySpecialCommand::key)) {
-            const bool leaf_extrusion = entity.child_count() == 0 &&
-                command->code == C_EXTRUSION_SPECIAL_COMMAND_EXTRUSION;
-            if (leaf_extrusion && entity.get(EPropertyExtrusionAxis::key) != nullptr)
-                throw std::invalid_argument("A leaf cannot combine EXTRUSION and an extrusion-axis request.");
-            if (!leaf_extrusion || entity.segment_count() == 0)
-                m_output += m_session.write_special_command(*command, m_state);
+            if (entity.is_deposit()) {
+                if (entity.child_count() != 0 || entity.point_count() != 1 || m_state.extrusion_axis)
+                    throw std::invalid_argument("DEPOSIT needs one point, no children and no extrusion-axis request.");
+            } else {
+                const bool leaf_extrusion = entity.child_count() == 0 &&
+                    command->code == C_EXTRUSION_SPECIAL_COMMAND_EXTRUSION;
+                if (leaf_extrusion && entity.get(EPropertyExtrusionAxis::key) != nullptr)
+                    throw std::invalid_argument("A leaf cannot combine EXTRUSION and an extrusion-axis request.");
+                if (!leaf_extrusion || entity.segment_count() == 0)
+                    m_output += m_session.write_special_command(*command, m_state);
+            }
         }
         if (const EPropertyExtrusionAxis *axis = entity.get(EPropertyExtrusionAxis::key)) {
             const bool is_empty_event = entity.segment_count() == 0 && entity.child_count() == 0;
@@ -350,12 +360,16 @@ protected:
         }
     }
 
+    // Borrow a leaf and append its geometric or stationary-volume output;
+    // the session owns machine state and rejects malformed movement requests.
     void visit_leaf(ExtrusionEntity entity) override
     {
         // Give derived firmware state a chance to react before this leaf emits
         // any standard process command or movement.
         m_output += m_session.visit_extrusion_leaf(entity);
-        if (entity.segment_count() > 0) {
+        if (entity.is_deposit()) {
+            m_output += m_session.write_deposit(entity, m_state);
+        } else if (entity.segment_count() > 0) {
             m_output += m_session.write_leaf_geometry(entity, m_state);
         }
     }
@@ -1093,23 +1107,7 @@ std::string DefaultGCodeFirmwareSession::write_leaf_geometry(const ExtrusionEnti
     if (is_printable_role(state.attributes->extrusion_role()))
         output += write_printable_markers(*state.attributes, fixed_e);
     const c_extrusion_segment first_segment = leaf.segment(0);
-    const c_vec3d first_position = machine_position(
-        first_segment.point_a, state.z_offset + first_segment.z_offset_a);
-    const c_vec3d quantized_first = m_formatter->quantize(first_position);
-
-    // Reach the first path point with travel speed. Acceleration deliberately
-    // remains the effective value carried by EPropertySpeed: an earlier
-    // pipeline step has already resolved every regional acceleration rule.
-    if (!m_gantry.position() || coordinates_differ(*m_gantry.position(), quantized_first)) {
-        const std::optional<double> print_speed = m_gantry.requested_speed();
-        m_gantry.request_speed(m_gantry.travel_speed());
-        PreparedMove travel;
-        travel.kind = PreparedMove::Kind::Travel;
-        travel.destination = first_position;
-        output += transition_wipe_marker(false);
-        output += write_lines(travel);
-        m_gantry.request_speed(print_speed);
-    }
+    output += approach_leaf_point(first_segment.point_a, state.z_offset + first_segment.z_offset_a);
 
     if (is_wipe)
         output += transition_wipe_marker(true);
@@ -1209,6 +1207,89 @@ std::string DefaultGCodeFirmwareSession::write_leaf_geometry(const ExtrusionEnti
     return output;
 }
 
+// Convert a scaled point and Z offset to machine coordinates and return approach
+// commands only when the quantized position differs; owned gantry state advances,
+// the inherited speed is restored, and encoding failures propagate to the caller.
+std::string DefaultGCodeFirmwareSession::approach_leaf_point(c_point point, coord_t z_offset)
+{
+    const c_vec3d position = machine_position(point, z_offset);
+    const c_vec3d quantized = m_formatter->quantize(position);
+    if (m_gantry.position() && !coordinates_differ(*m_gantry.position(), quantized))
+        return {};
+    const std::optional<double> print_speed = m_gantry.requested_speed();
+    m_gantry.request_speed(m_gantry.travel_speed());
+    PreparedMove travel;
+    travel.kind = PreparedMove::Kind::Travel;
+    travel.destination = position;
+    const std::string output = transition_wipe_marker(false) + write_lines(travel);
+    m_gantry.request_speed(print_speed);
+    return output;
+}
+
+// Borrow a one-point volume leaf and inherited process requests; validate positive
+// finite volume, flow, dimensions and speed with an active tool, then return markers,
+// travel and E-only output. The session advances E and repays debt without inventing
+// unretraction; filament speed includes the multiplier in both E modes. Invalid
+// requests or encoding failures throw, and the temporary speed is restored on success.
+// Support deposits trial a copied E state: a swallowed half-step request advances
+// by one displayed step and clears the remainder; smaller invisible requests dwell.
+std::string DefaultGCodeFirmwareSession::write_deposit(
+    const ExtrusionEntity &leaf, const RequestedState &state)
+{
+    if (!m_current_extruder_idx || !state.attributes || !state.speed_mm_per_s)
+        throw std::invalid_argument("DEPOSIT needs an active tool, attributes and speed.");
+    const EPropertySpecialCommand *command = leaf.get(EPropertySpecialCommand::key);
+    const c_extrusion_property_attributes &attributes = *state.attributes;
+    if (leaf.point_count() != 1 || leaf.child_count() != 0 || state.extrusion_axis ||
+        !std::isfinite(command->extra_data) || command->extra_data <= 0.0 ||
+        !is_printable_role(state.attributes->extrusion_role()) ||
+        !std::isfinite(attributes.mm3_per_mm) || attributes.mm3_per_mm <= 0.0 ||
+        !std::isfinite(attributes.width) || attributes.width <= 0.f ||
+        !std::isfinite(attributes.height) || attributes.height <= 0.f ||
+        !std::isfinite(*state.speed_mm_per_s) || *state.speed_mm_per_s <= 0.f)
+        throw std::invalid_argument("DEPOSIT needs positive finite volume and printable process attributes.");
+    ExtrusionAxisState &axis = current_extruder().extrusion_axis();
+    const double filament_speed = *state.speed_mm_per_s * attributes.mm3_per_mm * axis.filament_per_mm3();
+    const std::optional<uint32_t> acceleration = validated_acceleration_request(state.acceleration_mm_per_s2);
+    if (acceleration)
+        m_gantry.request_print_acceleration(acceleration);
+    apply_requested_state(state);
+    std::string output = transition_wipe_marker(false) + write_printable_markers(*state.attributes);
+    output += approach_leaf_point(leaf.point(0), state.z_offset + leaf.z_offset(0));
+    const std::optional<double> inherited_speed = m_gantry.requested_speed();
+    m_gantry.request_speed(filament_speed);
+    const double delta_e = command->extra_data * axis.e_per_mm3();
+    PreparedMove move;
+    move.kind = PreparedMove::Kind::Extrusion;
+    const bool support = RAW_EXTRUSION_ROLE_IS_SUPPORT(attributes.role);
+    if (support) {
+        // Trial quantization without changing the owned axis. A negative carried
+        // remainder can hide a deposit large enough to request its own E word.
+        const double step = GCodeFormatter::pow_10_inv[m_formatter->m_gcode_precision_e];
+        ExtrusionAxisState planned_axis = axis;
+        move.extrusion = planned_axis.extrude(delta_e);
+        if (!move.extrusion && delta_e >= SUPPORT_DEPOSIT_MIN_STEP_FRACTION * step) {
+            const double forced_delta = step - axis.extruded_dE_left();
+            planned_axis = axis;
+            move.extrusion = planned_axis.extrude(forced_delta);
+            planned_axis.repay_retraction(step);
+        } else {
+            planned_axis.repay_retraction(delta_e);
+        }
+        axis = planned_axis;
+    } else {
+        move.extrusion = axis.extrude(delta_e);
+        axis.repay_retraction(delta_e);
+    }
+    output += write_lines(move);
+    // Invisible sub-step support volume stays in the axis remainder. The dwell
+    // occurs after approach travel and is not counted by the estimator or reader.
+    if (support && !move.extrusion)
+        output += encode_pause(SUPPORT_DEPOSIT_PAUSE_MS);
+    m_gantry.request_speed(inherited_speed);
+    return output;
+}
+
 // Borrow an E-only request and return commands while updating the active tool;
 // invalid roles/values throw. Positive UNRETRACT limits restore only outstanding
 // filament, retain extras, and do nothing under native G10/G11 retraction.
@@ -1302,12 +1383,16 @@ std::string DefaultGCodeFirmwareSession::write_extrusion_axis_event(
     return output;
 }
 
+// Borrow an entry command and inherited state, returning dialect output while
+// updating owned machine state; malformed values and DEPOSIT outside a point leaf throw.
 std::string DefaultGCodeFirmwareSession::write_special_command(
     const EPropertySpecialCommand &command,
     const RequestedState &state)
 {
     apply_requested_state(state);
     switch (command.code) {
+    case C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT:
+        throw std::invalid_argument("DEPOSIT is emitted only at a one-point leaf.");
     case C_EXTRUSION_SPECIAL_COMMAND_TOOLCHANGE: {
         if (!std::isfinite(command.extra_data) || command.extra_data < 0.0 ||
             command.extra_data > double(std::numeric_limits<extruder_index_t>::max()) ||

@@ -104,6 +104,7 @@ public:
     FeatureRoleVisitor(storage_handle *storage, const std::string &script);
 
 protected:
+    // Annotate role changes on segmented or stationary-deposit leaves while ignoring preparation roles.
     void visit_leaf(MutableExtrusionEntity entity) override;
 
 private:
@@ -268,9 +269,10 @@ FeatureRoleVisitor::FeatureRoleVisitor(storage_handle *storage, const std::strin
     m_arguments.get_or_add("extrusion_role", SLIC3R_CONFIG_OPTION_STRING).set_string(std::string());
 }
 
+// Resolve the borrowed segmented or deposit leaf's role and attach transition script data when it changes; process preparation is ignored, insertion failures throw, and the tree owns all events.
 void FeatureRoleVisitor::visit_leaf(MutableExtrusionEntity entity)
 {
-    if (entity.segment_count() == 0)
+    if (entity.segment_count() == 0 && !entity.is_deposit())
         return;
 
     const EPropertyAttributes *attributes = current_property(EPropertyAttributes::key);

@@ -15,9 +15,25 @@ The ordered-leaf primitive preserves the outer entity handle while moving old
 content and direct properties into a child. Building phases from the right and
 then prepending entry phases produces every supported compact layout without a
 second tree-editing mechanism.
+Local endpoint extraction includes validated DEPOSIT leaves, whose single point
+locates a stationary volume request without manufacturing a segment.
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace ExtrusionScope {
+
+// Borrow geometry and copy its endpoint coordinates; malformed deposits and other segmentless leaves return false without changing the output or ownership, leaving deposit diagnostics to pre-validation.
+bool leaf_endpoints(const ExtrusionEntity &entity, LeafEndpoints &endpoints)
+{
+    if (entity.is_deposit() ? entity.point_count() != 1 : entity.segment_count() == 0)
+        return false;
+    const uint32_t last = entity.point_count() - 1;
+    endpoints.first = entity.point(0);
+    endpoints.last = entity.point(last);
+    endpoints.first_z = entity.z_offset(0);
+    endpoints.last_z = entity.z_offset(last);
+    return true;
+}
+
 namespace {
 
 /* Return the child count dictated by incoming and outgoing transition flags. */

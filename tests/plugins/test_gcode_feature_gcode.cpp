@@ -64,6 +64,56 @@ using namespace Slic3r::Test::GCode;
 
 } // namespace
 
+TEST_CASE("Feature G-code counts stationary deposit role transitions",
+          "[plugins][deposit][feature-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    select_printing_plan_writer(print);
+    configure_standard_firmware(print);
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.option<ConfigOptionString>("feature_gcode")->value =
+        "; FEATURE [previous_extrusion_role]>[next_extrusion_role]";
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    plan.groups.back().layers.emplace_back();
+    PrintingLayerGroup &layer = plan.groups.back().layers.back();
+    layer.print_z = scale_i(0.2);
+    layer.tool_groups.emplace_back();
+    PrintingToolGroup &tool = layer.tool_groups.back();
+    tool.extruder_id = 0;
+    append_path_extrusion(tool, make_firmware_path(
+        ArcPolyline(Points{Point(scale_i(1000.0), 0)}), 20.f, 400.f,
+        -1.f, -1.f, -1.f, ExtrusionRole::ExternalPerimeter));
+    append_path_extrusion(tool, make_firmware_path(
+        ArcPolyline(Points{Point(0, 0), Point(scale_i(1.0), 0)}), 20.f, 400.f));
+    std::unique_ptr<ExtrusionPath> deposit = make_firmware_path(
+        ArcPolyline(Points{Point(scale_i(2.0), 0)}), 20.f, 400.f,
+        -1.f, -1.f, -1.f, ExtrusionRole::SupportMaterial);
+    deposit->add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    append_path_extrusion(tool, std::move(deposit));
+    append_path_extrusion(tool, make_firmware_path(
+        ArcPolyline(Points{Point(scale_i(3.0), 0), Point(scale_i(4.0), 0)}), 20.f, 400.f));
+    Steps::StepExtrusionEdition::clear(print);
+    Steps::StepExtrusionEdition::run_step(Orchestrator::instance(), print);
+    CHECK(tool.extrusions[0].root->get_property<ExtrusionPropertyCustomGcode>() == nullptr);
+    const ExtrusionEntity &first = *tool.extrusions[1].root;
+    const ExtrusionPropertyCustomGcode *first_script = first.get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(first_script != nullptr);
+    CHECK(stored_script_string(first, *first_script, "previous_extrusion_role") == "Unknown");
+    const ExtrusionEntity &middle = *tool.extrusions[2].root;
+    const ExtrusionPropertyCustomGcode *script = middle.get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(script != nullptr);
+    CHECK(stored_script_string(middle, *script, "previous_extrusion_role") == "Perimeter");
+    CHECK(stored_script_string(middle, *script, "next_extrusion_role") == "Support material");
+    const ExtrusionEntity &last = *tool.extrusions[3].root;
+    const ExtrusionPropertyCustomGcode *last_script = last.get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(last_script != nullptr);
+    CHECK(stored_script_string(last, *last_script, "previous_extrusion_role") == "Support material");
+    CHECK(stored_script_string(last, *last_script, "next_extrusion_role") == "Perimeter");
+}
+
 TEST_CASE("Feature G-code follows explicit role transitions without duplicating annotations",
           "[plugins][gcode][feature-gcode][extrusion-edit][firmware]")
 {

@@ -743,6 +743,11 @@ public:
     /* Return whether this is a non-empty, fixed, continuous closed path. */
     bool is_loop() const { return extrusion_is_loop(self().handle()) != 0; }
     bool is_leaf() const { return extrusion_has_children(self().handle()) == 0; }
+    // Identify a direct stationary-volume request; geometry and values are validated by consumers.
+    bool is_deposit() const {
+        const EPropertySpecialCommand *command = self().get(EPropertySpecialCommand::key);
+        return command != nullptr && command->code == C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT;
+    }
     uint32_t child_count() const { return extrusion_child_count(self().handle()); }
 
     ExtrusionEntity child(uint32_t idx) const;

@@ -342,7 +342,7 @@ EffectiveState resolved_state(const ExtrusionEntity &entity,
     return state;
 }
 
-/* Summarize one local geometric leaf in absolute PrintingPlan coordinates. */
+// Copy printable endpoints from borrowed local geometry, including deposits; checked Z arithmetic throws on overflow and no scope or ownership is changed.
 EntityAnalysis analyze_local_geometry(const ExtrusionEntity &entity,
                                       const coord_t print_z,
                                       const EffectiveState &state)
@@ -358,23 +358,21 @@ EntityAnalysis analyze_local_geometry(const ExtrusionEntity &entity,
         analysis.has_process = true;
         return analysis;
     }
-    if (entity.segment_count() == 0)
+    ExtrusionScope::LeafEndpoints endpoints;
+    if (!ExtrusionScope::leaf_endpoints(entity, endpoints))
         return analysis;
 
     // A scope comparison needs only its first and last points. Interior gaps
     // are discovered separately while aggregating child analyses.
-    const c_extrusion_segment first_segment = entity.segment(0);
-    const c_extrusion_segment last_segment =
-        entity.segment(entity.segment_count() - 1);
     analysis.has_printable = true;
     analysis.first.position = PlannedPosition{
-        first_segment.point_a.x,
-        first_segment.point_a.y,
-        checked_add(checked_add(print_z, state.z_offset), first_segment.z_offset_a)};
+        endpoints.first.x,
+        endpoints.first.y,
+        checked_add(checked_add(print_z, state.z_offset), endpoints.first_z)};
     analysis.last.position = PlannedPosition{
-        last_segment.point_b.x,
-        last_segment.point_b.y,
-        checked_add(checked_add(print_z, state.z_offset), last_segment.z_offset_b)};
+        endpoints.last.x,
+        endpoints.last.y,
+        checked_add(checked_add(print_z, state.z_offset), endpoints.last_z)};
 
     // Modifiers are repeated on both ends because either side of a pair may
     // force a semantic transition when two candidates are compared.

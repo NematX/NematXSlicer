@@ -6,7 +6,8 @@
 #define slic3r_extrusion_property_h_
 
 #define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MAJOR 2u
-#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MINOR 1u
+/* Minor 2 appends the stationary-volume DEPOSIT special command. */
+#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MINOR 2u
 
 #include <stdint.h>
 
@@ -287,7 +288,7 @@ typedef struct c_extrusion_property_custom_gcode {
 
 /*
 Special commands are entry events carried in the extrusion stream, except for
-EXTRUSION on a geometric leaf as described below.
+EXTRUSION on a geometric leaf and DEPOSIT on a one-point leaf as described below.
 c_extrusion_property_special_command.extra_data stores the numeric parameter
 described below; commands without an explicit parameter ignore it.
 */
@@ -325,7 +326,16 @@ typedef enum c_extrusion_special_command {
     /* Resume emitting preview/G-code viewer tags for following generated G-code. */
     C_EXTRUSION_SPECIAL_COMMAND_ENABLE_PREVIEW = 9,
     /* Set the extruder motor current/trimpot to extra_data where the firmware supports it. */
-    C_EXTRUSION_SPECIAL_COMMAND_EXTRUDER_CURRENT = 10
+    C_EXTRUSION_SPECIAL_COMMAND_EXTRUDER_CURRENT = 10,
+    /* Deposit finite positive extra_data cubic millimeters before the extrusion
+       multiplier at the leaf's single polyline point. The leaf has flags 0,
+       printable attributes with positive flow/width/height, a positive speed,
+       and no extrusion-axis request. The writer travels to the point, then emits
+       E-only at the filament speed of a line with the same attributes. The active
+       tool supplies the multiplier, filament area and E mode. Retraction is
+       prepared by the plan; the deposit only repays outstanding retraction.
+       This command belongs inside PrintingExtrusion roots, not event scopes. */
+    C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT = 11
 } c_extrusion_special_command;
 
 /* Property type: EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND. */

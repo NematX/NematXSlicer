@@ -39,6 +39,11 @@
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "test_data.hpp"
 
+/*
+PrintingPlan tests build small ordered trees and source layers to verify cloning,
+scope events and plugin ordering. A deposit's one stored position follows the
+same instance translation as segmented leaves while the source stays unchanged.
+*/
 namespace {
 using namespace Slic3r;
 using namespace Slic3r::Printing;
@@ -1461,6 +1466,58 @@ TEST_CASE("STEP_EXTRUSION_EDIT rebuilds scope events in plugin priority order",
     CHECK(g_first_plan_event_editor.run_count.load() == 2);
     CHECK(g_second_plan_event_editor.run_count.load() == 2);
     CHECK(plan.events.before().child_count() == 2);
+}
+
+// The real default builder clones the source support bucket and translates its
+// single-point leaf by the object's instance shift before later ordering runs.
+TEST_CASE("Default plan builder clones and instance-shifts stationary deposits",
+          "[printing][plan][step-ordering][deposit]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    PluginStorage storage;
+    const ExPolygons subject{rectangle_expolygon(0., 0., 20., 20.)};
+    const slic3r_api::Object object(reinterpret_cast<const object_handle *>(&print.object(0)));
+    const c_point shift = object.instance_shift(0);
+    REQUIRE((shift.x != 0 || shift.y != 0));
+    const slic3r_api::AuxiliaryLayerBuildResult result = slic3r_api::build_auxiliary_layer_regions_from_subject(
+        reinterpret_cast<storage_handle *>(&storage), print_view(print), object, expolygons_view(subject),
+        scale_i(0.2), scale_i(0.4), scale_i(0.3));
+    REQUIRE(result.created);
+    layer_region_island_handle *region_island = layer_island_get_or_create_region_island(
+        const_cast<layer_island_handle *>(result.layer.island(0).handle()), nullptr, 0, 0);
+    REQUIRE(region_island != nullptr);
+    extrusion_entity_handle *root_handle = layer_region_island_get_mutable_extrusion(
+        region_island, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL);
+    REQUIRE(root_handle != nullptr);
+    ExtrusionEntityCollection &root = *reinterpret_cast<ExtrusionEntityCollection *>(root_handle);
+    const Point position = Point::new_scale(1.25, 2.5);
+    std::unique_ptr<ExtrusionEntity> deposit = test_path({position}, false);
+    deposit->add_property(ExtrusionAttributes(ExtrusionRole::SupportMaterial, ExtrusionFlow(0.08, 0.4f, 0.2f)));
+    deposit->add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.4));
+    root.append(std::move(deposit));
+    Steps::StepExtrusionOrdering::clear(print);
+    Steps::StepExtrusionOrdering::prepare(print);
+    Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+    REQUIRE(print.printing_plan() != nullptr);
+    REQUIRE(print.printing_plan()->groups.size() == 1);
+    const PrintingGroup &group = print.printing_plan()->groups.front();
+    REQUIRE(group.layers.size() == 1);
+    REQUIRE(group.layers.front().tool_groups.size() == 1);
+    const PrintingToolGroup &tool = group.layers.front().tool_groups.front();
+    REQUIRE(tool.extrusions.size() == 1);
+    const ExtrusionEntity &clone = tool.extrusions.front().root->child(0);
+    CHECK(&clone != &root.child(0));
+    REQUIRE(clone.polyline_or_null() != nullptr);
+    CHECK(clone.polyline_or_null()->size() == 1);
+    CHECK(clone.polyline_or_null()->front() == position + Point(shift.x, shift.y));
+    CHECK(root.child(0).polyline_or_null()->front() == position);
+    REQUIRE(clone.get_property<ExtrusionPropertySpecialCommand>() != nullptr);
+    CHECK(clone.get_property<ExtrusionPropertySpecialCommand>()->command_code() == ExtrusionPropertySpecialCommand::Code::DEPOSIT);
+    CHECK(clone.get_property<ExtrusionPropertySpecialCommand>()->extra_data == Approx(0.4));
+    CHECK(clone.get_property<ExtrusionAttributes>()->mm3_per_mm == Approx(0.08));
 }
 
 TEST_CASE("STEP_ORDERING runs default plugin chain on a shared PrintingPlan", "[printing][plan][step-ordering]")

@@ -171,7 +171,7 @@ double planar_segment_length(const c_extrusion_segment &segment);
 /* Identify a geometric leaf whose effective role is Travel. */
 bool is_travel_leaf(const OrderedLeaf &leaf);
 
-/* Update the last movement speed while scanning one immutable extrusion tree. */
+/* Update the last segmented or deposit speed while scanning one immutable tree. */
 void scan_last_speed(const MutableExtrusionEntity &entity,
                      const EffectiveTreeState &parent_state,
                      LayerEntrySpeed &last_speed,
@@ -310,6 +310,7 @@ bool is_travel_leaf(const OrderedLeaf &leaf)
         RAW_EXTRUSION_ROLE_IS_TRAVEL(leaf.state.attributes.extrusion_role());
 }
 
+// Scan borrowed segmented and deposit leaves for the final positive speed; update only the scalar snapshot, retain it for missing speed, and throw on cancellation.
 void scan_last_speed(const MutableExtrusionEntity &entity,
                      const EffectiveTreeState &parent_state,
                      LayerEntrySpeed &last_speed,
@@ -324,7 +325,7 @@ void scan_last_speed(const MutableExtrusionEntity &entity,
         }
         return;
     }
-    if (entity.segment_count() == 0)
+    if (entity.segment_count() == 0 && !entity.is_deposit())
         return;
 
     // A movement with no explicit speed keeps the firmware's previous speed.
@@ -368,6 +369,7 @@ void prepare_layer_entry_speeds(PrintingPlan &plan,
     }
 }
 
+// Append borrowed segmented and deposit leaf views in execution order without tree mutation; invalid lengths or cancellation throw, and the plan retains ownership.
 void collect_ordered_leaves(
     MutableExtrusionEntity entity,
     const EffectiveTreeState &parent_state,
@@ -387,7 +389,7 @@ void collect_ordered_leaves(
         }
         return;
     }
-    if (entity.segment_count() == 0)
+    if (entity.segment_count() == 0 && !entity.is_deposit())
         return;
 
     const distf_t length = entity.local_length();
@@ -458,7 +460,7 @@ TravelRun collect_travel_run(
     return run;
 }
 
-// Read borrowed regional geometry at a valid travel endpoint; synthetic targets return false, real lookup failures/cancellation throw, and no geometry or ownership changes.
+// Read borrowed regional settings at a travel endpoint; unmatched deposits use the island's first region, synthetic targets return false, and ordinary lookup failures or cancellation throw without mutation.
 bool target_deceleration_is_enabled(const std::vector<OrderedLeaf> &leaves,
                                     const TravelRun &travel,
                                     const OrderedLeaf &target,
@@ -486,6 +488,11 @@ bool target_deceleration_is_enabled(const std::vector<OrderedLeaf> &leaves,
     throw_if_cancelled(run_ctx);
     if (lookup.found())
         return lookup.value.get_bool("travel_deceleration_use_target");
+
+    // A deposit has no interior path to probe when the point is outside or ambiguous.
+    if (target.entity.is_deposit())
+        return target.region_island.region(0).print_region().config().bool_or_default(
+            "travel_deceleration_use_target", false);
 
     // A boundary belongs to both neighboring ExPolygons. Move a tiny distance
     // into the following printed path so the selected value comes from the

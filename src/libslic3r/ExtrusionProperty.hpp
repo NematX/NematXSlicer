@@ -22,6 +22,11 @@
 #include "PropertyStorage.hpp"
 #include "libslic3r.h"
 
+/*
+Host extrusion properties mirror the C payloads and supply typed cloning and
+storage ownership. Attributes carry printable flow; special commands carry
+ordered machine actions or a stationary volume at a one-point leaf.
+*/
 namespace Slic3r {
 
 class Flow;
@@ -196,6 +201,8 @@ public:
         DISABLE_PREVIEW = C_EXTRUSION_SPECIAL_COMMAND_DISABLE_PREVIEW,
         ENABLE_PREVIEW = C_EXTRUSION_SPECIAL_COMMAND_ENABLE_PREVIEW,
         EXTRUDER_CURRENT = C_EXTRUSION_SPECIAL_COMMAND_EXTRUDER_CURRENT,
+        // Stationary volume in mm3 before the active tool's extrusion multiplier.
+        DEPOSIT = C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT,
     };
 
     ExtrusionPropertySpecialCommand(Code c) : c_extrusion_property_special_command{ c_extrusion_special_command(c), 0. } {}

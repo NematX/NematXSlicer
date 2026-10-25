@@ -26,6 +26,11 @@
 #include "Line.hpp"
 #include "Polygon.hpp"
 
+/*
+Polyline operations act on scaled point sequences. ArcPolyline operations keep
+arc metadata aligned with endpoints, including diagnostic centers in Debug;
+translation preserves lengths and accepts a one-point position with no segments.
+*/
 namespace Slic3r {
 
 double total_length(const Polylines &polylines)
@@ -1045,6 +1050,8 @@ void ArcPolyline::append(const Geometry::ArcWelder::Segment &arc)
     assert(is_valid());
 }
 
+// Add the borrowed vector to every owned point and diagnostic arc center;
+// empty and one-point polylines remain legal, while segmented paths are validated.
 void ArcPolyline::translate(const Vector &vector)
 {
     for (Geometry::ArcWelder::Segment &seg : m_path) {
@@ -1055,7 +1062,7 @@ void ArcPolyline::translate(const Vector &vector)
         if (!seg.linear()) seg.center += vector;
 #endif
     }
-    assert(is_valid());
+    assert(m_path.size() < 2 || is_valid());
 }
 void ArcPolyline::rotate(double angle)
 {

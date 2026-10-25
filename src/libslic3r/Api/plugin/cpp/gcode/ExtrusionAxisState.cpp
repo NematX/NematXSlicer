@@ -21,6 +21,8 @@ The extrusion state accumulates exact requested distances and retains the
 sub-precision difference left by formatting. Firmware code receives only a
 quantized number to display; it never has to reconstruct or commit physical E
 state itself.
+filament_per_mm3() supplies the multiplier-adjusted filament conversion for E-only
+deposit speeds, validating the filament area even when encoded E is volumetric.
 
 A raw filament move (extrude) advances the E position and the usage statistics
 without changing the retraction state. Only the explicit operations retract,
@@ -393,6 +395,16 @@ bool ExtrusionAxisState::synchronize_after_external_gcode(
     m_restart_extra = normalized_restart;
     m_dE_left = 0.0;
     return true;
+}
+
+// Read the configured conversion without changing owned state; return filament
+// mm per mm3 including the multiplier in either E mode, or throw for invalid area.
+double ExtrusionAxisState::filament_per_mm3() const
+{
+    const double area = filament_crossection();
+    if (!std::isfinite(area) || area <= 0.0)
+        throw std::invalid_argument("A deposit needs a finite positive filament area.");
+    return m_use_volumetric_e ? m_e_per_mm3 / area : m_e_per_mm3;
 }
 
 double ExtrusionAxisState::filament_crossection() const

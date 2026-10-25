@@ -16,6 +16,11 @@
 #include "Config/ConfigOption.hpp"
 #include "Config/ConfigSnapshotSerialization.hpp"
 
+/*
+Extrusion visitors walk host entity trees and produce diagnostic text or geometry
+measurements. The printer decodes known property payloads into named fields,
+including stationary-volume special commands, without changing the source tree.
+*/
 namespace Slic3r {
 
 /* Convert the raw API role without forcing process-only roles through the legacy core role enum. */
@@ -105,6 +110,9 @@ void ExtrusionPrinter::print_string_value(const std::string &value)
     ss << "\"";
 }
 
+// Borrow a node and string delimiters, decode known direct properties into the
+// printer's owned stream and return whether any are present; source ownership and
+// payloads are unchanged, while stream/allocation failures follow the stream policy.
 bool ExtrusionPrinter::print_properties(const ExtrusionEntity &entity, const char *prefix, const char *suffix)
 {
     const bool has_known_property =
@@ -246,6 +254,7 @@ bool ExtrusionPrinter::print_properties(const ExtrusionEntity &entity, const cha
         case ExtrusionPropertySpecialCommand::Code::DISABLE_PREVIEW: command_name = "disable_preview"; break;
         case ExtrusionPropertySpecialCommand::Code::ENABLE_PREVIEW: command_name = "enable_preview"; break;
         case ExtrusionPropertySpecialCommand::Code::EXTRUDER_CURRENT: command_name = "extruder_current"; break;
+        case ExtrusionPropertySpecialCommand::Code::DEPOSIT: command_name = "deposit"; break;
         }
 
         bool first_field = true;

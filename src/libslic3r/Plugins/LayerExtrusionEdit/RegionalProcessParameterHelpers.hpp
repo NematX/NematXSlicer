@@ -27,6 +27,9 @@ the object instance coordinates already used by PrintingPlan. The second stage
 lets a process plugin resolve each tuple to its final stored float and merges
 zones that produce the same value. Callers may then inspect a temporary clone
 without changing the plan, or split and annotate the real plan leaf.
+DEPOSIT leaves request stationary volume at one point. They select a projected
+area without splitting; missing or conflicting areas use the island's first
+region value retained alongside the projection.
 
 The producer guarantees that RegionSettings masks are disjoint and cover the
 source island. These helpers intentionally do not diagnose or repair malformed
@@ -74,6 +77,7 @@ struct RegionalProcessPartition
     }
 
     float uniform_value = -1.f;
+    float fallback_value = -1.f;
     std::vector<StoredExPolygonCollection> areas;
     std::vector<float> values;
 };
@@ -94,14 +98,14 @@ RegionalProcessPartition project_regional_process_values(
     const RegionalSettingsPartition &settings,
     const RegionalValueResolver &resolve_value);
 
-// Test only the portions touched by a leaf by splitting a temporary deep clone.
+// Test touched regional values by splitting a clone, or selecting a deposit's point without splitting.
 bool regional_partition_leaf_matches(
     storage_handle *storage,
     const MutableExtrusionEntity &leaf,
     const RegionalProcessPartition &partition,
     const RegionalValuePredicate &matches_value);
 
-// Split a real leaf and assign each fragment through the selected field editor.
+// Assign regional values to split fragments or a single unsplit deposit selected by its point.
 // Returns false when the partition has only one final value and no split is needed.
 bool apply_regional_process_partition(
     MutableExtrusionEntity leaf,

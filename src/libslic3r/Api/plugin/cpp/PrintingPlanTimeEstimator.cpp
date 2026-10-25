@@ -8,10 +8,12 @@ PrintingPlan movement-time estimation
 =====================================
 
 This source mirrors the movement geometry consumed by G-code generation, but
-keeps timing deliberately simple. It resolves inherited speed and Z metadata,
+keeps timing deliberately simple. It resolves inherited speed, flow and Z metadata,
 measures each segment at constant speed, and inserts a straight synthetic
 travel whenever two consecutive leaves are separated by at least the shared
 scaled continuity epsilon.
+Stationary deposits consume volume at speed times inherited mm3_per_mm and
+establish the same machine position as a segmented leaf.
 */
 
 #include "PrintingPlanTimeEstimator.hpp"
@@ -34,6 +36,7 @@ struct Position3d
 struct EstimatorState
 {
     float speed_mm_per_s = -1.f;
+    double mm3_per_mm = 0.0;
     coord_t z_offset = 0;
 };
 
@@ -85,6 +88,7 @@ Position3d segment_position(c_point point, coord_t print_z, coord_t z_offset)
     return Position3d{unscaled(point.x), unscaled(point.y), unscaled(print_z + z_offset)};
 }
 
+// Traverse borrowed leaves and accumulate constant-speed movement, travel gaps and deposit duration; invalid effective rates throw, output position advances, and the plan stays unchanged.
 void estimate_entity(const ExtrusionEntity &entity,
                      const EstimatorState &parent_state,
                      coord_t print_z,
@@ -100,18 +104,26 @@ void estimate_entity(const ExtrusionEntity &entity,
             state.speed_mm_per_s = speed->speed_mm_per_s;
     if (const EPropertyZOffset *z = entity.get(EPropertyZOffset::key))
         state.z_offset = z->get();
+    if (const EPropertyAttributes *attributes = entity.get(EPropertyAttributes::key))
+        state.mm3_per_mm = attributes->mm3_per_mm();
 
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
         estimate_entity(entity.child(child_idx), state, print_z, travel_speed, position, duration);
 
-    if (entity.segment_count() == 0)
+    // Timing reaches fan selection before G-code pre-validation, so reject
+    // missing deposit positions and invalid volumes before they affect duration.
+    if (entity.is_deposit()) {
+        const double volume = entity.get(EPropertySpecialCommand::key)->extra_data;
+        if (entity.point_count() != 1 || !std::isfinite(volume) || volume <= 0.0)
+            throw std::invalid_argument("A deposit needs exactly one point and a finite positive volume.");
+    }
+    if (entity.segment_count() == 0 && !entity.is_deposit())
         return;
     if (state.speed_mm_per_s <= 0.f || !std::isfinite(state.speed_mm_per_s))
-        throw std::invalid_argument("A geometric PrintingPlan leaf has no positive effective speed.");
+        throw std::invalid_argument("A printable PrintingPlan leaf has no positive effective speed.");
 
-    const c_extrusion_segment first = entity.segment(0);
     const Position3d first_position = segment_position(
-        first.point_a, print_z, state.z_offset + first.z_offset_a);
+        entity.point(0), print_z, state.z_offset + entity.z_offset(0));
 
     // The first known point establishes machine position for free. Every later
     // gap large enough to survive travel-plugin snapping receives a synthetic
@@ -123,6 +135,15 @@ void estimate_entity(const ExtrusionEntity &entity,
         duration += distance_3d(*position, first_position) / travel_speed;
     }
     position = first_position;
+
+    // Multiplier scales both the volume and its rate, so it cancels from duration.
+    if (entity.is_deposit()) {
+        if (state.mm3_per_mm <= 0.0 || !std::isfinite(state.mm3_per_mm))
+            throw std::invalid_argument("A deposit needs positive effective mm3_per_mm.");
+        duration += entity.get(EPropertySpecialCommand::key)->extra_data /
+            (double(state.speed_mm_per_s) * state.mm3_per_mm);
+        return;
+    }
 
     for (uint32_t segment_idx = 0; segment_idx < entity.segment_count(); ++segment_idx) {
         const c_extrusion_segment segment = entity.segment(segment_idx);

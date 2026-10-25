@@ -15,6 +15,11 @@
 
 #include "ExtrusionEntityCollection.hpp"
 
+/*
+Host extrusion visitors dispatch by entity type or traverse whole trees with
+inherited properties. ExtrusionPrinter writes known payloads as diagnostic fields;
+other visitors extract geometry without transferring the source entities' ownership.
+*/
 namespace Slic3r {
 
 class ExtrusionVisitor {
@@ -185,6 +190,7 @@ class ExtrusionPrinter : public ExtrusionTreeConstVisitor<true> {
     // Print built-in properties stored directly on one entity. Custom plugin
     // properties are skipped because this debug printer does not know their
     // payload layout.
+    // Write known direct properties with the supplied delimiters and report their presence.
     bool print_properties(const ExtrusionEntity& entity, const char *prefix = "", const char *suffix = "");
     void begin_property(bool &first_property, const char *name);
     void begin_property_field(bool &first_field, const char *name);

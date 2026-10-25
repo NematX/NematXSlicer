@@ -21,6 +21,7 @@
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
 #include "libslic3r/Api/host/GCodeScriptProcessor.hpp"
+#include "libslic3r/Api/host/GCodeReaderService.hpp"
 #include "libslic3r/Api/host/GCodeThumbnailRenderer.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeThumbnailViews.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -76,6 +77,20 @@ using namespace Slic3r::Test::GCode;
 
 // Read E words from generated movement lines into an owned vector; malformed numbers throw.
 std::vector<double> firmware_move_e_values(const std::string &gcode);
+// Create an owned support deposit at (1.25, 2.5) with explicit printable process values.
+std::unique_ptr<ExtrusionEntity> firmware_deposit(double volume = 0.4);
+
+// Build a single-point owned entity, storing volume before the tool multiplier;
+// callers may mutate its properties to exercise validation, and allocation failures propagate.
+std::unique_ptr<ExtrusionEntity> firmware_deposit(const double volume)
+{
+    std::unique_ptr<ExtrusionEntity> leaf(new ExtrusionEntity(false,
+        ArcPolyline(Points{Point::new_scale(1.25, 2.5)})));
+    leaf->add_property(ExtrusionAttributes(ExtrusionRole::SupportMaterial, ExtrusionFlow(0.08, 0.4f, 0.2f)));
+    leaf->add_property(ExtrusionPropertySpeed(20.f, 500.f));
+    leaf->add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::DEPOSIT, volume));
+    return leaf;
+}
 
 // Borrow generated G-code, scan G1/G2/G3 lines and copy their displayed E numbers;
 // stod reports malformed numeric output, and lines without E leave no entry.
@@ -103,6 +118,14 @@ protected:
         return "CUSTOM_FAN T" + std::to_string(tool_id) +
                " S" + std::to_string(int32_t(std::lround(speed_percent))) + "\n";
     }
+};
+
+// Expose the owned Klipper tools for precision accounting without changing encoding.
+class DepositKlipperFirmwareProbe final :
+    public slic3r_api::GCodeGeneration::Firmware::KlipperGCodeFirmwareSession
+{
+public:
+    using KlipperGCodeFirmwareSession::extruders;
 };
 
 // Exposes the protected syntax encoder so kind dispatch can be tested without
@@ -2349,6 +2372,374 @@ TEST_CASE("Default firmware writes the E value prepared by the extruder state",
         throw;
     }
     remove_output_pair(output_path);
+}
+
+// Check stationary volume conversion with the extrusion multiplier in both E
+// modes: emitted E and F, and read-back deposit duration and volume.
+TEST_CASE("Default firmware deposits volume at one point in both E modes",
+          "[plugins][gcode][firmware][deposit]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool volumetric = GENERATE(false, true);
+    Print print;
+    print.mutable_printing_plan();
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.use_relative_e_distances.value = true;
+    config.use_volumetric_e.value = volumetric;
+    config.filament_diameter.set(std::vector<double>{1.75});
+    config.extrusion_multiplier.set(std::vector<double>{1.5});
+    ScriptStateFirmwareProbe firmware;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    const std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+        ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+    firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+    const std::unique_ptr<ExtrusionEntity> leaf = firmware_deposit();
+    const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
+        reinterpret_cast<const extrusion_entity_handle *>(leaf.get())));
+    INFO(output);
+    const size_t type = output.find(";TYPE:Support material\n");
+    const size_t width = output.find(";WIDTH:0.4\n");
+    const size_t height = output.find(";HEIGHT:0.2\n");
+    const size_t travel = output.find("G0 X1.25 Y2.5");
+    const size_t deposit = output.find("G1 E");
+    REQUIRE(type != std::string::npos);
+    REQUIRE(width != std::string::npos);
+    REQUIRE(height != std::string::npos);
+    REQUIRE(travel != std::string::npos);
+    REQUIRE(deposit != std::string::npos);
+    CHECK(type < width);
+    CHECK(width < height);
+    CHECK(height < travel);
+    CHECK(travel < deposit);
+    const size_t print_acceleration = output.find("M204 P500\n");
+    REQUIRE(print_acceleration != std::string::npos);
+    CHECK(travel < print_acceleration);
+    CHECK(print_acceleration < deposit);
+    CHECK(output.find(";SEAM:") == std::string::npos);
+    const std::string move = output.substr(deposit, output.find('\n', deposit) - deposit);
+    CHECK(move.find(" X") == std::string::npos);
+    CHECK(move.find(" Y") == std::string::npos);
+    REQUIRE(move.find(" F") != std::string::npos);
+    const double area = PI * 1.75 * 1.75 / 4.0;
+    CHECK(std::stod(move.substr(move.find(" F") + 2)) == Approx(60.0 * 20.0 * 0.08 * 1.5 / area).margin(0.001));
+    const std::vector<double> e = firmware_move_e_values(output);
+    REQUIRE(e.size() == 1);
+    CHECK(e.front() == Approx(0.4 * 1.5 / (volumetric ? 1.0 : area)).margin(0.00001));
+    CHECK(firmware.machine_extruder(0).extrusion_axis().extruded_volume() == Approx(0.6));
+
+    // The reader uses filament speed for stationary E in either mode. Its
+    // duration and role volume therefore match the same flow-equivalent line.
+    GCodeReaderService reader(Orchestrator::instance(), &print);
+    const GCodeProcessorResult result = reader.read_for_viewer("gcode.reader.marlin2",
+        "G90\nM83\nG92 X0 Y0 Z0 E0\n" + output);
+    REQUIRE_FALSE(result.moves.empty());
+    REQUIRE(result.moves.size() == 2);
+    CHECK(result.moves.back().move_time - result.moves.front().move_time ==
+          Approx(0.4 / (20.0 * 0.08)).margin(0.0001));
+    CHECK(result.print_statistics.volumes_per_role_per_extruder.at(GCodeExtrusionRole::SupportMaterial).at(0) ==
+          Approx(0.6).margin(0.0001));
+}
+
+// Compare reset-free support deposits and a line with reader volume at each
+// precision in both E modes; copied-axis trials also decide the half-step tie.
+TEST_CASE("Support deposits retain visible precision and filament accounting",
+          "[plugins][gcode][firmware][deposit][deposit-precision]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool klipper = GENERATE(false, true);
+    const bool relative = GENERATE(false, true);
+    const bool volumetric = GENERATE(false, true);
+    const int precision = GENERATE(2, 3, 5);
+    INFO("klipper=" << klipper << ", relative=" << relative << ", volumetric=" << volumetric << ", precision=" << precision);
+    Print print;
+    print.mutable_printing_plan();
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.use_relative_e_distances.value = relative;
+    config.use_volumetric_e.value = volumetric;
+    config.gcode_precision_e.value = precision;
+    config.filament_diameter.set(std::vector<double>{1.75});
+    config.extrusion_multiplier.set(std::vector<double>{1.5});
+    ScriptStateFirmwareProbe base;
+    DepositKlipperFirmwareProbe dialect;
+    slic3r_api::GCodeGeneration::DefaultGCodeFirmwareSession &firmware = klipper ?
+        static_cast<slic3r_api::GCodeGeneration::DefaultGCodeFirmwareSession &>(dialect) : base;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    const std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+        ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+    firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+    slic3r_api::GCodeGeneration::ExtrusionAxisState &axis = klipper ?
+        dialect.extruders().at(0).extrusion_axis() : base.machine_extruder(0).extrusion_axis();
+    const double step = std::pow(10.0, -precision);
+    const double area = PI * 1.75 * 1.75 / 4.0;
+    const double filament_per_e = volumetric ? 1.0 / area : 1.0;
+    std::string sequence = std::string("G90\n") + (relative ? "M83\n" : "M82\n") + "G92 X0 Y0 Z0 E0\n";
+    GCodeReaderService reader(Orchestrator::instance(), &print);
+    double previous_read_filament = 0.0;
+    double previous_display = 0.0;
+
+    SECTION("round-up, forced step, invisible sub-step and normal line") {
+        for (size_t index = 0; index < 4; ++index) {
+            const double used_before = axis.used_filament();
+            const double remainder_before = axis.extruded_dE_left();
+            const double fractions[] = {0.7, 0.6, 0.3, 2.1};
+            std::unique_ptr<ExtrusionEntity> leaf;
+            if (index < 3) {
+                leaf = firmware_deposit(fractions[index] * step / axis.e_per_mm3());
+            } else {
+                // A real one-millimetre line consumes the carried positive remainder.
+                leaf = marker_test_path(1.25, 2.25, ExtrusionRole::SupportMaterial, 0.4f, 0.2f);
+                slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(leaf.get()));
+                view.get_mutable(slic3r_api::EPropertyAttributes::key)->mm3_per_mm(
+                    fractions[index] * step / axis.e_per_mm3());
+            }
+            const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
+                reinterpret_cast<const extrusion_entity_handle *>(leaf.get())));
+            INFO(output);
+            sequence += output;
+            const std::vector<double> words = firmware_move_e_values(output);
+            if (index == 2) {
+                CHECK(words.empty());
+                CHECK(output.find("G4 P20\n") != std::string::npos);
+            } else {
+                REQUIRE(words.size() == 1);
+                CHECK(output.find("G4 P20\n") == std::string::npos);
+                const double displayed_delta = relative ? words.front() : words.front() - previous_display;
+                CHECK(displayed_delta == Approx((index == 3 ? 2.0 : 1.0) * step));
+                if (!relative) {
+                    CHECK(words.front() >= previous_display);
+                    previous_display = words.front();
+                }
+            }
+            const double expected_remainders[] = {-0.3, 0.0, 0.3, 0.4};
+            CHECK(axis.extruded_dE_left() == Approx(expected_remainders[index] * step).margin(step * 1e-9));
+            CHECK(axis.used_filament() - used_before ==
+                  Approx((index == 1 ? 1.3 : fractions[index]) * step * filament_per_e));
+            CHECK(axis.position() == Approx(relative ? 0.0 :
+                (index == 0 ? 0.7 : index == 1 ? 2.0 : index == 2 ? 2.3 : 4.4) * step));
+
+            // Reader statistics derive volume from displayed E. Without a reset,
+            // their difference from exact usage is precisely the carried remainder.
+            const GCodeProcessorResult result = reader.read_for_viewer(
+                klipper ? "gcode.reader.klipper" : "gcode.reader.marlin2", sequence);
+            const auto role_volume = result.print_statistics.volumes_per_role_per_extruder.find(
+                GCodeExtrusionRole::SupportMaterial);
+            const bool has_volume = role_volume != result.print_statistics.volumes_per_role_per_extruder.end() &&
+                role_volume->second.count(0) == 1;
+            const double read_filament = has_volume ? role_volume->second.at(0) / area : 0.0;
+            CHECK(std::abs(axis.extruded_dE_left() - remainder_before) < 0.5 * step);
+            // Accepted reader limitation (GCodeReaderResultBuilder.cpp:808-818): a
+            // stationary E move of at most EPSILON (1e-4 mm of filament) is ignored.
+            // The writer still counts such deposits, so they are missing from
+            // read-back statistics; the writer-side assertions above are unchanged.
+            constexpr double reader_epsilon = 1e-4;
+            const bool reader_sees_steps = step * filament_per_e > reader_epsilon;
+            if (reader_sees_steps) {
+                // An absent statistic means the reader counted zero volume; keep the
+                // failed assertion visible while checking the rest of the sequence.
+                CHECK(has_volume);
+                CHECK(axis.used_filament() - used_before == Approx(read_filament - previous_read_filament)
+                    .margin(0.5 * step * filament_per_e));
+                CHECK(axis.used_filament() == Approx(read_filament).margin(0.5 * step * filament_per_e));
+                CHECK(axis.used_filament() - read_filament ==
+                    Approx(axis.extruded_dE_left() * filament_per_e).margin(step * filament_per_e * 1e-5));
+                if (index == 1)
+                    CHECK(axis.used_filament() == Approx(read_filament));
+            } else if (index < 3) {
+                // The reader omits the stationary deposits (E-only moves).
+                CHECK(read_filament == Approx(0.0).margin(1e-12));
+            } else {
+                // The reader counts the printing line (it has an XY change): its
+                // word carries the +0.3 step remainder, i.e. two steps.
+                CHECK(has_volume);
+                CHECK(read_filament - previous_read_filament ==
+                    Approx(2.0 * step * filament_per_e).margin(0.1 * step * filament_per_e));
+            }
+            previous_read_filament = read_filament;
+        }
+    }
+    SECTION("the half-step tie follows the axis trial") {
+        const std::unique_ptr<ExtrusionEntity> first = firmware_deposit(0.7 * step / axis.e_per_mm3());
+        firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(first.get())));
+        const double remainder = axis.extruded_dE_left();
+        const double volume = (0.5 * step - remainder) / axis.e_per_mm3();
+        const double delta = volume * axis.e_per_mm3();
+        CHECK(remainder + delta == Approx(0.5 * step));
+        slic3r_api::GCodeGeneration::ExtrusionAxisState trial = axis;
+        std::optional<double> expected_word = trial.extrude(delta);
+        if (!expected_word) {
+            trial = axis;
+            expected_word = trial.extrude(step - remainder);
+        }
+        const std::unique_ptr<ExtrusionEntity> tie = firmware_deposit(volume);
+        const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(tie.get())));
+        const std::vector<double> words = firmware_move_e_values(output);
+        REQUIRE(expected_word);
+        REQUIRE(words.size() == 1);
+        CHECK(words.front() == Approx(*expected_word));
+        CHECK(axis.used_filament() == Approx(trial.used_filament()));
+        CHECK(axis.position() == Approx(trial.position()));
+        CHECK(axis.extruded_dE_left() == Approx(trial.extruded_dE_left()).margin(step * 1e-9));
+        CHECK(output.find("G4 P20\n") == std::string::npos);
+    }
+}
+
+TEST_CASE("Deposits follow planned unretraction after tool selection",
+          "[plugins][gcode][firmware][deposit][retraction]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool native = GENERATE(false, true);
+    const bool volumetric = GENERATE(false, true);
+    Print print;
+    print.mutable_printing_plan();
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.nozzle_diameter.set(std::vector<double>{0.4, 0.4});
+    config.filament_diameter.set(std::vector<double>{1.75, 1.75});
+    config.extrusion_multiplier.set(std::vector<double>{1.5, 1.5});
+    config.use_relative_e_distances.value = true;
+    config.use_volumetric_e.value = volumetric;
+    config.use_firmware_retraction.value = native;
+    config.retract_speed.set(std::vector<double>{40.0, 40.0});
+    config.deretract_speed.set(std::vector<double>{30.0, 30.0});
+    ScriptStateFirmwareProbe firmware;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    for (const double id : {0.0, 1.0}) {
+        const std::unique_ptr<ExtrusionEntity> tool = special_command_entity(ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, id);
+        firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(tool.get())));
+    }
+    const std::unique_ptr<ExtrusionEntity> retract = marker_test_retraction(true);
+    const std::string retract_output = firmware.write_event(slic3r_api::ExtrusionEntity(
+        reinterpret_cast<const extrusion_entity_handle *>(retract.get())));
+    const std::unique_ptr<ExtrusionEntity> unretract = marker_test_retraction(false);
+    slic3r_api::MutableExtrusionEntity unretract_view(reinterpret_cast<extrusion_entity_handle *>(unretract.get()));
+    unretract_view.get_mutable(slic3r_api::EPropertyAttributes::key)->extrusion_role(
+        RAW_EXTRUSION_ROLE_UNRETRACT | RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL);
+    unretract_view.get_mutable(slic3r_api::EPropertyExtrusionAxis::key)->unretract(0.05, true);
+    const std::string unretract_output = firmware.write_event(unretract_view.readonly());
+    slic3r_api::GCodeGeneration::ExtrusionAxisState &axis = firmware.machine_extruder(1).extrusion_axis();
+    CHECK(axis.retracted() == 0.0);
+    if (native) {
+        CHECK(retract_output.find("G10\n") != std::string::npos);
+        CHECK(unretract_output.find("G11\n") != std::string::npos);
+    } else {
+        CHECK(unretract_output.find(";TYPE:Support material\n") < unretract_output.find("G1 E"));
+    }
+    const double before = axis.extruded_volume();
+    const std::unique_ptr<ExtrusionEntity> leaf = firmware_deposit();
+    const std::string output = firmware.write_event(slic3r_api::ExtrusionEntity(
+        reinterpret_cast<const extrusion_entity_handle *>(leaf.get())));
+    CHECK(axis.extruded_volume() - before == Approx(0.6));
+    CHECK(axis.retracted() == 0.0);
+    // Isolate the deposit move for read-back so restart_extra is not included
+    // in its volume or duration, and establish the marker if unretraction emitted it.
+    GCodeReaderService reader(Orchestrator::instance(), &print);
+    const GCodeProcessorResult result = reader.read_for_viewer("gcode.reader.marlin2",
+        "G90\nM83\nT1\nG92 X0 Y0 Z0 E0\n;TYPE:Support material\n" + output);
+    REQUIRE_FALSE(result.moves.empty());
+    REQUIRE(result.moves.size() == 3);
+    CHECK(result.moves.front().type == EMoveType::Tool_change);
+    CHECK(result.moves[1].type == EMoveType::Travel);
+    CHECK(result.moves.back().type == EMoveType::Unretract);
+    CHECK(result.moves.back().move_time - result.moves[1].move_time == Approx(0.25).margin(0.0001));
+    CHECK(result.print_statistics.volumes_per_role_per_extruder.at(GCodeExtrusionRole::SupportMaterial).at(1) ==
+          Approx(0.6).margin(0.0001));
+}
+
+TEST_CASE("Default firmware rejects malformed stationary deposits",
+          "[plugins][gcode][firmware][deposit]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    ScriptStateFirmwareProbe firmware;
+    std::unique_ptr<ExtrusionEntity> leaf = firmware_deposit();
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(leaf.get()));
+    bool select_tool = true;
+    SECTION("no point") { REQUIRE(view.clear_polyline()); }
+    SECTION("two points") { REQUIRE(view.set_points(std::vector<c_point>{{0, 0}, {scale_i(1.), 0}})); }
+    SECTION("children") {
+        REQUIRE(view.clear_content());
+        PluginStorage storage;
+        slic3r_api::StoredExtrusionEntity child(reinterpret_cast<storage_handle *>(&storage));
+        REQUIRE(view.append_child_copy(child.readonly()) != EXTRUSION_INDEX_INVALID);
+    }
+    SECTION("axis request") { view.get_or_add(slic3r_api::EPropertyExtrusionAxis::key).retract_to(0.8, false); }
+    SECTION("zero volume") { view.get_mutable(slic3r_api::EPropertySpecialCommand::key)->extra_data = 0.0; }
+    SECTION("negative volume") { view.get_mutable(slic3r_api::EPropertySpecialCommand::key)->extra_data = -1.0; }
+    SECTION("non-finite volume") { view.get_mutable(slic3r_api::EPropertySpecialCommand::key)->extra_data = std::numeric_limits<double>::infinity(); }
+    SECTION("no speed") { leaf->remove_property<ExtrusionPropertySpeed>(); }
+    SECTION("no tool") { select_tool = false; }
+    SECTION("invalid volumetric filament area") {
+        config.set_deserialize("use_volumetric_e", "1");
+        config.set_deserialize("filament_diameter", "0");
+    }
+    SECTION("travel role") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->extrusion_role(RAW_EXTRUSION_ROLE_TRAVEL); }
+    SECTION("zero flow") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->mm3_per_mm(0.0); }
+    SECTION("zero width") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->width(0.f); }
+    SECTION("zero height") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->height(0.f); }
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    if (select_tool) {
+        const std::unique_ptr<ExtrusionEntity> select = special_command_entity(
+            ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.0);
+        firmware.write_event(slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(select.get())));
+    }
+    CHECK_THROWS_AS(firmware.write_event(view.readonly()), std::invalid_argument);
+}
+
+TEST_CASE("STEP_GCODE pre-validation checks stationary deposit requirements",
+          "[plugins][gcode][validation][deposit]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    PrintingToolGroup &tool = append_speed_validation_tool_group(print, scale_i(0.42), 0);
+    std::unique_ptr<ExtrusionEntity> leaf = firmware_deposit();
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(leaf.get()));
+    bool valid = false;
+    bool event_scope = false;
+    SECTION("valid leaf") { valid = true; }
+    SECTION("deposit in a tool-group event scope") { event_scope = true; }
+    SECTION("inherited attributes and speed") {
+        leaf->remove_property<ExtrusionAttributes>();
+        leaf->remove_property<ExtrusionPropertySpeed>();
+        ExtrusionEntity::Children children;
+        children.push_back(std::move(leaf));
+        leaf.reset(new ExtrusionEntity(std::move(children), false, false, true));
+        leaf->add_property(ExtrusionAttributes(ExtrusionRole::SupportMaterial, ExtrusionFlow(0.08, 0.4f, 0.2f)));
+        leaf->add_property(ExtrusionPropertySpeed(20.f));
+        valid = true;
+    }
+    SECTION("no point") { REQUIRE(view.clear_polyline()); }
+    SECTION("two points") { REQUIRE(view.set_points(std::vector<c_point>{{0, 0}, {scale_i(1.), 0}})); }
+    SECTION("children") {
+        REQUIRE(view.clear_content());
+        leaf->append_child(std::unique_ptr<ExtrusionEntity>(new ExtrusionNop()));
+    }
+    SECTION("axis") { view.get_or_add(slic3r_api::EPropertyExtrusionAxis::key).retract_to(0.8, false); }
+    SECTION("no speed") { leaf->remove_property<ExtrusionPropertySpeed>(); }
+    SECTION("non-finite speed") { view.get_mutable(slic3r_api::EPropertySpeed::key)->speed_mm_per_s = std::numeric_limits<float>::quiet_NaN(); }
+    SECTION("invalid tool") { tool.extruder_id = 3; }
+    SECTION("non-positive volume") { view.get_mutable(slic3r_api::EPropertySpecialCommand::key)->extra_data = 0.0; }
+    SECTION("non-finite volume") { view.get_mutable(slic3r_api::EPropertySpecialCommand::key)->extra_data = std::numeric_limits<double>::infinity(); }
+    SECTION("no attributes") { leaf->remove_property<ExtrusionAttributes>(); }
+    SECTION("zero flow") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->mm3_per_mm(0.0); }
+    SECTION("zero width") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->width(0.f); }
+    SECTION("zero height") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->height(0.f); }
+    SECTION("travel") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->extrusion_role(RAW_EXTRUSION_ROLE_TRAVEL); }
+    SECTION("wipe") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->extrusion_role(RAW_EXTRUSION_ROLE_WIPE); }
+    SECTION("retract") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->extrusion_role(RAW_EXTRUSION_ROLE_RETRACT); }
+    SECTION("unretract") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->extrusion_role(RAW_EXTRUSION_ROLE_UNRETRACT); }
+    SECTION("unsupported printable role") { view.get_mutable(slic3r_api::EPropertyAttributes::key)->extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER | RAW_EXTRUSION_ROLE_INFILL); }
+    if (event_scope)
+        tool.events.append_before(*leaf);
+    else
+        append_speed_validation_extrusion(tool, std::move(leaf));
+    std::string error;
+    CHECK(Steps::StepGenerateGcode::validate_pre(print, &error) == valid);
+    if (!valid)
+        CHECK(error.find("DEPOSIT needs") != std::string::npos);
+    if (event_scope) {
+        CHECK(error.find("events.before") != std::string::npos);
+        CHECK(error.find("rather than an event scope") != std::string::npos);
+    }
 }
 
 // Exercise signed fixed filament lengths without startup commands or file publication.

@@ -36,6 +36,11 @@ provider writes into travel(), a retraction provider may write into after() of
 the source and before() of the target, and every plugin reads printable paths
 through content().
 
+A stationary deposit requests a volume through DEPOSIT on a one-point leaf.
+Its first and last endpoints coincide, but ordinary segmentless leaves do not
+have printable endpoints. leaf_endpoints() shares that distinction with the
+scope, travel, retraction, lift and layer-entry consumers.
+
 Phase views are borrowed. A caller may edit a returned phase subtree, but must
 not restructure the scope root while retaining any of its child views.
 */
@@ -44,6 +49,18 @@ not restructure the scope root while retaining any of its child views.
 #include "libslic3r/Plugins/PrintingPlan/PrintingExtrusionScopeProperty.h"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace ExtrusionScope {
+
+// Local endpoints of a segmented leaf or a stationary deposit, before inherited Z offsets.
+struct LeafEndpoints
+{
+    c_point first{};
+    c_point last{};
+    coord_t first_z = 0;
+    coord_t last_z = 0;
+};
+
+// Read local endpoints of segmented geometry or a validated one-point deposit.
+bool leaf_endpoints(const ExtrusionEntity &entity, LeafEndpoints &endpoints);
 
 /*
 Named borrowed views over one compact scope root.

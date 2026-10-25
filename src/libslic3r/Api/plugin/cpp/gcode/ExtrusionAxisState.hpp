@@ -101,6 +101,8 @@ public:
     bool reset_E();
     double e_per_mm(double mm3_per_mm) const { return mm3_per_mm * m_e_per_mm3; }
     double e_per_mm3() const { return m_e_per_mm3; }
+    // Return multiplier-adjusted filament length per mm3, rejecting an invalid filament area.
+    double filament_per_mm3() const;
     double extruded_volume() const;
     double used_filament() const;
 
