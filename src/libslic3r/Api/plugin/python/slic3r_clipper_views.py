@@ -569,6 +569,29 @@ def clipper_intersection_polyline_expolygons(
 
 
 @abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
+def clipper_offset_polylines(storage,
+                             polylines: PolylineCollection,
+                             delta: float,
+                             join_type: int = CLIPPER_JOIN_SQUARE,
+                             miter_limit: float = 0.0,
+                             end_type: int = CLIPPER_END_OPEN_BUTT) -> ClipperOperand:
+    """
+    Offset open polylines into areas exactly like the native offset(Polylines).
+
+    The defaults are the native line defaults (square joins, butt ends).
+    ``delta`` is the scaled half width and must be positive. The polylines are
+    read during the call only; the returned operand is owned by ``storage``.
+    """
+    storage_address = _require_handle(storage, "storage")
+    if float(delta) <= 0.0:
+        raise ValueError("polyline offset delta must be positive")
+    handle = polylines.api.host.clipper_offset_polylines(
+        _void_p(storage_address), polylines.c_handle(), float(delta), int(join_type), float(miter_limit), int(end_type)
+    )
+    return ClipperOperand.adopt_owned(polylines.api, storage_address, handle)
+
+
+@abi_requires_headers("slic3r_clipper.h", "slic3r_geometry.h", "slic3r_utils.h")
 def clipper_diff_polylines_expolygons(
     storage, subject: PolylineCollection, clip: ExPolygonCollection
 ) -> StoredPolylineCollection:
@@ -748,6 +771,17 @@ class ClipperContext:
                 end_type: int = CLIPPER_END_CLOSED_POLYGON) -> ClipperOperand:
         return clipper_offset2(self.storage(), subject, delta1, delta2, join_type, miter_limit, end_type)
 
+    def offset_polylines(self,
+                         polylines: PolylineCollection,
+                         delta: float,
+                         join_type: int = CLIPPER_JOIN_SQUARE,
+                         miter_limit: float = 0.0,
+                         end_type: int = CLIPPER_END_OPEN_BUTT) -> ClipperOperand:
+        """Offset open polylines like the native offset(Polylines); see clipper_offset_polylines()."""
+        if polylines.api is not self.api:
+            raise ValueError("polylines must use this context's API instance")
+        return clipper_offset_polylines(self.storage(), polylines, delta, join_type, miter_limit, end_type)
+
     def clip_shapes_with_subject_bbox(self, subject: ClipperOperand, bbox) -> ClipperOperand:
         return clipper_clip_shapes_with_subject_bbox(self.storage(), subject, bbox)
 
@@ -831,6 +865,7 @@ __all__ = [
     "clipper_intersection_with_safety_offset",
     "clipper_offset",
     "clipper_offset2",
+    "clipper_offset_polylines",
     "clipper_split",
     "clipper_split_polyline_expolygons",
     "clipper_union",

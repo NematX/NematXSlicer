@@ -6,7 +6,7 @@
 #define slic3r_clipper_h_
 
 #define SLIC3R_PLUGIN_API_CLIPPER_MAJOR 1u
-#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 2u
+#define SLIC3R_PLUGIN_API_CLIPPER_MINOR 3u
 
 #include "slic3r_def.h"
 #include "slic3r_geometry.h"
@@ -205,6 +205,26 @@ SLIC3R_HOST_API clipper_shapes_handle *clipper_offset2(storage_handle *storage,
                                                        clipper_join_type_t join_type,
                                                        double miter_limit,
                                                        clipper_end_type_t end_type);
+
+/*
+Offset a collection of open polylines into closed areas, exactly as the native
+offset(Polylines) of ClipperUtils: each polyline is offset alone, then all the
+results are united with a non-zero fill. The native defaults for lines are
+CLIPPER_JOIN_SQUARE, miter_limit 0 (ignored for square joins) and
+CLIPPER_END_OPEN_BUTT. delta is the scaled half width of the result and must be
+positive.
+
+Returns a new storage-owned shape holding the united polygons (release it with
+storage_free()), ready for another Clipper operation or a conversion. Returns
+NULL when storage or polylines is NULL or delta <= 0. Unlike
+clipper_shapes_from_polyline(), the polylines are read during the call only.
+*/
+SLIC3R_HOST_API clipper_shapes_handle *clipper_offset_polylines(storage_handle *storage,
+                                                                const polyline_collection_handle *polylines,
+                                                                double delta,
+                                                                clipper_join_type_t join_type,
+                                                                double miter_limit,
+                                                                clipper_end_type_t end_type);
 
 /* ---- Conversion back to ABI collections ------------------------------
 Materialize a Clipper shape into a new storage-owned collection.

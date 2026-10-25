@@ -888,6 +888,20 @@ class StoredPolygonCollection(PolygonCollection, StoredHandleMixin, StoredCollec
         out._init_storage(storage)
         return out
 
+    # Native collection clean-ups; see polygons_ensure_valid() and the
+    # following functions in slic3r_geometry.h for the exact rules.
+    def ensure_valid(self, resolution: int = SCALED_EPSILON) -> None:
+        self.api.host.polygons_ensure_valid(self.mutable_c_handle(), int(resolution))
+
+    def remove_sticks(self) -> bool:
+        return bool(self.api.host.polygons_remove_sticks(self.mutable_c_handle()))
+
+    def remove_degenerate(self) -> bool:
+        return bool(self.api.host.polygons_remove_degenerate(self.mutable_c_handle()))
+
+    def smooth_outward(self, clip_distance: int) -> None:
+        self.api.host.polygons_smooth_outward(self.mutable_c_handle(), int(clip_distance))
+
 
 PolygonCollection._stored_collection_cls = StoredPolygonCollection
 
@@ -928,6 +942,13 @@ class StoredPolylineCollection(PolylineCollection, StoredHandleMixin, StoredColl
         PolylineCollection.__init__(out, api, handle)
         out._init_storage(storage)
         return out
+
+    # Native collection clean-ups; see polylines_ensure_valid() in slic3r_geometry.h.
+    def ensure_valid(self, resolution: int = SCALED_EPSILON) -> None:
+        self.api.host.polylines_ensure_valid(self.mutable_c_handle(), int(resolution))
+
+    def remove_degenerate(self) -> bool:
+        return bool(self.api.host.polylines_remove_degenerate(self.mutable_c_handle()))
 
 
 PolylineCollection._stored_collection_cls = StoredPolylineCollection

@@ -171,6 +171,10 @@ class StoredPolygonCollection
     void erase(uint32_t idx);
     StoredPolygon clone(uint32_t idx) const;
     StoredPolygon extract(uint32_t idx);
+    void ensure_valid(coord_t resolution = SCALED_EPSILON);
+    bool remove_sticks();
+    bool remove_degenerate();
+    void smooth_outward(coord_t clip_distance);
 
 class PolylineCollection
   Read-only collection of Polyline views.
@@ -203,6 +207,8 @@ class StoredPolylineCollection
     void erase(uint32_t idx);
     StoredPolyline clone(uint32_t idx) const;
     StoredPolyline extract(uint32_t idx);
+    void ensure_valid(coord_t resolution = SCALED_EPSILON);
+    bool remove_degenerate();
 
 class ExPolygon
   Read-only view over one contour polygon and zero or more hole polygons.
@@ -1096,6 +1102,12 @@ public:
         return StoredPolygonCollection(storage, handle);
     }
 
+    // Native collection clean-ups; see polygons_ensure_valid() and the following functions in slic3r_geometry.h.
+    void ensure_valid(coord_t resolution = SCALED_EPSILON) { polygons_ensure_valid(mutable_handle(), resolution); }
+    bool remove_sticks() { return polygons_remove_sticks(mutable_handle()) != 0; }
+    bool remove_degenerate() { return polygons_remove_degenerate(mutable_handle()) != 0; }
+    void smooth_outward(coord_t clip_distance) { polygons_smooth_outward(mutable_handle(), clip_distance); }
+
 private:
     friend class StoredGeometryHandleView<StoredPolygonCollection, PolygonCollection, polygon_collection_handle>;
     StoredPolygonCollection(storage_handle *storage, polygon_collection_handle *handle) :
@@ -1126,6 +1138,10 @@ public:
     static StoredPolylineCollection adopt(storage_handle *storage, polyline_collection_handle *handle) {
         return StoredPolylineCollection(storage, handle);
     }
+
+    // Native collection clean-ups; see polylines_ensure_valid() in slic3r_geometry.h.
+    void ensure_valid(coord_t resolution = SCALED_EPSILON) { polylines_ensure_valid(mutable_handle(), resolution); }
+    bool remove_degenerate() { return polylines_remove_degenerate(mutable_handle()) != 0; }
 
 private:
     friend class StoredGeometryHandleView<StoredPolylineCollection, PolylineCollection, polyline_collection_handle>;

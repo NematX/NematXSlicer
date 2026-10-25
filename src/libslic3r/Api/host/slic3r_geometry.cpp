@@ -17,6 +17,7 @@
 #include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/Geometry/MedialAxis.hpp"
 #include "libslic3r/MultiPoint.hpp"
+#include "libslic3r/MutablePolygon.hpp"
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
@@ -908,6 +909,25 @@ c_point polygons_point_projection(const polygon_collection_handle *me, c_point p
     return out;
 }
 
+// The collection clean-ups below forward to the native Polygons functions so plugins get the exact native results, quirks included.
+void polygons_ensure_valid(polygon_collection_handle *me, coord_t resolution) {
+    if (me != nullptr)
+        Slic3r::ensure_valid(*Slic3r::to_polygons(me), resolution);
+}
+
+int32_t polygons_remove_sticks(polygon_collection_handle *me) {
+    return me != nullptr && Slic3r::remove_sticks(*Slic3r::to_polygons(me)) ? 1 : 0;
+}
+
+int32_t polygons_remove_degenerate(polygon_collection_handle *me) {
+    return me != nullptr && Slic3r::remove_degenerate(*Slic3r::to_polygons(me)) ? 1 : 0;
+}
+
+void polygons_smooth_outward(polygon_collection_handle *me, coord_t clip_distance) {
+    if (me != nullptr)
+        *Slic3r::to_polygons(me) = Slic3r::smooth_outward(std::move(*Slic3r::to_polygons(me)), clip_distance);
+}
+
 /* ========================= polyline collection ========================= */
 
 // Allocate an empty polyline collection in the locked registry; storage must exist, and insertion errors release the allocation.
@@ -1030,6 +1050,19 @@ void polylines_move(polyline_collection_handle *dst, polyline_collection_handle 
         return;
     *Slic3r::to_polylines(dst) = std::move(*Slic3r::to_polylines(src));
     Slic3r::to_polylines(src)->clear();
+}
+
+// Drop the polylines the native function would assert on, then apply it unchanged.
+void polylines_ensure_valid(polyline_collection_handle *me, coord_t resolution) {
+    if (me == nullptr)
+        return;
+    Slic3r::Polylines &polylines = *Slic3r::to_polylines(me);
+    Slic3r::remove_degenerate(polylines);
+    Slic3r::ensure_valid(polylines, resolution);
+}
+
+int32_t polylines_remove_degenerate(polyline_collection_handle *me) {
+    return me != nullptr && Slic3r::remove_degenerate(*Slic3r::to_polylines(me)) ? 1 : 0;
 }
 
 /* ========================= expolygon ========================= */

@@ -72,6 +72,8 @@ two-stage offset helper used by many slicer algorithms to remove narrow features
 or build rings. For open polylines, pass the appropriate CLIPPER_END_* type.
 Rings meeting exactly along an edge after the offset are split as the native
 per-ring offset_ex() splits them, without zero-width bridges.
+clipper_offset_polylines(storage, polylines, delta) turns a whole
+PolylineCollection into areas exactly like the native offset(Polylines).
 
 Choosing output form
 --------------------
@@ -573,6 +575,19 @@ inline ClipperOperand clipper_offset2(const ClipperOperand &subject,
                                     double miter_limit = 3.0,
                                     clipper_end_type_t end_type = CLIPPER_END_CLOSED_POLYGON) {
     return clipper_offset2(subject.storage(), subject, delta1, delta2, join_type, miter_limit, end_type);
+}
+
+// Offset open polylines into areas like the native offset(Polylines); defaults mirror its line defaults
+// (square joins, butt ends). A non-positive delta gives an empty operand.
+inline ClipperOperand clipper_offset_polylines(storage_handle *storage,
+                                               const PolylineCollection &polylines,
+                                               double delta,
+                                               clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE,
+                                               double miter_limit = 0.0,
+                                               clipper_end_type_t end_type = CLIPPER_END_OPEN_BUTT) {
+    clipper_shapes_handle *handle =
+        ::clipper_offset_polylines(storage, polylines.handle(), delta, join_type, miter_limit, end_type);
+    return handle == nullptr ? ClipperOperand::create_empty(storage) : ClipperOperand::adopt(storage, handle);
 }
 
 inline StoredPolylineCollection clipper_diff_polyline_expolygons(storage_handle *storage,

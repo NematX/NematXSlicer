@@ -368,7 +368,51 @@ class PythonGeometryClipperViewTests(unittest.TestCase):
                 self.assertEqual(signatures[name], (ctypes.c_void_p, [ctypes.c_void_p] * 3))
                 self.assertIn(name, self.clipper.__all__)
                 self.assertTrue(callable(getattr(self.api_module, name)))
-        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_CLIPPER_MINOR, 2)
+        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_CLIPPER_MINOR, 3)
+
+    def test_collection_cleanups_and_polyline_offset_forward_to_the_host(self):
+        api = self.make_api()
+        host = api.host
+        calls = []
+        for name in ("polygons_ensure_valid", "polygons_smooth_outward", "polylines_ensure_valid"):
+            setattr(host, name, lambda handle, value, name=name: calls.append((name, address(handle), int(value))))
+        for name in ("polygons_remove_sticks", "polygons_remove_degenerate", "polylines_remove_degenerate"):
+            setattr(host, name, lambda handle, name=name: calls.append((name, address(handle))) or 1)
+        host.clipper_offset_polylines = lambda storage, polylines, delta, join, miter, end: (
+            calls.append(("offset", address(storage), address(polylines), delta, int(join), miter, int(end))) or 701
+        )
+        polygons = self.geometry.StoredPolygonCollection.adopt_owned(api, 9, 61)
+        polylines = self.geometry.StoredPolylineCollection.adopt_owned(api, 9, 62)
+
+        polygons.ensure_valid(15)
+        self.assertTrue(polygons.remove_sticks())
+        self.assertTrue(polygons.remove_degenerate())
+        polygons.smooth_outward(300)
+        polylines.ensure_valid(16)
+        self.assertTrue(polylines.remove_degenerate())
+        operand = self.clipper.clipper_offset_polylines(9, polylines, 250.0)
+        self.assertIsInstance(operand, self.clipper.ClipperOperand)
+        self.assertEqual(operand.handle(), 701)
+        self.assertEqual(calls, [
+            ("polygons_ensure_valid", 61, 15),
+            ("polygons_remove_sticks", 61),
+            ("polygons_remove_degenerate", 61),
+            ("polygons_smooth_outward", 61, 300),
+            ("polylines_ensure_valid", 62, 16),
+            ("polylines_remove_degenerate", 62),
+            ("offset", 9, 62, 250.0, self.generated.CLIPPER_JOIN_SQUARE, 0.0, self.generated.CLIPPER_END_OPEN_BUTT),
+        ])
+        with self.assertRaises(ValueError):
+            self.clipper.clipper_offset_polylines(9, polylines, 0.0)
+        self.assertIn("clipper_offset_polylines", self.clipper.__all__)
+        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_GEOMETRY_MINOR, 1)
+        signatures = {name: (result, arguments) for name, result, arguments in self.generated.C_FUNCTION_SIGNATURES}
+        self.assertEqual(signatures["clipper_offset_polylines"],
+                         (ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_double,
+                                            ctypes.c_int32, ctypes.c_double, ctypes.c_int32]))
+        for name in ("polygons_ensure_valid", "polygons_remove_sticks", "polygons_remove_degenerate",
+                     "polygons_smooth_outward", "polylines_ensure_valid", "polylines_remove_degenerate"):
+            self.assertIn(name, signatures)
 
     def test_polyline_difference_short_circuits_an_empty_subject(self):
         api = self.make_api()

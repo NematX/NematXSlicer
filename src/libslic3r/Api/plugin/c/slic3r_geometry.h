@@ -6,7 +6,7 @@
 #define slic3r_geometry_h_
 
 #define SLIC3R_PLUGIN_API_GEOMETRY_MAJOR 1u
-#define SLIC3R_PLUGIN_API_GEOMETRY_MINOR 0u
+#define SLIC3R_PLUGIN_API_GEOMETRY_MINOR 1u
 
 #include <stddef.h>
 #include <stdint.h>
@@ -334,6 +334,40 @@ SLIC3R_HOST_API void polygons_move(polygon_collection_handle *dst, polygon_colle
 SLIC3R_HOST_API int32_t polygons_on_boundary(const polygon_collection_handle *me, c_point point, coord_t max_distance);
 SLIC3R_HOST_API c_point polygons_point_projection(const polygon_collection_handle *me, c_point point);
 
+/*
+Clean-up operations on a whole collection, with the native Polygons
+behaviour. A null collection is ignored. Polygon handles previously borrowed
+from the collection may be invalidated because polygons can be removed.
+
+polygons_ensure_valid() simplifies each polygon with Douglas-Peucker at
+resolution and removes the polygons left with fewer than 3 points. The native
+code means to remove the clockwise holes following a removed contour too, but
+it tests the orientation of the removed polygon itself, whose area is then
+zero, so it stops at once: holes of a removed contour stay in the collection.
+This quirk is kept on purpose so plugins match the native results; prefer
+ExPolygons when holes matter.
+*/
+SLIC3R_HOST_API void polygons_ensure_valid(polygon_collection_handle *me, coord_t resolution);
+/*
+Remove "sticks": points where the outline goes forward and comes straight back
+(collinear within EPSILON) or repeats its previous point. Polygons left with
+fewer than 3 points are removed. Returns 1 when any polygon changed.
+*/
+SLIC3R_HOST_API int32_t polygons_remove_sticks(polygon_collection_handle *me);
+/* Remove the polygons with fewer than 3 points. Returns 1 when any was removed. */
+SLIC3R_HOST_API int32_t polygons_remove_degenerate(polygon_collection_handle *me);
+/*
+Smooth concave corners outward (Cura's smooth_outward): concave corners sharper
+than 135 degrees are cut or filled so that no notch narrower than clip_distance
+(scaled) remains; convex corners are kept. "Concave" is read from the turn of
+the outline (cross product > 0), so this holds for counter-clockwise contours;
+on a clockwise polygon (a hole) the same turns are the hole's convex corners,
+and those are the ones adjusted. Duplicate points closer than 0.01 mm
+are merged first. Polygons that vanish, including small clockwise triangles
+(tiny holes), are removed from the collection.
+*/
+SLIC3R_HOST_API void polygons_smooth_outward(polygon_collection_handle *me, coord_t clip_distance);
+
 /* ---- Polyline Collection ---- */
 typedef struct polyline_collection_handle polyline_collection_handle;
 
@@ -394,6 +428,20 @@ from either collection may be invalidated because the destination is replaced
 and the source is cleared. If dst and src are the same handle, nothing changes.
 */
 SLIC3R_HOST_API void polylines_move(polyline_collection_handle *dst, polyline_collection_handle *src);
+
+/*
+Clean-up operations on a whole collection, with the native Polylines
+behaviour. A null collection is ignored. Polyline handles previously borrowed
+from the collection may be invalidated because polylines can be removed.
+
+polylines_ensure_valid() simplifies each polyline with Douglas-Peucker at
+resolution and removes the ones reduced to two points closer than
+SCALED_EPSILON. The native code requires at least 2 points per polyline; shorter
+polylines are removed first instead of failing.
+*/
+SLIC3R_HOST_API void polylines_ensure_valid(polyline_collection_handle *me, coord_t resolution);
+/* Remove the polylines with fewer than 2 points. Returns 1 when any was removed. */
+SLIC3R_HOST_API int32_t polylines_remove_degenerate(polyline_collection_handle *me);
 
 /* ---- ExPolygon ---- */
 /* ExPolygon has one contour polygon and zero or more hole polygons. */

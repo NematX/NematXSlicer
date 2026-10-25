@@ -588,6 +588,26 @@ clipper_shapes_handle *clipper_offset2(storage_handle *storage,
     return second;
 }
 
+// Delegate to the native per-polyline offset and union so results match ClipperUtils point for point; the united polygons are copied into a path list.
+clipper_shapes_handle *clipper_offset_polylines(storage_handle *storage,
+                                                const polyline_collection_handle *polylines,
+                                                double delta,
+                                                clipper_join_type_t join_type,
+                                                double miter_limit,
+                                                clipper_end_type_t end_type)
+{
+    if (storage == nullptr || polylines == nullptr || delta <= 0.)
+        return nullptr;
+    const Slic3r::Polygons offset = Slic3r::offset(*Slic3r::to_polylines(polylines), delta,
+                                                   Slic3r::to_join_type(join_type), miter_limit,
+                                                   Slic3r::to_end_type(end_type));
+    Slic3r::ClipperLib::Paths paths;
+    paths.reserve(offset.size());
+    for (const Slic3r::Polygon &polygon : offset)
+        paths.emplace_back(polygon.points);
+    return Slic3r::store_shape(storage, Slic3r::ApiClipper::make_path_list_shapes(std::move(paths)));
+}
+
 /* ---- Conversion back to public geometry handles ----------------------
 These functions materialize the abstract ClipperShapes result into normal ABI
 collections. The output collections are also storage-owned and can be returned
