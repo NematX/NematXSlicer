@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <set>
@@ -10,6 +11,7 @@
 #include <stdexcept>
 #include <string>
 #include <type_traits>
+#include <utility>
 #include <vector>
 
 #include <boost/filesystem.hpp>
@@ -71,6 +73,32 @@ static_assert(std::is_constructible_v<slic3r_api::ConstPrintingPlan,
                                       const printing_plan_handle *>);
 static_assert(!std::is_constructible_v<slic3r_api::PrintingPlan,
                                        const printing_plan_handle *>);
+
+/* Carry the G-code and step results from one configured Cost export. */
+struct CostSeamExportResult
+{
+    std::string gcode;
+    bool ordering_completed = false;
+    bool wipe_tower_completed = false;
+};
+
+/* Export one configured Cost/advanced-ordering print and return its results. */
+CostSeamExportResult export_cost_seam_gcode(
+    const std::vector<std::pair<std::string, std::string>> &case_settings,
+    unsigned int extruder_count,
+    const std::function<void(const Print &)> &before_export);
+
+/* Count unmarked loops in the brim auxiliary layers of one processed object. */
+size_t count_auxiliary_unmarked_loops(const PrintObject &object);
+
+/* Count unmarked loops in the infill buckets of one processed object. */
+size_t count_infill_unmarked_loops(const PrintObject &object);
+
+/* Count unmarked closed loops below one extrusion node. */
+size_t count_unmarked_closed_loops(const slic3r_api::ExtrusionEntity &entity);
+
+/* Find a perimeter marker on one extrusion node or any of its descendants. */
+bool subtree_has_perimeter_marker(const slic3r_api::ExtrusionEntity &entity);
 
 struct FirmwareRecorder
 {
@@ -176,6 +204,175 @@ std::unique_ptr<ExtrusionPath> make_integration_path(const ArcPolyline &polyline
     if (role == ExtrusionRole::ExternalPerimeter)
         path->get_or_add_property<slic3r_api::EPropertyPerimeter>().shell_count(0);
     return path;
+}
+
+/*
+Set a registered plugin to the requested state for one test scope and restore its
+previous state when the guard is destroyed, including exception unwinding. The
+Orchestrator and Plugin are borrowed; missing plugins or failed activation fail
+the Catch2 test, while a failed restoration is ignored. The guard is noncopyable.
+*/
+class ScopedPluginActivation
+{
+public:
+    // Activate the registered plugin and remember its previous state.
+    ScopedPluginActivation(Orchestrator &orchestrator, const char *plugin_id, bool active = true) :
+        m_orchestrator(orchestrator), m_plugin(orchestrator.get_plugin(plugin_id))
+    {
+        REQUIRE(m_plugin != nullptr);
+        m_was_active = orchestrator.is_plugin_active(m_plugin);
+        REQUIRE(m_orchestrator.set_plugin_active(m_plugin, active));
+    }
+
+    // Restore the activation saved during construction.
+    ~ScopedPluginActivation()
+    {
+        m_orchestrator.set_plugin_active(m_plugin, m_was_active);
+    }
+
+    ScopedPluginActivation(const ScopedPluginActivation &) = delete;
+    ScopedPluginActivation &operator=(const ScopedPluginActivation &) = delete;
+
+private:
+    Orchestrator &m_orchestrator;
+    Plugin *m_plugin;
+    bool m_was_active = false;
+};
+
+/*
+For a borrowed extrusion entity, check its own EXTRUSION_PROPERTY_TYPE_PERIMETER
+property and those of its descendants without changing the tree.
+*/
+bool subtree_has_perimeter_marker(const slic3r_api::ExtrusionEntity &entity)
+{
+    if (entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER) != nullptr)
+        return true;
+    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
+        if (subtree_has_perimeter_marker(entity.child(child_idx)))
+            return true;
+    return false;
+}
+
+/*
+Given a borrowed entity, a provider binds a loop when the loop, an ancestor, or a
+descendant carries EXTRUSION_PROPERTY_TYPE_PERIMETER. The caller has already
+checked ancestors, so a marker stops descent; count a non-empty closed loop only
+when its subtree has no marker.
+*/
+size_t count_unmarked_closed_loops(const slic3r_api::ExtrusionEntity &entity)
+{
+    if (entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER) != nullptr)
+        return 0;
+    if (entity.is_loop() && entity.segment_count() != 0 &&
+        !subtree_has_perimeter_marker(entity))
+        return 1;
+    size_t count = 0;
+    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
+        count += count_unmarked_closed_loops(entity.child(child_idx));
+    return count;
+}
+
+/*
+For a borrowed processed object, pass brim auxiliary-layer PERIMETERS trees to
+the shared counter without changing print state; layer-access failures propagate.
+*/
+size_t count_auxiliary_unmarked_loops(const PrintObject &object)
+{
+    size_t count = 0;
+    for (const Layer &layer : object.auxiliary_layers()) {
+        const LayerAdhesionProperty *adhesion = layer.get_property<LayerAdhesionProperty>();
+        if (adhesion == nullptr || !adhesion->is_brim())
+            continue;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region_island : island.regions_islands()) {
+                if (!region_island.has_extrusion(LayerRegionIsland::PERIMETERS))
+                    continue;
+                count += count_unmarked_closed_loops(slic3r_api::ExtrusionEntity(
+                    reinterpret_cast<const extrusion_entity_handle *>(
+                        &region_island.extrusion(LayerRegionIsland::PERIMETERS))));
+            }
+    }
+    return count;
+}
+
+/*
+For a borrowed processed object, pass object-layer INFILLS trees to the shared
+counter without changing print state; layer-access failures propagate.
+*/
+size_t count_infill_unmarked_loops(const PrintObject &object)
+{
+    size_t count = 0;
+    for (const Layer &layer : object.layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region_island : island.regions_islands()) {
+                if (!region_island.has_extrusion(LayerRegionIsland::INFILLS))
+                    continue;
+                count += count_unmarked_closed_loops(slic3r_api::ExtrusionEntity(
+                    reinterpret_cast<const extrusion_entity_handle *>(
+                        &region_island.extrusion(LayerRegionIsland::INFILLS))));
+            }
+    return count;
+}
+
+/*
+Build and export a cube through Cost and advanced ordering; settings must suit
+extruder_count and before_export must be callable. The callback receives the
+helper's local Print after print.process() and before G-code export. Return owned G-code
+and step results after destroying the local print/model, restoring plugin state,
+and removing output files; processing, callback, or export failures propagate after cleanup.
+*/
+CostSeamExportResult export_cost_seam_gcode(
+    const std::vector<std::pair<std::string, std::string>> &case_settings,
+    unsigned int extruder_count,
+    const std::function<void(const Print &)> &before_export)
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const std::string seam_selector = Steps::plugin_exclusive_group_option_key(
+        orchestrator, SEAM_PLACER, "seam_placer_plugin");
+    const std::string ordering_selector = Steps::plugin_exclusive_group_option_key(
+        orchestrator, STEP_ORDERING, "ordering.extrusion_tree");
+    REQUIRE_FALSE(seam_selector.empty());
+    REQUIRE_FALSE(ordering_selector.empty());
+
+    const ScopedPluginActivation cost(orchestrator, "seam_placer.cost");
+    const ScopedPluginActivation advanced_ordering(orchestrator, "ordering.extrusion_tree.advanced");
+    const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(extruder_count);
+    config.set_deserialize_strict({
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"seam_visibility", "0"}});
+    config.set_deserialize_strict(seam_selector, "seam_placer.cost");
+    config.set_deserialize_strict(ordering_selector, "ordering.extrusion_tree.advanced");
+    for (const std::pair<std::string, std::string> &setting : case_settings)
+        config.set_deserialize_strict(setting.first, setting.second);
+
+    Model model;
+    Print print;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+
+    CostSeamExportResult result;
+    try {
+        print.process();
+        before_export(print);
+        const std::string generated_path = orchestrator.export_gcode(
+            print, output_path.string(), nullptr, nullptr);
+        REQUIRE(generated_path == output_path.string());
+        result.ordering_completed = print.is_step_done(STEP_ORDERING);
+        result.wipe_tower_completed = print.is_step_done(STEP_WIPETOWER);
+        REQUIRE(boost::filesystem::exists(output_path));
+        result.gcode = read_text_file(output_path);
+    } catch (...) {
+        remove_output_pair(output_path);
+        throw;
+    }
+    remove_output_pair(output_path);
+    return result;
 }
 
 } // namespace
@@ -801,15 +998,16 @@ TEST_CASE("Orchestrator export_gcode still routes through ordering and STEP_GCOD
 
 // Export an unflattened object-owned brim through the real Cost ordering and
 // file writer, retaining marked auxiliary loops as distance-only seam targets.
+// The Print and Model are locally owned, plugin activations restore on scope exit,
+// and output files are removed on success or exception before Catch2 failures propagate.
 TEST_CASE("PrintingPlan writer exports a cube with composed brim and cost seams",
           "[plugins][gcode][seam-placer][cost][integration][seambrim-export]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Orchestrator &orchestrator = Orchestrator::instance();
-    Plugin *cost_plugin = orchestrator.get_plugin("seam_placer.cost");
-    REQUIRE(cost_plugin != nullptr);
-    const bool cost_was_active = orchestrator.is_plugin_active(cost_plugin);
-    REQUIRE(orchestrator.set_plugin_active(cost_plugin, true));
+    const ScopedPluginActivation cost(orchestrator, "seam_placer.cost");
+    const ScopedPluginActivation advanced_ordering(orchestrator, "ordering.extrusion_tree.advanced");
+    const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
@@ -870,27 +1068,35 @@ TEST_CASE("PrintingPlan writer exports a cube with composed brim and cost seams"
         CHECK(gcode.find(";TYPE:Skirt") != std::string::npos);
     } catch (...) {
         remove_output_pair(output_path);
-        orchestrator.set_plugin_active(cost_plugin, cost_was_active);
         throw;
     }
     remove_output_pair(output_path);
-    orchestrator.set_plugin_active(cost_plugin, cost_was_active);
 }
 
+/*
+Export a cube through Cost and advanced ordering, then verify the generated
+extrusion and replay behavior while scoped plugin activations restore prior state.
+*/
 TEST_CASE("PrintingPlan writer exports a cube with cost seam placement",
           "[plugins][gcode][seam-placer][cost][checkpoint][integration]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
 
     Orchestrator &orchestrator = Orchestrator::instance();
-    Plugin *cost_plugin = orchestrator.get_plugin("seam_placer.cost");
-    REQUIRE(cost_plugin != nullptr);
-    const bool cost_was_active = orchestrator.is_plugin_active(cost_plugin);
-    REQUIRE(orchestrator.set_plugin_active(cost_plugin, true));
+    // The selectors below can only choose a plugin from the active set: the test
+    // runtime activates ordering.extrusion_tree.default, and the regional seam
+    // providers are deactivated after their registration.
+    const ScopedPluginActivation cost(orchestrator, "seam_placer.cost");
+    const ScopedPluginActivation advanced_ordering(orchestrator, "ordering.extrusion_tree.advanced");
+    const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
+    // The Cost provider measures every candidate's visibility when seam_visibility
+    // is enabled, which does not finish in test-scale time on this print, so the
+    // export replays below keep that measurement disabled.
+    config.set_deserialize_strict("seam_visibility", "0");
     const std::string seam_selector =
         Steps::plugin_exclusive_group_option_key(orchestrator, SEAM_PLACER, "seam_placer_plugin");
     REQUIRE_FALSE(seam_selector.empty());
@@ -1129,10 +1335,92 @@ TEST_CASE("PrintingPlan writer exports a cube with cost seam placement",
         print.restart();
         orchestrator.reset_plugin_cancel();
         remove_output_pair(output_path);
-        orchestrator.set_plugin_active(cost_plugin, cost_was_active);
         throw;
     }
     print.status().set_callback([](const PrintBase::SlicingStatus &) {});
     remove_output_pair(output_path);
-    orchestrator.set_plugin_active(cost_plugin, cost_was_active);
+}
+
+/*
+Rectilinear brim ears are closed loops without a perimeter marker: Brim.cpp builds
+them with FillWithPerimeter, which appends one closed perimeter path per ear and
+never adds EXTRUSION_PROPERTY_TYPE_PERIMETER. STEP_ORDERING asks a seam for every
+closed loop of the plan, so the regional router must project the approach
+position onto such an ear instead of sending it to a provider session that never
+bound it.
+*/
+TEST_CASE("PrintingPlan writer exports a cube with rectilinear brim ears and cost seams",
+          "[plugins][gcode][seam-placer][cost][integration][brim-ears]")
+{
+    const CostSeamExportResult exported = export_cost_seam_gcode(
+        {{"brim_width", "3.2"}, {"brim_per_object", "1"}, {"brim_ears", "1"},
+         {"brim_ears_pattern", "rectilinear"}, {"draft_shield", "disabled"},
+         {"brim_skirt_trim", "0"}, {"skirts", "0"}},
+        1,
+        [](const Print &print) {
+            // The ears must exist as unmarked closed loops before ordering runs.
+            const size_t unmarked_ears = count_auxiliary_unmarked_loops(print.object(0));
+            REQUIRE(unmarked_ears > 0);
+            UNSCOPED_INFO("unmarked brim loops: " << unmarked_ears);
+        });
+    CHECK(exported.ordering_completed);
+    CHECK(exported.gcode.find("G1 ") != std::string::npos);
+    CHECK(exported.gcode.find(";TYPE:Skirt") != std::string::npos);
+}
+
+/*
+A two-extruder print needs the wipe tower, and the tower helper prints closed
+rings and rectangles without a perimeter marker. Those loops are created in
+STEP_WIPETOWER, which Steps::execution_order() runs after STEP_ORDERING, so the
+regional router never receives them. This test keeps the two-extruder
+cost/advanced combination covered and checks that ordering and the tower both run
+and reach the exported file.
+*/
+TEST_CASE("PrintingPlan writer exports a two-extruder cube with a wipe tower and cost seams",
+          "[plugins][gcode][seam-placer][cost][integration][wipe-tower]")
+{
+    // Every per-extruder vector option needs one entry per nozzle, otherwise the
+    // layer-height step asserts on its own bounds.
+    const CostSeamExportResult exported = export_cost_seam_gcode(
+        {{"nozzle_diameter", "0.4,0.4"}, {"filament_diameter", "1.75,1.75"},
+         {"single_extruder_multi_material", "0"},
+         {"perimeter_extruder", "1"}, {"infill_extruder", "2"},
+         {"wipe_tower", "1"}, {"wipe_tower_x", "40"}, {"wipe_tower_y", "60"},
+         {"wiping_volumes_matrix", "0,140,140,0"},
+         {"filament_minimal_purge_on_wipe_tower", "15,15"}},
+        2,
+        [](const Print &print) {
+            // The tower is generated after ordering, so it cannot reach the router.
+            CHECK_FALSE(print.is_step_done(STEP_WIPETOWER));
+        });
+    CHECK(exported.ordering_completed);
+    CHECK(exported.wipe_tower_completed);
+    CHECK(exported.gcode.find("G1 ") != std::string::npos);
+    CHECK(exported.gcode.find(";TYPE:Wipe tower") != std::string::npos);
+}
+
+/*
+The concentric pattern publishes each ring as one polyline, and DefaultInfillGenerator
+clips that polyline by the seam gap. A zero seam gap keeps the closing point, so
+the ring stays a closed loop without a perimeter marker and STEP_ORDERING must
+project the approach position onto it. The legacy FillConcentric gap-fill path is
+not part of this pipeline: DefaultInfillGenerator dispatches to pattern plugins
+and leaves gap fill to the post-infill step.
+*/
+TEST_CASE("PrintingPlan writer exports a cube with concentric closed infill loops and cost seams",
+          "[plugins][gcode][seam-placer][cost][integration][concentric]")
+{
+    const CostSeamExportResult exported = export_cost_seam_gcode(
+        {{"fill_pattern", "concentric"}, {"solid_fill_pattern", "concentric"},
+         {"top_fill_pattern", "concentric"}, {"bottom_fill_pattern", "concentric"},
+         {"seam_gap", "0"}, {"skirts", "0"}},
+        1,
+        [](const Print &print) {
+            const size_t unmarked_loops = count_infill_unmarked_loops(print.object(0));
+            REQUIRE(unmarked_loops > 0);
+            UNSCOPED_INFO("unmarked infill loops: " << unmarked_loops);
+        });
+    CHECK(exported.ordering_completed);
+    CHECK(exported.gcode.find("G1 ") != std::string::npos);
+    CHECK(exported.gcode.find(";TYPE:Internal infill") != std::string::npos);
 }
