@@ -5,6 +5,8 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// Provides slicer geometry boolean operations and offsets through Clipper path adapters.
+// Polyline clipping returns fragments; arc length means distance measured along the subject path.
 #ifndef slic3r_ClipperUtils_hpp_
 #define slic3r_ClipperUtils_hpp_
 
@@ -513,9 +515,17 @@ Slic3r::Polylines  intersection_pl(const Slic3r::Polygons &subject, const Slic3r
 // Both intersection_pl() and diff_pl() of one polyline, computed from the same prepared Clipper input:
 // returns {inside, outside}. The two sides are cut at the same points, so every end of a piece that is
 // not an end of subject is also an end of a piece on the other side.
-// When the subject is a single polyline, intersection_pl() and diff_pl() glue back two pieces cut less
+// When the subject is a single subject path, intersection_pl() and diff_pl() glue back two pieces cut less
 // than SCALED_EPSILON apart. split_pl() then also drops the tiny piece between them on the other side.
+// Single-path intersection_pl(), diff_pl() and split_pl() sort and orient pieces along the subject,
+// including closed polylines: departure from the repeated start is zero, arrival is total arc length.
+// Polygon subject overloads additionally recombine fragments across that start: the recombined result
+// keeps the ring direction but does not necessarily start at the subject's first point.
+// Multiple subjects have no order guarantee and are not oriented along their subject paths.
+// A subject passing within a few units of itself may place a point on the wrong pass.
+// Splits one polyline into owned inside and outside collections with shared cut points.
 std::pair<Slic3r::Polylines, Slic3r::Polylines> split_pl(const Slic3r::Polyline &subject, const Slic3r::ExPolygons &clip);
+// Splits polylines into owned inside and outside collections with shared cut points.
 std::pair<Slic3r::Polylines, Slic3r::Polylines> split_pl(const Slic3r::Polylines &subject, const Slic3r::Polygons &clip);
 
 inline Slic3r::Lines intersection_ln(const Slic3r::Lines &subject, const Slic3r::Polygons &clip)

@@ -1,3 +1,5 @@
+// Exercises core clipping and plugin views with local geometry; path coordinates retain direction
+// and tests that inspect collection indices also retain the order returned by clipping.
 #include <catch2/catch.hpp>
 
 #include <chrono>
@@ -536,6 +538,100 @@ TEST_CASE("Clipper polyline pieces cut less than SCALED_EPSILON apart are glued 
     const Polyline loop({Point(0, 0), Point(2 * half, 0), Point(2 * half, 2 * half), Point(0, 2 * half), Point(0, 0)});
     const Polygon right_side({Point(half, -half), Point(3 * half, -half), Point(3 * half, 3 * half), Point(half, 3 * half)});
     CHECK(diff_pl(loop, right_side).size() == 2);
+}
+
+// A fully covered V retains all vertices and the subject direction in each single-path operation.
+TEST_CASE("Clipper single subject keeps V direction", "[plugins][clipper][rejoin-direction]")
+{
+    const Polyline subject({point_mm(0., 0.), point_mm(5., 10.), point_mm(10., 0.)});
+    const ExPolygons cover{ExPolygon(rectangle_mm(-1., -1., 11., 11.))};
+    const ExPolygons away{ExPolygon(rectangle_mm(20., 20., 30., 30.))};
+    const Polylines inside = intersection_pl(subject, cover);
+    const Polylines outside = diff_pl(subject, away);
+    const std::pair<Polylines, Polylines> split = split_pl(subject, cover);
+    REQUIRE(inside.size() == 1);
+    REQUIRE(outside.size() == 1);
+    REQUIRE(split.first.size() == 1);
+    CHECK(split.second.empty());
+    CHECK(inside[0].points == subject.points);
+    CHECK(outside[0].points == subject.points);
+    CHECK(split.first[0].points == subject.points);
+}
+
+// Clipper emits both raw V fragments from larger to smaller X; the tiny ascending-branch cut rejoins
+// them in subject direction without reversing the stored first fragment again.
+TEST_CASE("Clipper consecutive reversed pieces join in subject direction", "[plugins][clipper][rejoin-direction]")
+{
+    const coord_t half = scale_i(5.);
+    const Polyline subject({Point(0, 0), Point(half, 2 * half), Point(2 * half, 0)});
+    const coord_t cut = half / 2;
+    const Polygon strip({Point(cut, -half), Point(cut + SCALED_EPSILON / 4, -half),
+                         Point(cut + SCALED_EPSILON / 4, 3 * half), Point(cut, 3 * half)});
+    const Polylines outside = diff_pl(subject, strip);
+    REQUIRE(outside.size() == 1);
+    CHECK(outside[0].front() == subject.front());
+    CHECK(outside[0].back() == subject.back());
+    CHECK(outside[0].length() == Approx(subject.length()).epsilon(1e-6));
+    for (size_t idx = 1; idx < outside[0].size(); ++idx) {
+        CHECK(outside[0].points[idx].x() > outside[0].points[idx - 1].x());
+        if (outside[0].points[idx].x() <= half)
+            CHECK(outside[0].points[idx].y() > outside[0].points[idx - 1].y());
+        else
+            CHECK(outside[0].points[idx].y() < outside[0].points[idx - 1].y());
+    }
+}
+
+// A closed polyline keeps its seam (the repeated start point) and its actual piece order.
+TEST_CASE("Clipper closed subject places three pieces along the loop", "[plugins][clipper][rejoin-direction]")
+{
+    const Polyline subject({point_mm(0., 0.), point_mm(10., 0.), point_mm(10., 10.),
+                            point_mm(0., 10.), point_mm(0., 0.)});
+    const ExPolygons clip{ExPolygon(rectangle_mm(5., -1., 11., 11.))};
+    const std::pair<Polylines, Polylines> split = split_pl(subject, clip);
+    REQUIRE(split.first.size() == 1);
+    REQUIRE(split.second.size() == 2);
+    const Points first{point_mm(0., 0.), point_mm(5., 0.)};
+    const Points middle{point_mm(5., 0.), point_mm(10., 0.), point_mm(10., 10.), point_mm(5., 10.)};
+    const Points last{point_mm(5., 10.), point_mm(0., 10.), point_mm(0., 0.)};
+    CHECK(split.second[0].points == first);
+    CHECK(split.first[0].points == middle);
+    CHECK(split.second[1].points == last);
+    CHECK(split.second[0].back() == split.first[0].front());
+    CHECK(split.first[0].back() == split.second[1].front());
+    CHECK(split.second[1].back() == split.second[0].front());
+    CHECK(split.second[0].length() + split.first[0].length() + split.second[1].length() == Approx(subject.length()));
+
+    // Full coverage keeps the repeated start as the arrival at the total loop length.
+    const Polylines covered = intersection_pl(subject, rectangle_mm(-1., -1., 11., 11.));
+    REQUIRE(covered.size() == 1);
+    CHECK(covered[0].points == subject.points);
+
+    // Polygon overloads recombine the two seam fragments without reversing their direction.
+    const Polygon polygon({point_mm(0., 0.), point_mm(10., 0.), point_mm(10., 10.), point_mm(0., 10.)});
+    const Polylines recombined = diff_pl(Polygons{polygon}, Polygons{clip[0].contour});
+    REQUIRE(recombined.size() == 1);
+    const Points around_seam{point_mm(5., 10.), point_mm(0., 10.), point_mm(0., 0.), point_mm(5., 0.)};
+    CHECK(recombined[0].points == around_seam);
+}
+
+// A tiny strip across the last side is glued outside and removed inside, away from the seam.
+TEST_CASE("Clipper closed subject drops a tiny last-side piece", "[plugins][clipper][rejoin-direction]")
+{
+    const coord_t half = scale_i(5.);
+    const Polyline subject({Point(0, 0), Point(2 * half, 0), Point(2 * half, 2 * half),
+                            Point(0, 2 * half), Point(0, 0)});
+    const Polygon strip({Point(-half, half), Point(half, half),
+                         Point(half, half + SCALED_EPSILON / 2), Point(-half, half + SCALED_EPSILON / 2)});
+    const std::pair<Polylines, Polylines> split = split_pl(subject, ExPolygons{ExPolygon(strip)});
+    CHECK(split.first.empty());
+    REQUIRE(split.second.size() == 1);
+    CHECK(split.second[0].front() == subject.front());
+    CHECK(split.second[0].back() == subject.back());
+    REQUIRE(split.second[0].size() >= subject.size());
+    CHECK(split.second[0].points[1] == subject.points[1]);
+    CHECK(split.second[0].points[2] == subject.points[2]);
+    CHECK(split.second[0].points[3] == subject.points[3]);
+    CHECK(split.second[0].length() == Approx(subject.length()).epsilon(1e-6));
 }
 
 TEST_CASE("Clipper offset grows a polygon list of clockwise rings like ClipperOffset", "[plugins][clipper]")

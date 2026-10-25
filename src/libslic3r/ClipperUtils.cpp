@@ -11,6 +11,8 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// Converts slicer geometry to Clipper paths for boolean operations and offsets. Open-path clipping
+// restores slicer coordinates and locates fragments by arc length (distance along the subject).
 #include "ClipperUtils.hpp"
 
 #include "Geometry.hpp"
@@ -38,6 +40,18 @@
 #endif /* CLIPPER_UTILS_DEBUG */
 
 namespace Slic3r {
+
+// A subject interval stores start and end distances along one subject path in slicer units.
+using SubjectInterval = std::pair<double, double>;
+// Returns owned inside/outside fragments from borrowed providers, dropping tiny covered intervals.
+template<typename PathsProvider1, typename PathsProvider2>
+static std::pair<Polylines, Polylines> _split_pl(PathsProvider1 &&subject, PathsProvider2 &&clip);
+// Orients owned fragments and rejoins nearby intervals; subject and optional gap output are borrowed.
+static void _clipper_pl_rejoin(Polylines &pieces, const Points &subject, std::vector<SubjectInterval> *gaps);
+// Orients a nondegenerate borrowed piece and returns its interval along the borrowed subject.
+static SubjectInterval _place_subject_piece(Polyline &piece, const Points &subject);
+// Returns the closest arc-length position of a borrowed point along a borrowed subject.
+static double _subject_position(const Points &subject, const Point &pt);
 
 #ifdef CLIPPER_UTILS_DEBUG
 // For debugging the Clipper library, for providing bug reports to the Clipper author.
@@ -1598,22 +1612,24 @@ void scaleClipperPolygons(ClipperLib::Paths& polygons)
 // _clipper_pl_open_execute() then runs one operation on a fresh clipper and restores the slicer
 // coordinates. Operations run on the same prepared input share the same cut points. (A Clipper
 // object cannot run a second operation on open paths: its open edges are not reset between runs.)
-// With a single subject polyline, _clipper_pl_open_execute() also glues back the pieces that a
-// clip thinner than SCALED_EPSILON split (see _clipper_pl_rejoin()).
-// A stretch of the subject between two glued pieces: [from, to], in arc length from the subject start.
-using SubjectInterval = std::pair<double, double>;
+// With a single subject path, _clipper_pl_open_execute() sorts and orients pieces along the
+// subject and glues cuts thinner than SCALED_EPSILON. A closed subject retains its repeated start:
+// departure is at zero arc length, arrival is at the total length (see _place_subject_piece()).
+// The path may be a polyline or one polygon opened by _clipper_pl_closed(); multiple subject paths
+// are not oriented by this processing.
 
 struct PreparedPolylineClip
 {
     ClipperLib::Paths subject;
     ClipperLib::Paths clip;
-    // The points of the subject in slicer coordinates when it is a single polyline, empty otherwise.
+    // The single subject path in slicer coordinates (polyline or opened polygon), empty otherwise.
     Points single_subject;
 };
 
 // Arc length, from the start of subject, of the subject point closest to pt. Cut points lie on the
 // subject up to the rounding of the cut, so this locates each piece end along the subject. A subject
 // that passes within a few units of itself may locate such a point on the wrong pass.
+// Inputs are borrowed and unchanged; a closed subject's repeated start maps to zero here.
 static double _subject_position(const Points &subject, const Point &pt)
 {
     const Vec2d point = pt.cast<double>();
@@ -1636,13 +1652,56 @@ static double _subject_position(const Points &subject, const Point &pt)
     return best_position;
 }
 
+// Projects the first segment's floating-point midpoint to find its direction along the subject,
+// reverses the borrowed piece in place when necessary, and returns ordered arc-length bounds.
+// Clipping has removed duplicate adjacent points and one-point pieces; assertions reject violations.
+// The subject is borrowed and unchanged. For closed subjects, arrival at the repeated start is the
+// total length; nearby passes remain subject to the nearest-projection ambiguity of _subject_position.
+static SubjectInterval _place_subject_piece(Polyline &piece, const Points &subject)
+{
+    assert(piece.size() >= 2 && subject.size() >= 2);
+    const Vec2d direction = piece.points[1].cast<double>() - piece.front().cast<double>();
+    assert(direction.squaredNorm() > 0.);
+    const Vec2d midpoint = piece.front().cast<double>() + 0.5 * direction;
+    double best_distance_sqr = std::numeric_limits<double>::max();
+    Vec2d subject_direction = Vec2d::Zero();
+    double length = 0.;
+    for (size_t idx = 1; idx < subject.size(); ++idx) {
+        const Vec2d start = subject[idx - 1].cast<double>();
+        const Vec2d segment = subject[idx].cast<double>() - start;
+        const double segment_length_sqr = segment.squaredNorm();
+        length += std::sqrt(segment_length_sqr);
+        if (segment_length_sqr == 0.)
+            continue;
+        const double t = std::clamp((midpoint - start).dot(segment) / segment_length_sqr, 0., 1.);
+        const double distance_sqr = (start + t * segment - midpoint).squaredNorm();
+        if (distance_sqr < best_distance_sqr) {
+            best_distance_sqr = distance_sqr;
+            subject_direction = segment;
+        }
+    }
+    if (direction.dot(subject_direction) < 0.)
+        piece.reverse();
+    const double start = _subject_position(subject, piece.front());
+    double end = _subject_position(subject, piece.back());
+    if (subject.front() == subject.back()) {
+        if (piece.back() == subject.front() || end < start)
+            end = length;
+        return {start, end};
+    }
+    return {std::min(start, end), std::max(start, end)};
+}
+
 // Glues back the pieces of one clipped polyline that were cut less than SCALED_EPSILON apart along the
 // subject. Each piece is located along the subject by the arc length of its two ends (Clipper may
-// reverse open pieces) and the pieces are sorted by position. Two consecutive pieces whose gap along
-// the subject is shorter than SCALED_EPSILON are oriented along the subject and concatenated, and the
+// reverse open pieces) and each piece is oriented once before sorting. Two consecutive pieces whose gap along
+// the subject is shorter than SCALED_EPSILON are concatenated, and the
 // second junction point is dropped. Ends that are close in the plane but far apart along the subject
 // (a path coming back next to itself, the two ends of a loop) are never glued. The output is sorted
-// along the subject. Each glued stretch of the subject is appended to gaps when it is not null.
+// and oriented along the subject, including closed subjects with arrival at total loop length.
+// Pieces are moved into the output, subject is borrowed unchanged, and each glued stretch is appended
+// to the optional borrowed gaps output. Nondegenerate pieces are required by _place_subject_piece.
+// Allocation exceptions propagate without interception; moved pieces are not restored on failure.
 static void _clipper_pl_rejoin(Polylines &pieces, const Points &subject, std::vector<SubjectInterval> *gaps)
 {
     struct PlacedPiece
@@ -1650,35 +1709,25 @@ static void _clipper_pl_rejoin(Polylines &pieces, const Points &subject, std::ve
         Polyline polyline;
         double   start;
         double   end;
-        // True when the piece runs against the subject direction.
-        bool     reversed;
     };
     std::vector<PlacedPiece> placed;
     placed.reserve(pieces.size());
     for (Polyline &piece : pieces) {
-        const double front = _subject_position(subject, piece.front());
-        const double back = _subject_position(subject, piece.back());
-        placed.push_back({std::move(piece), std::min(front, back), std::max(front, back), front > back});
+        const SubjectInterval interval = _place_subject_piece(piece, subject);
+        placed.push_back({std::move(piece), interval.first, interval.second});
     }
     std::sort(placed.begin(), placed.end(), [](const PlacedPiece &a, const PlacedPiece &b) { return a.start < b.start; });
 
     pieces.clear();
     double last_end = 0.;
-    bool last_reversed = false;
     for (PlacedPiece &piece : placed) {
         if (!pieces.empty() && std::abs(piece.start - last_end) < double(SCALED_EPSILON)) {
             Points &previous = pieces.back().points;
-            if (last_reversed)
-                std::reverse(previous.begin(), previous.end());
-            if (piece.reversed)
-                std::reverse(piece.polyline.points.begin(), piece.polyline.points.end());
             previous.insert(previous.end(), piece.polyline.points.begin() + 1, piece.polyline.points.end());
             if (gaps != nullptr)
                 gaps->emplace_back(std::min(last_end, piece.start), std::max(last_end, piece.start));
-            last_reversed = false;
         } else {
             pieces.push_back(std::move(piece.polyline));
-            last_reversed = piece.reversed;
         }
         last_end = std::max(last_end, piece.end);
     }
@@ -1802,7 +1851,12 @@ Polylines _clipper_pl_open(ClipperLib::ClipType clipType, PathsProvider1 &&subje
 }
 
 // Shared body of the split_pl() overloads: both operations run on the same prepared input.
-// Gaps are only glued (and tiny pieces only dropped) for a single subject polyline.
+// Gaps are only glued (and tiny pieces only dropped) for a single subject path.
+// Providers are borrowed to prepare local paths; the returned pair owns the inside/outside pieces,
+// oriented only for a single subject path. Nondegenerate pieces are ensured by execution; closed
+// arrivals use total subject length. Allocation failures propagate without interception; a Clipper
+// failure is only reported by Clipper::Execute's return value, which this call ignores;
+// no restoration of moved pieces is promised on failure.
 template<typename PathsProvider1, typename PathsProvider2>
 static std::pair<Polylines, Polylines> _split_pl(PathsProvider1 &&subject, PathsProvider2 &&clip)
 {
@@ -1815,19 +1869,17 @@ static std::pair<Polylines, Polylines> _split_pl(PathsProvider1 &&subject, Paths
     Polylines outside = _clipper_pl_open_execute(input, ClipperLib::ctDifference, &outside_gaps);
     // A stretch glued on one side was a piece shorter than SCALED_EPSILON on the other side: drop that
     // piece, located along the subject like in _clipper_pl_rejoin(), so that both sides still tile the
-    // subject. Only pieces lying inside a glued stretch are dropped, never a longer one.
-    auto drop_pieces_in = [&input](Polylines &pieces, const std::vector<SubjectInterval> &gaps) {
+    // subject. The lambda borrows pieces and gaps, erases only pieces inside a glued stretch, never
+    // a longer one, and leaves already oriented surviving pieces in the same direction.
+    const auto drop_pieces_in = [&input](Polylines &pieces, const std::vector<SubjectInterval> &gaps) {
         if (gaps.empty())
             return;
         const double eps = double(SCALED_EPSILON);
         pieces.erase(std::remove_if(pieces.begin(), pieces.end(),
-                                    [&](const Polyline &piece) {
-                                        const double front = _subject_position(input.single_subject, piece.front());
-                                        const double back = _subject_position(input.single_subject, piece.back());
-                                        const double start = std::min(front, back);
-                                        const double end = std::max(front, back);
+                                    [&](Polyline &piece) {
+                                         const SubjectInterval interval = _place_subject_piece(piece, input.single_subject);
                                         return std::any_of(gaps.begin(), gaps.end(), [&](const SubjectInterval &gap) {
-                                            return start > gap.first - eps && end < gap.second + eps;
+                                             return interval.first > gap.first - eps && interval.second < gap.second + eps;
                                         });
                                     }),
                      pieces.end());

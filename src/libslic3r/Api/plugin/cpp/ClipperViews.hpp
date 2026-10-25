@@ -84,6 +84,9 @@ clipper_intersection_polyline_expolygons(), or
 clipper_split_polyline_expolygons() when both sides are needed: they are then cut
 at the same points. Converting an open polyline through
 ClipperOperand and back to polygons is not the same operation.
+These single-polyline diff, intersection and split helpers return pieces sorted and oriented along
+the subject, including a closed polyline whose repeated start is its departure and arrival.
+A subject passing within a few units of itself may place a point on the wrong pass.
 Use clipper_diff_polylines_expolygons() or clipper_intersection_polylines_expolygons()
 for a whole PolylineCollection in one batch; output collection order is unspecified.
 */
@@ -636,7 +639,9 @@ inline StoredPolylineCollection clipper_intersection_polylines_expolygons(storag
 }
 
 // Returns {inside, outside}: the pieces of subject inside clip and the pieces outside it, cut at the
-// same points. Both collections are owned by storage.
+// same points, sorted and oriented along subject. For a closed subject, departure from its repeated
+// start is at zero arc length and arrival is at total length. Both collections are owned by storage.
+// A subject passing within a few units of itself may place a point on the wrong pass.
 inline std::tuple<StoredPolylineCollection, StoredPolylineCollection>
 clipper_split_polyline_expolygons(storage_handle *storage, const Polyline &subject, const ExPolygonCollection &clip)
 {
