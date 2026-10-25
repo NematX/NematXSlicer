@@ -20,6 +20,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+/* Definitions own metadata and defaults. Nature predicates describe persistence and comparison eligibility without changing stored values. */
 #include "ConfigDef.hpp"
 
 #include <cassert>
@@ -56,6 +57,18 @@
 #define L(s) (s)
 
 namespace Slic3r {
+
+// Test absence of the destination's withdrawal flag; zero permits all writes. The host validates values; this value-only query has no effects, ownership transfer or failures.
+bool config_nature_writes(ConfigOptionNature nature, ConfigWriteTarget target)
+{
+    return (static_cast<uint8_t>(nature) & static_cast<uint8_t>(target)) == 0;
+}
+
+// Test absence of NotComparable in the withdrawal flags; the host validates values. This value-only query has no effects, ownership transfer or failures.
+bool config_nature_comparable(ConfigOptionNature nature)
+{
+    return (static_cast<uint8_t>(nature) & static_cast<uint8_t>(ConfigOptionNature::NotComparable)) == 0;
+}
 
 std::map<std::string, ConfigOptionMode> ConfigOptionDef::names_2_tag_mode = { {"Simple",comSimple},{"Advanced",comAdvanced},{"Expert",comExpert},{"Prusa",comPrusa},{"SuSi",comSuSi} };
 
@@ -1713,13 +1726,20 @@ ConfigSubstitutions ConfigBase::load_from_binary_gcode_file(const std::string& f
     return std::move(substitutions_ctxt).data();
 }
 
-void ConfigBase::save(const std::string &file, bool to_prusa) const
+// Write the configuration to a text file, one "key = value" line per key in key order, after a header comment line.
+// The file is created or truncated. Only the keys that writes_key() accepts for the target are written: a refused key
+// has no line at all, it is not written empty. With to_prusa, each kept key is then converted by to_prusa(), and a key
+// whose conversion clears its name is skipped. The destination filter runs before the serialization and the Prusa
+// conversion, so a refused key is never converted. A failure to open or write the file is not reported.
+void ConfigBase::save(const std::string &file, ConfigWriteTarget target, bool to_prusa) const
 {
     boost::nowide::ofstream c;
     c.open(file, std::ios::out | std::ios::trunc);
     c << "# " << Slic3r::header_slic3r_generated() << std::endl;
     if (to_prusa)
         for (std::string opt_key : this->keys()) {
+            if (!this->writes_key(opt_key, target))
+                continue;
             std::string value = this->opt_serialize(opt_key);
             this->to_prusa(opt_key, value);
             if(!opt_key.empty())
@@ -1727,8 +1747,21 @@ void ConfigBase::save(const std::string &file, bool to_prusa) const
         }
     else
         for (const std::string &opt_key : this->keys())
-            c << opt_key << " = " << this->opt_serialize(opt_key) << std::endl;
+            if (this->writes_key(opt_key, target))
+                c << opt_key << " = " << this->opt_serialize(opt_key) << std::endl;
     c.close();
+}
+
+// Return whether the nature of the key allows writing it to the target.
+// A configuration without definition (def() is null) has no policy, so every key is written; get_option_def() is only
+// called when a definition exists, since it throws without one. get_option_def() also searches the parent
+// configuration; a key that no definition knows has no policy either and is written. Never throws.
+bool ConfigBase::writes_key(const t_config_option_key &opt_key, ConfigWriteTarget target) const
+{
+    if (this->def() == nullptr)
+        return true;
+    const ConfigOptionDef *opt_def = this->get_option_def(opt_key);
+    return opt_def == nullptr || config_nature_writes(opt_def->nature, target);
 }
 
 #ifdef _DEBUG

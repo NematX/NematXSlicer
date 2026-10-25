@@ -693,7 +693,7 @@ Adding another option does not invalidate a separately allocated option. However
 
 `config_get_or_add_mutable`, clear and global deserialization require DynamicConfig; mutable access to an existing option may work on a static config. The keys returned by `config_keys` are in a thread-local snapshot, valid until the next call on the same thread. The text/SCFG getters copy into the caller's buffer. `RAW_CO_VECTOR_ENUM` does not currently correspond to a supported native family.
 
-Sources: `src/libslic3r/Config/ConfigDef.hpp:871`, `src/libslic3r/Config/ConfigOption.hpp:473`, `src/libslic3r/Config/PrintConfig.hpp:395`, `src/libslic3r/Api/host/slic3r_config.cpp:74`.
+Sources: `src/libslic3r/Config/ConfigDef.hpp:904`, `src/libslic3r/Config/ConfigOption.hpp:473`, `src/libslic3r/Config/PrintConfig.hpp:305`, `src/libslic3r/Api/host/slic3r_config.cpp:74`.
 
 ### Setting descriptors: schema, not user values
 
@@ -701,7 +701,7 @@ Owner: `PrintConfigDef` / `ConfigDef::options` catalog. Construction/patching be
 
 | Native storage | Exposed members / mapping | Lifetime |
 |---|---|---|
-| `ConfigOptionDef`: identity/classification | `opt_key`, `type`, `category`, `container_type`, `option_preset_type`, `gui_type`, `printer_technology`, `invalidates_step` | Catalog, read after finalization |
+| `ConfigOptionDef`: identity/classification | `opt_key`, `type`, `nature`, `category`, `container_type`, `option_preset_type`, `gui_type`, `printer_technology`, `invalidates_step` | Catalog, read after finalization |
 | ABI level/flags | `plugin_api_level`, `plugin_api_flags` | Distinct from ConfigOption::flags |
 | Presentation/editing | `is_optional`, `multiline`, `full_width`, `is_code`, `is_vector_extruder`, `readonly`, `can_phony`, `can_be_disabled`, `aligned_label_left`, `contains_plugin_id` | Schema values |
 | Owned texts | `gui_flags`, `label`, `full_label`, `tooltip`, `translation_domain`, `sidetext`, `cli`, `ratio_over` | Copies at registration |
@@ -719,7 +719,7 @@ Owner: `PrintConfigDef` / `ConfigDef::options` catalog. Construction/patching be
 
 `orchestrator_get_option_def` returns a structure containing pointers into a thread-local snapshot, invalidated at the next call on that thread. The `ConfigOptionDefinition` wrapper makes its own copies; the current wrapper does not represent `contains_plugin_id`. Registrations copy their inputs, unlike the borrowed read descriptors.
 
-Sources: `src/libslic3r/Config/ConfigDef.hpp:127`, `src/libslic3r/Api/host/slic3r_config_def.cpp:47`, `src/libslic3r/Api/plugin/cpp/ConfigDefinitionViews.hpp:75`.
+Sources: `src/libslic3r/Config/ConfigDef.hpp:153`, `src/libslic3r/Api/host/slic3r_config_def.cpp:56`, `src/libslic3r/Api/plugin/cpp/ConfigDefinitionViews.hpp:75`.
 
 ## 9. Step contexts and temporary outputs
 

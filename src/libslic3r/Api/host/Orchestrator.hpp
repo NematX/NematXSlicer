@@ -365,11 +365,8 @@ public:
                                     std::string &error_message) const;
 
 
-    // Register a dynamic print option provided by a plugin.
-    //
-    // This is the commit point for plugin settings. Compatible duplicate
-    // definitions are accepted only inside the same exclusive group, where
-    // several alternative plugins intentionally publish the same option.
+    // Validate and copy a plugin definition; compatible duplicates are unrestricted outside plugin initialization.
+    // During initialization, duplicates require the same plugin owner or the same non-empty exclusive group.
     option_def_error_code create_new_print_config(const raw_config_option_def *def);
 
     // Record a deferred option definition patch. Nothing is applied until

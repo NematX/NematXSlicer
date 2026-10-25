@@ -1171,7 +1171,7 @@ bool store_amf(std::string &path, Model *model, const DynamicPrintConfig *config
     {
         std::string str_config = "\n";
         for (const std::string &key : config->keys())
-            if (key != "compatible_printers")
+            if (config->writes_key(key, ConfigWriteTarget::Project))
                 str_config += "; " + key + " = " + config->opt_serialize(key) + "\n";
         stream << "<metadata type=\"" << SLIC3R_CONFIG_TYPE << "\">" << xml_escape(str_config) << "</metadata>\n";
     }

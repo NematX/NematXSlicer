@@ -105,26 +105,10 @@ void fill_iniconf(ConfMap &m, const SLAPrint &print)
 
 void fill_slicerconf(ConfMap &m, const SLAPrint &print)
 {
-    using namespace std::literals::string_view_literals;
-    
-    // Sorted list of config keys, which shall not be stored into the ini.
-    static constexpr auto banned_keys = { 
-		"compatible_printers"sv,
-        "compatible_prints"sv,
-        //FIXME The print host keys should not be exported to full_print_config anymore. The following keys may likely be removed.
-        "print_host"sv,
-        "printhost_apikey"sv,
-        "printhost_cafile"sv
-    };
-    
-    assert(std::is_sorted(banned_keys.begin(), banned_keys.end()));
-    auto is_banned = [](const std::string &key) {
-        return std::binary_search(banned_keys.begin(), banned_keys.end(), key);
-    };
-    
+    // The ini receives the keys allowed in G-code, except the disabled optional settings.
     auto &cfg = print.full_print_config();
     for (const std::string &key : cfg.keys())
-        if (!is_banned(key) && (cfg.option(key)->is_enabled() || !cfg.get_option_def(key)->is_optional))
+        if (cfg.writes_key(key, ConfigWriteTarget::GCode) && (cfg.option(key)->is_enabled() || !cfg.get_option_def(key)->is_optional))
             m[key] = cfg.opt_serialize(key);
     
 }

@@ -52,6 +52,11 @@
 
 namespace Slic3r {
 
+// Compare normalized definitions and report the first differing field.
+static bool config_option_def_compatible(const ConfigOptionDef &existing, const ConfigOptionDef &candidate, std::string *reason);
+// Copy validated raw metadata and deserialize its default into a native definition.
+static void populate_config_option_def_from_raw(ConfigOptionDef &out, const raw_config_option_def *def, const std::string &translation_domain);
+
 // Resolve a borrowed plugin to its executable invalidation producer, returning STEP_NONE for unsupported steps.
 static slicing_step_t plan_owner_step(const Plugin &plugin);
 
@@ -303,6 +308,7 @@ static bool graph_settings_equal(const ConfigOptionDef &lhs, const ConfigOptionD
            graph_enforced_values_equal(left, right);
 }
 
+// Compare borrowed normalized definitions without changing them; return false and optionally copy the first divergent field into reason, with allocation failures propagated.
 static bool config_option_def_compatible(const ConfigOptionDef &existing,
                                          const ConfigOptionDef &candidate,
                                          std::string *reason)
@@ -317,6 +323,7 @@ static bool config_option_def_compatible(const ConfigOptionDef &existing,
     if (existing.plugin_api_level != candidate.plugin_api_level) return fail("level");
     if (existing.plugin_api_flags != candidate.plugin_api_flags) return fail("flags");
     if (existing.contains_plugin_id != candidate.contains_plugin_id) return fail("contains_plugin_id");
+    if (existing.nature != candidate.nature) return fail("nature");
     if (existing.category != candidate.category) return fail("category");
     if (existing.gui_type != candidate.gui_type) return fail("gui_type");
     if (existing.printer_technology != candidate.printer_technology) return fail("printer_technology");
@@ -405,6 +412,7 @@ static bool is_path_inside(const boost::filesystem::path &directory,
     return true;
 }
 
+// Copy a non-null validated borrowed raw definition into out and install its newly allocated default; exceptions propagate, while the default deserializer's boolean status is not checked.
 static void populate_config_option_def_from_raw(ConfigOptionDef &out,
                                                 const raw_config_option_def *def,
                                                 const std::string &translation_domain)
@@ -414,6 +422,7 @@ static void populate_config_option_def_from_raw(ConfigOptionDef &out,
     out.plugin_api_level = uint32_t(def->level);
     out.plugin_api_flags = def->flags;
     out.contains_plugin_id = def->contains_plugin_id != 0;
+    out.nature = static_cast<ConfigOptionNature>(def->nature);
     out.category = static_cast<OptionCategory>(def->category);
     out.gui_type = static_cast<ConfigOptionDef::GUIType>(def->gui_type);
     out.printer_technology = static_cast<PrinterTechnology>(def->printer_technology);
@@ -1717,7 +1726,12 @@ bool Orchestrator::validate_plugin_activation(const std::vector<std::string> &pl
     return true;
 }
 
+// Validate a non-null borrowed definition before copying it into the global catalogue; reject invalid metadata or incompatible ownership with an error code and diagnose conflicting definitions, while allocation failures propagate.
 option_def_error_code Orchestrator::create_new_print_config(const raw_config_option_def *def) {
+    // VOLATILE contains all four withdrawal bits, so this bound rejects exactly the unknown bits.
+    if (def->nature > RAW_CONFIG_NATURE_VOLATILE)
+        return OPTION_DEF_ERROR_INVALID_ARGUMENT;
+
     const raw_config_option_def resolved_def =
         config_option_def_with_resolved_invalidation(*def, m_initializing_plugin);
     def = &resolved_def;

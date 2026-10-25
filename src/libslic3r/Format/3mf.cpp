@@ -2763,7 +2763,7 @@ namespace Slic3r {
         bool _add_layer_config_ranges_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig& global_config);
         bool _add_sla_support_points_file_to_archive(mz_zip_archive& archive, Model& model);
         bool _add_sla_drain_holes_file_to_archive(mz_zip_archive& archive, Model& model);
-        bool _add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, const std::string &file_path);
+        bool _add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig &config, const std::string &file_path, ConfigWriteTarget target);
         bool _add_model_config_file_to_archive(mz_zip_archive& archive, const Model& model, const DynamicPrintConfig& print_config, const IdToObjectDataMap &objects_data, const std::string &file_path);
         bool _add_custom_gcode_per_print_z_file_to_archive(mz_zip_archive& archive, Model& model, const DynamicPrintConfig& config);
     };
@@ -2887,9 +2887,10 @@ namespace Slic3r {
         // This file contains the content of FullPrintConfing / SLAFullPrintConfig.
         if (config && m_options.export_config) {
             // also add prusa (& superslicer for backward comp, just for some version from 2.3.56) print config
-            bool error = !_add_print_config_file_to_archive(archive, *config, SLIC3R_PRINT_CONFIG_FILE);
-            error = error || !_add_print_config_file_to_archive(archive, *config, PRUSA_PRINT_CONFIG_FILE);
-            error = error || !_add_print_config_file_to_archive(archive, *config, SUPER_PRINT_CONFIG_FILE);
+            // The Prusa-compatible file carries the same keys as the G-code, the others the keys of the project.
+            bool error = !_add_print_config_file_to_archive(archive, *config, SLIC3R_PRINT_CONFIG_FILE, ConfigWriteTarget::Project);
+            error = error || !_add_print_config_file_to_archive(archive, *config, PRUSA_PRINT_CONFIG_FILE, ConfigWriteTarget::GCode);
+            error = error || !_add_print_config_file_to_archive(archive, *config, SUPER_PRINT_CONFIG_FILE, ConfigWriteTarget::Project);
             if(error) {
                 close_zip_writer(&archive);
                 boost::filesystem::remove(filename);
@@ -3675,7 +3676,8 @@ namespace Slic3r {
         return true;
     }
 
-    bool _3MF_Exporter::_add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig& config, const std::string &config_name)
+    // Only the keys whose nature allows the destination are written; the filter runs before the Prusa conversion.
+    bool _3MF_Exporter::_add_print_config_file_to_archive(mz_zip_archive& archive, const DynamicPrintConfig& config, const std::string &config_name, ConfigWriteTarget target)
     {
         assert(is_decimal_separator_point());
         char buffer[1024];
@@ -3683,7 +3685,7 @@ namespace Slic3r {
         std::string out = buffer;
         if (config_name == PRUSA_PRINT_CONFIG_FILE) {
             for (std::string key : config.keys())
-                if (key != "compatible_printers") {
+                if (config.writes_key(key, target)) {
                     std::string value = config.opt_serialize(key);
                     config.to_prusa(key, value);
                     if (!key.empty())
@@ -3691,7 +3693,7 @@ namespace Slic3r {
                 }
         } else {
             for (const std::string& key : config.keys())
-                if (key != "compatible_printers")
+                if (config.writes_key(key, target))
                     out += "; " + key + " = " + config.opt_serialize(key) + "\n";
         }
 

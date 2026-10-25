@@ -614,7 +614,7 @@ int CLI::run(int argc, char **argv)
         } else if (opt_key == "save") {
             //FIXME check for mixing the FFF / SLA parameters.
             // or better save fff_print_config vs. sla_print_config
-            m_print_config.save(m_config.opt_string("save"));
+            m_print_config.save(m_config.opt_string("save"), ConfigWriteTarget::GCode);
         } else if (opt_key == "info") {
             // --info works on unrepaired model
             for (Model &model : m_models) {

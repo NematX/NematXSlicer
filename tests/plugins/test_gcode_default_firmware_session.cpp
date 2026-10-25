@@ -4469,7 +4469,7 @@ TEST_CASE("Thumbnail palette migration preserves FFF and SLA profiles",
                 "\nthumbnails_custom_color = " + value + "\n", ForwardCompatibilitySubstitutionRule::Disable);
             CHECK(loaded.option("thumbnail_color_mode")->serialize() == (value == "1" ? "uniform" : palette));
             const boost::filesystem::path saved = temporary_gcode_path();
-            loaded.save(saved.string());
+            loaded.save(saved.string(), ConfigWriteTarget::Local);
             const std::string serialized = read_text_file(saved);
             remove_output_pair(saved);
             CHECK(serialized.find("thumbnails_custom_color") == std::string::npos);

@@ -729,7 +729,7 @@ public:
     bool                has_empty_config() const;
     void                update_preset_names_in_config();
 
-    void                save() { this->config.save(this->file); }
+    void                save() { this->config.save(this->file, ConfigWriteTarget::Local); }
     void                save(const std::string& file_name_from, const std::string& file_name_to);
 
     void                update_from_preset(const Preset& preset);

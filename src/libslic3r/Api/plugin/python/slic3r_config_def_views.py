@@ -185,6 +185,7 @@ class ConfigOptionDefinition:
     precision: int
     mode: int
     flags: int
+    nature: int
     aliases: tuple[str, ...]
     shortcut: tuple[str, ...]
     depends_on: tuple[str, ...]
@@ -239,6 +240,7 @@ class ConfigOptionDefinition:
             precision=int(raw.precision),
             mode=int(raw.mode),
             flags=int(raw.flags),
+            nature=int(raw.nature),
             aliases=_copy_strings(raw.aliases),
             shortcut=_copy_strings(raw.shortcut),
             depends_on=_copy_strings(raw.depends_on),

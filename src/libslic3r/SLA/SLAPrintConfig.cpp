@@ -790,6 +790,7 @@ void init_sla_params(PrintConfigDef &definition)
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("default_sla_material_profile", coString, ptSLA);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Default SLA material profile");
     def->tooltip = L("Default print profile associated with the current printer profile. "
                    "On selection of the current printer profile, this print profile will be activated.");
@@ -797,14 +798,17 @@ void init_sla_params(PrintConfigDef &definition)
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("sla_material_settings_id", coString, ptSLA);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->set_default_value(new ConfigOptionString(""));
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("sla_material_settings_modified", coBool, ptSLA);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->set_default_value(new ConfigOptionBool(false));
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("default_sla_print_profile", coString, ptSLA);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Default SLA material profile");
     def->tooltip = L("Default print profile associated with the current printer profile. "
                    "On selection of the current printer profile, this print profile will be activated.");
@@ -812,10 +816,12 @@ void init_sla_params(PrintConfigDef &definition)
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("sla_print_settings_modified", coBool, ptSLA);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->set_default_value(new ConfigOptionBool(false));
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("sla_print_settings_id", coString, ptSLA);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->set_default_value(new ConfigOptionString(""));
     def->cli = ConfigOptionDef::nocli;
 

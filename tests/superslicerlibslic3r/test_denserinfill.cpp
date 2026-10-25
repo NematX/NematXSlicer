@@ -30,7 +30,7 @@ SCENARIO("denser infills: ")
             config.set_key_value("first_layer_height", new ConfigOptionFloatOrPercent(0.2, false));
             config.set_key_value("infill_dense", new ConfigOptionBool(true));
             config.set_key_value("infill_dense_algo", new ConfigOptionEnum<DenseInfillAlgo>(dfaEnlarged));
-            config.save("C:\\Users\\Admin\\Desktop\\config_def.ini");
+            config.save("C:\\Users\\Admin\\Desktop\\config_def.ini", ConfigWriteTarget::Local);
             Slic3r::Test::init_print(print, { Slic3r::Test::TestMesh::di_5mm_center_notch }, model, &config, false);
             print.process();
             const PrintObject& object = print.object(0);
@@ -99,7 +99,7 @@ SCENARIO("denser infills: ")
             config.set_key_value("first_layer_height", new ConfigOptionFloatOrPercent(0.2, false));
             config.set_key_value("infill_dense", new ConfigOptionBool(true));
             config.set_key_value("infill_dense_algo", new ConfigOptionEnum<DenseInfillAlgo>(dfaAutomatic));
-            config.save("C:\\Users\\Admin\\Desktop\\config_def.ini");
+            config.save("C:\\Users\\Admin\\Desktop\\config_def.ini", ConfigWriteTarget::Local);
             Slic3r::Test::init_print(print, { Slic3r::Test::TestMesh::di_10mm_notch }, model, &config, false);
             print.process();
             const PrintObject& object = print.object(0);
@@ -161,7 +161,7 @@ SCENARIO("denser infills: ")
             config.set_key_value("first_layer_height", new ConfigOptionFloatOrPercent(0.2, false));
             config.set_key_value("infill_dense", new ConfigOptionBool(true));
             config.set_key_value("infill_dense_algo", new ConfigOptionEnum<DenseInfillAlgo>(dfaAutoNotFull));
-            config.save("C:\\Users\\Admin\\Desktop\\config_def.ini");
+            config.save("C:\\Users\\Admin\\Desktop\\config_def.ini", ConfigWriteTarget::Local);
             Slic3r::Test::init_print(print, { Slic3r::Test::TestMesh::di_10mm_notch }, model, &config, false);
             print.process();
             const PrintObject& object = print.object(0);

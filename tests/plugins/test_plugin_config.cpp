@@ -13,6 +13,11 @@ Invalidation checks compare each option's earliest consuming step with the
 checkpoint used to replay its affected pipeline suffix.
 Setting-support checks compare definition defaults with config values and read
 only provider metadata; unregistered copies model providers with no used keys.
+Definition nature checks exercise classification transport and its permission
+table; the persistence checks write configurations to files, 3MF and AMF archives
+and read the text back, to verify that each destination only receives the keys that
+the nature of their definition allows. Redefinition diagnostics are captured from
+the host log, independently of the returned registration status.
 */
 
 #include <catch2/catch.hpp>
@@ -25,6 +30,7 @@ only provider metadata; unregistered copies model providers with no used keys.
 #include <initializer_list>
 #include <limits>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -33,6 +39,10 @@ only provider metadata; unregistered copies model providers with no used keys.
 // PrintConfig.hpp hash macros call boost::hash_combine without its definition;
 // Release builds of this file need it to instantiate the template.
 #include <boost/container_hash/hash.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/make_shared.hpp>
 
 #include "plugin_test_helpers.hpp"
 #include "gcode_test_helpers.hpp"
@@ -56,6 +66,10 @@ only provider metadata; unregistered copies model providers with no used keys.
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/Config/Preset.hpp"
+#include "libslic3r/Format/3mf.hpp"
+#include "libslic3r/Format/AMF.hpp"
+#include "libslic3r/miniz_extension.hpp"
 
 namespace {
 
@@ -101,6 +115,76 @@ static void check_vector_item_round_trip(OptionType &option);
 template<class OptionType>
 static void check_vector_item_rejections(
     OptionType &option, std::initializer_list<const char *> invalid_values);
+
+// Test-owned output files of the persistence checks live in one unique directory removed at scope exit.
+class ScopedNatureDirectory
+{
+public:
+    // Create one unique directory below the current working directory.
+    ScopedNatureDirectory()
+        : m_path(boost::filesystem::current_path() / boost::filesystem::unique_path("slic3r-nature-%%%%-%%%%-%%%%"))
+    {
+        boost::filesystem::create_directories(m_path);
+    }
+
+    // Remove the directory without throwing during stack unwinding.
+    ~ScopedNatureDirectory()
+    {
+        boost::system::error_code ignored;
+        boost::filesystem::remove_all(m_path, ignored);
+    }
+
+    // Return the borrowed path owned by this scope.
+    const boost::filesystem::path &path() const { return m_path; }
+
+private:
+    boost::filesystem::path m_path;
+};
+
+// Preset has a protected constructor; the test builds a standalone printer preset through this derived type.
+class NaturePreset final : public Slic3r::Preset
+{
+public:
+    NaturePreset() : Preset(Slic3r::Preset::TYPE_PRINTER, "nature printer") {}
+};
+
+// One key with the value written by the persistence checks and the destinations that must contain it.
+struct NatureKeyExpectation
+{
+    const char *key;
+    const char *value;
+    bool in_local;
+    bool in_project;
+    bool in_gcode;
+};
+
+// Keys of every nature: real keys of the print, printer and project, and the registered test keys of each nature.
+const NatureKeyExpectation k_nature_keys[] = {
+    {"layer_height", "0.31", true, true, true},
+    {"test_config_nature_normal", "11", true, true, true},
+    {"printhost_apikey", "local_secret_sentinel", true, false, false},
+    {"host_type", "octoprint", true, false, false},
+    {"test_config_nature_local", "12", true, false, false},
+    {"print_settings_id", "bookkeeping_sentinel", true, true, true},
+    {"test_config_nature_bookkeeping", "13", true, true, true},
+    {"inherits", "inherits_sentinel", true, true, false},
+    {"inherits_cummulative", "cumulative_sentinel", true, true, false},
+    {"compatible_printers", "compatible_sentinel", true, true, false},
+    {"default_print_profile", "default_profile_sentinel", true, true, false},
+    {"test_config_nature_preset_meta", "14", true, true, false},
+    {"test_config_nature_volatile", "15", false, false, false},
+};
+
+// Fill a configuration with one sentinel value for every key of k_nature_keys.
+void set_nature_sentinels(Slic3r::DynamicPrintConfig &config);
+// Return whether the text contains the complete line "key = value", with the given line prefix before the key.
+bool has_config_line(const std::string &text, const std::string &prefix, const NatureKeyExpectation &expectation);
+// Return whether the text has any line for the key, including a line that only has an empty value.
+bool has_config_key(const std::string &text, const std::string &prefix, const NatureKeyExpectation &expectation);
+// Split a text into its lines, without the line terminator ("\n" or "\r\n").
+std::vector<std::string> split_lines(const std::string &text);
+// Read one archive entry as text: the named entry, or the first one when no name is given; an absent entry gives an empty string.
+std::string read_archive_entry(const boost::filesystem::path &archive_path, const char *entry_name = nullptr);
 
 // Use the public two-call protocol so tests also validate byte counts and null
 // termination rather than reaching into the host implementation.
@@ -666,8 +750,111 @@ TEST_CASE("Configuration definition keys are ordered and filterable",
     CHECK(point3->type == RAW_CO_POINT3);
 }
 
+// Query borrowed definitions and verify literal withdrawal flags through native and C snapshots; missing definitions fail assertions without ownership changes.
+TEST_CASE("Configuration definition natures round-trip through the C API",
+          "[plugins][config][definition][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    CHECK(Slic3r::Test::Plugins::plugin_test_roundtrip_nature_result == 0);
+    const orchestrator_handle *handle = reinterpret_cast<const orchestrator_handle *>(&Slic3r::Orchestrator::instance());
+    const char *keys[] = {
+        "test_config_nature_normal", "test_config_nature_local", "test_config_nature_bookkeeping",
+        "test_config_nature_preset_meta", "test_config_nature_volatile", "test_config_nature_combined"};
+    CHECK(raw_config_option_def_init().nature == 0);
+    CHECK(static_cast<uint32_t>(Slic3r::ConfigOptionDef{}.nature) == 0);
+    const uint32_t raw_values[] = {RAW_CONFIG_NATURE_NORMAL, RAW_CONFIG_NATURE_LOCAL,
+        RAW_CONFIG_NATURE_BOOKKEEPING, RAW_CONFIG_NATURE_PRESET_META, RAW_CONFIG_NATURE_VOLATILE, 10};
+    const Slic3r::ConfigOptionNature native_values[] = {Slic3r::ConfigOptionNature::Normal, Slic3r::ConfigOptionNature::Local,
+        Slic3r::ConfigOptionNature::Bookkeeping, Slic3r::ConfigOptionNature::PresetMeta, Slic3r::ConfigOptionNature::Volatile,
+        static_cast<Slic3r::ConfigOptionNature>(10)};
+    const uint32_t expected_values[] = {0, 6, 8, 4, 15, 10};
+    for (size_t index = 0; index < 6; ++index) {
+        const uint32_t expected = expected_values[index];
+        CAPTURE(expected);
+        CHECK(raw_values[index] == expected);
+        CHECK(static_cast<uint32_t>(native_values[index]) == expected);
+        raw_config_option_def raw = raw_config_option_def_init();
+        REQUIRE(orchestrator_get_option_def(handle, keys[index], &raw) == 1);
+        CHECK(raw.nature == expected);
+        const Slic3r::ConfigOptionDef *native = Slic3r::PrintConfigDef::instance().get(keys[index]);
+        REQUIRE(native != nullptr);
+        CHECK(static_cast<uint32_t>(native->nature) == expected);
+    }
+}
+
+// Inspect saved registration results and catalogue membership for unknown bits and a valid unnamed combination; incorrect acceptance or rejection fails assertions without catalogue mutation.
+TEST_CASE("Configuration definitions reject an invalid nature before finalization",
+          "[plugins][config][definition][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    CHECK(Slic3r::Test::Plugins::plugin_test_invalid_nature_result == 2);
+    CHECK(Slic3r::PrintConfigDef::instance().get("test_config_nature_invalid") == nullptr);
+    CHECK(Slic3r::Test::Plugins::plugin_test_high_invalid_nature_result == 2);
+    CHECK(Slic3r::PrintConfigDef::instance().get("test_config_nature_high_invalid") == nullptr);
+    CHECK(Slic3r::Test::Plugins::plugin_test_combined_nature_result == 0);
+    CHECK(Slic3r::PrintConfigDef::instance().get("test_config_nature_valid_unnamed") != nullptr);
+}
+
+// Redeclare an existing borrowed snapshot with only nature changed, capture the host diagnostic, and assert rejection without replacing the owned definition.
+TEST_CASE("Configuration redefinitions reject a different nature",
+          "[plugins][config][definition][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&Slic3r::Orchestrator::instance());
+    raw_config_option_def raw = raw_config_option_def_init();
+    REQUIRE(orchestrator_get_option_def(handle, "test_config_nature_normal", &raw) == 1);
+    raw.nature = 1;
+    typedef boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend> LogSink;
+    const boost::shared_ptr<std::ostringstream> messages = boost::make_shared<std::ostringstream>();
+    const boost::shared_ptr<LogSink> sink = boost::make_shared<LogSink>();
+    sink->locked_backend()->add_stream(messages);
+    boost::log::core::get()->add_sink(sink);
+    const option_def_error_code result = orchestrator_create_option_def(handle, &raw);
+    sink->flush();
+    boost::log::core::get()->remove_sink(sink);
+    CHECK(result == 1);
+    CHECK(messages->str().find("already defined with incompatible nature.") != std::string::npos);
+    REQUIRE(orchestrator_get_option_def(handle, "test_config_nature_normal", &raw) == 1);
+    CHECK(raw.nature == 0);
+}
+
+// Evaluate all 16 withdrawal combinations against literal permissions; mismatches fail assertions without configuration effects or ownership changes.
+TEST_CASE("Configuration nature permissions match all persistence targets",
+          "[plugins][config][definition][nature]")
+{
+    const struct NatureExpectation { uint8_t nature; bool writes[3]; bool comparable; } expectations[] = {
+        {0,  {true,  true,  true},  true},
+        {1,  {false, true,  true},  true},
+        {2,  {true,  false, true},  true},
+        {3,  {false, false, true},  true},
+        {4,  {true,  true,  false}, true},
+        {5,  {false, true,  false}, true},
+        {6,  {true,  false, false}, true},
+        {7,  {false, false, false}, true},
+        {8,  {true,  true,  true},  false},
+        {9,  {false, true,  true},  false},
+        {10, {true,  false, true},  false},
+        {11, {false, false, true},  false},
+        {12, {true,  true,  false}, false},
+        {13, {false, true,  false}, false},
+        {14, {true,  false, false}, false},
+        {15, {false, false, false}, false}};
+    const Slic3r::ConfigWriteTarget targets[] = {Slic3r::ConfigWriteTarget::Local, Slic3r::ConfigWriteTarget::Project,
+        Slic3r::ConfigWriteTarget::GCode};
+    for (const NatureExpectation &expected : expectations) {
+        CAPTURE(expected.nature);
+        const Slic3r::ConfigOptionNature nature = static_cast<Slic3r::ConfigOptionNature>(expected.nature);
+        for (size_t target = 0; target < 3; ++target) {
+            CAPTURE(target);
+            CHECK(Slic3r::config_nature_writes(nature, targets[target]) == expected.writes[target]);
+        }
+        CHECK(Slic3r::config_nature_comparable(nature) == expected.comparable);
+    }
+}
+
+// Query borrowed snapshots and assert normalized scalar fields and copied metadata; missing output is tested as a zeroed record before any pointer access.
 TEST_CASE("Configuration definitions expose normalized plugin metadata",
-          "[plugins][config][definition]")
+          "[plugins][config][definition][nature]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Slic3r::Orchestrator &orchestrator = Slic3r::Orchestrator::instance();
@@ -722,6 +909,7 @@ TEST_CASE("Configuration definitions expose normalized plugin metadata",
     CHECK(raw.precision == 4);
     CHECK(raw.mode == RAW_CONFIG_OPTION_MODE_EXPERT);
     CHECK(raw.flags == uint64_t(0x1020304050607080ULL));
+    CHECK(raw.nature == 8);
     REQUIRE(raw.aliases.size == 2);
     CHECK(std::string(raw.aliases.items[0]) == "test_introspection_old");
     CHECK(std::string(raw.aliases.items[1]) == "test_introspection_legacy");
@@ -847,8 +1035,9 @@ TEST_CASE("Explicit graph reset values remain distinct from the option default",
     CHECK(native_graph.graph_settings->reset_values.point_count == 0);
 }
 
+// Query through the borrowed orchestrator and retain owning views across subsequent queries; require successful lookups before asserting detached metadata.
 TEST_CASE("C++ configuration definition views own their copied data",
-          "[plugins][config][definition][cpp]")
+          "[plugins][config][definition][cpp][nature]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Slic3r::Orchestrator &orchestrator = Slic3r::Orchestrator::instance();
@@ -865,6 +1054,7 @@ TEST_CASE("C++ configuration definition views own their copied data",
     REQUIRE(definition.has_value());
     REQUIRE(view.option_definition("layer_height").has_value());
     CHECK(definition->label == std::optional<std::string>("Introspection value"));
+    CHECK(definition->nature == 8);
     CHECK(definition->aliases == std::vector<std::string>{
         "test_introspection_old", "test_introspection_legacy"});
     REQUIRE(definition->enum_entries.size() == 2);
@@ -1537,4 +1727,265 @@ TEST_CASE("Print validation accepts active SEMM with a supporting built-in firmw
     INFO(validation.second);
     CHECK(validation.first == PrintBase::PrintValidationError::pveNone);
     CHECK(validation.second.empty());
+}
+
+namespace {
+
+// Fill a configuration with one sentinel value for every key of k_nature_keys.
+void set_nature_sentinels(Slic3r::DynamicPrintConfig &config)
+{
+    for (const NatureKeyExpectation &expectation : k_nature_keys)
+        config.set_deserialize_strict(expectation.key, expectation.value);
+}
+
+// Return whether the text contains the complete line "key = value", with the given line prefix before the key.
+bool has_config_line(const std::string &text, const std::string &prefix, const NatureKeyExpectation &expectation)
+{
+    const std::string wanted = prefix + expectation.key + " = " + expectation.value;
+    const std::vector<std::string> lines = split_lines(text);
+    return std::find(lines.begin(), lines.end(), wanted) != lines.end();
+}
+
+// Return whether the text has any line for the key, including a line that only has an empty value.
+bool has_config_key(const std::string &text, const std::string &prefix, const NatureKeyExpectation &expectation)
+{
+    const std::string start = prefix + expectation.key + " =";
+    for (const std::string &line : split_lines(text))
+        if (line == start || line.compare(0, start.size() + 1, start + " ") == 0)
+            return true;
+    return false;
+}
+
+// Split a text into its lines, without the line terminator ("\n" or "\r\n").
+std::vector<std::string> split_lines(const std::string &text)
+{
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r')
+            line.pop_back();
+        lines.push_back(line);
+    }
+    return lines;
+}
+
+// Read one archive entry as text: the named entry, or the first one when no name is given; an absent entry gives an empty string.
+std::string read_archive_entry(const boost::filesystem::path &archive_path, const char *entry_name)
+{
+    mz_zip_archive archive;
+    mz_zip_zero_struct(&archive);
+    REQUIRE(Slic3r::open_zip_reader(&archive, archive_path.string()));
+    size_t size = 0;
+    void *data = entry_name == nullptr ? mz_zip_reader_extract_to_heap(&archive, 0, &size, 0) :
+                                         mz_zip_reader_extract_file_to_heap(&archive, entry_name, &size, 0);
+    std::string text = data == nullptr ? std::string() : std::string(static_cast<const char *>(data), size);
+    mz_free(data);
+    Slic3r::close_zip_reader(&archive);
+    return text;
+}
+
+} // namespace
+
+// Compare the nature stored in the definition of every classified key with a literal table, and a few ordinary witnesses.
+TEST_CASE("Persistent settings have the literal nature of their classification",
+          "[plugins][config][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    using Slic3r::ConfigOptionNature;
+    const std::pair<const char *, ConfigOptionNature> natures[] = {
+        {"print_host", ConfigOptionNature::Local}, {"printhost_apikey", ConfigOptionNature::Local},
+        {"printhost_cafile", ConfigOptionNature::Local}, {"printhost_port", ConfigOptionNature::Local},
+        {"printhost_client_cert", ConfigOptionNature::Local},
+        {"printhost_client_cert_password", ConfigOptionNature::Local},
+        {"printhost_user", ConfigOptionNature::Local}, {"printhost_password", ConfigOptionNature::Local},
+        {"printhost_ssl_ignore_revoke", ConfigOptionNature::Local},
+        {"printhost_authorization_type", ConfigOptionNature::Local}, {"host_type", ConfigOptionNature::Local},
+        {"preset_name", ConfigOptionNature::Local}, {"preset_names", ConfigOptionNature::Local},
+        {"print_version", ConfigOptionNature::Bookkeeping}, {"print_settings_id", ConfigOptionNature::Bookkeeping},
+        {"filament_settings_id", ConfigOptionNature::Bookkeeping},
+        {"printer_settings_id", ConfigOptionNature::Bookkeeping},
+        {"physical_printer_settings_id", ConfigOptionNature::Bookkeeping},
+        {"sla_print_settings_id", ConfigOptionNature::Bookkeeping},
+        {"sla_material_settings_id", ConfigOptionNature::Bookkeeping},
+        {"print_settings_modified", ConfigOptionNature::Bookkeeping},
+        {"filament_settings_modified", ConfigOptionNature::Bookkeeping},
+        {"printer_settings_modified", ConfigOptionNature::Bookkeeping},
+        {"sla_print_settings_modified", ConfigOptionNature::Bookkeeping},
+        {"sla_material_settings_modified", ConfigOptionNature::Bookkeeping},
+        {"inherits", ConfigOptionNature::PresetMeta}, {"compatible_printers", ConfigOptionNature::PresetMeta},
+        {"compatible_printers_condition", ConfigOptionNature::PresetMeta},
+        {"compatible_prints", ConfigOptionNature::PresetMeta},
+        {"compatible_prints_condition", ConfigOptionNature::PresetMeta},
+        {"compatible_printers_condition_cummulative", ConfigOptionNature::PresetMeta},
+        {"compatible_prints_condition_cummulative", ConfigOptionNature::PresetMeta},
+        {"inherits_cummulative", ConfigOptionNature::PresetMeta},
+        {"default_print_profile", ConfigOptionNature::PresetMeta},
+        {"default_filament_profile", ConfigOptionNature::PresetMeta},
+        {"default_sla_print_profile", ConfigOptionNature::PresetMeta},
+        {"default_sla_material_profile", ConfigOptionNature::PresetMeta},
+        {"printer_model", ConfigOptionNature::Normal}, {"printer_variant", ConfigOptionNature::Normal},
+        {"printer_vendor", ConfigOptionNature::Normal}, {"filament_vendor", ConfigOptionNature::Normal},
+        {"material_vendor", ConfigOptionNature::Normal}, {"layer_height", ConfigOptionNature::Normal},
+        {"wiping_volumes_matrix", ConfigOptionNature::Normal},
+    };
+    for (const std::pair<const char *, ConfigOptionNature> &entry : natures) {
+        CAPTURE(entry.first);
+        const Slic3r::ConfigOptionDef *definition = Slic3r::PrintConfigDef::instance().get(entry.first);
+        REQUIRE(definition != nullptr);
+        CHECK(static_cast<uint32_t>(definition->nature) == static_cast<uint32_t>(entry.second));
+    }
+}
+
+// Write one configuration holding a key of every nature to each destination and read the text back:
+// a refused key is absent, not written empty.
+TEST_CASE("ConfigBase save writes the keys that the destination allows",
+          "[plugins][config][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    Slic3r::DynamicPrintConfig config;
+    set_nature_sentinels(config);
+    const Slic3r::ConfigWriteTarget targets[] = {Slic3r::ConfigWriteTarget::Local, Slic3r::ConfigWriteTarget::Project,
+                                                 Slic3r::ConfigWriteTarget::GCode};
+    for (size_t target = 0; target < 3; ++target) {
+        CAPTURE(target);
+        const boost::filesystem::path file = directory.path() / ("target" + std::to_string(target) + ".ini");
+        config.save(file.string(), targets[target]);
+        const std::string text = Slic3r::Test::GCode::read_text_file(file);
+        for (const NatureKeyExpectation &expectation : k_nature_keys) {
+            CAPTURE(expectation.key);
+            const bool expected = target == 0 ? expectation.in_local : target == 1 ? expectation.in_project : expectation.in_gcode;
+            CHECK(has_config_line(text, "", expectation) == expected);
+            CHECK(has_config_key(text, "", expectation) == expected);
+        }
+    }
+}
+
+// Save a preset holding a LOCAL key and a VOLATILE key in its own file: the first stays, the second is dropped.
+TEST_CASE("Preset save keeps the local keys and drops the volatile ones",
+          "[plugins][config][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    NaturePreset preset;
+    preset.file = (directory.path() / "nature printer.ini").string();
+    preset.config.set_deserialize_strict("print_host", "local_host_sentinel");
+    preset.config.set_deserialize_strict("test_config_nature_volatile", "15");
+    preset.save();
+    const std::string text = Slic3r::Test::GCode::read_text_file(preset.file);
+    CHECK(has_config_line(text, "", {"print_host", "local_host_sentinel", true, true, true}));
+    CHECK_FALSE(has_config_key(text, "", {"test_config_nature_volatile", "15", true, true, true}));
+}
+
+// Export a project: the project files keep PRESET_META and BOOKKEEPING keys and drop LOCAL ones, and the file read by
+// PrusaSlicer follows the G-code destination, so it drops PRESET_META too, with its own LOCAL filter applied before the conversion.
+TEST_CASE("3MF project configuration files follow their destination",
+          "[plugins][config][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    // The model comes from a regular print; the exported configuration only holds the sentinel keys.
+    Slic3r::Model model;
+    Slic3r::Print print;
+    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, model);
+    Slic3r::DynamicPrintConfig config;
+    set_nature_sentinels(config);
+    const boost::filesystem::path archive = directory.path() / "project.3mf";
+    REQUIRE(Slic3r::store_3mf(archive.string().c_str(), &model, &config, Slic3r::OptionStore3mf{}));
+
+    const std::string project_texts[] = {read_archive_entry(archive, "Metadata/Slic3r.config"),
+                                         read_archive_entry(archive, "Metadata/SuperSlicer.config")};
+    for (const std::string &text : project_texts) {
+        REQUIRE_FALSE(text.empty());
+        for (const NatureKeyExpectation &expectation : k_nature_keys) {
+            CAPTURE(expectation.key);
+            CHECK(has_config_line(text, "; ", expectation) == expectation.in_project);
+            CHECK(has_config_key(text, "; ", expectation) == expectation.in_project);
+        }
+    }
+
+    // The file read by PrusaSlicer has the real keys allowed in G-code. Plugin-defined options, such as the test keys,
+    // are never exported to it by the Prusa conversion, whatever their nature.
+    const std::string prusa_text = read_archive_entry(archive, "Metadata/Slic3r_PE.config");
+    REQUIRE_FALSE(prusa_text.empty());
+    for (const NatureKeyExpectation &expectation : k_nature_keys) {
+        CAPTURE(expectation.key);
+        if (std::string(expectation.key).rfind("test_config_nature_", 0) == 0)
+            CHECK_FALSE(has_config_key(prusa_text, "; ", expectation));
+        else
+            CHECK(has_config_key(prusa_text, "; ", expectation) == expectation.in_gcode);
+    }
+}
+
+// Export an AMF: its configuration block follows the project destination, like the project files of a 3MF.
+TEST_CASE("AMF configuration block follows the project destination",
+          "[plugins][config][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    Slic3r::Model model;
+    Slic3r::Print print;
+    Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, print, model);
+    Slic3r::DynamicPrintConfig config;
+    set_nature_sentinels(config);
+    config.set_deserialize_strict("print_host", "local_host_sentinel");
+    // store_amf forces the ".zip.amf" suffix and reports the final path through its argument.
+    std::string path = (directory.path() / "project.amf").string();
+    REQUIRE(Slic3r::store_amf(path, &model, &config, Slic3r::OptionStoreAmf{}));
+    const std::string text = read_archive_entry(path);
+    REQUIRE_FALSE(text.empty());
+    for (const NatureKeyExpectation &expectation : k_nature_keys) {
+        CAPTURE(expectation.key);
+        CHECK(has_config_line(text, "; ", expectation) == expectation.in_project);
+        CHECK(has_config_key(text, "; ", expectation) == expectation.in_project);
+    }
+    CHECK(has_config_line(text, "; ", {"compatible_printers", "compatible_sentinel", true, true, false}));
+    CHECK_FALSE(has_config_key(text, "; ", {"print_host", "local_host_sentinel", true, false, false}));
+}
+
+// A key without definition has no policy: it is written to every destination, by a configuration with a definition
+// that does not know the key, and by a configuration that has no definition at all.
+TEST_CASE("ConfigBase save writes the keys that have no definition",
+          "[plugins][config][nature]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedNatureDirectory directory;
+    const NatureKeyExpectation undefined_key = {"undefined_nature_key", "undefined_value", true, true, true};
+    const Slic3r::ConfigWriteTarget targets[] = {Slic3r::ConfigWriteTarget::Local, Slic3r::ConfigWriteTarget::Project,
+                                                 Slic3r::ConfigWriteTarget::GCode};
+
+    SECTION("a key unknown to the definition of a print configuration")
+    {
+        Slic3r::DynamicPrintConfig config;
+        config.set_key_value(undefined_key.key, new Slic3r::ConfigOptionString(undefined_key.value));
+        REQUIRE(Slic3r::PrintConfigDef::instance().get(undefined_key.key) == nullptr);
+        for (size_t target = 0; target < 3; ++target) {
+            CAPTURE(target);
+            CHECK(config.writes_key(undefined_key.key, targets[target]));
+            const boost::filesystem::path file = directory.path() / ("unknown" + std::to_string(target) + ".ini");
+            config.save(file.string(), targets[target]);
+            CHECK(has_config_line(Slic3r::Test::GCode::read_text_file(file), "", undefined_key));
+        }
+    }
+
+    SECTION("a configuration without definition")
+    {
+        Slic3r::DynamicConfig config;
+        REQUIRE(config.def() == nullptr);
+        config.set_key_value(undefined_key.key, new Slic3r::ConfigOptionString(undefined_key.value));
+        // Even a key that a definition would refuse is written: without definition there is no policy.
+        config.set_key_value("test_config_nature_volatile", new Slic3r::ConfigOptionInt(15));
+        const NatureKeyExpectation volatile_key = {"test_config_nature_volatile", "15", true, true, true};
+        for (size_t target = 0; target < 3; ++target) {
+            CAPTURE(target);
+            CHECK_NOTHROW(config.writes_key(undefined_key.key, targets[target]));
+            CHECK(config.writes_key(undefined_key.key, targets[target]));
+            const boost::filesystem::path file = directory.path() / ("nodef" + std::to_string(target) + ".ini");
+            CHECK_NOTHROW(config.save(file.string(), targets[target]));
+            const std::string text = Slic3r::Test::GCode::read_text_file(file);
+            CHECK(has_config_line(text, "", undefined_key));
+            CHECK(has_config_line(text, "", volatile_key));
+        }
+    }
 }

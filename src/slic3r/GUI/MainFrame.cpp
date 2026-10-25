@@ -2312,7 +2312,7 @@ void MainFrame::export_config(bool to_prusa)
     if (!file.IsEmpty()) {
         wxGetApp().app_config->update_config_dir(get_dir_name(file));
         m_last_config = file;
-        config.save(file.ToUTF8().data(), to_prusa);
+        config.save(file.ToUTF8().data(), ConfigWriteTarget::GCode, to_prusa);
     }
 }
 

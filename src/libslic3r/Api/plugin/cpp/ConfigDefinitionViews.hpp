@@ -71,9 +71,10 @@ struct ConfigGraphSettings
     std::vector<ConfigPoint> enforced_values;
 };
 
-/* An owning C++ copy of every field published by raw_config_option_def. */
+/* An owning C++ copy of definition metadata, excluding contains_plugin_id. */
 struct ConfigOptionDefinition
 {
+    // Copy a borrowed raw definition into independently owned metadata.
     explicit ConfigOptionDefinition(const raw_config_option_def &raw);
 
     std::string opt_key;
@@ -113,6 +114,7 @@ struct ConfigOptionDefinition
     int32_t precision = 0;
     raw_config_option_mode mode = RAW_CONFIG_OPTION_MODE_NONE;
     RawConfigOptionFlags flags = 0;
+    uint32_t nature = RAW_CONFIG_NATURE_NORMAL;
     std::vector<std::string> aliases;
     std::vector<std::string> shortcut;
     std::vector<std::string> depends_on;
@@ -161,6 +163,7 @@ inline ConfigGraphSettings::ConfigGraphSettings(const raw_graph_settings &raw) :
     }
 }
 
+// Copy a borrowed raw definition into independently owned metadata.
 inline ConfigOptionDefinition::ConfigOptionDefinition(const raw_config_option_def &raw) :
     opt_key(raw.opt_key == nullptr ? std::string() : std::string(raw.opt_key)),
     type(raw.type),
@@ -187,7 +190,8 @@ inline ConfigOptionDefinition::ConfigOptionDefinition(const raw_config_option_de
     max_literal_is_percent(raw.max_literal_is_percent != 0),
     precision(raw.precision),
     mode(raw.mode),
-    flags(raw.flags)
+    flags(raw.flags),
+    nature(raw.nature)
 {
     const std::pair<const char *, std::optional<std::string> *> optional_strings[] = {
         {raw.gui_flags, &gui_flags},

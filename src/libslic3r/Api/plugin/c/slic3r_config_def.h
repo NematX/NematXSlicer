@@ -2,11 +2,12 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+/* Configuration definitions carry metadata and defaults across the C ABI. */
 #ifndef slic3r_config_def_h_
 #define slic3r_config_def_h_
 
 #define SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 3u
+#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 4u
 
 #include "slic3r_config_option.h"
 #include "slic3r_config_types.h"
@@ -18,6 +19,22 @@ extern "C" {
 #endif
 
 /* ========================== ENUMS ========================== */
+
+/* Nature combines withdrawal flags matching ConfigOptionNature: zero is NORMAL
+   and every combination of the four flags is permitted. */
+typedef enum raw_config_option_nature {
+    RAW_CONFIG_NATURE_NOT_LOCAL = 1,      /* Withdraw writing to the setting owner's file. */
+    RAW_CONFIG_NATURE_NOT_PROJECT = 2,    /* Withdraw writing to the project. */
+    RAW_CONFIG_NATURE_NOT_GCODE = 4,      /* Withdraw writing to G-code. */
+    RAW_CONFIG_NATURE_NOT_COMPARABLE = 8, /* Withdraw participation in value comparisons. */
+    RAW_CONFIG_NATURE_NORMAL = 0,        /* Persisted and comparable without restrictions. */
+    RAW_CONFIG_NATURE_LOCAL = RAW_CONFIG_NATURE_NOT_PROJECT | RAW_CONFIG_NATURE_NOT_GCODE, /* Comparable, written only to the owner's file. */
+    RAW_CONFIG_NATURE_BOOKKEEPING = RAW_CONFIG_NATURE_NOT_COMPARABLE, /* Persisted tracking information, not compared. */
+    RAW_CONFIG_NATURE_PRESET_META = RAW_CONFIG_NATURE_NOT_GCODE, /* Comparable profile metadata, not written to G-code. */
+    /* Runtime-only: neither persisted nor compared. */
+    /* Keep the expression on one line; otherwise the Python API generator omits this constant. */
+    RAW_CONFIG_NATURE_VOLATILE = RAW_CONFIG_NATURE_NOT_LOCAL | RAW_CONFIG_NATURE_NOT_PROJECT | RAW_CONFIG_NATURE_NOT_GCODE | RAW_CONFIG_NATURE_NOT_COMPARABLE
+} raw_config_option_nature;
 
 /* GUI behavior / rendering type */
 typedef enum raw_gui_type {
@@ -380,12 +397,13 @@ typedef struct raw_config_option_def {
     or inactive and reports a non-fatal error when the remaining list is empty.
     No host-only value may be mixed into a plugin-id list.
 
-    This consumes the first reserved 64-bit slot. The remaining reserved_u64
-    entries keep the structure size and every following offset unchanged, so
-    already compiled callers that zero the reserved area keep working.
+    This flag and nature occupy the first reserved 64-bit slot. The remaining
+    reserved_u64 entries keep the structure size and following offsets unchanged.
     */
     int32_t contains_plugin_id;
-    uint32_t reserved_u64_0;
+    /* A combination of raw_config_option_nature withdrawal flags, stored at a fixed 32-bit width.
+       Callers that zero the reserved area obtain NORMAL. */
+    uint32_t nature;
 
     /* Reserved for future expansion (must be zero) */
     uint64_t reserved_u64[7];

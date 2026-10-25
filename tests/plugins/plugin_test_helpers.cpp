@@ -115,6 +115,13 @@
 #include "plugins_cpp/NozzleCleaning/NozzleCleaning.hpp"
 #include "plugins_cpp/Polyholes/Polyholes.hpp"
 
+namespace Slic3r::Test::Plugins {
+int plugin_test_invalid_nature_result = OPTION_DEF_ERROR_INTERNAL;
+int plugin_test_high_invalid_nature_result = OPTION_DEF_ERROR_INTERNAL;
+int plugin_test_combined_nature_result = OPTION_DEF_ERROR_INTERNAL;
+int plugin_test_roundtrip_nature_result = OPTION_DEF_ERROR_INTERNAL;
+}
+
 namespace {
 
 constexpr char k_exclusive_pruning_failed_plugin_id[] = "slic3r.test.exclusive_pruning.failed";
@@ -221,8 +228,7 @@ private:
     bool m_fail_initialization;
 };
 
-// Register one deliberately rich option before PrintConfigDef is finalized so
-// introspection tests can verify every pointer-backed and presence-tracked field.
+// Register copied metadata, graphs and nature examples before the shared catalogue is finalized.
 void register_config_introspection_fixture(orchestrator_handle *orchestrator);
 void register_config_option_or_fail(orchestrator_handle *orchestrator,
                                     const raw_config_option_def &definition);
@@ -457,6 +463,7 @@ void register_plugin_option_list_fixtures(orchestrator_handle *orchestrator)
     replicate("test.replicate.order_target", "test.replicate.order_source");
 }
 
+// Register metadata and withdrawal combinations through a borrowed handle before finalization; the host owns copies, named registration failures throw, and validation results are retained for assertions.
 void register_config_introspection_fixture(orchestrator_handle *orchestrator)
 {
     static const char *aliases[] = {"test_introspection_old", "test_introspection_legacy"};
@@ -523,6 +530,7 @@ void register_config_introspection_fixture(orchestrator_handle *orchestrator)
     definition.precision = 4;
     definition.mode = RAW_CONFIG_OPTION_MODE_EXPERT;
     definition.flags = uint64_t(0x1020304050607080ULL);
+    definition.nature = RAW_CONFIG_NATURE_BOOKKEEPING;
     definition.aliases = {aliases, 2};
     definition.shortcut = {shortcuts, 2};
     definition.depends_on = {dependencies, 2};
@@ -600,6 +608,43 @@ void register_config_introspection_fixture(orchestrator_handle *orchestrator)
     small_graph_definition.default_serialized_value = "0:2:1:0x0:100x0.001";
     small_graph_definition.graph_settings = &small_graph_settings;
     register_config_option_or_fail(orchestrator, small_graph_definition);
+
+    const struct NatureDefinition { const char *key; uint32_t nature; } nature_definitions[] = {
+        {"test_config_nature_normal", RAW_CONFIG_NATURE_NORMAL},
+        {"test_config_nature_local", RAW_CONFIG_NATURE_LOCAL},
+        {"test_config_nature_bookkeeping", RAW_CONFIG_NATURE_BOOKKEEPING},
+        {"test_config_nature_preset_meta", RAW_CONFIG_NATURE_PRESET_META},
+        {"test_config_nature_volatile", RAW_CONFIG_NATURE_VOLATILE}};
+    for (const NatureDefinition &entry : nature_definitions) {
+        raw_config_option_def nature_definition = raw_config_option_def_init();
+        nature_definition.opt_key = entry.key;
+        nature_definition.type = RAW_CO_INT;
+        nature_definition.container_type = RAW_CONTAINER_TYPE_PROJECT;
+        nature_definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+        nature_definition.printer_technology = RAW_PT_FFF;
+        nature_definition.default_serialized_value = "7";
+        nature_definition.nature = entry.nature;
+        register_config_option_or_fail(orchestrator, nature_definition);
+    }
+
+    raw_config_option_def invalid_nature = raw_config_option_def_init();
+    invalid_nature.opt_key = "test_config_nature_invalid";
+    invalid_nature.type = RAW_CO_INT;
+    invalid_nature.container_type = RAW_CONTAINER_TYPE_PROJECT;
+    invalid_nature.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    invalid_nature.printer_technology = RAW_PT_FFF;
+    invalid_nature.default_serialized_value = "7";
+    invalid_nature.nature = 16;
+    Slic3r::Test::Plugins::plugin_test_invalid_nature_result = orchestrator_create_option_def(orchestrator, &invalid_nature);
+    invalid_nature.opt_key = "test_config_nature_high_invalid";
+    invalid_nature.nature = 0x100;
+    Slic3r::Test::Plugins::plugin_test_high_invalid_nature_result = orchestrator_create_option_def(orchestrator, &invalid_nature);
+    invalid_nature.opt_key = "test_config_nature_valid_unnamed";
+    invalid_nature.nature = 5;
+    Slic3r::Test::Plugins::plugin_test_combined_nature_result = orchestrator_create_option_def(orchestrator, &invalid_nature);
+    invalid_nature.opt_key = "test_config_nature_combined";
+    invalid_nature.nature = 10;
+    Slic3r::Test::Plugins::plugin_test_roundtrip_nature_result = orchestrator_create_option_def(orchestrator, &invalid_nature);
 }
 
 void activate_plugin_or_fail(Slic3r::Orchestrator &orchestrator, const char *plugin_id)

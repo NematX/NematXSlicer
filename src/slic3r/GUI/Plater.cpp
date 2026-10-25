@@ -7578,7 +7578,7 @@ void Plater::export_platter()
                 }
             }
         }
-        DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config_secure();
+        DynamicPrintConfig full_config = wxGetApp().preset_bundle->full_config();
         if (dlg.GetFilterIndex() == 1) {
 
             //thumbnail
@@ -7797,7 +7797,7 @@ void Plater::export_amf()
 
     wxBusyCursor wait;
     bool export_config = true;
-    DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
+    DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config();
     bool full_pathnames = wxGetApp().app_config->get_bool("export_sources_full_pathnames");
     if (Slic3r::store_amf(path_u8, &p->model, export_config ? &cfg : nullptr, OptionStoreAmf{}.set_fullpath_sources(full_pathnames))) {
         // Success
@@ -7942,7 +7942,7 @@ bool Plater::export_3mf(const boost::filesystem::path& output_path)
     // modify model
     publish(p->model);
 
-    DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config_secure();
+    DynamicPrintConfig cfg = wxGetApp().preset_bundle->full_config();
     const std::string path_u8 = into_u8(path);
     wxBusyCursor wait;
     bool full_pathnames = wxGetApp().app_config->get_bool("export_sources_full_pathnames");

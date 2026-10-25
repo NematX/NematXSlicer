@@ -1,10 +1,21 @@
 #ifndef test_plugins_plugin_test_helpers_hpp_
 #define test_plugins_plugin_test_helpers_hpp_
 
+/* Shared provider startup finalizes option definitions once; before that freeze it records
+   rejection results for nature values 16 and 0x100, and acceptance results for 5 and 10. */
+
 struct orchestrator_handle;
 namespace Slic3r { struct PluginPackageLoadReport; }
 
 namespace Slic3r::Test::Plugins {
+
+// C API result recorded for an invalid nature during shared option registration.
+extern int plugin_test_invalid_nature_result;
+// Registration results for a high unknown bit and an unnamed valid combination.
+extern int plugin_test_high_invalid_nature_result;
+extern int plugin_test_combined_nature_result;
+// Registration result for the unnamed combination queried through definition views.
+extern int plugin_test_roundtrip_nature_result;
 
 /* Implemented by the regional SeamPlacer test fixture and called before config finalization. */
 void register_regional_seam_test_provider(orchestrator_handle *orchestrator);

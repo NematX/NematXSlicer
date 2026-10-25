@@ -245,6 +245,39 @@ class PythonConfigDefinitionViewTests(unittest.TestCase):
             first.label = "changed"
         self.assertIsNone(self.views.option_definition(api, "missing"))
 
+    def test_natures_copy_stable_numeric_values_from_raw(self):
+        """Check literal withdrawal constants and copied named or unnamed combinations."""
+        self.assertEqual(
+            (self.generated.RAW_CONFIG_NATURE_NORMAL, self.generated.RAW_CONFIG_NATURE_LOCAL,
+             self.generated.RAW_CONFIG_NATURE_BOOKKEEPING, self.generated.RAW_CONFIG_NATURE_PRESET_META,
+             self.generated.RAW_CONFIG_NATURE_VOLATILE),
+            (0, 6, 8, 4, 15),
+        )
+        raw = self.generated.RawConfigOptionDef()
+        self.assertEqual(raw.nature, 0)
+        for expected in (0, 6, 8, 4, 15, 10):
+            with self.subTest(nature=expected):
+                raw.nature = expected
+                definition = self.views.ConfigOptionDefinition.from_raw(raw)
+                raw.nature = 0
+                self.assertEqual(definition.nature, expected)
+
+    def test_create_option_def_passes_nature_to_raw(self):
+        """Check withdrawal combinations reach the borrowed registration record."""
+        class CreationHost:
+            def orchestrator_create_option_def(self, orchestrator, definition):
+                self.nature = definition._obj.nature
+                return 0
+
+        host = CreationHost()
+        api = self.api_module.Slic3rAPI.__new__(self.api_module.Slic3rAPI)
+        api.host = host
+        api.orchestrator = ctypes.c_void_p(10)
+        for expected in (0, 6, 8, 4, 15, 10):
+            with self.subTest(nature=expected):
+                api.create_option_def(opt_key="plugin.nature", nature=expected)
+                self.assertEqual(host.nature, expected)
+
     def test_nullable_strings_distinguish_empty_from_absent(self):
         raw = self.generated.RawConfigOptionDef()
         raw.opt_key = b"empty"

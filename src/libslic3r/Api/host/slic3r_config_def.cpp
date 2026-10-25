@@ -22,6 +22,7 @@ another temporary collection.
 
 #include <algorithm>
 #include <cfloat>
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -30,6 +31,13 @@ another temporary collection.
 #include "libslic3r/Config/PrintConfig.hpp"
 
 namespace Slic3r {
+
+// The classification word shares the existing slot without moving the remaining reserved storage.
+static_assert(offsetof(raw_config_option_def, nature) == offsetof(raw_config_option_def, contains_plugin_id) + sizeof(int32_t),
+              "nature must immediately follow contains_plugin_id");
+static_assert(sizeof(raw_config_option_def::nature) == sizeof(uint32_t), "nature must remain a 32-bit word");
+static_assert(offsetof(raw_config_option_def, nature) + sizeof(raw_config_option_def::nature) == offsetof(raw_config_option_def, reserved_u64),
+              "nature must end at the remaining reserved words");
 namespace {
 
 struct ConfigOptionDefSnapshot;
@@ -41,6 +49,7 @@ static const char *optional_string(const std::string &value) noexcept;
 static void rebuild_string_pointers(const std::vector<std::string> &strings,
                                     std::vector<const char *> &pointers);
 static void populate_graph_snapshot(ConfigOptionDefSnapshot &snapshot, const GraphSettings &source);
+// Copy definition metadata into owned backing storage and bind its raw snapshot pointers.
 static void populate_snapshot(ConfigOptionDefSnapshot &snapshot, const ConfigOptionDef &source);
 
 /* Own every allocation referenced by one returned raw_config_option_def. */
@@ -200,6 +209,7 @@ static void populate_graph_snapshot(ConfigOptionDefSnapshot &snapshot, const Gra
     out.enforced_value_count = uint32_t(snapshot.graph_enforced_values.size());
 }
 
+// Replace snapshot-owned backing storage from a borrowed definition and expose normalized raw fields; allocation failures propagate and old snapshot pointers are invalidated.
 static void populate_snapshot(ConfigOptionDefSnapshot &snapshot, const ConfigOptionDef &source)
 {
     snapshot = ConfigOptionDefSnapshot{};
@@ -287,6 +297,7 @@ static void populate_snapshot(ConfigOptionDefSnapshot &snapshot, const ConfigOpt
     out.default_serialized_value = source.default_value ? snapshot.default_serialized_value.c_str() : nullptr;
     out.enum_def.value_label_pairs = {snapshot.enum_pairs.data(), uint32_t(snapshot.enum_pairs.size())};
     out.contains_plugin_id = source.contains_plugin_id ? 1 : 0;
+    out.nature = static_cast<uint32_t>(source.nature);
     out.graph_settings = source.graph_settings ? &snapshot.graph_settings : nullptr;
 }
 

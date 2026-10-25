@@ -432,7 +432,7 @@ std::string Preset::remove_invalid_keys(DynamicPrintConfig &config, const Dynami
 
 void Preset::save()
 {
-    this->config.save(this->file);
+    this->config.save(this->file, ConfigWriteTarget::Local);
 }
 
 // Return a label of this preset, consisting of a name and a "(modified)" suffix, if this preset is dirty.
@@ -1604,7 +1604,7 @@ void PhysicalPrinter::save(const std::string& file_name_from, const std::string&
     boost::nowide::rename(file_name_from.data(), file_name_to.data());
     this->file = file_name_to;
     // save configuration
-    this->config.save(this->file);
+    this->config.save(this->file, ConfigWriteTarget::Local);
 }
 
 void PhysicalPrinter::update_from_preset(const Preset& preset)

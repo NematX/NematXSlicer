@@ -25,7 +25,9 @@
 #define slic3r_ConfigDef_hpp_
 
 /* Configuration definitions own option metadata/defaults; config stores hold
-   the corresponding values. A required plugin group connects an active value
+   the corresponding values. Nature predicates describe persistence and comparison
+   eligibility by testing withdrawal flags without filtering values; zero withdraws nothing.
+   A required plugin group connects an active value
    (different from its definition default) to a provider's declared config keys. */
 
 #include <cstdint>
@@ -71,6 +73,32 @@ enum class ConfigOptionContainerType : uint8_t {
     Layer,
     Region,
 };
+
+// Withdrawal flags share stable numeric values with raw_config_option_nature; every combination is valid.
+enum class ConfigOptionNature : uint8_t {
+    NotLocal = 1,
+    NotProject = 2,
+    NotGCode = 4,
+    NotComparable = 8,
+    Normal = 0,      // No capability is withdrawn.
+    Local = 6,       // NotProject | NotGCode.
+    Bookkeeping = 8, // NotComparable.
+    PresetMeta = 4,  // NotGCode.
+    Volatile = 15,   // All four withdrawal flags.
+};
+
+// Persistence destinations describe the role of the output, not its file extension.
+enum class ConfigWriteTarget : uint8_t {
+    // Each destination intentionally equals its corresponding withdrawal flag.
+    Local = static_cast<uint8_t>(ConfigOptionNature::NotLocal),     // The setting owner's file.
+    Project = static_cast<uint8_t>(ConfigOptionNature::NotProject), // The complete project, including profile sections.
+    GCode = static_cast<uint8_t>(ConfigOptionNature::NotGCode),     // Embedded configuration or an export of the same contents.
+};
+
+// Return whether the destination's withdrawal flag is absent from the nature.
+bool config_nature_writes(ConfigOptionNature nature, ConfigWriteTarget target);
+// Return whether the comparison withdrawal flag is absent from the nature.
+bool config_nature_comparable(ConfigOptionNature nature);
 
 class ConfigOptionDef;
 
@@ -266,6 +294,8 @@ public:
     // orchestrator prunes values whose plugin is missing or inactive when
     // plugin option definitions are finalized.
     bool                                contains_plugin_id = false;
+    // Persistence and comparison policy, also checked when plugins redeclare a definition.
+    ConfigOptionNature                  nature = ConfigOptionNature::Normal;
     // Host-only link (1-based, 0 = none) into the orchestrator GUI activation
     // pool. It lets the GUI ask for the activation rules of the settings a page
     // displays. Never set from a plugin definition and excluded from the plugin
@@ -851,7 +881,12 @@ public:
     ConfigSubstitutions load_from_gcode_file(const std::string &filename, ForwardCompatibilitySubstitutionRule compatibility_rule);
     ConfigSubstitutions load_from_binary_gcode_file(const std::string& filename, ForwardCompatibilitySubstitutionRule compatibility_rule);
     ConfigSubstitutions load(const boost::property_tree::ptree &tree, ForwardCompatibilitySubstitutionRule compatibility_rule);
-    void save(const std::string &file, bool to_prusa = false) const;
+    // Write the keys whose nature allows the given destination; the other keys are not written at all.
+    // The destination is mandatory so that every caller states the role of the file.
+    void save(const std::string &file, ConfigWriteTarget target, bool to_prusa = false) const;
+    // Return whether the nature of the key allows writing it to the destination.
+    // A configuration or a key without definition has no policy: the key is written.
+    bool writes_key(const t_config_option_key &opt_key, ConfigWriteTarget target) const;
 #ifdef _DEBUG
     std::string to_debug_string() const;
 #endif

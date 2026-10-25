@@ -242,6 +242,7 @@ void PrintConfigDef::init_common_params()
     // a '_'
     // version in X.X.X.X
     def = this->add("print_version", coString);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->printer_technology = ptFFF | ptSLA;
     // defautl to none : only set if loaded. only write our version
     def->set_default_value(new ConfigOptionStringVersion());
@@ -371,6 +372,7 @@ void PrintConfigDef::init_common_params()
     def->set_default_value(new ConfigOptionFloat(200.0));
 
     def = this->add("print_host", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Hostname, IP or URL");
     def->category = OptionCategory::general;
     def->tooltip = L("Slic3r can upload G-code files to a printer host. This field should contain "
@@ -382,6 +384,7 @@ void PrintConfigDef::init_common_params()
     def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("printhost_apikey", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("API Key / Password");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::general;
@@ -393,6 +396,7 @@ void PrintConfigDef::init_common_params()
     
     // for repetier
     def = this->add("printhost_port", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Printer");
     def->tooltip = L("Name of the printer");
     def->printer_technology = ptFFF | ptSLA;
@@ -403,6 +407,7 @@ void PrintConfigDef::init_common_params()
     
     // only if there isn't a native SSL support
     def = this->add("printhost_cafile", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("HTTPS CA File");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::general;
@@ -413,6 +418,7 @@ void PrintConfigDef::init_common_params()
     def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("printhost_client_cert", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Client Certificate File");
     def->printer_technology = ptFFF | ptSLA;
     def->category = OptionCategory::general;
@@ -422,6 +428,7 @@ void PrintConfigDef::init_common_params()
     def->set_default_value(new ConfigOptionString(""));
 
     def = this->add("printhost_client_cert_password", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Client Certificate Password");
     def->category = OptionCategory::general;
     def->tooltip = L("Password for client certificate for 2-way ssl authentication. "
@@ -431,6 +438,7 @@ void PrintConfigDef::init_common_params()
 
     // For PrusaLink
     def = this->add("printhost_user", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("User");
 //    def->tooltip = L("");
     def->printer_technology = ptFFF | ptSLA;
@@ -440,6 +448,7 @@ void PrintConfigDef::init_common_params()
 
     // For PrusaLink
     def = this->add("printhost_password", coString);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Password");
 //    def->tooltip = L("");
     def->printer_technology = ptFFF | ptSLA;
@@ -449,6 +458,7 @@ void PrintConfigDef::init_common_params()
 
     // Only available on Windows.
     def = this->add("printhost_ssl_ignore_revoke", coBool);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Ignore HTTPS certificate revocation checks");
     def->tooltip = L("Ignore HTTPS certificate revocation checks in case of missing or offline distribution points. "
         "One may want to enable this option for self signed certificates if connection fails.");
@@ -458,6 +468,7 @@ void PrintConfigDef::init_common_params()
     def->set_default_value(new ConfigOptionBool(false));
     
     def = this->add("preset_names", coStrings);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Printer preset names");
     def->tooltip = L("Names of presets related to the physical printer");
     def->mode = comAdvancedE | comPrusa;
@@ -465,6 +476,7 @@ void PrintConfigDef::init_common_params()
 
     // For PrusaLink
     def = this->add("printhost_authorization_type", coEnum);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Authorization Type");
 //    def->tooltip = L("");
     def->printer_technology = ptFFF | ptSLA;
@@ -479,6 +491,7 @@ void PrintConfigDef::init_common_params()
     // temporary workaround for compatibility with older Slicer
     {
         def = this->add("preset_name", coString);
+        def->nature = ConfigOptionNature::Local;
         def->printer_technology = ptFFF | ptSLA;
         def->set_default_value(new ConfigOptionString());
     }

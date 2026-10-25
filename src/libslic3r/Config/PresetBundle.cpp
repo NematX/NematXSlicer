@@ -728,17 +728,6 @@ DynamicPrintConfig PresetBundle::full_config() const
         this->full_sla_config();
 }
 
-DynamicPrintConfig PresetBundle::full_config_secure() const
-{
-    DynamicPrintConfig config = this->full_config();
-    //FIXME legacy, the keys should not be there after conversion to a Physical Printer profile.
-    config.erase("print_host");
-    config.erase("printhost_apikey");
-    config.erase("printhost_cafile");
-    config.erase("printhost_port");
-    return config;
-}
-
 DynamicPrintConfig PresetBundle::full_fff_config() const
 {    
     DynamicPrintConfig out;
@@ -1982,7 +1971,8 @@ void PresetBundle::export_configbundle(const std::string &path, bool export_syst
                 continue;
             c << std::endl << "[" << presets->section_name() << ":" << preset.name << "]" << std::endl;
             for (const std::string &opt_key : preset.config.keys())
-                c << opt_key << " = " << preset.config.opt_serialize(opt_key) << std::endl;
+                if (preset.config.writes_key(opt_key, ConfigWriteTarget::Local))
+                    c << opt_key << " = " << preset.config.opt_serialize(opt_key) << std::endl;
         }
     }
 
@@ -1990,7 +1980,8 @@ void PresetBundle::export_configbundle(const std::string &path, bool export_syst
         for (const PhysicalPrinter& ph_printer : this->physical_printers) {
             c << std::endl << "[physical_printer:" << ph_printer.name << "]" << std::endl;
             for (const std::string& opt_key : ph_printer.config.keys())
-                c << opt_key << " = " << ph_printer.config.opt_serialize(opt_key) << std::endl;
+                if (ph_printer.config.writes_key(opt_key, ConfigWriteTarget::Local))
+                    c << opt_key << " = " << ph_printer.config.opt_serialize(opt_key) << std::endl;
         }
     }
 

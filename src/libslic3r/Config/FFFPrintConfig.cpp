@@ -1795,12 +1795,14 @@ void init_fff_params(PrintConfigDef &definition)
     def->set_default_value(new ConfigOptionFloats { });
 
     def = definition.add("compatible_printers", coStrings, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Compatible printers");
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionStrings());
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("compatible_printers_condition", coString, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Compatible printers condition");
     def->tooltip = L("A boolean expression using the configuration values of an active printer profile. "
                    "If this expression evaluates to true, this profile is considered compatible "
@@ -1810,12 +1812,14 @@ void init_fff_params(PrintConfigDef &definition)
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("compatible_prints", coStrings, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Compatible print profiles");
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionStrings());
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("compatible_prints_condition", coString, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Compatible print profiles condition");
     def->tooltip = L("A boolean expression using the configuration values of an active print profile. "
                    "If this expression evaluates to true, this profile is considered compatible "
@@ -1827,10 +1831,12 @@ void init_fff_params(PrintConfigDef &definition)
     // The following value is to be stored into the project file (AMF, 3MF, Config ...)
     // and it contains a sum of "compatible_printers_condition" values over the print and filament profiles.
     def = definition.add("compatible_printers_condition_cummulative", coStrings, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->set_default_value(new ConfigOptionStrings());
     def->cli = ConfigOptionDef::nocli;
     def->mode = comNone | comPrusa; // note: hidden setting
     def = definition.add("compatible_prints_condition_cummulative", coStrings, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->set_default_value(new ConfigOptionStrings());
     def->cli = ConfigOptionDef::nocli;
     def->mode = comNone | comPrusa; // note: hidden setting
@@ -1957,6 +1963,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->set_default_value(new ConfigOptionFloat(2));
 
     def = definition.add("default_filament_profile", coStrings, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Default filament profile");
     def->tooltip = L("Default filament profile associated with the current printer profile. "
                    "On selection of the current printer profile, this filament profile will be activated.");
@@ -1965,6 +1972,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("default_print_profile", coString, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Default print profile");
     def->tooltip = L("Default print profile associated with the current printer profile. "
                    "On selection of the current printer profile, this print profile will be activated.");
@@ -3123,11 +3131,13 @@ void init_fff_params(PrintConfigDef &definition)
     def->set_default_value(new ConfigOptionFloats { 0. });
 
     def = definition.add("filament_settings_id", coStrings, ptFFF);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->mode = comNone | comPrusa; // note: hidden setting
     def->set_default_value(new ConfigOptionStrings { "" });
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("filament_settings_modified", coBools, ptFFF);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->mode = comNone | comPrusa; // note: hidden setting
     def->set_default_value(new ConfigOptionBools({false}));
     def->cli = ConfigOptionDef::nocli;
@@ -3982,6 +3992,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->set_default_value(new ConfigOptionFloatOrPercent(25, true));
 
     def = definition.add("inherits", coString, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->label = L("Inherits profile");
     def->tooltip = L("Name of the profile, from which this profile inherits.");
     def->full_width = true;
@@ -3992,6 +4003,7 @@ void init_fff_params(PrintConfigDef &definition)
     // The following value is to be stored into the project file (AMF, 3MF, Config ...)
     // and it contains a sum of "inherits" values over the print and filament profiles.
     def = definition.add("inherits_cummulative", coStrings, ptFFF);
+    def->nature = ConfigOptionNature::PresetMeta;
     def->set_default_value(new ConfigOptionStrings());
     def->mode = comPrusa;
     def->cli = ConfigOptionDef::nocli;
@@ -4505,6 +4517,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->set_default_value(new ConfigOptionFloats{ 0.4 });
 
     def = definition.add("host_type", coEnum, ptFFF);
+    def->nature = ConfigOptionNature::Local;
     def->label = L("Host Type");
     def->category = OptionCategory::general;
     def->tooltip = L("Slic3r can upload G-code files to a printer host. This field must contain "
@@ -5201,26 +5214,31 @@ void init_fff_params(PrintConfigDef &definition)
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("print_settings_id", coString, ptFFF);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->mode = comNone | comPrusa; // note: hidden setting
     def->set_default_value(new ConfigOptionString(""));
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("print_settings_modified", coBool, ptFFF);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->mode = comNone | comPrusa; // note: hidden setting
     def->set_default_value(new ConfigOptionBool(false));
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("printer_settings_id", coString, ptFFF);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->mode = comNone | comPrusa; // note: hidden setting
     def->set_default_value(new ConfigOptionString(""));
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("printer_settings_modified", coBool, ptFFF);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->mode = comNone | comPrusa; // note: hidden setting
     def->set_default_value(new ConfigOptionBool(false));
     def->cli = ConfigOptionDef::nocli;
 
     def = definition.add("physical_printer_settings_id", coString, ptFFF);
+    def->nature = ConfigOptionNature::Bookkeeping;
     def->mode = comNone | comPrusa; // note: hidden setting
     def->set_default_value(new ConfigOptionString(""));
     def->cli = ConfigOptionDef::nocli;
