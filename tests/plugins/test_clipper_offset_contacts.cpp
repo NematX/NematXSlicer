@@ -651,3 +651,45 @@ TEST_CASE("Clipper offset contacts: topology and timing report", "[.][clipper-of
         write_svg(contact_case, results);
     }
 }
+
+// traverse_pt() lists an island before the islands nested in its holes, as union_ex() does: a frame with two holes comes first, then
+// the two boxes lying in those holes.
+TEST_CASE("Traversing a Clipper PolyTree lists the islands from outside to inside", "[plugins][clipper][clipper-island-order]")
+{
+    using Slic3r::Point;
+    using Slic3r::Polygon;
+    using Slic3r::Polygons;
+    const coord_t unit = coord_t(1. / SCALING_FACTOR);
+    Polygon unit_box;
+    unit_box.points = { Point(0, 0), Point(unit, 0), Point(unit, unit), Point(0, unit) };
+    Polygon frame = unit_box;
+    frame.scale(20, 10);
+    Polygon hole_left = unit_box;
+    hole_left.scale(8);
+    hole_left.translate(unit, unit);
+    hole_left.reverse();
+    Polygon hole_right = hole_left;
+    hole_right.translate(unit * 10, 0);
+    Polygon inner_left = unit_box;
+    inner_left.scale(4);
+    inner_left.translate(unit * 3, unit * 3);
+    Polygon inner_right = inner_left;
+    inner_right.translate(unit * 10, 0);
+    const Polygons nested = Slic3r::union_({ frame, hole_left, hole_right, inner_left, inner_right });
+    ClipperLib::PolyTree tree = Slic3r::union_pt(nested);
+    Slic3r::ExPolygons islands;
+    Slic3r::traverse_pt(&tree, &islands);
+    REQUIRE(islands.size() == 3);
+    CHECK(islands[0].holes.size() == 2);
+    CHECK(islands[1].holes.empty());
+    CHECK(islands[2].holes.empty());
+    for (size_t inner = 1; inner < islands.size(); ++inner)
+        CHECK(std::any_of(islands[0].holes.begin(), islands[0].holes.end(),
+                          [&](const Polygon &hole) { return hole.contains(islands[inner].contour.first_point()); }));
+    const Slic3r::ExPolygons reference = Slic3r::union_ex(nested);
+    REQUIRE(reference.size() == islands.size());
+    for (size_t idx = 0; idx < islands.size(); ++idx) {
+        CHECK(islands[idx].contour.area() == Approx(reference[idx].contour.area()));
+        CHECK(islands[idx].holes.size() == reference[idx].holes.size());
+    }
+}

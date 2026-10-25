@@ -62,6 +62,9 @@ public:
     /*
     Materialize as Slic3r ExPolygons, grouping contours and holes where the
     underlying representation contains enough hierarchy, for example PolyTree.
+    The islands of the result of a Clipper operation are listed from outside to
+    inside (an island lying in a hole of another comes after it); a collection
+    converted without an operation keeps its source order.
     */
     virtual ExPolygons to_expolygons() const = 0;
 

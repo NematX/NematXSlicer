@@ -343,6 +343,9 @@ class ClipperOperand(_UniqueOwnerMixin):
         return StoredPolygonCollection.adopt_owned(self.api, self.storage(), handle)
 
     def to_expolygon_collection(self) -> StoredExPolygonCollection:
+        """Materialize the shape as ExPolygons. The islands of the result of a Clipper operation are listed from outside to
+        inside (an island lying in a hole of another comes after it), as the host's layer islands require; an ExPolygon
+        collection converted without an operation keeps its source order."""
         handle = self.api.host.clipper_shapes_to_expolygons(self.c_storage(), self.c_handle())
         return StoredExPolygonCollection.adopt_owned(self.api, self.storage(), handle)
 
@@ -350,6 +353,7 @@ class ClipperOperand(_UniqueOwnerMixin):
         self.api.host.clipper_shapes_replace_polygons(dst.mutable_c_handle(), self.c_handle())
 
     def write_expolygons_to(self, dst: StoredExPolygonCollection) -> None:
+        """Replace the contents of dst with the ExPolygons, in the same order as to_expolygon_collection()."""
         self.api.host.clipper_shapes_replace_expolygons(dst.mutable_c_handle(), self.c_handle())
 
     def for_each_expolygon(self, fn: Callable[[ExPolygon], object]) -> None:

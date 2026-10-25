@@ -103,6 +103,7 @@ static Polygons polygons_from_paths(const ClipperLib::Paths &paths)
     return out;
 }
 
+// The islands of a tree, ordered from outside to inside (see traverse_pt()).
 static ExPolygons expolygons_from_polytree(const ClipperLib::PolyTree &tree)
 {
     ExPolygons out;

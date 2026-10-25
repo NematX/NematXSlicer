@@ -616,33 +616,25 @@ void traverse_pt(const ClipperLib::PolyNode *tree, Polygons *out)
     traverse_pt<ordering>(tree->Childs, out);
 }
 
-// Collecting polygons of the tree into a list of ExPolygons.
+// Collecting polygons of the tree into a list of ExPolygons. An island comes before the islands nested in its holes, so the
+// list is ordered from outside to inside, as union_ex() orders it.
 template<e_ordering ordering = e_ordering::OFF>
 void traverse_pt(const ClipperLib::PolyNode *tree, ExPolygons *out)
 {
     if (!tree) return;
-    else if(tree->IsHole()) {
-        // Levels of holes are skipped and handled together with the
-        // contour levels.
+    else if (tree->IsHole()) {
+        // Levels of holes are skipped: their contours are the holes of the parent level; the islands they hold follow it.
         traverse_pt<ordering>(tree->Childs, out);
         return;
     }
-    
-    ExPolygon level;
+    out->emplace_back();
+    ExPolygon &level = out->back();
     level.contour.points = tree->Contour;
-    
-    foreach_node<ordering>(tree->Childs, 
-                           [out, &level] (const ClipperLib::PolyNode *node) {
-        
-        // Holes are collected here. 
-        level.holes.emplace_back(node->Contour);
-        
-        // By doing a recursion, a new level expoly is created with the contour
-        // and holes of the lower level. Doing this for all the childs.
-        traverse_pt<ordering>(node->Childs, out);
-    }); 
-    
-    out->emplace_back(level);
+    level.holes.reserve(tree->Childs.size());
+    for (const ClipperLib::PolyNode *hole : tree->Childs)
+        level.holes.emplace_back(hole->Contour);
+    // level is not used past this point: the recursion may reallocate out.
+    traverse_pt<ordering>(tree->Childs, out);
 }
 
 template<e_ordering o = e_ordering::OFF, class ExOrJustPolygons>

@@ -307,7 +307,9 @@ Materialize a Clipper shape into a new storage-owned collection.
 clipper_shapes_to_polygons() returns a polygon_collection_handle where each
 item is intended to be interpreted as a Polygon.
 
-clipper_shapes_to_expolygons() returns a real expolygon_collection_handle.
+clipper_shapes_to_expolygons() returns a real expolygon_collection_handle. The islands of the result of a Clipper operation
+are listed from outside to inside (an island lying in a hole of another comes after it), as the host's layer islands require;
+an ExPolygon collection converted without an operation keeps its source order.
 Both returned handles are owned by storage and may be released with
 storage_free().
 */
@@ -319,7 +321,8 @@ Replace an existing collection with the materialized contents of shapes.
 
 These functions are useful when the caller already owns a suitable output
 collection and wants to avoid allocating another storage object. The destination
-collection is cleared first, then filled with the converted result.
+collection is cleared first, then filled with the converted result. The ExPolygons are in the same order as
+clipper_shapes_to_expolygons() gives them.
 
 dst is not freed or replaced; only its contents are changed.
 */

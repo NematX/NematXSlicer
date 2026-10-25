@@ -302,7 +302,9 @@ public:
     }
 
     // Materialize the shape into a storage-owned ExPolygonCollection. Prefer
-    // this when contour/hole hierarchy matters.
+    // this when contour/hole hierarchy matters. The islands of the result of a Clipper operation are listed from outside to inside
+    // (an island lying in a hole of another comes after it), as the host's layer islands require; an ExPolygon collection converted
+    // without an operation keeps its source order.
     // The returned collection is owned by storage, so free it with storage_free(storage, handle) when t's no longer used.
     StoredExPolygonCollection to_expolygon_collection() const {
         return StoredExPolygonCollection::adopt(m_storage, clipper_shapes_to_expolygons(m_storage, handle()));
@@ -315,7 +317,7 @@ public:
         return StoredPolygonCollection::adopt(m_storage, clipper_shapes_to_polygons(m_storage, handle()));
     }
 
-    // Replace an existing destination collection without allocating a new collection handle.
+    // Replace an existing destination collection without allocating a new collection handle. Same order as to_expolygon_collection().
     void write_expolygons_to(StoredExPolygonCollection &dst) const {
         clipper_shapes_replace_expolygons(dst.mutable_handle(), handle());
     }
