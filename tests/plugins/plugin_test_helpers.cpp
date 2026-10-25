@@ -64,6 +64,7 @@
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultFan.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultLayerEntryState.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultSpeed.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp"
 #include "libslic3r/Plugins/Ordering/DefaultOrdering.hpp"
@@ -774,6 +775,8 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultFanPlugin::register_default_fan_plugin(
             orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::DefaultTemperaturePlugin::register_default_temperature_plugins(
+            orchestrator_handle_value);
         slic3r_api::SkirtBrim::DefaultBrimGeneratorPlugin::register_default_brim_generator_plugin(
             orchestrator_handle_value);
         slic3r_api::SkirtBrim::DefaultSkirtGeneratorPlugin::register_default_skirt_generator_plugin(
@@ -929,6 +932,8 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.acceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel_deceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.default");
+        activate_plugin_or_fail(orchestrator, "extrusion_edit.startup_temperature.default");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.temperature.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.toolchange.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.retraction.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.lift.default");

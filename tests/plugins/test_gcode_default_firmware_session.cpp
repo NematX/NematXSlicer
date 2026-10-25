@@ -4304,6 +4304,7 @@ TEST_CASE("Default firmware rejects missing process properties and unknown tools
     }
 }
 
+// Confirm that the preamble brackets start-script modes while startup heater commands come from the temperature plugin.
 TEST_CASE("Preamble brackets start script before priming and restores profile state",
           "[plugins][gcode][firmware][preamble]")
 {
@@ -4352,9 +4353,10 @@ TEST_CASE("Preamble brackets start script before priming and restores profile st
             CHECK(text.find("G21", start_pos) != std::string::npos);
             CHECK(text.find("G90", start_pos) != std::string::npos);
             CHECK(text.find("M82", start_pos) != std::string::npos);
-            CHECK(text.find("M109", start_pos) < text.find("G1 X1"));
-            CHECK(text.find("S215", start_pos) != std::string::npos);
-            CHECK(text.find("S60", start_pos) != std::string::npos);
+            CHECK(text.find("M109", start_pos) == std::string::npos);
+            CHECK(text.find("M190", start_pos) == std::string::npos);
+            CHECK(text.find("S215", start_pos) == std::string::npos);
+            CHECK(text.find("S60", start_pos) == std::string::npos);
             CHECK(count_occurrences(text, "G1 X1") == 1);
         }
     } catch (...) { remove_output_pair(path); throw; }
@@ -4552,8 +4554,8 @@ TEST_CASE("Thumbnail encoder adapter contains errors and owns its session once",
     CHECK_THROWS(slic3r_api::GCodeThumbnailEncoderView(&incomplete));
 }
 
-// Startup heats only the initial SEMM filament, selecting it with the dialect's shared-tool command.
-TEST_CASE("Preamble heats physical tools but only one MMU nozzle",
+// The firmware preamble selects only the initial tool and leaves automatic heating to the temperature plugin.
+TEST_CASE("Preamble leaves automatic heating to the temperature plugin",
           "[plugins][gcode][firmware][preamble]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -4571,21 +4573,21 @@ TEST_CASE("Preamble heats physical tools but only one MMU nozzle",
     print.mutable_printing_plan().groups[0].layers[0].tool_groups.back().extruder_id = 0;
     const std::string text = export_with_firmware(print, firmware_id);
     INFO(text);
-    CHECK(text.find("S220") != std::string::npos);
-    CHECK((text.find("S205") != std::string::npos) == !mmu);
-    if (mmu) {
-        CHECK(count_occurrences(text, "M109 S220\n") == 1);
-        CHECK(text.find("M104 S220") == std::string::npos);
-    }
+    const size_t first_layer = text.find(";LAYER_CHANGE\n");
+    REQUIRE(first_layer != std::string::npos);
+    const std::string preamble = text.substr(0, first_layer);
+    CHECK(text.find("S220") == std::string::npos);
+    CHECK(text.find("S205") == std::string::npos);
+    CHECK(text.find("M109") == std::string::npos);
+    CHECK(text.find("M190") == std::string::npos);
     const std::string initial_selection = std::string(firmware_id) == "gcode.firmware.klipper" && !mmu ?
         "ACTIVATE_EXTRUDER EXTRUDER=extruder1\n" : "T1\n";
-    CHECK(text.find(initial_selection + "G92 E0\n") != std::string::npos);
-    if (std::string(firmware_id) == "gcode.firmware.klipper") {
-        // The active Klipper tool remains unaddressed; preamble requests select
-        // a non-active physical tool before emitting its heater command.
-        const std::string selection = mmu ? "T1\n" : "ACTIVATE_EXTRUDER EXTRUDER=extruder1\n";
-        CHECK(text.find(selection) < text.find("M109 S220"));
-        if (!mmu) CHECK(text.find("ACTIVATE_EXTRUDER EXTRUDER=extruder\n") < text.find("M109 S205"));
+    CHECK(preamble.find(initial_selection + "G92 E0\n") != std::string::npos);
+    if (!mmu) {
+        if (std::string(firmware_id) == "gcode.firmware.marlin2")
+            CHECK(preamble.find("T0\n") == std::string::npos);
+        else
+            CHECK(preamble.find("ACTIVATE_EXTRUDER EXTRUDER=extruder\n") == std::string::npos);
     }
 }
 

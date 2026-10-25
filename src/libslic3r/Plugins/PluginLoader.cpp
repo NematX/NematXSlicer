@@ -114,6 +114,7 @@ after the available plugin set is known.
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultFan.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultLayerEntryState.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultSpeed.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp"
 #include "libslic3r/Plugins/Ordering/DefaultOrdering.hpp"
@@ -776,6 +777,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::LayerExtrusionEdit::DefaultTravelDecelerationPlugin::register_default_travel_deceleration_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.fan.default",
         slic3r_api::LayerExtrusionEdit::DefaultFanPlugin::register_default_fan_plugin);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.temperature.default",
+        slic3r_api::LayerExtrusionEdit::DefaultTemperaturePlugin::register_default_temperature_plugins);
     register_builtin_plugin(orchestrator, "skirt_brim.brim.default",
         slic3r_api::SkirtBrim::DefaultBrimGeneratorPlugin::register_default_brim_generator_plugin);
     register_builtin_plugin(orchestrator, "skirt_brim.skirt.default",

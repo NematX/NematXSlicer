@@ -11,7 +11,6 @@
 #include <wx/wupdlock.h>
 
 #include "libslic3r/Config/AppConfig.hpp"
-#include "libslic3r/CustomGCode.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Utils.hpp"
@@ -88,7 +87,11 @@ void CalibrationTempDialog::create_geometry(wxCommandEvent& event_args) {
 
     // -- get temps
     const ConfigOptionInts* temperature_config = filament_config->option<ConfigOptionInts>("temperature");
-    const int first_layer_temperature = filament_config->option<ConfigOptionInts>("temperature")->get_at(0);
+    const ConfigOptionInts* first_layer_temperature_config = filament_config->option<ConfigOptionInts>("first_layer_temperature");
+    // The first layer keeps the filament's first-layer temperature (its normal one when unset),
+    // because the object's print_temperature (bottom floor) would otherwise win on that layer.
+    const int first_layer_temperature = first_layer_temperature_config->get_at(0) > 0 ?
+        first_layer_temperature_config->get_at(0) : temperature_config->get_at(0);
     assert(temperature_config->size() >= 1);
     long nb_items_up = 1;
     if (!nb_up->GetValue().ToLong(&nb_items_up)) {
@@ -165,21 +168,9 @@ void CalibrationTempDialog::create_geometry(wxCommandEvent& event_args) {
     DynamicPrintConfig new_print_config = *print_config; //make a copy
     new_print_config.set_key_value("complete_objects", new ConfigOptionBool(false));
     
-    /// -- generate the heat change gcode
-    //std::string str_layer_gcode = "{if layer_num > 0 and layer_z  <= " + std::to_string(2 * xyzScale) + "}\nM104 S" + std::to_string(temperature - (int8_t)nb_delta * 5);
-    //    double print_z, std::string gcode,int extruder, std::string color
-    double firstChangeHeight = print_config->option("first_layer_height")->get_effective_value(nozzle_diameter);
-    //model.custom_gcode_per_print_z.gcodes.emplace_back(CustomGCode::Item{ firstChangeHeight + nozzle_diameter/2, CustomGCode::Type::Custom, -1, "", "M104 S" + std::to_string(temperature) + " ; ground floor temp tower set" });
+    // the object temperature is the first floor's
     model.objects()[objs_idx[0]].config.set_key_value("print_temperature", new ConfigOptionInt(temperature));
     model.objects()[objs_idx[0]].config.set_key_value("print_first_layer_temperature", new ConfigOptionInt(first_layer_temperature));
-    for (int16_t i = 1; i < nb_items; i++) {
-        model.custom_gcode_per_print_z.gcodes.push_back(CustomGCode::Item{ scale_to_layer_coord(i * 10 * xyzScale), CustomGCode::Type::Custom , -1, "", "M104 S" + std::to_string(temperature - i * step_temp) + " ; floor " + std::to_string(i) + " of the temp tower set" });
-        //model.custom_gcode_per_print_z.gcodes.emplace_back((i * 10 * xyzScale), CustomGCode::Type::Custom , -1, "", "M104 S" + std::to_string(temperature - i * step_temp) + " ; floor " + std::to_string(i) + " of the temp tower set");
-        //str_layer_gcode += "\n{ elsif layer_z >= " + std::to_string(i * 10 * xyzScale) + " and layer_z <= " + std::to_string((1 + i * 10) * xyzScale) + " }\nM104 S" + std::to_string(temperature - (int8_t)nb_delta * 5 + i * 5);
-    }
-    //str_layer_gcode += "\n{endif}\n";
-    //DynamicPrintConfig new_printer_config = *printerConfig; //make a copy
-    //new_printer_config.set_key_value("layer_gcode", new ConfigOptionString(str_layer_gcode));
 
     /// --- custom config ---
     float brim_width = print_config->option<ConfigOptionFloat>("brim_width")->value;
@@ -202,6 +193,23 @@ void CalibrationTempDialog::create_geometry(wxCommandEvent& event_args) {
     model.objects()[objs_idx[0]].config.set_key_value("infill_filled_bottom", new ConfigOptionBool(true));
     //disable ironing post-process, it only slow down things
     model.objects()[objs_idx[0]].config.set_key_value("ironing", new ConfigOptionBool(false));
+
+    /// --- one height range per floor above the first carries its temperature ---
+    // A range applies to layers whose middle is inside [low, high), so each floor
+    // changes temperature at its own first layer. get_default_layer_config() gives
+    // the layer_height (read by slicing and by the object list) and extruder (needed
+    // to list the range) of a user-made range; it must run after the object's
+    // layer_height is set. The last range extends one floor higher so a model top
+    // above the last nominal floor keeps that floor's temperature (ranges are
+    // clipped at the object height).
+    ModelObject &tower = model.objects()[objs_idx[0]];
+    for (int16_t i = 1; i < nb_items; i++) {
+        const double low = double(i) * 10. * xyzScale;
+        const double high = double(i + 1 < nb_items ? i + 1 : i + 2) * 10. * xyzScale;
+        ModelConfig &floor_config = tower.layer_config_ranges[{ low, high }];
+        floor_config.assign_config(this->gui_app->obj_list()->get_default_layer_config(int(objs_idx[0])));
+        floor_config.set_key_value("print_temperature", new ConfigOptionInt(int(temperature - i * step_temp)));
+    }
 
     //update plater
     //GLCanvas3D::set_warning_freeze(false);

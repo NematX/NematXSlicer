@@ -12,13 +12,16 @@
 #include <charconv>
 #include <cmath>
 #include <limits>
-#include <set>
 #include <sstream>
 #include <stdexcept>
+#include <vector>
 
 /* Startup composition and shared script interpreter.
    All public geometry stays in the plan. This helper emits initialization and
    existing event trees, and updates the owning session after encoding commands.
+   Automatic bed, chamber, and tool heating is supplied by the
+   extrusion_edit.startup_temperature.default plugin after start_gcode; this
+   helper keeps only startup mode, tool selection, and first-layer fan state.
    Thumbnail text may be retained for end_print, but no source view survives begin.
    A custom G-code E move changes the retraction state only when its own line
    declares it: a negative E move retracts with the comment "; retraction" and a
@@ -152,6 +155,7 @@ private:
 
     double unit_scale() const { return m_session.m_units_in_mm ? 1.0 : 25.4; }
 
+    // Resolve an explicit or current/script tool selector, returning no tool for missing, negative, or out-of-range IDs.
     std::optional<extruder_index_t> addressed_tool(const GCodeLineParser::GCodeLine &line,
                                                    char selector) const
     {
@@ -257,7 +261,7 @@ private:
 };
 
 
-// Initialize startup-only context; clear borrowed views on both exit paths.
+// Scan the first concrete plan visit, compose thumbnails and start events, and clear borrowed state on both success and failure; unresolved or out-of-range tools are rejected.
 std::string GCodePreamble::begin(
     const Print &print,
     const ConstPrintingPlan &plan,
@@ -268,20 +272,20 @@ std::string GCodePreamble::begin(
     m_in_preamble = true;
     m_start_written = false;
     m_initial_tool = EXTRUDER_ID_UNKNOWN;
-    m_initial_tools.clear();
     m_trailing_thumbnails.clear();
     try {
-        for (uint32_t gi = 0; gi < plan.group_count() && m_initial_tools.empty(); ++gi) {
+        for (uint32_t gi = 0; gi < plan.group_count() && m_initial_tool == EXTRUDER_ID_UNKNOWN; ++gi) {
             const ConstPrintingGroup group = plan.group(gi);
-            for (uint32_t li = 0; li < group.layer_group_count() && m_initial_tools.empty(); ++li) {
+            for (uint32_t li = 0;
+                 li < group.layer_group_count() && m_initial_tool == EXTRUDER_ID_UNKNOWN;
+                 ++li) {
                 const ConstPrintingLayerGroup layer = group.layer_group(li);
                 for (uint32_t ti = 0; ti < layer.tool_group_count(); ++ti) {
                     const extruder_index_t tool = layer.tool_group(ti).extruder_id();
-                    if (tool >= m_session.m_extruders.size())
+                    if (tool <= EXTRUDER_ID_UNKNOWN || tool >= m_session.m_extruders.size())
                         throw std::invalid_argument("Preamble requires resolved, valid tool IDs.");
-                    if (m_initial_tool == EXTRUDER_ID_UNKNOWN) m_initial_tool = tool;
-                    if (std::find(m_initial_tools.begin(), m_initial_tools.end(), tool) == m_initial_tools.end())
-                        m_initial_tools.push_back(tool);
+                    m_initial_tool = tool;
+                    break;
                 }
             }
         }
@@ -334,9 +338,7 @@ std::string GCodePreamble::pre_start(const std::string &resolved)
     return output;
 }
 
-// Request profile startup state only after the script's effects are known.
-// MMU logical tools share one physical heater: only the initial filament's
-// target is applied. No loading, purge, priming or homing geometry is invented.
+// Restore startup modes, select the initial tool, and emit first-layer fan state; the no-argument result owns only these commands, while startup heater targets are appended by the temperature plugin after start_gcode and no input state is retained.
 std::string GCodePreamble::post_start()
 {
     if (!m_config || m_config->bool_or_default("start_gcode_manual", false)) return {};
@@ -351,45 +353,14 @@ std::string GCodePreamble::post_start()
     if (envelope) output += m_session.encode_machine_envelope(*envelope);
     if (m_initial_tool == EXTRUDER_ID_UNKNOWN) return output;
     output += m_session.select_extruder(m_initial_tool);
-    const bool mmu = m_config->bool_or_default("single_extruder_multi_material", false);
-    // Bed and chamber are shared hardware and use the initial tool's profile.
-    for (bool bed : {true, false}) {
-        const char *key = bed ? "first_layer_bed_temperature" : "chamber_temperature";
-        const int32_t target = m_config->vector_int_or_default(key, m_initial_tool, 0);
-        if (target <= 0) continue;
-        if (target > INT16_MAX) throw std::invalid_argument("Startup temperature is out of range.");
-        HeaterState &heater = bed ? m_session.m_printer.bed_heater() : m_session.m_printer.chamber_heater();
-        heater.request_temperature(int16_t(target));
-        if (heater.needs_wait_encoding()) {
-            output += bed ? m_session.encode_bed_temperature(heater.effective_temperature(), true) :
-                            m_session.encode_chamber_temperature(heater.effective_temperature(), true);
-            heater.mark_encoded_with_wait();
+    DefaultExtruder &tool = m_session.extruder(m_initial_tool);
+    if (m_config->vector_int_or_default("disable_fan_first_layers", m_initial_tool, 0) > 0) {
+        tool.fan().request_speed_percent(0.0);
+        if (tool.fan().needs_encoding()) {
+            output += m_session.encode_fan(m_initial_tool, tool.fan().effective_speed_percent());
+            tool.fan().mark_encoded();
         }
     }
-    for (extruder_index_t id : m_initial_tools) {
-        if (mmu && id != m_initial_tool) continue;
-        // Some dialects (notably Klipper's M104/M109) address the active
-        // heater, so select each physical tool before using those encoders.
-        output += m_session.select_extruder(id);
-        DefaultExtruder &tool = m_session.extruder(id);
-        const int32_t target = m_config->vector_int_or_default("first_layer_temperature", id, 0);
-        if (target > INT16_MAX) throw std::invalid_argument("Startup temperature is out of range.");
-        if (target > 0) {
-            tool.heater().request_temperature(int16_t(target));
-            if (tool.heater().needs_wait_encoding()) {
-                output += m_session.encode_tool_temperature(id, tool.heater().effective_temperature(), true);
-                tool.heater().mark_encoded_with_wait();
-            }
-        }
-        if (m_config->vector_int_or_default("disable_fan_first_layers", id, 0) > 0) {
-            tool.fan().request_speed_percent(0.0);
-            if (tool.fan().needs_encoding()) {
-                output += m_session.encode_fan(id, tool.fan().effective_speed_percent());
-                tool.fan().mark_encoded();
-            }
-        }
-    }
-    output += m_session.select_extruder(m_initial_tool);
     return output;
 }
 

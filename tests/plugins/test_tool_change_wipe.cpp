@@ -802,6 +802,8 @@ TEST_CASE("Tool-change exported tower scales only its purge speed", "[plugins][w
 // temperature is waited for before the pulls (normal mode) or after the cooling moves (fast
 // skinnydip), with the toolchange part fan, and nothing requests a temperature after the tool change.
 // The final unload requests none, and a multi-nozzle tower requests none at all.
+// The no-request check is limited to the layer of the first change because later layers legitimately
+// receive root-temperature requests from the layer plugin.
 TEST_CASE("SEMM tool change temperatures follow the swap phases",
           "[plugins][wipe-tower][toolchange][semm]")
 {
@@ -887,6 +889,7 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
     size_t first_pulls = 0, first_geometric = 0;
     size_t tower_changes = 0, layer_changes = 0;
     int first_change_tool = -1;
+    size_t first_change_layer_changes = 0;
     reader.parse_buffer(gcode, [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
         if (line.comment() == "TYPE:Wipe tower") {
             tower = true;
@@ -902,6 +905,7 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
                     first_change_tool = line.cmd_is("T0") ? 0 : 1;
                     first_pulls = pulls;
                     first_geometric = geometric;
+                    first_change_layer_changes = layer_changes;
                 }
                 ++tower_changes;
             }
@@ -1052,10 +1056,12 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
             else
                 CHECK((event.value == 200 || event.value == 240));
         }
-    // Nothing requests a temperature between the change and the load; the final unload, which runs
-    // after the last change, requests no incoming temperature either.
+    // On the first-change layer nothing requests a temperature between the change and the load; later
+    // layers may legitimately receive root-temperature requests from the layer plugin. The final
+    // unload, which runs after the last change, requests no incoming temperature either.
     for (const Event &event : events) {
-        const bool after_change = event.tower && event.phase == 4 && event.tower_changes == 1;
+        const bool after_change = event.tower && event.phase == 4 && event.tower_changes == 1 &&
+            event.layer_changes == first_change_layer_changes;
         const bool incoming_after_last_change = event.tower && event.tower_changes == tower_changes &&
             (event.value == 200 || event.value == 210 || event.value == 240 || event.value == 250);
         CHECK_FALSE(after_change);
