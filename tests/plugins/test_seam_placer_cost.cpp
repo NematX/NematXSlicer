@@ -11,8 +11,10 @@
 #include <string>
 #include <vector>
 
+
 #include "perimeter_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+#include "test_data.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
@@ -32,6 +34,7 @@
 #include "libslic3r/Plugins/SeamPlacer/CostSeamPlacer.hpp"
 #include "libslic3r/Plugins/SeamPlacer/SeamCandidatePreparation.hpp"
 #include "libslic3r/Plugins/SeamPlacer/SeamCostModel.hpp"
+#include "libslic3r/Plugins/SeamPlacer/SeamPlacerRouter.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintObjectRegion.hpp"
@@ -2252,4 +2255,42 @@ TEST_CASE("Contiguous seam rejects repeated initialization and invalid requests"
             reinterpret_cast<const extrusion_entity_handle *>(&open)),
         fixture.region_view(), {}),
         "Contiguous seam placement needs a non-empty closed loop.");
+}
+
+TEST_CASE("Seam router projects loops without a perimeter marker and keeps marked loops on Cost",
+          "[plugins][seam-placer][cost][router]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const ScopedPluginActivation cost(orchestrator, k_cost_plugin);
+    const std::string seam_selector = Slic3r::Steps::plugin_exclusive_group_option_key(
+        orchestrator, SEAM_PLACER, "seam_placer_plugin");
+    CostFixture fixture({{seam_selector, k_cost_plugin}, {"seam_visibility", "0"},
+                         {"seam_angle_cost", "0"}, {"seam_travel_cost", "0"}});
+    // Keep the root views: a later add may reallocate the tool group's extrusion list.
+    const slic3r_api::ExtrusionEntity marked = fixture.add(
+        rectangle_loop(-8, -8, 2, 2), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER).root();
+    const slic3r_api::ExtrusionEntity unmarked = fixture.add(
+        rectangle_loop(4, -8, 8, -4), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE,
+        0, nullptr, false).root();
+
+    PluginStorage storage;
+    const slic3r_api::SeamPlacement::SeamPlacerRouter router(
+        reinterpret_cast<orchestrator_handle *>(&orchestrator),
+        slic3r_api::Print(reinterpret_cast<const print_handle *>(&fixture.prepared.print)),
+        slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(
+            &fixture.prepared.print.mutable_printing_plan())),
+        reinterpret_cast<storage_handle *>(&storage));
+
+    const c_point front = unmarked.front();
+    const c_point start = {front.x + scale_i(2), front.y - scale_i(3)};
+    const c_point projected = router.place_seam(unmarked, start);
+    CHECK(projected.x == front.x + scale_i(2));
+    CHECK(projected.y == front.y);
+
+    const slic3r_api::SeamPlacer direct = create_cost_session(fixture.prepared.print);
+    const c_point expected = direct.place_seam(marked, fixture.region_view(), start);
+    const c_point routed = router.place_seam(marked, start);
+    CHECK(routed.x == expected.x);
+    CHECK(routed.y == expected.y);
 }
