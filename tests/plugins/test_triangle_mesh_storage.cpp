@@ -34,6 +34,14 @@ c_matrix4d identity_transform()
     return transform;
 }
 
+// Mode 0 (REGULAR) with the identity transform, which must be set explicitly.
+c_mesh_slicing_params regular_params()
+{
+    c_mesh_slicing_params params{};
+    params.transform = identity_transform();
+    return params;
+}
+
 // RAW_MESH_SLICING_MODE_POSITIVE is the CloseHoles slicing mode of the native object slicing.
 c_mesh_slicing_params positive_params()
 {
@@ -87,17 +95,16 @@ TEST_CASE("Storage-owned triangle mesh reads back arrays and slices through ever
     CHECK(expolygons.back().empty());
 
     const std::vector<slic3r_api::StoredPolygonCollection> regular =
-        mesh.slice_to_polygons(handle, identity_transform(), zs);
+        mesh.slice_to_polygons(handle, regular_params(), zs, nullptr);
     REQUIRE(regular.size() == zs.size());
     CHECK(regular[1].size() == 1);
     CHECK(regular.back().empty());
 
-    slic3r_api::StoredExPolygonCollection regular_expolygons(handle);
-    expolygon_collection_handle *regular_expolygon_handle = regular_expolygons.mutable_handle();
-    const float mid_z = 5.f;
-    triangle_mesh_slice_to_expolygons(mesh.handle(), identity_transform(), &mid_z, &regular_expolygon_handle, 1);
+    const std::vector<slic3r_api::StoredExPolygonCollection> regular_expolygons =
+        mesh.slice_to_expolygons(handle, regular_params(), {5.f}, nullptr);
     REQUIRE(regular_expolygons.size() == 1);
-    CHECK(unscaled(unscaled(regular_expolygons.at(0).area())) == Approx(100.));
+    REQUIRE(regular_expolygons.front().size() == 1);
+    CHECK(unscaled(unscaled(regular_expolygons.front().at(0).area())) == Approx(100.));
 
     std::vector<slic3r_api::StoredPolygonCollection> positive_polygons;
     std::vector<polygon_collection_handle *> positive_handles;
@@ -105,8 +112,8 @@ TEST_CASE("Storage-owned triangle mesh reads back arrays and slices through ever
         positive_polygons.emplace_back(handle);
         positive_handles.push_back(positive_polygons.back().mutable_handle());
     }
-    triangle_mesh_slice_to_polygons_with_params(mesh.handle(), &positive, zs.data(), positive_handles.data(),
-                                                uint32_t(zs.size()));
+    CHECK(triangle_mesh_slice_to_polygons(mesh.handle(), &positive, zs.data(), positive_handles.data(),
+                                          uint32_t(zs.size()), nullptr) == RAW_MESH_SLICE_STATUS_DONE);
     REQUIRE(positive_polygons.size() == zs.size());
     CHECK(positive_polygons[1].size() == 1);
     CHECK(unscaled(unscaled(positive_polygons[1].at(0).area())) == Approx(100.));

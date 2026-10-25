@@ -222,7 +222,7 @@ These storages are **inputs for plugins**. Returned transformations are copied v
 
 `object_get_max_z` is not always a pure local height: for a model object, it uses the model's transformed max Z; for the auxiliary object without a model, it returns the object's native height.
 
-Sources: `src/libslic3r/Model.hpp:358`, `src/libslic3r/Model.hpp:844`, `src/libslic3r/Model.hpp:994`, `src/libslic3r/Api/host/slic3r_volume.cpp:307`, `src/libslic3r/Api/host/slic3r_volume.cpp:592`, `src/libslic3r/Api/host/slic3r_data_tree.cpp:781`.
+Sources: `src/libslic3r/Model.hpp:358`, `src/libslic3r/Model.hpp:844`, `src/libslic3r/Model.hpp:994`, `src/libslic3r/Api/host/slic3r_volume.cpp:373`, `src/libslic3r/Api/host/slic3r_volume.cpp:726`, `src/libslic3r/Api/host/slic3r_data_tree.cpp:781`.
 
 ### Canonical regions and associations
 
@@ -245,7 +245,7 @@ Sources: `src/libslic3r/Model.hpp:358`, `src/libslic3r/Model.hpp:844`, `src/libs
 
 `apply()` can rewire `LayerRegion::m_region` without replacing its geometry. Restoring an old full copy of LayerRegion could therefore undo a valid current configuration. Painted associations, `prev_same_region`, volume caches and internal counters are not exposed as editable views of this API.
 
-Sources: `src/libslic3r/PrintRegion.hpp:65`, `src/libslic3r/PrintObjectRegion.hpp:54`, `src/libslic3r/Api/host/slic3r_volume.cpp:236`, `src/libslic3r/PrintApply.cpp:1529`.
+Sources: `src/libslic3r/PrintRegion.hpp:65`, `src/libslic3r/PrintObjectRegion.hpp:54`, `src/libslic3r/Api/host/slic3r_volume.cpp:302`, `src/libslic3r/PrintApply.cpp:1529`.
 
 ## 4. Layers, regions, islands and surfaces
 

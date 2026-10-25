@@ -21,7 +21,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <functional>
 #include <iterator>
+#include <limits>
 #include <optional>
 #include <random>
 #include <sstream>
@@ -522,6 +524,11 @@ plugin_run_context probe_context(CancelProbe &probe)
 // The cube-like mesh and parameters of the cancellation cases.
 constexpr size_t cancel_layer_count = 12;
 
+// is_cancelled calls of triangle_mesh_slice_to_polygons() on a small mesh: the check before the work, the one of
+// slice_make_lines (face 0), the one between the lines and the loops, the one of make_loops (layer 0), and the one before
+// publishing.
+constexpr int raw_slice_checks = 5;
+
 } // namespace
 
 TEST_CASE("slice_to_expolygons helper is identical to the native slicing", "[plugins][slice-volume][slicing-helper]")
@@ -588,8 +595,8 @@ TEST_CASE("slice_to_expolygons helper stops on cancellation", "[plugins][slice-v
         const plugin_run_context context = probe_context(probe);
         const std::vector<slic3r_api::StoredExPolygonCollection> out = view.slice_to_expolygons(handle, params, zs, &context);
         CHECK(out.size() == zs.size());
-        // Two checks around the raw slicing, one per layer, one at the end.
-        CHECK(probe.calls.load() == int(zs.size()) + 3);
+        // The checks of the raw slicing, one per layer, one at the end.
+        CHECK(probe.calls.load() == raw_slice_checks + int(zs.size()) + 1);
     }
     SECTION("a context cancelled before the call") {
         CancelProbe probe;
@@ -600,23 +607,24 @@ TEST_CASE("slice_to_expolygons helper stops on cancellation", "[plugins][slice-v
     }
     SECTION("a context cancelled while the layers are finished") {
         CancelProbe probe;
-        probe.cancel_after = 2 + int(zs.size()) / 2;
+        probe.cancel_after = raw_slice_checks + int(zs.size()) / 2;
         const plugin_run_context context = probe_context(probe);
         CHECK_THROWS_AS(view.slice_to_expolygons(handle, params, zs, &context), slic3r_api::PluginCancelled);
         CHECK(storage.size() == objects_before);
     }
     SECTION("a context cancelled after the last layer") {
         CancelProbe probe;
-        probe.cancel_after = 2 + int(zs.size());
+        probe.cancel_after = raw_slice_checks + int(zs.size());
         const plugin_run_context context = probe_context(probe);
         CHECK_THROWS_AS(view.slice_to_expolygons(handle, params, zs, &context), slic3r_api::PluginCancelled);
         CHECK(storage.size() == objects_before);
     }
-    SECTION("an exception of a layer is rethrown after the loop, not through the host frames") {
+    SECTION("an exception of the first layer job is rethrown after the loop, not through the host frames") {
         CancelProbe probe;
-        probe.throw_after = 2;
+        probe.throw_after = raw_slice_checks;
         const plugin_run_context context = probe_context(probe);
-        CHECK_THROWS_AS(view.slice_to_expolygons(handle, params, zs, &context), std::runtime_error);
+        // The exception of the probe itself, not the message of the host for an internal error.
+        CHECK_THROWS_WITH(view.slice_to_expolygons(handle, params, zs, &context), "probe");
         CHECK(storage.size() == objects_before);
     }
     SECTION("a call inside a parallel group that is already cancelled") {
@@ -635,6 +643,294 @@ TEST_CASE("slice_to_expolygons helper stops on cancellation", "[plugins][slice-v
     }
 }
 
+// ---- triangle_mesh_slice_to_polygons: status, cancellation and invalid arguments ----
+
+namespace {
+
+// One mesh sliced into 12 collections. fill() slices once so that the later failing calls have outputs to clear.
+struct RawSliceFixture {
+    TriangleMesh mesh;
+    c_mesh_slicing_params params;
+    std::vector<float> zs;
+    PluginStorage storage;
+    std::vector<slic3r_api::StoredPolygonCollection> out;
+    std::vector<polygon_collection_handle *> handles;
+
+    RawSliceFixture() :
+        mesh(slicing_dump_mesh("extruder_idler")),
+        params(helper_slicing_params(helper_param_cases()[1], false)),
+        zs(helper_slice_zs(mesh, params, cancel_layer_count))
+    {
+        for (size_t idx = 0; idx < zs.size(); ++idx) {
+            out.emplace_back(reinterpret_cast<storage_handle *>(&storage));
+            handles.push_back(out.back().mutable_handle());
+        }
+    }
+
+    const triangle_mesh_handle *mesh_handle() const { return reinterpret_cast<const triangle_mesh_handle *>(&mesh); }
+
+    int32_t call(const plugin_run_context *context)
+    {
+        return triangle_mesh_slice_to_polygons(mesh_handle(), &params, zs.data(), handles.data(), uint32_t(zs.size()), context);
+    }
+
+    // Make every collection non-empty.
+    void fill()
+    {
+        REQUIRE(call(nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+        REQUIRE_FALSE(all_empty());
+        for (const slic3r_api::StoredPolygonCollection &layer : out)
+            REQUIRE_FALSE(layer.empty());
+    }
+
+    bool all_empty() const
+    {
+        return std::all_of(out.begin(), out.end(), [](const slic3r_api::StoredPolygonCollection &layer) { return layer.empty(); });
+    }
+};
+
+} // namespace
+
+TEST_CASE("triangle_mesh_slice_to_polygons reports done, cancelled and internal error",
+          "[plugins][slice-volume][slicing-helper][cancel]")
+{
+    RawSliceFixture fixture;
+    const size_t objects_before = fixture.storage.size();
+
+    SECTION("a context that never cancels, a NULL context and a NULL callback give the slices") {
+        CancelProbe probe;
+        const plugin_run_context context = probe_context(probe);
+        CHECK(fixture.call(&context) == RAW_MESH_SLICE_STATUS_DONE);
+        CHECK(probe.calls.load() == raw_slice_checks);
+        CHECK_FALSE(fixture.all_empty());
+        CHECK(fixture.call(nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+        const plugin_run_context no_callback = {};
+        CHECK(fixture.call(&no_callback) == RAW_MESH_SLICE_STATUS_DONE);
+        CHECK_FALSE(fixture.all_empty());
+    }
+    SECTION("a context cancelled before the call is checked before any work") {
+        fixture.fill();
+        CancelProbe probe;
+        probe.cancel_after = 0;
+        const plugin_run_context context = probe_context(probe);
+        CHECK(fixture.call(&context) == RAW_MESH_SLICE_STATUS_CANCELLED);
+        CHECK(probe.calls.load() == 1);
+        CHECK(fixture.all_empty());
+    }
+    SECTION("a context cancelled by the first check of the slicer") {
+        fixture.fill();
+        CancelProbe probe;
+        probe.cancel_after = 1;
+        const plugin_run_context context = probe_context(probe);
+        CHECK(fixture.call(&context) == RAW_MESH_SLICE_STATUS_CANCELLED);
+        // The sentinel stops the work: no check after the one that answered yes.
+        CHECK(probe.calls.load() == probe.cancel_after + 1);
+        CHECK(fixture.all_empty());
+    }
+    SECTION("a context cancelled between the lines and the loops, then at the first loop") {
+        for (const int cancel_after : {2, 3}) {
+            fixture.fill();
+            CancelProbe probe;
+            probe.cancel_after = cancel_after;
+            const plugin_run_context context = probe_context(probe);
+            CHECK(fixture.call(&context) == RAW_MESH_SLICE_STATUS_CANCELLED);
+            CHECK(probe.calls.load() == cancel_after + 1);
+            CHECK(fixture.all_empty());
+        }
+    }
+    SECTION("a cancellation after the last check of the slicer is seen before publishing") {
+        fixture.fill();
+        CancelProbe probe;
+        probe.cancel_after = raw_slice_checks - 1;
+        const plugin_run_context context = probe_context(probe);
+        CHECK(fixture.call(&context) == RAW_MESH_SLICE_STATUS_CANCELLED);
+        // The slicer finished normally: only the check before publishing saw the request.
+        CHECK(probe.calls.load() == raw_slice_checks);
+        CHECK(fixture.all_empty());
+    }
+    SECTION("a call inside a parallel group that is already cancelled gives cancelled, also without a context") {
+        fixture.fill();
+        tbb::task_group_context group;
+        std::atomic<int32_t> status{RAW_MESH_SLICE_STATUS_DONE};
+        tbb::parallel_for(0, 1, [&](int) {
+            group.cancel_group_execution();
+            status = fixture.call(nullptr);
+        }, group);
+        CHECK(status.load() == RAW_MESH_SLICE_STATUS_CANCELLED);
+        CHECK(fixture.all_empty());
+    }
+    SECTION("an exception of the callback becomes an internal error") {
+        fixture.fill();
+        CancelProbe probe;
+        probe.throw_after = 1;
+        const plugin_run_context context = probe_context(probe);
+        CHECK(fixture.call(&context) == RAW_MESH_SLICE_STATUS_INTERNAL_ERROR);
+        CHECK(probe.calls.load() == probe.throw_after + 1);
+        CHECK(fixture.all_empty());
+    }
+    CHECK(fixture.storage.size() == objects_before);
+}
+
+TEST_CASE("triangle_mesh_slice_to_polygons rejects invalid arguments and clears the outputs",
+          "[plugins][slice-volume][slicing-helper][cancel]")
+{
+    RawSliceFixture fixture;
+    const uint32_t count = uint32_t(fixture.zs.size());
+    const float nan = std::numeric_limits<float>::quiet_NaN();
+    const float infinity = std::numeric_limits<float>::infinity();
+
+    SECTION("every invalid argument gives -1 and empties the outputs") {
+        c_mesh_slicing_params negative_radius = fixture.params;
+        negative_radius.closing_radius = -0.1f;
+        c_mesh_slicing_params non_finite_transform = fixture.params;
+        non_finite_transform.transform.value[3] = std::numeric_limits<double>::quiet_NaN();
+        const float quiet_nan = std::numeric_limits<float>::quiet_NaN();
+        const double quiet_nan_double = std::numeric_limits<double>::quiet_NaN();
+        const double infinity_double = std::numeric_limits<double>::infinity();
+        c_mesh_slicing_params nan_radius = fixture.params;
+        nan_radius.closing_radius = quiet_nan;
+        c_mesh_slicing_params infinite_radius = fixture.params;
+        infinite_radius.closing_radius = infinity;
+        c_mesh_slicing_params nan_extra_offset = fixture.params;
+        nan_extra_offset.extra_offset = quiet_nan;
+        c_mesh_slicing_params infinite_extra_offset = fixture.params;
+        infinite_extra_offset.extra_offset = -infinity;
+        c_mesh_slicing_params nan_resolution = fixture.params;
+        nan_resolution.resolution = quiet_nan_double;
+        c_mesh_slicing_params infinite_resolution = fixture.params;
+        infinite_resolution.resolution = infinity_double;
+        c_mesh_slicing_params nan_model_resolution = fixture.params;
+        nan_model_resolution.model_resolution = quiet_nan_double;
+        c_mesh_slicing_params infinite_model_resolution = fixture.params;
+        infinite_model_resolution.model_resolution = infinity_double;
+        std::vector<float> not_finite = fixture.zs;
+        not_finite[2] = nan;
+        std::vector<float> infinite = fixture.zs;
+        infinite.back() = infinity;
+        std::vector<float> decreasing = fixture.zs;
+        std::swap(decreasing[3], decreasing[4]);
+        REQUIRE(decreasing[3] > decreasing[4]);
+
+        const std::vector<std::pair<std::string, std::function<int32_t()>>> cases{
+            {"mesh NULL", [&] { return triangle_mesh_slice_to_polygons(nullptr, &fixture.params, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"params NULL", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), nullptr, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"z NULL", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, nullptr, fixture.handles.data(), count, nullptr); }},
+            {"slices NULL", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, fixture.zs.data(), nullptr, count, nullptr); }},
+            {"Z NaN", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, not_finite.data(), fixture.handles.data(), count, nullptr); }},
+            {"Z infinite", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, infinite.data(), fixture.handles.data(), count, nullptr); }},
+            {"Z decreasing", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, decreasing.data(), fixture.handles.data(), count, nullptr); }},
+            {"negative closing radius", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &negative_radius, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"NaN closing radius", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &nan_radius, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"infinite closing radius", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &infinite_radius, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"NaN extra offset", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &nan_extra_offset, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"infinite extra offset", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &infinite_extra_offset, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"NaN resolution", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &nan_resolution, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"infinite resolution", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &infinite_resolution, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"NaN model resolution", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &nan_model_resolution, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"infinite model resolution", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &infinite_model_resolution, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+            {"non-finite transform", [&] { return triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &non_finite_transform, fixture.zs.data(), fixture.handles.data(), count, nullptr); }},
+        };
+        for (const std::pair<std::string, std::function<int32_t()>> &invalid : cases) {
+            INFO(invalid.first);
+            fixture.fill();
+            CHECK(invalid.second() == RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT);
+            // A NULL slices array has no output to clear, the other cases clear them all.
+            if (invalid.first != "slices NULL")
+                CHECK(fixture.all_empty());
+        }
+    }
+    SECTION("an invalid argument wins over a cancelled context") {
+        CancelProbe probe;
+        probe.cancel_after = 0;
+        const plugin_run_context context = probe_context(probe);
+        CHECK(triangle_mesh_slice_to_polygons(nullptr, &fixture.params, fixture.zs.data(), fixture.handles.data(), count, &context) ==
+              RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT);
+        CHECK(probe.calls.load() == 0);
+    }
+    SECTION("no layer is valid with NULL arrays, and a NULL entry of the outputs is ignored") {
+        CHECK(triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, nullptr, nullptr, 0, nullptr) ==
+              RAW_MESH_SLICE_STATUS_DONE);
+        CancelProbe probe;
+        probe.cancel_after = 0;
+        const plugin_run_context context = probe_context(probe);
+        CHECK(triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, nullptr, nullptr, 0, &context) ==
+              RAW_MESH_SLICE_STATUS_CANCELLED);
+
+        // A cancelled enclosing parallel group is reported even when there is nothing to slice.
+        tbb::task_group_context group;
+        std::atomic<int32_t> group_status{RAW_MESH_SLICE_STATUS_DONE};
+        tbb::parallel_for(0, 1, [&](int) {
+            group.cancel_group_execution();
+            group_status = triangle_mesh_slice_to_polygons(fixture.mesh_handle(), &fixture.params, nullptr, nullptr, 0, nullptr);
+        }, group);
+        CHECK(group_status.load() == RAW_MESH_SLICE_STATUS_CANCELLED);
+
+        fixture.handles[1] = nullptr;
+        CHECK(fixture.call(nullptr) == RAW_MESH_SLICE_STATUS_DONE);
+        CHECK(fixture.out[0].size() > 0);
+        CHECK(fixture.out[1].empty());
+        CHECK(fixture.out[2].size() > 0);
+    }
+}
+
+TEST_CASE("The slice_to_polygons wrapper translates the status into exceptions",
+          "[plugins][slice-volume][slicing-helper][cancel]")
+{
+    RawSliceFixture fixture;
+    const slic3r_api::TriangleMesh view(fixture.mesh_handle());
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&fixture.storage);
+    // The collections of the fixture are not used by the wrapper: it allocates its own and frees them on failure.
+    const size_t objects_before = fixture.storage.size();
+
+    CHECK(view.slice_to_polygons(handle, fixture.params, fixture.zs, nullptr).size() == fixture.zs.size());
+    CHECK(fixture.storage.size() == objects_before);
+
+    CancelProbe cancelled;
+    cancelled.cancel_after = 0;
+    const plugin_run_context cancelled_context = probe_context(cancelled);
+    CHECK_THROWS_AS(view.slice_to_polygons(handle, fixture.params, fixture.zs, &cancelled_context), slic3r_api::PluginCancelled);
+
+    // No layer: the cancellation is still reported, by the context and by the enclosing group.
+    CHECK(view.slice_to_polygons(handle, fixture.params, {}, nullptr).empty());
+    CHECK_THROWS_AS(view.slice_to_polygons(handle, fixture.params, {}, &cancelled_context), slic3r_api::PluginCancelled);
+    CHECK_THROWS_AS(view.slice_to_expolygons(handle, fixture.params, {}, &cancelled_context), slic3r_api::PluginCancelled);
+    bool empty_group_cancelled = false;
+    tbb::task_group_context empty_group;
+    tbb::parallel_for(0, 1, [&](int) {
+        empty_group.cancel_group_execution();
+        try {
+            view.slice_to_polygons(handle, fixture.params, {}, nullptr);
+        } catch (const slic3r_api::PluginCancelled &) {
+            empty_group_cancelled = true;
+        }
+    }, empty_group);
+    CHECK(empty_group_cancelled);
+
+    CancelProbe failing;
+    failing.throw_after = 1;
+    const plugin_run_context failing_context = probe_context(failing);
+    CHECK_THROWS_AS(view.slice_to_polygons(handle, fixture.params, fixture.zs, &failing_context), std::runtime_error);
+
+    c_mesh_slicing_params negative_radius = fixture.params;
+    negative_radius.closing_radius = -0.1f;
+    CHECK_THROWS_AS(view.slice_to_polygons(handle, negative_radius, fixture.zs, nullptr), std::invalid_argument);
+    CHECK_THROWS_AS(view.slice_to_polygons(handle, fixture.params, {1.f, 0.f}, nullptr), std::invalid_argument);
+
+    tbb::task_group_context group;
+    bool group_cancelled = false;
+    tbb::parallel_for(0, 1, [&](int) {
+        group.cancel_group_execution();
+        try {
+            view.slice_to_polygons(handle, fixture.params, fixture.zs, nullptr);
+        } catch (const slic3r_api::PluginCancelled &) {
+            group_cancelled = true;
+        }
+    }, group);
+    CHECK(group_cancelled);
+
+    // Every failure released the collections it allocated.
+    CHECK(fixture.storage.size() == objects_before);
+}
 // ---- slice_to_expolygons helper without the one-thread arena ----
 
 namespace {
@@ -873,6 +1169,46 @@ assert checked > 0
 assert not mismatches, "%d of %d rings differ, first: %r" % (len(mismatches), checked, mismatches[:1])
 )PY";
 
+// The Python script that checks the status of the raw slicing of the host: success, a cancelled context and an invalid argument.
+const char *const python_status_script = R"PY(
+import slic3r_api
+import slic3r_api_generated as generated
+import slic3r_datatree_views as views
+from slic3r_run_context import PluginCancelled
+
+api = slic3r_api._registered_apis[0]
+mesh = views.TriangleMesh(api, PARAMS["mesh"])
+params = generated.CMeshSlicingParams()
+for index in range(0, 16, 5):
+    params.transform.value[index] = 1.0
+zs = PARAMS["zs"]
+storage = PARAMS["storage"]
+slicers = (mesh.slice_to_polygons, mesh.slice_to_expolygons)
+
+for slicer in slicers:
+    layers = slicer(storage, params.transform, zs, params, PARAMS["context"])
+    assert len(layers) == len(zs)
+    assert any(layer.size() > 0 for layer in layers)
+    for layer in layers:
+        layer.free_from_storage()
+
+for slicer in slicers:
+    try:
+        slicer(storage, params.transform, zs, params, PARAMS["cancelled_context"])
+    except PluginCancelled:
+        pass
+    else:
+        raise AssertionError("a cancelled context must raise PluginCancelled")
+
+params.closing_radius = -1.0
+for slicer in slicers:
+    try:
+        slicer(storage, params.transform, zs, params, PARAMS["context"])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("an invalid argument must raise ValueError")
+)PY";
 } // namespace
 
 TEST_CASE("The Python slice_to_expolygons is identical to the C++ helper on the real host",
@@ -938,6 +1274,44 @@ TEST_CASE("The Python slice_to_expolygons is identical to the C++ helper on the 
     });
 }
 
+TEST_CASE("The Python slicing maps the status of the real host to its exceptions",
+          "[plugins][slice-volume][slicing-helper][python-real-host][cancel]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const PythonEntryPoints python = find_python_entry_points();
+    // The gate must not pass silently without the embedded interpreter.
+    REQUIRE(Test::Plugins::python_plugin_test_runtime_available());
+    REQUIRE(python.run_simple_string != nullptr);
+    const TriangleMesh mesh = slicing_dump_mesh("extruder_idler");
+    const c_mesh_slicing_params params = helper_slicing_params(helper_param_cases()[1], false);
+    const std::vector<float> zs = helper_slice_zs(mesh, params, 10);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    CancelProbe never;
+    const plugin_run_context context = probe_context(never);
+    CancelProbe always;
+    always.cancel_after = 0;
+    const plugin_run_context cancelled_context = probe_context(always);
+
+    std::ostringstream text;
+    text.precision(17);
+    text << "PARAMS = {\"mesh\": " << reinterpret_cast<uintptr_t>(&mesh) << ", \"storage\": " << reinterpret_cast<uintptr_t>(handle)
+         << ", \"context\": " << reinterpret_cast<uintptr_t>(&context)
+         << ", \"cancelled_context\": " << reinterpret_cast<uintptr_t>(&cancelled_context) << ", \"zs\": [";
+    for (size_t idx = 0; idx < zs.size(); ++idx)
+        text << (idx ? ", " : "") << double(zs[idx]);
+    text << "]}\n" << python_status_script;
+    TemporaryFiles files;
+    const std::filesystem::path script = files.make("status.py");
+    write_text(script, text.str());
+
+    const size_t objects_before = storage.size();
+    CHECK(run_python_script(python, script));
+    // The Python run freed what it allocated, also on its failing calls.
+    CHECK(storage.size() == objects_before);
+    CHECK(never.calls.load() > 0);
+    CHECK(always.calls.load() > 0);
+}
 TEST_CASE("The Python remove_collinear gives the points of the native Polygon::remove_collinear",
           "[plugins][slice-volume][remove-collinear][python-real-host]")
 {
@@ -1066,7 +1440,7 @@ TEST_CASE("Object slicing timing bench", "[.][slicing-bench]")
             },
             [&] {
                 PluginStorage storage;
-                view.slice_to_polygons(reinterpret_cast<storage_handle *>(&storage), params, zs);
+                view.slice_to_polygons(reinterpret_cast<storage_handle *>(&storage), params, zs, nullptr);
             }};
         for (const std::function<void()> &path : paths)
             path();

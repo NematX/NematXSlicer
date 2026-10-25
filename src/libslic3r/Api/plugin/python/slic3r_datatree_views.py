@@ -60,6 +60,9 @@ from slic3r_api_generated import (
     CMatrix4d,
     CMeshSlicingParams,
     CTriangleIndices,
+    RAW_MESH_SLICE_STATUS_CANCELLED,
+    RAW_MESH_SLICE_STATUS_DONE,
+    RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT,
     CVec2d,
     EXTRUDER_ID_UNKNOWN,
     PLUGIN_PROPERTY_TYPE_LAYER_ADHESION,
@@ -123,6 +126,7 @@ from slic3r_surface_views import (
     srf_type,
 )
 from slic3r_abi import abi_requires_headers
+from slic3r_run_context import PluginCancelled, _context_view, throw_if_cancelled
 from slic3r_property_key import PluginPropertyKey
 
 
@@ -1222,23 +1226,29 @@ def _slice_mesh_to_expolygons(
     storage_address: int,
     params: CMeshSlicingParams,
     z_values: list[float],
+    context,
 ) -> list[StoredExPolygonCollection]:
     """
     Slice a mesh to one ExPolygonCollection per Z with the result of the native object slicing.
-    The host gives the raw loops (``PositiveLargestContour`` replaced by ``Positive``, as the native
-    slicer does) and the rest of the post-processing runs here, layer by layer, through the API.
+    The host gives the raw loops, cancellable through the run context (``PositiveLargestContour``
+    replaced by ``Positive``, as the native slicer does) and the rest of the post-processing runs
+    here, layer by layer, through the API. The context is checked before each layer and after the
+    last one.
     """
+    view = _context_view(context)
     raw_params = CMeshSlicingParams.from_buffer_copy(params)
     if raw_params.mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR:
         raw_params.mode = RAW_MESH_SLICING_MODE_POSITIVE
     if raw_params.mode_below == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR:
         raw_params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE
-    raw = mesh.slice_to_polygons(storage_address, params.transform, z_values, raw_params)
+    raw = mesh.slice_to_polygons(storage_address, params.transform, z_values, raw_params, view)
     out: list[StoredExPolygonCollection] = []
     try:
         for layer, rings in enumerate(raw):
+            throw_if_cancelled(view)
             out.append(_finish_sliced_layer(mesh.api, storage_address, params, layer, rings))
             rings.free_from_storage()
+        throw_if_cancelled(view)
     except BaseException:
         for collection in (*raw, *out):
             collection.free_from_storage()
@@ -1296,6 +1306,7 @@ class TriangleMesh(DataTreeView):
         transform: CMatrix4d,
         z_mm_by_layer: Iterable[float],
         params: CMeshSlicingParams | None = None,
+        context=None,
     ) -> list[StoredPolygonCollection]:
         """
         Slice this mesh into one flat PolygonCollection per requested Z.
@@ -1314,25 +1325,51 @@ class TriangleMesh(DataTreeView):
         the storage. Polygons borrowed from a returned collection become invalid
         when that collection is freed or modified. The method reads the mesh
         only and never changes host model data.
+
+        ``context`` is the run context of the running step: the address of its
+        ``PluginRunContext``, a ``PluginRunContextView`` or a ``PluginRunContext``
+        structure, or ``None``. The host polls its cancellation callback during
+        the slicing, at a coarse granularity and also when there is no layer: a
+        cancelled context raises ``PluginCancelled``, an invalid argument (for example a negative
+        ``closing_radius`` or a non-finite transform) raises ``ValueError`` and an
+        internal host error raises ``RuntimeError``. Every allocation is freed
+        before the exception is raised.
         """
         z_values = _validated_mesh_slice_z_values(z_mm_by_layer)
-        if not z_values:
-            return []
-
-        output = [StoredPolygonCollection(self.api, storage_address) for _unused in z_values]
-        z_array = (ctypes.c_float * len(z_values))(*z_values)
-        output_array = (ctypes.c_void_p * len(output))(
-            *[collection.c_handle() for collection in output]
-        )
+        # Everything that can fail on a bad argument is built before the first allocation.
         if params is None:
-            self.api.host.triangle_mesh_slice_to_polygons(
-                self.c_handle(), transform, z_array, output_array, len(output)
+            params = CMeshSlicingParams()
+            params.transform = transform
+        params_pointer = ctypes.byref(params)
+        view = _context_view(context)
+        context_pointer = None if view is None else ctypes.byref(view.common)
+        z_array = (ctypes.c_float * len(z_values))(*z_values)
+
+        output: list[StoredPolygonCollection] = []
+        try:
+            for _unused in z_values:
+                output.append(StoredPolygonCollection(self.api, storage_address))
+            output_array = (ctypes.c_void_p * len(output))(
+                *[collection.c_handle() for collection in output]
             )
-        else:
-            self.api.host.triangle_mesh_slice_to_polygons_with_params(
-                self.c_handle(), ctypes.byref(params), z_array, output_array, len(output)
+            status = int(
+                self.api.host.triangle_mesh_slice_to_polygons(
+                    self.c_handle(), params_pointer, z_array, output_array, len(output), context_pointer
+                )
             )
-        return output
+        except BaseException:
+            for collection in output:
+                collection.free_from_storage()
+            raise
+        if status == RAW_MESH_SLICE_STATUS_DONE:
+            return output
+        for collection in output:
+            collection.free_from_storage()
+        if status == RAW_MESH_SLICE_STATUS_CANCELLED:
+            raise PluginCancelled()
+        if status == RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT:
+            raise ValueError("The TriangleMesh slicing arguments are invalid.")
+        raise RuntimeError("The TriangleMesh slicing failed inside the host.")
 
     def slice_to_expolygons(
         self,
@@ -1340,6 +1377,7 @@ class TriangleMesh(DataTreeView):
         transform: CMatrix4d,
         z_mm_by_layer: Iterable[float],
         params: CMeshSlicingParams | None = None,
+        context=None,
     ) -> list[StoredExPolygonCollection]:
         """
         Slice this mesh into topology-aware ExPolygonCollections.
@@ -1358,15 +1396,15 @@ class TriangleMesh(DataTreeView):
         API, layer by layer (the collinear point removal is a port of the native ``Polygon::remove_collinear``). Without
         ``params``, the slicing is regular with ``transform`` and no cleaning
         distance.
+
+        ``context`` and the exceptions are the ones of ``slice_to_polygons()``; the
+        context is also checked between two layers.
         """
         z_values = _validated_mesh_slice_z_values(z_mm_by_layer)
-        if not z_values:
-            return []
-
         if params is None:
             params = CMeshSlicingParams()
             params.transform = transform
-        return _slice_mesh_to_expolygons(self, storage_address, params, z_values)
+        return _slice_mesh_to_expolygons(self, storage_address, params, z_values, context)
 
 
 @abi_requires_headers("slic3r_volume.h")
@@ -2223,6 +2261,7 @@ def _auxiliary_slice_volume_mask(
         return empty
 
     params = _auxiliary_mask_slicing_params(print_view, obj)
+    # No run context here: the helper slices one Z of one volume, so it has nothing worth cancelling.
     slices = volume.mesh().slice_to_expolygons(
         storage_address,
         params.transform,

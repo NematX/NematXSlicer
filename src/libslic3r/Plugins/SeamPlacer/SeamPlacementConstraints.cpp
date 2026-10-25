@@ -531,8 +531,10 @@ void SeamPlacementConstraints::initialize_impl(
             InitializationCancellation::check(run_context);
             const Volume volume=object.volume(v);
             if (volume.type()!=RAW_VOLUME_TYPE_SEAM_POSITION_INSIDE) continue;
-            std::vector<StoredPolygonCollection> slices=volume.mesh().slice_to_polygons(
-                storage,matrix4d_mul(transform,volume_get_matrix(volume.handle())),zs);
+            // Raw loops of the regular slicing; the transform must be set (a zeroed one crushes the mesh).
+            c_mesh_slicing_params slicing_params={};
+            slicing_params.transform=matrix4d_mul(transform,volume_get_matrix(volume.handle()));
+            std::vector<StoredPolygonCollection> slices=volume.mesh().slice_to_polygons(storage,slicing_params,zs,run_context);
             InitializationCancellation::check(run_context);
             for (uint32_t l=0;l<object.layer_count();++l) {
                 InitializationCancellation::check_periodic(run_context, l);

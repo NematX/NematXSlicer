@@ -5,13 +5,14 @@
 #ifndef slic3r_volume_h_
 #define slic3r_volume_h_
 
-#define SLIC3R_PLUGIN_API_VOLUME_MAJOR 1u
-#define SLIC3R_PLUGIN_API_VOLUME_MINOR 2u
+#define SLIC3R_PLUGIN_API_VOLUME_MAJOR 2u
+#define SLIC3R_PLUGIN_API_VOLUME_MINOR 0u
 
 #include <stdint.h>
 
 #include "slic3r_data_tree.h"
 #include "slic3r_geometry.h"
+#include "slic3r_plugin_run_context.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -50,6 +51,12 @@ C ABI mirror of MeshSlicingParamsEx.
 All distances are unscaled millimeters because TriangleMesh vertices and the
 low-level slicer work in float/double model coordinates. The transform is also
 unscaled and is applied before slicing.
+
+triangle_mesh_slice_to_polygons() reads only mode, slicing_mode_normal_below_layer
+(an index into its z_mm_by_layer array: layers below it use mode_below), mode_below
+and transform. closing_radius, extra_offset, resolution and model_resolution drive the
+plugin-side post-processing of the raw loops (slice_to_expolygons in the C++ and Python
+helpers); the host still validates them (finite, closing_radius >= 0).
 */
 typedef struct c_mesh_slicing_params {
     raw_mesh_slicing_mode mode;
@@ -236,68 +243,71 @@ SLIC3R_HOST_API polygon_collection_handle *triangle_mesh_project_to_polygons(
     storage_handle *storage, const triangle_mesh_handle *mesh, c_matrix4d transform);
 
 /*
-Slice a TriangleMesh into raw polygon loops at object-local Z positions.
-
-transform is an unscaled 3D transform matrix. slice_zs are also unscaled float
-values because TriangleMesh vertices live in float 3D coordinates. If the Z
-comes from a Layer view, convert Layer::slice_z() with unscaled() before calling
-this function.
-
-out_by_layer must point to slice_count mutable polygon_collection_handle objects,
-usually created in plugin storage by the plugin.
-Each destination collection is cleared and replaced by the polygons generated at
-the matching Z.
+Result of triangle_mesh_slice_to_polygons(). The function returns an int32_t
+holding one of these values.
 */
-SLIC3R_HOST_API void triangle_mesh_slice_to_polygons(const triangle_mesh_handle *mesh,
-                                                     c_matrix4d transform,
-                                                     const float *z_mm_by_layer,
-                                                     polygon_collection_handle **slices_by_layer,
-                                                     uint32_t layer_count);
+typedef enum raw_mesh_slice_status {
+    RAW_MESH_SLICE_STATUS_INTERNAL_ERROR   = -2,
+    RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT = -1,
+    RAW_MESH_SLICE_STATUS_CANCELLED        = 0,
+    RAW_MESH_SLICE_STATUS_DONE             = 1
+} raw_mesh_slice_status;
 
 /*
-Same as triangle_mesh_slice_to_polygons(), but exposes MeshSlicingParamsEx so a
-plugin can reproduce the native PrintObject::slice_volumes() behavior.
+Slice a TriangleMesh into raw polygon loops at object-local Z positions, with
+the low-level slicer of the host (slice_mesh): no union, offset or simplification
+is applied to the loops. The triangles are flipped when the determinant of the
+transform is negative, so a mirroring transform keeps outward-facing triangles.
+RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR keeps its native raw meaning
+here (the largest raw loop of each layer).
+
+params must be fully set: a zeroed c_mesh_slicing_params has a null transform
+matrix, which crushes the mesh. Mode 0 is RAW_MESH_SLICING_MODE_REGULAR.
+z_mm_by_layer holds layer_count unscaled float Z values, which must be finite
+and non-decreasing. If a Z comes from a Layer view, convert Layer::slice_z() with
+unscaled() first.
+
+slices_by_layer holds layer_count mutable polygon_collection_handle pointers,
+usually created in plugin storage by the plugin. Every non-NULL collection is
+cleared and replaced by the polygons generated at the matching Z; a NULL entry is
+ignored. Outputs are published only when the result is
+RAW_MESH_SLICE_STATUS_DONE.
+
+context may be NULL, and so may its is_cancelled callback: both mean "never
+cancelled". The host calls is_cancelled() during the work, from several threads
+at the same time: it must support concurrent calls and must never throw. The
+real granularity of the checks is coarse. The host checks:
+  - before starting;
+  - at face 0 and at every 65,536th face while building the segments;
+  - once between building and joining the segments;
+  - at layer 0 and at every 65,536th layer while joining the segments into loops;
+  - once before publishing the result.
+A small mesh with few layers is therefore checked only a handful of times, and a
+cancellation that arrives after the last check is still detected before the result
+is published. Cancellation is also reported (also before starting, and also when
+layer_count is 0) when the call runs inside a parallel group that was cancelled,
+for example one cancelled by a failing sibling job, even when context is NULL.
+
+Return value:
+  RAW_MESH_SLICE_STATUS_DONE (1): finished, including layer_count == 0, for which
+      z_mm_by_layer and slices_by_layer may be NULL (the cancellation checks still
+      apply first).
+  RAW_MESH_SLICE_STATUS_CANCELLED (0): stopped by the context or by the enclosing
+      parallel group.
+  RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT (-1): mesh or params is NULL; z_mm_by_layer
+      or slices_by_layer is NULL with layer_count > 0; a Z is not finite or is lower
+      than the previous one; closing_radius is negative or not finite; extra_offset,
+      resolution, model_resolution or a transform coefficient is not finite.
+  RAW_MESH_SLICE_STATUS_INTERNAL_ERROR (-2): an exception such as an allocation
+      error was caught at the boundary.
+On 0, -1 and -2 every non-NULL output collection is cleared (not freed).
 */
-SLIC3R_HOST_API void triangle_mesh_slice_to_polygons_with_params(const triangle_mesh_handle *mesh,
-                                                                 const c_mesh_slicing_params *params,
-                                                                 const float *z_mm_by_layer,
-                                                                 polygon_collection_handle **slices_by_layer,
-                                                                 uint32_t layer_count);
-
-SLIC3R_HOST_API polygon_collection_handle *triangle_mesh_slice_to_polygon(storage_handle *storage,
-                                                                         const triangle_mesh_handle *mesh,
-                                                                         c_matrix4d transform,
-                                                                         float layer_z_mm);
-
-/*
-Slice a TriangleMesh into raw expolygon at object-local Z positions.
-
-transform is an unscaled 3D transform matrix. slice_zs are also unscaled float
-values because TriangleMesh vertices live in float 3D coordinates. If the Z
-comes from a Layer view, convert Layer::slice_z() with unscaled() before calling
-this function.
-
-out_by_layer must point to slice_count mutable polygon_collection_handle objects,
-usually created in plugin storage by the plugin.
-Each destination collection is cleared and replaced by the polygons generated at
-the matching Z.
-*/
-SLIC3R_HOST_API void triangle_mesh_slice_to_expolygons(const triangle_mesh_handle *mesh,
-                                                       c_matrix4d transform,
-                                                       const float *z_mm_by_layer,
-                                                       expolygon_collection_handle **slices_by_layer,
-                                                       uint32_t layer_count);
-
-/*
-Slice directly to ExPolygons using MeshSlicingParamsEx. This is the preferred
-entry point for STEP_SLICING plugins because it follows the same low-level path
-as PrintObjectSlice.cpp::slice_volumes_inner().
-*/
-SLIC3R_HOST_API void triangle_mesh_slice_to_expolygons_with_params(const triangle_mesh_handle *mesh,
-                                                                   const c_mesh_slicing_params *params,
-                                                                   const float *z_mm_by_layer,
-                                                                   expolygon_collection_handle **slices_by_layer,
-                                                                   uint32_t layer_count);
+SLIC3R_HOST_API int32_t triangle_mesh_slice_to_polygons(const triangle_mesh_handle *mesh,
+                                                        const c_mesh_slicing_params *params,
+                                                        const float *z_mm_by_layer,
+                                                        polygon_collection_handle **slices_by_layer,
+                                                        uint32_t layer_count,
+                                                        const plugin_run_context *context);
 
 #ifdef __cplusplus
 } /* extern "C" */

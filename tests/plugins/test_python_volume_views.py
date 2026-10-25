@@ -42,14 +42,19 @@ class VolumeHost:
         self.volume_types = {}
         self.painting = set()
         self.slice_calls = []
+        # Status returned by triangle_mesh_slice_to_polygons(): 1 done, 0 cancelled, -1 invalid, -2 internal.
+        self.slice_status = 1
         self.projection_calls = []
         self.freed = []
+        # Polygon collections allocated and not freed yet.
+        self.live_polygons = set()
 
     def triangle_mesh_triangle_count(self, mesh):
         return self.mesh_triangle_counts[address(mesh)]
 
     def storage_new_polygons(self, storage):
         self.next_handle += 1
+        self.live_polygons.add(self.next_handle)
         return self.next_handle
 
     def storage_new_expolygons(self, storage):
@@ -67,11 +72,10 @@ class VolumeHost:
             }
         )
 
-    def triangle_mesh_slice_to_polygons(self, mesh, transform, z_values, output, count):
-        self._record_slice("polygons", mesh, transform, z_values, output, count)
-
-    def triangle_mesh_slice_to_polygons_with_params(self, mesh, params, z_values, output, count):
-        self._record_slice("polygons_with_params", mesh, params, z_values, output, count)
+    def triangle_mesh_slice_to_polygons(self, mesh, params, z_values, output, count, context):
+        self._record_slice("polygons", mesh, params, z_values, output, count)
+        self.slice_calls[-1]["context"] = ctypes.addressof(context._obj) if context is not None else None
+        return self.slice_status
 
     def volume_get_type(self, volume):
         return self.volume_types[address(volume)]
@@ -96,6 +100,7 @@ class VolumeHost:
 
     def storage_free(self, storage, handle):
         self.freed.append((address(storage), address(handle)))
+        self.live_polygons.discard(address(handle))
         return 1
 
 
@@ -127,8 +132,8 @@ class SlicingPipelineHost(VolumeHost):
         self.areas[handle] = 0.0
         return handle
 
-    def triangle_mesh_slice_to_polygons_with_params(self, mesh, params, z_values, output, count):
-        super().triangle_mesh_slice_to_polygons_with_params(mesh, params, z_values, output, count)
+    def triangle_mesh_slice_to_polygons(self, mesh, params, z_values, output, count, context):
+        status = super().triangle_mesh_slice_to_polygons(mesh, params, z_values, output, count, context)
         self.calls.append(("raw_slice", int(params._obj.mode), int(params._obj.mode_below)))
         for layer in range(int(count)):
             polygons = []
@@ -137,6 +142,7 @@ class SlicingPipelineHost(VolumeHost):
                 self.rings[handle] = list(ring)
                 polygons.append(handle)
             self.polygon_lists[address(output[layer])] = polygons
+        return status
 
     def polygons_ensure_valid(self, polygons, resolution):
         self.calls.append(("polygons_ensure_valid", int(resolution)))
@@ -272,6 +278,7 @@ class PythonVolumeViewTests(unittest.TestCase):
         cls.views = importlib.import_module("slic3r_datatree_views")
         cls.geometry = importlib.import_module("slic3r_geometry_views")
         cls.api_module = importlib.import_module("slic3r_api")
+        cls.run_context_module = importlib.import_module("slic3r_run_context")
 
     @classmethod
     def tearDownClass(cls):
@@ -285,7 +292,7 @@ class PythonVolumeViewTests(unittest.TestCase):
 
     def test_mesh_empty_and_slicing_ownership(self):
         api = self.make_pipeline_api()
-        api.host.raw_layers = [[]]
+        api.host.raw_layers = [[], []]
         self.assertTrue(self.views.TriangleMesh(api, 11).empty())
         mesh = self.views.TriangleMesh(api, 12)
         self.assertFalse(mesh.empty())
@@ -305,7 +312,7 @@ class PythonVolumeViewTests(unittest.TestCase):
         # The ExPolygons are made from the raw rings of the host: the post-processing runs in Python.
         self.assertEqual([call["name"] for call in api.host.slice_calls], [
             "polygons",
-            "polygons_with_params",
+            "polygons",
         ])
         self.assertEqual(api.host.slice_calls[0]["z"], [
             ctypes.c_float(0.2).value,
@@ -315,6 +322,74 @@ class PythonVolumeViewTests(unittest.TestCase):
             self.assertEqual(result.storage(), 7)
             self.assertTrue(result.free_from_storage())
 
+    def test_mesh_slicing_maps_the_host_status_and_passes_the_context(self):
+        api = self.make_api()
+        mesh = self.views.TriangleMesh(api, 12)
+        transform = self.generated.CMatrix4d()
+        context = self.generated.PluginRunContext()
+        address_of_context = ctypes.addressof(context)
+
+        mesh.slice_to_polygons(7, transform, [0.2], None, address_of_context)[0].free_from_storage()
+        mesh.slice_to_polygons(7, transform, [0.2])[0].free_from_storage()
+        self.assertEqual([call["context"] for call in api.host.slice_calls], [address_of_context, None])
+
+        expected_errors = {0: self.api_module.PluginCancelled, -1: ValueError, -2: RuntimeError}
+        for status, error in expected_errors.items():
+            api.host.slice_status = status
+            api.host.freed.clear()
+            with self.subTest(status=status), self.assertRaises(error):
+                mesh.slice_to_polygons(7, transform, [0.2, 0.4], None, address_of_context)
+            # The two collections allocated for the call are released before the exception leaves.
+            self.assertEqual(len(api.host.freed), 2)
+            self.assertEqual(api.host.live_polygons, set())
+
+        # The three forms of context reach the host as the same structure; no layer still asks the host.
+        api.host.slice_status = 1
+        api.host.slice_calls.clear()
+        for form in (address_of_context, self.run_context_module.PluginRunContextView(api, context), context):
+            mesh.slice_to_polygons(7, transform, [0.2], None, form)[0].free_from_storage()
+        self.assertEqual({call["context"] for call in api.host.slice_calls}, {address_of_context})
+        api.host.slice_status = 0
+        for slicer in (mesh.slice_to_polygons, mesh.slice_to_expolygons):
+            with self.subTest(slicer=slicer.__name__), self.assertRaises(self.api_module.PluginCancelled):
+                slicer(7, transform, [], None, address_of_context)
+
+    def test_mesh_slicing_with_a_bad_argument_leaves_nothing_in_the_storage(self):
+        api = self.make_pipeline_api()
+        api.host.raw_layers = [[], []]
+        mesh = self.views.TriangleMesh(api, 12)
+        transform = self.generated.CMatrix4d()
+
+        # Neither a context of an unknown type nor a transform of an unknown type reaches the host.
+        with self.assertRaises((TypeError, ValueError)):
+            mesh.slice_to_polygons(7, transform, [0.2, 0.4], None, object())
+        with self.assertRaises((TypeError, ValueError)):
+            mesh.slice_to_expolygons(7, transform, [0.2, 0.4], None, object())
+        with self.assertRaises(TypeError):
+            mesh.slice_to_polygons(7, "not a matrix", [0.2, 0.4])
+        self.assertEqual(api.host.slice_calls, [])
+        self.assertEqual(api.host.live_polygons, set())
+
+    def test_expolygon_slicing_checks_the_context_at_every_layer(self):
+        api = self.make_pipeline_api()
+        api.host.raw_layers = [[], [], []]
+        mesh = self.views.TriangleMesh(api, 12)
+        transform = self.generated.CMatrix4d()
+        checks = []
+        # The host is a fake: only the checks of the Python post-processing reach this callback.
+        for cancel_after in range(0, 4):
+            checks.clear()
+            context = self.generated.PluginRunContext()
+            callback = self.generated.PLUGIN_IS_CANCELLED(
+                lambda _host: checks.append(None) or (1 if len(checks) > cancel_after else 0)
+            )
+            context.is_cancelled = callback
+            with self.subTest(cancel_after=cancel_after), self.assertRaises(self.api_module.PluginCancelled):
+                mesh.slice_to_expolygons(7, transform, [0.1, 0.2, 0.3], None, context)
+            # It stops at the first check that answers yes: no more work after it.
+            self.assertEqual(len(checks), cancel_after + 1)
+            self.assertEqual(api.host.live_polygons, set())
+
     def test_mesh_slicing_rejects_invalid_height_order_and_values(self):
         api = self.make_api()
         mesh = self.views.TriangleMesh(api, 12)
@@ -323,8 +398,9 @@ class PythonVolumeViewTests(unittest.TestCase):
         for heights in ([0.4, 0.2], [0.2, math.nan], [math.inf]):
             with self.subTest(heights=heights), self.assertRaises(ValueError):
                 mesh.slice_to_polygons(7, transform, heights)
+        # An empty list of heights still goes through the host, which checks the cancellation first.
         self.assertEqual(mesh.slice_to_expolygons(7, transform, []), [])
-        self.assertEqual(api.host.slice_calls, [])
+        self.assertEqual([call["z"] for call in api.host.slice_calls], [[]])
 
     def test_volume_role_and_painting_predicates(self):
         api = self.make_api()

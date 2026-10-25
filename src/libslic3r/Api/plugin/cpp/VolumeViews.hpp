@@ -187,54 +187,22 @@ public:
         return triangle_mesh_triangle_at(handle(), idx);
     }
 
-    ///*
-    //Fill one already-created StoredPolygonCollection per slice Z. Z values are
-    //unscaled float coordinates, matching TriangleMesh vertices. If the source is
-    //Layer::slice_z(), convert it with unscaled() before calling this helper.
-    //*/
-    //void slice_to_polygons(storage_handle *storage,
-    //                       c_matrix4d transform,
-    //                       const float *slice_zs,
-    //                       uint32_t slice_count,
-    //                       polygon_collection_handle **out_by_layer) const
-    //{
-    //    triangle_mesh_slice_to_polygons(storage, handle(), transform, slice_zs, slice_count, out_by_layer);
-    //}
-
     /*
-    Convenience overload for plugin code. The returned StoredPolygonCollection
-    objects own their storage allocations and may be moved into later steps.
-    */
-    std::vector<StoredPolygonCollection> slice_to_polygons(storage_handle *storage,
-                                                           c_matrix4d transform,
-                                                           const std::vector<float> &slice_zs) const
-    {
-        std::vector<StoredPolygonCollection> out;
-        out.reserve(slice_zs.size());
-        for (size_t idx = 0; idx < slice_zs.size(); ++idx)
-            out.emplace_back(storage);
-
-        std::vector<polygon_collection_handle *> out_handles;
-        out_handles.reserve(out.size());
-        for (StoredPolygonCollection &polygons : out)
-            out_handles.push_back(polygons.mutable_handle());
-
-        assert(slice_zs.size() == out_handles.size());
-        triangle_mesh_slice_to_polygons(handle(), transform, slice_zs.data(), out_handles.data(), static_cast<uint32_t>(slice_zs.size()));
-        return out;
-    }
-
-    /*
-    Same as the overload above, but with the slicing parameters of c_mesh_slicing_params. The host reads only
-    mode, slicing_mode_normal_below_layer, mode_below and transform (triangle_mesh_slice_to_polygons_with_params()
-    passes the base MeshSlicingParams to the slicer): closing_radius, extra_offset, resolution and model_resolution are
-    ignored here, and the polygons are the raw loops of the slicer. transform must be set (for example with
-    matrix4d_identity()): a zeroed struct holds a null matrix, which crushes the mesh. slice_zs are in millimeters and
-    must be increasing. The storage must outlive the returned collections.
+    Raw loops of the native slicer, one StoredPolygonCollection per slice Z (see triangle_mesh_slice_to_polygons()
+    in slic3r_volume.h). Z values are unscaled float millimeters, finite and non-decreasing; if the source is
+    Layer::slice_z(), convert it with unscaled() first. Only mode, slicing_mode_normal_below_layer, mode_below and
+    transform are used: the polygons are not unioned, offset or simplified, so closing_radius, extra_offset,
+    resolution and model_resolution only have to be valid. transform must be set (for example with
+    matrix4d_identity()): a zeroed struct holds a null matrix, which crushes the mesh. The returned collections own
+    their storage allocations and may be moved into later steps; the storage must outlive them.
+    A cancelled context (or a cancelled surrounding parallel group) throws PluginCancelled; an invalid argument
+    throws std::invalid_argument and an internal host error std::runtime_error. context may be null (never
+    cancelled by the context).
     */
     std::vector<StoredPolygonCollection> slice_to_polygons(storage_handle *storage,
                                                            const c_mesh_slicing_params &params,
-                                                           const std::vector<float> &slice_zs) const
+                                                           const std::vector<float> &slice_zs,
+                                                           const plugin_run_context *context) const
     {
         std::vector<StoredPolygonCollection> out;
         out.reserve(slice_zs.size());
@@ -246,16 +214,26 @@ public:
         for (StoredPolygonCollection &polygons : out)
             out_handles.push_back(polygons.mutable_handle());
 
-        triangle_mesh_slice_to_polygons_with_params(handle(), &params, slice_zs.data(), out_handles.data(),
-                                                    static_cast<uint32_t>(slice_zs.size()));
-        return out;
+        // On any failure the host leaves the outputs empty and `out` frees them while the exception propagates.
+        const int32_t status = triangle_mesh_slice_to_polygons(handle(), &params, slice_zs.data(), out_handles.data(),
+                                                               static_cast<uint32_t>(slice_zs.size()), context);
+        switch (status) {
+        case RAW_MESH_SLICE_STATUS_DONE:
+            return out;
+        case RAW_MESH_SLICE_STATUS_CANCELLED:
+            throw PluginCancelled();
+        case RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT:
+            throw std::invalid_argument("The TriangleMesh slicing arguments are invalid.");
+        default:
+            throw std::runtime_error("The TriangleMesh slicing failed inside the host.");
+        }
     }
 
     /*
     ExPolygon slicing path, byte-identical to the native slice_mesh_ex() followed by the final ensure_valid() that the
-    host function triangle_mesh_slice_to_expolygons_with_params() of the volume ABI 1.2 (slic3r_volume.cpp) applied. Use it from slicing plugins that reproduce the native slicing. The raw loops come from
-    the host (with PositiveLargestContour replaced by Positive), and the rest is done here through the plugin API, layer
-    by layer in parallel:
+    host applied before the volume ABI 2.0. Use it from slicing plugins that reproduce the native slicing. The raw loops
+    come from the cancellable triangle_mesh_slice_to_polygons() (with PositiveLargestContour replaced by Positive), and
+    the rest is done here through the plugin API, layer by layer in parallel:
       1. polygons_ensure_valid at SCALED_EPSILON;
       2. remove_collinear(model_resolution) on every ring when model_resolution > 0;
       3. clipper_union_ex with the fill rule of the layer mode (EvenOdd: even-odd, PositiveLargestContour: positive,
@@ -275,16 +253,13 @@ public:
                                                                const std::vector<float> &slice_zs,
                                                                const plugin_run_context *context) const
     {
-        throw_if_cancelled(context);
-
         // The raw slicing keeps the polygons of PositiveLargestContour as they are for the fill rule below.
         c_mesh_slicing_params raw_params = params;
         if (raw_params.mode == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR)
             raw_params.mode = RAW_MESH_SLICING_MODE_POSITIVE;
         if (raw_params.mode_below == RAW_MESH_SLICING_MODE_POSITIVE_LARGEST_CONTOUR)
             raw_params.mode_below = RAW_MESH_SLICING_MODE_POSITIVE;
-        std::vector<StoredPolygonCollection> rings = slice_to_polygons(storage, raw_params, slice_zs);
-        throw_if_cancelled(context);
+        std::vector<StoredPolygonCollection> rings = slice_to_polygons(storage, raw_params, slice_zs, context);
 
         // The outputs exist before the loop, so the jobs only fill them.
         std::vector<StoredExPolygonCollection> out;

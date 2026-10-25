@@ -1269,9 +1269,11 @@ TEST_CASE("Seam constraint boundaries and degenerate segments remain classified"
         const c_matrix4d transform=matrix4d_mul(
             matrix4d_translation(-unscaled(center.x),-unscaled(center.y),0),object.transform());
         // Use actual sliced boundaries, including native float-to-integer rounding.
+        c_mesh_slicing_params slicing_params={};
+        slicing_params.transform=matrix4d_mul(transform,volume_get_matrix(volume.handle()));
         const std::vector<slic3r_api::StoredPolygonCollection> slices=volume.mesh().slice_to_polygons(
-            reinterpret_cast<storage_handle *>(&storage),matrix4d_mul(transform,volume_get_matrix(volume.handle())),
-            {float(unscaled(fixture.view().layer().print_z()))});
+            reinterpret_cast<storage_handle *>(&storage),slicing_params,
+            {float(unscaled(fixture.view().layer().print_z()))},nullptr);
         REQUIRE(slices.front().readonly().size()>0);
         const slic3r_api::Polygon polygon=slices.front().readonly().at(0);
         for (uint32_t i=0;i<polygon.size();++i) {

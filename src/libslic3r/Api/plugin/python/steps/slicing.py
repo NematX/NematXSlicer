@@ -212,10 +212,11 @@ class SlicingContext(PluginRunContextView):
         slicing modes are applied through the API (see TriangleMesh.slice_to_expolygons()).
 
         The heights are validated: a value that is not finite, or smaller than the one
-        before it, raises ValueError before anything is allocated.
+        before it, raises ValueError before anything is allocated. The raw slicing polls the
+        cancellation of this step context and raises PluginCancelled when it is cancelled.
         """
         return volume.mesh().slice_to_expolygons(
-            self.plugin_storage(), volume.matrix(), z_mm_by_layer, params
+            self.plugin_storage(), volume.matrix(), z_mm_by_layer, params, ctypes.addressof(self.common)
         )
 
 __all__ = [

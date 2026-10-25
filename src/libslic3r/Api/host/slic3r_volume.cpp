@@ -2,10 +2,22 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+/* Host side of slic3r_volume.h: volumes, layer-range tables, painting projection, plugin-built triangle meshes and the
+   slicing of a mesh into raw loops.
+
+   Each C function of the ABI is a thin wrapper (in the extern "C" block at the end) over a function of namespace
+   Slic3r, which holds the logic and the native types. triangle_mesh_slice_to_polygons() is the one that does real work
+   at the boundary: it validates its arguments, polls the plugin context from the native slicer, and turns every
+   exception into a status, so that nothing is thrown through C frames. */#include <atomic>
 #include <cmath>
 #include <cstring>
+#include <exception>
+#include <functional>
 #include <memory>
 #include <utility>
+#include <vector>
+
+#include <oneapi/tbb/task_group.h>
 
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -21,6 +33,27 @@
 
 namespace Slic3r {
 
+// Forward declarations of the slicing entry point and its helpers, in call order.
+// Slices the mesh into raw loops; returns a raw_mesh_slice_status and never throws.
+int32_t triangle_mesh_slice_to_polygons(const triangle_mesh_handle *mesh,
+                                        const c_mesh_slicing_params *params,
+                                        const float *z_mm_by_layer,
+                                        polygon_collection_handle **slices_by_layer,
+                                        uint32_t layer_count,
+                                        const plugin_run_context *context);
+
+namespace {
+// True if the arguments are valid (see slic3r_volume.h): finite Z in non-decreasing order, finite params and transform.
+bool slice_arguments_are_valid(const triangle_mesh_handle *mesh,
+                               const c_mesh_slicing_params *params,
+                               const float *z_mm_by_layer,
+                               polygon_collection_handle **slices_by_layer,
+                               uint32_t layer_count);
+// True if the plugin context asks to stop. A NULL context or callback means "never cancelled".
+bool context_is_cancelled(const plugin_run_context *context);
+// Empties every non-NULL output collection (they stay owned by the caller's storage).
+void clear_slice_outputs(polygon_collection_handle **slices_by_layer, uint32_t layer_count);
+} // namespace
 static const PrintObject *to_object(const object_handle *me)
 {
     return reinterpret_cast<const PrintObject *>(me);
@@ -468,6 +501,107 @@ polygon_collection_handle *triangle_mesh_project_to_polygons(
     }
 }
 
+namespace {
+
+// Thrown by the native slicer callback to unwind a cancelled slice; never leaves triangle_mesh_slice_to_polygons().
+struct MeshSliceCancelled {};
+
+bool context_is_cancelled(const plugin_run_context *context)
+{
+    return context != nullptr && context->is_cancelled != nullptr && context->is_cancelled(context->host_context) != 0;
+}
+
+void clear_slice_outputs(polygon_collection_handle **slices_by_layer, uint32_t layer_count)
+{
+    if (slices_by_layer == nullptr)
+        return;
+    for (uint32_t idx = 0; idx < layer_count; ++idx)
+        if (slices_by_layer[idx] != nullptr)
+            to_polygons(slices_by_layer[idx])->clear();
+}
+
+bool slice_arguments_are_valid(const triangle_mesh_handle *mesh,
+                               const c_mesh_slicing_params *params,
+                               const float *z_mm_by_layer,
+                               polygon_collection_handle **slices_by_layer,
+                               uint32_t layer_count)
+{
+    if (mesh == nullptr || params == nullptr || (layer_count > 0 && (z_mm_by_layer == nullptr || slices_by_layer == nullptr)))
+        return false;
+    // Written so that a NaN radius is rejected too.
+    if (!(params->closing_radius >= 0.f) || !std::isfinite(params->closing_radius))
+        return false;
+    // The fields that only drive the plugin-side post-processing are validated here as well.
+    if (!std::isfinite(params->extra_offset) || !std::isfinite(params->resolution) || !std::isfinite(params->model_resolution))
+        return false;
+    for (const double value : params->transform.value)
+        if (!std::isfinite(value))
+            return false;
+    for (uint32_t idx = 0; idx < layer_count; ++idx)
+        if (!std::isfinite(z_mm_by_layer[idx]) || (idx > 0 && z_mm_by_layer[idx] < z_mm_by_layer[idx - 1]))
+            return false;
+    return true;
+}
+
+} // namespace
+
+// Slice with the native slicer (see slic3r_volume.h for the contract).
+// 1. Invalid arguments give -1; every non-NULL output collection is cleared (emptied, never freed) on -1, 0 and -2.
+// 2. The context and the enclosing TBB task group are checked before any work, also when layer_count is 0.
+// 3. The native callback runs on several TBB threads: it raises a flag and throws a private sentinel, which TBB
+//    carries back to this thread. A cancellation that the callback did not see (late request, or a cancelled
+//    enclosing task group that made TBB skip the work) is detected after the call, before publishing.
+// 4. The sentinel becomes 0 and any other exception becomes -2, so nothing crosses the C boundary.
+int32_t triangle_mesh_slice_to_polygons(const triangle_mesh_handle *mesh,
+                                        const c_mesh_slicing_params *params,
+                                        const float *z_mm_by_layer,
+                                        polygon_collection_handle **slices_by_layer,
+                                        uint32_t layer_count,
+                                        const plugin_run_context *context)
+{
+    if (!slice_arguments_are_valid(mesh, params, z_mm_by_layer, slices_by_layer, layer_count)) {
+        clear_slice_outputs(slices_by_layer, layer_count);
+        return RAW_MESH_SLICE_STATUS_INVALID_ARGUMENT;
+    }
+    try {
+        if (context_is_cancelled(context) || tbb::is_current_task_group_canceling()) {
+            clear_slice_outputs(slices_by_layer, layer_count);
+            return RAW_MESH_SLICE_STATUS_CANCELLED;
+        }
+        if (layer_count == 0)
+            return RAW_MESH_SLICE_STATUS_DONE;
+
+        std::atomic<bool> cancelled_flag{false};
+        const std::function<void()> throw_on_cancel = [&cancelled_flag, context] {
+            if (cancelled_flag.load() || context_is_cancelled(context)) {
+                cancelled_flag.store(true);
+                throw MeshSliceCancelled();
+            }
+        };
+
+        std::vector<float> zs(z_mm_by_layer, z_mm_by_layer + layer_count);
+        MeshSlicingParamsEx native_params = to_mesh_slicing_params(params);
+        indexed_triangle_set its = to_triangle_mesh(mesh)->its;
+        if (native_params.trafo.rotation().determinant() < 0.)
+            its_flip_triangles(its);
+        std::vector<Polygons> sliced = slice_mesh(its, zs, native_params, throw_on_cancel);
+
+        if (cancelled_flag.load() || context_is_cancelled(context) || tbb::is_current_task_group_canceling()) {
+            clear_slice_outputs(slices_by_layer, layer_count);
+            return RAW_MESH_SLICE_STATUS_CANCELLED;
+        }
+        for (uint32_t idx = 0; idx < layer_count; ++idx)
+            if (slices_by_layer[idx] != nullptr)
+                *to_polygons(slices_by_layer[idx]) = idx < sliced.size() ? std::move(sliced[idx]) : Polygons{};
+        return RAW_MESH_SLICE_STATUS_DONE;
+    } catch (const MeshSliceCancelled &) {
+        clear_slice_outputs(slices_by_layer, layer_count);
+        return RAW_MESH_SLICE_STATUS_CANCELLED;
+    } catch (...) {
+        clear_slice_outputs(slices_by_layer, layer_count);
+        return RAW_MESH_SLICE_STATUS_INTERNAL_ERROR;
+    }
+}
 } // namespace Slic3r
 
 extern "C" {
@@ -635,95 +769,13 @@ polygon_collection_handle *triangle_mesh_project_to_polygons(
     return Slic3r::triangle_mesh_project_to_polygons(storage, mesh, transform);
 }
 
-void triangle_mesh_slice_to_polygons(const triangle_mesh_handle *mesh,
-                                     c_matrix4d transform,
-                                     const float *z_mm_by_layer,
-                                     polygon_collection_handle **slices_by_layer,
-                                     uint32_t layer_count)
+int32_t triangle_mesh_slice_to_polygons(const triangle_mesh_handle *mesh,
+                                        const c_mesh_slicing_params *params,
+                                        const float *z_mm_by_layer,
+                                        polygon_collection_handle **slices_by_layer,
+                                        uint32_t layer_count,
+                                        const plugin_run_context *context)
 {
-    c_mesh_slicing_params params = {};
-    params.mode = RAW_MESH_SLICING_MODE_REGULAR;
-    params.mode_below = RAW_MESH_SLICING_MODE_REGULAR;
-    params.transform = transform;
-    triangle_mesh_slice_to_polygons_with_params(mesh, &params, z_mm_by_layer, slices_by_layer, layer_count);
+    return Slic3r::triangle_mesh_slice_to_polygons(mesh, params, z_mm_by_layer, slices_by_layer, layer_count, context);
 }
-
-void triangle_mesh_slice_to_polygons_with_params(const triangle_mesh_handle *mesh,
-                                                 const c_mesh_slicing_params *params,
-                                                 const float *z_mm_by_layer,
-                                                 polygon_collection_handle **slices_by_layer,
-                                                 uint32_t layer_count)
-{
-    if (mesh == nullptr || z_mm_by_layer == nullptr || slices_by_layer == nullptr || layer_count == 0)
-        return;
-
-    std::vector<float> zs(z_mm_by_layer, z_mm_by_layer + layer_count);
-
-    Slic3r::MeshSlicingParamsEx native_params = Slic3r::to_mesh_slicing_params(params);
-    indexed_triangle_set its = Slic3r::to_triangle_mesh(mesh)->its;
-    if (native_params.trafo.rotation().determinant() < 0.)
-        Slic3r::its_flip_triangles(its);
-    std::vector<Slic3r::Polygons> sliced = Slic3r::slice_mesh(its, zs, native_params);
-
-    for (uint32_t idx = 0; idx < layer_count; ++idx) {
-        assert(slices_by_layer != nullptr);
-        if (slices_by_layer[idx] != nullptr)
-            *Slic3r::to_polygons(slices_by_layer[idx]) = idx < sliced.size() ? std::move(sliced[idx]) : Slic3r::Polygons{};
-    }
-}
-
-polygon_collection_handle *triangle_mesh_slice_to_polygon(storage_handle *storage,
-                                                          const triangle_mesh_handle *mesh,
-                                                          c_matrix4d transform,
-                                                          float layer_z_mm) {
-    if (storage == nullptr || mesh == nullptr)
-        return nullptr;
-
-    //MeshSlicingParams params;
-    //params.trafo = to_transform3d(transform);
-    //std::vector<Polygons> sliced = slice_mesh(to_triangle_mesh(mesh)->its, zs, params);
-
-
-    return nullptr;
-}
-
-void triangle_mesh_slice_to_expolygons(const triangle_mesh_handle *mesh,
-                                       c_matrix4d transform,
-                                       const float *z_mm_by_layer,
-                                       expolygon_collection_handle **slices_by_layer,
-                                       uint32_t layer_count)
-{
-    c_mesh_slicing_params params = {};
-    params.mode = RAW_MESH_SLICING_MODE_REGULAR;
-    params.mode_below = RAW_MESH_SLICING_MODE_REGULAR;
-    params.transform = transform;
-    triangle_mesh_slice_to_expolygons_with_params(mesh, &params, z_mm_by_layer, slices_by_layer, layer_count);
-}
-
-void triangle_mesh_slice_to_expolygons_with_params(const triangle_mesh_handle *mesh,
-                                                   const c_mesh_slicing_params *params,
-                                                   const float *z_mm_by_layer,
-                                                   expolygon_collection_handle **slices_by_layer,
-                                                   uint32_t layer_count)
-{
-    if (mesh == nullptr || z_mm_by_layer == nullptr || slices_by_layer == nullptr || layer_count == 0)
-        return;
-
-    std::vector<float> zs(z_mm_by_layer, z_mm_by_layer + layer_count);
-
-    Slic3r::MeshSlicingParamsEx native_params = Slic3r::to_mesh_slicing_params(params);
-    indexed_triangle_set its = Slic3r::to_triangle_mesh(mesh)->its;
-    if (native_params.trafo.rotation().determinant() < 0.)
-        Slic3r::its_flip_triangles(its);
-    std::vector<Slic3r::ExPolygons> sliced = Slic3r::slice_mesh_ex(its, zs, native_params);
-
-    for (uint32_t idx = 0; idx < layer_count; ++idx) {
-        if (slices_by_layer[idx] == nullptr)
-            continue;
-        Slic3r::ExPolygons &dst = *Slic3r::to_expolygons(slices_by_layer[idx]);
-        dst = idx < sliced.size() ? std::move(sliced[idx]) : Slic3r::ExPolygons{};
-        Slic3r::ensure_valid(dst, scale_i(native_params.resolution));
-    }
-}
-
 } // extern "C"
