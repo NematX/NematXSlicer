@@ -609,6 +609,7 @@ TEST_CASE("Default skirt/brim plugins are active by default for plugin tests", "
 
 TEST_CASE("Default brim generator leaves output empty when brim is disabled", "[plugins][skirt-brim]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedBrimPrint prepared;
     run_until_skirt_brim(prepared, brim_test_config(false, false));
 
@@ -621,6 +622,7 @@ TEST_CASE("Default brim generator leaves output empty when brim is disabled", "[
 TEST_CASE("Default brim generator creates global brim and expands the first-layer hull",
           "[plugins][skirt-brim]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedBrimPrint prepared;
     run_until_skirt_brim(prepared, brim_test_config(true, false));
 
@@ -699,6 +701,7 @@ TEST_CASE("Default brim generator applies brim inside holes", "[plugins][skirt-b
 
 TEST_CASE("Default brim generator can publish object-owned brim", "[plugins][skirt-brim]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedBrimPrint prepared;
     run_until_skirt_brim(prepared, brim_test_config(true, true));
 
@@ -729,6 +732,7 @@ TEST_CASE("Default brim generator can publish object-owned brim", "[plugins][ski
 
 TEST_CASE("Default skirt generator creates global skirt", "[plugins][skirt-brim]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedBrimPrint prepared;
     run_until_skirt_brim(prepared, skirt_test_config(1, 0, false));
 
@@ -741,6 +745,7 @@ TEST_CASE("Default skirt generator creates global skirt", "[plugins][skirt-brim]
 
 TEST_CASE("Default skirt generator can publish object-owned skirt", "[plugins][skirt-brim]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedBrimPrint prepared;
     run_until_skirt_brim(prepared, skirt_test_config(1, 0, true));
 
@@ -752,6 +757,7 @@ TEST_CASE("Default skirt generator can publish object-owned skirt", "[plugins][s
 
 TEST_CASE("Default skirt generator publishes skirt-brim as first-layer-only skirt", "[plugins][skirt-brim]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedBrimPrint prepared;
     run_until_skirt_brim(prepared, skirt_test_config(0, 2, false));
 

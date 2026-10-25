@@ -469,7 +469,7 @@ void activate_plugin_or_fail(Slic3r::Orchestrator &orchestrator, const char *plu
 
 namespace Slic3r::Test::Plugins {
 
-// Register built-in and test providers before config finalization, then initialize once; registered instances are borrowed.
+// Register and activate the shared providers once, finalize settings, initialize the FFF/SLA print config caches and disable scoped probes; call before constructing Slic3r::Print or DynamicPrintConfig::full_print_config(). Missing expected plugins log an error and call assert(false), not a return value.
 void ensure_plugin_test_runtime_initialized()
 {
     static bool initialized = []() {

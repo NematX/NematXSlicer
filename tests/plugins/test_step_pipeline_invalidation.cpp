@@ -290,6 +290,7 @@ TEST_CASE("Pipeline state invalidation preserves checkpoint prefixes and is idem
 TEST_CASE("Pipeline control replay captures a running step before the stop callback clears it",
           "[plugins][step-pipeline][pipeline-state][cancellation]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     using namespace Slic3r;
     LifecyclePrint print;
     print.set_running_step(STEP_PERIMETER);
@@ -487,6 +488,7 @@ TEST_CASE("Task bounds only stop the worker and slicing still completes the full
 TEST_CASE("Pipeline completion cannot publish done after cancellation",
           "[plugins][step-pipeline][pipeline-state][cancellation]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     using namespace Slic3r;
     Print print;
     print.set_running_step(STEP_PERIMETER);
@@ -502,6 +504,7 @@ TEST_CASE("Pipeline completion cannot publish done after cancellation",
 TEST_CASE("Pipeline warnings change the clock and are retired on successful retry",
           "[plugins][step-pipeline][pipeline-state][warnings]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     using namespace Slic3r;
     Print print;
     size_t notifications = 0;
@@ -1052,6 +1055,7 @@ TEST_CASE("Terminal Print reset abandons failed cleanup and permits a new projec
 TEST_CASE("Direct G-code export rejects an invalid slicing prefix before clearing owners",
           "[plugins][step-pipeline][checkpoint][gcode]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     using namespace Slic3r::Test::PerimeterPluginTests;
     PreparedPerimeterPrint prepared;
     prepare_cube_print(prepared, perimeter_config({}));
@@ -1076,6 +1080,7 @@ TEST_CASE("Direct G-code export rejects an invalid slicing prefix before clearin
 TEST_CASE("Checkpoint cleanup discards derived groups and auxiliary owners without changing source slices",
           "[plugins][step-pipeline][checkpoint][cleanup]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     using namespace Slic3r;
     using namespace Slic3r::Test::PerimeterPluginTests;
     bool local_source_alive = false;
@@ -1249,6 +1254,7 @@ TEST_CASE("Checkpoint replay invalidates and republishes every canonical Print r
 TEST_CASE("Ordering clear destroys output without scheduling any step",
           "[plugins][step-pipeline][checkpoint][cleanup]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Slic3r::Print print;
     for (const slicing_step_t step : Slic3r::Steps::execution_order())
         print.mark_step_executed(step);
@@ -1395,6 +1401,7 @@ TEST_CASE("A setting read by a plugin invalidates no later than that plugin",
 TEST_CASE("Replay requests resume from the earliest invalid checkpoint",
           "[plugins][step-pipeline][invalidation][checkpoint]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     using Slic3r::Steps::Checkpoint;
 
     Slic3r::Print print;
@@ -1549,6 +1556,7 @@ TEST_CASE("Disabling the ordering checkpoint releases its copy",
 TEST_CASE("G-code clear resets every published statistic",
           "[plugins][step-pipeline][cleanup][gcode]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Slic3r::Print print;
     Slic3r::PrintStatistics &statistics = print.print_statistics();
     statistics.estimated_print_time[0] = 12.5;

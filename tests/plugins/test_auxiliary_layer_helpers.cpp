@@ -202,6 +202,7 @@ TEST_CASE("PrintApply keeps region zero as object default fallback",
 TEST_CASE("Auxiliary layer C API creates mutable generic layers",
           "[plugins][auxiliary-layer][api]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Model model = make_auxiliary_region_model(false, false, false);
     Print print;
     init_print_from_model(model, print);
@@ -232,6 +233,7 @@ TEST_CASE("Auxiliary layer C API creates mutable generic layers",
 TEST_CASE("Print auxiliary object owns print-level auxiliary layers outside object list",
           "[plugins][auxiliary-layer][api]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     const print_handle *print_handle_value = reinterpret_cast<const print_handle *>(&print);
     CHECK(print_count_object(print_handle_value) == 0);
@@ -265,6 +267,7 @@ TEST_CASE("Print auxiliary object owns print-level auxiliary layers outside obje
 TEST_CASE("Auxiliary layer helper builds regions on print-level auxiliary object",
           "[plugins][auxiliary-layer][regions]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     PluginStorage plugin_storage;
     storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
@@ -358,6 +361,7 @@ TEST_CASE("Auxiliary layer helper splits subject into default, part and modifier
 TEST_CASE("Auxiliary layer helper ignores negative volumes by default",
           "[plugins][auxiliary-layer][regions]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Model model = make_auxiliary_region_model(false, false, true);
     Print print;
     init_print_from_model(model, print);

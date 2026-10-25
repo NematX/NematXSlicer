@@ -313,6 +313,7 @@ TEST_CASE("Wipe-into-first ordering registers after the tree ordering",
 TEST_CASE("Wipe-into-first moves the infill bucket of the first island after a change",
           "[plugins][ordering][wipe-tower][wipe-into]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -347,6 +348,7 @@ TEST_CASE("Wipe-into-first moves the infill bucket of the first island after a c
 TEST_CASE("Wipe-into-first leaves a visit without a change or a soluble filament untouched",
           "[plugins][ordering][wipe-tower][wipe-into]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -386,6 +388,7 @@ TEST_CASE("Wipe-into-first leaves a visit without a change or a soluble filament
 TEST_CASE("Wipe-into-first requires the perimeters to be printed before the incoming visit",
           "[plugins][ordering][wipe-tower][wipe-into]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -425,6 +428,7 @@ TEST_CASE("Wipe-into-first requires the perimeters to be printed before the inco
 TEST_CASE("Wipe-into-first moves wipe-into-object extrusions first and leaves support alone",
           "[plugins][ordering][wipe-tower][wipe-into]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -460,6 +464,7 @@ TEST_CASE("Wipe-into-first moves wipe-into-object extrusions first and leaves su
 TEST_CASE("Wipe-into-first touches only the first island after a change",
           "[plugins][ordering][wipe-tower][wipe-into]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -492,6 +497,7 @@ TEST_CASE("Wipe-into-first touches only the first island after a change",
 TEST_CASE("Wipe-into-first leaves the plan unchanged when the options are off or there is no tower",
           "[plugins][ordering][wipe-tower][wipe-into]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -537,6 +543,7 @@ TEST_CASE("Wipe-into-first leaves the plan unchanged when the options are off or
 TEST_CASE("Wipe-into-first keeps the previous tool across unresolved visits",
           "[plugins][ordering][wipe-tower][wipe-into]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;

@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "perimeter_test_helpers.hpp"
+#include "plugin_test_helpers.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
@@ -172,6 +173,7 @@ TEST_CASE("Mark first loop tags terminal contour and hole loops", "[plugins][per
 
 TEST_CASE("Mark first loop falls back to the nearest generated parent", "[plugins][perimeter][first-loop]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     // This direct tree reproduces the edge case where a generated node has a
     // child area, but that child never produced perimeter extrusion. The empty
     // child must not block the parent loop from being considered innermost.
@@ -193,6 +195,7 @@ TEST_CASE("Mark first loop falls back to the nearest generated parent", "[plugin
 
 TEST_CASE("Mark first loop ignores gap fill and thin wall loops", "[plugins][perimeter][first-loop]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     // Gap fill and thin walls may live in the perimeter generation tree, but
     // they are not shell loops. Even if they carry loop-like metadata in a
     // malformed or transitional tree, this module must leave them untagged.

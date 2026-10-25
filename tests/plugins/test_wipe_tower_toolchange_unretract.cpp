@@ -401,6 +401,7 @@ TEST_CASE("Tool-change unretraction wipe registers after retraction",
 TEST_CASE("Tool-change unretraction wipes the tower start after a return change",
           "[plugins][wipe-tower][retraction]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -465,6 +466,7 @@ TEST_CASE("Tool-change unretraction wipes the tower start after a return change"
 TEST_CASE("Tool-change unretraction wipe turns at half its length",
           "[plugins][wipe-tower][retraction]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     const auto check_turn = [](Print &print, const double leaf_length_mm) {
         const OrderedExtrusionScope scope(visit_scope(print, 3), scope_property_key());
@@ -513,6 +515,7 @@ TEST_CASE("Tool-change unretraction wipe turns at half its length",
 TEST_CASE("Tool-change unretraction wipe keeps its no-op cases",
           "[plugins][wipe-tower][retraction]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     const auto require_untouched = [](Print &print, const uint32_t visit_index,
                                       const bool toolchange) {
@@ -585,6 +588,7 @@ TEST_CASE("Tool-change unretraction wipe keeps its no-op cases",
 TEST_CASE("Tool-change unretraction wipe at one hundred percent is only the wipe",
           "[plugins][wipe-tower][retraction]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -613,6 +617,7 @@ TEST_CASE("Tool-change unretraction wipe at one hundred percent is only the wipe
 TEST_CASE("Tool-change unretraction wipe repeats a short tower leaf",
           "[plugins][wipe-tower][retraction]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;
@@ -638,6 +643,7 @@ TEST_CASE("Tool-change unretraction wipe repeats a short tower leaf",
 TEST_CASE("Tool-change unretraction wipe resolves its speed ceiling",
           "[plugins][wipe-tower][retraction]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     const auto wipe_speed = [](Print &print) {
         const OrderedExtrusionScope scope(visit_scope(print, 3), scope_property_key());
@@ -697,6 +703,7 @@ TEST_CASE("Tool-change unretraction wipe resolves its speed ceiling",
 TEST_CASE("Tool-change unretraction wipe resolves an instance tower ceiling",
           "[plugins][wipe-tower][retraction]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
     Print print;
     Model model;

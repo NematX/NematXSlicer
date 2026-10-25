@@ -1073,6 +1073,7 @@ void prepare_mixed_cubic_surfaces(PreparedPerimeterPrint &prepared)
 
 TEST_CASE("Adaptive and Support spacing remain separate in mixed regions", "[plugins][support-cubic][multi-region]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedPerimeterPrint prepared;
     prepare_mixed_cubic_surfaces(prepared);
 

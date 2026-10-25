@@ -1070,6 +1070,7 @@ TEST_CASE("Generic plugin execution reports inactive cancellation and plugin err
 TEST_CASE("Print cancellation reaches plugins and stops the step pipeline",
           "[plugins][orchestrator][cancellation][pipeline]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     ensure_service_plugins_registered();
     Orchestrator &orchestrator = Orchestrator::instance();
     orchestrator.reset_plugin_cancel();

@@ -1787,6 +1787,7 @@ TEST_CASE("Layer fan rerun preserves unrelated process fields",
 TEST_CASE("PrintingPlan time estimator counts geometry and connecting travel",
           "[plugins][layer-extrusion-edit][fan][time-estimator]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = speed_config({{"travel_speed", "10"}});
     PrintingPlan plan;
     plan.groups.emplace_back();
@@ -1824,6 +1825,7 @@ TEST_CASE("PrintingPlan time estimator counts geometry and connecting travel",
 TEST_CASE("PrintingPlan time estimator treats sub-epsilon gaps as continuous",
           "[plugins][layer-extrusion-edit][fan][time-estimator][travel]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = speed_config({{"travel_speed", "1"}});
     PrintingPlan plan;
     plan.groups.emplace_back();

@@ -386,6 +386,7 @@ std::vector<const ExtrusionEntity *> geometric_leaves(const ExtrusionEntity &ent
 // request is not floating.
 TEST_CASE("Tool-change wipe collects every real visit boundary", "[plugins][wipe-tower][toolchange]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model, 3);
@@ -434,6 +435,7 @@ TEST_CASE("Tool-change wipe collects every real visit boundary", "[plugins][wipe
 // floating final unload after it.
 TEST_CASE("SEMM final unload needs a reported tool change", "[plugins][wipe-tower][toolchange][semm]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model);
@@ -457,6 +459,7 @@ TEST_CASE("SEMM final unload needs a reported tool change", "[plugins][wipe-towe
 // every change carries an outgoing part at the end of the previous visit.
 TEST_CASE("SEMM edit adds outgoing and priming visits", "[plugins][wipe-tower][toolchange][semm]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model, 3);
@@ -498,6 +501,7 @@ TEST_CASE("SEMM edit adds outgoing and priming visits", "[plugins][wipe-tower][t
 // hides the real change from the tool before it to the tool after it.
 TEST_CASE("Tool-change wipe skips unresolved tool visits", "[plugins][wipe-tower][toolchange]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model);
@@ -511,6 +515,7 @@ TEST_CASE("Tool-change wipe skips unresolved tool visits", "[plugins][wipe-tower
 // Exercise asymmetric pair/component volumes and incoming/both-tool minimum floors on an owned two-visit plan; each branch preserves its exact expected volume.
 TEST_CASE("Tool-change wipe uses matrix components and minimum purge fallbacks", "[plugins][wipe-tower][toolchange]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model);
@@ -546,6 +551,7 @@ TEST_CASE("Tool-change wipe uses matrix components and minimum purge fallbacks",
 // Generate a long owned incoming purge at either band entry side, checking exact rounded flow/pitch, connected local geometry, volume within one row and the explicit four-line ramp scaled by the filament purge factor.
 TEST_CASE("Tool-change wipe fills rounded-flow bands with scaled four-line speeds", "[plugins][wipe-tower][toolchange]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model);
@@ -1067,6 +1073,7 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
 // only the configured ramming volume at the configured flow, then the flush, and the purge.
 TEST_CASE("Two-part tool change rams, unloads and loads in its band", "[plugins][wipe-tower][toolchange][semm]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model);
@@ -1837,6 +1844,7 @@ TEST_CASE("SEMM swap disables the retraction around it",
 // Let the real manager add empty contour visits to an owned three-tool plan, requiring both forced-change purges, no first-visit purge and no outgoing source mutation.
 TEST_CASE("Production wipe includes manager-forced contour visits and can be disabled", "[plugins][wipe-tower][toolchange]")
 {
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     Print print;
     Model model;
     configure_print(print, model, 3);
