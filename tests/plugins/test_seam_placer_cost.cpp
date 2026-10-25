@@ -2470,3 +2470,77 @@ TEST_CASE("Seam router projects loops without a perimeter marker and keeps marke
     CHECK(routed.x == expected.x);
     CHECK(routed.y == expected.y);
 }
+
+/*
+Random records loops from its assigned source islands without requiring a
+perimeter marker and rejects a loop absent from that set. FixedDirection chooses
+from loop geometry without relying on a perimeter marker. With only these two
+providers active in each section, the test checks the configured provider and
+the router's approach projection; scoped guards restore their prior activation.
+*/
+TEST_CASE("Seam router projects loops without a perimeter marker for Random and Fixed",
+          "[plugins][seam-placer][router]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const std::string seam_selector = Slic3r::Steps::plugin_exclusive_group_option_key(
+        orchestrator, SEAM_PLACER, "seam_placer_plugin");
+
+    SECTION("Random")
+    {
+        const ScopedPluginActivation fixed(orchestrator, k_fixed_plugin);
+        const ScopedPluginActivation random(orchestrator, k_random_plugin);
+        CostFixture fixture({{seam_selector, k_random_plugin}, {"seam_visibility", "0"}});
+        const PrintRegionConfig &selector_config = fixture.region->region().config();
+        Plugin *selected = Steps::selected_active_plugin_from_group(
+            orchestrator, SEAM_PLACER, "seam_placer_plugin", &selector_config);
+        REQUIRE(selected != nullptr);
+        CHECK(selected->get_id() == "seam_placer.random");
+        const slic3r_api::ExtrusionEntity unmarked = fixture.add(
+            rectangle_loop(4, -8, 8, -4), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE,
+            0, nullptr, false).root();
+        PluginStorage storage;
+        const slic3r_api::SeamPlacement::SeamPlacerRouter router(
+            reinterpret_cast<orchestrator_handle *>(&orchestrator),
+            slic3r_api::Print(reinterpret_cast<const print_handle *>(&fixture.prepared.print)),
+            slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(
+                &fixture.prepared.print.mutable_printing_plan())),
+            reinterpret_cast<storage_handle *>(&storage));
+
+        const c_point front = unmarked.front();
+        const c_point start = {front.x + scale_i(2), front.y - scale_i(3)};
+        const c_point projected = router.place_seam(unmarked, start);
+        CHECK(projected.x == front.x + scale_i(2));
+        CHECK(projected.y == front.y);
+    }
+
+    SECTION("Fixed direction")
+    {
+        const ScopedPluginActivation fixed(orchestrator, k_fixed_plugin);
+        const ScopedPluginActivation random(orchestrator, k_random_plugin);
+        CostFixture fixture({{seam_selector, k_fixed_plugin}, {"seam_visibility", "0"}});
+        const PrintRegionConfig &selector_config = fixture.region->region().config();
+        Plugin *selected = Steps::selected_active_plugin_from_group(
+            orchestrator, SEAM_PLACER, "seam_placer_plugin", &selector_config);
+        REQUIRE(selected != nullptr);
+        CHECK(selected->get_id() == "seam_placer.fixed");
+        const slic3r_api::ExtrusionEntity unmarked = fixture.add(
+            rectangle_loop(4, -8, 8, -4), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE,
+            0, nullptr, false).root();
+        PluginStorage storage;
+        const slic3r_api::SeamPlacement::SeamPlacerRouter router(
+            reinterpret_cast<orchestrator_handle *>(&orchestrator),
+            slic3r_api::Print(reinterpret_cast<const print_handle *>(&fixture.prepared.print)),
+            slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(
+                &fixture.prepared.print.mutable_printing_plan())),
+            reinterpret_cast<storage_handle *>(&storage));
+
+        // The approach position projects onto the front edge of the rectangle; a
+        // provider-driven answer would return one of its vertices instead.
+        const c_point front = unmarked.front();
+        const c_point start = {front.x + scale_i(2), front.y - scale_i(3)};
+        const c_point projected = router.place_seam(unmarked, start);
+        CHECK(projected.x == front.x + scale_i(2));
+        CHECK(projected.y == front.y);
+    }
+}
