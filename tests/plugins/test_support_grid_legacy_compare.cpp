@@ -22,6 +22,9 @@
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
+using SG::PathMeasures;
+using SG::measure_layer;
+using SG::prepare_legacy_inputs;
 
 namespace {
 // Run one model through every style, contact-distance and interface-count combination.
@@ -30,106 +33,7 @@ void run_comparison(int model_id, bool same_tool = false);
 // means support may not rest on the object (build plate only).
 void check_family(const PrintObject &object, const slic3r_api::Support::Common::GeneratedSupport &support,
                   const slic3r_api::Support::Common::SupportParams &params, int model_id, bool on_object = true);
-// Populate deprecated region caches and concrete extrusion classes for native support.
-void prepare_legacy_inputs(PrintObject &object);
-// Copy generic extrusion leaves into concrete paths with resolved flow attributes.
-void legacy_paths(const ExtrusionEntity &entity, ExtrusionPaths &paths, const ExtrusionAttributes *attributes = nullptr);
-// Rebuild concrete loops and paths for the native support reader.
-void legacy_extrusions(const ExtrusionEntity &entity, ExtrusionEntityCollection &out, const ExtrusionAttributes *attributes = nullptr);
-struct PathMeasure { double length = 0, volume = 0; size_t count = 0; };
-using PathMeasures = std::map<std::pair<extruder_index_t, uint16_t>, PathMeasure>;
-// Sum effective flow and geometric length for each extrusion leaf.
-void measure_paths(const ExtrusionEntity &entity, extruder_index_t extruder, PathMeasures &result, const ExtrusionAttributes *attributes = nullptr);
-// Measure both support buckets in every region island of a layer.
-PathMeasures measure_layer(const Layer &layer);
 
-// Resolve inherited attributes while visiting the tree; missing support flow fails instead of silently omitting a leaf, and result owns the summed values.
-void measure_paths(const ExtrusionEntity &entity, extruder_index_t extruder, PathMeasures &result, const ExtrusionAttributes *attributes)
-{
-    if (const ExtrusionAttributes *local = entity.get_property<ExtrusionAttributes>()) attributes = local;
-    if (entity.has_polyline()) {
-        REQUIRE(attributes != nullptr);
-        PathMeasure &measure = result[{extruder, uint16_t(attributes->role)}];
-        const double length = unscaled(entity.polyline_ref().length());
-        measure.length += length;
-        measure.volume += length * attributes->mm3_per_mm;
-        ++measure.count;
-    }
-    for (const ExtrusionEntityUPtr &child : entity.children()) measure_paths(*child, extruder, result, attributes);
-}
-
-// Read support and interface trees without modifying the layer; the returned map separates roles and tools even when both buckets use one tool.
-PathMeasures measure_layer(const Layer &layer)
-{
-    PathMeasures result;
-    for (const LayerSliceIsland &island : layer.islands())
-        for (const LayerRegionIsland &region : island.regions_islands())
-            for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
-                if (region.has_extrusion(bucket)) measure_paths(region.extrusion(bucket), region.extruder_id(), result);
-    return result;
-}
-
-// Classify raw footprints by adjacent-layer coverage and copy island fills and paths into legacy-readable inputs; only the legacy print's caches and path classes change.
-void prepare_legacy_inputs(PrintObject &object)
-{
-    for (Layer &layer : object.layers())
-        for (LayerRegion &region : layer.regions()) {
-            const ExPolygons &raw = region.get_raw_slices();
-            const ExPolygons bottom = layer.lower_layer ? diff_ex(raw, layer.lower_layer->lslices()) : raw;
-            const ExPolygons top = diff_ex(layer.upper_layer ? diff_ex(raw, layer.upper_layer->lslices()) : raw, bottom);
-            region.m_slices.clear();
-            region.m_slices.append(bottom, layer.lower_layer ? stPosBottom | stDensSolid | stModBridge : stPosBottom | stDensSolid);
-            region.m_slices.append(top, stPosTop | stDensSolid);
-            region.m_slices.append(diff_ex(diff_ex(raw, bottom), top), stPosInternal | stDensSparse);
-            SurfaceCollection &fills = region.set_fill_surfaces();
-            fills.clear();
-            for (const LayerSliceIsland &island : layer.islands())
-                for (const LayerRegionIsland &work : island.regions_islands())
-                    if (work.regions().count(&region))
-                        for (const Surface &surface : work.fill_surfaces())
-                            fills.append(intersection_ex(ExPolygons{surface.expolygon}, raw), surface);
-        }
-    for (Layer &layer : object.layers())
-        for (LayerSliceIsland &island : layer.islands())
-            for (LayerRegionIsland &work : island.regions_islands())
-                for (const ExtrusionRole role : {LayerRegionIsland::PERIMETERS, LayerRegionIsland::INFILLS}) {
-                    if (!work.has_extrusion(role)) continue;
-                    ExtrusionEntityCollection concrete;
-                    legacy_extrusions(work.extrusion(role), concrete);
-                    work.mutable_extrusion(role) = std::move(concrete);
-                }
-}
-
-// Resolve nearest attributes while copying polylines into test-owned paths; missing flow on a geometric leaf fails the comparison instead of dropping geometry.
-void legacy_paths(const ExtrusionEntity &entity, ExtrusionPaths &paths, const ExtrusionAttributes *attributes)
-{
-    if (const ExtrusionAttributes *local = entity.get_property<ExtrusionAttributes>()) attributes = local;
-    if (entity.has_polyline()) {
-        REQUIRE(attributes != nullptr);
-        ExtrusionPath path(*attributes);
-        path.set_polyline(entity.polyline_ref());
-        paths.push_back(std::move(path));
-    }
-    for (const ExtrusionEntityUPtr &child : entity.children()) legacy_paths(*child, paths, attributes);
-}
-
-// Preserve loop boundaries while flattening generic wrapper nodes into concrete classes; the legacy print owns the copies and the source tree stays valid until replacement.
-void legacy_extrusions(const ExtrusionEntity &entity, ExtrusionEntityCollection &out, const ExtrusionAttributes *attributes)
-{
-    if (const ExtrusionAttributes *local = entity.get_property<ExtrusionAttributes>()) attributes = local;
-    if (entity.is_loop()) {
-        ExtrusionPaths paths;
-        legacy_paths(entity, paths, attributes);
-        if (!paths.empty()) out.append(ExtrusionLoop(std::move(paths)));
-    } else if (entity.has_polyline()) {
-        REQUIRE(attributes != nullptr);
-        ExtrusionPath path(*attributes);
-        path.set_polyline(entity.polyline_ref());
-        out.append(std::move(path));
-    } else {
-        for (const ExtrusionEntityUPtr &child : entity.children()) legacy_extrusions(*child, out, attributes);
-    }
-}
 // Check that every published leaf carries a positive flow whose height is its layer's thickness.
 void check_published_paths(const ExtrusionEntity &entity, const Layer &layer);
 // Hash the published auxiliary layers (Z, thickness, extruder, surface types and points) of the family.

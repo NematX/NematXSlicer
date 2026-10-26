@@ -522,6 +522,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/SupportDemandOverhangs.hpp
 	Plugins/Support/SupportDemandPainting.cpp
 	Plugins/Support/SupportDemandPainting.hpp
+	Plugins/Support/Toolpath/BranchIslandClass.cpp
+	Plugins/Support/Toolpath/BranchIslandClass.hpp
 	Plugins/Support/Toolpath/BranchSheathPaths.cpp
 	Plugins/Support/Toolpath/BranchSheathPaths.hpp
 	Plugins/Support/Toolpath/LegacySupportPaths.cpp

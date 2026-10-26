@@ -1,6 +1,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* Writing support paths, shared by the support toolpath algorithms: the base pattern fill with its recipe,
-   the path entities that carry the flow, the validation of polylines and the small helpers they use.
+   the path entities that carry the flow, stationary deposits, and the validation of polylines.
+   A deposit carries one contour-centroid point and the island's net area times height as volume; it bypasses
+   polyline validation, which drops paths with fewer than two points.
 
    A base fill hands an area to an INFILL_PATTERN plugin through the pattern service of the payload. The recipe
    gives the pattern the flow and spacing of its lines, their density, angle and Z phase. With perimeter set, each
@@ -42,6 +44,9 @@ void fill_base_areas(const run_ctx_support_toolpath &payload, storage_handle *st
 // tells whether the paths may be reversed; the loops never may.
 void append_paths(storage_handle *storage, MutableExtrusionEntity parent, const std::vector<std::vector<c_point>> &lines,
                   const EPropertyAttributes &attributes, bool reversible);
+
+// Append one stationary support deposit at the contour centroid with net island area times flow height as volume.
+void append_deposit(storage_handle *storage, MutableExtrusionEntity parent, const ExPolygon &island, const c_flow &flow);
 
 // Return a new collection with the polylines simplified by the host ensure_valid(Polylines), and leave the input untouched.
 // Polylines with fewer than two points are dropped; each remaining polyline is simplified with Douglas-Peucker at the

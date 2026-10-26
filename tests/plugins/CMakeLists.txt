@@ -137,6 +137,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_toolpath_step.cpp
     test_support_toolpath_legacy.cpp
     test_support_toolpath_branch.cpp
+    test_support_branch_classify.cpp
     test_support_common.cpp
     test_support_step.cpp
     test_layer_extrusion_edit_support_acceleration.cpp

@@ -5,10 +5,12 @@
 #include <cmath>
 #include <cstdlib>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
+#include "BranchIslandClass.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_entity.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
@@ -38,6 +40,18 @@
    offset on its own, as the legacy does before subtracting the holes (the outline shrinks, each hole grows), and a
    candidate point belongs to the contour whose own offset ring it lies on. A point on two such rings lies where two
    offsets cross, and is tagged -1: the anchor search never follows it.
+
+   A branch gets thinner towards its tip, so a sheath is only one of the methods. The surfaces of a region island are
+   fused (closed by one epsilon) into islands, and each island gets one method chosen by classify_island() from the
+   share of its area narrower than 1.5 extrusion widths and from its compactness (BranchIslandClass.hpp):
+   - Sheath: the sheaths above, from the pieces of the island that survive the closing. Their thin leftovers stay unfilled.
+   - Centreline: no sheath. The medial axis of the island prints as one variable-width line, as wide as the island where it
+     is at most 1.5 widths wide. A part narrower than the nozzle is widened to the nozzle when the widening is small and
+     within the support XY distance (centreline_widths()); a narrower part, or an island with no line left, prints nothing.
+   - Blob: a thin island that is not elongated. One stationary deposit at its contour centroid prints the island's net
+     area times layer height, before the extrusion multiplier, with the sheath's support flow attributes.
+   A Centreline or Blob entity takes the place of the first sheath piece that its island would have printed, so the order of the
+   sheaths of the other islands does not change; an island whose pieces all vanished appends its entity after them.
 
    On the first support layer the bottom of the layer is the bed, and the surfaces become the base flange of
    LegacySupportPaths: first-layer flow, rectilinear lines inside a perimeter, and the base angle turned by a quarter
@@ -85,7 +99,7 @@ struct SeamFoot {
 
 // Generate the paths of each object island of one support layer and publish them into the island's base-tool region.
 void process_layer(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params, layer_handle *layer);
-// Append the paths of one region island's branch surfaces to out: the first-layer flange, or the sheaths of its surfaces.
+// Append the paths of one region island's branch surfaces to out: the first-layer flange, or the paths of its fused islands.
 void append_region_paths(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const BranchParams &params,
                          const layer_handle *layer, const layer_region_island_handle *region, MutableExtrusionEntity out);
 // The branch surfaces of one region island, with the support and branch bits set, as one collection.
@@ -93,6 +107,12 @@ StoredExPolygonCollection branch_surfaces(storage_handle *storage, const layer_r
 // The first-layer flange of the surfaces: the base flange recipe of LegacySupportPaths over their closing, appended to out.
 void append_flange(const run_ctx_support_toolpath &payload, storage_handle *storage, const layer_handle *layer,
                    const StoredExPolygonCollection &surfaces, const BranchParams &params, MutableExtrusionEntity out);
+// Append island methods in closed-piece order, replacing the first thin-island piece or appending when no piece survives.
+void append_island_paths(storage_handle *storage, const StoredExPolygonCollection &fused, const StoredExPolygonCollection &closed,
+                         const BranchParams &params, const c_flow &flow, MutableExtrusionEntity out);
+// The medial axis of a thin elongated island as one entity of variable-width lines, appended to out; nothing when it yields no line.
+// xy_distance is the support XY distance that bounds the widening of the lines narrower than the nozzle.
+void append_centreline(storage_handle *storage, const ExPolygon &island, const c_flow &flow, coord_t xy_distance, MutableExtrusionEntity out);
 // The paths of one closed surface: its sheaths, or the double-wall group when the surface is larger than the threshold.
 void append_surface_paths(storage_handle *storage, const ExPolygon &surface, const BranchParams &params, const c_flow &flow,
                           MutableExtrusionEntity out);
@@ -161,8 +181,10 @@ void append_region_paths(const run_ctx_support_toolpath &payload, storage_handle
     StoredExPolygonCollection closed = clipper_offset2(clipper(surfaces), double(SCALED_EPSILON),
                                                        -(double(SCALED_EPSILON) + 0.5 * double(flow.width))).to_expolygon_collection();
     closed.ensure_valid(params.geometry.resolution);
-    for (const ExPolygon surface : closed)
-        append_surface_paths(storage, surface, params, flow, out);
+    // The fused islands are the surfaces closed by the epsilon only, as the flange fuses them: each gets one method.
+    StoredExPolygonCollection fused = clipper_offset2(clipper(surfaces), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection();
+    fused.ensure_valid(params.geometry.resolution);
+    append_island_paths(storage, fused, closed, params, flow, out);
 }
 
 StoredExPolygonCollection branch_surfaces(storage_handle *storage, const layer_region_island_handle *region)
@@ -190,6 +212,72 @@ void append_flange(const run_ctx_support_toolpath &payload, storage_handle *stor
     Common::fill_base_areas(payload, storage, out, fused, layer, recipe, true);
 }
 
+// Classify valid disjoint fused islands using flow width, then move owned entities into out in closed-piece order. A piece
+// outside every island throws; thin islands print once at their first piece, or after the loop in fused-island order.
+void append_island_paths(storage_handle *storage, const StoredExPolygonCollection &fused, const StoredExPolygonCollection &closed,
+                         const BranchParams &params, const c_flow &flow, MutableExtrusionEntity out)
+{
+    std::vector<BranchIslandClass> kinds;
+    for (const ExPolygon island : fused)
+        kinds.push_back(classify_island(storage, island, flow.width).kind);
+    // A closed piece belongs to the fused island that holds the first point of its contour. The piece lies at least half a
+    // width inside that island and the fused islands are disjoint, so exactly one island holds the point: finding none is a
+    // broken invariant.
+    std::vector<size_t> owners;
+    for (uint32_t piece = 0; piece < closed.size(); ++piece) {
+        const c_point first = closed.at(piece).contour().front();
+        size_t owner = 0;
+        while (owner < fused.size() && !fused.at(uint32_t(owner)).contains(first))
+            ++owner;
+        if (owner == fused.size())
+            throw std::logic_error("A closed branch piece lies in no fused island");
+        owners.push_back(owner);
+    }
+
+    // The pieces of a Sheath island print as they are, with no check that the island has one, because it always does. Its thin
+    // part is under half of its area, so the opening of the island by r = 0.75 w is not empty, and nor is the erosion of the
+    // island by r that the opening grows back. The island is D eroded by one epsilon, D being the dilation of the branch
+    // surfaces by one epsilon, and a closed piece is D eroded by epsilon + w / 2. Erosions of the same D nest: the larger the
+    // distance, the smaller the result. The erosion of the island by r is D eroded by epsilon + r, which lies inside D eroded by
+    // epsilon + w / 2 because r is larger than w / 2. The equality is approximate: two composed offsets differ from one offset
+    // by the rounding of the Clipper grid and by the corners, which the miter join (limit 3) does not follow exactly. The gap
+    // between the two distances, w / 4 (about 0.1 mm), absorbs that difference.
+    // Both thin methods replace the first piece; the other pieces of that island are skipped.
+    std::vector<bool> drawn(fused.size(), false);
+    for (uint32_t piece = 0; piece < closed.size(); ++piece) {
+        const size_t island = owners[piece];
+        if (kinds[island] == BranchIslandClass::Sheath) {
+            append_surface_paths(storage, closed.at(piece), params, flow, out);
+        } else if (!drawn[island]) {
+            drawn[island] = true;
+            if (kinds[island] == BranchIslandClass::Blob)
+                Common::append_deposit(storage, out, fused.at(uint32_t(island)), flow);
+            else
+                append_centreline(storage, fused.at(uint32_t(island)), flow, params.geometry.gap_xy, out);
+        }
+    }
+    for (uint32_t island = 0; island < fused.size(); ++island)
+        if (kinds[island] != BranchIslandClass::Sheath && !drawn[island]) {
+            if (kinds[island] == BranchIslandClass::Blob)
+                Common::append_deposit(storage, out, fused.at(island), flow);
+            else
+                append_centreline(storage, fused.at(island), flow, params.geometry.gap_xy, out);
+        }
+}
+
+void append_centreline(storage_handle *storage, const ExPolygon &island, const c_flow &flow, coord_t xy_distance, MutableExtrusionEntity out)
+{
+    // The helper trims the parts of the island narrower than the nozzle by more than the widening limit and widens the others
+    // to the nozzle (centreline_widths()). It is told no extrusion maximum and no endpoint extension. The line is extended to
+    // the contour before the trim, so the trim shortens it where the island narrows; at a square end the extension copies the
+    // last width to the contour (MedialAxis::extends_line()), and the bead overshoots the island by about w / 2.
+    const CentrelineWidths widths = centreline_widths(flow, xy_distance);
+    std::optional<StoredExtrusionEntity> centreline = medial_axis_extrusion(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, flow)
+        .medial_widths(widths.min_medial_width, widths.max_medial_width).extrusion_widths(widths.min_extrusion_width, 0).can_reverse()
+        .try_build(storage, island);
+    if (centreline.has_value())
+        out.append_child_move(centreline->mutable_view());
+}
 void append_surface_paths(storage_handle *storage, const ExPolygon &surface, const BranchParams &params, const c_flow &flow,
                           MutableExtrusionEntity out)
 {
@@ -424,7 +512,9 @@ void publish_paths(layer_handle *layer, uint32_t island_index, MutableExtrusionE
 
 } // namespace
 
-// Walk the callback object's support layers and append their branch sheaths; per-call parameters isolate concurrent objects.
+// Walk the callback object's support layers, publishing the first-layer flange and then classified island sheaths,
+// centrelines or deposits into their base-tool support buckets. Per-call parameters isolate concurrent objects;
+// missing payload, cancellation, geometry, pattern-service and publication errors propagate to the caller.
 void generate_branch_paths(const plugin_run_context *context)
 {
     const run_ctx_support_toolpath *payload = plugin_ctx_as_support_toolpath(context);

@@ -2,6 +2,7 @@
 #include "SupportPaths.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <utility>
 
 #include "PerimeterFill.hpp"
@@ -10,7 +11,8 @@
 
 /* Implementation of the shared support path helpers (see SupportPaths.hpp). Each helper keeps the statements,
    constants and rounding of the legacy code it was taken from, so the base paths of the legacy support are
-   unchanged. */
+   unchanged. Stationary support deposits are built directly as one-point entities, with geometric volume before
+   the extrusion multiplier and with the support flow attributes used by the writer. */
 
 namespace slic3r_api::Support::Common {
 
@@ -94,6 +96,22 @@ void append_paths(storage_handle *storage, MutableExtrusionEntity parent, const 
         loop.set_flags(0u);
         parent.append_child_move(loop.mutable_view());
     }
+}
+
+// Build a one-point leaf from a fused island and support flow, then move it into a parent that accepts children. storage
+// owns the temporary entity; parent receives its contents. Holes reduce volume but not the contour centroid.
+void append_deposit(storage_handle *storage, MutableExtrusionEntity parent, const ExPolygon &island, const c_flow &flow)
+{
+    const double volume = unscaled(unscaled(island.area())) * unscaled(flow.height);
+    // A degenerate island prints nothing.
+    if (!std::isfinite(volume) || volume <= 0.)
+        return;
+    StoredExtrusionEntity deposit(storage, std::vector<c_point>{island.contour().centroid()});
+    deposit.set_flags(0u);
+    deposit.get_or_add(EPropertyAttributes::key).extrusion_role(int32_t(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL))
+        .mm3_per_mm(flow.mm3_per_mm).width(float(unscaled(flow.width))).height(float(unscaled(flow.height)));
+    deposit.get_or_add(EPropertySpecialCommand::key).set(C_EXTRUSION_SPECIAL_COMMAND_DEPOSIT, volume);
+    parent.append_child_move(deposit.mutable_view());
 }
 
 // The polylines are copied into a host collection, which simplifies its own copy in place; the input is not modified.
