@@ -940,6 +940,9 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "support.demand.buildplate_only");
         activate_plugin_or_fail(orchestrator, "support.demand.bridge_removal");
         activate_plugin_or_fail(orchestrator, "support.family.grid");
+        activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_sparse");
+        activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_bottom");
+        activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_top");
         activate_plugin_or_fail(orchestrator, "gui_rules.core");
         activate_plugin_or_fail(orchestrator, "perimeter.generator.arachne");
         activate_plugin_or_fail(orchestrator, "perimeter.generator.classic");

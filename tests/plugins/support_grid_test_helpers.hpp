@@ -20,10 +20,12 @@
 #include "libslic3r/Steps/StepPostInfillGeneration.hpp"
 #include "libslic3r/Steps/StepPostPerimeterGeneration.hpp"
 #include "libslic3r/Steps/StepPostSlicing.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepPrepareForPeriemters.hpp"
 #include "libslic3r/Steps/StepPrepareInfill.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "libslic3r/Steps/StepSupportDemand.hpp"
+#include "libslic3r/Steps/StepSupportToolpath.hpp"
 #include "libslic3r/Steps/StepSurfaceGeneration.hpp"
 
 namespace Slic3r::Test::SupportGrid {
@@ -40,9 +42,10 @@ inline TriangleMesh slab(bool platform = false)
     }
     return post;
 }
-// Configure small nozzles, explicit support tools and a fixed first layer for geometric comparisons.
-inline DynamicPrintConfig config(const char *style = "grid", bool soluble = false, int interfaces = 3)
+// Configure small nozzles, explicit support tools and production toolpath selectors, excluding the registered test probes.
+inline DynamicPrintConfig config(const char *style = "grid", bool soluble = false, int interfaces = 3, bool same_tool = false)
 {
+    Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig result = DynamicPrintConfig::full_print_config();
     result.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", style},
         {"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"nozzle_diameter", "0.4,0.4"},
@@ -52,9 +55,16 @@ inline DynamicPrintConfig config(const char *style = "grid", bool soluble = fals
         {"support_material_bottom_contact_distance", "0.2"},
         {"support_material_interface_layers", std::to_string(interfaces)},
         {"support_material_bottom_interface_layers", std::to_string(interfaces)},
-        {"support_material_extruder", "1"}, {"support_material_interface_extruder", "2"},
+        {"support_material_extruder", "1"}, {"support_material_interface_extruder", same_tool ? "1" : "2"},
         {"support_material_synchronize_layers", "0"}, {"dont_support_bridges", "0"},
         {"raft_first_layer_expansion", "0"}, {"brim_width", "0"}, {"skirts", "0"}});
+    for (const std::pair<const char *, const char *> &provider : {
+        std::pair<const char *, const char *>{"support_toolpath_sparse", "support.toolpath.legacy_sparse"},
+        {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom"},
+        {"support_toolpath_top_interface", "support.toolpath.legacy_top"}}) {
+        const std::string key = Steps::plugin_exclusive_group_option_key(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, provider.first);
+        if (!key.empty()) result.set_deserialize_strict({{key, std::string(provider.second)}});
+    }
     return result;
 }
 // Run the production slicing steps through post-infill, keeping auxiliary geometry editable for either support implementation.
@@ -98,6 +108,19 @@ inline void family(Print &print)
     print.set_running_step(STEP_SUPPORT);
     Steps::StepGenerateSupport::prepare(print);
     Steps::StepGenerateSupport::run_step(Orchestrator::instance(), print);
+}
+// Generate support extrusions under the real editing step and restore idle access afterward.
+inline void toolpaths(Print &print)
+{
+    struct Idle {
+        Print &print;
+        // Restore idle access when support toolpath dispatch ends.
+        ~Idle() { print.set_running_step(STEP_NONE); }
+    };
+    const Idle reset{print};
+    print.set_running_step(STEP_SUPPORT_TOOLPATH);
+    Steps::StepSupportToolpath::prepare(print);
+    Steps::StepSupportToolpath::run_step(Orchestrator::instance(), print);
 }
 }
 #endif

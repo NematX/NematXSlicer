@@ -123,6 +123,9 @@ support.demand.painting = 1
 support.demand.modifiers = 1
 support.demand.buildplate_only = 1
 support.family.grid = 1
+support.toolpath.legacy_sparse = 1
+support.toolpath.legacy_bottom = 1
+support.toolpath.legacy_top = 1
 
 [plugin_packages]
 ; External plugin ids enabled above and the package that provides them.

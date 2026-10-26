@@ -191,7 +191,7 @@ const std::vector<SupportToolpathProbe *> &probes()
 class ScopedToolpathProbes
 {
 public:
-    // Activate all test providers and start with an empty call log.
+    // Replace built-in algorithms with test providers and clear their call log; activation is restored by the destructor.
     ScopedToolpathProbes()
     {
         Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -199,15 +199,18 @@ public:
         setup_records.clear();
         setup_run_records.clear();
         run_records.clear();
-
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+            REQUIRE(Orchestrator::instance().set_plugin_active(id, false));
         for (SupportToolpathProbe *probe : probes())
             REQUIRE(Orchestrator::instance().set_plugin_active(probe->id(), true));
     }
-    // Disable the test providers so they do not run in other tests.
+    // Disable test providers and restore production algorithms after the scoped test.
     ~ScopedToolpathProbes()
     {
         for (SupportToolpathProbe *probe : probes())
             Orchestrator::instance().set_plugin_active(probe->id(), false);
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+            Orchestrator::instance().set_plugin_active(id, true);
     }
 };
 

@@ -735,6 +735,12 @@ Polygons contours(const Grid &grid, coord_t offset, bool fill_holes)
             current = next;
             polygon.points.push_back(lines[current].b);
         }
+        // The polygon is stored while its points are still grid cells: moving it here
+        // drops a last point that nearly coincides with the first one, as the native
+        // generator does with its cell coordinates.
+        out.push_back(std::move(polygon));
+    }
+    for (Polygon &polygon : out) {
         for (Point &point : polygon.points) { point *= grid.pixel_size; point += grid.bbox.min; }
         Points corners;
         for (size_t i = 0; i < polygon.points.size(); ++i) {
@@ -747,7 +753,6 @@ Polygons contours(const Grid &grid, coord_t offset, bool fill_holes)
             }
         }
         polygon.points = std::move(corners);
-        out.push_back(std::move(polygon));
     }
     return out;
 }

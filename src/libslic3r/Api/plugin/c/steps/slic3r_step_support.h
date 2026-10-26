@@ -103,6 +103,17 @@ auxiliary layers marked with LayerSupportProperty, and publishes fill surfaces:
   when a lower contact uses bridge flow;
 - support | internal | sparse: the support base.
 
+A contact is published as support | internal | sparse when no interface layer is configured on its
+side and the support regions can merge (one extruder, no bridging contact, and the merged base
+layer of that print Z, whose thickness is the smallest of that Z, has the contact's thickness or does
+not exist): the user asked for no interface, so that contact is base.
+
+Within one auxiliary layer these three kinds must stay disjoint: an area
+published twice is extruded twice. An area can be both upper and lower when the
+gap between the object above and the object below is thinner than the support
+layers; such an area belongs to the top surface, as the native generator merged
+the lower contact into the upper one.
+
 The family writes no extrusions: STEP_SUPPORT_TOOLPATH generates them from
 these surfaces. Use the print and object handles only during the callback;
 never free them.

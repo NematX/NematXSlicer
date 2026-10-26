@@ -133,6 +133,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_demand_modifiers.cpp
     test_support_demand_overhangs.cpp
     test_support_toolpath_step.cpp
+    test_support_toolpath_legacy.cpp
     test_support_step.cpp
     test_layer_extrusion_edit_support_acceleration.cpp
     test_support_pattern_service.cpp

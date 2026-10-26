@@ -518,6 +518,10 @@ set(SLIC3R_SOURCES
 	Plugins/WipeTower/WipeTowerLayout.hpp
 	Plugins/WipeTower/WipeTowerManager.cpp
 	Plugins/WipeTower/WipeTowerManager.hpp
+	Plugins/Support/Toolpath/LegacySupportPaths.cpp
+	Plugins/Support/Toolpath/LegacySupportPaths.hpp
+	Plugins/Support/Toolpath/SupportToolpathLegacy.cpp
+	Plugins/Support/Toolpath/SupportToolpathLegacy.hpp
 	Printing/PrintingPlan.cpp
 	Printing/PrintingPlan.hpp
 	Steps/StepDetectSupportSpots.cpp

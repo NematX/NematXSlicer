@@ -1,6 +1,7 @@
 #include "support_grid_test_helpers.hpp"
 #include "libslic3r/Plugins/Support/Grid/GridSupportParams.hpp"
 #include "libslic3r/Plugins/Support/Grid/GridSupportGenerator.hpp"
+#include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 
 /* Grid-family tests inspect geometric output before toolpath generation. A
@@ -281,7 +282,7 @@ TEST_CASE("Synchronized support shares close top and bottom contacts without a s
     CHECK(bottom_contact);
 }
 
-// Process a rotated cube with a hole at two first-layer heights and check nonempty support, bed contact Z and spacing between published slabs.
+// Process a rotated cube at two first-layer heights; check one bed layer, unique Z/thickness pairs and minimum spacing between distinct Z groups.
 TEST_CASE("Grid first-layer and height limits cover the cube-with-hole support case", "[plugins][support-grid]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -297,11 +298,67 @@ TEST_CASE("Grid first-layer and height limits cover the cube-with-hole support c
     const LayerRefs support = print.object(0).auxiliary_layers();
     REQUIRE_FALSE(support.empty());
     CHECK(support.front().unscaled_print_z() == Approx(std::stod(first)));
+    std::set<size_t> ids;
+    std::set<std::pair<coord_t, coord_t>> slabs;
+    size_t first_layers = 0;
+    for (const Layer &layer : support) {
+        CHECK(ids.insert(layer.id()).second);
+        CHECK(slabs.insert({layer.scaled_print_z(), layer.scaled_height()}).second);
+        if (layer.scaled_print_z() == support.front().scaled_print_z()) {
+            ++first_layers;
+            CHECK(layer.unscaled_height() == Approx(std::stod(first)));
+        }
+    }
+    CHECK(first_layers == 1);
+    size_t shared_z = 0;
     for (size_t i = 1; i < support.size(); ++i) {
         const double distance = support[i].unscaled_print_z() - support[i - 1].unscaled_print_z();
-        CHECK(distance >= 0.05 - EPSILON);
+        if (support[i].scaled_print_z() == support[i - 1].scaled_print_z()) {
+            // Layers of one print Z keep the native order: the thickest layer first.
+            ++shared_z;
+            CHECK(support[i].scaled_height() != support[i - 1].scaled_height());
+            CHECK(support[i - 1].scaled_height() > support[i].scaled_height());
+        }
+        else CHECK(distance >= 0.05 - EPSILON);
         CHECK(distance <= 0.4 + EPSILON);
     }
+    CHECK(shared_z > 0);
+}
+
+// The family gives every area of one auxiliary layer a single owner: a lower surface loses the
+// areas an upper surface already prints, and the base loses the areas any interface covers.
+TEST_CASE("Grid family resolves the top and bottom overlap of one layer", "[plugins][support-grid]")
+{
+    // Two 4x4-mm squares overlapping over half their width, and a base square crossing both.
+    const Polygons top{Polygon{Point(0, 0), Point(scale_i(4.), 0), Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))}};
+    const Polygons bottom{Polygon{Point(scale_i(2.), 0), Point(scale_i(6.), 0), Point(scale_i(6.), scale_i(4.)), Point(scale_i(2.), scale_i(4.))}};
+    const Polygons sparse{Polygon{Point(scale_i(5.), 0), Point(scale_i(7.), 0), Point(scale_i(7.), scale_i(4.)), Point(scale_i(5.), scale_i(4.))}};
+    const Polygons shared = intersection(top, bottom);
+    REQUIRE(!shared.empty());
+    const Polygons resolved_bottom = slic3r_api::Support::Grid::Internal::resolve_overlap(bottom, top);
+    // The shared area stays on the top surface only, and the rest of the bottom area is kept.
+    CHECK(intersection(resolved_bottom, top).empty());
+    CHECK(area(resolved_bottom) == Approx(area(bottom) - area(shared)));
+    const Polygons interfaces = union_(top, resolved_bottom);
+    const Polygons resolved_sparse = slic3r_api::Support::Grid::Internal::resolve_overlap(sparse, interfaces);
+    // The base keeps only the area no interface covers, so the three kinds are disjoint.
+    CHECK(intersection(resolved_sparse, interfaces).empty());
+    CHECK(area(resolved_sparse) == Approx(area(sparse) - area(intersection(sparse, interfaces))));
+    CHECK(!resolved_sparse.empty());
+}
+
+// The family types a contact as base exactly when the native generator would have merged it into the
+// base: one extruder, no bridging contact, and the merged base layer of that print Z, whose thickness
+// is the smallest of that Z, has the contact's thickness or does not exist.
+TEST_CASE("Grid family types a mergeable contact as base", "[plugins][support-grid]")
+{
+    using slic3r_api::Support::Grid::Internal::merged_into_base;
+    CHECK_FALSE(merged_into_base(false, true, true, false));  // Separate extruders never merge.
+    CHECK(merged_into_base(true, true, true, false));         // Same layer, same thickness, same flag.
+    CHECK_FALSE(merged_into_base(true, true, true, true));    // A bridging contact never merges.
+    CHECK_FALSE(merged_into_base(true, false, true, false));  // A base elsewhere at this print Z.
+    CHECK(merged_into_base(true, false, false, false));       // An empty base takes the contact.
+    CHECK_FALSE(merged_into_base(true, false, false, true));  // An empty base never takes a bridge.
 }
 
 // Dispatch a roof with a requested raft and count family warning messages while requiring geometric support, without expecting raft layers.

@@ -151,6 +151,7 @@ after the available plugin set is known.
 #include "libslic3r/Plugins/WipeTower/ToolChangeWipe.hpp"
 #include "libslic3r/Plugins/WipeTower/WipeTowerManager.hpp"
 #include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
+#include "libslic3r/Plugins/Support/Toolpath/SupportToolpathLegacy.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandBuildplateOnly.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandModifiers.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandOverhangs.hpp"
@@ -945,7 +946,7 @@ void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator)
 
 } // namespace
 
-// Register demand providers and the grid/snug family before plugin initialization; startup and tests reuse this list so their support providers agree.
+// Register demand, grid geometry and native toolpath providers before initialization; startup and tests share these registrations and activation defaults.
 void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
 {
     register_builtin_plugin(orchestrator, "support.demand.overhangs",
@@ -960,6 +961,12 @@ void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Support::SupportDemandBridgeRemovalPlugin::register_support_demand_bridge_removal_plugin);
     register_builtin_plugin(orchestrator, "support.family.grid",
         slic3r_api::Support::Grid::register_support_family_grid_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_sparse",
+        slic3r_api::Support::Toolpath::register_support_toolpath_sparse_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_bottom",
+        slic3r_api::Support::Toolpath::register_support_toolpath_bottom_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_top",
+        slic3r_api::Support::Toolpath::register_support_toolpath_top_plugin);
 }
 
 bool resolve_plugin_startup_activation_config(const boost::filesystem::path &data_directory,
