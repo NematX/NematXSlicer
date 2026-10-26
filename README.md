@@ -5,6 +5,7 @@ A collection of plugins for NematXSlicer.
 ## Plugins
 
 - [nematx_second_layer_flow](doc/nematx_second_layer_flow.md)
+- [nematx_corner_stretch](doc/nematx_corner_stretch.md)
 
 ## Build targets
 

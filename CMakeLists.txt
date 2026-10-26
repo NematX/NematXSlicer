@@ -90,3 +90,32 @@ nematx_package_plugin(
 if(MSVC)
     set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT nematx_second_layer_flow)
 endif()
+
+add_library(nematx_corner_stretch SHARED src/CornerStretch.cpp)
+target_compile_definitions(nematx_corner_stretch PRIVATE SLIC3R_PLUGIN_EXPORTS)
+if(WIN32)
+    target_compile_definitions(nematx_corner_stretch PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
+target_link_libraries(nematx_corner_stretch PRIVATE nematx_host_sdk)
+set_target_properties(nematx_corner_stretch PROPERTIES
+    ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/corner_stretch_import/$<CONFIG>")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(nematx_corner_stretch PRIVATE "LINKER:--no-undefined")
+endif()
+nematx_package_plugin(
+    TARGET nematx_corner_stretch PLUGIN_ID nematx_corner_stretch
+    PACKAGE_ID nematx-corner-stretch PACKAGE_VERSION 0.1.0
+    NAME "NematX corner stretch" DESCRIPTION "Volume-preserving perimeter corner stretching."
+    DATADIR "${CMAKE_BINARY_DIR}/test-data/corner_stretch"
+    ACTIVATION_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/cmake/prepare_activated_ini.py"
+    ABI_SCRIPT "${SUPERSLICER_SOURCE_DIR}/src/plugins_cpp/write_plugin_abi_manifest.py"
+    DESCRIPTION_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/package/nematx-extrusion/description.ini.in"
+    VERSION_TEMPLATE "${CMAKE_CURRENT_SOURCE_DIR}/package/nematx-extrusion/version-base.ini.in"
+    SLICER_VERSION "${SUPERSLICER_VERSION_FULL}"
+    DEFAULT_ACTIVATED_FILE "${SUPERSLICER_DEFAULT_ACTIVATED_FILE}"
+    OUTPUT_SUBDIR nematx-corner-stretch
+)
+enable_testing()
+add_executable(corner_stretch_tests tests/corner_stretch/geometry_tests.cpp)
+target_include_directories(corner_stretch_tests PRIVATE src)
+add_test(NAME corner_stretch_geometry COMMAND corner_stretch_tests)
