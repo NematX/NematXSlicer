@@ -144,7 +144,7 @@ void slice_path(storage_handle *scratch, const TreeSlicing &slicing, const Route
     // The identity transform is required (a zeroed matrix would crush the mesh). mode_below is inert here (slicing_mode_normal_below_layer
     // stays 0); closing_radius, extra_offset and the resolutions are left 0 and have no effect on this path: the host slices with the
     // base MeshSlicingParams and gives the raw loops, as the legacy slice_mesh() did.
-    std::vector<slic3r_api::StoredPolygonCollection> cut_sections = stored_mesh.slice_to_polygons(scratch, params, zs);
+    std::vector<slic3r_api::StoredPolygonCollection> cut_sections = stored_mesh.slice_to_polygons(scratch, params, zs, slicing.context);
     for (size_t cut = 0; cut < cuts.size(); ++cut) {
         if (cut_sections[cut].empty())
             continue;

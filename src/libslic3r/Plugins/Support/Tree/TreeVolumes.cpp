@@ -121,7 +121,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
             const slic3r_api::Volume volume = object.volume(volume_idx);
             if (volume.type() != RAW_VOLUME_TYPE_SUPPORT_BLOCKER)
                 continue;
-            // The helper checks the context before and after slicing the volume and between its cleaned layers; only the slicing of one mesh cannot be cancelled (the slicing API does not expose the native slicer's cancellation).
+            // The helper checks the context before and after slicing the volume and between its cleaned layers; the slicing of one mesh checks it too, at the coarse granularity of the native slicer.
             std::vector<StoredExPolygonCollection> slices = Common::slice_support_modifier_volume(volume, slice_zs, slicing_params, run_storage, m_context);
             if (slices.empty())
                 continue;

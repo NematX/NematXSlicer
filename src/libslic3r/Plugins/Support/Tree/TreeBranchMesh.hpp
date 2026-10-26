@@ -24,8 +24,8 @@ namespace Slic3r::TreeFamily {
 // The trees are sliced in parallel, one job per tree, and the sections are joined in tree order, then in path order. That order of
 // the polygons is the only one guaranteed: the order of the rings and their start points inside one section are the slicer's, and
 // they vary from one call to the next when the slicer runs in parallel.
-// The cancellation of the context is checked before each job and before each branch path; slicing one path is not interruptible
-// (the slicing API does not expose the native slicer's cancellation). An invalid mesh (the host refuses it) throws std::invalid_argument.
+// The cancellation of the context is checked before each job and before each branch path; the slicing of one path checks it too, at the
+// coarse granularity of the native slicer (see triangle_mesh_slice_to_polygons() in slic3r_volume.h). An invalid mesh (the host refuses it) throws std::invalid_argument.
 std::vector<slic3r_api::StoredPolygonCollection> slice_branch_meshes(storage_handle *out_storage, const std::vector<RoutedTree> &trees,
                                                                      const std::vector<coord_t> &slice_z, const plugin_run_context *context);
 

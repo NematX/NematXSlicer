@@ -78,7 +78,8 @@ class TreeVolumes
 public:
     // Reads the object once, in run_storage: it slices the support blockers and simplifies the outline of every layer. No area is
     // computed until precalculate(). The areas are owned by run_storage, which must outlive this object. The context, which must
-    // outlive it too, is checked before and after the slicing of each blocker volume and between its cleaned layers (the slicing of one mesh is not cancellable)
+    // outlive it too, is checked before and after the slicing of each blocker volume and between its cleaned layers
+    // (the slicing of one mesh checks it too, at the coarse granularity of the native slicer)
     // and by every later computation.
     TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
                 const plugin_run_context *context);
