@@ -496,35 +496,35 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
 }
 
 // Compare a roof on a narrow post through eight independent native/family sections with geometry and contact assertions.
-TEST_CASE("Grid legacy comparison: overhanging slab", "[plugins][support-grid][legacy-compare]") { run_comparison(0); }
+TEST_CASE("Grid legacy comparison: overhanging slab", "[plugins][support-grid][legacy-compare][slow]") { run_comparison(0); }
 // Compare eight native/family combinations on a rotated cube with a hole and contacts above object surfaces.
-TEST_CASE("Grid legacy comparison: cube with hole", "[plugins][support-grid][legacy-compare]") { run_comparison(1); }
+TEST_CASE("Grid legacy comparison: cube with hole", "[plugins][support-grid][legacy-compare][slow]") { run_comparison(1); }
 // Compare a bridge through eight independent native/family sections, preserving family geometry checks.
-TEST_CASE("Grid legacy comparison: bridge", "[plugins][support-grid][legacy-compare]") { run_comparison(2); }
+TEST_CASE("Grid legacy comparison: bridge", "[plugins][support-grid][legacy-compare][slow]") { run_comparison(2); }
 // Compare the enforced demand of a sheared cube through eight sections with both soluble and separated contacts.
-TEST_CASE("Grid legacy comparison: 45 degree overhang", "[plugins][support-grid][legacy-compare]") { run_comparison(3); }
+TEST_CASE("Grid legacy comparison: 45 degree overhang", "[plugins][support-grid][legacy-compare][slow]") { run_comparison(3); }
 // Compare a roof above a low platform through eight sections, verifying family bottom contacts before native execution.
-TEST_CASE("Grid legacy comparison: object above platform", "[plugins][support-grid][legacy-compare]") { run_comparison(4); }
+TEST_CASE("Grid legacy comparison: object above platform", "[plugins][support-grid][legacy-compare][slow]") { run_comparison(4); }
 // Compare the same configurations with one support tool for both roles, exercising the native cross-role merges.
-TEST_CASE("Grid legacy comparison: same support tool", "[plugins][support-grid][legacy-compare][support-fusion]") { run_comparison(4, true); }
+TEST_CASE("Grid legacy comparison: same support tool", "[plugins][support-grid][legacy-compare][support-fusion][slow]") { run_comparison(4, true); }
 // Compare a soluble overhang with one support tool, where contacts and interfaces share their slab.
-TEST_CASE("Grid legacy comparison: same support tool soluble", "[plugins][support-grid][legacy-compare][support-fusion]") { run_comparison(3, true); }
+TEST_CASE("Grid legacy comparison: same support tool soluble", "[plugins][support-grid][legacy-compare][support-fusion][slow]") { run_comparison(3, true); }
 // Compare the bridge model with one support tool: its shared slabs exercise the interface part
 // joining the bottom contact, for a soluble and a non-soluble interface.
-TEST_CASE("Grid legacy comparison: bridge with same support tool", "[plugins][support-grid][legacy-compare][support-fusion]") { run_comparison(2, true); }
+TEST_CASE("Grid legacy comparison: bridge with same support tool", "[plugins][support-grid][legacy-compare][support-fusion][slow]") { run_comparison(2, true); }
 // Compare explicit concentric contact patterns on both interfaces, including the bridging bottom
 // contact, which the native filler also prints with the configured contact pattern.
-TEST_CASE("Grid legacy comparison: concentric interfaces", "[plugins][support-grid][legacy-compare][support-pattern]") {
+TEST_CASE("Grid legacy comparison: concentric interfaces", "[plugins][support-grid][legacy-compare][support-pattern][slow]") {
     for (const char *style : {"grid", "snug"}) compare(1, style, false, 3, false, "concentric");
 }
 // Compare automatic contact patterns resolving to the sparse support pattern through a positive interface spacing.
-TEST_CASE("Grid legacy comparison: automatic sparse interfaces", "[plugins][support-grid][legacy-compare][support-pattern]") {
+TEST_CASE("Grid legacy comparison: automatic sparse interfaces", "[plugins][support-grid][legacy-compare][support-pattern][slow]") {
     for (const char *style : {"grid", "snug"}) compare(1, style, false, 3, false, "auto_sparse");
 }
 // Compare top contact loops around the overhang. The snug soluble combination is left out: the
 // family demand differs slightly from the native overhang detection there, and the loop length
 // follows the contact contour, so that documented difference is amplified beyond one percent.
-TEST_CASE("Grid legacy comparison: contact loops", "[plugins][support-grid][legacy-compare][support-pattern]") {
+TEST_CASE("Grid legacy comparison: contact loops", "[plugins][support-grid][legacy-compare][support-pattern][slow]") {
     for (const char *style : {"grid", "snug"})
         for (const bool soluble : {false, true}) {
             if (strcmp(style, "snug") == 0 && soluble) continue;
@@ -535,50 +535,50 @@ TEST_CASE("Grid legacy comparison: contact loops", "[plugins][support-grid][lega
 // (accepted gap): honeycomb sections compare slices and heights and only record path counts and lengths. On the cube
 // with a hole and three interfaces the native pattern gives 105 paths of 5364 mm against 186 paths of 4706 mm for grid,
 // and 60 paths of 3995 mm against 141 paths of 3446 mm for snug.
-TEST_CASE("Grid legacy comparison: honeycomb and sheath", "[plugins][support-grid][legacy-compare][support-pattern]") {
+TEST_CASE("Grid legacy comparison: honeycomb and sheath", "[plugins][support-grid][legacy-compare][support-pattern][slow]") {
     for (const char *style : {"grid", "snug"})
         for (const char *variant : {"honeycomb", "no_sheath"}) compare(1, style, false, 3, false, variant);
 }
 // Compare the rectilinear-grid base pattern, whose angle alternates per print Z, so the native and
 // the family layer counts must agree even when one print Z carries several auxiliary layers.
-TEST_CASE("Grid legacy comparison: rectilinear grid pattern", "[plugins][support-grid][legacy-compare][support-pattern]") {
+TEST_CASE("Grid legacy comparison: rectilinear grid pattern", "[plugins][support-grid][legacy-compare][support-pattern][slow]") {
     for (const char *style : {"grid", "snug"}) compare(1, style, false, 3, false, "rectilinear_grid");
 }
 // Compare a filament contact distance, whose bridge contacts take the object's bridge height, on a
 // roof and on a bridge.
-TEST_CASE("Grid legacy comparison: filament contact distance", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: filament contact distance", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const int model_id : {1, 2})
         for (const char *style : {"grid", "snug"}) compare(model_id, style, false, 3, false, "filament");
 }
 // Compare the three bridge types, which give the height of the bridges above a bridging contact.
-TEST_CASE("Grid legacy comparison: bridge types", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: bridge types", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const char *style : {"grid", "snug"})
         for (const char *variant : {"bridge_flow", "bridge_height", "bridge_nozzle"}) compare(2, style, false, 3, false, variant);
 }
 // Compare a brim with an interior width: the first-layer support keeps away from it.
-TEST_CASE("Grid legacy comparison: brim", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: brim", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const int model_id : {0, 1})
         for (const char *style : {"grid", "snug"}) compare(model_id, style, false, 3, false, "brim");
 }
 // Compare an expanded first-layer foot of the support columns.
-TEST_CASE("Grid legacy comparison: foot expansion", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: foot expansion", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const int model_id : {0, 1})
         for (const char *style : {"grid", "snug"}) compare(model_id, style, false, 3, false, "feet");
 }
 // Compare a snug closing radius other than the default.
-TEST_CASE("Grid legacy comparison: snug closing radius", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: snug closing radius", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const int model_id : {0, 1}) compare(model_id, "snug", false, 3, false, "closing");
 }
 // Compare a roof overhanging the bed and a low platform, the model of the build-plate restriction below.
-TEST_CASE("Grid legacy comparison: roof over bed and platform", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: roof over bed and platform", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const char *style : {"grid", "snug"}) compare(5, style, false, 3, false, "");
 }
 // The same roof with support restricted to the build plate, snug style.
-TEST_CASE("Grid legacy comparison: build plate only restriction, snug", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: build plate only restriction, snug", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     compare(5, "snug", false, 3, false, "buildplate_only");
 }
 // The same roof with support restricted to the build plate, grid style: the native and the family both cut
 // their grid contacts and columns by the area the object covers below each layer, so neither puts support on the platform.
-TEST_CASE("Grid legacy comparison: build plate only restriction, grid", "[plugins][support-grid][legacy-compare][support-settings]") {
+TEST_CASE("Grid legacy comparison: build plate only restriction, grid", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     compare(5, "grid", false, 3, false, "buildplate_only");
 }
