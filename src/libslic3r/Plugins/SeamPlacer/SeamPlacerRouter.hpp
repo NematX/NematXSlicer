@@ -18,10 +18,14 @@ namespace slic3r_api { namespace SeamPlacement {
 Regional seam-provider router used by extrusion-tree ordering plugins.
 
 Construction reads every PrintRegion selector, creates one shared session per
-selected provider, and resolves every atomic plan loop to one LayerRegion. The
-resulting tables are immutable, so place_seam() may be called concurrently by
-ordering workers. The Print, PrintingPlan, regions, and loop handles are all
-borrowed and must outlive the router.
+selected provider, and resolves every atomic plan loop that carries a perimeter
+marker (an EXTRUSION_PROPERTY_TYPE_PERIMETER property on the loop, an ancestor
+or a descendant) to one LayerRegion. Other closed loops get no session, whatever
+the selected provider, and place_seam() projects the approach position onto
+them. The resulting tables are immutable, so
+place_seam() may be called concurrently by ordering workers. The Print,
+PrintingPlan, regions, and loop handles are all borrowed and must outlive the
+router.
 */
 class SeamPlacerRouter
 {
@@ -42,9 +46,9 @@ public:
     SeamPlacerRouter &operator=(const SeamPlacerRouter &) = delete;
 
     /*
-    Ask the provider preselected for loop to choose its final seam. loop is
-    borrowed for the call, start_position is a value, and the returned point is
-    produced by the selected provider session.
+    Ask the provider preselected for a marked loop to choose its final seam. A
+    loop without a marker receives the point of the loop nearest to
+    start_position. loop is borrowed for the call and start_position is a value.
     */
     c_point place_seam(const ExtrusionEntity &loop,
                        c_point start_position) const;

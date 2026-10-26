@@ -1,6 +1,7 @@
 #include <catch2/catch.hpp>
 
 #include <initializer_list>
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -11,6 +12,7 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -728,6 +730,59 @@ TEST_CASE("Default brim generator can publish object-owned brim", "[plugins][ski
     Steps::StepSkirtBrim::clear(prepared.print);
     CHECK(object.brim().empty());
     CHECK(object_brim_auxiliary_layers(object).empty());
+}
+
+// Inspect generated auxiliary geometry before ordering: each closed brim parent
+// owns the same complete attributes as its unchanged segment-bearing path.
+TEST_CASE("Generated brim loop parents copy complete path attributes",
+          "[plugins][skirt-brim][regression][seambrim-source]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedBrimPrint prepared;
+    DynamicPrintConfig config = brim_test_config(true, true);
+    config.set_deserialize_strict({{"draft_shield", "disabled"}, {"brim_skirt_trim", "0"}});
+    run_until_skirt_brim(prepared, config);
+    PrintObject &object = prepared.print.objects().front();
+    const std::vector<const Layer *> brim_layers = object_brim_auxiliary_layers(object);
+    REQUIRE(brim_layers.size() == 1);
+    const LayerRegionIsland &island = brim_layers.front()->island(0).regions_island(0);
+    REQUIRE(island.has_extrusion(LayerRegionIsland::PERIMETERS));
+    const slic3r_api::ExtrusionEntity root(reinterpret_cast<const extrusion_entity_handle *>(
+        &island.extrusion(LayerRegionIsland::PERIMETERS)));
+    size_t loop_count = 0;
+    std::function<void(const slic3r_api::ExtrusionEntity &)> inspect;
+    // Borrow generated nodes recursively, compare copied values, and count only
+    // SKIRT-marked closed parents; assertions report absent or changed properties.
+    inspect = [&](const slic3r_api::ExtrusionEntity &entity) {
+        const c_extrusion_property_perimeter *perimeter = static_cast<const c_extrusion_property_perimeter *>(
+            entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+        if (entity.is_loop() && perimeter != nullptr &&
+            (perimeter->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_SKIRT) != 0) {
+            ++loop_count;
+            CHECK(entity.segment_count() == 0);
+            REQUIRE(entity.child_count() == 1);
+            const c_extrusion_property_attributes *parent = static_cast<const c_extrusion_property_attributes *>(
+                entity.property_data(EXTRUSION_PROPERTY_TYPE_ATTRIBUTES));
+            const c_extrusion_property_attributes *leaf = static_cast<const c_extrusion_property_attributes *>(
+                entity.child(0).property_data(EXTRUSION_PROPERTY_TYPE_ATTRIBUTES));
+            REQUIRE(leaf != nullptr);
+            REQUIRE(parent != nullptr);
+            CHECK(parent != leaf);
+            CHECK(parent->role == RAW_EXTRUSION_ROLE_SKIRT);
+            CHECK(parent->role == leaf->role);
+            CHECK(parent->width == leaf->width);
+            CHECK(parent->height == leaf->height);
+            CHECK(parent->mm3_per_mm == leaf->mm3_per_mm);
+            CHECK(parent->no_seam == leaf->no_seam);
+            CHECK(leaf->width > 0);
+            CHECK(leaf->height > 0);
+            CHECK(leaf->mm3_per_mm > 0);
+        }
+        for (uint32_t index = 0; index < entity.child_count(); ++index)
+            inspect(entity.child(index));
+    };
+    inspect(root);
+    REQUIRE(loop_count > 1);
 }
 
 TEST_CASE("Default skirt generator creates global skirt", "[plugins][skirt-brim]")

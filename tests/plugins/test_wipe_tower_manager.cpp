@@ -70,6 +70,7 @@ public:
     bool duplicate = false;
     bool empty = false;
     bool fail = false;
+    c_wipe_tower_phase failure_phase = C_WIPE_TOWER_GENERATE;
     bool last_layer_only = false;
     bool supplied_requests = false;
     std::vector<c_wipe_tower_request> supplied;
@@ -150,13 +151,15 @@ void TestWipe::setup_impl(const plugin_run_context *run, const uint32_t count) c
         throw std::runtime_error("Wipe service setup requires null data and one manager run.");
 }
 
-// Read borrowed phase data, record edited tools, report owned supplied/change anchors and move scaled local lines with explicit speeds into lent roots; invalid phase access or reporter failures throw.
+// Read borrowed phase data, record edited tools, report owned supplied/change anchors and move scaled local lines with explicit speeds into lent roots; the selected failure phase throws the service's own cause, and invalid phase access or reporter failures throw without retaining borrowed data.
 void TestWipe::run_impl(const plugin_run_context *run) const
 {
     const run_ctx_wipe_tower_wipe *ctx = plugin_ctx_as_wipe_tower_wipe(run);
     if (ctx == nullptr)
         throw std::runtime_error("Missing wipe service payload.");
     phases.push_back(ctx->phase);
+    if (fail && ctx->phase == failure_phase)
+        throw std::runtime_error("Intentional wipe service failure.");
     if (ctx->phase == C_WIPE_TOWER_EDIT) {
         if (ctx->mutable_plan == nullptr || ctx->report_request != nullptr || ctx->report_context != nullptr ||
             ctx->request != nullptr || ctx->band != nullptr || ctx->exit != nullptr)
@@ -222,8 +225,6 @@ void TestWipe::run_impl(const plugin_run_context *run) const
     if (ctx->phase != C_WIPE_TOWER_GENERATE || ctx->mutable_plan != nullptr ||
         ctx->request == nullptr || ctx->band == nullptr || ctx->exit == nullptr || ctx->report_request != nullptr)
         throw std::runtime_error("GENERATE must only edit supplied roots and return an exit.");
-    if (fail)
-        throw std::runtime_error("Intentional wipe service generation failure.");
     const c_wipe_tower_band &band = *ctx->band;
     bands.push_back({ctx->request->private_id, band.print_z, band.layer_height,
                       band.min.y, band.max.y, band.extrusion_width, band.tower_catalog_id, band.entry});
@@ -267,6 +268,7 @@ WipeActivation::WipeActivation(const uint32_t count)
         plugin->requests.clear();
         plugin->bands.clear();
         plugin->outgoing = plugin->duplicate = plugin->empty = plugin->fail = false;
+        plugin->failure_phase = C_WIPE_TOWER_GENERATE;
         plugin->last_layer_only = plugin->supplied_requests = false;
         plugin->supplied.clear();
         plugin->edit_tools.clear();
@@ -625,6 +627,7 @@ TEST_CASE("Global tower eligibility and an empty request list do not modify the 
             CHECK(tool.extrusions.size() == 1);
 }
 
+// Run empty output or a selected service failure against an owned plan; inspect the step exception and consume diagnostics to require the service's sole cause without a manager error.
 TEST_CASE("Empty service output is not inserted and service errors retain their identity", "[plugins][wipe-tower]")
 {
     WipeActivation active;
@@ -637,9 +640,25 @@ TEST_CASE("Empty service output is not inserted and service errors retain their 
         CHECK(active.first->bands.size() == 3);
     }
     SECTION("service error") {
+        const c_wipe_tower_phase phase = GENERATE(C_WIPE_TOWER_COLLECT, C_WIPE_TOWER_GENERATE);
         active.first->fail = true;
+        active.first->failure_phase = phase;
+        Orchestrator &host = Orchestrator::instance();
+        (void) host.consume_plugin_messages();
         CHECK_THROWS_WITH(Steps::StepGenerateWipeTower::run_step(Orchestrator::instance(), print),
-                         Catch::Contains("WIPE_TOWER_WIPE stopped after plugin 'test.wipe.low'"));
+                         "WIPE_TOWER_WIPE stopped after plugin 'test.wipe.low' reported an error during run.");
+        const std::vector<Orchestrator::PluginMessage> messages = host.consume_plugin_messages();
+        size_t errors = 0;
+        for (const Orchestrator::PluginMessage &message : messages) {
+            INFO(message.plugin_id << ": " << message.message);
+            CHECK(message.message.find("Wipe service ") == std::string::npos);
+            if (message.level != Orchestrator::PluginMessageLevel::Error)
+                continue;
+            ++errors;
+            CHECK(message.plugin_id == "test.wipe.low");
+            CHECK(message.message == "Intentional wipe service failure.");
+        }
+        CHECK(errors == 1);
     }
 }
 

@@ -294,6 +294,16 @@ c_point mm_point(const double x, const double y)
     return c_point{scale_i(x), scale_i(y)};
 }
 
+/* Give a closed loop the perimeter marker that seam providers bind. */
+void mark_perimeter_loop(slic3r_api::MutableExtrusionEntity loop)
+{
+    orchestrator_handle *orch = reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance());
+    c_extrusion_property_perimeter *perimeter = static_cast<c_extrusion_property_perimeter *>(
+        loop.get_or_add_property_data_mutable(orch, EXTRUSION_PROPERTY_TYPE_PERIMETER));
+    REQUIRE(perimeter != nullptr);
+    perimeter->perimeter_flags = C_EXTRUSION_PERIMETER_FLAG_LOOP;
+}
+
 /*
 Own two real PrintRegions and one synthetic plan loop that may reference one or
 both LayerRegions. The plan stores platter coordinates; source slices remain in
@@ -394,6 +404,8 @@ struct RegionalRouterFixture
                 shift + Point::new_scale(5.0, 1.0),
                 shift + Point::new_scale(-5.0, 1.0),
                 shift + Point::new_scale(-5.0, -1.0)})));
+        mark_perimeter_loop(slic3r_api::MutableExtrusionEntity(
+            reinterpret_cast<extrusion_entity_handle *>(loop.get())));
         source->mutable_extrusion(LayerRegionIsland::PERIMETERS).append(*loop);
 
         PrintingPlan &plan = prepared.print.mutable_printing_plan();
@@ -472,13 +484,16 @@ struct RegionalRouterFixture
 
         const Point shift = prepared.print.object(0).instances().front().shift;
         auto shifted_loop = [shift](const double center_x) {
-            return std::unique_ptr<ExtrusionEntity>(new ExtrusionEntity(
+            std::unique_ptr<ExtrusionEntity> loop(new ExtrusionEntity(
                 false, ArcPolyline(Points{
                     shift + Point::new_scale(center_x - 1.0, -1.0),
                     shift + Point::new_scale(center_x + 1.0, -1.0),
                     shift + Point::new_scale(center_x + 1.0, 1.0),
                     shift + Point::new_scale(center_x - 1.0, 1.0),
                     shift + Point::new_scale(center_x - 1.0, -1.0)})));
+            mark_perimeter_loop(slic3r_api::MutableExtrusionEntity(
+                reinterpret_cast<extrusion_entity_handle *>(loop.get())));
+            return loop;
         };
         ExtrusionEntity::Children children;
         children.emplace_back(shifted_loop(-5.0));
@@ -1914,7 +1929,9 @@ TEST_CASE("Regional seam router selects the configured Random provider", "[plugi
     REQUIRE(config.opt<ConfigOptionInt>(selector) != nullptr);
     config.set_deserialize_strict(selector, "seam_placer.random");
     replace_region_config(*fixture.region, config);
-    const slic3r_api::ExtrusionEntity loop=fixture.add(square_loop()).root();
+    slic3r_api::PrintingExtrusion extrusion=fixture.add(square_loop());
+    mark_perimeter_loop(extrusion.mutable_root());
+    const slic3r_api::ExtrusionEntity loop=extrusion.root();
     slic3r_api::SeamPlacer reference=create_fixed_session(fixture.prepared.print,"seam_placer.random");
     PluginStorage storage;
     slic3r_api::SeamPlacement::SeamPlacerRouter router(
