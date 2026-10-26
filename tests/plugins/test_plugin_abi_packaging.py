@@ -136,7 +136,7 @@ class AbiPackagingTests(unittest.TestCase):
             first = self.generator.generate_abi_catalog()
             self.assertEqual(first, self.generator.generate_abi_catalog())
             catalog = json.loads(first)
-            self.assertEqual(catalog["headers"]["steps/slic3r_step_support_toolpath.h"]["version"], [1, 0])
+            self.assertEqual(catalog["headers"]["steps/slic3r_step_support_toolpath.h"]["version"], [1, 1])
             self.assertIn("steps/slic3r_step_support_toolpath.h", catalog["python_symbols"]["RunCtxSupportToolpath"])
             self.assertIn("slic3r_extrusion_entity.h", catalog["c_functions"]["extrusion_is_loop"])
             self.assertIn("slic3r_geometry.h", catalog["python_symbols"]["CPoint"])

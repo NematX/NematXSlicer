@@ -1004,7 +1004,8 @@ void ensure_plugin_test_runtime_initialized()
         orchestrator.set_plugin_active("test.support.family.early", false);
         orchestrator.set_plugin_active("test.support.family.late", false);
         for (const char *id : {"test.support_toolpath.sparse", "test.support_toolpath.bottom",
-                               "test.support_toolpath.top", "test.support_toolpath.alternate"})
+                               "test.support_toolpath.top", "test.support_toolpath.alternate",
+                               "test.support_toolpath.patterns"})
             orchestrator.set_plugin_active(id, false);
         orchestrator.set_plugin_active("seam_placer.aligned", false);
         orchestrator.set_plugin_active("seam_placer.contiguous", false);

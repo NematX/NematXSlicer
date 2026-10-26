@@ -202,8 +202,9 @@ class SupportToolpathContext(_PrintObjectContext):
 
     @classmethod
     def from_support_toolpath_run_context(cls, api, address: int):
-        """Validate the step and non-null payload handles, returning None on mismatch."""
-        return cls._from_run_context(api, address, STEP_SUPPORT_TOOLPATH, RunCtxSupportToolpath, ("print", "object"))
+        """Validate the step, handles and pattern callbacks, returning None on mismatch."""
+        fields = ("print", "object", "resolve_pattern_id", "generate_pattern")
+        return cls._from_run_context(api, address, STEP_SUPPORT_TOOLPATH, RunCtxSupportToolpath, fields)
 
     def support_toolpath_print(self) -> Print:
         """The print being processed; use it only during this callback."""
@@ -212,6 +213,27 @@ class SupportToolpathContext(_PrintObjectContext):
     def support_toolpath_object(self) -> Object:
         """The object whose support auxiliary layers the algorithm processes."""
         return self._object()
+
+    def support_toolpath_resolve_pattern_id(self, plugin_id: str) -> int:
+        """Runtime id of an INFILL_PATTERN plugin, valid only during this step run."""
+        return int(self.payload.resolve_pattern_id(self._payload_ptr, plugin_id.encode("utf-8")))
+
+    def support_toolpath_generate_pattern(
+        self, pattern_id: int, layer, island, region_island, primary_region,
+        surface, no_overlap_areas, params, output: MutableExtrusionEntity,
+    ) -> bool:
+        """Fill ``surface`` into borrowed/plugin-owned ``output``; the caller publishes it.
+
+        ``params`` is a complete caller-built RawInfillPatternParams (see the C
+        header for the fields to set). False means nothing was generated
+        because of an unknown id or a pattern refused by this step.
+        """
+        params_ptr = ctypes.byref(params) if isinstance(params, RawInfillPatternParams) else params
+        return bool(self.payload.generate_pattern(
+            self._payload_ptr, int(pattern_id), _void_p(layer), _void_p(island),
+            _void_p(region_island), _void_p(primary_region), _void_p(surface),
+            _void_p(no_overlap_areas), params_ptr, _void_p(output),
+        ))
 
 
 @abi_requires_headers("steps/slic3r_step_support_spot.h")
