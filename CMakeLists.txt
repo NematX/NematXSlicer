@@ -116,6 +116,7 @@ nematx_package_plugin(
     OUTPUT_SUBDIR nematx-corner-stretch
 )
 enable_testing()
+add_subdirectory(plugins/infill_aroundholes)
 add_executable(corner_stretch_tests tests/corner_stretch/geometry_tests.cpp)
 target_include_directories(corner_stretch_tests PRIVATE src)
 add_test(NAME corner_stretch_geometry COMMAND corner_stretch_tests)
