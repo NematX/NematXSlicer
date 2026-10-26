@@ -52,6 +52,8 @@ storage owner checked before mutation. Publication callbacks then copy or move
 the prepared result into the live tree at the permitted processing boundary.
 Bridge metadata and native-flow queries let plugins describe prepared surfaces
 without guessing the host's surface flags or flow calculation.
+Default configuration queries borrow Print-owned settings without creating the
+auxiliary object. Concurrent readers require stable defaults, as other views do.
 
 Scratch setters keep ownership unchanged, validate arguments and contain failures
 before returning through C. Null, range and phase rules are documented with their functions
@@ -1399,6 +1401,11 @@ config_handle *print_get_config_mutable(print_handle *me)
 const config_handle *print_get_config(const print_handle *me)
 {
     return me == nullptr ? nullptr : Slic3r::ApiHost::to_config_handle(&Slic3r::to_print(me)->config());
+}
+
+const config_handle *print_get_default_region_config(const print_handle *me)
+{
+    return me == nullptr ? nullptr : Slic3r::ApiHost::to_config_handle(&Slic3r::to_print(me)->default_region_config());
 }
 
 const_strings_t print_records_channels(const print_handle *me)

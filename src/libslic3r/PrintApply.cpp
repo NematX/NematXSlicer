@@ -40,6 +40,9 @@ apply prepares the Print for the pipeline rather than running every slicing step
 The model supplied by the caller remains the source of editing state. Print
 owns its applied copies and generated results. Matching identities and comparing
 settings decide which copies can be reused and which processing suffix must run.
+Each object's region zero includes its own overrides, not its volume overrides.
+Both new-region creation and reuse verification receive those same defaults,
+so auxiliary geometry and a configuration-only replay resolve the same values.
 
 Representative direct calls (branches are not a timeline):
 
@@ -678,6 +681,9 @@ PrintObjectRegions::BoundingAlignedBox3f find_modifier_volume_extents(const Prin
 }
 
 PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &default_or_parent_region_config, const DynamicPrintConfig *layer_range_config, const ModelVolume &volume, size_t num_extruders);
+// Copy Print defaults with only this object's regional overrides and normalize
+// them by the same rules as volume regions. Inputs remain unchanged.
+PrintRegionConfig object_default_region_config(const PrintRegionConfig &print_default_region_config, const ModelObject &object, size_t num_extruders);
 
 // Verify whether the PrintRegions of a PrintObject are still valid, possibly after updating the region configs.
 // Before region configs are updated, callback_invalidate() is called to possibly stop background processing.
@@ -959,10 +965,11 @@ static std::shared_ptr<PrintObjectRegions> generate_print_object_regions(
     };
 
     /*
-    Region zero is the object's fallback PrintRegion. Auxiliary layers use it
-    for helper geometry that is outside every model-part or modifier mask, so it
-    must exist even on objects whose real mesh volumes all override the default
-    settings.
+    Region zero is the object's fallback PrintRegion: the Print's defaults with
+    the object's own region overrides. Auxiliary layers use it for helper
+    geometry that is outside every model-part or modifier mask, so it must exist
+    even on objects whose real mesh volumes all override the default settings.
+    When a part has no other override, it shares this region.
     */
     const PrintRegion *default_region = get_create_region(PrintRegionConfig(default_region_config));
     assert(default_region != nullptr);
@@ -1576,6 +1583,11 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
             painting_extruders.assign(num_extruders, 0);
             std::iota(painting_extruders.begin(), painting_extruders.end(), 1);
         }
+        // Region zero is the object's fallback region: the Print's defaults with the
+        // object's own region overrides. Parts start from it too; applying the object
+        // overrides again there gives the same values.
+        const PrintRegionConfig object_default_region =
+            object_default_region_config(m_default_region_config, model_object, num_extruders);
         if (model_object_status.print_object_regions_status == ModelObjectStatus::PrintObjectRegionsStatus::Valid) {
             // Verify that the trafo for regions & volume bounding boxes thus for regions is still applicable.
             auto invalidate = [&request_replay, it_print_object, it_print_object_end, update_apply_status]() {
@@ -1592,7 +1604,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 verify_update_print_object_regions(
                     *this,
                     print_object.model_object()->volumes,
-                    m_default_region_config,
+                    object_default_region,
                     num_extruders,
                     painting_extruders,
                     *print_object_regions,
@@ -1630,7 +1642,7 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
                 print_object_regions,
                 print_object.model_object()->volumes,
                 LayerRanges(print_object.model_object()->layer_config_ranges),
-                m_default_region_config,
+                object_default_region,
                 model_object_status.print_instances.front().trafo,
                 num_extruders,
                 print_object.is_mm_painted() ? 0.f : float(xy_size_compensation != nullptr ? xy_size_compensation->value : 0.),

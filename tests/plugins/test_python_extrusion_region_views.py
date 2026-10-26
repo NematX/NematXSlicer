@@ -210,6 +210,18 @@ class PythonExtrusionRegionViewTests(unittest.TestCase):
         self.assertTrue(self.extrusions.ExtrusionEntity(api, 1).is_loop())
         self.assertFalse(self.extrusions.ExtrusionEntity(api, 2).is_loop())
 
+    def test_print_defaults_are_borrowed_without_creating_an_auxiliary_object(self):
+        """Forward only the read query and keep the returned config read-only."""
+        api = self.make_api()
+        api.host.print_get_default_region_config = mock.Mock(return_value=991)
+        api.host.print_get_auxiliary_object = mock.Mock(side_effect=AssertionError("unexpected mutation"))
+        defaults = self.datatree.Print(api, 42).default_region_config()
+        self.assertEqual(defaults.address, 991)
+        self.assertNotIsInstance(defaults, self.datatree.MutableConfig)
+        arguments = api.host.print_get_default_region_config.call_args.args
+        self.assertEqual(tuple(map(address, arguments)), (42,))
+        api.host.print_get_auxiliary_object.assert_not_called()
+
     def test_stored_extrusion_entity_has_unique_ownership(self):
         api = self.make_api()
         entity = self.extrusions.StoredExtrusionEntity.adopt_owned(api, 12, 901)

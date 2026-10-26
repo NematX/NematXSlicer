@@ -636,6 +636,14 @@ public:
     c_flow_mm region_flow_mm(uint32_t region_idx, raw_extrusion_role role, double height_mm, uint32_t layer_id) const {
         return object_get_region_flow_mm(handle(), region_idx, role, height_mm, layer_id);
     }
+
+    // Default region configuration, as the host's PrintObject::default_region_config():
+    // the first PrintRegion, or the print's default region configuration when the object
+    // has none. For the print's auxiliary object, it is the print's default. Stable,
+    // unlike the address-ordered regions of a LayerRegionIsland: use it for skirt, brim
+    // and support paths. print must own this object. Defined after Print.
+    Config default_region_config(const Print &print) const;
+
     uint32_t volume_count() const;
     Volume volume(uint32_t idx) const;
 };
@@ -699,6 +707,12 @@ public:
         return Config(print_get_config(handle()));
     }
 
+    // Region settings of the print preset, before any object or volume override.
+    // Read-only, unlike auxiliary_object(), which creates that object if needed.
+    Config default_region_config() const {
+        return Config(print_get_default_region_config(handle()));
+    }
+
     // Copy regional overrides onto current Print defaults and intern the result.
     // The immutable borrowed result survives apply(), but not clear()/destruction.
     // Does not attach geometry. Concurrent registration is allowed while defaults
@@ -729,6 +743,11 @@ public:
         return Object(print_get_auxiliary_object(handle()));
     }
 };
+
+inline Config Object::default_region_config(const Print &print) const
+{
+    return print_region_count() > 0 ? print_region(0).config() : print.default_region_config();
+}
 
 inline Layer LayerRegion::layer() const
 {

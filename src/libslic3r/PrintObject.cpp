@@ -51,6 +51,9 @@ by later surface, extrusion and ordering stages, not the source model mesh.
 The object supplies slicing parameters, layer creation and cleanup, and access
 to the generated islands. Its owning Print coordinates recomputation. References
 to layers and their descendants must not survive a rebuild of those collections.
+Region zero is the object's fallback for helper geometry outside all volume
+masks. Its configuration combines Print defaults with object overrides, using
+the same normalization as volume regions but no volume or layer-range override.
 
 Representative direct calls (branches are not a timeline):
 
@@ -58,6 +61,10 @@ Representative direct calls (branches are not a timeline):
         |-- SlicingParameters::create_from_config()
         |-- default_region_config()
         `-- this->object_extruders()
+
+    object_default_region_config()
+        |-- apply_to_print_region_config(): apply only object-level overrides
+        `-- finalize_region_config(): share extruder, density and fuzzy-skin rules
 */
 
 using namespace std::literals;
@@ -87,6 +94,14 @@ using namespace std::literals;
 #endif
 
 namespace Slic3r {
+
+// Normalize extruder indices, near-zero infill and unusable fuzzy skin in the
+// owned configuration; this is shared by object defaults and volume regions.
+static void finalize_region_config(PrintRegionConfig &config, size_t num_extruders);
+// Return owned Print defaults with object-level regional overrides, excluding
+// layer ranges and volumes. Sources remain unchanged; allocation errors propagate.
+PrintRegionConfig object_default_region_config(const PrintRegionConfig &print_default_region_config,
+                                               const ModelObject &object, size_t num_extruders);
 
 void ApiInternal::PrintObjectAccess::set_layer_profile(PrintObject &object, std::vector<coord_t> &&layer_profile)
 {
@@ -299,7 +314,6 @@ const PrintRegion &PrintObject::printing_region(size_t idx) const throw() {
 }
 
 const PrintRegionConfig &PrintObject::default_region_config(const PrintRegionConfig &from_print) const {
-    //TODO check if a regionconfig set in an object modifier go through
     if (this->m_shared_regions && num_printing_regions() > 0) {
         return printing_region(0).config();
     }
@@ -419,12 +433,28 @@ static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPr
             }
 }
 
+static void finalize_region_config(PrintRegionConfig &config, size_t num_extruders)
+{
+    clamp_exturder_to_default(config.infill_extruder,       num_extruders);
+    clamp_exturder_to_default(config.perimeter_extruder,    num_extruders);
+    clamp_exturder_to_default(config.solid_infill_extruder, num_extruders);
+    if (config.fill_density.value < 0.00011f)
+        // Switch of infill for very low infill rates, also avoid division by zero in infill generator for these very low rates.
+        // See GH issue #5910.
+        config.fill_density.value = 0;
+    else
+        config.fill_density.value = std::min(config.fill_density.value, 100.);
+    if (config.fuzzy_skin.value != FuzzySkinType::None && (config.fuzzy_skin_point_dist.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
+        config.fuzzy_skin.value = FuzzySkinType::None;
+}
+
 PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &default_or_parent_region_config, const DynamicPrintConfig *layer_range_config, const ModelVolume &volume, size_t num_extruders)
 {
     PrintRegionConfig config = default_or_parent_region_config;
     if (volume.is_model_part()) {
-        // default_or_parent_region_config contains the Print's PrintRegionConfig.
-        // Override with ModelObject's PrintRegionConfig values.
+        // default_or_parent_region_config is the object's default region config (see
+        // object_default_region_config()). Applying the ModelObject's region values
+        // again is harmless and keeps this function correct from the Print defaults.
         apply_to_print_region_config(config, volume.get_object()->config.get());
     } else {
         // default_or_parent_region_config contains parent PrintRegion config, which already contains ModelVolume's config.
@@ -437,18 +467,18 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     apply_to_print_region_config(config, volume.config.get());
     if (! volume.material_id().empty())
         apply_to_print_region_config(config, volume.material()->config.get());
-    // Clamp invalid extruders to the default extruder (with index 1).
-    clamp_exturder_to_default(config.infill_extruder,       num_extruders);
-    clamp_exturder_to_default(config.perimeter_extruder,    num_extruders);
-    clamp_exturder_to_default(config.solid_infill_extruder, num_extruders);
-    if (config.fill_density.value < 0.00011f)
-        // Switch of infill for very low infill rates, also avoid division by zero in infill generator for these very low rates.
-        // See GH issue #5910.
-        config.fill_density.value = 0;
-    else
-        config.fill_density.value = std::min(config.fill_density.value, 100.);
-    if (config.fuzzy_skin.value != FuzzySkinType::None && (config.fuzzy_skin_point_dist.value < 0.01 || config.fuzzy_skin_thickness.value < 0.001))
-        config.fuzzy_skin.value = FuzzySkinType::None;
+    finalize_region_config(config, num_extruders);
+    return config;
+}
+
+PrintRegionConfig object_default_region_config(const PrintRegionConfig &print_default_region_config, const ModelObject &object, size_t num_extruders)
+{
+    // The Print's defaults overridden by the object's own region settings, without
+    // any layer range or volume setting. This is the object's fallback region: the
+    // settings of helper geometry outside every part, such as skirt, brim or support.
+    PrintRegionConfig config = print_default_region_config;
+    apply_to_print_region_config(config, object.config.get());
+    finalize_region_config(config, num_extruders);
     return config;
 }
 

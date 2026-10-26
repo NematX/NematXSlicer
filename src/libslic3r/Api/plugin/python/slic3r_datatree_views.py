@@ -30,6 +30,9 @@ Read configuration:
     density = config.float("fill_density")
     enabled = config.bool("support_material")
 
+Print.default_region_config() reads the preset's regional defaults without
+creating an auxiliary object. Its borrowed result must be reacquired after apply().
+
 Inspect region-island extrusions:
 
     region_island = island.region_island(0)
@@ -2161,6 +2164,15 @@ class MutableObject(Object):
 class Print(DataTreeView):
     def config(self) -> Config:
         return Config(self.api, self.api.host.print_get_config(self.c_handle()))
+
+    @abi_requires_headers("slic3r_data_tree.h")
+    def default_region_config(self) -> Config:
+        """Borrow preset regional defaults, without creating an auxiliary object.
+
+        Read only while apply()/clear() are stopped; reacquire after apply().
+        The Print retains ownership and neither geometry nor settings are changed.
+        """
+        return Config(self.api, self.api.host.print_get_default_region_config(self.c_handle()))
 
     @abi_requires_headers("slic3r_data_tree.h")
     def register_print_region_config(self, config: Config) -> PrintRegion:

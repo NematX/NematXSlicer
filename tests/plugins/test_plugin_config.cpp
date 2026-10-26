@@ -1359,6 +1359,72 @@ public:
 };
 }
 
+TEST_CASE("Print and object expose their default region configurations", "[plugins][config][default-region]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("perimeters", "3");
+    // An object-level override changes the object's default region, not the print's.
+    Model model;
+    ModelObject *model_object = model.add_object();
+    model_object->add_volume(make_cube(20., 20., 20.));
+    model_object->config.set_deserialize_strict("perimeters", "5");
+    model_object->add_instance();
+    model.center_instances_around_point({100., 100.});
+    model_object->ensure_on_bed();
+    Print print;
+    print.auto_assign_extruders(model_object);
+    print.apply(model, config);
+    REQUIRE(print.object(0).num_printing_regions() > 0);
+
+    const print_handle *print_c = reinterpret_cast<const print_handle *>(&print);
+    const auto perimeters = [](const slic3r_api::Config &region_config) {
+        REQUIRE(region_config.valid());
+        return region_config.get("perimeters").get_int();
+    };
+    REQUIRE(print.auxiliary_object() == nullptr);
+    CHECK(perimeters(slic3r_api::Config(print_get_default_region_config(print_c))) == 3);
+    CHECK(print_get_default_region_config(nullptr) == nullptr);
+
+    const slic3r_api::Print print_view(print_c);
+    CHECK(print_view.default_region_config().handle() == print_get_default_region_config(print_c));
+    const slic3r_api::Object object(reinterpret_cast<const object_handle *>(&print.object(0)));
+    CHECK(perimeters(object.default_region_config(print_view)) == 5);
+    // Parallel readers must not manufacture the auxiliary object as a side effect.
+    const config_handle *expected_default = print_get_default_region_config(print_c);
+    std::atomic<bool> same_default{true};
+    std::vector<std::thread> readers;
+    for (size_t idx = 0; idx < 4; ++idx)
+        readers.emplace_back([print_c, expected_default, &same_default]() {
+            for (size_t iteration = 0; iteration < 64; ++iteration)
+                if (print_get_default_region_config(print_c) != expected_default)
+                    same_default = false;
+        });
+    for (std::thread &reader : readers)
+        reader.join();
+    CHECK(same_default.load());
+    CHECK(print.auxiliary_object() == nullptr);
+    // The auxiliary object's first region is the print's default region.
+    const slic3r_api::Object auxiliary(reinterpret_cast<const object_handle *>(&print.mutable_auxiliary_object()));
+    CHECK(perimeters(auxiliary.default_region_config(print_view)) == 3);
+
+    // Reapplying the same Print must replace fallback values, not retain a region
+    // from the previous object or confuse a volume override with the object default.
+    model_object->config.set_deserialize_strict("perimeters", "7");
+    print.apply(model, config);
+    const slic3r_api::Object reapplied(reinterpret_cast<const object_handle *>(&print.object(0)));
+    CHECK(perimeters(reapplied.default_region_config(print_view)) == 7);
+    CHECK(perimeters(print_view.default_region_config()) == 3);
+    model_object->volumes.front()->config.set_deserialize_strict("perimeters", "9");
+    print.apply(model, config);
+    const slic3r_api::Object with_volume_override(reinterpret_cast<const object_handle *>(&print.object(0)));
+    CHECK(perimeters(with_volume_override.default_region_config(print_view)) == 7);
+    bool found_volume_override = false;
+    for (const PrintRegion &region : print.object(0).all_regions())
+        found_volume_override |= perimeters(slic3r_api::Config(ApiHost::to_config_handle(&region.config()))) == 9;
+    CHECK(found_volume_override);
+}
 TEST_CASE("Print registry validates and owns immutable regional snapshots", "[plugins][config][print-region-registry]")
 {
     using namespace Slic3r;

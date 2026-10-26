@@ -588,7 +588,7 @@ void ToolChangeUnretract::setup_impl(const plugin_run_context *run_ctx, uint32_t
     const Print print(ctx->print);
     const Config print_config = print.config();
     const uint32_t tool_count = print_config.size("nozzle_diameter", 0);
-    m_default_region_config = print.auxiliary_object().print_region(0).config();
+    m_default_region_config = print.default_region_config();
 
     const ConstPrintingPlan plan(ctx->plan);
     std::vector<bool> already_left(tool_count, false);
