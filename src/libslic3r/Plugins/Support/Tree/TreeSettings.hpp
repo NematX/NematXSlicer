@@ -36,9 +36,6 @@ namespace TreeFamily {
 // Index of an object layer, bottom first.
 using LayerIndex = int;
 
-// Polygon simplification of the routing does not need strictly simple results.
-static constexpr const bool polygons_strictly_simple = false;
-
 // Areas smaller than this are dropped, as too small to hold a branch.
 static constexpr const double tiny_area_threshold = scale_d(0.001) * scale_d(0.001);
 

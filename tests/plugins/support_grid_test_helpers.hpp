@@ -165,10 +165,25 @@ struct Generated {
         slic3r_api::Support::Grid::generate_support(nullptr, print_view(print), object_view(object), params(print, object), support);
     }
 };
+// The API handle of a plugin storage (the storage that owns the results of one test).
+inline storage_handle *handle(PluginStorage &storage)
+{
+    return reinterpret_cast<storage_handle *>(&storage);
+}
+// The three native() overloads are host-side test helpers: they reinterpret the handle of a stored collection as the native type of the
+// host (Polygons, ExPolygons, Polylines). They return a BORROWED reference, valid as long as the collection that owns the handle.
 // The host polygons behind an API polygon collection.
 inline const Polygons &native(const slic3r_api::StoredPolygonCollection &polygons)
 {
     return *reinterpret_cast<const Polygons *>(polygons.handle());
+}
+inline const ExPolygons &native(const slic3r_api::StoredExPolygonCollection &expolygons)
+{
+    return *reinterpret_cast<const ExPolygons *>(expolygons.handle());
+}
+inline const Polylines &native(const slic3r_api::StoredPolylineCollection &polylines)
+{
+    return *reinterpret_cast<const Polylines *>(polylines.handle());
 }
 
 // Flow-weighted volume and geometric length of the extrusion leaves, per extruder and role.

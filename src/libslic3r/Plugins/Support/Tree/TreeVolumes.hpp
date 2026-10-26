@@ -32,8 +32,8 @@
 
    Concurrency: once the constructor and precalculate() have returned, the getters are called from many threads at once, and any
    of them may have to compute a missing key. The constructor and precalculate() must complete before the first concurrent getter:
-   precalculate() writes members that the getters read without a lock (m_precalculated, m_ignorable_radii). Moving a TreeVolumes,
-   clearing a cache and destroying it need exclusive access as well.
+   precalculate() writes members that the getters read without a lock (m_precalculated, m_ignorable_radii). Destroying a TreeVolumes
+   needs exclusive access as well.
    - Each cache guards its maps with a short lock, taken only for a lookup or an insertion. No lock is held while an area is
      computed or while waiting for TBB tasks, as the computations run parallel_for and call other getters.
    - A getter that misses a key computes the whole range of that key, from its first layer to the requested layer, without
@@ -42,7 +42,7 @@
      computation, a getter finds its key in the cache.
    - A published area is never modified or moved while its TreeVolumes is alive: the layers are kept in a std::deque, which does
      not relocate its elements when it grows. A reference returned by a getter stays valid while other threads insert, until the
-     TreeVolumes is moved, cleared or destroyed.
+     TreeVolumes is destroyed.
    - The moves into the run storage happen before the cache lock is taken, and the areas that lose the insertion are freed after
      it is released: a cache lock is never held while a storage lock is taken. */
 #ifndef plugins_support_tree_volumes_hpp_
@@ -76,16 +76,14 @@ static constexpr const coord_t SUPPORT_TREE_COLLISION_RESOLUTION = scale_i(0.5);
 class TreeVolumes
 {
 public:
-    TreeVolumes() = default;
     // Reads the object once, in run_storage: it slices the support blockers and simplifies the outline of every layer. No area is
     // computed until precalculate(). The areas are owned by run_storage, which must outlive this object. The context, which must
     // outlive it too, is checked before and after the slicing of each blocker volume and between its cleaned layers (the slicing of one mesh is not cancellable)
     // and by every later computation.
     TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
                 const plugin_run_context *context);
-    TreeVolumes(TreeVolumes&&) = default;
-    TreeVolumes& operator=(TreeVolumes&&) = default;
-
+    TreeVolumes(TreeVolumes&&) = delete;
+    TreeVolumes& operator=(TreeVolumes&&) = delete;
     TreeVolumes(const TreeVolumes&) = delete;
     TreeVolumes& operator=(const TreeVolumes&) = delete;
 
@@ -206,11 +204,7 @@ private:
         // One area to publish, with the key it is published for.
         using Entry = std::pair<RadiusLayerPair, slic3r_api::StoredPolygonCollection>;
     public:
-        RadiusLayerPolygonCache() = default;
         explicit RadiusLayerPolygonCache(storage_handle *run_storage) : m_run_storage(run_storage) {}
-        RadiusLayerPolygonCache(RadiusLayerPolygonCache &&rhs) : m_data(std::move(rhs.m_data)), m_run_storage(rhs.m_run_storage) {}
-        RadiusLayerPolygonCache& operator=(RadiusLayerPolygonCache &&rhs) { m_data = std::move(rhs.m_data); m_run_storage = rhs.m_run_storage; return *this; }
-
         RadiusLayerPolygonCache(const RadiusLayerPolygonCache&) = delete;
         RadiusLayerPolygonCache& operator=(const RadiusLayerPolygonCache&) = delete;
 
@@ -251,12 +245,6 @@ private:
                 return std::nullopt;
 
             return std::optional<std::reference_wrapper<const slic3r_api::StoredPolygonCollection>>{it->second};
-        }
-
-        // Drops every area. References returned by getArea() become invalid, so no other thread may use the cache meanwhile.
-        void clear() {
-            std::lock_guard<std::mutex> guard(m_mutex);
-            m_data.clear();
         }
 
     private:

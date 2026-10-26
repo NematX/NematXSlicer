@@ -46,7 +46,9 @@ enum class LineStatus
 using LineInformation = std::vector<std::pair<c_point, LineStatus>>;
 using LineInformations = std::vector<LineInformation>;
 
-// The number of vertices in each circle.
+// The maximum chord error of the circles of the branches, in scaled units (25 nm): the target largest distance between a side of the polygon and the true circle. It is a target
+// before the truncation of the coordinates to integers, so the actual polygon may exceed it slightly. It is used by the branch circles and
+// by the small tip-base circle.
 static constexpr const size_t SUPPORT_TREE_CIRCLE_RESOLUTION = 25;
 
 struct AreaIncreaseSettings

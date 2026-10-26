@@ -1,3 +1,4 @@
+#include "polygon_metrics_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 #include "support_tree_test_helpers.hpp"
 #include "gcode_test_helpers.hpp"
@@ -2179,10 +2180,10 @@ Polygons brim_mask(const PrintObject &object, double width)
     return to_polygons(offset_ex(object.layer(0).lslices(), float(scale_d(width))));
 }
 
-// The area in mm2 of the symmetric difference of two sets of polygons.
+// The area in mm2 of the symmetric difference of two sets of polygons, without any filter of small areas.
 double xor_mm2(const Polygons &a, const Polygons &b)
 {
-    return unscaled(unscaled(area(diff_ex(a, b)) + area(diff_ex(b, a))));
+    return Slic3r::Test::PolygonMetrics::sym_diff_mm2(a, b);
 }
 }
 

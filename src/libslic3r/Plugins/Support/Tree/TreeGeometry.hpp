@@ -181,7 +181,7 @@ struct LineHit
 // close at different points: the centre of a square is as close to its four sides, and the hit point is the middle of the first side
 // here, of another side natively (test "nearest_on_lines on an exact tie"). Its caller, push_out_of_outline() in TreeSmoothing.cpp (shared by
 // smooth_organic_branches() and push_sphere_out_of_outline()), pushes the sphere away from that point, so the push direction may differ on
-// such a tie. Measured with the baseline dump on its organic and family scenes (about 4000 real hits): no tie met, no hit differs.
+// such a tie. Measured on the dump, organic and family scenes (about 4000 real hits): no tie met, no hit differs.
 //
 // `index` must hold the same segments as `lines`, appended in the same order (LineDistancer::append_segment(), then build_index()
 // before calling this function from several threads). It is only used to skip the lines that are too far: the distances are

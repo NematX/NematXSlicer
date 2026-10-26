@@ -471,6 +471,8 @@ void add_branch_circles(StoredPolygonCollection &circles, storage_handle *storag
             continue;
         const double t = double(middle_z - segment.bottom_z) / double(segment.top_z - segment.bottom_z);
         const double radius = double(segment.bottom_radius) + double(segment.top_radius - segment.bottom_radius) * t;
+        // A section whose radius does not exceed the chord error has no circle: that keeps make_circle() inside its domain
+        // (error < 2 * radius) and gives the circle at least three vertices.
         if (radius <= SUPPORT_TREE_CIRCLE_RESOLUTION)
             continue;
         const Vec2d centre = to_vec2d(segment.bottom_centre) + to_vec2d(segment.top_centre - segment.bottom_centre) * t;
@@ -495,6 +497,9 @@ double section_overhang(const PolygonCollection &upper, const PolygonCollection 
 }
 
 // Each ring answers with the contains() of the host (border inside), and the answers are counted, so a point in a hole is outside.
+// It is kept beside point_in_polygons() on purpose: on a hole border it counts two rings and answers false, so section_overhang()
+// still measures the distance (with its residue of about 7e-9 unit from the projection in doubles), where point_in_polygons(border = true)
+// would answer true and skip it.
 bool inside_section(const PolygonCollection &section, c_point point)
 {
     size_t containing = 0;

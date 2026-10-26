@@ -1,3 +1,4 @@
+#include "polygon_metrics_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 #include "support_tree_test_helpers.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
@@ -42,6 +43,7 @@
    request really took the lazy path, so that they do not silently test the caches only. */
 
 using namespace Slic3r;
+namespace PM = Slic3r::Test::PolygonMetrics;
 namespace SG = Slic3r::Test::SupportGrid;
 namespace ST = Slic3r::Test::SupportTree;
 namespace TF = Slic3r::TreeFamily;
@@ -110,9 +112,8 @@ struct Scene {
         settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
     }
     const PrintObject &object() const { return print.object(0); }
-    storage_handle *storage_handle_ptr() { return reinterpret_cast<storage_handle *>(&storage); }
     // New volumes over the first object, owning their areas in the storage of the scene; the context (nullptr never cancels) is the one they check.
-    Volumes volumes(const plugin_run_context *context = nullptr) { return Volumes(SG::object_view(object()), SG::print_view(print), settings, storage_handle_ptr(), context); }
+    Volumes volumes(const plugin_run_context *context = nullptr) { return Volumes(SG::object_view(object()), SG::print_view(print), settings, SG::handle(storage), context); }
 };
 
 // One area that TreeVolumes can give: its kind and the arguments of the getter.
@@ -217,14 +218,14 @@ size_t compare_blocker_slices(const Print &print, storage_handle *run_storage, b
         REQUIRE(slices.size() == native.size());
         for (size_t layer_idx = 0; layer_idx < slices.size(); ++ layer_idx) {
             const slic3r_api::StoredPolygonCollection rings = TF::to_polygons(run_storage, slices[layer_idx]);
-            append(api[layer_idx], ST::to_native(rings.readonly()));
+            append(api[layer_idx], SG::native(rings));
         }
     }
     for (size_t layer_idx = 0; layer_idx < native.size(); ++ layer_idx) {
         const Polygons native_rings = to_polygons(native[layer_idx]);
         const Polygons united = union_(api[layer_idx]);
-        const double difference_mm2 = (area(diff(united, native_rings)) + area(diff(native_rings, united))) / (scale_d(1.) * scale_d(1.));
-        const double bound_mm2 = curved ? total_length(native_rings) * resolution / (scale_d(1.) * scale_d(1.)) : 1e-3;
+        const double difference_mm2 = PM::sym_diff_mm2(united, native_rings);
+        const double bound_mm2 = curved ? PM::mm2(total_length(native_rings) * resolution) : 1e-3;
         CAPTURE(layer_idx, difference_mm2, bound_mm2);
         CHECK(difference_mm2 <= bound_mm2);
         sliced_layers += native_rings.empty() ? 0 : 1;
@@ -252,7 +253,6 @@ slic3r_api::StoredPolygonCollection blocker_collision(storage_handle *run_storag
     return copy;
 }
 
-double mm2(double scaled_area) { return scaled_area / (scale_d(1.) * scale_d(1.)); }
 }
 
 // One box: its collision contains the collision of the object alone and is larger by the box.
@@ -261,13 +261,13 @@ TEST_CASE("Support blockers are part of the collision", "[plugins][support-tree-
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     // The storage owns the collections below and the areas of the volumes, so it is declared first.
     PluginStorage storage;
-    storage_handle *run_storage = reinterpret_cast<storage_handle *>(&storage);
+    storage_handle *run_storage = SG::handle(storage);
     constexpr TF::LayerIndex layer = 8;
     const slic3r_api::StoredPolygonCollection without = blocker_collision(run_storage, {}, layer);
     const slic3r_api::StoredPolygonCollection with = blocker_collision(run_storage, { blocker_box(5., 2., 1., 3., 3., 2.) }, layer);
-    CHECK(mm2(TF::polygons_area(with) - TF::polygons_area(without)) > 5.);
+    CHECK(PM::mm2(TF::polygons_area(with) - TF::polygons_area(without)) > 5.);
     const slic3r_api::StoredPolygonCollection lost = TF::polygons_diff(run_storage, without, with);
-    CHECK(mm2(TF::polygons_area(lost)) < 1e-3);
+    CHECK(PM::mm2(TF::polygons_area(lost)) < 1e-3);
 
     Print print;
     Model model;
@@ -285,7 +285,7 @@ TEST_CASE("Curved support blockers are sliced within the resolution of the nativ
     TriangleMesh cylinder = make_cylinder(1.5, 2.);
     cylinder.translate(6.5, 4., 1.);
     make_blocker_print(print, model, { cylinder });
-    CHECK(compare_blocker_slices(print, reinterpret_cast<storage_handle *>(&storage), true) > 0);
+    CHECK(compare_blocker_slices(print, SG::handle(storage), true) > 0);
 }
 
 // Two overlapping blockers are united: the slices equal the native union, and the collision equals the one of a single blocker that
@@ -294,7 +294,7 @@ TEST_CASE("Overlapping support blockers are united like the native ones", "[plug
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     PluginStorage storage;
-    storage_handle *run_storage = reinterpret_cast<storage_handle *>(&storage);
+    storage_handle *run_storage = SG::handle(storage);
     constexpr TF::LayerIndex layer = 8;
     TriangleMesh first = blocker_box(5., 2., 1., 3., 3., 2.);
     TriangleMesh second = blocker_box(6.5, 3.5, 1., 3., 3., 2.);
@@ -311,13 +311,13 @@ TEST_CASE("Overlapping support blockers are united like the native ones", "[plug
     const slic3r_api::StoredPolygonCollection only_first = blocker_collision(run_storage, { first }, layer);
     // The collision of the merged mesh and the one of the two volumes differ by rounding along the contour: perimeter x resolution.
     const double resolution = scale_d(SG::print_view(print).config().get("resolution").get_float());
-    const double bound = mm2(total_length(ST::to_native(one_volume.readonly())) * resolution);
+    const double bound = PM::mm2(total_length(SG::native(one_volume)) * resolution);
     const slic3r_api::StoredPolygonCollection extra = TF::polygons_diff(run_storage, two_volumes, one_volume);
     const slic3r_api::StoredPolygonCollection missing = TF::polygons_diff(run_storage, one_volume, two_volumes);
-    CHECK(mm2(TF::polygons_area(extra)) <= bound);
-    CHECK(mm2(TF::polygons_area(missing)) <= bound);
+    CHECK(PM::mm2(TF::polygons_area(extra)) <= bound);
+    CHECK(PM::mm2(TF::polygons_area(missing)) <= bound);
     // The second blocker counts: its part outside of the first one enlarges the collision.
-    CHECK(mm2(TF::polygons_area(two_volumes) - TF::polygons_area(only_first)) > 2.);
+    CHECK(PM::mm2(TF::polygons_area(two_volumes) - TF::polygons_area(only_first)) > 2.);
 }
 // The placeable areas of radius 0 are computed together with the collision of radius 0. A cold cache must not hand the collision back
 // as placeable areas: the first call, a second call and the precalculated reference give the same areas.
@@ -408,14 +408,14 @@ TEST_CASE("The avoidance of a branch that cannot move is its collision", "[plugi
             const slic3r_api::StoredPolygonCollection &collision = volumes.getCollision(0, lazy_layer, true);
             // To the model, the places where a branch can stand are free.
             const slic3r_api::StoredPolygonCollection expected = to_model ?
-                TF::polygons_diff(scene.storage_handle_ptr(), collision, volumes.getPlaceableAreas(0, lazy_layer)) :
-                TF::polygons_union(scene.storage_handle_ptr(), collision);
+                TF::polygons_diff(SG::handle(scene.storage), collision, volumes.getPlaceableAreas(0, lazy_layer)) :
+                TF::polygons_union(SG::handle(scene.storage), collision);
             if (type == Volumes::AvoidanceType::Fast)
                 CHECK(same(avoidance, expected));
             else {
                 // The slow and the holefree avoidances start from the holefree collision, which is not public: it contains the
                 // plain collision.
-                const slic3r_api::StoredPolygonCollection missing = TF::polygons_diff(scene.storage_handle_ptr(), expected, avoidance);
+                const slic3r_api::StoredPolygonCollection missing = TF::polygons_diff(SG::handle(scene.storage), expected, avoidance);
                 CHECK(TF::polygons_area(missing) <= TF::sqr(scale_d(0.01)));
             }
         }
@@ -441,7 +441,7 @@ TEST_CASE("Precalculation without holefree collision keys completes", "[plugins]
     REQUIRE(settings.increase_radius_until_radius == settings.branch_radius);
 
     PluginStorage storage;
-    Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, reinterpret_cast<storage_handle *>(&storage), nullptr);
+    Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, SG::handle(storage), nullptr);
     volumes.precalculate(reference_layers);
     CHECK(volumes.getCollision(settings.branch_radius, 1, true).size() > 0);
 }

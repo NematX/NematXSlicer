@@ -18,7 +18,6 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/task_group.h>
 
-#include "libslic3r/Api/plugin/c/slic3r_utils.h"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PolygonOps.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
@@ -122,7 +121,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
             const slic3r_api::Volume volume = object.volume(volume_idx);
             if (volume.type() != RAW_VOLUME_TYPE_SUPPORT_BLOCKER)
                 continue;
-            // The helper checks the context before and after slicing the volume and between its cleaned layers; only the slicing of one mesh cannot be cancelled.
+            // The helper checks the context before and after slicing the volume and between its cleaned layers; only the slicing of one mesh cannot be cancelled (the slicing API does not expose the native slicer's cancellation).
             std::vector<StoredExPolygonCollection> slices = Common::slice_support_modifier_volume(volume, slice_zs, slicing_params, run_storage, m_context);
             if (slices.empty())
                 continue;
@@ -156,7 +155,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
     });
     // The helper that slices the blockers may drop a cancellation at the boundary of its job: no half-built object leaves the constructor.
     throw_if_interrupted();
-    // The maximum move keeps a margin of two microns against rounding errors.
+    // The maximum move keeps a margin of 2 scaled units (2 nm) against rounding errors.
     for (coord_t move : settings.max_move)
         m_max_move.push_back(std::max<coord_t>(move - 2, 0));
     for (coord_t move : settings.max_move_slow)

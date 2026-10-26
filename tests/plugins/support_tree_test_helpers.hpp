@@ -28,6 +28,7 @@
    only, while this one breaks ties between equal points by the points that follow, so that the form is unique for any ring. */
 #ifndef support_tree_test_helpers_hpp_
 #define support_tree_test_helpers_hpp_
+#include "polygon_metrics_test_helpers.hpp"
 #include "support_grid_test_helpers.hpp"
 #include "support_pattern_test_context.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -384,8 +385,7 @@ inline Polygons polygons_of(const std::vector<Ring> &rings)
 // when two canonical ring lists differ.
 inline double symmetric_difference_mm2(const std::vector<Ring> &a, const std::vector<Ring> &b)
 {
-    const Polygons pa = polygons_of(a), pb = polygons_of(b);
-    return unscaled(unscaled(std::abs(area(diff(pa, pb))) + std::abs(area(diff(pb, pa)))));
+    return PolygonMetrics::sym_diff_mm2(polygons_of(a), polygons_of(b));
 }
 
 // Compare a dump with its reference: records are matched by key, the text lines must be equal, the rings equal or a drift.

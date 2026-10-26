@@ -1,9 +1,12 @@
+#include "polygon_metrics_test_helpers.hpp"
 #include "support_tree_test_helpers.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <random>
+#include <set>
+#include <sstream>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -24,11 +27,15 @@
      line too unless two lines tie (the first line of the vector wins here, which is checked on its own);
    - spatial_order: the exact order of AABBTreeIndirect::Tree::build_modify_input(), including many ties;
    - the Clipper wrappers: compared as regions (symmetric difference below 1e-3 mm2) and by ring or expolygon count, never ring by
-     ring: the order of the rings and their first point differ from the native result. The largest differences are printed.
+     ring: the order of the rings and their first point differ from the native result. The largest differences are measured but not asserted;
+     the hidden case [.][tree-geometry-report] prints them (WARN), and the hidden benchmark [.][tree-geometry-benchmark] prints timings.
+     The INFO lines of the other cases give context to a check and show when it fails.
 
    The tests build no Print, so the plugin runtime does not need to be initialized. */
 
 using namespace Slic3r;
+namespace PM = Slic3r::Test::PolygonMetrics;
+namespace SG = Slic3r::Test::SupportGrid;
 namespace ST = Slic3r::Test::SupportTree;
 namespace TF = Slic3r::TreeFamily;
 
@@ -71,34 +78,17 @@ inline PointOperatorResults apply_point_operators(c_point p, c_point q)
 namespace {
 // Largest accepted area of the symmetric difference with the native result, in mm2.
 constexpr double max_sym_diff_mm2 = 1e-3;
-
-// The storage that owns the results of one test.
-struct TestStorage {
-    PluginStorage storage;
-    storage_handle *handle() { return reinterpret_cast<storage_handle *>(&storage); }
-};
+// The radius of a vertex of the stars is between this fraction of the radius of the star and the radius itself.
+constexpr double star_min_fraction = 0.6;
 
 // Read-only API views over native collections: the native containers are what the API handles point to.
 slic3r_api::PolygonCollection view_of(const Polygons &polygons);
 slic3r_api::ExPolygonCollection view_of(const ExPolygons &expolygons);
 slic3r_api::PolylineCollection view_of(const Polylines &polylines);
-// The native collections held by results.
-Polygons native_of(const slic3r_api::StoredPolygonCollection &collection);
-ExPolygons native_of(const slic3r_api::StoredExPolygonCollection &collection);
-Polylines native_of(const slic3r_api::StoredPolylineCollection &collection);
-// c_point and c_bounding_box from native ones, and back.
-c_point c_of(const Point &point);
-Point point_of(c_point point);
-c_bounding_box c_of(const BoundingBox &box);
+// c_bounding_box from a native box, and back (ST::to_c_point and ST::to_point do the points; there is no shared helper for boxes).
+c_bounding_box c_box_of(const BoundingBox &box);
 BoundingBox box_of(const c_bounding_box &box);
 
-// Area in mm2 from an area in scaled units squared.
-double mm2(double scaled_area);
-// Area in mm2 of the symmetric difference of two ring sets (NonZero fill: counter-clockwise contours, clockwise holes), without any filter
-// of small areas.
-double sym_diff_mm2(const Polygons &a, const Polygons &b);
-// Star-shaped counter-clockwise ring around a center, with a random radius per vertex.
-Polygon random_star(std::mt19937 &rng, const Point &center, double radius_mm, size_t points);
 // A random set of overlapping stars, the first one with a clockwise star hole; 3 to 5 rings in a square of about 40 mm.
 Polygons random_scene(std::mt19937 &rng);
 // A random point in the box of the scene, grown by margin_mm.
@@ -185,62 +175,14 @@ slic3r_api::PolylineCollection view_of(const Polylines &polylines)
     return slic3r_api::PolylineCollection(reinterpret_cast<const polyline_collection_handle *>(&polylines));
 }
 
-Polygons native_of(const slic3r_api::StoredPolygonCollection &collection)
+c_bounding_box c_box_of(const BoundingBox &box)
 {
-    return *reinterpret_cast<const Polygons *>(collection.handle());
-}
-
-ExPolygons native_of(const slic3r_api::StoredExPolygonCollection &collection)
-{
-    return *reinterpret_cast<const ExPolygons *>(collection.handle());
-}
-
-Polylines native_of(const slic3r_api::StoredPolylineCollection &collection)
-{
-    return *reinterpret_cast<const Polylines *>(collection.handle());
-}
-
-c_point c_of(const Point &point)
-{
-    return c_point{ point.x(), point.y() };
-}
-
-Point point_of(c_point point)
-{
-    return Point(point.x, point.y);
-}
-
-c_bounding_box c_of(const BoundingBox &box)
-{
-    return c_bounding_box{ c_of(box.min), c_of(box.max) };
+    return c_bounding_box{ ST::to_c_point(box.min), ST::to_c_point(box.max) };
 }
 
 BoundingBox box_of(const c_bounding_box &box)
 {
-    return BoundingBox(point_of(box.min), point_of(box.max));
-}
-
-double mm2(double scaled_area)
-{
-    return scaled_area * SCALING_FACTOR * SCALING_FACTOR;
-}
-
-double sym_diff_mm2(const Polygons &a, const Polygons &b)
-{
-    // Polygon differences: diff_ex() would drop the small areas (remove_small_areas) and could report 0 for a real difference.
-    return mm2(area(diff(a, b)) + area(diff(b, a)));
-}
-
-Polygon random_star(std::mt19937 &rng, const Point &center, double radius_mm, size_t points)
-{
-    std::uniform_real_distribution<double> jitter(0.6, 1.0);
-    Polygon polygon;
-    for (size_t i = 0; i < points; ++i) {
-        const double angle = 2. * PI * double(i) / double(points);
-        const double radius = radius_mm * jitter(rng);
-        polygon.points.emplace_back(center.x() + scale_i(radius * std::cos(angle)), center.y() + scale_i(radius * std::sin(angle)));
-    }
-    return polygon;
+    return BoundingBox(ST::to_point(box.min), ST::to_point(box.max));
 }
 
 Polygons random_scene(std::mt19937 &rng)
@@ -251,9 +193,9 @@ Polygons random_scene(std::mt19937 &rng)
     std::uniform_int_distribution<int> vertices(5, 40);
     Polygons scene;
     for (int i = 0, n = count(rng); i < n; ++i)
-        scene.push_back(random_star(rng, Point(scale_i(position(rng)), scale_i(position(rng))), radius(rng), size_t(vertices(rng))));
+        scene.push_back(PM::random_star(rng, Point(scale_i(position(rng)), scale_i(position(rng))), radius(rng), size_t(vertices(rng)), star_min_fraction));
     // A clockwise hole inside the first star (its radius is always above 0.6 * 5 mm).
-    Polygon hole = random_star(rng, scene.front().centroid(), 1.5, 12);
+    Polygon hole = PM::random_star(rng, scene.front().centroid(), 1.5, 12, star_min_fraction);
     hole.make_clockwise();
     scene.push_back(hole);
     return scene;
@@ -301,7 +243,7 @@ std::vector<c_bounding_box> random_boxes(std::mt19937 &rng, size_t count, coord_
 
 void check_polygons(const Polygons &mine, const Polygons &native, Largest &largest, bool same_ring_count)
 {
-    const double diff = sym_diff_mm2(mine, native);
+    const double diff = PM::sym_diff_mm2(mine, native);
     CHECK(diff < max_sym_diff_mm2);
     if (same_ring_count)
         CHECK(mine.size() == native.size());
@@ -328,9 +270,9 @@ void check_expolygons(const ExPolygons &mine, const ExPolygons &native, Largest 
 
 std::vector<WindingScene> winding_scenes(std::mt19937 &rng)
 {
-    auto ccw = [&](double x, double y, double radius) { return random_star(rng, Point(scale_i(x), scale_i(y)), radius, 24); };
+    auto ccw = [&](double x, double y, double radius) { return PM::random_star(rng, Point(scale_i(x), scale_i(y)), radius, 24, star_min_fraction); };
     auto cw = [&](double x, double y, double radius) {
-        Polygon ring = random_star(rng, Point(scale_i(x), scale_i(y)), radius, 24);
+        Polygon ring = PM::random_star(rng, Point(scale_i(x), scale_i(y)), radius, 24, star_min_fraction);
         ring.make_clockwise();
         return ring;
     };
@@ -405,7 +347,7 @@ TEST_CASE("tree geometry point conversions, products and hash match the native o
     // EPSILON and the scale functions are the ones of slic3r_def.h, which the native code imports (libslic3r.h): nothing to compare.
     for (int i = 0; i < 2000; ++i) {
         const Point p(coord(rng), coord(rng)), q(coord(rng), coord(rng));
-        const c_point cp = c_of(p), cq = c_of(q);
+        const c_point cp = ST::to_c_point(p), cq = ST::to_c_point(q);
         // to_vec2d and unscale_p
         CHECK(TF::to_vec2d(cp) == p.cast<double>());
         CHECK(TF::unscale_p(cp) == unscale_p(p));
@@ -415,17 +357,17 @@ TEST_CASE("tree geometry point conversions, products and hash match the native o
         CHECK(TF::squared_norm(c_point{ cp.x - cq.x, cp.y - cq.y }) == (p - q).cast<int64_t>().squaredNorm());
         // the API operators, found in the TreeFamily namespace
         const TF::PointOperatorResults ops = TF::apply_point_operators(cp, cq);
-        CHECK(point_of(ops.sum) == p + q);
-        CHECK(point_of(ops.difference) == p - q);
-        CHECK(point_of(ops.tripled) == Point(p.x() * 3, p.y() * 3));
-        CHECK(point_of(ops.middle) == (p + q) / 2);
+        CHECK(ST::to_point(ops.sum) == p + q);
+        CHECK(ST::to_point(ops.difference) == p - q);
+        CHECK(ST::to_point(ops.tripled) == Point(p.x() * 3, p.y() * 3));
+        CHECK(ST::to_point(ops.middle) == (p + q) / 2);
         CHECK(ops.equal == (p == q));
         CHECK(ops.different == (p != q));
         CHECK(ops.length == (p - q).cast<double>().norm());
         // vectors of doubles back to points: truncation and millimeter scaling
         const Vec2d v(real(rng), real(rng));
-        CHECK(point_of(TF::truncated_point(v)) == Point(v.cast<coord_t>()));
-        CHECK(point_of(TF::scaled_point(v)) == Point::new_scale(v));
+        CHECK(ST::to_point(TF::truncated_point(v)) == Point(v.cast<coord_t>()));
+        CHECK(ST::to_point(TF::scaled_point(v)) == Point::new_scale(v));
     }
 
     SECTION("PointHash and PointEqual")
@@ -435,8 +377,8 @@ TEST_CASE("tree geometry point conversions, products and hash match the native o
         for (int i = 0; i < 5000; ++i) {
             // Few distinct values, and some close ones (hash collisions on purpose).
             const Point p(coord(rng) / 100000 * 7, coord(rng) / 100000 * 7);
-            CHECK(TF::PointHash()(c_of(p)) == Slic3r::PointHash()(p));
-            const bool mine_new = mine.insert(c_of(p)).second;
+            CHECK(TF::PointHash()(ST::to_c_point(p)) == Slic3r::PointHash()(p));
+            const bool mine_new = mine.insert(ST::to_c_point(p)).second;
             const bool native_new = native.insert(p).second;
             CHECK(mine_new == native_new);
         }
@@ -474,8 +416,8 @@ TEST_CASE("tree geometry bounding boxes match the native ones", "[plugins][tree-
     SECTION("ClipperOperand::bounding_box, the API function that replaces clipper_shapes_bounding_box, gives the same box")
     {
         const Polygons scene = random_scene(rng);
-        TestStorage fixture;
-        const slic3r_api::ClipperContext clipper(fixture.handle());
+        PluginStorage owner;
+        const slic3r_api::ClipperContext clipper(SG::handle(owner));
         CHECK(box_of(clipper(view_of(scene)).bounding_box()) == get_extents(scene));
     }
 }
@@ -483,7 +425,8 @@ TEST_CASE("tree geometry bounding boxes match the native ones", "[plugins][tree-
 TEST_CASE("tree geometry polygon collection helpers match the native ones", "[plugins][tree-geometry]")
 {
     std::mt19937 rng(4);
-    TestStorage fixture;
+    PluginStorage owner;
+    storage_handle *storage = SG::handle(owner);
     for (int iteration = 0; iteration < 50; ++iteration) {
         const Polygons scene = random_scene(rng);
         const slic3r_api::PolygonCollection view = view_of(scene);
@@ -491,7 +434,7 @@ TEST_CASE("tree geometry polygon collection helpers match the native ones", "[pl
         CHECK(TF::total_length(view) == total_length(scene));
 
         const Polylines native_polylines = to_polylines(scene);
-        const Polylines mine_polylines = native_of(TF::to_polylines(fixture.handle(), view));
+        const Polylines mine_polylines = SG::native(TF::to_polylines(storage, view));
         REQUIRE(mine_polylines.size() == native_polylines.size());
         for (size_t i = 0; i < native_polylines.size(); ++i)
             CHECK(mine_polylines[i].points == native_polylines[i].points);
@@ -500,13 +443,13 @@ TEST_CASE("tree geometry polygon collection helpers match the native ones", "[pl
         const std::vector<TF::LineSegment> mine_lines = TF::to_lines(view);
         REQUIRE(mine_lines.size() == native_lines.size());
         for (size_t i = 0; i < native_lines.size(); ++i) {
-            CHECK(point_of(mine_lines[i].a) == native_lines[i].a);
-            CHECK(point_of(mine_lines[i].b) == native_lines[i].b);
+            CHECK(ST::to_point(mine_lines[i].a) == native_lines[i].a);
+            CHECK(ST::to_point(mine_lines[i].b) == native_lines[i].b);
         }
 
         // to_polygons of expolygons: contour then holes, expolygon after expolygon
         const ExPolygons expolygons = union_ex(scene);
-        CHECK(native_of(TF::to_polygons(fixture.handle(), view_of(expolygons))) == to_polygons(expolygons));
+        CHECK(SG::native(TF::to_polygons(storage, view_of(expolygons))) == to_polygons(expolygons));
     }
 
     SECTION("empty collection")
@@ -515,9 +458,9 @@ TEST_CASE("tree geometry polygon collection helpers match the native ones", "[pl
         const ExPolygons no_expolygons;
         CHECK(TF::polygons_area(view_of(none)) == 0.);
         CHECK(TF::total_length(view_of(none)) == 0.);
-        CHECK(TF::to_polylines(fixture.handle(), view_of(none)).empty());
+        CHECK(TF::to_polylines(storage, view_of(none)).empty());
         CHECK(TF::to_lines(view_of(none)).empty());
-        CHECK(TF::to_polygons(fixture.handle(), view_of(no_expolygons)).empty());
+        CHECK(TF::to_polygons(storage, view_of(no_expolygons)).empty());
     }
     SECTION("degenerate rings")
     {
@@ -531,24 +474,24 @@ TEST_CASE("tree geometry polygon collection helpers match the native ones", "[pl
         const Lines native = to_lines(two);
         REQUIRE(lines.size() == 2);
         REQUIRE(native.size() == 2);
-        CHECK(point_of(lines[0].a) == native[0].a);
-        CHECK(point_of(lines[1].b) == native[1].b);
+        CHECK(ST::to_point(lines[0].a) == native[0].a);
+        CHECK(ST::to_point(lines[1].b) == native[1].b);
         const Polygons none_points{ Polygon(), Polygon({ P(0, 0), P(10, 0), P(10, 10) }) };
         CHECK(TF::to_lines(view_of(none_points)).size() == 3);
-        CHECK(TF::to_polylines(fixture.handle(), view_of(none_points)).size() == 1);
+        CHECK(TF::to_polylines(storage, view_of(none_points)).size() == 1);
         CHECK(TF::total_length(view_of(none_points)) == total_length(Polygons{ none_points[1] }));
     }
     SECTION("clipper_offset_polylines, the API function used with to_polylines, gives the native offset of polylines")
     {
         const Polygons scene = random_scene(rng);
         const Polylines closed = to_polylines(scene);
-        const Polylines from_helper = native_of(TF::to_polylines(fixture.handle(), view_of(scene)));
+        const Polylines from_helper = SG::native(TF::to_polylines(storage, view_of(scene)));
         const Polygons native = offset(closed, scale_d(0.002), ClipperLib::jtMiter, 1.2);
-        const slic3r_api::StoredPolylineCollection helper_polylines = TF::to_polylines(fixture.handle(), view_of(scene));
-        const Polygons api = native_of(slic3r_api::clipper_offset_polylines(fixture.handle(), helper_polylines, scale_d(0.002), CLIPPER_JOIN_MITER, 1.2)
+        const slic3r_api::StoredPolylineCollection helper_polylines = TF::to_polylines(storage, view_of(scene));
+        const Polygons api = SG::native(slic3r_api::clipper_offset_polylines(storage, helper_polylines, scale_d(0.002), CLIPPER_JOIN_MITER, 1.2)
                                            .to_polygon_collection());
         CHECK(from_helper.size() == closed.size());
-        CHECK(sym_diff_mm2(api, native) < max_sym_diff_mm2);
+        CHECK(PM::sym_diff_mm2(api, native) < max_sym_diff_mm2);
         CHECK(!api.empty());
     }
 }
@@ -561,7 +504,7 @@ TEST_CASE("point_in_polygons matches the native contains on random points and on
         const slic3r_api::PolygonCollection view = view_of(polygons);
         for (const bool border_result : { true, false }) {
             const bool native = contains(polygons, point, border_result);
-            CHECK(TF::point_in_polygons(view, c_of(point), border_result) == native);
+            CHECK(TF::point_in_polygons(view, ST::to_c_point(point), border_result) == native);
         }
         // Is the point on a border? With a different border_result the answers differ exactly then.
         if (contains(polygons, point, true) != contains(polygons, point, false))
@@ -704,7 +647,7 @@ TEST_CASE("nearest_on_lines matches the native indexed lines distance", "[plugin
                 compare(lines, index, from, std::numeric_limits<double>::infinity(), true);
             }
         }
-        WARN("nearest_on_lines: " << hits << " hits, " << misses << " misses, largest squared distance difference " << worst_distance_diff
+        INFO("nearest_on_lines: " << hits << " hits, " << misses << " misses, largest squared distance difference " << worst_distance_diff
                                   << ", largest hit point difference " << worst_point_diff << " (scaled units), " << other_line << " hits on another line than the native one (ties)");
         CHECK(hits > 1000);
         CHECK(misses > 100);
@@ -828,11 +771,14 @@ TEST_CASE("spatial_order gives the exact order of the native AABB tree", "[plugi
     }
 }
 
-TEST_CASE("tree geometry Clipper wrappers match the native operations", "[plugins][tree-geometry]")
+namespace {
+// The checks of the random scenes and of the edge cases; returns the largest differences with the native result, for the report case.
+std::string run_clipper_wrappers()
 {
+    std::string report;
     std::mt19937 rng(8);
-    TestStorage fixture;
-    storage_handle *storage = fixture.handle();
+    PluginStorage owner;
+    storage_handle *storage = SG::handle(owner);
     Largest unions, diffs, intersections, offsets, offsets_round, expolygon_ops, expolygon_offsets, clips, diff_clippeds;
     SECTION("random scenes")
     {
@@ -843,13 +789,13 @@ TEST_CASE("tree geometry Clipper wrappers match the native operations", "[plugin
             const ExPolygons b_ex = union_ex(b);
             const slic3r_api::PolygonCollection a_view = view_of(a), b_view = view_of(b);
 
-            check_polygons(native_of(TF::polygons_union(storage, a_view)), union_(a), unions);
-            check_polygons(native_of(TF::polygons_union(storage, a_view, b_view)), union_(a, b), unions);
-            check_polygons(native_of(TF::polygons_union(storage, view_of(a_ex))), union_(a_ex), unions);
-            check_polygons(native_of(TF::polygons_diff(storage, a_view, b_view)), diff(a, b), diffs);
-            check_polygons(native_of(TF::polygons_diff(storage, a_view, view_of(b_ex))), diff(a, b_ex), diffs);
-            check_polygons(native_of(TF::polygons_intersection(storage, a_view, b_view)), intersection(a, b), intersections);
-            check_polygons(native_of(TF::polygons_intersection(storage, view_of(a_ex), view_of(b_ex))), intersection(a_ex, b_ex), intersections);
+            check_polygons(SG::native(TF::polygons_union(storage, a_view)), union_(a), unions);
+            check_polygons(SG::native(TF::polygons_union(storage, a_view, b_view)), union_(a, b), unions);
+            check_polygons(SG::native(TF::polygons_union(storage, view_of(a_ex))), union_(a_ex), unions);
+            check_polygons(SG::native(TF::polygons_diff(storage, a_view, b_view)), diff(a, b), diffs);
+            check_polygons(SG::native(TF::polygons_diff(storage, a_view, view_of(b_ex))), diff(a, b_ex), diffs);
+            check_polygons(SG::native(TF::polygons_intersection(storage, a_view, b_view)), intersection(a, b), intersections);
+            check_polygons(SG::native(TF::polygons_intersection(storage, view_of(a_ex), view_of(b_ex))), intersection(a_ex, b_ex), intersections);
 
             // The rings of a without overlap (a union), the counter-clockwise rings of a alone (overlapping, no hole), and expolygons.
             const Polygons clean = union_(a);
@@ -868,14 +814,14 @@ TEST_CASE("tree geometry Clipper wrappers match the native operations", "[plugin
                 // ring count as the native function in every case below. A delta of 0 is only for the expolygons (the ring lists
                 // assert on it, natively too).
                 if (delta != 0.) {
-                    check_polygons(native_of(TF::polygons_offset(storage, view_of(clean), delta, CLIPPER_JOIN_MITER, 1.2)), offset(clean, delta, ClipperLib::jtMiter, 1.2), offsets);
-                    check_polygons(native_of(TF::polygons_offset(storage, view_of(clean), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
+                    check_polygons(SG::native(TF::polygons_offset(storage, view_of(clean), delta, CLIPPER_JOIN_MITER, 1.2)), offset(clean, delta, ClipperLib::jtMiter, 1.2), offsets);
+                    check_polygons(SG::native(TF::polygons_offset(storage, view_of(clean), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
                                    offset(clean, delta, ClipperLib::jtRound, scale_d(0.01)), offsets_round);
                 }
                 // Overlapping rings are supported for a positive delta when no ring is clockwise.
                 if (delta > 0) {
-                    check_polygons(native_of(TF::polygons_offset(storage, view_of(ccw_only), delta, CLIPPER_JOIN_MITER, 1.2)), offset(ccw_only, delta, ClipperLib::jtMiter, 1.2), offsets);
-                    check_polygons(native_of(TF::polygons_offset(storage, view_of(ccw_only), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
+                    check_polygons(SG::native(TF::polygons_offset(storage, view_of(ccw_only), delta, CLIPPER_JOIN_MITER, 1.2)), offset(ccw_only, delta, ClipperLib::jtMiter, 1.2), offsets);
+                    check_polygons(SG::native(TF::polygons_offset(storage, view_of(ccw_only), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
                                    offset(ccw_only, delta, ClipperLib::jtRound, scale_d(0.01)), offsets_round);
                 }
                 // Expolygons are supported for both signs, overlapping ones for a positive delta (the native function documents that they
@@ -884,33 +830,34 @@ TEST_CASE("tree geometry Clipper wrappers match the native operations", "[plugin
                 for (const ExPolygons *expolygons : std::vector<const ExPolygons *>{ &a_ex, &overlapping_ex }) {
                     if (expolygons == &overlapping_ex && delta <= 0)
                         continue;
-                    check_polygons(native_of(TF::polygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_MITER, 1.2)),
+                    check_polygons(SG::native(TF::polygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_MITER, 1.2)),
                                    offset(*expolygons, delta, ClipperLib::jtMiter, 1.2), offsets);
-                    check_polygons(native_of(TF::polygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
+                    check_polygons(SG::native(TF::polygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
                                    offset(*expolygons, delta, ClipperLib::jtRound, scale_d(0.01)), offsets_round);
-                    check_expolygons(native_of(TF::expolygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_MITER, 1.2)),
+                    check_expolygons(SG::native(TF::expolygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_MITER, 1.2)),
                                      offset_ex(*expolygons, delta, ClipperLib::jtMiter, 1.2), expolygon_offsets);
-                    check_expolygons(native_of(TF::expolygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
+                    check_expolygons(SG::native(TF::expolygons_offset(storage, view_of(*expolygons), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
                                      offset_ex(*expolygons, delta, ClipperLib::jtRound, scale_d(0.01)), expolygon_offsets);
                 }
             }
 
-            check_expolygons(native_of(TF::expolygons_union(storage, a_view)), union_ex(a), expolygon_ops);
-            check_expolygons(native_of(TF::expolygons_union(storage, view_of(a_ex))), union_ex(a_ex), expolygon_ops);
-            check_expolygons(native_of(TF::expolygons_diff(storage, a_view, b_view)), diff_ex(a, b), expolygon_ops);
-            check_expolygons(native_of(TF::expolygons_diff(storage, view_of(a_ex), view_of(b_ex))), diff_ex(a_ex, b_ex), expolygon_ops);
+            check_expolygons(SG::native(TF::expolygons_union(storage, a_view)), union_ex(a), expolygon_ops);
+            check_expolygons(SG::native(TF::expolygons_union(storage, view_of(a_ex))), union_ex(a_ex), expolygon_ops);
+            check_expolygons(SG::native(TF::expolygons_diff(storage, a_view, b_view)), diff_ex(a, b), expolygon_ops);
+            check_expolygons(SG::native(TF::expolygons_diff(storage, view_of(a_ex), view_of(b_ex))), diff_ex(a_ex, b_ex), expolygon_ops);
 
             // The rings that can touch a small box: compared by the region they leave after a union (the rings are not merged).
             const BoundingBox box = get_extents(a);
             const BoundingBox small(box.min + Point(scale_i(8.), scale_i(8.)), box.min + Point(scale_i(14.), scale_i(14.)));
-            check_polygons(native_of(TF::polygons_union(storage, TF::clip_polygons_with_subject_bbox(storage, b_view, c_of(small)))),
+            check_polygons(SG::native(TF::polygons_union(storage, TF::clip_polygons_with_subject_bbox(storage, b_view, c_box_of(small)))),
                            union_(ClipperUtils::clip_clipper_polygons_with_subject_bbox(b, small)), clips);
             // A small subject against a large clip, and the large one against the small, as the routing does.
-            const Polygons small_subject{ random_star(rng, Point(box.min.x() + scale_i(10.), box.min.y() + scale_i(10.)), 3., 20) };
-            check_polygons(native_of(TF::diff_clipped(storage, view_of(small_subject), b_view)), diff_clipped(small_subject, b), diff_clippeds);
-            check_polygons(native_of(TF::diff_clipped(storage, a_view, b_view)), diff_clipped(a, b), diff_clippeds);
+            const Polygons small_subject{ PM::random_star(rng, Point(box.min.x() + scale_i(10.), box.min.y() + scale_i(10.)), 3., 20, star_min_fraction) };
+            check_polygons(SG::native(TF::diff_clipped(storage, view_of(small_subject), b_view)), diff_clipped(small_subject, b), diff_clippeds);
+            check_polygons(SG::native(TF::diff_clipped(storage, a_view, b_view)), diff_clipped(a, b), diff_clippeds);
         }
-        WARN("Clipper wrappers, largest symmetric difference (mm2) / rings identical to the native ones:"
+        std::ostringstream text;
+        text << "Clipper wrappers, largest symmetric difference (mm2) / rings identical to the native ones:"
              << "\n  union " << unions.sym_diff << " / " << unions.identical_rings << " of " << unions.compared
              << "\n  diff " << diffs.sym_diff << " / " << diffs.identical_rings << " of " << diffs.compared
              << "\n  intersection " << intersections.sym_diff << " / " << intersections.identical_rings << " of " << intersections.compared
@@ -919,7 +866,8 @@ TEST_CASE("tree geometry Clipper wrappers match the native operations", "[plugin
              << "\n  union_ex, diff_ex " << expolygon_ops.sym_diff << " / " << expolygon_ops.identical_rings << " of " << expolygon_ops.compared
              << "\n  offset_ex " << expolygon_offsets.sym_diff << " / " << expolygon_offsets.identical_rings << " of " << expolygon_offsets.compared
              << "\n  clip with bbox " << clips.sym_diff << " / " << clips.identical_rings << " of " << clips.compared
-             << "\n  diff_clipped " << diff_clippeds.sym_diff << " / " << diff_clippeds.identical_rings << " of " << diff_clippeds.compared);
+             << "\n  diff_clipped " << diff_clippeds.sym_diff << " / " << diff_clippeds.identical_rings << " of " << diff_clippeds.compared;
+        report = text.str();
     }
 
     SECTION("empty subject and clip")
@@ -938,22 +886,29 @@ TEST_CASE("tree geometry Clipper wrappers match the native operations", "[plugin
         CHECK(TF::diff_clipped(storage, view_of(none), view_of(scene)).empty());
         // An empty clip leaves the region of the subject.
         Largest ignored;
-        check_polygons(native_of(TF::polygons_diff(storage, view_of(scene), view_of(none))), diff(scene, none), ignored);
-        check_polygons(native_of(TF::diff_clipped(storage, view_of(scene), view_of(none))), diff_clipped(scene, none), ignored);
-        check_polygons(native_of(TF::clip_polygons_with_subject_bbox(storage, view_of(none), c_of(get_extents(scene)))), Polygons{}, ignored);
+        check_polygons(SG::native(TF::polygons_diff(storage, view_of(scene), view_of(none))), diff(scene, none), ignored);
+        check_polygons(SG::native(TF::diff_clipped(storage, view_of(scene), view_of(none))), diff_clipped(scene, none), ignored);
+        check_polygons(SG::native(TF::clip_polygons_with_subject_bbox(storage, view_of(none), c_box_of(get_extents(scene)))), Polygons{}, ignored);
         // A union of nothing with something.
-        check_polygons(native_of(TF::polygons_union(storage, view_of(none), view_of(scene))), union_(none, scene), ignored);
+        check_polygons(SG::native(TF::polygons_union(storage, view_of(none), view_of(scene))), union_(none, scene), ignored);
     }
     SECTION("shrinking past nothing, and shapes far from the clip")
     {
         const Polygons square{ Polygon({ Point(0, 0), Point(scale_i(2.), 0), Point(scale_i(2.), scale_i(2.)), Point(0, scale_i(2.)) }) };
-        CHECK(native_of(TF::polygons_offset(storage, view_of(square), -scale_d(5.))).empty());
+        CHECK(SG::native(TF::polygons_offset(storage, view_of(square), -scale_d(5.))).empty());
         CHECK(offset(square, -scale_d(5.)).empty());
         const Polygons far_clip{ Polygon({ Point(scale_i(100.), 0), Point(scale_i(102.), 0), Point(scale_i(102.), scale_i(2.)), Point(scale_i(100.), scale_i(2.)) }) };
         Largest ignored;
-        check_polygons(native_of(TF::diff_clipped(storage, view_of(square), view_of(far_clip))), diff_clipped(square, far_clip), ignored);
-        CHECK(!native_of(TF::diff_clipped(storage, view_of(square), view_of(far_clip))).empty());
+        check_polygons(SG::native(TF::diff_clipped(storage, view_of(square), view_of(far_clip))), diff_clipped(square, far_clip), ignored);
+        CHECK(!SG::native(TF::diff_clipped(storage, view_of(square), view_of(far_clip))).empty());
     }
+    return report;
+}
+} // namespace
+
+TEST_CASE("tree geometry Clipper wrappers match the native operations", "[plugins][tree-geometry]")
+{
+    run_clipper_wrappers();
 }
 
 TEST_CASE("tree geometry operators coexist with the native ones", "[plugins][tree-geometry]")
@@ -963,11 +918,13 @@ TEST_CASE("tree geometry operators coexist with the native ones", "[plugins][tre
     CHECK(TF::native_and_c_point_operators_coexist());
 }
 
-TEST_CASE("tree geometry Clipper wrappers match the native operations on winding edge cases", "[plugins][tree-geometry]")
+namespace {
+// The checks of the winding edge cases; returns the largest differences with the native result, for the report case.
+std::string run_winding_edge_cases()
 {
     std::mt19937 rng(9);
-    TestStorage fixture;
-    storage_handle *storage = fixture.handle();
+    PluginStorage owner;
+    storage_handle *storage = SG::handle(owner);
     Largest offsets, booleans;
     const Polygons other = random_scene(rng);
     std::string unsupported_report;
@@ -981,8 +938,8 @@ TEST_CASE("tree geometry Clipper wrappers match the native operations on winding
         for (const double delta_mm : { 0.05, 0.5, 2., -0.05, -0.5, -2. }) {
             const double delta = scale_d(delta_mm);
             INFO("delta " << delta_mm << " mm");
-            const Polygons mine_miter = native_of(TF::polygons_offset(storage, view, delta, CLIPPER_JOIN_MITER, 1.2));
-            const Polygons mine_round = native_of(TF::polygons_offset(storage, view, delta, CLIPPER_JOIN_ROUND, scale_d(0.01)));
+            const Polygons mine_miter = SG::native(TF::polygons_offset(storage, view, delta, CLIPPER_JOIN_MITER, 1.2));
+            const Polygons mine_round = SG::native(TF::polygons_offset(storage, view, delta, CLIPPER_JOIN_ROUND, scale_d(0.01)));
             const Polygons native_miter = offset(scene.rings, delta, ClipperLib::jtMiter, 1.2);
             const Polygons native_round = offset(scene.rings, delta, ClipperLib::jtRound, scale_d(0.01));
             // Supported: clean lists with both signs, counter-clockwise rings (overlapping or not) with a positive delta.
@@ -991,22 +948,30 @@ TEST_CASE("tree geometry Clipper wrappers match the native operations on winding
                 check_polygons(mine_round, native_round, offsets);
             } else {
                 // Documented as unsupported: measured, not compared.
-                unsupported_worst = std::max({ unsupported_worst, sym_diff_mm2(mine_miter, native_miter), sym_diff_mm2(mine_round, native_round) });
+                unsupported_worst = std::max({ unsupported_worst, PM::sym_diff_mm2(mine_miter, native_miter), PM::sym_diff_mm2(mine_round, native_round) });
             }
         }
         if (!scene.clean)
             unsupported_report += "\n  " + scene.name + ": " + std::to_string(unsupported_worst) + " mm2";
         // The boolean operations are exact whatever the windings.
-        check_polygons(native_of(TF::polygons_union(storage, view)), union_(scene.rings), booleans);
-        check_polygons(native_of(TF::polygons_diff(storage, view, view_of(other))), diff(scene.rings, other), booleans);
-        check_polygons(native_of(TF::polygons_diff(storage, view_of(other), view)), diff(other, scene.rings), booleans);
-        check_polygons(native_of(TF::polygons_intersection(storage, view, view_of(other))), intersection(scene.rings, other), booleans);
-        check_expolygons(native_of(TF::expolygons_union(storage, view)), union_ex(scene.rings), booleans);
-        check_expolygons(native_of(TF::expolygons_diff(storage, view, view_of(other))), diff_ex(scene.rings, other), booleans);
+        check_polygons(SG::native(TF::polygons_union(storage, view)), union_(scene.rings), booleans);
+        check_polygons(SG::native(TF::polygons_diff(storage, view, view_of(other))), diff(scene.rings, other), booleans);
+        check_polygons(SG::native(TF::polygons_diff(storage, view_of(other), view)), diff(other, scene.rings), booleans);
+        check_polygons(SG::native(TF::polygons_intersection(storage, view, view_of(other))), intersection(scene.rings, other), booleans);
+        check_expolygons(SG::native(TF::expolygons_union(storage, view)), union_ex(scene.rings), booleans);
+        check_expolygons(SG::native(TF::expolygons_diff(storage, view, view_of(other))), diff_ex(scene.rings, other), booleans);
     }
-    WARN("winding edge cases, largest symmetric difference (mm2): supported offsets " << offsets.sym_diff << " (" << offsets.compared << " compared, "
+    std::ostringstream text;
+    text << "winding edge cases, largest symmetric difference (mm2): supported offsets " << offsets.sym_diff << " (" << offsets.compared << " compared, "
          << offsets.identical_rings << " with identical rings), union/diff/intersection " << booleans.sym_diff << " (" << booleans.compared
-         << " compared)\nUnsupported offsets (measured, not compared), largest difference per scene:" << unsupported_report);
+         << " compared)\nUnsupported offsets (measured, not compared), largest difference per scene:" << unsupported_report;
+    return text.str();
+}
+} // namespace
+
+TEST_CASE("tree geometry Clipper wrappers match the native operations on winding edge cases", "[plugins][tree-geometry]")
+{
+    run_winding_edge_cases();
 }
 
 namespace {
@@ -1048,25 +1013,46 @@ std::vector<LargeCase> large_cases()
 }
 } // namespace
 
-TEST_CASE("tree geometry polygons_offset on a large input: result", "[plugins][tree-geometry]")
+namespace {
+// The checks of the large inputs; returns the largest difference with the native result, for the report case.
+std::string run_large_inputs()
 {
-    TestStorage fixture;
-    storage_handle *storage = fixture.handle();
+    PluginStorage owner;
+    storage_handle *storage = SG::handle(owner);
     Largest largest;
     for (const LargeCase &entry : large_cases()) {
         INFO(entry.name);
         const double delta = scale_d(entry.delta_mm);
-        check_polygons(native_of(TF::polygons_offset(storage, view_of(entry.rings), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
+        check_polygons(SG::native(TF::polygons_offset(storage, view_of(entry.rings), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
                        offset(entry.rings, delta, ClipperLib::jtRound, scale_d(0.01)), largest);
     }
-    WARN("large inputs, largest symmetric difference with the native result " << largest.sym_diff << " mm2 over " << largest.compared << " comparisons");
+    std::ostringstream text;
+    text << "large inputs, largest symmetric difference with the native result " << largest.sym_diff << " mm2 over " << largest.compared << " comparisons";
+    return text.str();
+}
+} // namespace
+
+TEST_CASE("tree geometry polygons_offset on a large input: result", "[plugins][tree-geometry]")
+{
+    run_large_inputs();
+}
+
+// The largest differences with the native result that the cases above measure (they are shown nowhere else, since a passing case prints
+// nothing); hidden, run it by its tag: plugins_tests "[tree-geometry-report]". It repeats the checks of those cases.
+TEST_CASE("tree geometry report of the largest differences with the native operations", "[.][tree-geometry-report]")
+{
+    // The sections of the first run make Catch2 run the case again: each report is printed once.
+    static std::set<std::string> printed;
+    for (const std::string &report : { run_clipper_wrappers(), run_winding_edge_cases(), run_large_inputs() })
+        if (!report.empty() && printed.insert(report).second)
+            WARN(report);
 }
 
 // Cost of polygons_offset on the large inputs; hidden, run it by its tag: plugins_tests "[tree-geometry-benchmark]".
 TEST_CASE("tree geometry polygons_offset cost on a large input", "[.][tree-geometry-benchmark]")
 {
-    TestStorage fixture;
-    storage_handle *storage = fixture.handle();
+    PluginStorage owner;
+    storage_handle *storage = SG::handle(owner);
     std::string report;
     for (const LargeCase &entry : large_cases()) {
         const slic3r_api::PolygonCollection view = view_of(entry.rings);
@@ -1085,31 +1071,31 @@ TEST_CASE("tree geometry polygons_offset cost on a large input", "[.][tree-geome
 TEST_CASE("tree geometry polygons_offset branches: a lone ring, a list with a short ring", "[plugins][tree-geometry]")
 {
     std::mt19937 rng(12);
-    TestStorage fixture;
-    storage_handle *storage = fixture.handle();
+    PluginStorage owner;
+    storage_handle *storage = SG::handle(owner);
     Largest largest;
     // A lone counter-clockwise ring, grown and shrunk (the positive route and the union route with one ring).
-    const Polygons lone{ random_star(rng, Point(0, 0), 10., 30) };
+    const Polygons lone{ PM::random_star(rng, Point(0, 0), 10., 30, star_min_fraction) };
     // A ring of two points (not an area, ignored) next to a valid ring.
-    const Polygons mixed{ Polygon({ P(0, 0), P(30, 40) }), random_star(rng, Point(scale_i(50.), 0), 8., 20) };
+    const Polygons mixed{ Polygon({ P(0, 0), P(30, 40) }), PM::random_star(rng, Point(scale_i(50.), 0), 8., 20, star_min_fraction) };
     for (const Polygons *rings : { &lone, &mixed })
         for (const double delta_mm : { 0.3, -0.3 }) {
             INFO("rings " << rings->size() << ", delta " << delta_mm << " mm");
             const double delta = scale_d(delta_mm);
-            check_polygons(native_of(TF::polygons_offset(storage, view_of(*rings), delta, CLIPPER_JOIN_MITER, 1.2)), offset(*rings, delta, ClipperLib::jtMiter, 1.2), largest);
-            check_polygons(native_of(TF::polygons_offset(storage, view_of(*rings), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
+            check_polygons(SG::native(TF::polygons_offset(storage, view_of(*rings), delta, CLIPPER_JOIN_MITER, 1.2)), offset(*rings, delta, ClipperLib::jtMiter, 1.2), largest);
+            check_polygons(SG::native(TF::polygons_offset(storage, view_of(*rings), delta, CLIPPER_JOIN_ROUND, scale_d(0.01))),
                            offset(*rings, delta, ClipperLib::jtRound, scale_d(0.01)), largest);
         }
     // Only short rings: nothing to offset.
     const Polygons only_short{ Polygon({ P(0, 0), P(30, 40) }) };
+    INFO("lone ring and list with a short ring: largest symmetric difference " << largest.sym_diff << " mm2 over " << largest.compared << " comparisons");
     CHECK(TF::polygons_offset(storage, view_of(only_short), scale_d(0.3)).empty());
-    WARN("lone ring and list with a short ring: largest symmetric difference " << largest.sym_diff << " mm2 over " << largest.compared << " comparisons");
 }
 
 TEST_CASE("tree geometry expolygons_offset keeps the small areas like offset_ex", "[plugins][tree-geometry]")
 {
-    TestStorage fixture;
-    storage_handle *storage = fixture.handle();
+    PluginStorage owner;
+    storage_handle *storage = SG::handle(owner);
     Largest largest;
     // A thin parallelogram whose area is under the threshold of remove_small_areas(): offset_ex() keeps it, union_ex() would not.
     const ExPolygons parallelogram{ ExPolygon(Polygon({ Point(0, 0), Point(10000000, 0), Point(10500000, 136), Point(500000, 136) })) };
@@ -1121,22 +1107,21 @@ TEST_CASE("tree geometry expolygons_offset keeps the small areas like offset_ex"
     for (const std::pair<const ExPolygons *, double> &entry : cases) {
         INFO("delta " << entry.second);
         const ExPolygons native = offset_ex(*entry.first, entry.second, ClipperLib::jtMiter, 1.2);
-        const ExPolygons mine = native_of(TF::expolygons_offset(storage, view_of(*entry.first), entry.second, CLIPPER_JOIN_MITER, 1.2));
+        const ExPolygons mine = SG::native(TF::expolygons_offset(storage, view_of(*entry.first), entry.second, CLIPPER_JOIN_MITER, 1.2));
         // The same expolygons after the filter of union_ex(): what would be lost if the conversion dropped small areas.
         const ExPolygons filtered = union_ex(to_polygons(native));
         if (!native.empty() && filtered.size() < native.size())
             ++kept_small;
-        WARN("delta " << entry.second << ": offset_ex gives " << native.size() << " expolygons, " << filtered.size() << " after the filter of union_ex");
+        INFO("delta " << entry.second << ": offset_ex gives " << native.size() << " expolygons, " << filtered.size() << " after the filter of union_ex");
         check_expolygons(mine, native, largest);
-        CHECK(native_of(TF::polygons_offset(storage, view_of(*entry.first), entry.second, CLIPPER_JOIN_MITER, 1.2)).size() == mine.size());
+        CHECK(SG::native(TF::polygons_offset(storage, view_of(*entry.first), entry.second, CLIPPER_JOIN_MITER, 1.2)).size() == mine.size());
     }
     // The test discriminates: the native offset_ex result has small areas that the filter of union_ex would drop.
+    INFO("small areas kept, largest symmetric difference " << largest.sym_diff << " mm2 over " << largest.compared << " comparisons");
     CHECK(kept_small >= 1);
     // The union of the same thin shape, with the native filter of union_ex() (the thin shape is dropped natively and here).
     const Polygons thin = to_polygons(parallelogram);
-    CHECK(union_ex(thin).size() == native_of(TF::expolygons_union(storage, view_of(thin))).size());
-    WARN("small areas kept, largest symmetric difference " << largest.sym_diff << " mm2 over " << largest.compared << " comparisons; union_ex of the thin shape keeps "
-         << union_ex(thin).size() << " expolygons");
+    CHECK(union_ex(thin).size() == SG::native(TF::expolygons_union(storage, view_of(thin))).size());
 }
 
 TEST_CASE("nearest_on_lines on an exact tie", "[plugins][tree-geometry]")
@@ -1163,6 +1148,8 @@ TEST_CASE("nearest_on_lines on an exact tie", "[plugins][tree-geometry]")
 
     const std::optional<TF::LineHit> mine = TF::nearest_on_lines(index, lines, origin);
     REQUIRE(mine.has_value());
+    INFO("tie at the centre of a square: helper line " << mine->line_index << " point (" << mine->point.x() << ", " << mine->point.y() << "), native line " << native_index
+         << " point (" << native_point.x() << ", " << native_point.y() << ")");
     // The distance is the same, the closest point is the middle of a side in both cases, but the helper takes the first line (the right
     // side) where the native traversal takes another one: the direction of a push away from the hit point differs.
     CHECK(mine->squared_distance == native_distance);
@@ -1171,8 +1158,6 @@ TEST_CASE("nearest_on_lines on an exact tie", "[plugins][tree-geometry]")
     CHECK(mine->point == Vec2d(double(one), 0.));
     const bool native_on_a_side_middle = std::abs(native_point.x()) == double(one) && native_point.y() == 0. || std::abs(native_point.y()) == double(one) && native_point.x() == 0.;
     CHECK(native_on_a_side_middle);
-    WARN("tie at the centre of a square: helper line " << mine->line_index << " point (" << mine->point.x() << ", " << mine->point.y() << "), native line " << native_index
-         << " point (" << native_point.x() << ", " << native_point.y() << ")");
 }
 
 namespace {
@@ -1314,7 +1299,7 @@ TEST_CASE("move_inside_if_outside matches the native function", "[plugins][tree-
     size_t moved = 0, inside = 0;
     auto compare = [&](const Polygons &polygons, const Point &point) {
         const Point native = native_move_inside_if_outside(polygons, point);
-        const c_point mine = TF::move_inside_if_outside(view_of(polygons), c_of(point));
+        const c_point mine = TF::move_inside_if_outside(view_of(polygons), ST::to_c_point(point));
         CHECK(mine.x == native.x());
         CHECK(mine.y == native.y());
         if (native == point)
@@ -1383,21 +1368,21 @@ TEST_CASE("move_inside_if_outside keeps the first ring on an exact tie", "[plugi
     const Point query = P(15000, 5000);
     const Polygons left_first{ left, right };
     const Polygons right_first{ right, left };
-    const c_point first = TF::move_inside_if_outside(view_of(left_first), c_of(query));
-    const c_point second = TF::move_inside_if_outside(view_of(right_first), c_of(query));
+    const c_point first = TF::move_inside_if_outside(view_of(left_first), ST::to_c_point(query));
+    const c_point second = TF::move_inside_if_outside(view_of(right_first), ST::to_c_point(query));
     CHECK(first.x == P(10000, 5000).x());
     CHECK(first.y == P(10000, 5000).y());
     CHECK(second.x == P(20000, 5000).x());
     CHECK(second.y == P(20000, 5000).y());
     // The native function has the same rule: it agrees with the helper on both orders.
-    CHECK(native_move_inside_if_outside(left_first, query) == point_of(first));
-    CHECK(native_move_inside_if_outside(right_first, query) == point_of(second));
+    CHECK(native_move_inside_if_outside(left_first, query) == ST::to_point(first));
+    CHECK(native_move_inside_if_outside(right_first, query) == ST::to_point(second));
 }
 // The scratch storage lives for the work only: a result leaves it by being moved to another storage, an exception leaves the work.
 TEST_CASE("tree geometry with_scratch_storage runs the work once and lets a moved result leave", "[plugins][tree-geometry]")
 {
     PluginStorage run_storage;
-    slic3r_api::StoredPolygonCollection kept(reinterpret_cast<storage_handle *>(&run_storage));
+    slic3r_api::StoredPolygonCollection kept(SG::handle(run_storage));
     int runs = 0;
     const coord_t side = scale_i(5.);
     const Polygon native_square({ Point(0, 0), Point(side, 0), Point(side, side), Point(0, side) });
@@ -1405,7 +1390,7 @@ TEST_CASE("tree geometry with_scratch_storage runs the work once and lets a move
         ++runs;
         slic3r_api::StoredPolygon ring(scratch);
         for (const Point &point : native_square.points)
-            ring.push_back(c_point{ point.x(), point.y() });
+            ring.push_back(ST::to_c_point(point));
         slic3r_api::StoredPolygonCollection rings(scratch);
         rings.push_back(ring);
         slic3r_api::StoredPolygonCollection united = TF::polygons_union(scratch, rings);

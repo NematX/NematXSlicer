@@ -1,5 +1,5 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
-/* Routed tree branches of one sliced object, kept in memory for the slab drawing and for the tests.
+/* Routed tree branches of one sliced object, kept in memory for the slab drawing and smoothing (generate_tree_slabs() of TreeSupportGenerator.cpp) and for the tests.
 
    route_trees() reads the island support demand of the object, adds the top contacts it finds to the support storage
    through the shared helper (Common/SupportZPlacement.hpp), places the tips under those contacts and propagates the

@@ -69,7 +69,7 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    route_trees(): their collections are freed when route_trees() returns, before the run storage, and the returned trees hold
    no handle.
 
-   The code is the legacy tree support (Support/TreeSupport.cpp), copied into this namespace. Drawing, roofs, rafts
+   The code is a port of the legacy tree support (Support/TreeSupport.cpp) onto the plugin API. Drawing, roofs, rafts
    and organic branches are not part of it. The tips start under the top interface stack, and the influence areas use
    the real height of each layer for their maximum move.
 */
@@ -170,16 +170,13 @@ static std::optional<std::pair<c_point, size_t>> polyline_sample_next_point_at_d
 // Unions two polygon sets, keeping the result non empty when an input is.
 [[nodiscard]] static StoredPolygonCollection safe_union(storage_handle *storage, const PolygonCollection &first, const PolygonCollection &second);
 [[nodiscard]] static StoredPolygonCollection safe_union(storage_handle *storage, const PolygonCollection &first);
-// The area of a collection that may have been moved from (it then holds no handle and no ring).
+// Whether the collection holds at least one ring; a collection that was moved from holds no handle and no ring.
 [[nodiscard]] static bool has_rings(const StoredPolygonCollection &collection);
 // The union of the part of the area that is outside the forbidden area, kept non empty like safe_union().
 [[nodiscard]] static StoredPolygonCollection safe_free_area(storage_handle *storage, const PolygonCollection &area, const PolygonCollection &forbidden);
 // Propagates the influence areas down the object layers, merging the ones that overlap.
 static void create_layer_pathing(const TreeVolumes &volumes, const TreeSettings &config, std::vector<SupportElements> &move_bounds,
                                  storage_handle *run_storage, const plugin_run_context *context);
-// The layers of create_layer_pathing(), from the top one down; layer_storage holds the merging data of the layer being treated.
-static void create_pathing_layers(storage_handle *layer_storage, const TreeVolumes &volumes, const TreeSettings &config,
-                                  std::vector<SupportElements> &move_bounds, storage_handle *run_storage, const plugin_run_context *context);
 // Merges the influence areas of one layer that overlap, bucket by bucket.
 static void merge_influence_areas(
     const TreeVolumes                  &volumes,
@@ -795,7 +792,6 @@ static std::optional<std::pair<c_point, size_t>> polyline_sample_next_point_at_d
 static Lines generate_support_infill_lines(storage_handle *scratch, const TipPlacement &placement, const raw_infill_pattern_params &recipe, const PolygonCollection &polygon)
 {
     Lines out;
-    // The surface type does not matter.
     const StoredExPolygonCollection areas = expolygons_union(scratch, polygon);
     for (uint32_t idx = 0; idx < areas.size(); ++idx) {
         Lines lines = placement.patterns.fill_lines(scratch, areas.at(idx), recipe);
@@ -813,7 +809,7 @@ static Lines generate_support_infill_lines(storage_handle *scratch, const TipPla
  * \param layer_idx[in] The current layer.
  * \return All lines of the \p polylines object, with information for each point regarding in which avoidance it is currently valid in.
  */
-// Called by generate_initial_areas()
+// Called by place_source_tips(), the job of generate_initial_areas().
 [[nodiscard]] static LineInformations convert_lines_to_internal(
     const TreeVolumes &volumes, const TreeSettings &config,
     const Lines &polylines, LayerIndex layer_idx)
@@ -1050,103 +1046,97 @@ struct SupportElementMerging {
 static void create_layer_pathing(const TreeVolumes &volumes, const TreeSettings &config, std::vector<SupportElements> &move_bounds,
                                  storage_handle *run_storage, const plugin_run_context *context)
 {
+    // layer_storage holds the merging data of the layer being treated.
     with_scratch_storage([&](storage_handle *layer_storage) {
-        create_pathing_layers(layer_storage, volumes, config, move_bounds, run_storage, context);
-    });
-}
+        std::chrono::nanoseconds dur_inc   = std::chrono::duration_values<std::chrono::nanoseconds>::zero();
+        std::chrono::nanoseconds dur_total = std::chrono::duration_values<std::chrono::nanoseconds>::zero();
 
-// The layers of create_layer_pathing(), from the top one down; layer_storage holds the merging data of the layer being treated.
-static void create_pathing_layers(storage_handle *layer_storage, const TreeVolumes &volumes, const TreeSettings &config,
-                                  std::vector<SupportElements> &move_bounds, storage_handle *run_storage, const plugin_run_context *context)
-{
-    std::chrono::nanoseconds dur_inc   = std::chrono::duration_values<std::chrono::nanoseconds>::zero();
-    std::chrono::nanoseconds dur_total = std::chrono::duration_values<std::chrono::nanoseconds>::zero();
+        LayerIndex last_merge_layer_idx = move_bounds.size();
+        bool new_element = false;
 
-    LayerIndex last_merge_layer_idx = move_bounds.size();
-    bool new_element = false;
+        // Ensures at least one merge operation per 3mm height, 50 layers, 1 mm movement of slow speed or 5mm movement of fast speed (whatever is lowest). Values were guessed.
+        // The merge budget per pass shrinks with the largest move of the object.
+        const coord_t max_move = *std::max_element(config.max_move.begin(), config.max_move.end());
+        const coord_t max_move_slow = *std::max_element(config.max_move_slow.begin(), config.max_move_slow.end());
+        size_t max_merge_every_x_layers = std::min(std::min(5000 / (std::max(max_move, coord_t(100))), 1000 / std::max(max_move_slow, coord_t(20))), 3000 / config.layer_height);
+        size_t merge_every_x_layers = 1;
+        // Calculate the influence areas for each layer below (Top down)
+        // This is done by first increasing the influence area by the allowed movement distance, and merging them with other influence areas if possible
+        for (int layer_idx = int(move_bounds.size()) - 1; layer_idx > 0; -- layer_idx)
+            if (SupportElements &prev_layer = move_bounds[layer_idx]; ! prev_layer.empty()) {
+                // merging is expensive and only parallelized to a max speedup of 2. As such it may be useful in some cases to only merge every few layers to improve performance.
+                bool had_new_element = new_element;
+                const bool merge_this_layer = had_new_element || size_t(last_merge_layer_idx - layer_idx) >= merge_every_x_layers;
+                if (had_new_element)
+                    merge_every_x_layers = 1;
+                const std::chrono::high_resolution_clock::time_point ta = std::chrono::high_resolution_clock::now();
 
-    // Ensures at least one merge operation per 3mm height, 50 layers, 1 mm movement of slow speed or 5mm movement of fast speed (whatever is lowest). Values were guessed.
-    // The merge budget per pass shrinks with the largest move of the object.
-    const coord_t max_move = *std::max_element(config.max_move.begin(), config.max_move.end());
-    const coord_t max_move_slow = *std::max_element(config.max_move_slow.begin(), config.max_move_slow.end());
-    size_t max_merge_every_x_layers = std::min(std::min(5000 / (std::max(max_move, coord_t(100))), 1000 / std::max(max_move_slow, coord_t(20))), 3000 / config.layer_height);
-    size_t merge_every_x_layers = 1;
-    // Calculate the influence areas for each layer below (Top down)
-    // This is done by first increasing the influence area by the allowed movement distance, and merging them with other influence areas if possible
-    for (int layer_idx = int(move_bounds.size()) - 1; layer_idx > 0; -- layer_idx)
-        if (SupportElements &prev_layer = move_bounds[layer_idx]; ! prev_layer.empty()) {
-            // merging is expensive and only parallelized to a max speedup of 2. As such it may be useful in some cases to only merge every few layers to improve performance.
-            bool had_new_element = new_element;
-            const bool merge_this_layer = had_new_element || size_t(last_merge_layer_idx - layer_idx) >= merge_every_x_layers;
-            if (had_new_element)
-                merge_every_x_layers = 1;
-            const std::chrono::high_resolution_clock::time_point ta = std::chrono::high_resolution_clock::now();
+                // ### Increase the influence areas by the allowed movement distance
+                std::vector<SupportElementMerging> influence_areas;
+                influence_areas.reserve(prev_layer.size());
+                for (int32_t element_idx = 0; element_idx < int32_t(prev_layer.size()); ++ element_idx) {
+                    SupportElement &el = prev_layer[element_idx];
+                    assert(!el.influence_area.empty());
+                    SupportElement::ParentIndices parents;
+                    parents.emplace_back(element_idx);
+                    influence_areas.emplace_back(layer_storage, el.state, parents);
+                }
+                increase_areas_one_layer(volumes, config, influence_areas, layer_idx, prev_layer, merge_this_layer, context);
 
-            // ### Increase the influence areas by the allowed movement distance
-            std::vector<SupportElementMerging> influence_areas;
-            influence_areas.reserve(prev_layer.size());
-            for (int32_t element_idx = 0; element_idx < int32_t(prev_layer.size()); ++ element_idx) {
-                SupportElement &el = prev_layer[element_idx];
-                assert(!el.influence_area.empty());
-                SupportElement::ParentIndices parents;
-                parents.emplace_back(element_idx);
-                influence_areas.emplace_back(layer_storage, el.state, parents);
-            }
-            increase_areas_one_layer(volumes, config, influence_areas, layer_idx, prev_layer, merge_this_layer, context);
-
-            // Place already fully constructed elements to the output, remove them from influence_areas.
-            SupportElements &this_layer = move_bounds[layer_idx - 1];
-            influence_areas.erase(std::remove_if(influence_areas.begin(), influence_areas.end(),
-                [&this_layer, layer_idx, run_storage](SupportElementMerging &elem) {
-                    if (! has_rings(elem.areas.influence_areas))
-                        // This area was removed completely due to collisions.
-                        return true;
-                    if (! has_rings(elem.areas.to_bp_areas) && ! has_rings(elem.areas.to_model_areas)) {
-                        if (polygons_area(elem.areas.influence_areas) < tiny_area_threshold) {
-                            BOOST_LOG_TRIVIAL(error) << "Insert Error of Influence area bypass on layer " << layer_idx - 1;
-                            BOOST_LOG_TRIVIAL(error) << "Insert error of area after bypassing merge.\n"sv;
+                // Place already fully constructed elements to the output, remove them from influence_areas.
+                SupportElements &this_layer = move_bounds[layer_idx - 1];
+                influence_areas.erase(std::remove_if(influence_areas.begin(), influence_areas.end(),
+                    [&this_layer, layer_idx, run_storage](SupportElementMerging &elem) {
+                        if (! has_rings(elem.areas.influence_areas))
+                            // This area was removed completely due to collisions.
+                            return true;
+                        if (! has_rings(elem.areas.to_bp_areas) && ! has_rings(elem.areas.to_model_areas)) {
+                            if (polygons_area(elem.areas.influence_areas) < tiny_area_threshold) {
+                                BOOST_LOG_TRIVIAL(error) << "Insert Error of Influence area bypass on layer " << layer_idx - 1;
+                                BOOST_LOG_TRIVIAL(error) << "Insert error of area after bypassing merge.\n"sv;
+                            }
+                            // Move the area to output, in the run storage.
+                            this_layer.emplace_back(elem.state, std::move(elem.parents), moved_to_storage(run_storage, elem.areas.influence_areas));
+                            return true;
                         }
-                        // Move the area to output, in the run storage.
-                        this_layer.emplace_back(elem.state, std::move(elem.parents), moved_to_storage(run_storage, elem.areas.influence_areas));
-                        return true;
-                    }
-                    // Keep the area.
-                    return false;
-                }),
-                influence_areas.end());
+                        // Keep the area.
+                        return false;
+                    }),
+                    influence_areas.end());
 
-            dur_inc += std::chrono::high_resolution_clock::now() - ta;
-            new_element = ! move_bounds[layer_idx - 1].empty();
-            if (merge_this_layer) {
-                bool reduced_by_merging = false;
-                if (size_t count_before_merge = influence_areas.size(); count_before_merge > 1) {
-                    // ### Calculate which influence areas overlap, and merge them into a new influence area (simplified: an intersection of influence areas that have such an intersection)
-                    merge_influence_areas(volumes, config, layer_idx, influence_areas, context);
-                    reduced_by_merging = count_before_merge > influence_areas.size();
+                dur_inc += std::chrono::high_resolution_clock::now() - ta;
+                new_element = ! move_bounds[layer_idx - 1].empty();
+                if (merge_this_layer) {
+                    bool reduced_by_merging = false;
+                    if (size_t count_before_merge = influence_areas.size(); count_before_merge > 1) {
+                        // ### Calculate which influence areas overlap, and merge them into a new influence area (simplified: an intersection of influence areas that have such an intersection)
+                        merge_influence_areas(volumes, config, layer_idx, influence_areas, context);
+                        reduced_by_merging = count_before_merge > influence_areas.size();
+                    }
+                    last_merge_layer_idx = layer_idx;
+                    if (! reduced_by_merging && ! had_new_element)
+                        merge_every_x_layers = std::min(max_merge_every_x_layers, merge_every_x_layers + 1);
                 }
-                last_merge_layer_idx = layer_idx;
-                if (! reduced_by_merging && ! had_new_element)
-                    merge_every_x_layers = std::min(max_merge_every_x_layers, merge_every_x_layers + 1);
+
+                dur_total += std::chrono::high_resolution_clock::now() - ta;
+
+                // Save calculated elements to output, in the run storage, as they will not be changed again.
+                for (SupportElementMerging &elem : influence_areas)
+                    if (has_rings(elem.areas.influence_areas)) {
+                        StoredPolygonCollection new_area = safe_union(layer_storage, elem.areas.influence_areas);
+                        if (polygons_area(new_area) < tiny_area_threshold) {
+                            BOOST_LOG_TRIVIAL(error) << "Insert Error of Influence area on layer " << layer_idx - 1 << ". Origin of " << elem.parents.size() << " areas. Was to bp " << elem.state.to_buildplate;
+                            BOOST_LOG_TRIVIAL(error) << "Insert error of area after merge.\n"sv;
+                        }
+                        this_layer.emplace_back(elem.state, std::move(elem.parents), moved_to_storage(run_storage, new_area));
+                    }
+
+                slic3r_api::throw_if_cancelled(context);
             }
 
-            dur_total += std::chrono::high_resolution_clock::now() - ta;
-
-            // Save calculated elements to output, in the run storage, as they will not be changed again.
-            for (SupportElementMerging &elem : influence_areas)
-                if (has_rings(elem.areas.influence_areas)) {
-                    StoredPolygonCollection new_area = safe_union(layer_storage, elem.areas.influence_areas);
-                    if (polygons_area(new_area) < tiny_area_threshold) {
-                        BOOST_LOG_TRIVIAL(error) << "Insert Error of Influence area on layer " << layer_idx - 1 << ". Origin of " << elem.parents.size() << " areas. Was to bp " << elem.state.to_buildplate;
-                        BOOST_LOG_TRIVIAL(error) << "Insert error of area after merge.\n"sv;
-                    }
-                    this_layer.emplace_back(elem.state, std::move(elem.parents), moved_to_storage(run_storage, new_area));
-                }
-
-            slic3r_api::throw_if_cancelled(context);
-        }
-
-    BOOST_LOG_TRIVIAL(info) << "Time spent with creating influence areas' subtasks: Increasing areas " << dur_inc.count() / 1000000 <<
-        " ms merging areas: " << (dur_total - dur_inc).count() / 1000000 << " ms";
+        BOOST_LOG_TRIVIAL(info) << "Time spent with creating influence areas' subtasks: Increasing areas " << dur_inc.count() / 1000000 <<
+            " ms merging areas: " << (dur_total - dur_inc).count() / 1000000 << " ms";
+    });
 }
 
 /*!
@@ -1167,7 +1157,8 @@ static void create_pathing_layers(storage_handle *layer_storage, const TreeVolum
  *
  * \param layer_idx[in] The layer of the elements whose areas are merged (the areas are the ones of the layer below).
  * \param influence_areas[in,out] The elements of the layer, each with its three candidate areas.
- */static void merge_influence_areas(
+ */
+static void merge_influence_areas(
     const TreeVolumes                  &volumes,
     const TreeSettings                 &config,
     const LayerIndex                    layer_idx,
@@ -1311,7 +1302,8 @@ static SupportElementMerging* merge_influence_areas_two_sets(
  *
  * \return The new end of the range: [dst_begin, end) holds the survivors, with their merged areas, states and parents; the slots after
  * it hold moved-from elements. scratch holds the temporaries of the merges.
- */static SupportElementMerging* merge_influence_areas_leaves(
+ */
+static SupportElementMerging* merge_influence_areas_leaves(
     const TreeVolumes &volumes, const TreeSettings &config, const LayerIndex layer_idx, storage_handle *scratch,
     SupportElementMerging * const dst_begin, SupportElementMerging *dst_end)
 {
@@ -1562,7 +1554,8 @@ static bool merge_influence_areas_two_elements(
  * \param layer_idx[in] Number of the layer of layer_elements, the layer above the one that is computed.
  * \param layer_elements[in,out] The elements of the layer above; their influence areas are read, their states may be marked lost.
  * \param mergelayer[in] Will the merge method be called on this layer. This information is required as some calculation can be avoided if they are not required for merging.
- */static void increase_areas_one_layer(
+ */
+static void increase_areas_one_layer(
     const TreeVolumes                  &volumes,
     const TreeSettings                 &config,
     // New areas at the layer below layer_idx
@@ -1613,7 +1606,7 @@ static void increase_merging_area(
     // As the branch may have become larger the distance between these 2 walls is smaller than the distance of the center points.
     // These extra distance is added to the movement distance possible for this layer.
 
-    coord_t extra_speed = 5; // The extra speed is added to both movement distances. Also move 5 microns faster than allowed to avoid rounding errors, this may cause issues at VERY VERY small layer heights.
+    coord_t extra_speed = 5; // The extra speed is added to both movement distances. Also move 5 scaled units (5 nm) faster than allowed to avoid rounding errors, this may cause issues at VERY VERY small layer heights.
     coord_t extra_slow_speed = 0; // Only added to the slow movement distance.
     const coord_t ceiled_parent_radius = volumes.ceilRadius(support_element_collision_radius(config, parent.state), parent.state.use_min_xy_dist);
     coord_t projected_radius_increased = config.getRadius(parent.state.effective_radius_height + 1, parent.state.elephant_foot_increases);
@@ -1730,8 +1723,7 @@ static void increase_merging_area(
     for (const AreaIncreaseSettings &settings : order) {
         if (settings.move) {
             if (offset_slow.empty() && (settings.increase_speed == slow_speed || ! offset_independant_faster)) {
-                // offsetting in 2 steps makes our offsetted area rounder preventing (rounding) errors created by to pointy areas. At this point one can see that the Polygons class
-                // was never made for precision in the single digit micron range.
+                // offsetting in 2 steps makes our offsetted area rounder preventing (rounding) errors created by to pointy areas.
                 offset_slow.get() = safe_offset_inc(scratch, parent.influence_area, extra_speed + extra_slow_speed + config.maximum_move_distance_slow(layer_idx),
                     wall_restriction, safe_movement_distance, offset_independant_faster ? safe_movement_distance + radius : 0, 2);
             }
@@ -1842,12 +1834,13 @@ static void increase_merging_area(
  * \param parent[in] The element of the layer above (its state and its influence area).
  * \param relevant_offset[in] The maximal possible influence area. No guarantee regarding validity with current layer collision required, as it is ensured in-function! Only read when the element moves.
  * \param to_bp_data[out] The part of the Influence area that can reach the buildplate (allocated when it is first filled).
- * \param to_model_data[out] The part of the Influence area that do not have to reach the buildplate. This has overlap with new_layer_data.
+ * \param to_model_data[out] The part of the Influence area that do not have to reach the buildplate. This has overlap with to_bp_data.
  * \param increased[out]  Area than can reach all further up support points. No assurance is made that the buildplate or the model can be reached in accordance to the user-supplied settings. It is replaced (not appended to).
  * \param overspeed[in] How much should the already offset area be offset again. Usually this is 0.
  * \param mergelayer[in] Will the merge method be called on this layer. This information is required as some calculation can be avoided if they are not required for merging.
  * \return The state of the element on the layer below (status and radius may have been corrected), or nothing if no influence area can be created using the supplied influence area and settings.
- */[[nodiscard]] static std::optional<SupportElementState> increase_single_area(
+ */
+[[nodiscard]] static std::optional<SupportElementState> increase_single_area(
     storage_handle                 *scratch,
     const TreeVolumes              &volumes,
     const TreeSettings             &config,

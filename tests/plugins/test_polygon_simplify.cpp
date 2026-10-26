@@ -11,6 +11,7 @@
 #include <catch2/catch.hpp>
 
 #include "plugin_test_helpers.hpp"
+#include "polygon_metrics_test_helpers.hpp"
 #include "test_data.hpp"
 
 #include <algorithm>
@@ -32,27 +33,24 @@
 #include "libslic3r/Steps/StepSlicing.hpp"
 
 using namespace Slic3r;
+namespace PM = Slic3r::Test::PolygonMetrics;
 
 namespace {
 // Largest accepted area of the symmetric difference with the native result, in mm2.
 constexpr double max_sym_diff_mm2 = 1e-3;
+// The radius of a vertex of the stars is between this fraction of the radius of the star and the radius itself.
+constexpr double star_min_fraction = 0.8;
 // Tolerances (mm) of the comparisons.
 const std::vector<double> tolerances_mm = {0.005, 0.0125, 0.05, 0.2};
 
 // Scaled point from millimeters.
 Point point_mm(double x, double y);
-// Area in mm2 from an area in scaled units squared.
-double mm2(double scaled_area);
-// Area in mm2 of the symmetric difference of two ring sets (rings use the NonZero fill: CCW contours, CW holes).
-double sym_diff_mm2(const Polygons &a, const Polygons &b);
 // Run the API helper on native polygons and return the result as native polygons.
 Polygons simplify_api(const Polygons &polygons, double tolerance_mm);
 // Run the native function on the same input.
 Polygons simplify_native(const Polygons &polygons, double tolerance_mm);
 // Number of rings whose orientation is wrong for their nesting depth (contour CCW at an even depth, hole CW at an odd one).
 size_t wrong_orientation_count(const Polygons &polygons);
-// Star-shaped CCW ring around a center, with a random radius per vertex.
-Polygon random_star(std::mt19937 &rng, const Point &center, double radius_mm, size_t points);
 // Sliced lslices of a test mesh (Test::TestMesh), one Polygons (contours CCW, holes CW) per layer.
 std::vector<Polygons> sliced_layers(Test::TestMesh mesh);
 // Compare the API helper with the native function on one input; returns the symmetric difference (mm2).
@@ -61,16 +59,6 @@ double compare_with_native(const Polygons &input, double tolerance_mm, bool expe
 Point point_mm(double x, double y)
 {
     return Point(scale_i(x), scale_i(y));
-}
-
-double mm2(double scaled_area)
-{
-    return scaled_area * SCALING_FACTOR * SCALING_FACTOR;
-}
-
-double sym_diff_mm2(const Polygons &a, const Polygons &b)
-{
-    return mm2(area(diff_ex(a, b)) + area(diff_ex(b, a)));
 }
 
 Polygons simplify_api(const Polygons &polygons, double tolerance_mm)
@@ -104,18 +92,6 @@ size_t wrong_orientation_count(const Polygons &polygons)
     return wrong;
 }
 
-Polygon random_star(std::mt19937 &rng, const Point &center, double radius_mm, size_t points)
-{
-    std::uniform_real_distribution<double> jitter(0.8, 1.0);
-    Polygon polygon;
-    for (size_t i = 0; i < points; ++i) {
-        const double angle = 2. * PI * double(i) / double(points);
-        const double radius = radius_mm * jitter(rng);
-        polygon.points.emplace_back(center.x() + scale_i(radius * std::cos(angle)), center.y() + scale_i(radius * std::sin(angle)));
-    }
-    return polygon;
-}
-
 std::vector<Polygons> sliced_layers(Test::TestMesh mesh)
 {
     // The Print needs the plugin runtime.
@@ -141,7 +117,7 @@ double compare_with_native(const Polygons &input, double tolerance_mm, bool expe
 {
     const Polygons api = simplify_api(input, tolerance_mm);
     const Polygons native = simplify_native(input, tolerance_mm);
-    const double diff = sym_diff_mm2(api, native);
+    const double diff = PM::sym_diff_mm2(api, native);
     CHECK(diff < max_sym_diff_mm2);
     // The comparison is not vacuous: something is kept.
     if (!input.empty())
@@ -161,12 +137,12 @@ TEST_CASE("polygons_simplify matches the native function on random rings", "[plu
         for (int iteration = 0; iteration < 20; ++iteration) {
             // Three islands far from each other, the first one with a hole (clockwise ring inside the contour).
             Polygons input;
-            input.push_back(random_star(rng, point_mm(0., 0.), 20., 150));
-            Polygon hole = random_star(rng, point_mm(0., 0.), 6., 80);
+            input.push_back(PM::random_star(rng, point_mm(0., 0.), 20., 150, star_min_fraction));
+            Polygon hole = PM::random_star(rng, point_mm(0., 0.), 6., 80, star_min_fraction);
             hole.make_clockwise();
             input.push_back(hole);
-            input.push_back(random_star(rng, point_mm(60., 0.), 10., 120));
-            input.push_back(random_star(rng, point_mm(0., 60.), 12., 60));
+            input.push_back(PM::random_star(rng, point_mm(60., 0.), 10., 120, star_min_fraction));
+            input.push_back(PM::random_star(rng, point_mm(0., 60.), 12., 60, star_min_fraction));
             worst = std::max(worst, compare_with_native(input, tolerance, true));
             // The rings really are simplified (the stars have 410 points).
             if (tolerance >= 0.05) {
@@ -177,7 +153,8 @@ TEST_CASE("polygons_simplify matches the native function on random rings", "[plu
             }
         }
     }
-    WARN("random rings: largest symmetric difference " << worst << " mm2");
+    INFO("random rings: largest symmetric difference " << worst << " mm2");
+    CHECK(worst < max_sym_diff_mm2);
 }
 
 TEST_CASE("polygons_simplify matches the native function on sliced test meshes", "[plugins][polygon-simplify]")
@@ -196,7 +173,8 @@ TEST_CASE("polygons_simplify matches the native function on sliced test meshes",
                 worst = std::max(worst, compare_with_native(layers[i], tolerance, true));
             }
     }
-    WARN("test meshes lslices: " << layer_count << " comparisons, largest symmetric difference " << worst << " mm2");
+    INFO("test meshes lslices: " << layer_count << " comparisons, largest symmetric difference " << worst << " mm2");
+    CHECK(worst < max_sym_diff_mm2);
 }
 
 TEST_CASE("polygons_simplify orientation: contours CCW, holes CW", "[plugins][polygon-simplify]")
@@ -211,7 +189,7 @@ TEST_CASE("polygons_simplify orientation: contours CCW, holes CW", "[plugins][po
     CHECK(std::count_if(result.begin(), result.end(), [](const Polygon &p) { return p.is_counter_clockwise(); }) == 1);
     CHECK(std::count_if(result.begin(), result.end(), [](const Polygon &p) { return p.is_clockwise(); }) == 1);
     CHECK(wrong_orientation_count(result) == 0);
-    CHECK(mm2(area(result)) == Approx(300.).margin(1e-6));
+    CHECK(PM::mm2(area(result)) == Approx(300.).margin(1e-6));
 
     // The inverted pair (contour CW, hole CCW) describes the same region under the NonZero rule, and the final union
     // normalizes it: the native function would keep the inverted orientations.
@@ -222,7 +200,7 @@ TEST_CASE("polygons_simplify orientation: contours CCW, holes CW", "[plugins][po
     CHECK(std::count_if(result.begin(), result.end(), [](const Polygon &p) { return p.is_counter_clockwise(); }) == 1);
     CHECK(std::count_if(result.begin(), result.end(), [](const Polygon &p) { return p.is_clockwise(); }) == 1);
     CHECK(wrong_orientation_count(result) == 0);
-    CHECK(mm2(area(result)) == Approx(300.).margin(1e-6));
+    CHECK(PM::mm2(area(result)) == Approx(300.).margin(1e-6));
 }
 
 TEST_CASE("polygons_simplify cleans each ring alone, like the native function", "[plugins][polygon-simplify]")
@@ -232,7 +210,7 @@ TEST_CASE("polygons_simplify cleans each ring alone, like the native function", 
         const Polygons api = simplify_api(input, 0.0125);
         const Polygons native = simplify_native(input, 0.0125);
         CHECK(!api.empty());
-        CHECK(sym_diff_mm2(api, native) < max_sym_diff_mm2);
+        CHECK(PM::sym_diff_mm2(api, native) < max_sym_diff_mm2);
         CHECK(wrong_orientation_count(api) == 0);
     };
     // Self-intersecting contour: its two lobes have opposite windings.
@@ -272,11 +250,11 @@ TEST_CASE("polygons_simplify cleans each ring alone, like the native function", 
         Polygons global_only = input;
         ensure_valid(global_only, coord_t(scale_d(0.0125)));
         const Polygons native = simplify_native(input, 0.0125);
-        const double previous_diff = sym_diff_mm2(union_(global_only), native);
-        WARN("previous global-only union on the counter-example: " << previous_diff << " mm2 away from the native region");
+        const double previous_diff = PM::sym_diff_mm2(union_(global_only), native);
+        INFO("previous global-only union on the counter-example: " << previous_diff << " mm2 away from the native region");
         CHECK(previous_diff > 0.5);
         // The helper keeps the hole: the region is the native one.
-        CHECK(sym_diff_mm2(simplify_api(input, 0.0125), native) < max_sym_diff_mm2);
+        CHECK(PM::sym_diff_mm2(simplify_api(input, 0.0125), native) < max_sym_diff_mm2);
     }
     SECTION("orphan clockwise ring")
     {
@@ -286,7 +264,7 @@ TEST_CASE("polygons_simplify cleans each ring alone, like the native function", 
         const Polygons api = simplify_api({orphan}, 0.0125);
         REQUIRE(api.size() == 1);
         CHECK(api.front().is_counter_clockwise());
-        CHECK(mm2(area(api)) == Approx(100.).margin(1e-6));
+        CHECK(PM::mm2(area(api)) == Approx(100.).margin(1e-6));
         compare({orphan});
     }
 }
@@ -309,7 +287,7 @@ TEST_CASE("polygons_simplify edge cases", "[plugins][polygon-simplify]")
         const Polygons native = simplify_native(input, 0.0125);
         CHECK(api.size() == 1);
         CHECK(native.size() == 1);
-        CHECK(sym_diff_mm2(api, native) < max_sym_diff_mm2);
+        CHECK(PM::sym_diff_mm2(api, native) < max_sym_diff_mm2);
     }
     SECTION("only collapsing rings give an empty result")
     {
@@ -328,7 +306,7 @@ TEST_CASE("polygons_simplify edge cases", "[plugins][polygon-simplify]")
         REQUIRE(api.size() == 1);
         CHECK(native.size() == 1);
         CHECK(api.front().is_counter_clockwise());
-        CHECK(sym_diff_mm2(api, native) < max_sym_diff_mm2);
+        CHECK(PM::sym_diff_mm2(api, native) < max_sym_diff_mm2);
     }
     SECTION("rings touching after the simplification merge (accepted difference)")
     {
@@ -340,7 +318,7 @@ TEST_CASE("polygons_simplify edge cases", "[plugins][polygon-simplify]")
         const Polygons native = simplify_native(input, 0.0125);
         CHECK(native.size() == 2);
         CHECK(api.size() == 1);
-        CHECK(sym_diff_mm2(api, native) < max_sym_diff_mm2);
+        CHECK(PM::sym_diff_mm2(api, native) < max_sym_diff_mm2);
     }
     SECTION("the input is not modified")
     {
