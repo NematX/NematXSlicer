@@ -3,6 +3,7 @@
 #include "gcode_test_helpers.hpp"
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+#include "support_grid_test_helpers.hpp"
 
 #include "test_data.hpp"
 
@@ -1627,6 +1628,79 @@ TEST_CASE("Layer extrusion editor resolves brim speed over the support speed",
         CHECK(brim_speed({{"brim_speed", "0"}, {"max_print_speed", "100"},
                           {"max_volumetric_speed", "20"}}) == 100.f);
     }
+}
+
+TEST_CASE("A print with support exports support moves at the support speeds",
+          "[plugins][layer-extrusion-edit][speed][support][gcode]")
+{
+    // The fan layer-time estimate and STEP_GCODE reject a geometric leaf
+    // without a speed, so this export fails unless the speed plugin resolves
+    // the support and interface paths. Support layers are not synchronized,
+    // so some print Z groups also mix object and support layer heights.
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = Slic3r::Test::SupportGrid::config("grid", false, 3, true);
+    config.set_deserialize_strict({
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"support_material_speed", "40"}, {"support_material_interface_speed", "50%"},
+        {"max_print_speed", "80"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
+        {"max_volumetric_speed", "0"}, {"filament_max_speed", "0,0"},
+        {"filament_max_volumetric_speed", "0,0"}, {"slowdown_below_layer_time", "0,0"},
+        {"use_relative_e_distances", "1"}, {"wipe", "0,0"}, {"filament_diameter", "1.75,1.75"}
+    });
+    Model model;
+    Print print;
+    Slic3r::Test::init_print({Slic3r::Test::SupportGrid::slab(true)}, print, model, config);
+    const boost::filesystem::path path = Slic3r::Test::GCode::temporary_gcode_path();
+    std::string code;
+    try {
+        print.process();
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        code = Slic3r::Test::GCode::read_text_file(path);
+    } catch (...) {
+        Slic3r::Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Slic3r::Test::GCode::remove_output_pair(path);
+
+    // Follow the modal feedrate and the ;TYPE: marker. With relative E, a
+    // printing move is a G1 with X or Y and a positive E; collect the feedrate
+    // (mm/min) of every such move in the two support sections.
+    std::set<double> base_feedrates;
+    std::set<double> interface_feedrates;
+    std::string type;
+    double feedrate = 0.;
+    std::istringstream stream(code);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.rfind(";TYPE:", 0) == 0) {
+            type = line.substr(6);
+            continue;
+        }
+        if (line.rfind("G1 ", 0) != 0 && line.rfind("G0 ", 0) != 0)
+            continue;
+        const std::string command = line.substr(0, line.find(';'));
+        const auto word = [&command](char letter, double &value) {
+            const size_t pos = command.find(std::string(" ") + letter);
+            if (pos == std::string::npos)
+                return false;
+            value = std::stod(command.substr(pos + 2));
+            return true;
+        };
+        double value = 0.;
+        if (word('F', value))
+            feedrate = value;
+        double e = 0.;
+        const bool moves_xy = word('X', value) || word('Y', value);
+        if (!moves_xy || !word('E', e) || e <= 0.)
+            continue;
+        if (type == "Support material")
+            base_feedrates.insert(feedrate);
+        else if (type == "Support material interface")
+            interface_feedrates.insert(feedrate);
+    }
+    CHECK(base_feedrates == std::set<double>{40. * 60.});
+    CHECK(interface_feedrates == std::set<double>{20. * 60.});
 }
 
 TEST_CASE("Layer extrusion editor preserves overrides and applies first-layer caps",

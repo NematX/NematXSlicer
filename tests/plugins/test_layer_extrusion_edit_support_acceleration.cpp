@@ -9,6 +9,7 @@
 
 #include "gcode_test_helpers.hpp"
 #include "layer_extrusion_edit_transition_test_helpers.hpp"
+#include "support_grid_test_helpers.hpp"
 
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
@@ -21,7 +22,8 @@
    its base. Unit cases publish one support, one interface and one skirt leaf
    on a small auxiliary layer, let ordering clone them into the PrintingPlan,
    run only the acceleration plugin and read the effective acceleration of
-   each leaf. */
+   each leaf. A final case slices a real object with grid support, exports it
+   and checks the print acceleration (Marlin M204 P) active on support moves. */
 
 using namespace Slic3r;
 using namespace Slic3r::Printing;
@@ -156,4 +158,69 @@ TEST_CASE("Acceleration plugin resolves support interface and brim accelerations
         CHECK(accelerations.interface == 300.f);
         CHECK(accelerations.brim == 400.f);
     }
+}
+
+// Slice and export a supported slab, then follow the Marlin print acceleration
+// (M204 P) through the ;TYPE: sections: support and interface extrusions must
+// run at their own accelerations.
+TEST_CASE("A print with support exports support moves at the support accelerations",
+          "[plugins][layer-extrusion-edit][acceleration][support][gcode]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = Test::SupportGrid::config("grid", false, 3, true);
+    config.set_deserialize_strict({
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"default_acceleration", "1000"}, {"support_material_acceleration", "600"},
+        {"support_material_interface_acceleration", "50%"}, {"first_layer_acceleration", "0"},
+        {"machine_limits_usage", "ignore"}, {"use_relative_e_distances", "1"}, {"wipe", "0,0"},
+        {"filament_diameter", "1.75,1.75"}
+    });
+    Model model;
+    Print print;
+    Test::init_print({Test::SupportGrid::slab(true)}, print, model, config);
+    const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+    std::string code;
+    try {
+        print.process();
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        code = Test::GCode::read_text_file(path);
+    } catch (...) {
+        Test::GCode::remove_output_pair(path);
+        throw;
+    }
+    Test::GCode::remove_output_pair(path);
+
+    // With relative E, a printing move is a G1 with X or Y and a positive E.
+    std::set<int> base_accelerations;
+    std::set<int> interface_accelerations;
+    std::string type;
+    int print_acceleration = -1;
+    std::istringstream stream(code);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.rfind(";TYPE:", 0) == 0) {
+            type = line.substr(6);
+            continue;
+        }
+        const std::string command = line.substr(0, line.find(';'));
+        if (command.rfind("M204 ", 0) == 0) {
+            const size_t pos = command.find(" P");
+            if (pos != std::string::npos)
+                print_acceleration = std::stoi(command.substr(pos + 2));
+            continue;
+        }
+        if (command.rfind("G1 ", 0) != 0)
+            continue;
+        const size_t e_pos = command.find(" E");
+        const bool moves_xy = command.find(" X") != std::string::npos || command.find(" Y") != std::string::npos;
+        if (!moves_xy || e_pos == std::string::npos || std::stod(command.substr(e_pos + 2)) <= 0.)
+            continue;
+        if (type == "Support material")
+            base_accelerations.insert(print_acceleration);
+        else if (type == "Support material interface")
+            interface_accelerations.insert(print_acceleration);
+    }
+    CHECK(base_accelerations == std::set<int>{600});
+    CHECK(interface_accelerations == std::set<int>{300});
 }
