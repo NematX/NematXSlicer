@@ -13,6 +13,7 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_utils.h"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Api/plugin/cpp/DeferredCallbackException.hpp"
 #include "libslic3r/Api/plugin/cpp/LineDistancer.hpp"
 
 /* Implementation of the organic branch smoothing (see TreeSmoothing.hpp).
@@ -97,6 +98,8 @@ struct RelaxPass {
     const std::vector<double> *print_z;
     const std::vector<LayerCollision> *collisions;
     std::atomic<size_t> *num_overlapping;
+    // First exception of a job (an allocation can fail); the jobs after it return at once and relax() rethrows it after the loop.
+    slic3r_api::DeferredCallbackException failure;
 };
 // Runs the iterations of the relaxation, at most max_iterations, and stops once no free sphere overlapped in an iteration and no
 // node moved more than settled_displacement in it. Returns the number of iterations that ran.
@@ -236,8 +239,9 @@ size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, c
         for (Sphere &sphere : spheres)
             sphere.prev_position = sphere.position;
         std::atomic<size_t> num_overlapping{ 0 };
-        RelaxPass pass{ &spheres, &print_z, &collisions, &num_overlapping };
+        RelaxPass pass{ &spheres, &print_z, &collisions, &num_overlapping, {} };
         slic3r_parallel_for(0, uint32_t((spheres.size() + spheres_per_job - 1) / spheres_per_job), &pass, &relax_chunk);
+        pass.failure.rethrow_if_captured();
         slic3r_api::throw_if_cancelled(context);
         double largest_move = 0.;
         for (const Sphere &sphere : spheres)
@@ -250,15 +254,22 @@ size_t relax(std::vector<Sphere> &spheres, const std::vector<double> &print_z, c
 
 void relax_chunk(uint32_t job, void *user_data)
 {
-    const RelaxPass &pass = *static_cast<const RelaxPass *>(user_data);
-    std::vector<Sphere> &spheres = *pass.spheres;
-    const size_t end = std::min(spheres.size(), (size_t(job) + 1) * spheres_per_job);
-    for (size_t id = size_t(job) * spheres_per_job; id < end; ++id)
-        if (!spheres[id].locked) {
-            if (push_out_of_outline(spheres[id], *pass.print_z, *pass.collisions))
-                ++*pass.num_overlapping;
-            pull_toward_links(spheres[id], spheres);
-        }
+    // slic3r_parallel_for is an extern "C" host function: no exception may leave the job.
+    RelaxPass &pass = *static_cast<RelaxPass *>(user_data);
+    if (pass.failure.captured())
+        return;
+    try {
+        std::vector<Sphere> &spheres = *pass.spheres;
+        const size_t end = std::min(spheres.size(), (size_t(job) + 1) * spheres_per_job);
+        for (size_t id = size_t(job) * spheres_per_job; id < end; ++id)
+            if (!spheres[id].locked) {
+                if (push_out_of_outline(spheres[id], *pass.print_z, *pass.collisions))
+                    ++*pass.num_overlapping;
+                pull_toward_links(spheres[id], spheres);
+            }
+    } catch (...) {
+        pass.failure.capture_current();
+    }
 }
 
 bool push_out_of_outline(Sphere &sphere, const std::vector<double> &print_z, const std::vector<LayerCollision> &collisions)

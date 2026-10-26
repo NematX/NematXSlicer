@@ -1,4 +1,5 @@
 #include <catch2/catch.hpp>
+#include "libslic3r/Api/plugin/cpp/DeferredCallbackException.hpp"
 
 #include <atomic>
 #include <algorithm>
@@ -824,15 +825,24 @@ TEST_CASE("PatternService is shared by the threads of a family and gives the ser
         const Common::PatternService *patterns;
         const std::vector<std::pair<std::string, ExPolygon>> *shapes;
         std::vector<std::vector<std::vector<Point>>> *results;
-    } jobs{ &patterns, &shapes, nullptr };
+        slic3r_api::DeferredCallbackException failure;
+    } jobs{ &patterns, &shapes, nullptr, {} };
     std::vector<std::vector<std::vector<Point>>> parallel(serial.size());
     jobs.results = &parallel;
     slic3r_parallel_for_storage(0, uint32_t(parallel.size()), &jobs, [](uint32_t job, storage_handle *scratch, void *user_data) {
-        const Jobs &jobs = *static_cast<const Jobs *>(user_data);
-        TipFill tip;
-        tip.layer_id = job;
-        (*jobs.results)[job] = wrapper_lines(*jobs.patterns, scratch, tip_patterns[job % 3], (*jobs.shapes)[job % jobs.shapes->size()].second, tip);
+        // No exception may leave the callback of the extern "C" host loop: keep the first one and rethrow it below.
+        Jobs &jobs = *static_cast<Jobs *>(user_data);
+        if (jobs.failure.captured())
+            return;
+        try {
+            TipFill tip;
+            tip.layer_id = job;
+            (*jobs.results)[job] = wrapper_lines(*jobs.patterns, scratch, tip_patterns[job % 3], (*jobs.shapes)[job % jobs.shapes->size()].second, tip);
+        } catch (...) {
+            jobs.failure.capture_current();
+        }
     });
+    jobs.failure.rethrow_if_captured();
     for (size_t job = 0; job < serial.size(); ++job) {
         CAPTURE(job);
         CHECK(parallel[job] == serial[job]);

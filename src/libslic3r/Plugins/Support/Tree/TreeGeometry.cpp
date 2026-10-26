@@ -5,6 +5,7 @@
 #include <cmath>
 
 #include "libslic3r/Api/plugin/c/slic3r_utils.h"
+#include "libslic3r/Api/plugin/cpp/DeferredCallbackException.hpp"
 
 /* Implementation of the geometry helpers of the tree support family (see TreeGeometry.hpp).
 
@@ -207,14 +208,25 @@ slic3r_api::StoredPolygonCollection diff_clipped(storage_handle *storage, const 
 }
 
 // A job of one index: the host builds the scratch storage, runs the job on this thread (or a worker) and destroys the storage.
+// slic3r_parallel_for_storage is an extern "C" host function, so no exception may leave the job: it is caught, kept, and rethrown here
+// once the host call has returned. A cancellation raised in a parallel loop nested in `work` is deferred the same way until that loop joins.
 void with_scratch_storage(const std::function<void(storage_handle *)> &work)
 {
-    slic3r_parallel_for_storage(0, 1, const_cast<std::function<void(storage_handle *)> *>(&work),
+    struct Job {
+        const std::function<void(storage_handle *)> &work;
+        slic3r_api::DeferredCallbackException failure;
+    } job{ work, {} };
+    slic3r_parallel_for_storage(0, 1, &job,
         [](uint32_t, storage_handle *scratch_storage, void *user_data) {
-            (*static_cast<const std::function<void(storage_handle *)> *>(user_data))(scratch_storage);
+            Job &job = *static_cast<Job *>(user_data);
+            try {
+                job.work(scratch_storage);
+            } catch (...) {
+                job.failure.capture_current();
+            }
         });
+    job.failure.rethrow_if_captured();
 }
-
 // Allocates the result in storage and moves the content of source into it, so that source stays valid and empty in its own storage.
 // The result lives as long as storage. An allocation failure propagates to the caller.
 slic3r_api::StoredPolygonCollection moved_to_storage(storage_handle *storage, slic3r_api::StoredPolygonCollection &source)
