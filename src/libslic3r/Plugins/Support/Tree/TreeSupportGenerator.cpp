@@ -191,7 +191,7 @@ void generate_tree_support(const plugin_run_context *context, const Print &print
     const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
     const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&object));
     const Common::SupportParams params(print_view, object_view);
-    const TreeSettings settings(object, params);
+    const TreeSettings settings(object_view, print_view, params);
     std::vector<RoutedTree> trees = route_trees(print, object, params, settings, out);
     generate_tree_slabs(context, print, object, trees, organic, out);
 }
@@ -203,7 +203,7 @@ void generate_tree_slabs(const plugin_run_context *context, const Print &print, 
     const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
     const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&object));
     const Common::SupportParams params(print_view, object_view);
-    const TreeSettings settings(object, params);
+    const TreeSettings settings(object_view, print_view, params);
     std::vector<slic3r_api::Layer> layers;
     for (uint32_t id = 0; id < object_view.layer_count(); ++id)
         layers.push_back(object_view.layer(id));

@@ -26,11 +26,19 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 #include "SupportSettings.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_plugin_run_context.h"
+#include "libslic3r/Api/plugin/c/slic3r_volume.h"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 
 namespace slic3r_api::Support::Common {
+
+// Native check_z_step() on millimeters: round val to the nearest multiple of z_step, at 1e-8 mm.
+// Contract: val must be finite and >= 0 (it is converted to uint64_t); val is returned unchanged when z_step <= EPSILON (1e-4 mm),
+// that is when no machine Z step is set, not only when z_step is 0.
+double check_z_step_mm(double val, double z_step);
 
 struct SupportParams
 {
@@ -80,6 +88,26 @@ struct SupportParams
     // Line density of the first-layer flange, in (0, 1].
     double raft_first_layer_density = 0;
 };
+
+/* ---- Support modifier volumes (enforcers and blockers) ----
+   The demand modifiers and the tree family both slice these volumes at the slice Z of every object layer. The helpers below are
+   shared by them so that both slice the volumes alike. */
+
+// The slice Z of every object layer (mm), the heights the modifier volumes are sliced at.
+std::vector<float> layer_slice_zs(const Object &object);
+
+// The slicing parameters of the modifier volumes: the centering transform of the object, the print resolution (at least EPSILON)
+// and the regular slicing mode. Slice a volume with the transform multiplied by the matrix of the volume.
+c_mesh_slicing_params support_modifier_slicing_params(const Print &print, const Object &object);
+
+// Slice one modifier volume at the given Z values. base_params comes from support_modifier_slicing_params(). The result has one
+// collection per Z (empty vector when the volume has no mesh), each cleaned with the resolution of base_params.
+// run_ctx gives the cancellation checks and may be null.
+std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volume &volume,
+                                                                     const std::vector<float> &slice_zs,
+                                                                     const c_mesh_slicing_params &base_params,
+                                                                     storage_handle *storage,
+                                                                     const plugin_run_context *run_ctx);
 
 } // namespace slic3r_api::Support::Common
 

@@ -14,9 +14,13 @@
    request up to its top layer, so the router normally only reads the caches. A key that precalculate() did not cover is
    computed by the getter that misses it (see Concurrency).
 
-       TreeVolumes volumes(object, settings);
+       TreeVolumes volumes(object, print, settings, run_storage, throw_on_cancel);
        volumes.precalculate(max_layer, throw_on_cancel);
-       const Polygons &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist);
+       const StoredPolygonCollection &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist);
+
+   Storage: the areas are StoredPolygonCollection values owned by the run storage given to the constructor, which must outlive the
+   TreeVolumes (declare it first). A computation runs on a scratch storage of its own (slic3r_parallel_for_storage); its result is
+   moved into the run storage when it is published, so that no handle of a scratch storage survives the computation.
 
    Concurrency: once the constructor and precalculate() have returned, the getters are called from many threads at once, and any
    of them may have to compute a missing key. The constructor and precalculate() must complete before the first concurrent getter:
@@ -30,12 +34,15 @@
      computation, a getter finds its key in the cache.
    - A published area is never modified or moved while its TreeVolumes is alive: the layers are kept in a std::deque, which does
      not relocate its elements when it grows. A reference returned by a getter stays valid while other threads insert, until the
-     TreeVolumes is moved, cleared or destroyed. */
+     TreeVolumes is moved, cleared or destroyed.
+   - The moves into the run storage happen before the cache lock is taken, and the areas that lose the insertion are freed after
+     it is released: a cache lock is never held while a storage lock is taken. */
 #ifndef plugins_support_tree_volumes_hpp_
 #define plugins_support_tree_volumes_hpp_
 
 #include <cassert>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <functional>
 #include <map>
@@ -44,14 +51,10 @@
 #include <utility>
 #include <vector>
 
-#include "libslic3r/ExPolygon.hpp"
-#include "libslic3r/Point.hpp"
-#include "libslic3r/Polygon.hpp"
+#include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 #include "TreeSettings.hpp"
 
 namespace Slic3r {
-
-class PrintObject;
 
 namespace TreeFamily {
 
@@ -64,8 +67,11 @@ class TreeVolumes
 {
 public:
     TreeVolumes() = default;
-    // Read the object layers, its support blockers and the settings; no area is computed until precalculate().
-    TreeVolumes(const PrintObject &object, const TreeSettings &settings);
+    // Reads the object once, in run_storage: it slices the support blockers and simplifies the outline of every layer. No area is
+    // computed until precalculate(). The areas are owned by run_storage, which must outlive this object; throw_on_cancel is called
+    // between the blocker volumes (the slicing of one volume is not cancellable).
+    TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
+                const std::function<void()> &throw_on_cancel);
     TreeVolumes(TreeVolumes&&) = default;
     TreeVolumes& operator=(TreeVolumes&&) = default;
 
@@ -94,7 +100,7 @@ public:
      * \param layer_idx The layer of interest
      * \param min_xy_dist Is the minimum xy distance used.
      */
-    const Polygons& getCollision(const coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
+    const slic3r_api::StoredPolygonCollection& getCollision(const coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
 
     /*!
      * \brief Provides the areas that a node of the given radius must avoid on this layer to still reach the build plate,
@@ -105,7 +111,7 @@ public:
      * \param to_model Does the avoidance allow good connections with the model.
      * \param min_xy_dist is the minimum xy distance used.
      */
-    const Polygons& getAvoidance(coord_t radius, LayerIndex layer_idx, AvoidanceType type, bool to_model, bool min_xy_dist) const;
+    const slic3r_api::StoredPolygonCollection& getAvoidance(coord_t radius, LayerIndex layer_idx, AvoidanceType type, bool to_model, bool min_xy_dist) const;
 
     /*!
      * \brief Provides the area where a branch of this radius completely fits on the model on this layer.
@@ -114,7 +120,7 @@ public:
      * \param radius The radius of the node of interest
      * \param layer_idx The layer of interest
      */
-    const Polygons& getPlaceableAreas(coord_t radius, LayerIndex layer_idx, std::function<void()> throw_on_cancel) const;
+    const slic3r_api::StoredPolygonCollection& getPlaceableAreas(coord_t radius, LayerIndex layer_idx, std::function<void()> throw_on_cancel) const;
 
     /*!
      * \brief Provides the abstract walls that a branch must not pass when it moves between two layers.
@@ -122,7 +128,7 @@ public:
      * \param layer_idx The layer of interest.
      * \param min_xy_dist is the minimum xy distance used.
      */
-    const Polygons& getWallRestriction(coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
+    const slic3r_api::StoredPolygonCollection& getWallRestriction(coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
 
     /*!
      * \brief Round \p radius upwards to a multiple of SUPPORT_TREE_COLLISION_RESOLUTION or to an exponentially increasing value.
@@ -147,27 +153,33 @@ public:
     }
 
 private:
-    // Polygons of a range of layers, indexed by layer.
+    // Areas of a range of layers computed on a scratch storage, indexed by layer. A collection stays in the storage that allocated it, so
+    // the cache that receives them moves their content into new collections of the run storage when it publishes them; the range must
+    // be destroyed before its scratch storage.
     class LayerPolygonCache {
     public:
-        void allocate(LayerIndex aidx_begin, LayerIndex aidx_end) {
+        void allocate(storage_handle *storage, LayerIndex aidx_begin, LayerIndex aidx_end) {
             m_idx_begin = aidx_begin;
             m_idx_end = aidx_end;
-            m_polygons.assign(aidx_end - aidx_begin, {});
+            m_polygons.clear();
+            m_polygons.reserve(size_t(aidx_end - aidx_begin));
+            for (LayerIndex idx = aidx_begin; idx < aidx_end; ++ idx)
+                m_polygons.emplace_back(storage);
         }
 
         LayerIndex begin() const { return m_idx_begin; }
         LayerIndex end()   const { return m_idx_end; }
         size_t     size()  const { return m_polygons.size(); }
 
-        bool      has(LayerIndex idx) const { return idx >= m_idx_begin && idx < m_idx_end; }
-        Polygons& operator[](LayerIndex idx) { assert(idx >= m_idx_begin && idx < m_idx_end); return m_polygons[idx - m_idx_begin]; }
-        std::vector<Polygons>& polygons_mutable() { return m_polygons; }
+        bool has(LayerIndex idx) const { return idx >= m_idx_begin && idx < m_idx_end; }
+        slic3r_api::StoredPolygonCollection& operator[](LayerIndex idx) { assert(idx >= m_idx_begin && idx < m_idx_end); return m_polygons[idx - m_idx_begin]; }
+        const slic3r_api::StoredPolygonCollection& operator[](LayerIndex idx) const { assert(idx >= m_idx_begin && idx < m_idx_end); return m_polygons[idx - m_idx_begin]; }
+        std::vector<slic3r_api::StoredPolygonCollection>& polygons_mutable() { return m_polygons; }
 
     private:
-        std::vector<Polygons> m_polygons;
-        LayerIndex            m_idx_begin;
-        LayerIndex            m_idx_end;
+        std::vector<slic3r_api::StoredPolygonCollection> m_polygons;
+        LayerIndex                                       m_idx_begin = 0;
+        LayerIndex                                       m_idx_end = 0;
     };
 
     // A cache key: the radius and the layer of an area.
@@ -176,50 +188,58 @@ private:
     // An area is never replaced or moved once inserted: the layers are in a std::deque, which keeps its elements in place when it
     // grows (a std::vector of maps would copy them on MSVC, where a map is not nothrow movable), and std::map nodes do not move.
     // So a reference returned by getArea() stays valid while other threads insert.
+    // The insert functions receive collections of a scratch storage and move them into the run storage first, outside the lock.
     class RadiusLayerPolygonCache {
-        using LayerData = std::map<coord_t, Polygons>;
+        using LayerData = std::map<coord_t, slic3r_api::StoredPolygonCollection>;
         using Layers = std::deque<LayerData>;
+        // One area to publish, with the key it is published for.
+        using Entry = std::pair<RadiusLayerPair, slic3r_api::StoredPolygonCollection>;
     public:
         RadiusLayerPolygonCache() = default;
-        RadiusLayerPolygonCache(RadiusLayerPolygonCache &&rhs) : m_data(std::move(rhs.m_data)) {}
-        RadiusLayerPolygonCache& operator=(RadiusLayerPolygonCache &&rhs) { m_data = std::move(rhs.m_data); return *this; }
+        explicit RadiusLayerPolygonCache(storage_handle *run_storage) : m_run_storage(run_storage) {}
+        RadiusLayerPolygonCache(RadiusLayerPolygonCache &&rhs) : m_data(std::move(rhs.m_data)), m_run_storage(rhs.m_run_storage) {}
+        RadiusLayerPolygonCache& operator=(RadiusLayerPolygonCache &&rhs) { m_data = std::move(rhs.m_data); m_run_storage = rhs.m_run_storage; return *this; }
 
         RadiusLayerPolygonCache(const RadiusLayerPolygonCache&) = delete;
         RadiusLayerPolygonCache& operator=(const RadiusLayerPolygonCache&) = delete;
 
         // The insertions below keep the area that is already cached for a key: a thread that computed the same key at the same
         // time loses nothing, as both computed the same area.
-        void insert(std::vector<std::pair<RadiusLayerPair, Polygons>> &&in) {
-            std::lock_guard<std::mutex> guard(m_mutex);
-            for (auto &d : in)
-                this->get_allocate_layer_data(d.first.second).emplace(d.first.first, std::move(d.second));
+        void insert(std::vector<std::pair<RadiusLayerPair, slic3r_api::StoredPolygonCollection>> &&in) {
+            std::vector<Entry> entries;
+            entries.reserve(in.size());
+            for (Entry &d : in)
+                entries.emplace_back(d.first, to_run_storage(d.second));
+            publish(entries);
         }
-        void insert(std::vector<Polygons> &&in, coord_t first_layer_idx, coord_t radius) {
-            std::lock_guard<std::mutex> guard(m_mutex);
-            allocate_layers(first_layer_idx + in.size());
-            for (auto &d : in)
-                m_data[first_layer_idx ++].emplace(radius, std::move(d));
+        void insert(std::vector<slic3r_api::StoredPolygonCollection> &&in, coord_t first_layer_idx, coord_t radius) {
+            std::vector<Entry> entries;
+            entries.reserve(in.size());
+            for (slic3r_api::StoredPolygonCollection &d : in)
+                entries.emplace_back(RadiusLayerPair(radius, first_layer_idx ++), to_run_storage(d));
+            publish(entries);
         }
         void insert(LayerPolygonCache &&in, coord_t radius) {
-            std::lock_guard<std::mutex> guard(m_mutex);
+            std::vector<Entry> entries;
+            entries.reserve(in.size());
             LayerIndex i = in.begin();
-            allocate_layers(i + LayerIndex(in.size()));
-            for (auto &d : in.polygons_mutable())
-                m_data[i ++].emplace(radius, std::move(d));
+            for (slic3r_api::StoredPolygonCollection &d : in.polygons_mutable())
+                entries.emplace_back(RadiusLayerPair(radius, i ++), to_run_storage(d));
+            publish(entries);
         }
         // Return the area of a key when it was already computed, nothing otherwise.
-        std::optional<std::reference_wrapper<const Polygons>> getArea(const RadiusLayerPair &key) const {
+        std::optional<std::reference_wrapper<const slic3r_api::StoredPolygonCollection>> getArea(const RadiusLayerPair &key) const {
             std::lock_guard<std::mutex> guard(m_mutex);
 
             if (key.second >= LayerIndex(m_data.size()))
                 return std::nullopt;
 
             const LayerData &layer = m_data[key.second];
-            auto it = layer.find(key.first);
+            std::map<coord_t, slic3r_api::StoredPolygonCollection>::const_iterator it = layer.find(key.first);
             if (it == layer.end())
                 return std::nullopt;
 
-            return std::optional<std::reference_wrapper<const Polygons>>{it->second};
+            return std::optional<std::reference_wrapper<const slic3r_api::StoredPolygonCollection>>{it->second};
         }
 
         // Drops every area. References returned by getArea() become invalid, so no other thread may use the cache meanwhile.
@@ -229,6 +249,19 @@ private:
         }
 
     private:
+        // Moves the content of a collection of a scratch storage into a new collection of the run storage.
+        slic3r_api::StoredPolygonCollection to_run_storage(slic3r_api::StoredPolygonCollection &scratch) const {
+            slic3r_api::StoredPolygonCollection out(m_run_storage);
+            out.move_from(scratch);
+            return out;
+        }
+        // Inserts the entries under the lock. try_emplace leaves the entry alone when its key is taken: the area that lost is
+        // freed with the vector of the caller, after the lock is released.
+        void publish(std::vector<Entry> &entries) {
+            std::lock_guard<std::mutex> guard(m_mutex);
+            for (Entry &d : entries)
+                get_allocate_layer_data(d.first.second).try_emplace(d.first.first, std::move(d.second));
+        }
         LayerData&          get_allocate_layer_data(LayerIndex layer_idx) {
             allocate_layers(layer_idx + 1);
             return m_data[layer_idx];
@@ -240,6 +273,7 @@ private:
 
         Layers              m_data;
         mutable std::mutex  m_mutex;
+        storage_handle     *m_run_storage = nullptr;
     };
 
     /*!
@@ -271,7 +305,7 @@ private:
     void calculateWallRestrictions(RadiusLayerPair key) { calculateWallRestrictions(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }, []{}); }
 
     // Return the collision of a radius and layer, computed on demand when precalculate() did not cover it.
-    const Polygons& getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const;
+    const slic3r_api::StoredPolygonCollection& getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const;
     coord_t ceilRadius(const coord_t radius) const;
 
     RadiusLayerPolygonCache& avoidance_cache(const AvoidanceType type, const bool to_model) {
@@ -312,9 +346,9 @@ private:
     // Smallest radius a branch can have, at distance to top 0.
     coord_t m_radius_0;
     // Object outline of each layer.
-    std::vector<Polygons> m_layer_outlines;
-    // Support blockers of each layer, avoided like the object.
-    std::vector<ExPolygons> m_anti_overhang;
+    std::vector<slic3r_api::StoredPolygonCollection> m_layer_outlines;
+    // Support blockers of each layer, avoided like the object; empty when the object has no blocker.
+    std::vector<slic3r_api::StoredExPolygonCollection> m_anti_overhang;
     // Radii that ceilRadius skips, as no tree tip can request them, sorted.
     std::vector<coord_t> m_ignorable_radii;
     // Layers count of the Z gaps used by the collisions, from the nominal layer height.

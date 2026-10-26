@@ -1,4 +1,5 @@
 #include "support_grid_test_helpers.hpp"
+#include "support_tree_test_helpers.hpp"
 #include "gcode_test_helpers.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/GCode/ToolOrdering.hpp"
@@ -54,7 +55,7 @@ struct Routed {
     const TF::TreeSettings settings;
     std::vector<TF::RoutedTree> trees;
     explicit Routed(const Print &print)
-        : params(SG::params(print, print.object(0))), settings(print.object(0), params),
+        : params(SG::params(print, print.object(0))), settings(Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params)),
           trees(TF::route_trees(print, print.object(0), params, settings, support)) {}
 };
 
@@ -375,7 +376,7 @@ TEST_CASE("Tree contacts carry their interface slabs at the interface step", "[p
     Model model;
     Test::init_print({SG::slab()}, print, model, config);
     SG::prefix(print);
-    const TF::TreeSettings settings(print.object(0), SG::params(print, print.object(0)));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
     const TreeSlabs slabs(print, organic);
     REQUIRE_FALSE(slabs.support.top.empty());
     const coord_t dense = settings.dense_slab_height;
@@ -538,7 +539,7 @@ TEST_CASE("Tree slabs keep their heights within the support limits", "[plugins][
     Test::init_print({SG::slab()}, print, model, config);
     SG::prefix(print);
     const Common::SupportParams params = SG::params(print, print.object(0));
-    const TF::TreeSettings settings(print.object(0), params);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params);
     const TreeSlabs slabs(print, organic);
     const coord_t largest = std::max(settings.max_slab_height, settings.dense_slab_height);
     for (const Common::GeneratorLayer *slab : slabs.support.base) {
@@ -565,7 +566,7 @@ TEST_CASE("Tree slabs keep the XY distance from the object", "[plugins][support-
     Test::init_print({SG::slab(true)}, print, model, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const TreeSlabs slabs(print, organic);
     const auto check_slab = [&](const Common::GeneratorLayer &slab) {
         const Polygons &area = SG::native(slab.polygons);
@@ -694,7 +695,7 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     place_print({ { block, Vec3d(100., 100., 0.), "" } }, config, print, model);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const auto layer_at = [&object](double z_mm) {
         size_t id = 0;
         while (id + 1 < object.layer_count() && std::abs(object.layer(id).unscaled_print_z() - z_mm) > 0.01)
@@ -804,7 +805,7 @@ TEST_CASE("Tree slab bounds join the print Z of the object layers of another obj
     const auto snapped = std::min_element(zs.begin(), zs.end(),
         [bound](coord_t a, coord_t b) { return std::abs(a - bound) < std::abs(b - bound); });
     REQUIRE(std::abs(*snapped - bound) <= 4 * SCALED_EPSILON);
-    const TF::TreeSettings settings(print.object(0), SG::params(print, print.object(0)));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
     std::vector<const Common::GeneratorLayer *> base(slabs.support.base.begin(), slabs.support.base.end());
     std::sort(base.begin(), base.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) { return a->print_z < b->print_z; });
     size_t joined = 0;
@@ -959,7 +960,7 @@ TEST_CASE("Tree floors keep the gap and the contact footprint free of branch sur
     place_print({ { block, Vec3d(100., 100., 0.), "" } }, config, print, model);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const ExPolygons block_slices = object.layer(layer_at_height(object, 4.)).lslices();
     const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
         [](const ExPolygon &a, const ExPolygon &b) { return a.area() < b.area(); });
@@ -1011,7 +1012,7 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
     place_print({ { block, Vec3d(100., 100., 0.), "" } }, SG::config("organic", false, 0), print, model);
     SG::prefix(print);
     PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const size_t foot_layer = layer_at_height(object, 4.4), tip_layer = layer_at_height(object, 4.6);
     const ExPolygons block_slices = object.layer(layer_at_height(object, 4.)).lslices();
     const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
@@ -1768,7 +1769,7 @@ TEST_CASE("Tree floors keep the bridge footprint out of the bridge thread band",
     const ThreadBand band = thread_band(print, object, thin_layer);
     REQUIRE_FALSE(band.footprint.empty());
     // One branch stands on the block under the roof, 3 mm from the block centre, toward the post.
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const ExPolygons block_slices = object.layer(layer_at_height(object, 4.)).lslices();
     const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
         [](const ExPolygon &a, const ExPolygon &b) { return a.area() < b.area(); });

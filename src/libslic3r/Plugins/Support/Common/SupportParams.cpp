@@ -6,7 +6,9 @@
 #include <limits>
 #include <set>
 
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
+#include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 
 /* Implementation of SupportParams (see SupportParams.hpp).
 
@@ -23,13 +25,14 @@
      host's millimeter values; values the native code derives from a flow width
      or spacing in millimeters (densities, the XY gap) read the _mm values, so
      they are exact.
-   The path fields reproduce the PathParams of the legacy toolpaths. */
+   The path fields reproduce the PathParams of the legacy toolpaths.
+
+   The slicing helpers of the support modifier volumes (layer_slice_zs, support_modifier_slicing_params, slice_support_modifier_volume)
+   are shared by the demand modifiers and the tree family, so that both slice the volumes alike. */
 
 namespace slic3r_api::Support::Common {
 namespace {
 
-// Native check_z_step() on millimeters: round val to the nearest multiple of z_step, at 1e-8 mm.
-double check_z_step_mm(double val, double z_step);
 // Nozzle diameter of a zero-based extruder; an index past the end reads the first nozzle.
 double nozzle_diameter(const Config &print_config, uint32_t extruder_idx);
 // Smallest layer height of an extruder: the configured minimum, 0.07 mm when unset, rounded to z_step.
@@ -40,15 +43,6 @@ double max_layer_height_from_nozzle(const Config &print_config, uint32_t extrude
 uint32_t extruder_index(int32_t one_based);
 // Convert degrees to radians in float, as Geometry::deg2rad<float>().
 float deg2rad_float(float degrees);
-
-double check_z_step_mm(double val, double z_step)
-{
-    if (z_step <= EPSILON)
-        return val;
-    const uint64_t valint = uint64_t(val * 100000000. + 0.5);
-    const uint64_t stepint = uint64_t(z_step * 100000000. + 0.5);
-    return (((valint + (stepint / 2)) / stepint) * stepint) / 100000000.;
-}
 
 double nozzle_diameter(const Config &print_config, uint32_t extruder_idx)
 {
@@ -84,6 +78,17 @@ float deg2rad_float(float degrees)
 }
 
 } // namespace
+
+// Both values are converted to integers of 1e-8 mm (rounding to nearest), so the division by the step is exact integer arithmetic and
+// val + step / 2 rounds half up to a multiple of the step; the result is converted back to millimeters.
+double check_z_step_mm(double val, double z_step)
+{
+    if (z_step <= EPSILON)
+        return val;
+    const uint64_t valint = uint64_t(val * 100000000. + 0.5);
+    const uint64_t stepint = uint64_t(z_step * 100000000. + 0.5);
+    return (((valint + (stepint / 2)) / stepint) * stepint) / 100000000.;
+}
 
 // Read borrowed print/object views to derive owned settings and flows; valid handles are required, unavailable host flows give zero flows, and other C++ failures propagate.
 SupportParams::SupportParams(const Print &print, const Object &object)
@@ -221,6 +226,55 @@ SupportParams::SupportParams(const Print &print, const Object &object)
     angle_height = config.get("support_material_angle_height").get_float();
     interface_angle_increment = config.get("support_material_interface_angle_increment").get_float();
     raft_first_layer_density = config.get("raft_first_layer_density").get_effective_value(1.);
+}
+
+std::vector<float> layer_slice_zs(const Object &object)
+{
+    std::vector<float> slice_zs;
+    slice_zs.reserve(object.layer_count());
+    for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx)
+        slice_zs.push_back(float(unscaled(object.layer(layer_idx).slice_z())));
+    return slice_zs;
+}
+
+c_mesh_slicing_params support_modifier_slicing_params(const Print &print, const Object &object)
+{
+    const Config print_config = print.config();
+
+    c_mesh_slicing_params params = {};
+    params.transform = object.transform_centered();
+    params.resolution = std::max(EPSILON, print_config.get("resolution").get_float());
+    params.mode = RAW_MESH_SLICING_MODE_REGULAR;
+    params.mode_below = params.mode;
+    return params;
+}
+
+// The volume matrix is applied on top of the object transform; the slices are then cleaned with the slicing resolution, which
+// removes the points closer than it to the outline.
+std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volume &volume,
+                                                                     const std::vector<float> &slice_zs,
+                                                                     const c_mesh_slicing_params &base_params,
+                                                                     storage_handle *storage,
+                                                                     const plugin_run_context *run_ctx)
+{
+    throw_if_cancelled(run_ctx);
+    std::vector<StoredExPolygonCollection> out;
+    const coord_t resolution = scale_i(base_params.resolution);
+
+    if (volume.mesh().empty())
+        return out;
+
+    c_mesh_slicing_params params = base_params;
+    params.transform = matrix4d_mul(base_params.transform, volume.matrix());
+    throw_if_cancelled(run_ctx);
+    out = volume.mesh().slice_to_expolygons(storage, params, slice_zs, run_ctx);
+    throw_if_cancelled(run_ctx);
+    for (StoredExPolygonCollection &layer_polygons : out) {
+        throw_if_cancelled(run_ctx);
+        layer_polygons.ensure_valid(resolution);
+    }
+
+    return out;
 }
 
 } // namespace slic3r_api::Support::Common

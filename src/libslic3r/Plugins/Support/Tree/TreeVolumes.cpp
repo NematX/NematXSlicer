@@ -18,12 +18,12 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 #include <oneapi/tbb/parallel_for.h>
 #include <oneapi/tbb/task_group.h>
 
-#include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/Layer.hpp"
-#include "libslic3r/Point.hpp"
-#include "libslic3r/Polygon.hpp"
-#include "libslic3r/PrintObject.hpp"
-#include "libslic3r/Utils.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_utils.h"
+#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PolygonOps.hpp"
+#include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "TreeGeometry.hpp"
 
 // Errors about a missing cache entry are logged at the error level.
 #define error_level_not_in_cache error
@@ -44,19 +44,66 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    so two threads that compute the same key only duplicate work. The functions that read other getters (the holefree collisions,
    the avoidances, the placeable areas, the wall restrictions) first request the highest layer they need, so that a cold cache is
    filled by one computation instead of one per layer. See the Concurrency note in TreeVolumes.hpp.
+
+   All the geometry is written on the plugin API: the areas are StoredPolygonCollection, the boolean operations and offsets are the
+   wrappers of TreeGeometry.hpp, and the simplification is slic3r_api::polygons_simplify. Each computation allocates its temporary
+   collections in a scratch storage (with_scratch_storage), which is destroyed when the computation returns; the areas to keep are
+   moved into the run storage by the caches when they are published.
 */
 
 namespace Slic3r::TreeFamily {
 
 using namespace std::literals;
+using slic3r_api::PolygonCollection;
+using slic3r_api::StoredExPolygonCollection;
+using slic3r_api::StoredPolygonCollection;
+namespace Common = slic3r_api::Support::Common;
 
-// ClipperUtils rejects a zero offset of polygons, which a zero XY distance or a zero branch move gives; a zero distance keeps them.
-static Polygons offset_polygons(const Polygons &polygons, double distance, ClipperLib::JoinType join_type = DefaultJoinType, double miter_limit = DefaultMiterLimit)
+namespace {
+// One cut of a maximum move into steps no longer than a step size: the count, the step, and the last step, which takes the rest.
+struct MoveSteps {
+    int   count;
+    float step;
+    float last;
+};
+
+// Runs work once, with a scratch storage that is destroyed when work returns. Everything allocated from that storage must be
+// destroyed, or moved to another storage, before work returns. An exception thrown by work propagates to the caller.
+void with_scratch_storage(const std::function<void(storage_handle *)> &work);
+// A copy of the rings of a collection, allocated in the given storage.
+StoredPolygonCollection copy_of(storage_handle *storage, const PolygonCollection &source);
+// Cuts a maximum move into steps. A very short last step is avoided by stretching the other steps instead.
+MoveSteps split_move(const float max_move, const float move_step);
+
+void with_scratch_storage(const std::function<void(storage_handle *)> &work)
 {
-    return distance == 0. ? polygons : offset(polygons, distance, join_type, miter_limit);
+    slic3r_parallel_for_storage(0, 1, const_cast<std::function<void(storage_handle *)> *>(&work),
+        [](uint32_t, storage_handle *scratch_storage, void *user_data) {
+            (*static_cast<const std::function<void(storage_handle *)> *>(user_data))(scratch_storage);
+        });
 }
 
-TreeVolumes::TreeVolumes(const PrintObject &object, const TreeSettings &settings) :
+StoredPolygonCollection copy_of(storage_handle *storage, const PolygonCollection &source)
+{
+    StoredPolygonCollection out(storage);
+    out.copy_from(source);
+    return out;
+}
+
+MoveSteps split_move(const float max_move, const float move_step)
+{
+    MoveSteps steps{ std::max(1, round_up_divide<int>(max_move, move_step)), move_step, 0.f };
+    steps.last = max_move - float(steps.count - 1) * move_step;
+    if (steps.last < scale_d(0.05) && steps.count > 1) {
+        steps.step = max_move / float(-- steps.count);
+        steps.last = steps.step;
+    }
+    return steps;
+}
+} // namespace
+
+TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
+                         const std::function<void()> &throw_on_cancel) :
     m_min_resolution(settings.resolution),
     m_current_min_xy_dist(settings.xy_min_distance),
     m_current_min_xy_dist_delta(settings.xy_distance - settings.xy_min_distance),
@@ -65,12 +112,71 @@ TreeVolumes::TreeVolumes(const PrintObject &object, const TreeSettings &settings
     m_radius_0(settings.getRadius(0)),
     m_z_distance_bottom_layers(int(settings.z_distance_bottom_layers)),
     m_z_distance_top_layers(int(settings.z_distance_top_layers)),
-    m_settings(settings)
+    m_settings(settings),
+    m_collision_cache(run_storage),
+    m_collision_cache_holefree(run_storage),
+    m_avoidance_cache(run_storage),
+    m_avoidance_cache_slow(run_storage),
+    m_avoidance_cache_to_model(run_storage),
+    m_avoidance_cache_to_model_slow(run_storage),
+    m_placeable_areas_cache(run_storage),
+    m_avoidance_cache_holefree(run_storage),
+    m_avoidance_cache_holefree_to_model(run_storage),
+    m_wall_restrictions_cache(run_storage),
+    m_wall_restrictions_cache_min(run_storage)
 {
-    m_anti_overhang = object.slice_support_blockers();
-    m_layer_outlines.reserve(object.layer_count());
-    for (size_t layer_idx = 0; layer_idx < object.layer_count(); ++ layer_idx)
-        m_layer_outlines.push_back(polygons_simplify(to_polygons(object.layer(layer_idx).lslices()), settings.resolution, polygons_strictly_simple));
+    // The constructor does the two once-only readings of the object, in the run storage: it slices the support blockers and it
+    // simplifies the outline of every layer. Nothing else is computed until precalculate().
+
+    // The support blockers of every layer: the union of all the blocker volumes, which are sliced at the slice Z of the layers.
+    // The slices use the print resolution to clean the outlines, where the native PrintObject::slice_support_blockers() uses the
+    // default one: a contour lies within `resolution` of the native contour.
+    const std::vector<float> slice_zs = Common::layer_slice_zs(object);
+    const c_mesh_slicing_params slicing_params = Common::support_modifier_slicing_params(print, object);
+    for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++ volume_idx) {
+        const slic3r_api::Volume volume = object.volume(volume_idx);
+        if (volume.type() != RAW_VOLUME_TYPE_SUPPORT_BLOCKER)
+            continue;
+        // The cancellation is only checked between the volumes: the slicing of one volume cannot be cancelled inside.
+        throw_on_cancel();
+        std::vector<StoredExPolygonCollection> slices = Common::slice_support_modifier_volume(volume, slice_zs, slicing_params, run_storage, nullptr);
+        if (slices.empty())
+            continue;
+        if (m_anti_overhang.empty()) {
+            m_anti_overhang = std::move(slices);
+            continue;
+        }
+        // Every volume is sliced at the same Z values, so the sizes are equal; only the common layers are merged if they ever differ.
+        assert(slices.size() == m_anti_overhang.size());
+        const size_t merged_layers = std::min(slices.size(), m_anti_overhang.size());
+        for (size_t layer_idx = 0; layer_idx < merged_layers; ++ layer_idx) {
+            if (m_anti_overhang[layer_idx].empty())
+                m_anti_overhang[layer_idx] = std::move(slices[layer_idx]);
+            else if (! slices[layer_idx].empty()) {
+                // The union is computed in a scratch storage and its content moved into the collection of the run storage.
+                with_scratch_storage([&](storage_handle *scratch_storage) {
+                    StoredExPolygonCollection both(scratch_storage);
+                    both.append_copy_from(m_anti_overhang[layer_idx]);
+                    both.append_copy_from(slices[layer_idx]);
+                    StoredExPolygonCollection united = expolygons_union(scratch_storage, both);
+                    m_anti_overhang[layer_idx].move_from(united);
+                });
+            }
+        }
+    }
+
+    // The outline of every layer, simplified with the resolution of the settings. They are computed in a scratch storage and
+    // moved to the run storage.
+    const uint32_t layer_count = object.layer_count();
+    m_layer_outlines.reserve(layer_count);
+    with_scratch_storage([&](storage_handle *scratch_storage) {
+        for (uint32_t layer_idx = 0; layer_idx < layer_count; ++ layer_idx) {
+            const StoredPolygonCollection rings = to_polygons(scratch_storage, object.layer(layer_idx).slices());
+            StoredPolygonCollection simplified = slic3r_api::polygons_simplify(scratch_storage, rings, double(settings.resolution));
+            m_layer_outlines.emplace_back(run_storage);
+            m_layer_outlines.back().move_from(simplified);
+        }
+    });
     // The maximum move keeps a margin of two microns against rounding errors.
     for (coord_t move : settings.max_move)
         m_max_move.push_back(std::max<coord_t>(move - 2, 0));
@@ -113,7 +219,7 @@ void TreeVolumes::precalculate(const coord_t max_layer, std::function<void()> th
             // A zero radius needs no area.
             if (r <= 0)
                 return;
-            auto it = radius_until_layer.find(r);
+            std::unordered_map<coord_t, LayerIndex>::iterator it = radius_until_layer.find(r);
             if (it == radius_until_layer.end())
                 radius_until_layer.emplace_hint(it, r, current_layer);
             else
@@ -150,6 +256,9 @@ void TreeVolumes::precalculate(const coord_t max_layer, std::function<void()> th
         calculatePlaceables(relevant_avoidance_radiis, throw_on_cancel);
 
     {
+        // FIXME(perf): kept on tbb::task_group: the two tasks are heterogeneous (avoidance and wall restrictions) and there is
+        // nothing to index. They wait here with no lock held. slic3r_parallel_for would add nothing without a measured gain.
+        // Revisit with real performance tests.
         tbb::task_group task_group;
         task_group.run([this, relevant_avoidance_radiis, throw_on_cancel]{ calculateAvoidance(relevant_avoidance_radiis, true, m_support_rests_on_model, throw_on_cancel); });
         task_group.run([this, relevant_avoidance_radiis, throw_on_cancel]{ calculateWallRestrictions(relevant_avoidance_radiis, throw_on_cancel); });
@@ -159,6 +268,9 @@ void TreeVolumes::precalculate(const coord_t max_layer, std::function<void()> th
 
 void TreeVolumes::calculateCollision(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel)
 {
+    // FIXME(perf): kept on tbb::parallel_for: the cost of a key varies a lot with its layer range, and the default
+    // partitioner balances it. Moving to slic3r_parallel_for would change the balancing without a measured gain. Revisit
+    // with real performance tests.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
         [&](const tbb::blocked_range<size_t> &range) {
         for (size_t ikey = range.begin(); ikey != range.end(); ++ ikey) {
@@ -175,89 +287,111 @@ void TreeVolumes::calculateCollision(const std::vector<RadiusLayerPair> &keys, s
 // cache holds, and the result is inserted without replacing what another thread inserted meanwhile.
 void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_layer_idx, std::function<void()> throw_on_cancel)
 {
-    const std::vector<Polygons> &outlines = m_layer_outlines;
-    const coord_t xy_distance = m_current_min_xy_dist;
-    const int z_distance_bottom_layers = m_z_distance_bottom_layers;
-    const int z_distance_top_layers = m_z_distance_top_layers;
+    // The layers are computed by parallel loops. Each chunk of a loop works in a scratch storage of its own, so that the chunks do not wait
+    // for each other on the lock of a storage; the results are moved into the collections of result_storage, which are allocated before
+    // the loops and hold them until they are published.
+    with_scratch_storage([&](storage_handle *result_storage) {
+        const std::vector<StoredPolygonCollection> &outlines = m_layer_outlines;
+        const coord_t xy_distance = m_current_min_xy_dist;
+        const int z_distance_bottom_layers = m_z_distance_bottom_layers;
+        const int z_distance_top_layers = m_z_distance_top_layers;
 
-    // Layer range for which the collisions will be calculated.
-    LayerPolygonCache data;
-    data.allocate(0, max_layer_idx + 1);
+        // Layer range for which the collisions will be calculated.
+        LayerPolygonCache data;
+        data.allocate(result_storage, 0, max_layer_idx + 1);
 
-    const bool calculate_placable = m_support_rests_on_model && radius == 0;
-    LayerPolygonCache data_placeable;
-    if (calculate_placable)
-        data_placeable.allocate(data.begin(), data.end());
+        const bool calculate_placable = m_support_rests_on_model && radius == 0;
+        LayerPolygonCache data_placeable;
+        if (calculate_placable)
+            data_placeable.allocate(result_storage, data.begin(), data.end());
 
-    // 1) Offset the outlines of the layers that the sums below use.
-    LayerPolygonCache collision_areas_offsetted;
-    collision_areas_offsetted.allocate(
-        std::max<LayerIndex>(0, data.begin() - z_distance_bottom_layers),
-        std::min<LayerIndex>(outlines.size(), data.end() + z_distance_top_layers));
-    tbb::parallel_for(tbb::blocked_range<LayerIndex>(collision_areas_offsetted.begin(), collision_areas_offsetted.end()),
-        [&outlines, offset_value = radius + xy_distance, &collision_areas_offsetted, &throw_on_cancel]
-        (const tbb::blocked_range<LayerIndex> &range) {
-            for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
-                // jtRound is not needed here, as the overshoot can not cause errors in the algorithm, because no assumptions are made about the model.
-                collision_areas_offsetted[layer_idx] = offset_value == 0 ?
-                    union_(outlines[layer_idx]) :
-                    offset(union_ex(outlines[layer_idx]), offset_value, ClipperLib::jtMiter, 1.2);
-                throw_on_cancel();
-            }
-        });
-
-    // 2) Sum the outlines over the Z gaps of each layer. The outlines above are offset by a distance that shrinks with the
-    // layer distance, so that a branch may come as close to the layers above as the xy distance of the overhang requires.
-    // The Z gaps are counts of nominal layers, rounded as the legacy does (TreeSettings.hpp).
-    tbb::parallel_for(tbb::blocked_range<LayerIndex>(data.begin(), data.end()),
-        [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, radius, xy_distance, z_distance_bottom_layers, z_distance_top_layers,
-            min_resolution = m_min_resolution, &data, &throw_on_cancel]
-        (const tbb::blocked_range<LayerIndex>& range) {
-            for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
-                Polygons collisions;
-                for (int i = - z_distance_bottom_layers; i <= 0; ++ i)
-                    if (int j = layer_idx + i; collision_areas_offsetted.has(j))
-                        append(collisions, collision_areas_offsetted[j]);
-                for (int i = 1; i <= z_distance_top_layers; ++ i)
-                    if (int j = layer_idx + i; j < int(outlines.size())) {
-                        // The conditional -0.5 keeps plastic from touching diagonally below a layer when the Z gap is one layer:
-                        // an overhang below 90 degrees is then left unsupported rather than fused to the object.
-                        const coord_t required_range_x =
-                            (xy_distance - ((i - (z_distance_top_layers == 1 ? 0.5 : 0)) * xy_distance / z_distance_top_layers));
-                        append(collisions, offset(union_ex(outlines[j]), radius + required_range_x, ClipperLib::jtMiter, 1.2));
+        // 1) Offset the outlines of the layers that the sums below use.
+        LayerPolygonCache collision_areas_offsetted;
+        collision_areas_offsetted.allocate(result_storage,
+            std::max<LayerIndex>(0, data.begin() - z_distance_bottom_layers),
+            std::min<LayerIndex>(LayerIndex(outlines.size()), data.end() + z_distance_top_layers));
+        // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
+        // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
+        tbb::parallel_for(tbb::blocked_range<LayerIndex>(collision_areas_offsetted.begin(), collision_areas_offsetted.end()),
+            [&outlines, offset_value = radius + xy_distance, &collision_areas_offsetted, &throw_on_cancel]
+            (const tbb::blocked_range<LayerIndex> &range) {
+                with_scratch_storage([&](storage_handle *storage) {
+                    for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
+                        // jtRound is not needed here, as the overshoot can not cause errors in the algorithm, because no assumptions are made about the model.
+                        if (offset_value == 0)
+                            collision_areas_offsetted[layer_idx].move_from(polygons_union(storage, outlines[layer_idx]));
+                        else {
+                            const StoredExPolygonCollection regions = expolygons_union(storage, outlines[layer_idx]);
+                            collision_areas_offsetted[layer_idx].move_from(polygons_offset(storage, regions, offset_value, CLIPPER_JOIN_MITER, 1.2));
+                        }
+                        throw_on_cancel();
                     }
-                collisions = layer_idx < int(anti_overhang.size()) ?
-                    union_(collisions, offset(anti_overhang[layer_idx], radius, ClipperLib::jtMiter, 1.2)) :
-                    union_(collisions);
-                data[layer_idx] = polygons_simplify(collisions, min_resolution, polygons_strictly_simple);
-                throw_on_cancel();
-            }
-        });
-
-    // 3) The placeable areas: the top surface of the layer below, minus the collision of this layer, inset by the XY distance.
-    if (calculate_placable) {
-        tbb::parallel_for(tbb::blocked_range<LayerIndex>(std::max(z_distance_bottom_layers + 1, data.begin()), data.end()),
-            [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, min_resolution = m_min_resolution,
-                z_distance_bottom_layers, xy_distance, &data_placeable, &throw_on_cancel]
-            (const tbb::blocked_range<LayerIndex>& range) {
-                for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
-                    const LayerIndex layer_idx_below = layer_idx - z_distance_bottom_layers - 1;
-                    const Polygons &current = collision_areas_offsetted[layer_idx];
-                    const Polygons &below   = outlines[layer_idx_below];
-                    data_placeable[layer_idx] = polygons_simplify(diff(
-                        // Inflate the surface to sit on by the separation distance to increase chance of a support being placed on a sloped surface.
-                        offset_polygons(below, xy_distance),
-                        layer_idx_below < int(anti_overhang.size()) ? union_(current, to_polygons(anti_overhang[layer_idx_below])) : current),
-                        min_resolution, polygons_strictly_simple);
-                    throw_on_cancel();
-                }
+                });
             });
-    }
 
-    throw_on_cancel();
-    m_collision_cache.insert(std::move(data), radius);
-    if (calculate_placable)
-        m_placeable_areas_cache.insert(std::move(data_placeable), radius);
+        // 2) Sum the outlines over the Z gaps of each layer. The outlines above are offset by a distance that shrinks with the
+        // layer distance, so that a branch may come as close to the layers above as the xy distance of the overhang requires.
+        // The Z gaps are counts of nominal layers, rounded as the legacy does (TreeSettings.hpp).
+        // FIXME(perf): same as the loop above (default partitioner, no measured gain from slic3r_parallel_for).
+        tbb::parallel_for(tbb::blocked_range<LayerIndex>(data.begin(), data.end()),
+            [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, radius, xy_distance, z_distance_bottom_layers, z_distance_top_layers,
+                min_resolution = m_min_resolution, &data, &throw_on_cancel]
+            (const tbb::blocked_range<LayerIndex>& range) {
+                with_scratch_storage([&](storage_handle *storage) {
+                    for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
+                        StoredPolygonCollection collisions(storage);
+                        for (int i = - z_distance_bottom_layers; i <= 0; ++ i)
+                            if (int j = layer_idx + i; collision_areas_offsetted.has(j))
+                                collisions.append_copy_from(collision_areas_offsetted[j]);
+                        for (int i = 1; i <= z_distance_top_layers; ++ i)
+                            if (int j = layer_idx + i; j < int(outlines.size())) {
+                                // The conditional -0.5 keeps plastic from touching diagonally below a layer when the Z gap is one layer:
+                                // an overhang below 90 degrees is then left unsupported rather than fused to the object.
+                                const coord_t required_range_x =
+                                    (xy_distance - ((i - (z_distance_top_layers == 1 ? 0.5 : 0)) * xy_distance / z_distance_top_layers));
+                                const StoredExPolygonCollection regions = expolygons_union(storage, outlines[j]);
+                                StoredPolygonCollection grown = polygons_offset(storage, regions, radius + required_range_x, CLIPPER_JOIN_MITER, 1.2);
+                                collisions.append_move_from(grown);
+                            }
+                        StoredPolygonCollection merged = layer_idx < int(anti_overhang.size()) ?
+                            polygons_union(storage, collisions, polygons_offset(storage, anti_overhang[layer_idx], radius, CLIPPER_JOIN_MITER, 1.2)) :
+                            polygons_union(storage, collisions);
+                        data[layer_idx].move_from(slic3r_api::polygons_simplify(storage, merged, double(min_resolution)));
+                        throw_on_cancel();
+                    }
+                });
+            });
+
+        // 3) The placeable areas: the top surface of the layer below, minus the collision of this layer, inset by the XY distance.
+        if (calculate_placable) {
+            // FIXME(perf): same as the loop above (default partitioner, no measured gain from slic3r_parallel_for).
+            tbb::parallel_for(tbb::blocked_range<LayerIndex>(std::max(z_distance_bottom_layers + 1, data.begin()), data.end()),
+                [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, min_resolution = m_min_resolution,
+                    z_distance_bottom_layers, xy_distance, &data_placeable, &throw_on_cancel]
+                (const tbb::blocked_range<LayerIndex>& range) {
+                    with_scratch_storage([&](storage_handle *storage) {
+                        for (LayerIndex layer_idx = range.begin(); layer_idx != range.end(); ++ layer_idx) {
+                            const LayerIndex layer_idx_below = layer_idx - z_distance_bottom_layers - 1;
+                            const StoredPolygonCollection &current = collision_areas_offsetted[layer_idx];
+                            const StoredPolygonCollection &below   = outlines[layer_idx_below];
+                            // Inflate the surface to sit on by the separation distance to increase chance of a support being placed on a sloped surface.
+                            // A zero distance keeps the surface: the offset of a clean list by 0 is not supported.
+                            const StoredPolygonCollection surface = xy_distance == 0 ? copy_of(storage, below) : polygons_offset(storage, below, xy_distance);
+                            const StoredPolygonCollection free_area = layer_idx_below < int(anti_overhang.size()) ?
+                                polygons_diff(storage, surface, polygons_union(storage, current, anti_overhang[layer_idx_below])) :
+                                polygons_diff(storage, surface, current);
+                            data_placeable[layer_idx].move_from(slic3r_api::polygons_simplify(storage, free_area, double(min_resolution)));
+                            throw_on_cancel();
+                        }
+                    });
+                });
+        }
+
+        throw_on_cancel();
+        m_collision_cache.insert(std::move(data), radius);
+        if (calculate_placable)
+            m_placeable_areas_cache.insert(std::move(data_placeable), radius);
+    });
 }
 
 // Computes, for each key (radius, last layer), the collision of that radius on layers 0 to the last layer without the holes too small
@@ -274,55 +408,45 @@ void TreeVolumes::calculateCollisionHolefree(const std::vector<RadiusLayerPair> 
         return;
 
     LayerIndex max_layer = 0;
-    for (long long unsigned int i = 0; i < keys.size(); i++)
+    for (size_t i = 0; i < keys.size(); i++)
         max_layer = std::max(max_layer, keys[i].second);
 
     // The layers below grow the collision of m_increase_until_radius. When it is not cached, one computation of its whole range
     // fills it, instead of one computation per layer in the loop below.
     getCollision(m_increase_until_radius, max_layer, false);
 
+    // FIXME(perf): kept on tbb::parallel_for with the grain of the key count, so that a chunk holds the layers of all the
+    // keys and publishes them together. slic3r_parallel_for has no grain; moving to it would change the balancing without a
+    // measured gain. Revisit with real performance tests.
     tbb::parallel_for(tbb::blocked_range<LayerIndex>(0, max_layer + 1, keys.size()),
         [&](const tbb::blocked_range<LayerIndex> &range) {
-        std::vector<std::pair<RadiusLayerPair, Polygons>> data;
-        data.reserve(range.size() * keys.size());
-        for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
-            for (RadiusLayerPair key : keys)
-                if (layer_idx <= key.second) {
-                    // Logically increase the collision by m_increase_until_radius
-                    coord_t radius = key.first;
-                    assert(radius == this->ceilRadius(radius));
-                    assert(radius < m_increase_until_radius + m_current_min_xy_dist_delta);
-                    coord_t increase_radius_ceil = ceilRadius(m_increase_until_radius, false) - radius;
-                    assert(increase_radius_ceil > 0);
-                    // this union is important as otherwise holes(in form of lines that will increase to holes in a later step) can get unioned onto the area.
-                    data.emplace_back(RadiusLayerPair(radius, layer_idx), polygons_simplify(
-                        offset(union_ex(this->getCollision(m_increase_until_radius, layer_idx, false)),
-                            5 - increase_radius_ceil, ClipperLib::jtRound, m_min_resolution),
-                        m_min_resolution, polygons_strictly_simple));
-                    throw_on_cancel();
-                }
-        }
-        m_collision_cache_holefree.insert(std::move(data));
+        // The results of the chunk live in result_storage; the temporaries of the chunk live in a second scratch storage, so that
+        // freeing a temporary does not scan the results already made.
+        with_scratch_storage([&](storage_handle *result_storage) {
+            std::vector<std::pair<RadiusLayerPair, StoredPolygonCollection>> data;
+            data.reserve(range.size() * keys.size());
+            with_scratch_storage([&](storage_handle *storage) {
+            for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                for (RadiusLayerPair key : keys)
+                    if (layer_idx <= key.second) {
+                        // Logically increase the collision by m_increase_until_radius
+                        coord_t radius = key.first;
+                        assert(radius == this->ceilRadius(radius));
+                        assert(radius < m_increase_until_radius + m_current_min_xy_dist_delta);
+                        coord_t increase_radius_ceil = ceilRadius(m_increase_until_radius, false) - radius;
+                        assert(increase_radius_ceil > 0);
+                        // this union is important as otherwise holes(in form of lines that will increase to holes in a later step) can get unioned onto the area.
+                        data.emplace_back(RadiusLayerPair(radius, layer_idx), StoredPolygonCollection(result_storage));
+                        const StoredExPolygonCollection regions = expolygons_union(storage, this->getCollision(m_increase_until_radius, layer_idx, false));
+                        const StoredPolygonCollection shrunk = polygons_offset(storage, regions, 5 - increase_radius_ceil, CLIPPER_JOIN_ROUND, m_min_resolution);
+                        data.back().second.move_from(slic3r_api::polygons_simplify(storage, shrunk, double(m_min_resolution)));
+                        throw_on_cancel();
+                    }
+            }
+            });
+            m_collision_cache_holefree.insert(std::move(data));
+        });
     });
-}
-
-// One cut of a maximum move into steps no longer than a step size: the count, the step, and the last step, which takes the rest.
-struct MoveSteps {
-    int   count;
-    float step;
-    float last;
-};
-
-// Cuts a maximum move into steps. A very short last step is avoided by stretching the other steps instead.
-static MoveSteps split_move(const float max_move, const float move_step)
-{
-    MoveSteps steps{ std::max(1, round_up_divide<int>(max_move, move_step)), move_step, 0.f };
-    steps.last = max_move - float(steps.count - 1) * move_step;
-    if (steps.last < scale_d(0.05) && steps.count > 1) {
-        steps.step = max_move / float(-- steps.count);
-        steps.last = steps.step;
-    }
-    return steps;
 }
 
 // Propagates the avoidance of each key upwards, one object layer at a time. Between layer_idx - 1 and layer_idx the avoidance may
@@ -363,6 +487,9 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
 
     throw_on_cancel();
 
+    // FIXME(perf): kept on tbb::parallel_for with grain 1: the tasks (one whole propagation each) differ a lot in length,
+    // and the default partitioner balances them. Moving to slic3r_parallel_for would change the balancing without a measured
+    // gain. Revisit with real performance tests.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, avoidance_tasks.size(), 1),
         [this, &avoidance_tasks, &throw_on_cancel, first_layer](const tbb::blocked_range<size_t> &range) {
         for (size_t task_idx = range.begin(); task_idx < range.end(); ++ task_idx) {
@@ -373,7 +500,7 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
             // The following loop propagating avoidance regions bottom up is inherently serial.
             const bool collision_holefree = (task.slow() || task.holefree()) && task.radius < m_increase_until_radius + m_current_min_xy_dist_delta;
             // The collision that the avoidance of this task merges with, on a layer.
-            const auto collision_of_layer = [this, &task, collision_holefree](LayerIndex layer_idx) -> const Polygons& {
+            const auto collision_of_layer = [this, &task, collision_holefree](LayerIndex layer_idx) -> const StoredPolygonCollection& {
                 return collision_holefree ? getCollisionHolefree(task.radius, layer_idx) : getCollision(task.radius, layer_idx, true);
             };
             // When the collisions are not cached, one computation of their whole range fills them, instead of one per layer below.
@@ -386,34 +513,54 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
             // it (no radius and no XY distance) has no step to propagate with: its avoidance is its collision. It is published
             // like the others, as the getter that asked for it reads it back.
             const bool can_move = move_step >= 0.5f;
-            // minDist as the delta was already added, also avoidance for layer 0 will return the collision.
-            Polygons latest_avoidance = getAvoidance(task.radius, first_layer - 1, task.type, task.to_model, true);
-            std::vector<std::pair<RadiusLayerPair, Polygons>> data;
-            data.reserve(task.max_required_layer + 1 - first_layer);
-            for (LayerIndex layer_idx = first_layer; layer_idx <= task.max_required_layer; ++ layer_idx) {
-                // Merge current layer collisions with shrunk last_avoidance.
-                const Polygons &current_layer_collisions = collision_of_layer(layer_idx);
-                if (can_move) {
-                    // For mildly steep branch angles only one step will be taken.
-                    const MoveSteps steps = split_move(float(max_moves[layer_idx]), move_step);
-                    for (int istep = 0; istep < steps.count; ++ istep)
-                        latest_avoidance = union_(current_layer_collisions,
-                            offset_polygons(latest_avoidance, istep + 1 == steps.count ? - steps.last : - steps.step, ClipperLib::jtRound, m_min_resolution));
-                } else
-                    latest_avoidance = current_layer_collisions;
-                if (task.to_model)
-                    latest_avoidance = diff(latest_avoidance, getPlaceableAreas(task.radius, layer_idx, throw_on_cancel));
-                latest_avoidance = polygons_simplify(latest_avoidance, m_min_resolution, polygons_strictly_simple);
-                data.emplace_back(RadiusLayerPair{task.radius, layer_idx}, latest_avoidance);
-                throw_on_cancel();
-            }
-            avoidance_cache(task.type, task.to_model).insert(std::move(data));
-        }
+            // The results live in result_storage; the avoidance being propagated and the temporaries of every layer live in a second
+            // scratch storage, one per task. Freeing a handle scans the storage that owns it, so the temporaries must not share a
+            // storage with the results of all the earlier layers.
+            with_scratch_storage([&](storage_handle *result_storage) {
+                std::vector<std::pair<RadiusLayerPair, StoredPolygonCollection>> data;
+                data.reserve(task.max_required_layer + 1 - first_layer);
+                with_scratch_storage([&](storage_handle *storage) {
+                    // minDist as the delta was already added, also avoidance for layer 0 will return the collision.
+                    StoredPolygonCollection latest_avoidance = copy_of(storage, getAvoidance(task.radius, first_layer - 1, task.type, task.to_model, true));
+                    for (LayerIndex layer_idx = first_layer; layer_idx <= task.max_required_layer; ++ layer_idx) {
+                        // Merge current layer collisions with shrunk last_avoidance.
+                        const StoredPolygonCollection &current_layer_collisions = collision_of_layer(layer_idx);
+                        // The collection the next operation reads: each result is assigned to latest_avoidance after it is materialized.
+                        const StoredPolygonCollection *operand = &latest_avoidance;
+                        if (can_move) {
+                            // For mildly steep branch angles only one step will be taken.
+                            const MoveSteps steps = split_move(float(max_moves[layer_idx]), move_step);
+                            for (int istep = 0; istep < steps.count; ++ istep) {
+                                const float shrink = istep + 1 == steps.count ? - steps.last : - steps.step;
+                                if (shrink == 0.f)
+                                    // A zero move (a branch that may not move on this layer) keeps the avoidance: the offset by 0 is not supported.
+                                    latest_avoidance = polygons_union(storage, current_layer_collisions, latest_avoidance);
+                                else {
+                                    const StoredPolygonCollection shrunk = polygons_offset(storage, latest_avoidance, shrink, CLIPPER_JOIN_ROUND, m_min_resolution);
+                                    latest_avoidance = polygons_union(storage, current_layer_collisions, shrunk);
+                                }
+                            }
+                        } else
+                            operand = &current_layer_collisions;
+                        if (task.to_model) {
+                            latest_avoidance = polygons_diff(storage, *operand, getPlaceableAreas(task.radius, layer_idx, throw_on_cancel));
+                            operand = &latest_avoidance;
+                        }
+                        latest_avoidance = slic3r_api::polygons_simplify(storage, *operand, double(m_min_resolution));
+                        data.emplace_back(RadiusLayerPair{task.radius, layer_idx}, copy_of(result_storage, latest_avoidance));
+                        throw_on_cancel();
+                    }
+                });
+                avoidance_cache(task.type, task.to_model).insert(std::move(data));
+            });        }
     });
 }
 
 void TreeVolumes::calculatePlaceables(const std::vector<RadiusLayerPair> &keys, std::function<void()> throw_on_cancel)
 {
+    // FIXME(perf): kept on tbb::parallel_for: the cost of a key varies a lot with its layer range, and the default
+    // partitioner balances it. Moving to slic3r_parallel_for would change the balancing without a measured gain. Revisit
+    // with real performance tests.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
         [&, keys](const tbb::blocked_range<size_t>& range) {
             for (size_t key_idx = range.begin(); key_idx < range.end(); ++ key_idx)
@@ -426,26 +573,35 @@ void TreeVolumes::calculatePlaceables(const std::vector<RadiusLayerPair> &keys, 
 // it finds its key.
 void TreeVolumes::calculatePlaceables(const coord_t radius, const LayerIndex max_required_layer, std::function<void()> throw_on_cancel)
 {
-    std::vector<Polygons> data(max_required_layer + 1, Polygons{});
+    with_scratch_storage([&](storage_handle *result_storage) {
+        std::vector<StoredPolygonCollection> data;
+        data.reserve(max_required_layer + 1);
+        for (LayerIndex layer_idx = 0; layer_idx <= max_required_layer; ++ layer_idx)
+            data.emplace_back(result_storage);
 
-    // When the placeable areas of radius 0 are not cached, one computation of their whole range fills them (they come with the
-    // collision of radius 0), instead of one per layer in the loop below.
-    getPlaceableAreas(0, max_required_layer, throw_on_cancel);
+        // When the placeable areas of radius 0 are not cached, one computation of their whole range fills them (they come with the
+        // collision of radius 0), instead of one per layer in the loop below.
+        getPlaceableAreas(0, max_required_layer, throw_on_cancel);
 
-    tbb::parallel_for(tbb::blocked_range<LayerIndex>(1, max_required_layer + 1),
-        [this, &data, radius, &throw_on_cancel](const tbb::blocked_range<LayerIndex>& range) {
-            for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
-                data[layer_idx] = offset(
-                    union_ex(getPlaceableAreas(0, layer_idx, throw_on_cancel)),
-                    // As a placeable area is calculated by (collision of the layer below) - (collision of the current layer) and the collision is offset by xy_distance,
-                    // it can happen that a small line is considered a flat area to place something onto, even though it is mostly
-                    // xy_distance that cant support it. Making the area smaller by xy_distance fixes this.
-                    - (radius + m_current_min_xy_dist + m_current_min_xy_dist_delta),
-                    jtMiter, 1.2);
-                throw_on_cancel();
-            }
-        });
-    m_placeable_areas_cache.insert(std::move(data), 0, radius);
+        // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
+        // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
+        tbb::parallel_for(tbb::blocked_range<LayerIndex>(1, max_required_layer + 1),
+            [this, &data, radius, &throw_on_cancel](const tbb::blocked_range<LayerIndex>& range) {
+                with_scratch_storage([&](storage_handle *storage) {
+                    for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                        const StoredExPolygonCollection regions = expolygons_union(storage, getPlaceableAreas(0, layer_idx, throw_on_cancel));
+                        data[layer_idx].move_from(polygons_offset(storage, regions,
+                            // As a placeable area is calculated by (collision of the layer below) - (collision of the current layer) and the collision is offset by xy_distance,
+                            // it can happen that a small line is considered a flat area to place something onto, even though it is mostly
+                            // xy_distance that cant support it. Making the area smaller by xy_distance fixes this.
+                            - (radius + m_current_min_xy_dist + m_current_min_xy_dist_delta),
+                            CLIPPER_JOIN_MITER, 1.2));
+                        throw_on_cancel();
+                    }
+                });
+            });
+        m_placeable_areas_cache.insert(std::move(data), 0, radius);
+    });
 }
 
 // Computes, for each key (radius, last layer), the wall restrictions of that radius on layers 1 to the last layer, with the regular
@@ -487,6 +643,9 @@ void TreeVolumes::calculateWallRestrictions(const std::vector<RadiusLayerPair> &
      *  layer z-1: ixiiiiiiiiiii
      */
 
+    // FIXME(perf): kept on tbb::parallel_for: the cost of a key varies a lot with its layer range, and the default
+    // partitioner balances it. Moving to slic3r_parallel_for would change the balancing without a measured gain. Revisit
+    // with real performance tests.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
         [&, keys](const tbb::blocked_range<size_t> &range) {
         for (size_t key_idx = range.begin(); key_idx < range.end(); ++ key_idx) {
@@ -497,41 +656,52 @@ void TreeVolumes::calculateWallRestrictions(const std::vector<RadiusLayerPair> &
             if (max_required_layer < first_layer)
                 continue;
             const size_t     buffer_size        = max_required_layer + 1 - first_layer;
-            std::vector<Polygons> data(buffer_size, Polygons{});
-            std::vector<Polygons> data_min;
-            if (m_current_min_xy_dist_delta > 0)
-                data_min.assign(buffer_size, Polygons{});
+            const bool       with_min           = m_current_min_xy_dist_delta > 0;
             // When the collisions are not cached, one computation of their whole range fills them, instead of one per layer below.
             getCollision(0, max_required_layer, false);
-            if (! data_min.empty())
+            if (with_min)
                 getCollision(0, max_required_layer, true);
             getCollision(radius, max_required_layer - 1, true);
-            tbb::parallel_for(tbb::blocked_range<LayerIndex>(first_layer, max_required_layer + 1),
-                [this, &data, &data_min, radius, first_layer, &throw_on_cancel](const tbb::blocked_range<LayerIndex> &range) {
-                for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
-                    data[layer_idx - first_layer] = polygons_simplify(
-                        // radius contains m_current_min_xy_dist_delta already if required
-                        intersection(getCollision(0, layer_idx, false), getCollision(radius, layer_idx - 1, true)),
-                        m_min_resolution, polygons_strictly_simple);
-                    if (! data_min.empty())
-                        data_min[layer_idx - first_layer] =
-                            polygons_simplify(
-                                intersection(getCollision(0, layer_idx, true), getCollision(radius, layer_idx - 1, true)),
-                                m_min_resolution, polygons_strictly_simple);
-                    throw_on_cancel();
+            with_scratch_storage([&](storage_handle *result_storage) {
+                std::vector<StoredPolygonCollection> data;
+                std::vector<StoredPolygonCollection> data_min;
+                data.reserve(buffer_size);
+                for (size_t idx = 0; idx < buffer_size; ++ idx)
+                    data.emplace_back(result_storage);
+                if (with_min) {
+                    data_min.reserve(buffer_size);
+                    for (size_t idx = 0; idx < buffer_size; ++ idx)
+                        data_min.emplace_back(result_storage);
                 }
+                // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
+                // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
+                tbb::parallel_for(tbb::blocked_range<LayerIndex>(first_layer, max_required_layer + 1),
+                    [this, &data, &data_min, radius, first_layer, &throw_on_cancel](const tbb::blocked_range<LayerIndex> &range) {
+                    with_scratch_storage([&](storage_handle *storage) {
+                        for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
+                            // radius contains m_current_min_xy_dist_delta already if required
+                            const StoredPolygonCollection walls = polygons_intersection(storage, getCollision(0, layer_idx, false), getCollision(radius, layer_idx - 1, true));
+                            data[layer_idx - first_layer].move_from(slic3r_api::polygons_simplify(storage, walls, double(m_min_resolution)));
+                            if (! data_min.empty()) {
+                                const StoredPolygonCollection walls_min = polygons_intersection(storage, getCollision(0, layer_idx, true), getCollision(radius, layer_idx - 1, true));
+                                data_min[layer_idx - first_layer].move_from(slic3r_api::polygons_simplify(storage, walls_min, double(m_min_resolution)));
+                            }
+                            throw_on_cancel();
+                        }
+                    });
+                });
+                m_wall_restrictions_cache.insert(std::move(data), first_layer, radius);
+                if (! data_min.empty())
+                    m_wall_restrictions_cache_min.insert(std::move(data_min), first_layer, radius);
             });
-            m_wall_restrictions_cache.insert(std::move(data), first_layer, radius);
-            if (! data_min.empty())
-                m_wall_restrictions_cache_min.insert(std::move(data_min), first_layer, radius);
         }
     });
 }
 
-const Polygons& TreeVolumes::getCollision(const coord_t orig_radius, LayerIndex layer_idx, bool min_xy_dist) const
+const StoredPolygonCollection& TreeVolumes::getCollision(const coord_t orig_radius, LayerIndex layer_idx, bool min_xy_dist) const
 {
     const coord_t radius = this->ceilRadius(orig_radius, min_xy_dist);
-    if (std::optional<std::reference_wrapper<const Polygons>> result = m_collision_cache.getArea({ radius, layer_idx }); result)
+    if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result = m_collision_cache.getArea({ radius, layer_idx }); result)
         return (*result).get();
     if (m_precalculated) {
         BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate collision at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
@@ -541,11 +711,11 @@ const Polygons& TreeVolumes::getCollision(const coord_t orig_radius, LayerIndex 
     return getCollision(orig_radius, layer_idx, min_xy_dist);
 }
 
-const Polygons& TreeVolumes::getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const
+const StoredPolygonCollection& TreeVolumes::getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const
 {
     assert(radius == this->ceilRadius(radius));
     assert(radius < m_increase_until_radius + m_current_min_xy_dist_delta);
-    if (std::optional<std::reference_wrapper<const Polygons>> result = m_collision_cache_holefree.getArea({ radius, layer_idx }); result)
+    if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result = m_collision_cache_holefree.getArea({ radius, layer_idx }); result)
         return (*result).get();
     if (m_precalculated) {
         BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate collision holefree at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
@@ -555,7 +725,7 @@ const Polygons& TreeVolumes::getCollisionHolefree(coord_t radius, LayerIndex lay
     return getCollisionHolefree(radius, layer_idx);
 }
 
-const Polygons& TreeVolumes::getAvoidance(const coord_t orig_radius, LayerIndex layer_idx, AvoidanceType type, bool to_model, bool min_xy_dist) const
+const StoredPolygonCollection& TreeVolumes::getAvoidance(const coord_t orig_radius, LayerIndex layer_idx, AvoidanceType type, bool to_model, bool min_xy_dist) const
 {
     if (layer_idx == 0) // What on the layer directly above buildplate do i have to avoid to reach the buildplate ...
         return getCollision(orig_radius, layer_idx, min_xy_dist);
@@ -565,7 +735,7 @@ const Polygons& TreeVolumes::getAvoidance(const coord_t orig_radius, LayerIndex 
         // no holes anymore by definition at this request
         type = AvoidanceType::Fast;
 
-    if (std::optional<std::reference_wrapper<const Polygons>> result =
+    if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result =
             this->avoidance_cache(type, to_model).getArea({ radius, layer_idx });
         result)
         return (*result).get();
@@ -587,14 +757,14 @@ const Polygons& TreeVolumes::getAvoidance(const coord_t orig_radius, LayerIndex 
 // Gives the placeable areas of a branch of orig_radius (rounded as the other getters do, without the XY distance delta) on layer
 // layer_idx >= 0. On a cache miss it computes the key, from layer 0 to layer_idx, then reads the cache again; the reference is
 // owned by the cache. An exception thrown by throw_on_cancel propagates, and what was published before it stays.
-const Polygons& TreeVolumes::getPlaceableAreas(const coord_t orig_radius, LayerIndex layer_idx, std::function<void()> throw_on_cancel) const
+const StoredPolygonCollection& TreeVolumes::getPlaceableAreas(const coord_t orig_radius, LayerIndex layer_idx, std::function<void()> throw_on_cancel) const
 {
     const coord_t radius = ceilRadius(orig_radius);
-    if (std::optional<std::reference_wrapper<const Polygons>> result = m_placeable_areas_cache.getArea({ radius, layer_idx }); result)
+    if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result = m_placeable_areas_cache.getArea({ radius, layer_idx }); result)
         return (*result).get();
     if (m_precalculated) {
         BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate Placeable Areas at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
-        BOOST_LOG_TRIVIAL(error) << format("Not precalculated Placeable areas requested, radius %1%, layer %2%", radius, layer_idx);
+        BOOST_LOG_TRIVIAL(error) << "Not precalculated Placeable areas requested, radius " << radius << ", layer " << layer_idx;
     }
     if (orig_radius == 0) {
         // Placeable areas for radius 0 are calculated in the general collision code, which inserts them with the collisions. The
@@ -611,7 +781,7 @@ const Polygons& TreeVolumes::getPlaceableAreas(const coord_t orig_radius, LayerI
     return getPlaceableAreas(orig_radius, layer_idx, throw_on_cancel);
 }
 
-const Polygons& TreeVolumes::getWallRestriction(const coord_t orig_radius, LayerIndex layer_idx, bool min_xy_dist) const
+const StoredPolygonCollection& TreeVolumes::getWallRestriction(const coord_t orig_radius, LayerIndex layer_idx, bool min_xy_dist) const
 {
     assert(layer_idx > 0);
     if (layer_idx == 0)
@@ -622,7 +792,7 @@ const Polygons& TreeVolumes::getWallRestriction(const coord_t orig_radius, Layer
     min_xy_dist &= m_current_min_xy_dist_delta > 0;
 
     const coord_t radius = ceilRadius(orig_radius);
-    if (std::optional<std::reference_wrapper<const Polygons>> result =
+    if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result =
         (min_xy_dist ? m_wall_restrictions_cache_min : m_wall_restrictions_cache).getArea({ radius, layer_idx });
         result)
         return (*result).get();
@@ -650,7 +820,7 @@ coord_t TreeVolumes::ceilRadius(const coord_t radius) const
             const int num_steps = round_up_divide(initial_radius_delta, SUPPORT_TREE_EXPONENTIAL_THRESHOLD);
             const int stepsize  = initial_radius_delta / num_steps;
             out += stepsize;
-            for (auto step = 0; step < num_steps; ++ step) {
+            for (int step = 0; step < num_steps; ++ step) {
                 if (out >= radius && ! ignore(out))
                     return out;
                 out += stepsize;

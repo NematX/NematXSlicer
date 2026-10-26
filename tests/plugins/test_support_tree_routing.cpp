@@ -1,4 +1,5 @@
 #include "support_grid_test_helpers.hpp"
+#include "support_tree_test_helpers.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeRouting.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSettings.hpp"
@@ -28,7 +29,7 @@ struct Routed {
     const TF::TreeSettings settings;
     std::vector<TF::RoutedTree> trees;
     explicit Routed(const Print &print)
-        : params(SG::params(print, print.object(0))), settings(print.object(0), params),
+        : params(SG::params(print, print.object(0))), settings(Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params)),
           trees(TF::route_trees(print, print.object(0), params, settings, support)) {}
 };
 
@@ -120,7 +121,7 @@ TEST_CASE("Tree nodes keep their XY distance to the object", "[plugins][support-
     Test::init_print({platform ? SG::slab(true) : SG::slab()}, print, model, SG::config("organic"));
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const double xy_distance_mm = unscaled(double(settings.xy_distance));
     const Routed routed(print);
     REQUIRE_FALSE(routed.trees.empty());
@@ -151,7 +152,7 @@ TEST_CASE("Tree branch moves follow the real height of each layer", "[plugins][s
     SG::init_print_with_profile(print, model, narrow_platform_overhang(), std::vector<coordf_t>{0., 0.2, 1., 0.05, 2., 0.2, 2.4, 0.05, 2.6, 0.3, 7., 0.3}, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const Routed routed(print);
     REQUIRE_FALSE(routed.trees.empty());
     double largest_ratio = 0.;
@@ -198,7 +199,7 @@ TEST_CASE("A small max branch overhang lowers the branch angle", "[plugins][supp
     Test::init_print({SG::slab(true)}, print, model, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const double min_height_mm = SG::params(print, object).support_min_height;
     CAPTURE(min_height_mm, settings.angle);
     CHECK(settings.angle == Approx(std::atan2(0.05, min_height_mm)).epsilon(1e-6));
@@ -287,7 +288,7 @@ TEST_CASE("The branch angle cap follows the minimum layer height of the support 
     Test::init_print({SG::slab(true)}, print, model, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const double support_min_mm = thin_support ? 0.05 : 0.2;
     const double cap = std::atan2(0.05, support_min_mm);
     CAPTURE(thin_support, settings.angle);
@@ -377,7 +378,7 @@ TEST_CASE("Tips use the reduced XY distance next to the object and the full dist
     Test::init_print({lip}, print, model, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings(object, SG::params(print, object));
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
     const double xy_min_mm = unscaled(double(settings.xy_min_distance));
     const double xy_mm = unscaled(double(settings.xy_distance));
     CAPTURE(xy_min_mm, xy_mm);

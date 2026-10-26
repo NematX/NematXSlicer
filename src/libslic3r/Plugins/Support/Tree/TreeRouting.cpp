@@ -202,7 +202,7 @@ std::vector<RoutedTree> route_trees(const Print &print, const PrintObject &objec
     LayerIndex max_layer = 0;
     for (const TipSource &source : sources)
         max_layer = std::max(max_layer, source.layer);
-    TreeVolumes volumes(object, settings);
+    TreeVolumes volumes(object_view, print_view, settings, support.storage, [] {});
     volumes.precalculate(max_layer, [] {});
     const FFFSupport::SupportParameters support_params(object);
     std::vector<SupportElements> move_bounds(object.layer_count());
@@ -362,8 +362,8 @@ static void generate_initial_areas(const TreeVolumes &volumes, const TreeSetting
             Polygons relevant_forbidden;
             {
                 const Polygons &relevant_forbidden_raw = config.support_rests_on_model ?
-                    volumes.getCollision(config.getRadius(0), layer_idx, min_xy_dist) :
-                    volumes.getAvoidance(config.getRadius(0), layer_idx, AvoidanceType::Fast, false, min_xy_dist);
+                    native_polygons(volumes.getCollision(config.getRadius(0), layer_idx, min_xy_dist)) :
+                    native_polygons(volumes.getAvoidance(config.getRadius(0), layer_idx, AvoidanceType::Fast, false, min_xy_dist));
                 // prevent rounding errors down the line, points placed directly on the line of the forbidden area may not be added otherwise.
                 relevant_forbidden = offset(union_ex(relevant_forbidden_raw), scale_d(0.005), jtMiter, 1.2);
             }
@@ -379,7 +379,7 @@ static void generate_initial_areas(const TreeVolumes &volumes, const TreeSetting
                         circle_length_to_half_linewidth_change,
                     extra_outset - extra_total_offset_acc);
                 extra_total_offset_acc += offset_current_step;
-                const Polygons &raw_collision = volumes.getCollision(0, layer_idx, true);
+                const Polygons &raw_collision = native_polygons(volumes.getCollision(0, layer_idx, true));
                 const coord_t offset_step = config.xy_min_distance + config.support_line_width;
                 // Reduce the remaining overhang by the areas already supported, then extend the supported area by what is left.
                 remaining_overhang = diff(remaining_overhang, safe_offset_inc(overhang_regular, 1.5 * extra_total_offset_acc, raw_collision, offset_step, 0, 1));
@@ -670,15 +670,15 @@ static std::optional<std::pair<Point, size_t>> polyline_sample_next_point_at_dis
     for (const Polyline &line : polylines) {
         LineInformation res_line;
         for (Point p : line) {
-            if (! contains(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::FastSafe, false, min_xy_dist), p))
+            if (! contains(native_polygons(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::FastSafe, false, min_xy_dist)), p))
                 res_line.emplace_back(p, LineStatus::TO_BP_SAFE);
-            else if (! contains(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist), p))
+            else if (! contains(native_polygons(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist)), p))
                 res_line.emplace_back(p, LineStatus::TO_BP);
-            else if (config.support_rests_on_model && ! contains(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::FastSafe, true, min_xy_dist), p))
+            else if (config.support_rests_on_model && ! contains(native_polygons(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::FastSafe, true, min_xy_dist)), p))
                 res_line.emplace_back(p, LineStatus::TO_MODEL_GRACIOUS_SAFE);
-            else if (config.support_rests_on_model && ! contains(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::Fast, true, min_xy_dist), p))
+            else if (config.support_rests_on_model && ! contains(native_polygons(volumes.getAvoidance(config.getRadius(0), layer_idx, TreeVolumes::AvoidanceType::Fast, true, min_xy_dist)), p))
                 res_line.emplace_back(p, LineStatus::TO_MODEL_GRACIOUS);
-            else if (config.support_rests_on_model && ! contains(volumes.getCollision(config.getRadius(0), layer_idx, min_xy_dist), p))
+            else if (config.support_rests_on_model && ! contains(native_polygons(volumes.getCollision(config.getRadius(0), layer_idx, min_xy_dist)), p))
                 res_line.emplace_back(p, LineStatus::TO_MODEL);
             else if (!res_line.empty()) {
                 result.emplace_back(res_line);
@@ -1199,7 +1199,7 @@ static bool merge_influence_areas_two_elements(
     // Because of this a merge may happen even if the influence areas (that represent possible center points of branches) do not intersect yet.
     // Remember that collision radius <= real radius as otherwise this assumption would be false.
     const coord_t   smaller_collision_radius    = support_element_collision_radius(config, smaller_rad.state);
-    const Polygons &collision                   = volumes.getCollision(smaller_collision_radius, layer_idx - 1, use_min_radius);
+    const Polygons &collision                   = native_polygons(volumes.getCollision(smaller_collision_radius, layer_idx - 1, use_min_radius));
     auto            intersect_small_with_bigger = [real_radius_delta, smaller_collision_radius, &collision, &config](const Polygons &small, const Polygons &bigger) {
         return intersection(
             safe_offset_inc(
@@ -1358,7 +1358,7 @@ static void increase_areas_one_layer(
             SupportElementState      elem           = SupportElementState::propagate_down(parent.state);
             const Polygons          &wall_restriction =
                 // Abstract representation of the model outline. If an influence area would move through it, it could teleport through a wall.
-                volumes.getWallRestriction(support_element_collision_radius(config, parent.state), layer_idx, parent.state.use_min_xy_dist);
+                native_polygons(volumes.getWallRestriction(support_element_collision_radius(config, parent.state), layer_idx, parent.state.use_min_xy_dist));
 
 
             Polygons to_bp_data, to_model_data;
@@ -1469,7 +1469,7 @@ static void increase_areas_one_layer(
                 }
                 order = new_order;
             }
-            if (elem.to_buildplate || (elem.to_model_gracious && intersection(parent.influence_area, volumes.getPlaceableAreas(radius, layer_idx, throw_on_cancel)).empty())) {
+            if (elem.to_buildplate || (elem.to_model_gracious && intersection(parent.influence_area, native_polygons(volumes.getPlaceableAreas(radius, layer_idx, throw_on_cancel))).empty())) {
                 // error case
                 // it is normal that we wont be able to find a new area at some point in time if we wont be able to reach layer 0 aka have to connect with the model
                 insertSetting({ AvoidanceType::Fast, fast_speed, !increase_radius, !no_error, elem.use_min_xy_dist, move }, true);
@@ -1553,7 +1553,7 @@ static void increase_areas_one_layer(
                 // Union seems useless, but some rounding errors somewhere can cause to_bp_data to be slightly bigger than it should be.
                 assert(! inc_wo_collision.empty() || ! to_bp_data.empty() || ! to_model_data.empty());
                 Polygons max_influence_area = safe_union(
-                    diff_clipped(inc_wo_collision, volumes.getCollision(radius, layer_idx - 1, elem.use_min_xy_dist)),
+                    diff_clipped(inc_wo_collision, native_polygons(volumes.getCollision(radius, layer_idx - 1, elem.use_min_xy_dist))),
                     safe_union(to_bp_data, to_model_data));
                 merging_area.state = elem;
                 assert(!max_influence_area.empty());
@@ -1626,7 +1626,7 @@ static void increase_areas_one_layer(
                 (std::min(config.z_distance_top_layers, config.z_distance_bottom_layers) > 0 ? config.min_feature_size : 0);
             // The difference to ensure that the result not only conforms to wall_restriction, but collision/avoidance is done later.
             // The higher last_safe_step_movement_distance comes exactly from the fact that the collision will be subtracted later.
-            increased = safe_offset_inc(increased, overspeed, volumes.getWallRestriction(support_element_collision_radius(config, parent.state), layer_idx, parent.state.use_min_xy_dist),
+            increased = safe_offset_inc(increased, overspeed, native_polygons(volumes.getWallRestriction(support_element_collision_radius(config, parent.state), layer_idx, parent.state.use_min_xy_dist)),
                 safe_movement_distance, safe_movement_distance + radius, 1);
         }
         if (settings.no_error && settings.move)
@@ -1637,7 +1637,7 @@ static void increase_areas_one_layer(
         increased = parent.influence_area;
 
     if (mergelayer || current_elem.to_buildplate) {
-        to_bp_data = safe_union(diff_clipped(increased, volumes.getAvoidance(radius, layer_idx - 1, settings.type, false, settings.use_min_distance)));
+        to_bp_data = safe_union(diff_clipped(increased, native_polygons(volumes.getAvoidance(radius, layer_idx - 1, settings.type, false, settings.use_min_distance))));
         if (! current_elem.to_buildplate && area(to_bp_data) > tiny_area_threshold) {
             // mostly happening in the tip, but with merges one should check every time, just to be sure.
             current_elem.to_buildplate = true; // sometimes nodes that can reach the buildplate are marked as cant reach, tainting subtrees. This corrects it.
@@ -1647,7 +1647,7 @@ static void increase_areas_one_layer(
     }
     if (config.support_rests_on_model) {
         if (mergelayer || current_elem.to_model_gracious)
-            to_model_data = safe_union(diff_clipped(increased, volumes.getAvoidance(radius, layer_idx - 1, settings.type, true, settings.use_min_distance)));
+            to_model_data = safe_union(diff_clipped(increased, native_polygons(volumes.getAvoidance(radius, layer_idx - 1, settings.type, true, settings.use_min_distance))));
 
         if (!current_elem.to_model_gracious) {
             if (mergelayer && area(to_model_data) >= tiny_area_threshold) {
@@ -1656,7 +1656,7 @@ static void increase_areas_one_layer(
                     current_elem.target_height << " with radius " << radius;
             } else
                 // Cannot route to gracious areas. Push the tree away from object and route it down anyways.
-                to_model_data = safe_union(diff_clipped(increased, volumes.getCollision(radius, layer_idx - 1, settings.use_min_distance)));
+                to_model_data = safe_union(diff_clipped(increased, native_polygons(volumes.getCollision(radius, layer_idx - 1, settings.use_min_distance))));
         }
     }
 
@@ -1670,13 +1670,13 @@ static void increase_areas_one_layer(
             Polygons to_bp_data_2;
             if (current_elem.to_buildplate)
                 // regular union as output will not be used later => this area should always be a subset of the safe_union one (i think)
-                to_bp_data_2 = diff_clipped(increased, volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, false, settings.use_min_distance));
+                to_bp_data_2 = diff_clipped(increased, native_polygons(volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, false, settings.use_min_distance)));
             Polygons to_model_data_2;
             if (config.support_rests_on_model && !current_elem.to_buildplate)
                 to_model_data_2 = diff_clipped(increased,
                     current_elem.to_model_gracious ?
-                        volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, true, settings.use_min_distance) :
-                        volumes.getCollision(next_radius, layer_idx - 1, settings.use_min_distance));
+                        native_polygons(volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, true, settings.use_min_distance)) :
+                        native_polygons(volumes.getCollision(next_radius, layer_idx - 1, settings.use_min_distance)));
             Polygons check_layer_data_2 = current_elem.to_buildplate ? to_bp_data_2 : to_model_data_2;
             return area(check_layer_data_2) > tiny_area_threshold;
         };
@@ -1713,12 +1713,12 @@ static void increase_areas_one_layer(
 
         if (ceil_radius_before != volumes.ceilRadius(radius, settings.use_min_distance)) {
             if (current_elem.to_buildplate)
-                to_bp_data = safe_union(diff_clipped(increased, volumes.getAvoidance(radius, layer_idx - 1, settings.type, false, settings.use_min_distance)));
+                to_bp_data = safe_union(diff_clipped(increased, native_polygons(volumes.getAvoidance(radius, layer_idx - 1, settings.type, false, settings.use_min_distance))));
             if (config.support_rests_on_model && (!current_elem.to_buildplate || mergelayer))
                 to_model_data = safe_union(diff_clipped(increased,
                     current_elem.to_model_gracious ?
-                        volumes.getAvoidance(radius, layer_idx - 1, settings.type, true, settings.use_min_distance) :
-                        volumes.getCollision(radius, layer_idx - 1, settings.use_min_distance)
+                        native_polygons(volumes.getAvoidance(radius, layer_idx - 1, settings.type, true, settings.use_min_distance)) :
+                        native_polygons(volumes.getCollision(radius, layer_idx - 1, settings.use_min_distance))
                 ));
             check_layer_data = current_elem.to_buildplate ? to_bp_data : to_model_data;
             if (area(check_layer_data) < tiny_area_threshold) {
@@ -2022,7 +2022,7 @@ static void set_to_model_contact_to_model_gracious(
     {
         SupportElement *elem = &first_elem;
         for (LayerIndex layer_check = elem->state.layer_idx;
-            ! intersection(elem->influence_area, volumes.getPlaceableAreas(support_element_collision_radius(config, elem->state), layer_check, throw_on_cancel)).empty();
+            ! intersection(elem->influence_area, native_polygons(volumes.getPlaceableAreas(support_element_collision_radius(config, elem->state), layer_check, throw_on_cancel))).empty();
             elem = &move_bounds[++ layer_check][elem->parents.front()]) {
             assert(elem->state.layer_idx == layer_check);
             assert(! elem->state.deleted);

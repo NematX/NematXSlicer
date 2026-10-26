@@ -539,6 +539,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Tree/TreeBranchMesh.cpp
 	Plugins/Support/Tree/TreeBranchMesh.hpp
 	Plugins/Support/Tree/TreeElements.hpp
+	Plugins/Support/Tree/TreeGeometry.cpp
+	Plugins/Support/Tree/TreeGeometry.hpp
 	Plugins/Support/Tree/TreeRouting.cpp
 	Plugins/Support/Tree/TreeRouting.hpp
 	Plugins/Support/Tree/TreeSettings.cpp

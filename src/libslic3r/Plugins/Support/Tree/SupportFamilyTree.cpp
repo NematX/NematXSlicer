@@ -16,8 +16,10 @@
 
 namespace slic3r_api::Support::Tree {
 namespace {
-// Tree branch settings read by the routing and the slab placement, beyond the geometry keys of SupportParams.
+// Tree branch settings read by the routing and the slab placement, beyond the geometry keys of SupportParams. "resolution" is the
+// print slicing resolution that cleans the support blockers sliced by TreeVolumes.
 const raw_used_config_key k_tree_keys[] = {
+    {"resolution", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"support_tree_angle", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"support_tree_angle_slow", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"support_tree_branch_diameter", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},

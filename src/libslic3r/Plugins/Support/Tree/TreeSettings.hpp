@@ -10,7 +10,7 @@
    exceed support_tree_max_overhang at the minimum layer height of the support extruder:
        effective angle = min(support_tree_angle, atan(max_overhang / support_min_height)).
 
-       const TreeSettings settings(object, params);
+       const TreeSettings settings(object, print, params);
        const coord_t move = settings.maximum_move_distance(layer_idx); */
 #ifndef plugins_support_tree_settings_hpp_
 #define plugins_support_tree_settings_hpp_
@@ -18,15 +18,18 @@
 #include <cstddef>
 #include <vector>
 
-#include "libslic3r/libslic3r.h"
+#include "libslic3r/Api/plugin/c/slic3r_def.h"
+
+namespace slic3r_api {
+class Object;
+class Print;
+}
 
 namespace slic3r_api::Support::Common {
 struct SupportParams;
 }
 
 namespace Slic3r {
-
-class PrintObject;
 
 namespace TreeFamily {
 
@@ -37,13 +40,14 @@ using LayerIndex = int;
 static constexpr const bool polygons_strictly_simple = false;
 
 // Areas smaller than this are dropped, as too small to hold a branch.
-static constexpr const auto tiny_area_threshold = sqr(scale_d(0.001));
+static constexpr const double tiny_area_threshold = scale_d(0.001) * scale_d(0.001);
 
 struct TreeSettings
 {
     TreeSettings() = default;
-    // Read the object and print settings; params gives the minimum layer height, the Z gaps and the support extrusion width.
-    TreeSettings(const PrintObject &object, const slic3r_api::Support::Common::SupportParams &params);
+    // Read the object and print settings through the plugin API views; params gives the minimum layer height, the Z gaps, the machine Z step
+    // and the support flows. The views must be those params was built from.
+    TreeSettings(const slic3r_api::Object &object, const slic3r_api::Print &print, const slic3r_api::Support::Common::SupportParams &params);
 
     // Nominal layer height, used by the layer counts (scaled).
     coord_t layer_height = 0;

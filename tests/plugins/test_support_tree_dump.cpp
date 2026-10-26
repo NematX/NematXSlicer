@@ -71,7 +71,7 @@ void dump_one(Dump &dump, const DumpCase &current, const Print &print);
 // Records every field of TreeSettings and the maximum moves of the layers as text.
 void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings &settings);
 // Records the TreeVolumes areas of a fixed list of keys as canonical rings.
-void dump_volumes(Dump &dump, const std::string &prefix, const PrintObject &object, const TF::TreeSettings &settings);
+void dump_volumes(Dump &dump, const std::string &prefix, const Print &print, const PrintObject &object, const TF::TreeSettings &settings);
 // Records the node count, the tip count and every node of each routed tree; base is the key of the record.
 void dump_routing(Dump &dump, const std::string &base, const std::vector<TF::RoutedTree> &trees);
 // Records the slabs of each role, in a total order, with the contact and overhang areas of the top contacts.
@@ -132,9 +132,9 @@ void dump_one(Dump &dump, const DumpCase &current, const Print &print)
     const std::string prefix = current.name;
     const PrintObject &object = print.object(0);
     const Common::SupportParams params = SG::params(print, object);
-    const TF::TreeSettings settings(object, params);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, params);
     dump_settings(dump, prefix, settings);
-    dump_volumes(dump, prefix, object, settings);
+    dump_volumes(dump, prefix, print, object, settings);
     if (!current.routing)
         return;
     // The trees are routed once, recorded, then the slabs are generated from these same trees: the organic smoothing moves their
@@ -180,16 +180,20 @@ void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings
 // The holefree collisions (collisions that also keep out the holes too small for a branch) have no public getter
 // (TreeVolumes::getCollisionHolefree is private), so they are not recorded directly. The FastSafe avoidances are propagated from
 // them, so they are covered through those records: a change of a holefree collision shows in the FastSafe avoidance.
-void dump_volumes(Dump &dump, const std::string &prefix, const PrintObject &object, const TF::TreeSettings &settings)
+void dump_volumes(Dump &dump, const std::string &prefix, const Print &print, const PrintObject &object, const TF::TreeSettings &settings)
 {
     using Volumes = TF::TreeVolumes;
     const TF::LayerIndex layers = TF::LayerIndex(object.layer_count());
-    Volumes volumes(object, settings);
+    // The storage owns the areas of the volumes, so it is declared first and destroyed last.
+    PluginStorage storage;
+    Volumes volumes(SG::object_view(object), SG::print_view(print), settings, reinterpret_cast<storage_handle *>(&storage), [] {});
     volumes.precalculate(layers - 1, [] {});
     const std::set<coord_t> radii{settings.getRadius(0), settings.branch_radius, settings.bp_radius};
     const std::vector<std::pair<Volumes::AvoidanceType, const char *>> types{
         {Volumes::AvoidanceType::Slow, "slow"}, {Volumes::AvoidanceType::FastSafe, "fastsafe"}, {Volumes::AvoidanceType::Fast, "fast"}};
-    auto add = [&](const std::string &key, const Polygons &polygons) { dump.add(prefix + "/volumes/" + key).rings = ST::rings_of(polygons); };
+    auto add = [&](const std::string &key, const slic3r_api::StoredPolygonCollection &polygons) {
+        dump.add(prefix + "/volumes/" + key).rings = ST::rings_of_view(polygons);
+    };
     for (const coord_t radius : radii) {
         const std::string r = "r" + std::to_string((long long) radius);
         for (const bool min_xy : {true, false}) {

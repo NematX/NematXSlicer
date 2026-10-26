@@ -93,6 +93,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_grid_legacy_compare.cpp
     test_support_tree_dump.cpp
     test_support_tree_routing.cpp
+    test_support_tree_settings.cpp
     test_support_tree_volumes.cpp
 test_support_tree_family.cpp
     test_support_tree_legacy_compare.cpp
@@ -154,6 +155,7 @@ test_support_tree_family.cpp
     test_surface_solid_shells.cpp
     test_surface_top_surface_expansion.cpp
     test_tool_change_wipe.cpp
+    test_tree_geometry.cpp
     test_vase_multi_island_connector.cpp
     test_wipe_tower_footprint.cpp
     test_wipe_tower_layout.cpp

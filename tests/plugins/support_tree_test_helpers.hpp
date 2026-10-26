@@ -74,6 +74,12 @@ inline TriangleMesh comparison_mesh(int model_id)
     return post;
 }
 
+// The tree settings of an object of a sliced print, read through the plugin API views as the family does.
+inline TF::TreeSettings tree_settings(const Print &print, const PrintObject &object, const slic3r_api::Support::Common::SupportParams &params)
+{
+    return TF::TreeSettings(SupportGrid::object_view(object), SupportGrid::print_view(print), params);
+}
+
 // The routed trees of the first object of a sliced print, with the storage that owns the contacts they support. The storage is
 // declared first so that it outlives the contacts that live in it.
 struct Routed {
@@ -83,7 +89,7 @@ struct Routed {
     const TF::TreeSettings settings;
     std::vector<TF::RoutedTree> trees;
     explicit Routed(const Print &print)
-        : params(SupportGrid::params(print, print.object(0))), settings(print.object(0), params),
+        : params(SupportGrid::params(print, print.object(0))), settings(Slic3r::Test::SupportTree::tree_settings(print, print.object(0), params)),
           trees(TF::route_trees(print, print.object(0), params, settings, support)) {}
 };
 

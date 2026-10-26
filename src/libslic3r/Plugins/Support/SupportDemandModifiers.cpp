@@ -13,6 +13,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 
 /*
 SupportDemandModifiers
@@ -76,27 +77,6 @@ uint32_t island_work_count(const Object &object)
     return count;
 }
 
-std::vector<float> layer_slice_zs(const Object &object)
-{
-    std::vector<float> slice_zs;
-    slice_zs.reserve(object.layer_count());
-    for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx)
-        slice_zs.push_back(float(unscaled(object.layer(layer_idx).slice_z())));
-    return slice_zs;
-}
-
-c_mesh_slicing_params support_modifier_slicing_params(const Print &print, const Object &object)
-{
-    const Config print_config = print.config();
-
-    c_mesh_slicing_params params = {};
-    params.transform = object.transform_centered();
-    params.resolution = std::max(EPSILON, print_config.get("resolution").get_float());
-    params.mode = RAW_MESH_SLICING_MODE_REGULAR;
-    params.mode_below = params.mode;
-    return params;
-}
-
 struct SlicedSupportModifier
 {
     raw_volume_type type = RAW_VOLUME_TYPE_INVALID;
@@ -109,32 +89,6 @@ bool has_any_layer_slices(const std::vector<StoredExPolygonCollection> &by_layer
         if (!layer_slices.empty())
             return true;
     return false;
-}
-
-std::vector<StoredExPolygonCollection> slice_support_modifier_volume(const Volume &volume,
-                                                                     const std::vector<float> &slice_zs,
-                                                                     const c_mesh_slicing_params &base_params,
-                                                                     storage_handle *storage,
-                                                                     const plugin_run_context *run_ctx)
-{
-    throw_if_cancelled(run_ctx);
-    std::vector<StoredExPolygonCollection> out;
-    const coord_t resolution = scale_i(base_params.resolution);
-
-    if (volume.mesh().empty())
-        return out;
-
-    c_mesh_slicing_params params = base_params;
-    params.transform = matrix4d_mul(base_params.transform, volume.matrix());
-    throw_if_cancelled(run_ctx);
-    out = volume.mesh().slice_to_expolygons(storage, params, slice_zs, run_ctx);
-    throw_if_cancelled(run_ctx);
-    for (StoredExPolygonCollection &layer_polygons : out) {
-        throw_if_cancelled(run_ctx);
-        layer_polygons.ensure_valid(resolution);
-    }
-
-    return out;
 }
 
 std::vector<SlicedSupportModifier> slice_support_modifier_volumes_in_order(const Object &object,
@@ -153,7 +107,7 @@ std::vector<SlicedSupportModifier> slice_support_modifier_volumes_in_order(const
             continue;
 
         std::vector<StoredExPolygonCollection> slices =
-            slice_support_modifier_volume(volume, slice_zs, base_params, storage, run_ctx);
+            Common::slice_support_modifier_volume(volume, slice_zs, base_params, storage, run_ctx);
         if (!has_any_layer_slices(slices))
             continue;
 
@@ -309,8 +263,8 @@ void SupportDemandModifiers::run_impl(const plugin_run_context *run_ctx) const
 
     storage_handle *storage = run_ctx->plugin_storage;
     const Print print(ctx->print);
-    const std::vector<float> slice_zs = layer_slice_zs(object);
-    const c_mesh_slicing_params params = support_modifier_slicing_params(print, object);
+    const std::vector<float> slice_zs = Common::layer_slice_zs(object);
+    const c_mesh_slicing_params params = Common::support_modifier_slicing_params(print, object);
     throw_if_cancelled(run_ctx);
     const std::vector<SlicedSupportModifier> modifiers =
         slice_support_modifier_volumes_in_order(object, slice_zs, params, storage, run_ctx);
