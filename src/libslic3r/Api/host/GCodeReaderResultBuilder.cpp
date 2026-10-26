@@ -117,6 +117,14 @@ uint16_t viewer_object_id(const slic3r_api::GCodeStateTracker &state)
     return static_cast<uint16_t>(object_id);
 }
 
+// Read the validated uint32 LAYER item, default missing state to 0, and clamp it
+// to MoveVertex::layer_id's uint16 range. This borrows state and does not mutate it.
+uint32_t viewer_layer_id(const slic3r_api::GCodeStateTracker &state)
+{
+    return std::min<uint32_t>(static_cast<uint32_t>(
+        state.value(RAW_GCODE_READER_ITEM_LAYER).value_or(0.0)), UINT16_MAX);
+}
+
 // Convert the public extrusion-role bit mask to the compact viewer category.
 // Invalid or mixed masks stay visible as None instead of asserting in host UI.
 GCodeExtrusionRole viewer_role(const slic3r_api::GCodeStateTracker &state)
@@ -399,10 +407,14 @@ void GCodeReaderResultBuilder::consume_event(
     m_previous_state = post_state;
 }
 
+// Store any MAX_LAYER_HEIGHT delta for its current layer, then append a tool transition
+// when the borrowed complete states differ. Result vectors own the copies; allocation
+// failures and invalid tool IDs propagate to the synchronous Reader caller.
 void GCodeReaderResultBuilder::process_state_update(
     const raw_gcode_reader_event &event,
     const slic3r_api::GCodeStateTracker &state)
 {
+    process_max_layer_height(event, state);
     const std::optional<uint32_t> previous_tool = m_previous_state.active_tool();
     const std::optional<uint32_t> current_tool = state.active_tool();
     if (!previous_tool || !current_tool || *previous_tool == *current_tool)
@@ -583,6 +595,9 @@ void GCodeReaderResultBuilder::process_temperature(
     // is stored. A target-only command has no geometry of its own.
 }
 
+// Convert a validated marker event into one owned viewer move, using its layer tag
+// before the last HEIGHT. Event and state are borrowed; unknown markers or invalid
+// tools throw, and result-vector allocation failures propagate.
 void GCodeReaderResultBuilder::process_marker(
     const raw_gcode_reader_event &event,
     const slic3r_api::GCodeStateTracker &state)
@@ -621,10 +636,13 @@ void GCodeReaderResultBuilder::process_marker(
         state, RAW_GCODE_READER_ITEM_TOOL_FAN, 0.0, tool));
 
     //w idht & height of the marker is used (*1.5) to show the marker in the gcodeviewer.
+    // The height is the MAX_LAYER_HEIGHT tag of the marker's layer when it has one,
+    // else the last HEIGHT read.
     const double width = state.value(RAW_GCODE_READER_ITEM_WIDTH).value_or(0.0);
     const double height = state.value(RAW_GCODE_READER_ITEM_HEIGHT).value_or(0.0);
     const double marker_width = state.value(RAW_GCODE_READER_ITEM_WIDTH).value_or(width);
-    const double marker_height = state.value(RAW_GCODE_READER_ITEM_HEIGHT).value_or(height);
+    const double marker_height = tagged_layer_height(viewer_layer_id(state)).value_or(
+        state.value(RAW_GCODE_READER_ITEM_HEIGHT).value_or(height));
 
     // Markers have no geometric delta. They sample the current machine state
     // so the viewer can place and color the point without parsing G-code text.
@@ -648,9 +666,7 @@ void GCodeReaderResultBuilder::process_marker(
         static_cast<float>(state.value(
             RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE, tool).value_or(0.0)), // float temperature
         m_total_time, // float move_time
-        static_cast<uint16_t>(std::min<uint32_t>(
-            static_cast<uint32_t>(state.value(
-                RAW_GCODE_READER_ITEM_LAYER).value_or(0.0)), UINT16_MAX)), // uint16_t layer_id
+        static_cast<uint16_t>(viewer_layer_id(state)), // uint16_t layer_id
         false // bool internal_only
     );
 }
@@ -747,10 +763,10 @@ void GCodeReaderResultBuilder::invalidate_derived_state(
             m_retracted_filament[tool] = 0.0;
 }
 
-// Borrow a validated event/state and known endpoints, classify their delta and
-// append a viewer move with time/material totals. Positive E repays shared SEMM
-// or per-tool debt before role/tool consumption; no-op deltas change nothing.
-// Inputs are not retained; unrepresentable tool/object IDs throw and allocations may fail.
+// Borrow a validated event/state and endpoints, classify their delta, append an owned
+// viewer move, account time/material, and raise a layer maximum from known extrusion
+// HEIGHT values. Positive E repays shared SEMM or per-tool debt before consumption;
+// no-op deltas change nothing. Inputs are not retained; invalid IDs throw and allocations may fail.
 void GCodeReaderResultBuilder::append_move(
     const raw_gcode_reader_event &event,
     const slic3r_api::GCodeStateTracker &state,
@@ -847,8 +863,7 @@ void GCodeReaderResultBuilder::append_move(
     const double offset_z = state_value_or(state, RAW_GCODE_READER_ITEM_TOOL_OFFSET_Z, 0.0, tool);
     const uint32_t line = static_cast<uint32_t>(
         event_value(event, RAW_GCODE_READER_ITEM_LINE_NUMBER).value_or(0.0));
-    const uint32_t layer = std::min<uint32_t>(static_cast<uint32_t>(
-        state.value(RAW_GCODE_READER_ITEM_LAYER).value_or(0.0)), UINT16_MAX);
+    const uint16_t layer = static_cast<uint16_t>(viewer_layer_id(state));
     const uint32_t fan_id = static_cast<uint32_t>(
         state.value(RAW_GCODE_READER_ITEM_TOOL_FAN, tool).value_or(0.0));
     const double fan = state.value(RAW_GCODE_READER_ITEM_FAN_SPEED, fan_id).value_or(0.0);
@@ -866,7 +881,12 @@ void GCodeReaderResultBuilder::append_move(
         static_cast<float>(e_delta), feedrate, width, height,
         static_cast<float>(mm3_per_mm), static_cast<float>(fan),
         static_cast<float>(temperature), m_total_time,
-        static_cast<uint16_t>(std::min<uint32_t>(layer, UINT16_MAX)), internal_only);
+        layer, internal_only);
+
+    // Only extrusions whose HEIGHT is known contribute to the layer height.
+    if (type == EMoveType::Extrude)
+        if (const std::optional<double> extrusion_height = state.value(RAW_GCODE_READER_ITEM_HEIGHT))
+            raise_layer_max_height(layer, *extrusion_height);
 
     m_move_times[static_cast<size_t>(type)] += elapsed;
     m_role_times[static_cast<size_t>(role)] += elapsed;
@@ -897,6 +917,46 @@ void GCodeReaderResultBuilder::append_move(
             m_color_volumes.resize(static_cast<size_t>(m_current_color) + 1, 0.0);
         m_color_volumes[m_current_color] += volume;
     }
+}
+
+// Read a validated event delta and store its MAX_LAYER_HEIGHT under the borrowed
+// post-state's current layer. The result owns vector values; event/state are not
+// retained, later layers use separate slots, and vector allocation failures propagate.
+void GCodeReaderResultBuilder::process_max_layer_height(
+    const raw_gcode_reader_event &event,
+    const slic3r_api::GCodeStateTracker &state)
+{
+    const std::optional<double> tag = event_value(event, RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT);
+    if (!tag)
+        return;
+    const size_t layer = viewer_layer_id(state);
+    if (layer >= m_result.layers_max_height.size())
+        m_result.layers_max_height.resize(layer + 1, 0.0f);
+    if (layer >= m_layer_max_height_tagged.size())
+        m_layer_max_height_tagged.resize(layer + 1, false);
+    m_result.layers_max_height[layer] = static_cast<float>(*tag);
+    m_layer_max_height_tagged[layer] = true;
+}
+
+// Raise one untagged layer's stored height to a known extrusion HEIGHT; the result
+// owns the vector value, no external input is retained, and vector growth may throw.
+void GCodeReaderResultBuilder::raise_layer_max_height(uint32_t layer, double extrusion_height)
+{
+    if (layer < m_layer_max_height_tagged.size() && m_layer_max_height_tagged[layer])
+        return;
+    if (layer >= m_result.layers_max_height.size())
+        m_result.layers_max_height.resize(static_cast<size_t>(layer) + 1, 0.0f);
+    m_result.layers_max_height[layer] = std::max(
+        m_result.layers_max_height[layer], static_cast<float>(extrusion_height));
+}
+
+// Return a layer's own MAX_LAYER_HEIGHT value or nullopt when no tag was consumed;
+// this reads result-owned vectors without mutation or allocation.
+std::optional<double> GCodeReaderResultBuilder::tagged_layer_height(uint32_t layer) const
+{
+    if (layer < m_layer_max_height_tagged.size() && m_layer_max_height_tagged[layer])
+        return static_cast<double>(m_result.layers_max_height[layer]);
+    return std::nullopt;
 }
 
 // Ensure owned logical-tool metadata covers tool, with one debt slot for SEMM

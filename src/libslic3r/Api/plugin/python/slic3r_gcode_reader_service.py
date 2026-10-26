@@ -33,6 +33,7 @@ from slic3r_api_generated import (
     RAW_GCODE_READER_ITEM_DIAGNOSTIC_TYPE,
     RAW_GCODE_READER_ITEM_LINE_NUMBER,
     RAW_GCODE_READER_ITEM_MARKER,
+    RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT,
     RAW_GCODE_READER_ITEM_READER_ID,
     RAW_GCODE_READER_MARKER_CUSTOM_GCODE,
     RAW_GCODE_READER_MARKER_SEAM,
@@ -56,13 +57,13 @@ DEFAULT_GCODE_READER_PLUGIN_ID = "gcode.reader.default"
 
 
 def _copied_items(raw_state, event_kind=None) -> tuple[tuple[int, int, float], ...]:
-    """Validate and copy one borrowed state or one explicitly typed event."""
+    """Validate and copy borrowed items through MAX_LAYER_HEIGHT; invalid items raise ValueError."""
     count = int(raw_state.item_count)
     if count and not raw_state.items:
         raise ValueError("a G-code Reader item array is null")
     copied = []
     seen = set()
-    last_standard = int(RAW_GCODE_READER_ITEM_DIAGNOSTIC_TYPE)
+    last_standard = int(RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT)
     for index in range(count):
         item = raw_state.items[index]
         item_type = int(item.type)

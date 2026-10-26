@@ -35,6 +35,7 @@ class DefaultExtruder : public Tool
 public:
     explicit DefaultExtruder(uint16_t id) : Tool(id) {}
 
+    // Load configured tool and filament-density state, then reset owned runtime components.
     void setup(const Config &config) override;
     void reset_runtime_state() override;
     void synchronize_runtime_from(const DefaultExtruder &source);
@@ -47,6 +48,8 @@ public:
     const PressureAdvanceState &pressure_advance() const { return m_pressure_advance; }
     ExtrusionAxisState &extrusion_axis() { return m_extrusion_axis; }
     const ExtrusionAxisState &extrusion_axis() const { return m_extrusion_axis; }
+    // Return filament density in g/cm³ for converting extruded volume to script weight.
+    double filament_density() const { return m_filament_density; }
 
 private:
     friend class DefaultGCodeFirmwareSession;
@@ -55,6 +58,8 @@ private:
     HeaterState m_heater;
     PressureAdvanceState m_pressure_advance;
     ExtrusionAxisState m_extrusion_axis;
+    // g/cm³, converts the extruded volume into a weight for scripts.
+    double m_filament_density = 0.0;
 };
 
 }} // namespace slic3r_api::GCodeGeneration

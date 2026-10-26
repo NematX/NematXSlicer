@@ -38,6 +38,12 @@ Consumed volume is recorded per logical tool and extrusion role. In single-
 extruder multi-material (SEMM), logical tools share one physical extruder and
 one retraction debt: positive E repays earlier negative E before consumption.
 
+Layer heights: GCodeProcessorResult::layers_max_height stores, under each
+layer id, the MAX_LAYER_HEIGHT value of that layer, or else the greatest HEIGHT
+of its extrusions (0 when neither exists). Seam, color-change, pause and custom
+G-code markers use the tag of their own layer when it has one, else the last
+HEIGHT. Nothing is inherited from one layer to the next.
+
 Event arrays and source chunks are borrowed for one synchronous call. The
 builder copies only derived values into its result. One instance represents
 one input stream and must be consumed in stream order.
@@ -79,7 +85,7 @@ private:
     void initialize_result(Print *print,
                            const Printing::PrintingPlan *plan,
                            const std::string &reader_plugin_id);
-    // Dispatch semantic events; each listener handles one viewer concern.
+    // Store layer-height deltas and dispatch any active-tool transition in a state update.
     void process_state_update(const raw_gcode_reader_event &event,
                               const slic3r_api::GCodeStateTracker &state);
     // Store the visible transition between two known logical tools.
@@ -99,6 +105,7 @@ private:
                                  const slic3r_api::GCodeStateTracker &state);
     void process_temperature(const raw_gcode_reader_event &event,
                              const slic3r_api::GCodeStateTracker &state);
+    // Append one typed marker using its layer tag or the last HEIGHT.
     void process_marker(const raw_gcode_reader_event &event,
                         const slic3r_api::GCodeStateTracker &state);
     void process_diagnostic(const raw_gcode_reader_event &event,
@@ -110,7 +117,7 @@ private:
     void invalidate_derived_state(const raw_gcode_reader_event &event,
                                   const slic3r_api::GCodeStateTracker &state);
 
-    // Store one linearized endpoint and accumulate consumption by role and logical tool.
+    // Store a move, account filament, and raise its layer maximum from a known extrusion HEIGHT.
     void append_move(const raw_gcode_reader_event &event,
                      const slic3r_api::GCodeStateTracker &state,
                      const Vec3d &start,
@@ -118,6 +125,13 @@ private:
                      double start_e,
                      double end_e,
                      bool internal_only);
+    // Store an event's MAX_LAYER_HEIGHT under post_state's layer and mark that slot tagged.
+    void process_max_layer_height(const raw_gcode_reader_event &event,
+                                  const slic3r_api::GCodeStateTracker &state);
+    // Raise an untagged layer's recorded height to a known extrusion HEIGHT in mm.
+    void raise_layer_max_height(uint32_t layer, double extrusion_height);
+    // Return a layer's MAX_LAYER_HEIGHT tag in mm, or nullopt if that layer has none.
+    std::optional<double> tagged_layer_height(uint32_t layer) const;
     // Extend logical-tool metadata and allocate its independent or shared debt slot.
     void ensure_tool(uint32_t tool);
     // Rebuild the compact vectors expected by the viewer from running totals.
@@ -128,6 +142,9 @@ private:
     std::array<float, static_cast<size_t>(EMoveType::Count)> m_move_times{};
     std::array<float, static_cast<size_t>(GCodeExtrusionRole::Count)> m_role_times{};
     std::vector<float> m_layer_times;
+    // Per layer (same indexing as GCodeProcessorResult::layers_max_height): true when
+    // the stored height is a MAX_LAYER_HEIGHT tag and extrusions must not alter it.
+    std::vector<bool> m_layer_max_height_tagged;
     std::vector<double> m_color_volumes;
     // Debt is filament length in mm. SEMM uses only slot 0; otherwise each
     // logical tool has its own slot. Shared debt follows the active tool's

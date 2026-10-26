@@ -2331,6 +2331,12 @@ const std::vector<double>& GLCanvas3D::get_gcode_layers_zs() const
     return m_gcode_viewer.get_layers_zs();
 }
 
+// Returns a value copy of the viewer's per-layer heights without changing canvas state; allocation failures propagate.
+std::vector<double> GLCanvas3D::get_gcode_layers_max_heights() const
+{
+    return m_gcode_viewer.get_layers_max_heights();
+}
+
 std::vector<double> GLCanvas3D::get_volumes_print_zs(bool active_only) const
 {
     std::vector<double> print_zs_mm;

@@ -3,6 +3,7 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include "PrintHelpers.hpp"
+#include "PrintingPlanViews.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -18,18 +19,25 @@ PrintObject, and Extruder classes without making those host-only classes part
 of the plugin API. They are compatibility helpers for plugin algorithms, not a
 second source of persistent print state.
 
-The implementation covers four related tasks:
+The implementation covers six related tasks:
 
     |-- normalize configured one-based extruder ids to zero-based ids
     |-- collect object, support, and skirt extruders
     |-- resolve first-layer heights from absolute or nozzle-relative settings
-    `-- convert volumetric extrusion into E-axis distance per millimeter
+    |-- convert volumetric extrusion into E-axis distance per millimeter
+    |-- round coordinates to a requested Z step
+    `-- find source-layer heights in finalized plan extrusion order
 
 Configuration lengths and areas arrive in user-facing millimeters, while
 `coord_t` and `c_flow` geometry values use scaled internal coordinates. The
 helpers perform the conversion at their boundary and return scaled values when
 the result is a coordinate. Extruder ids returned by this file are zero-based,
 even though the corresponding user settings are one-based.
+
+A source extrusion is a PrintingPlan extrusion linked to a sliced regional island;
+its source layer height comes from the LayerRegion attached to that island.
+Plan groups and their child tool groups and extrusions are already arranged in
+the order consumed by G-code generation.
 
 The fallback behavior is intentional: an invalid or unavailable configured
 extruder resolves to tool zero, an object with no detected extruder falls back
@@ -96,6 +104,53 @@ void append_support_extruders(const Print &print,
 }
 
 } // namespace
+
+// Read borrowed extrusion, island, region and layer views; return the linked
+// scaled source height, or no value for an invalid view or empty region list.
+// The helper allocates nothing, retains no ownership and does not mutate the plan.
+std::optional<coord_t> source_layer_height(const ConstPrintingExtrusion &extrusion)
+{
+    if (!extrusion.valid())
+        return std::nullopt;
+    const LayerRegionIsland island = extrusion.region_island();
+    if (!island.valid() || island.region_count() == 0)
+        return std::nullopt;
+    const LayerRegion region = island.region(0);
+    if (!region.valid())
+        return std::nullopt;
+    const Layer layer = region.layer();
+    if (!layer.valid())
+        return std::nullopt;
+    return layer.height();
+}
+
+// Visit a valid borrowed layer group's tools and extrusions in plan order;
+// return the first linked scaled source height, or no value when none exists.
+// No allocation, plan mutation or ownership transfer occurs.
+std::optional<coord_t> first_source_layer_height(const ConstPrintingLayerGroup &layer_group)
+{
+    for (uint32_t tool_idx = 0; tool_idx < layer_group.tool_group_count(); ++tool_idx) {
+        const std::optional<coord_t> height = first_source_layer_height(
+            layer_group.tool_group(tool_idx));
+        if (height)
+            return height;
+    }
+    return std::nullopt;
+}
+
+// Visit a valid borrowed tool group's extrusions in plan order; return the
+// first linked scaled source height, or no value when none exists. No allocation,
+// group mutation or ownership transfer occurs.
+std::optional<coord_t> first_source_layer_height(const ConstPrintingToolGroup &tool_group)
+{
+    for (uint32_t extrusion_idx = 0; extrusion_idx < tool_group.extrusion_count(); ++extrusion_idx) {
+        const std::optional<coord_t> height = source_layer_height(
+            tool_group.extrusion(extrusion_idx));
+        if (height)
+            return height;
+    }
+    return std::nullopt;
+}
 
 coord_t check_z_step(coord_t val, coord_t z_step)
 {

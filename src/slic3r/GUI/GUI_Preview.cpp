@@ -59,6 +59,9 @@
 #include "BitmapComboBox.hpp"
 #endif
 
+/* Loads and refreshes FFF and SLA previews, synchronizing layer and movement sliders with available data.
+   Layer inputs include Z positions, print times, surface areas, and G-code heights. */
+
 namespace Slic3r {
 namespace GUI {
 
@@ -539,6 +542,9 @@ void Preview::check_layers_slider_values(std::vector<CustomGCode::Item>& ticks_f
         m_schedule_background_process();
 }
 
+// Updates the slider for an ordered Z sequence under its render lock, retaining the requested range where possible.
+// Supplied G-code heights are used only for FFF G-code previews; sliced previews and SLA pass an empty vector.
+// The slider copies the data, the lock releases on scope exit, no status is returned, and allocation failures propagate.
 void Preview::update_layers_slider(const std::vector<double>& layers_z, bool show_gcode_data, bool keep_z_range)
 {
   //lock rendering while updating
@@ -613,6 +619,10 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool sho
     bool sequential_print = wxGetApp().preset_bundle->fff_prints.get_edited_preset().config.opt_bool("complete_objects");
     bool sla_print_technology = plater->printer_technology() == ptSLA;
     m_layers_slider->SetDrawMode(sla_print_technology, sequential_print);
+    std::vector<double> layers_max_heights;
+    if (show_gcode_data && !sla_print_technology)
+        layers_max_heights = m_canvas->get_gcode_layers_max_heights();
+    m_layers_slider->SetLayersMaxHeights(layers_max_heights);
     if (show_gcode_data) {
         if (sla_print_technology) {
             m_layers_slider->SetLayersTimes(plater->sla_print().print_statistics().layers_times);

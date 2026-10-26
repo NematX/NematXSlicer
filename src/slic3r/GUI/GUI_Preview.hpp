@@ -5,6 +5,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/* Declares the View3D and Preview panels for print previews.
+   Preview presents layer Z positions, print times, surface areas, and G-code heights. */
 #ifndef slic3r_GUI_Preview_hpp_
 #define slic3r_GUI_Preview_hpp_
 
@@ -207,6 +209,7 @@ private:
     void check_layers_slider_values(std::vector<CustomGCode::Item>& ticks_from_model,
         const std::vector<double>& layers_z);
     void reset_layers_slider();
+    // Refresh the layer slider for the supplied Z sequence and its available G-code annotations.
     void update_layers_slider(const std::vector<double>& layers_z, bool show_gcode_data = false, bool keep_z_range = false);
     void update_layers_slider_mode();
     // update vertical DoubleSlider after keyDown in canvas

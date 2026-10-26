@@ -59,6 +59,30 @@ static const std::vector<std::string> DEFAULT_EXTRUDER_COLORS = { "#FF8000", "#D
 
 namespace Slic3r {
 
+// Copies nonzero result heights selected by opening move IDs; missing IDs or zero heights use Z at indices 0 and 1,
+// then the difference from the preceding Z, matching Slic3r::DoubleSlider::Control::get_label. Z values are ordered and
+// IDs index the result vector; a shorter ID list leaves unmatched Z entries on the fallback. Returns one owned height
+// per Z without retaining inputs; allocation failures propagate, and an empty Z list produces an empty result.
+std::vector<double> calculate_gcode_layer_heights(const std::vector<double>& layer_zs,
+    const std::vector<uint16_t>& opening_layer_ids, const std::vector<float>& layers_max_height)
+{
+    std::vector<double> heights;
+    heights.reserve(layer_zs.size());
+    for (size_t layer_index = 0; layer_index < layer_zs.size(); ++layer_index) {
+        double layer_height = layer_zs[layer_index];
+        if (layer_index > 1)
+            layer_height -= layer_zs[layer_index - 1];
+
+        if (layer_index < opening_layer_ids.size()) {
+            const size_t layer_id = opening_layer_ids[layer_index];
+            if (layer_id < layers_max_height.size() && layers_max_height[layer_id] != 0.0f)
+                layer_height = layers_max_height[layer_id];
+        }
+        heights.push_back(layer_height);
+    }
+    return heights;
+}
+
 // G-code tool selectors arrive as wider parser values. Keep invalid values
 // out of the signed public identity before converting them to extruder_index_t.
 static std::optional<extruder_index_t> checked_extruder_index(const int64_t value)
@@ -98,6 +122,7 @@ const std::vector<std::string> GCodeProcessor::Reserved_Tags = {
     "_GP_ESTIMATED_PRINTING_TIME_PLACEHOLDER",
     " printing object",
     " stop printing object",
+    "MAX_LAYER_HEIGHT:",
 };
 
 const float GCodeProcessor::Wipe_Width = 0.05f;
@@ -514,6 +539,9 @@ void GCodeProcessor::UsedFilaments::process_caches(const GCodeProcessor* process
 }
 
 #if ENABLE_GCODE_VIEWER_STATISTICS
+// Clear Reader data, moves, bed/settings, extruder/filament, object/custom-code/spiral,
+// per-layer-height and statistics data; retain is_binary_file, filament_colors and lines_ends.
+// Rebuilding default filament vectors may allocate.
 void GCodeProcessorResult::reset() {
     reader_plugin_id.clear();
     reader_diagnostics.clear();
@@ -531,12 +559,16 @@ void GCodeProcessorResult::reset() {
     object_names.clear();
     custom_gcode_per_print_z = std::vector<CustomGCode::Item>();
     spiral_vase_layers = std::vector<std::pair<float, std::pair<size_t, size_t>>>();
+    layers_max_height.clear();
     conflict_result = std::nullopt;
     time = 0;
     computed_timestamp = std::time(0);
     print_statistics.reset();
 }
 #else
+// Clear Reader and binary-file state, moves/line ends, bed/settings, extruder/filament,
+// object/custom-code/spiral, per-layer-height and statistics data; retain filament_colors.
+// Rebuilding default filament vectors may allocate.
 void GCodeProcessorResult::reset() {
     reader_plugin_id.clear();
     reader_diagnostics.clear();
@@ -556,6 +588,7 @@ void GCodeProcessorResult::reset() {
     object_names.clear();
     custom_gcode_per_print_z = std::vector<CustomGCode::Item>();
     spiral_vase_layers = std::vector<std::pair<float, std::pair<size_t, size_t>>>();
+    layers_max_height.clear();
     conflict_result = std::nullopt;
     computed_timestamp = std::time(0);
     print_statistics.reset();
@@ -1095,6 +1128,8 @@ void GCodeProcessor::enable_stealth_time_estimator(bool enabled)
     m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].enabled = enabled;
 }
 
+// Reset parser, processor, and result state before a new stream; all inputs are
+// internal, prior per-layer tag flags are discarded, and owned-container failures propagate.
 void GCodeProcessor::reset()
 {
     m_units = EUnits::Millimeters;
@@ -1163,6 +1198,7 @@ void GCodeProcessor::reset()
     m_seam.reset();
 
     m_options_z_corrector.reset();
+    m_layer_max_height_tagged.clear();
 
     m_spiral_vase_active = false;
     m_kissslicer_toolchange_time_correction = 0.0f;
@@ -2143,6 +2179,9 @@ template<typename T>
     }
 }
 
+// Interpret the borrowed comment as a producer or viewer tag and update parser state.
+// MAX_LAYER_HEIGHT accepts finite positive values for the current layer; invalid values
+// are logged without replacing that slot. Text is not retained; allocation failures propagate.
 void GCodeProcessor::process_tags(const std::string_view comment, bool producers_enabled)
 {
     // producers tags
@@ -2201,6 +2240,16 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (boost::starts_with(comment, reserved_tag(ETags::Width))) {
             if (!parse_number(comment.substr(reserved_tag(ETags::Width).size()), m_forced_width))
                 BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Width (" << comment << ").";
+            return;
+        }
+        // Store the greatest height under the current layer; this tag does not carry into later layer slots.
+        if (boost::starts_with(comment, reserved_tag(ETags::Max_Layer_Height))) {
+            float max_layer_height = 0.f;
+            if (!parse_number(comment.substr(reserved_tag(ETags::Max_Layer_Height).size()), max_layer_height) ||
+                !std::isfinite(max_layer_height) || max_layer_height <= 0.f)
+                BOOST_LOG_TRIVIAL(error) << "GCodeProcessor encountered an invalid value for Max_Layer_Height (" << comment << ").";
+            else
+                set_layer_max_height_tag(max_layer_height);
             return;
         }
     }
@@ -2897,6 +2946,9 @@ void GCodeProcessor::process_G1(const GCodeReader::GCodeLine& line)
     process_G1(g1_axes, g1_feedrate);
 }
 
+// Consume borrowed axis/feed values, update machine and extrusion state, and append any resulting move.
+// A positive forced HEIGHT raises the layer maximum; pending markers receive a local tag-or-extrusion
+// height without changing m_height. Stored vertices belong to m_result; vector allocation failures propagate.
 void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes, const std::optional<double>& feedrate,
     G1DiscretizationOrigin origin, const std::optional<unsigned int>& remaining_internal_g1_lines)
 {
@@ -2987,6 +3039,7 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
         if (m_forced_height > 0.0f) {
             // use height coming from the gcode tags
             m_height = m_forced_height;
+            raise_layer_max_height(m_forced_height);
         } else if (m_forced_width > 0.0f) {
             m_width = m_forced_width;
             if (m_extrusion_role == GCodeExtrusionRole::ExternalPerimeter)
@@ -3027,7 +3080,9 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4>& axes
 
         if (origin == G1DiscretizationOrigin::G1)
             m_extruded_last_z = m_end_position[Z];
-        m_options_z_corrector.update(m_height);
+        // A waiting marker takes its layer tag when present, else this extrusion's height.
+        m_options_z_corrector.update(
+            m_height, m_result.layers_max_height, m_layer_max_height_tagged);
 
 #if ENABLE_GCODE_VIEWER_DATA_CHECKING
         m_height_compare.update(m_height, m_extrusion_role);
@@ -4944,12 +4999,19 @@ void GCodeProcessor::post_process()
     }
 }
 
+// Copy current state into one result-owned vertex with the layer id capped to uint16; marker
+// types use that layer's tag, unlike retractions/tool changes. Noop asserts; result growth may throw.
 void GCodeProcessor::store_move_vertex(EMoveType type, bool internal_only)
 {
     m_last_line_id = (type == EMoveType::Color_change || type == EMoveType::Pause_Print || type == EMoveType::Custom_GCode) ?
         m_line_id + 1 :
         ((type == EMoveType::Seam) ? m_last_line_id : m_line_id);
     assert(type != EMoveType::Noop);
+    const uint16_t layer_id = current_viewer_layer_id();
+    float height = (m_height == 0 && m_forced_height > 0) ? m_forced_height : m_height;
+    // markers (not retractions nor tool changes) are drawn with the height of their layer's tag
+    if (type == EMoveType::Seam || type == EMoveType::Color_change || type == EMoveType::Pause_Print || type == EMoveType::Custom_GCode)
+        height = marker_height(layer_id, height);
     // push_back(GCodeProcessorResult::MoveVertex{})
     m_result.moves.emplace_back(
         m_last_line_id,
@@ -4964,12 +5026,12 @@ void GCodeProcessor::store_move_vertex(EMoveType type, bool internal_only)
         float(m_end_position[E] - m_start_position[E]), // delta_extruder
         m_feedrate,
         m_width,
-        (m_height == 0 && m_forced_height > 0) ? m_forced_height : m_height,
+        height,
         m_mm3_per_mm,
         m_fan_speed,
         m_extruder_temps[static_cast<size_t>(m_extruder_id)],
         m_current_time[0], // note: m_time_processor.machines[0].time, is too slow to recompute. it will be updated when recomputed.
-        m_layer_id,
+        layer_id,
         internal_only
     );
 
@@ -4990,6 +5052,46 @@ void GCodeProcessor::store_move_vertex(EMoveType type, bool internal_only)
             machine.stop_times.push_back({ m_g1_line_id, 0.0f });
         }
     }
+}
+
+// Clamp m_layer_id to MoveVertex's uint16 range without changing processor state or allocating.
+uint16_t GCodeProcessor::current_viewer_layer_id() const
+{
+    return static_cast<uint16_t>(std::min<unsigned int>(m_layer_id, UINT16_MAX));
+}
+
+// Store the parsed finite positive tag under the capped viewer layer and flag it as
+// authoritative; result vectors own the values and growth failures propagate.
+void GCodeProcessor::set_layer_max_height_tag(float height)
+{
+    const uint16_t layer_id = current_viewer_layer_id();
+    if (layer_id >= m_result.layers_max_height.size())
+        m_result.layers_max_height.resize(size_t(layer_id) + 1, 0.f);
+    if (layer_id >= m_layer_max_height_tagged.size())
+        m_layer_max_height_tagged.resize(size_t(layer_id) + 1, false);
+    m_result.layers_max_height[layer_id] = height;
+    m_layer_max_height_tagged[layer_id] = true;
+}
+
+// Raise the capped viewer layer to a known extrusion HEIGHT unless its slot is tagged;
+// the result owns stored values and vector growth failures propagate.
+void GCodeProcessor::raise_layer_max_height(float extrusion_height)
+{
+    const uint16_t layer_id = current_viewer_layer_id();
+    if (layer_id < m_layer_max_height_tagged.size() && m_layer_max_height_tagged[layer_id])
+        return;
+    if (layer_id >= m_result.layers_max_height.size())
+        m_result.layers_max_height.resize(size_t(layer_id) + 1, 0.f);
+    m_result.layers_max_height[layer_id] = std::max(m_result.layers_max_height[layer_id], extrusion_height);
+}
+
+// Return the capped layer's tag or fallback without mutation or allocation. A true tag
+// flag implies that the matching result slot was grown before the flag was set.
+float GCodeProcessor::marker_height(uint16_t layer_id, float fallback) const
+{
+    if (layer_id < m_layer_max_height_tagged.size() && m_layer_max_height_tagged[layer_id])
+        return m_result.layers_max_height[layer_id];
+    return fallback;
 }
 
 void GCodeProcessor::set_extrusion_role(GCodeExtrusionRole role)

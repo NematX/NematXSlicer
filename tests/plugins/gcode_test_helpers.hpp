@@ -27,6 +27,7 @@ contains only the probes and assertions specific to the component it covers.
 namespace Slic3r {
 
 class LayerRegionIsland;
+class Model;
 class Orchestrator;
 class Print;
 
@@ -94,6 +95,13 @@ void append_multi_tool_process_sequence(Printing::PrintingLayerGroup &layer);
 
 void configure_standard_firmware(Print &print, uint16_t extruder_count = 1);
 void configure_machine_envelope(Print &print);
+// Initialize two cubes with distinct source layer heights and selected tools, leaving processing to the caller.
+void initialize_mixed_height_cube_print(
+    Print &print,
+    Model &model,
+    DynamicPrintConfig &config,
+    int32_t first_tool,
+    int32_t second_tool);
 size_t count_occurrences(const std::string &text, const std::string &needle);
 size_t count_command_lines(const std::string &text, const std::string &command);
 

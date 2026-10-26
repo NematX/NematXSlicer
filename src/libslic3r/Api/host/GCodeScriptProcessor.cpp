@@ -7,8 +7,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <map>
@@ -24,8 +26,10 @@
 
 #include "ApiHostUtils.hpp"
 #include "Orchestrator.hpp"
+#include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/GCodeReader.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/PlaceholderParser.hpp"
 #include "libslic3r/Print.hpp"
@@ -41,6 +45,9 @@ Every prepare() creates a fresh public Config. process() then splits that
 Config into read-only script inputs and writable machine outputs before it
 enters PlaceholderParser. Outputs are validated in temporary storage and are
 published back only after the complete script succeeds.
+
+Export-wide globals are set once in the constructor, machine options remain
+read-write, and execution options are read-only values filled by the firmware.
 */
 
 namespace Slic3r {
@@ -65,6 +72,30 @@ std::array<std::optional<double>, 3> position_after_gcode(
 bool is_machine_option_key(const std::string &key);
 // Return true when any finalized plan extrusion belongs to a wipe tower; a missing plan holds none.
 bool plan_has_wipe_tower(const Printing::PrintingPlan *plan);
+// Hold layer and tool facts extracted from the finalized plan without retaining plan ownership.
+struct PlanFacts
+{
+    // First concrete tool in plan order: the tool GCodePreamble selects before start_gcode.
+    extruder_index_t initial_tool = 0;
+    // Changes between consecutive concrete tool visits, in plan order.
+    int32_t toolchanges = 0;
+    // PrintingLayerGroup count, which is the range of layer_num.
+    int32_t layer_count = 0;
+    // Highest layer print Z of the plan, 0 without layers.
+    coord_t max_print_z = 0;
+    // One flag per tool slot, set when a tool visit of the plan uses that tool.
+    std::vector<unsigned char> used_tools;
+};
+// Read a possibly null finalized plan, count layers and concrete tool changes, and return one usage flag per supplied tool slot; callers provide at least 255 slots because PlaceholderParser returns element 0 for an index beyond a vector, which would make is_extruder_used[n] falsely report tool n used whenever tool 0 is used, and an out-of-range plan tool throws.
+PlanFacts summarize_plan(const Printing::PrintingPlan *plan, size_t tool_slots);
+// Count borrowed Print object extrusion Z values with the legacy total_layer_count formula, including complete-object instances but excluding support layers; the returned scalar does not mutate or retain the Print.
+int32_t object_layer_count(const Print &print);
+// Publish dimensions derived from a borrowed Print into parser-owned options, using zero vectors when there are no object instances, the bed shape is undefined, or the first-layer envelope is empty; a non-empty degenerate first-layer envelope keeps its true bounds, and option allocation or parser failures propagate without changing the Print.
+void set_dimension_globals(PlaceholderParser &parser, const Print &print);
+// Convert borrowed colour settings and publish parser-owned integer vectors, using zero for invalid colours or an empty colour vector; an index beyond a shorter vector reuses its first colour, extruder_count controls non-empty vector sizes, and option failures propagate.
+void set_colour_globals(PlaceholderParser &parser, const PrintConfig &config, size_t extruder_count);
+// Parse borrowed seven-character #RRGGBB text without side effects and return its integer value, or zero for every invalid form.
+int32_t colour_to_int(const std::string &colour);
 
 void copy_option(DynamicConfig &destination,
                  const DynamicConfig &source,
@@ -165,6 +196,131 @@ bool plan_has_wipe_tower(const Printing::PrintingPlan *plan)
     return false;
 }
 
+// Read a possibly null finalized plan, count layers and concrete tool changes, and return one usage flag per supplied tool slot; callers provide at least 255 slots because PlaceholderParser returns element 0 for an index beyond a vector, which would make is_extruder_used[n] falsely report tool n used whenever tool 0 is used, and an out-of-range plan tool throws.
+PlanFacts summarize_plan(const Printing::PrintingPlan *plan, size_t tool_slots)
+{
+    PlanFacts facts;
+    facts.used_tools.assign(tool_slots, 0);
+    if (plan == nullptr)
+        return facts;
+
+    std::optional<extruder_index_t> previous_tool;
+    for (const Printing::PrintingGroup &group : plan->groups)
+        for (const Printing::PrintingLayerGroup &layer : group.layers) {
+            ++facts.layer_count;
+            facts.max_print_z = std::max(facts.max_print_z, layer.print_z);
+            for (const Printing::PrintingToolGroup &tool : layer.tool_groups) {
+                if (tool.extruder_id == EXTRUDER_ID_UNKNOWN)
+                    continue;
+                facts.used_tools.at(tool.extruder_id) = 1;
+                if (!previous_tool)
+                    facts.initial_tool = tool.extruder_id;
+                else if (*previous_tool != tool.extruder_id)
+                    ++facts.toolchanges;
+                previous_tool = tool.extruder_id;
+            }
+        }
+    return facts;
+}
+
+// Count borrowed Print object extrusion Z values with the legacy total_layer_count formula, including complete-object instances but excluding support layers; the returned scalar does not mutate or retain the Print.
+int32_t object_layer_count(const Print &print)
+{
+    int32_t count = 0;
+    if (print.config().complete_objects.value) {
+        for (const PrintObject &object : print.objects()) {
+            std::vector<coord_t> z_values;
+            for (const Layer &layer : object.layers())
+                if (layer.has_extrusions())
+                    z_values.push_back(layer.scaled_print_z());
+            std::sort(z_values.begin(), z_values.end());
+            const std::vector<coord_t>::iterator unique_end =
+                std::unique(z_values.begin(), z_values.end());
+            count += int32_t(object.instances().size() * (unique_end - z_values.begin()));
+        }
+        return count;
+    }
+
+    std::vector<coord_t> z_values;
+    for (const PrintObject &object : print.objects())
+        for (const Layer &layer : object.layers())
+            if (layer.has_extrusions())
+                z_values.push_back(layer.scaled_print_z());
+    std::sort(z_values.begin(), z_values.end());
+    return int32_t(std::unique(z_values.begin(), z_values.end()) - z_values.begin());
+}
+
+// Publish dimensions derived from a borrowed Print into parser-owned options, using zero vectors when there are no object instances, the bed shape is undefined, or the first-layer envelope is empty; a non-empty degenerate first-layer envelope keeps its true bounds, and option allocation or parser failures propagate without changing the Print.
+void set_dimension_globals(PlaceholderParser &parser, const Print &print)
+{
+    BoundingBoxf3 object_box;
+    for (const PrintObject &object : print.objects())
+        for (const PrintInstance &instance : object.instances())
+            object_box.merge(instance.model_instance->get_object()->instance_bounding_box(
+                *instance.model_instance, false));
+    const Vec3d object_min = object_box.defined ? object_box.min : Vec3d::Zero();
+    const Vec3d object_max = object_box.defined ? object_box.max : Vec3d::Zero();
+    parser.set("bounding_box", new ConfigOptionFloats(std::vector<double>{
+        object_min.x(), object_min.y(), object_min.z(),
+        object_max.x(), object_max.y(), object_max.z()}));
+
+    const BoundingBoxf bed_box(print.config().bed_shape.get_values());
+    const Vec2d bed_min = bed_box.defined ? bed_box.min : Vec2d::Zero();
+    const Vec2d bed_max = bed_box.defined ? bed_box.max : Vec2d::Zero();
+    parser.set("print_bed_min", new ConfigOptionFloats(std::vector<double>{bed_min.x(), bed_min.y()}));
+    parser.set("print_bed_max", new ConfigOptionFloats(std::vector<double>{bed_max.x(), bed_max.y()}));
+    parser.set("print_bed_size", new ConfigOptionFloats(std::vector<double>{
+        bed_max.x() - bed_min.x(), bed_max.y() - bed_min.y()}));
+
+    const Polygon hull = print.first_layer_convex_hull_with_wipe_towers();
+    std::vector<Vec2d> points;
+    points.reserve(hull.size());
+    for (const Point &point : hull)
+        points.emplace_back(unscaled(point.x()), unscaled(point.y()));
+    // Keep variables defined for a Print without a first layer, such as an empty test plan; empty vector options are invalid.
+    if (points.empty())
+        points.emplace_back(Vec2d::Zero());
+    const BoundingBoxf first_layer_box(points);
+    const Vec2d first_layer_min = first_layer_box.min;
+    const Vec2d first_layer_max = first_layer_box.max;
+    parser.set("first_layer_print_convex_hull", new ConfigOptionPoints(points));
+    parser.set("first_layer_print_min", new ConfigOptionFloats(std::vector<double>{
+        first_layer_min.x(), first_layer_min.y()}));
+    parser.set("first_layer_print_max", new ConfigOptionFloats(std::vector<double>{
+        first_layer_max.x(), first_layer_max.y()}));
+    parser.set("first_layer_print_size", new ConfigOptionFloats(std::vector<double>{
+        first_layer_max.x() - first_layer_min.x(), first_layer_max.y() - first_layer_min.y()}));
+}
+
+// Convert borrowed colour settings and publish parser-owned integer vectors, using zero for invalid colours or an empty colour vector; an index beyond a shorter vector reuses its first colour, extruder_count controls non-empty vector sizes, and option failures propagate.
+void set_colour_globals(PlaceholderParser &parser,
+                        const PrintConfig &config,
+                        size_t extruder_count)
+{
+    ConfigOptionInts *filament_colour_option = new ConfigOptionInts(extruder_count, 0);
+    ConfigOptionInts *extruder_colour_option = new ConfigOptionInts(extruder_count, 0);
+    for (size_t idx = 0; idx < extruder_count; ++idx) {
+        filament_colour_option->set_at(
+            colour_to_int(config.filament_colour.get_at(idx)), idx);
+        extruder_colour_option->set_at(
+            colour_to_int(config.extruder_colour.get_at(idx)), idx);
+    }
+    parser.set("filament_colour_int", filament_colour_option);
+    parser.set("extruder_colour_int", extruder_colour_option);
+    parser.set("thumbnails_color_int", new ConfigOptionInt(colour_to_int(config.thumbnails_color.value)));
+}
+
+// Parse borrowed seven-character #RRGGBB text without side effects and return its integer value, or zero for every invalid form.
+int32_t colour_to_int(const std::string &colour)
+{
+    if (colour.size() != 7 || colour[0] != '#')
+        return 0;
+    for (size_t idx = 1; idx < colour.size(); ++idx)
+        if (!std::isxdigit(static_cast<unsigned char>(colour[idx])))
+            return 0;
+    return int32_t(std::strtol(colour.c_str() + 1, nullptr, 16));
+}
+
 } // namespace
 
 class GCodeScriptProcessor::Impl
@@ -187,6 +343,8 @@ private:
                            const ConfigBase *producer_config);
     std::string process(const std::string &script, extruder_index_t current_extruder);
     void create_machine_options();
+    // Create read-only execution options; firmware fills them before each script, producer-frozen layer values win, and defaults remain when firmware does not fill them.
+    void create_execution_options();
     void create_specific_options(const std::string &script_name);
     void merge_producer_config(const ConfigBase *producer_config);
     void resolve_object_names();
@@ -206,12 +364,15 @@ private:
     bool m_processing = false;
     const Orchestrator &m_orchestrator;
     int32_t m_first_layer_bed_temperature = 0;
+    // Maximum print Z of the finalized plan, exposed as a persistent script constant.
+    double m_max_layer_z = 0.0;
     std::vector<std::string> m_object_names;
     std::string m_output;
     std::string m_error;
     raw_gcode_script_processor m_c_processor = {};
 };
 
+// Construct one export-scoped processor from borrowed print and orchestrator data; clone persistent options, publish owned globals, and install C callbacks, while configuration or allocation failures propagate without retaining input ownership.
 GCodeScriptProcessor::Impl::Impl(const Print &print,
                                  const Orchestrator &orchestrator)
     : m_parser(print.placeholder_parser().external_config())
@@ -258,6 +419,23 @@ GCodeScriptProcessor::Impl::Impl(const Print &print,
     m_parser.set("has_single_extruder_multi_material_priming", has_wipe_tower &&
         print.config().single_extruder_multi_material.value &&
         print.config().single_extruder_multi_material_priming.value);
+
+    // Set export constants after the final plan is available; dimensions come from the sliced Print and remain fixed for every script.
+    const PlanFacts plan_facts = summarize_plan(
+        print.printing_plan(), std::max(size_t(255), print.config().nozzle_diameter.size()));
+    m_max_layer_z = unscaled(plan_facts.max_print_z);
+    m_parser.set("initial_tool", int(plan_facts.initial_tool));
+    m_parser.set("initial_extruder", int(plan_facts.initial_tool));
+    m_parser.set("initial_filament_type",
+                 print.config().filament_type.get_at(size_t(plan_facts.initial_tool)));
+    m_parser.set("total_toolchanges", int(plan_facts.toolchanges));
+    m_parser.set("all_layer_count", int(plan_facts.layer_count));
+    m_parser.set("total_layer_count", int(object_layer_count(print)));
+    m_parser.set("max_layer_z", m_max_layer_z);
+    m_parser.set("is_extruder_used", new ConfigOptionBools(plan_facts.used_tools));
+    m_parser.set("num_extruders", int(print.config().nozzle_diameter.size()));
+    set_dimension_globals(m_parser, print);
+    set_colour_globals(m_parser, print.config(), m_extruder_count);
 
     // Object script contexts store compact indices. Copy sanitized labels now
     // so processing later never retains model pointers from the Print view.
@@ -336,6 +514,7 @@ void GCodeScriptProcessor::Impl::process_thunk(
     }
 }
 
+// Prepare a fresh borrowed context with machine, execution and producer options; producer values are cloned, the returned handle expires on the next prepare(), and reentrancy, unknown script types or invalid options throw.
 config_handle *GCodeScriptProcessor::Impl::prepare(
     gcode_script_type script_type,
     const ConfigBase *producer_config)
@@ -354,6 +533,7 @@ config_handle *GCodeScriptProcessor::Impl::prepare(
     if (script_name == nullptr)
         throw std::invalid_argument("Unknown G-code script type.");
     create_machine_options();
+    create_execution_options();
     create_specific_options(*script_name);
     merge_producer_config(producer_config);
     if (script_type == GCODE_SCRIPT_TYPE_START_GCODE)
@@ -383,6 +563,7 @@ void GCodeScriptProcessor::Impl::resolve_object_names()
     }
 }
 
+// Process one prepared script using its numeric tool index, validate and publish only machine outputs, and return owned text through the processor; preparation, parser, validation or publication failures reset state and leave no partial output.
 std::string GCodeScriptProcessor::Impl::process(
     const std::string &script,
     extruder_index_t current_extruder)
@@ -416,7 +597,6 @@ std::string GCodeScriptProcessor::Impl::process(
         // remains in config_outputs, where PlaceholderParser permits assignment.
         const ConfigOptionFloats *position = outputs.option<ConfigOptionFloats>("position");
         m_parser.set("current_position", new ConfigOptionFloats(position->get_values()));
-        m_parser.set("zhop", new ConfigOptionFloat(0.0));
 
         // PlaceholderParser uses the numeric process argument to select vector
         // settings, while [current_extruder] is a regular named option. Keep
@@ -450,6 +630,32 @@ void GCodeScriptProcessor::Impl::create_machine_options()
             "e_position", new ConfigOptionFloats(m_extruder_count, 0.0));
 }
 
+// Create read-only execution options and register their keys for parser input; firmware fills them before each script, producer-frozen layer values win, and defaults remain when firmware does not fill them.
+void GCodeScriptProcessor::Impl::create_execution_options()
+{
+    m_public_config.set_key_value("current_object_idx", new ConfigOptionInt(0));
+    m_specific_keys.push_back("current_object_idx");
+    m_public_config.set_key_value(
+        "extruded_volume", new ConfigOptionFloats(m_extruder_count, 0.0));
+    m_specific_keys.push_back("extruded_volume");
+    m_public_config.set_key_value(
+        "extruded_weight", new ConfigOptionFloats(m_extruder_count, 0.0));
+    m_specific_keys.push_back("extruded_weight");
+    m_public_config.set_key_value("extruded_volume_total", new ConfigOptionFloat(0.0));
+    m_specific_keys.push_back("extruded_volume_total");
+    m_public_config.set_key_value("extruded_weight_total", new ConfigOptionFloat(0.0));
+    m_specific_keys.push_back("extruded_weight_total");
+    m_public_config.set_key_value("layer_num", new ConfigOptionInt(-1));
+    m_specific_keys.push_back("layer_num");
+    m_public_config.set_key_value("layer_z", new ConfigOptionFloat(0.0));
+    m_specific_keys.push_back("layer_z");
+    m_public_config.set_key_value("layer_current_height", new ConfigOptionFloat(0.0));
+    m_specific_keys.push_back("layer_current_height");
+    m_public_config.set_key_value("zhop", new ConfigOptionFloat(0.0));
+    m_specific_keys.push_back("zhop");
+}
+
+// Create options named by one registered script type without duplicating execution keys, initialize max_layer_z from the finalized export, and throw when a declared option has no definition.
 void GCodeScriptProcessor::Impl::create_specific_options(const std::string &script_name)
 {
     const std::map<t_custom_gcode_key, t_config_option_keys> &all_placeholders =
@@ -460,11 +666,17 @@ void GCodeScriptProcessor::Impl::create_specific_options(const std::string &scri
         return;
 
     for (const std::string &key : found->second) {
+        // Skip keys already registered as execution options because layer_num and layer_z are supplied there.
+        if (std::find(m_specific_keys.begin(), m_specific_keys.end(), key) != m_specific_keys.end())
+            continue;
         const ConfigOptionDef *definition = custom_gcode_specific_config_def.get(key);
         if (definition == nullptr)
             throw std::logic_error("Missing custom G-code option definition: " + key);
 
-        ConfigOption *option = definition->create_default_option();
+        // Start max_layer_z at the export constant so a producer that omits it, such as feature_gcode, cannot expose zero.
+        ConfigOption *option = key == "max_layer_z" ?
+            static_cast<ConfigOption *>(new ConfigOptionFloat(m_max_layer_z)) :
+            definition->create_default_option();
         // This placeholder is consumed as one value per extruder by the legacy
         // generator, so its prepared vector uses the same cardinality.
         if (key == "layer_used_filament") {

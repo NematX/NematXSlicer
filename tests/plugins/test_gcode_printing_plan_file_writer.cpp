@@ -887,7 +887,7 @@ TEST_CASE("PrintingPlan scripts cannot replace a previously published file",
     PrintingPlan &plan = print.mutable_printing_plan();
     ExtrusionNop script(ExtrusionPropertyCustomGcodeText(
         ExtrusionPropertyCustomGcodeText::Code::SCRIPT,
-        "M117 {layer_num}"));
+        "M117 {undefined_script_variable}"));
     plan.events.append_before(script);
 
     const boost::filesystem::path output_path = temporary_gcode_path();

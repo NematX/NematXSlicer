@@ -1,8 +1,10 @@
+
 #include <catch2/catch.hpp>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <limits>
 #include <map>
@@ -38,6 +40,9 @@
 #include "libslic3r/Plugins/GCode/Reader/RepRapGCodeReader.hpp"
 #include "libslic3r/Plugins/GCode/Reader/RepRapGCodeReaderState.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+
+/* Tests for normalized G-code Reader events, built-in command handling,
+   host viewer conversion, and legacy GCodeProcessor results. */
 
 /*
 G-code reader event tests
@@ -623,6 +628,78 @@ TEST_CASE("Common G-code reader parses historical state comments",
     REQUIRE(state.x());
     CHECK(*state.x() == Approx(20.0));
     CHECK(state.line_number() == 12u);
+}
+
+// Verify that the integrated Reader publishes the tag separately without changing layer transitions.
+TEST_CASE("Common G-code reader publishes MAX_LAYER_HEIGHT without touching HEIGHT or LAYER_CHANGE",
+          "[plugins][gcode][reader][markers][layer_height]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    ReaderProbe probe;
+    probe.chunks = {
+        ";LAYER_CHANGE\n"
+        ";Z:0.400\n"
+        ";MAX_LAYER_HEIGHT:0.400\n"
+        ";HEIGHT:0.200\n"
+        "G1 X10 Y10 E1\n"
+        ";LAYER_CHANGE\n"
+        ";Z:0.600\n"
+        ";HEIGHT:0.300\n"
+    };
+
+    REQUIRE(execute_default_reader(probe, initial) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(probe.final_state);
+    REQUIRE(probe.observed.size() == 8);
+
+    // The tag has its own state update and does not set HEIGHT.
+    CHECK(probe.observed[2].kind == RAW_GCODE_READER_EVENT_STATE_UPDATE);
+    REQUIRE(observed_item_value(probe.observed[2], RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT));
+    CHECK(*observed_item_value(probe.observed[2], RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT) == Approx(0.4));
+    CHECK_FALSE(observed_item_value(probe.observed[2], RAW_GCODE_READER_ITEM_HEIGHT));
+
+    // A real HEIGHT tag still sets HEIGHT only.
+    REQUIRE(observed_item_value(probe.observed[3], RAW_GCODE_READER_ITEM_HEIGHT));
+    CHECK(*observed_item_value(probe.observed[3], RAW_GCODE_READER_ITEM_HEIGHT) == Approx(0.2));
+    CHECK_FALSE(observed_item_value(probe.observed[3], RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT));
+
+    // The next LAYER_CHANGE only advances LAYER; clearing the value is left to
+    // the consumers, which store it under the layer it was published for.
+    REQUIRE(observed_item_value(probe.observed[5], RAW_GCODE_READER_ITEM_LAYER));
+    CHECK_FALSE(observed_item_value(probe.observed[5], RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT));
+
+    REQUIRE(probe.final_state->value(RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT));
+    CHECK(*probe.final_state->value(RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT) == Approx(0.4));
+}
+
+// Verify that malformed or nonpositive layer-height values become Reader diagnostics.
+TEST_CASE("Common G-code reader reports an invalid MAX_LAYER_HEIGHT",
+          "[plugins][gcode][reader][markers][layer_height][diagnostic]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    ReaderProbe probe;
+    probe.chunks = {
+        ";MAX_LAYER_HEIGHT:abc\n"
+        ";MAX_LAYER_HEIGHT:0\n"
+        ";MAX_LAYER_HEIGHT:-0.2\n"
+        ";MAX_LAYER_HEIGHT:nan\n"
+        ";MAX_LAYER_HEIGHT:\n"
+        ";MAX_LAYER_HEIGHT\n"
+    };
+
+    REQUIRE(execute_default_reader(probe, initial) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(probe.final_state);
+    REQUIRE(probe.observed.size() == 6);
+    for (const ObservedEvent &event : probe.observed) {
+        CHECK(event.kind == RAW_GCODE_READER_EVENT_DIAGNOSTIC);
+        REQUIRE(event.diagnostic);
+        CHECK(*event.diagnostic == RAW_GCODE_READER_DIAGNOSTIC_INVALID_COMMAND_PARAMETERS);
+        CHECK_FALSE(observed_item_value(event, RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT));
+    }
+    CHECK_FALSE(probe.final_state->known(RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT));
 }
 
 TEST_CASE("Common G-code reader matches LAYER_CHANGE exactly",
@@ -2462,6 +2539,289 @@ TEST_CASE("Host G-code reader creates typed marker vertices",
     CHECK(result.moves.back().cp_color_id == 1u);
 }
 
+// Search a borrowed result in order; return the first matching index or size() if absent, without mutation or allocation.
+size_t first_move_of_type(const GCodeProcessorResult &result, EMoveType type)
+{
+    for (size_t index = 0; index < result.moves.size(); ++index)
+        if (result.moves[index].type == type)
+            return index;
+    return result.moves.size();
+}
+
+// Read a borrowed layer-height slot, returning 0 when absent, without mutation or allocation.
+float recorded_layer_height(const GCodeProcessorResult &result, size_t layer)
+{
+    return layer < result.layers_max_height.size() ? result.layers_max_height[layer] : 0.0f;
+}
+
+// Verify tagged heights, extrusion-derived maxima, absent layers, and unchanged move heights.
+TEST_CASE("Host G-code reader stores the maximal height of each layer",
+          "[plugins][gcode][reader][viewer][layer_height]")
+{
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    slic3r_api::GCodeStateTracker state(initial);
+    GCodeReaderResultBuilder builder(nullptr, nullptr, "test.reader", state);
+
+    double line = 0.0;
+    // Copy the borrowed delta into local storage for synchronous tracker and builder calls,
+    // append a line number, and propagate allocation or validation failures.
+    const std::function<void(std::initializer_list<raw_gcode_reader_event_item>)> consume_update =
+        [&](std::initializer_list<raw_gcode_reader_event_item> items) {
+            std::vector<raw_gcode_reader_event_item> owned(items);
+            owned.push_back({RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, line++});
+            const raw_gcode_reader_event event = {
+                RAW_GCODE_READER_EVENT_STATE_UPDATE, owned.data(), static_cast<uint32_t>(owned.size())};
+            state.apply(event);
+            builder.consume_event(event, state);
+        };
+    double x = 1.0;
+    double e = 0.0;
+    // Advance local X/E and consume one linear move at the current layer and HEIGHT;
+    // event data is not retained, and allocation or validation failures propagate.
+    const std::function<void()> consume_extrusion = [&]() {
+        x += 1.0;
+        e += 1.0;
+        consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_LINEAR_MOVE,
+            {{RAW_GCODE_READER_ITEM_X, 0, x},
+             {RAW_GCODE_READER_ITEM_E, 0, e},
+             {RAW_GCODE_READER_ITEM_FEEDRATE, 0, 60.0},
+             {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, line++}});
+    };
+
+    // Layer 0: the tag (0.4) wins over the extrusions (0.2).
+    consume_update({{RAW_GCODE_READER_ITEM_LAYER, 0, 0.0}});
+    consume_update({{RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT, 0, 0.4}});
+    consume_update({{RAW_GCODE_READER_ITEM_HEIGHT, 0, 0.2}});
+    consume_extrusion();
+    // Layer 1: no tag, the greatest extrusion height (0.3 then 0.2) is kept.
+    consume_update({{RAW_GCODE_READER_ITEM_LAYER, 0, 1.0}});
+    consume_update({{RAW_GCODE_READER_ITEM_HEIGHT, 0, 0.3}});
+    consume_extrusion();
+    consume_update({{RAW_GCODE_READER_ITEM_HEIGHT, 0, 0.2}});
+    consume_extrusion();
+    // Layer 2: neither tag nor extrusion; nothing is inherited from layer 0.
+    consume_update({{RAW_GCODE_READER_ITEM_LAYER, 0, 2.0}});
+
+    const GCodeProcessorResult result = builder.finish(state);
+    CHECK(recorded_layer_height(result, 0) == Approx(0.4));
+    CHECK(recorded_layer_height(result, 1) == Approx(0.3));
+    CHECK(recorded_layer_height(result, 2) == 0.0f);
+    // The extrusions keep their own height.
+    REQUIRE(result.moves.size() == 3);
+    CHECK(result.moves[0].height == Approx(0.2));
+    CHECK(result.moves[1].height == Approx(0.3));
+    CHECK(result.moves[2].height == Approx(0.2));
+}
+
+// Verify that tagged marker geometry uses its layer height while extrusion geometry remains unchanged.
+TEST_CASE("Host G-code reader sizes markers with the maximal height of their layer",
+          "[plugins][gcode][reader][viewer][layer_height]")
+{
+    // Layer 0 ends with HEIGHT 0.2; layer 1 starts with the marker, optionally
+    // tagged 0.4, and then extrudes at 0.3.
+    // Build fresh local Reader state for one supported marker and optional tag, then
+    // return its owned result; event data is synchronous and processing failures propagate.
+    const std::function<GCodeProcessorResult(bool, uint32_t)> build = [](bool tagged, uint32_t marker) {
+        std::vector<raw_gcode_reader_event_item> initial_items;
+        const raw_gcode_reader_state initial = initial_state(initial_items);
+        slic3r_api::GCodeStateTracker state(initial);
+        GCodeReaderResultBuilder builder(nullptr, nullptr, "test.reader", state);
+        consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_STATE_UPDATE,
+            {{RAW_GCODE_READER_ITEM_LAYER, 0, 0.0},
+             {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, 0.0}});
+        consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_STATE_UPDATE,
+            {{RAW_GCODE_READER_ITEM_HEIGHT, 0, 0.2},
+             {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, 1.0}});
+        consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_STATE_UPDATE,
+            {{RAW_GCODE_READER_ITEM_LAYER, 0, 1.0},
+             {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, 2.0}});
+        if (tagged)
+            consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_STATE_UPDATE,
+                {{RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT, 0, 0.4},
+                 {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, 3.0}});
+        consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_MARKER,
+            {{RAW_GCODE_READER_ITEM_MARKER, 0, double(marker)},
+             {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, 4.0}});
+        consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_STATE_UPDATE,
+            {{RAW_GCODE_READER_ITEM_HEIGHT, 0, 0.3},
+             {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, 5.0}});
+        consume_builder_event(builder, state, RAW_GCODE_READER_EVENT_LINEAR_MOVE,
+            {{RAW_GCODE_READER_ITEM_X, 0, 2.0},
+             {RAW_GCODE_READER_ITEM_E, 0, 1.0},
+             {RAW_GCODE_READER_ITEM_FEEDRATE, 0, 60.0},
+             {RAW_GCODE_READER_ITEM_LINE_NUMBER, 0, 6.0}});
+        return builder.finish(state);
+    };
+
+    SECTION("a color change takes the tag of its layer, the extrusion keeps its height") {
+        const GCodeProcessorResult result = build(true, RAW_GCODE_READER_MARKER_COLOR_CHANGE);
+        const size_t marker = first_move_of_type(result, EMoveType::Color_change);
+        const size_t extrusion = first_move_of_type(result, EMoveType::Extrude);
+        REQUIRE(marker < result.moves.size());
+        REQUIRE(extrusion < result.moves.size());
+        CHECK(result.moves[marker].height == Approx(0.4));
+        CHECK(result.moves[extrusion].height == Approx(0.3));
+    }
+    SECTION("a seam takes the tag of its layer") {
+        const GCodeProcessorResult result = build(true, RAW_GCODE_READER_MARKER_SEAM);
+        const size_t marker = first_move_of_type(result, EMoveType::Seam);
+        REQUIRE(marker < result.moves.size());
+        CHECK(result.moves[marker].height == Approx(0.4));
+    }
+    SECTION("without a tag the marker keeps the last HEIGHT read") {
+        const GCodeProcessorResult result = build(false, RAW_GCODE_READER_MARKER_COLOR_CHANGE);
+        const size_t marker = first_move_of_type(result, EMoveType::Color_change);
+        REQUIRE(marker < result.moves.size());
+        CHECK(result.moves[marker].height == Approx(0.2));
+    }
+}
+
+// Parse borrowed G-code text with a fresh processor and return its owned result after finalization;
+// the input is not retained, and parse or allocation failures propagate.
+GCodeProcessorResult process_with_legacy_processor(const std::string &gcode)
+{
+    GCodeProcessor processor;
+    processor.reset();
+    processor.process_string(gcode);
+    processor.finalize(false);
+    return processor.extract_result();
+}
+
+// Verify tagged heights, extrusion-derived maxima, absent layers, reset behavior, and tag reservation.
+TEST_CASE("GCodeProcessor stores the maximal height of each layer",
+          "[plugins][gcode][processor][layer_height]")
+{
+    ensure_plugin_test_runtime_initialized();
+    SECTION("tag, extrusion fallback and absent layer") {
+        const GCodeProcessorResult result = process_with_legacy_processor(
+            "G90\nM82\n"
+            ";LAYER_CHANGE\n;Z:0.4\n;MAX_LAYER_HEIGHT:0.4\n;HEIGHT:0.2\nG1 X10 Y0 E1 F6000\n"
+            ";LAYER_CHANGE\n;Z:0.6\n;HEIGHT:0.3\nG1 X20 Y0 E2\n;HEIGHT:0.2\nG1 X30 Y0 E3\n"
+            ";LAYER_CHANGE\n;Z:0.8\n");
+        // GCodeProcessor numbers the layers from 1: LAYER_CHANGE increments the id.
+        CHECK(recorded_layer_height(result, 1) == Approx(0.4));
+        CHECK(recorded_layer_height(result, 2) == Approx(0.3));
+        CHECK(recorded_layer_height(result, 3) == 0.0f);
+    }
+    SECTION("an invalid tag is ignored and the extrusions decide") {
+        const GCodeProcessorResult result = process_with_legacy_processor(
+            "G90\nM82\n"
+            ";LAYER_CHANGE\n;Z:0.4\n;MAX_LAYER_HEIGHT:abc\n;HEIGHT:0.2\nG1 X10 Y0 E1 F6000\n"
+            ";LAYER_CHANGE\n;Z:0.6\n;MAX_LAYER_HEIGHT:0\n;HEIGHT:0.3\nG1 X20 Y0 E2\n");
+        CHECK(recorded_layer_height(result, 1) == Approx(0.2));
+        CHECK(recorded_layer_height(result, 2) == Approx(0.3));
+    }
+    SECTION("a processor reset forgets the previous file") {
+        GCodeProcessor processor;
+        processor.process_string(
+            ";LAYER_CHANGE\n;Z:0.4\n;MAX_LAYER_HEIGHT:0.4\n;HEIGHT:0.2\nG1 X10 Y0 E1 F6000\n");
+        REQUIRE(processor.get_result().layers_max_height.size() == 2);
+        processor.reset();
+        CHECK(processor.get_result().layers_max_height.empty());
+        // A fresh layer 1 without tag must not see the tag of the earlier file.
+        processor.process_string(
+            ";LAYER_CHANGE\n;Z:0.4\n;HEIGHT:0.2\nG1 X10 Y0 E1 F6000\n");
+        CHECK(recorded_layer_height(processor.get_result(), 1) == Approx(0.2));
+    }
+    SECTION("the tag is a reserved tag") {
+        std::string found;
+        CHECK(GCodeProcessor::contains_reserved_tag(";MAX_LAYER_HEIGHT:0.3\n", found));
+    }
+}
+
+// Verify marker tag selection in immediate and deferred paths without changing extrusion heights.
+TEST_CASE("GCodeProcessor sizes markers with the maximal height of their layer",
+          "[plugins][gcode][processor][layer_height]")
+{
+    ensure_plugin_test_runtime_initialized();
+    // Layer 1 extrudes at 0.2. Layer 2 starts with a color change, optionally
+    // in a layer tagged 0.4, and then extrudes at 0.3.
+    // Return an owned G-code string differing only by layer-tag presence; no processor
+    // state is mutated, and string-allocation failures propagate.
+    const std::function<std::string(bool)> color_change_gcode = [](bool tagged) {
+        return std::string("G90\nM82\n"
+            ";LAYER_CHANGE\n;Z:0.4\n;HEIGHT:0.2\nG1 X10 Y0 E1 F6000\n"
+            ";LAYER_CHANGE\n;Z:0.6\n") +
+            (tagged ? ";MAX_LAYER_HEIGHT:0.4\n" : "") +
+            ";COLOR_CHANGE,T0,#FF0000\n;HEIGHT:0.3\nG1 X20 Y0 E2\n";
+    };
+
+    SECTION("a waiting color change takes the tag of its layer, the extrusion keeps its height") {
+        const GCodeProcessorResult result = process_with_legacy_processor(color_change_gcode(true));
+        const size_t marker = first_move_of_type(result, EMoveType::Color_change);
+        REQUIRE(marker < result.moves.size());
+        CHECK(result.moves[marker].height == Approx(0.4));
+        // Both extrusions stay at their own height.
+        REQUIRE(first_move_of_type(result, EMoveType::Extrude) < result.moves.size());
+        CHECK(result.moves[first_move_of_type(result, EMoveType::Extrude)].height == Approx(0.2));
+        CHECK(result.moves.back().type == EMoveType::Extrude);
+        CHECK(result.moves.back().height == Approx(0.3));
+    }
+    SECTION("without a tag the color change takes the height of the next extrusion") {
+        const GCodeProcessorResult result = process_with_legacy_processor(color_change_gcode(false));
+        const size_t marker = first_move_of_type(result, EMoveType::Color_change);
+        REQUIRE(marker < result.moves.size());
+        CHECK(result.moves[marker].height == Approx(0.3));
+        CHECK(result.moves.back().height == Approx(0.3));
+    }
+    SECTION("a pause without following extrusion takes the tag of its layer") {
+        const GCodeProcessorResult result = process_with_legacy_processor(
+            "G90\nM82\n"
+            ";LAYER_CHANGE\n;Z:0.4\n;MAX_LAYER_HEIGHT:0.4\n;HEIGHT:0.2\nG1 X10 Y0 E1 F6000\n"
+            ";PAUSE_PRINT\n");
+        const size_t marker = first_move_of_type(result, EMoveType::Pause_Print);
+        REQUIRE(marker < result.moves.size());
+        CHECK(result.moves[marker].height == Approx(0.4));
+    }
+    SECTION("a seam takes the tag of its layer and the extrusion keeps its height") {
+        const GCodeProcessorResult result = process_with_legacy_processor(
+            "G90\nM82\n"
+            ";LAYER_CHANGE\n;Z:0.4\n;MAX_LAYER_HEIGHT:0.4\n;HEIGHT:0.3\n;SEAM:5:0\nG1 X10 Y0 E1 F6000\n");
+        const size_t marker = first_move_of_type(result, EMoveType::Seam);
+        const size_t extrusion = first_move_of_type(result, EMoveType::Extrude);
+        REQUIRE(marker < result.moves.size());
+        REQUIRE(extrusion < result.moves.size());
+        CHECK(result.moves[marker].height == Approx(0.4));
+        CHECK(result.moves[extrusion].height == Approx(0.3));
+    }
+}
+
+// Process local G-code with a tag on layer 65535 and a deferred marker on 65536; verify the shared
+// capped slot, 0.4 marker height, and explicit 0.2 extrusion HEIGHT. Result data is locally owned;
+// parsing or allocation failures fail the test.
+TEST_CASE("GCodeProcessor caps layer heights at the MoveVertex boundary",
+          "[plugins][gcode][processor][layer_height]")
+{
+    ensure_plugin_test_runtime_initialized();
+
+    std::string gcode = "G90\nM82\n";
+    gcode.reserve(gcode.size() + (static_cast<size_t>(UINT16_MAX) + 1u) * 14u + 128u);
+    for (size_t layer = 0; layer < static_cast<size_t>(UINT16_MAX); ++layer)
+        gcode += ";LAYER_CHANGE\n";
+    gcode += ";MAX_LAYER_HEIGHT:0.4\n"
+             ";LAYER_CHANGE\n"
+             ";COLOR_CHANGE,T0,#FF0000\n"
+             ";HEIGHT:0.2\n"
+             "G1 X10 Y0 E1 F6000\n";
+
+    const GCodeProcessorResult result = process_with_legacy_processor(gcode);
+    const size_t marker = first_move_of_type(result, EMoveType::Color_change);
+    const size_t extrusion = first_move_of_type(result, EMoveType::Extrude);
+    const uint16_t capped_layer = static_cast<uint16_t>(UINT16_MAX);
+
+    REQUIRE(marker < result.moves.size());
+    REQUIRE(extrusion < result.moves.size());
+    REQUIRE(result.layers_max_height.size() == static_cast<size_t>(UINT16_MAX) + 1u);
+    CHECK(result.layers_max_height[capped_layer] == Approx(0.4));
+    CHECK(result.moves[marker].layer_id == capped_layer);
+    CHECK(result.moves[marker].height == Approx(0.4));
+    CHECK(result.moves[marker].height == Approx(
+        result.layers_max_height[result.moves[marker].layer_id]));
+    CHECK(result.moves[extrusion].layer_id == capped_layer);
+    CHECK(result.moves[extrusion].height == Approx(0.2));
+}
+
 TEST_CASE("Host G-code reader owns typed diagnostics in stream order",
           "[plugins][gcode][reader][viewer][diagnostic]")
 {
@@ -3211,12 +3571,13 @@ TEST_CASE("G-code reader reconstructs lines split across borrowed chunks",
     CHECK(next == chunks.size());
 }
 
+// Verify that the state tracker rejects a standard item identifier beyond its declared range.
 TEST_CASE("G-code reader rejects item types outside its declared vocabulary",
           "[plugins][gcode][reader]")
 {
     std::vector<raw_gcode_reader_event_item> items;
     raw_gcode_reader_state state = initial_state(items);
-    items.push_back({RAW_GCODE_READER_ITEM_READER_ID + 1u, 0, 1.0});
+    items.push_back({RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT + 1u, 0, 1.0});
     state.items = items.data();
     state.item_count = static_cast<uint32_t>(items.size());
     CHECK_THROWS_AS(slic3r_api::GCodeStateTracker(state), std::invalid_argument);

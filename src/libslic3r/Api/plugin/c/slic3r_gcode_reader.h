@@ -6,7 +6,7 @@
 #define slic3r_gcode_reader_h_
 
 #define SLIC3R_PLUGIN_API_GCODE_READER_MAJOR 2u
-#define SLIC3R_PLUGIN_API_GCODE_READER_MINOR 2u
+#define SLIC3R_PLUGIN_API_GCODE_READER_MINOR 3u
 
 #include <stdint.h>
 
@@ -186,7 +186,13 @@ typedef enum raw_gcode_reader_item_type {
     /* Event-local raw_gcode_reader_diagnostic_type. A DIAGNOSTIC event
        contains exactly one such item with target zero. It is forbidden in
        every other event and in a complete machine state. */
-    RAW_GCODE_READER_ITEM_DIAGNOSTIC_TYPE
+    RAW_GCODE_READER_ITEM_DIAGNOSTIC_TYPE,
+    /* Greatest height in millimetres published for the current LAYER. The target
+       is always zero. The complete state retains the last published value until
+       replaced or invalidated; consumers associate each publication with its
+       current LAYER and must not assign it to later layers. Without it, consumers
+       may use extrusion HEIGHTs. */
+    RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT
 } raw_gcode_reader_item_type;
 
 /* Registry type used to intern private Reader-state schema names. */

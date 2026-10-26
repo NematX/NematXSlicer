@@ -83,7 +83,8 @@ class PythonGCodeFirmwareTests(unittest.TestCase):
         cls.generated_directory.cleanup()
 
     def test_reader_identity_and_custom_range_constants_are_generated(self):
-        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_GCODE_READER_MINOR, 2)
+        """Keep generated Python Reader identifiers aligned with the C API version."""
+        self.assertEqual(self.generated.SLIC3R_PLUGIN_API_GCODE_READER_MINOR, 3)
         self.assertEqual(self.generated.RAW_GCODE_READER_MARKER_SEAM, 1)
         self.assertEqual(self.generated.RAW_GCODE_READER_MARKER_CUSTOM_GCODE, 4)
         self.assertNotIn("source", dict(self.generated.RawGcodeReaderEvent._fields_))

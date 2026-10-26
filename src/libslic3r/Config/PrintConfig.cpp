@@ -3588,13 +3588,32 @@ void DynamicPrintAndCLIConfig::handle_legacy(t_config_option_key &opt_key, std::
 
 // SlicingStatesConfigDefs
 
+// Register read-only slicing-state options and placeholder guidance in the
+// base definition; this no-argument constructor stores them in the config object
+// and propagates allocation failures.
 ReadOnlySlicingStatesConfigDef::ReadOnlySlicingStatesConfigDef()
 {
     ConfigOptionDef* def;
 
+    def = this->add("layer_num", coInt);
+    def->label = L("Layer number");
+    def->tooltip = L("Zero-based index of the current layer, counted over every layer of the G-code (the first printed layer is 0; sequential objects continue the count). Available in every custom G-code. In before_layer_gcode and layer_gcode it is the layer that starts, in start_gcode the first layer; -1 before the first layer otherwise.");
+
+    def = this->add("layer_z", coFloat);
+    def->label = L("Layer Z");
+    def->tooltip = L("Height of the top of the current layer above the print bed (print Z, without z_offset). Same layer as layer_num. Available in every custom G-code; in before_layer_gcode and layer_gcode it is the layer that starts, and in start_gcode it is the first layer.");
+
+    def = this->add("layer_current_height", coFloat);
+    def->label = L("Current layer height");
+    def->tooltip = L("Actual source-layer thickness, unlike the layer_height setting: it follows first_layer_height, variable layer height, height ranges and raft or support layers. Before a layer, it is the first source layer encountered in print order (or that group's Z gap when no source extrusion exists); within a layer, an extrusion without a source keeps the current height, and a source extrusion uses its own height; in the postamble, the last source extrusion's height remains, while a source-free group uses its Z gap, even for the final group. Available in every custom G-code.");
+
+    def = this->add("max_layer_z", coFloat);
+    def->label = L("Maximal layer Z");
+    def->tooltip = L("Height of the last layer above the print bed. Available in every custom G-code.");
+
     def = this->add("zhop", coFloat);
     def->label = L("Current z-hop");
-    def->tooltip = L("Contains z-hop present at the beginning of the custom G-code block.");
+    def->tooltip = L("Z lift at the beginning of the custom G-code block: how far the nozzle is above the Z of the current layer (layer_z plus z_offset). 0 when the nozzle is not above it, when its position is unknown, or before the first layer.");
 }
 
 ReadWriteSlicingStatesConfigDef::ReadWriteSlicingStatesConfigDef()
@@ -3850,8 +3869,8 @@ OtherPresetsConfigDef::OtherPresetsConfigDef()
 
 
 static std::map<t_custom_gcode_key, t_config_option_keys> s_CustomGcodeSpecificPlaceholders{
-    {"start_filament_gcode",    {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id", "previous_extruder", "next_extruder"}},
-    {"end_filament_gcode",      {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id", "previous_extruder", "next_extruder"}},
+    {"start_filament_gcode",    {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id", "previous_extruder", "next_extruder", "toolchange_z"}},
+    {"end_filament_gcode",      {"layer_num", "layer_z", "max_layer_z", "filament_extruder_id", "previous_extruder", "next_extruder", "toolchange_z"}},
     {"milling_toolchange_start_gcode", {"layer_num", "layer_z", "previous_layer_z", "max_layer_z", "previous_extruder", "next_extruder"}},
     {"milling_toolchange_end_gcode",   {"layer_num", "layer_z", "previous_layer_z", "max_layer_z", "previous_extruder", "next_extruder"}},
     {"start_gcode",             {"start_gcode_bed_temperature", "max_layer_z"}},
@@ -3907,7 +3926,7 @@ CustomGcodeSpecificConfigDef::CustomGcodeSpecificConfigDef()
 
     def = this->add("toolchange_z", coFloat);
     def->label = L("Toolchange Z");
-    def->tooltip = L("Height above the print bed when the toolchange takes place. Usually the same as layer_z, but can be different.");
+    def->tooltip = L("Z height of the layer where a tool change takes place. Usually the same as layer_z, but can be different. For the final end_filament_gcode, it is the Z of the last layer.");
 
     def = this->add("color_change_extruder", coInt);
     // TRN: This is a label in custom g-code editor dialog, belonging to color_change_extruder. Denoted index of the extruder for which color change is performed.
