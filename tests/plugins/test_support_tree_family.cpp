@@ -640,14 +640,6 @@ namespace {
 void check_isolated_tips(int fixture, bool thin, int interfaces, const char *layer_height)
 {
     CAPTURE(isolated_tips_name(fixture), thin, interfaces, layer_height);
-    // The downward point with interface layers stops the Debug build on an assertion of the slicing of the support layers
-    // (Layer.cpp, recompute_slices_from_layer_regions: "!slices[check_idx].contour.contains(slices[bigger_idx].contour.first_point())"),
-    // which aborts the whole test binary: that combination is left out; the island-order assertion at Layer.cpp:134 is to be fixed in a
-    // follow-up change.
-    if (fixture == 2 && interfaces > 0) {
-        WARN("Skipped: the downward point with interface layers hits the island-order assertion at Layer.cpp:134, to be fixed in a follow-up change.");
-        return;
-    }
     DynamicPrintConfig config = SG::config("organic", false, interfaces, true);
     config.set_deserialize_strict({{"layer_height", layer_height}, {"first_layer_height", layer_height}});
     if (thin)
@@ -3199,4 +3191,110 @@ TEST_CASE("Tree routing and slab generation benchmark", "[.][tree-routing-benchm
                         model_id, style, nodes, route_min, median(route_times), slab_min, median(slab_times));
             CHECK(nodes > 0);
         }
+}
+
+
+namespace {
+// The island-order condition that the Debug build asserts in Layer.cpp (recompute_slices_from_layer_regions). A violation is an island
+// listed after an earlier island whose bounding box it contains and whose first point its contour contains, i.e. a container listed
+// after an island lying in one of its holes; the correct order lists the container first. Returns true and fills earlier and later with
+// the indexes of the pair on a violation; returns false and leaves them unchanged otherwise.
+bool island_order_violation(const ExPolygons &islands, size_t &earlier, size_t &later)
+{
+    std::vector<BoundingBox> boxes;
+    for (size_t check = 0; check < islands.size(); ++check) {
+        boxes.emplace_back(islands[check].contour.points);
+        for (size_t bigger = 0; bigger < check; ++bigger)
+            if (boxes[check].contains(boxes[bigger]) && islands[check].contour.contains(islands[bigger].contour.first_point())) {
+                earlier = bigger;
+                later = check;
+                return true;
+            }
+    }
+    return false;
+}
+} // namespace
+
+// The API union lists the islands from outside to inside, as the native union_ex does: an island nested in a hole comes after the
+// island that holds it (ClipperShapes::to_expolygons walks the Clipper tree with traverse_pt, ClipperUtils.hpp). The API union of three
+// nested squares lists the outer ring first.
+TEST_CASE("The API union lists nested islands from outside to inside", "[plugins][support-island-order]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto square = [](double from, double to) {
+        Polygon polygon;
+        polygon.points = { Point::new_scale(from, from), Point::new_scale(to, from), Point::new_scale(to, to), Point::new_scale(from, to) };
+        return polygon;
+    };
+    // An outer square, a hole in it and a square inside the hole.
+    Polygons nested{ square(0., 10.), square(2., 8.), square(4., 6.) };
+    nested[1].make_clockwise();
+    const ExPolygons native_result = union_ex(nested);
+    size_t earlier = 0, later = 0;
+    REQUIRE(native_result.size() == 2);
+    CHECK_FALSE(island_order_violation(native_result, earlier, later));
+    PluginStorage storage;
+    slic3r_api::StoredPolygonCollection collection(SG::handle(storage));
+    assign_native(collection, nested);
+    const slic3r_api::ClipperContext clipper(SG::handle(storage));
+    const slic3r_api::StoredExPolygonCollection api = slic3r_api::clipper_union(clipper(collection)).to_expolygon_collection();
+    const ExPolygons &api_result = *reinterpret_cast<const ExPolygons *>(api.handle());
+    REQUIRE(api_result.size() == 2);
+    CHECK_FALSE(island_order_violation(api_result, earlier, later));
+}
+
+// The islands of every object layer, and of every support layer
+// that the publication builds (the union of the slabs of one print Z and thickness, as publish() does), of the downward point with
+// 3 interface layers must be ordered outside to inside, which the Debug build asserts when a layer is published (Layer.cpp,
+// recompute_slices_from_layer_regions). The support layers are rebuilt here as publish() builds them. The interface slabs of the point are rings around the cone section, with
+// branch discs in their holes.
+TEST_CASE("The islands of the layers of the downward point are ordered from outside to inside", "[plugins][support-island-order]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool thin = GENERATE(true, false);
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    CAPTURE(thin, layer_height);
+    DynamicPrintConfig config = SG::config("organic", false, 3, true);
+    config.set_deserialize_strict({{"layer_height", layer_height}, {"first_layer_height", layer_height}});
+    if (thin)
+        config.set_deserialize_strict({{"support_tree_tip_diameter", "0.42"}, {"support_tree_branch_diameter", "0.42"},
+                                       {"support_material_extrusion_width", "0.42"}});
+    Print print;
+    Model model;
+    Test::init_print({isolated_tips_mesh(2)}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    size_t earlier = 0, later = 0, object_violations = 0;
+    for (size_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx)
+        object_violations += island_order_violation(object.layer(layer_idx).lslices(), earlier, later) ? 1 : 0;
+    CHECK(object_violations == 0);
+    Routed routed(print);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, true, routed.support);
+    Common::GeneratorLayers sorted = routed.support.top;
+    for (const Common::GeneratorLayers *list : { &routed.support.bottom, &routed.support.base, &routed.support.interfaces })
+        sorted.insert(sorted.end(), list->begin(), list->end());
+    std::sort(sorted.begin(), sorted.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) { return *a < *b; });
+    const slic3r_api::ClipperContext clipper(SG::handle(routed.storage));
+    size_t groups = 0, violations = 0;
+    std::ostringstream report;
+    for (size_t begin = 0; begin < sorted.size();) {
+        size_t end = begin + 1;
+        while (end < sorted.size() && sorted[end]->print_z == sorted[begin]->print_z && sorted[end]->height == sorted[begin]->height)
+            ++end;
+        slic3r_api::StoredPolygonCollection all(SG::handle(routed.storage));
+        for (size_t idx = begin; idx < end; ++idx)
+            all.append_copy_from(sorted[idx]->polygons);
+        if (!all.empty()) {
+            ++groups;
+            const slic3r_api::StoredExPolygonCollection islands = Common::native_expolygons(slic3r_api::clipper_union(clipper(all)));
+            if (island_order_violation(*reinterpret_cast<const ExPolygons *>(islands.handle()), earlier, later)) {
+                ++violations;
+                report << " z=" << unscaled(sorted[begin]->print_z) << " (island " << earlier << " listed before the island " << later << " that holds it)";
+            }
+        }
+        begin = end;
+    }
+    REQUIRE(groups > 0);
+    CAPTURE(groups, violations, report.str());
+    CHECK(violations == 0);
 }
