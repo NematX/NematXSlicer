@@ -11,9 +11,13 @@
 #include <string>
 #include <vector>
 
+#include <boost/filesystem.hpp>
 
+
+#include "gcode_test_helpers.hpp"
 #include "perimeter_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+#include "support_grid_test_helpers.hpp"
 #include "test_data.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -2496,6 +2500,52 @@ TEST_CASE("Seam router projects loops without a perimeter marker and keeps marke
     const c_point routed = router.place_seam(marked, start);
     CHECK(routed.x == expected.x);
     CHECK(routed.y == expected.y);
+}
+
+/*
+Cost seam with the advanced ordering on a grid-supported slab: the support
+interfaces print on extruder 2, so the plan changes tools and needs a wipe
+tower, and the support contact loops are closed loops without a perimeter
+marker that the seam router must project. The G-code export must complete with
+the ordering and wipe tower steps done; scoped guards restore the prior plugin
+activation.
+*/
+TEST_CASE("Cost seam completes a supported two-extruder print with a wipe tower",
+          "[plugins][seam-placer][cost][ordering][integration]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const ScopedPluginActivation cost(orchestrator, k_cost_plugin);
+    const ScopedPluginActivation default_ordering(orchestrator, "ordering.extrusion_tree.default", false);
+    const ScopedPluginActivation advanced_ordering(orchestrator, "ordering.extrusion_tree.advanced");
+
+    // Support interfaces print on extruder 2, so the plan changes tools and needs the wipe tower.
+    // Contact loops are the closed support loops without a perimeter marker that the router must project.
+    DynamicPrintConfig config = Slic3r::Test::SupportGrid::config("grid", false, 3, false);
+    // Seam visibility builds a ray-cast visibility model for every external loop; loop binding does not depend on it.
+    config.set_deserialize_strict({{"support_material_interface_contact_loops", "1"}, {"wipe_tower", "1"},
+        {"wipe_tower_x", "40"}, {"wipe_tower_y", "60"}, {"single_extruder_multi_material", "0"},
+        {"wiping_volumes_matrix", "0,140,140,0"}, {"filament_minimal_purge_on_wipe_tower", "15,15"},
+        {"filament_diameter", "1.75,1.75"}, {"seam_visibility", "0"}});
+    config.set_deserialize_strict(
+        Slic3r::Steps::plugin_exclusive_group_option_key(orchestrator, SEAM_PLACER, "seam_placer_plugin"),
+        k_cost_plugin);
+    config.set_deserialize_strict(
+        Slic3r::Steps::plugin_exclusive_group_option_key(orchestrator, STEP_ORDERING, "ordering.extrusion_tree"),
+        "ordering.extrusion_tree.advanced");
+
+    Model model;
+    Print print;
+    Slic3r::Test::init_print(std::vector<TriangleMesh>{Slic3r::Test::SupportGrid::slab()}, print, model, config);
+    REQUIRE_NOTHROW(print.process());
+
+    // Seam ordering runs in the export pipeline; process() stops after slicing.
+    const boost::filesystem::path output_path = Slic3r::Test::GCode::temporary_gcode_path();
+    Slic3r::Test::GCode::remove_output_pair(output_path);
+    REQUIRE_NOTHROW(orchestrator.export_gcode(print, output_path.string(), nullptr));
+    CHECK(print.is_step_done(STEP_ORDERING));
+    CHECK(print.is_step_done(STEP_WIPETOWER));
+    Slic3r::Test::GCode::remove_output_pair(output_path);
 }
 
 /*
