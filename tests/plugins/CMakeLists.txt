@@ -91,6 +91,7 @@ add_executable(${_TEST_NAME}_tests
     test_layer_region_support_flow.cpp
     test_support_grid_family.cpp
     test_support_grid_legacy_compare.cpp
+    test_support_publication.cpp
     test_flat_area_layer_height.cpp
     test_nozzle_cleaning.cpp
     test_ordering_advanced_extrusion_tree.cpp
@@ -134,6 +135,7 @@ add_executable(${_TEST_NAME}_tests
     test_support_demand_overhangs.cpp
     test_support_toolpath_step.cpp
     test_support_toolpath_legacy.cpp
+    test_support_toolpath_branch.cpp
     test_support_common.cpp
     test_support_step.cpp
     test_layer_extrusion_edit_support_acceleration.cpp

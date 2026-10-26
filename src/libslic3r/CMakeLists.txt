@@ -500,6 +500,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/SupportLayers.hpp
 	Plugins/Support/Common/SupportParams.cpp
 	Plugins/Support/Common/SupportParams.hpp
+	Plugins/Support/Common/SupportPaths.cpp
+	Plugins/Support/Common/SupportPaths.hpp
 	Plugins/Support/Common/SupportPublication.cpp
 	Plugins/Support/Common/SupportPublication.hpp
 	Plugins/Support/Common/SupportSettings.cpp
@@ -518,6 +520,14 @@ set(SLIC3R_SOURCES
 	Plugins/Support/SupportDemandOverhangs.hpp
 	Plugins/Support/SupportDemandPainting.cpp
 	Plugins/Support/SupportDemandPainting.hpp
+	Plugins/Support/Toolpath/BranchSheathPaths.cpp
+	Plugins/Support/Toolpath/BranchSheathPaths.hpp
+	Plugins/Support/Toolpath/LegacySupportPaths.cpp
+	Plugins/Support/Toolpath/LegacySupportPaths.hpp
+	Plugins/Support/Toolpath/SupportToolpathBranch.cpp
+	Plugins/Support/Toolpath/SupportToolpathBranch.hpp
+	Plugins/Support/Toolpath/SupportToolpathLegacy.cpp
+	Plugins/Support/Toolpath/SupportToolpathLegacy.hpp
 	Plugins/WipeTower/ToolChangeUnretract.cpp
 	Plugins/WipeTower/ToolChangeUnretract.hpp
 	Plugins/WipeTower/ToolChangeWipe.cpp
@@ -526,10 +536,6 @@ set(SLIC3R_SOURCES
 	Plugins/WipeTower/WipeTowerLayout.hpp
 	Plugins/WipeTower/WipeTowerManager.cpp
 	Plugins/WipeTower/WipeTowerManager.hpp
-	Plugins/Support/Toolpath/LegacySupportPaths.cpp
-	Plugins/Support/Toolpath/LegacySupportPaths.hpp
-	Plugins/Support/Toolpath/SupportToolpathLegacy.cpp
-	Plugins/Support/Toolpath/SupportToolpathLegacy.hpp
 	Printing/PrintingPlan.cpp
 	Printing/PrintingPlan.hpp
 	Steps/StepDetectSupportSpots.cpp

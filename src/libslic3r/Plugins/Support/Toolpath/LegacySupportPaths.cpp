@@ -17,8 +17,8 @@
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
-#include "libslic3r/Plugins/Support/Common/PerimeterFill.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 
 /* Support surfaces describe printable areas, not paths. This file chooses the
@@ -100,8 +100,6 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
 void fuse_parts(LayerParts &parts);
 // The attributes of paths with this role and flow: width, height and mm3 per mm.
 EPropertyAttributes flow_attributes(raw_extrusion_role role, const c_flow &flow);
-// Append each polyline to parent as a path, or as a loop when closed, carrying the given attributes.
-void append_paths(storage_handle *storage, MutableExtrusionEntity parent, const PointLists &lines, const EPropertyAttributes &attributes);
 // Collect the points of every polyline-bearing leaf of an extrusion tree.
 void leaf_lines(const ExtrusionEntity &entity, PointLists &out);
 // Whether any of the polylines crosses the area.
@@ -123,23 +121,12 @@ double squared_distance(c_point a, c_point b);
 void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &contact, const Polys &overhang, const c_flow &flow, coord_t resolution);
 // Split each polyline by the area, returning the pieces inside and the pieces outside.
 std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area);
-// Drop degenerate polylines and snap the points to the resolution, as the native ensure_valid(Polylines).
-PointLists valid_lines(storage_handle *storage, const PointLists &lines, coord_t resolution);
 // Clip one path from the highest overlap down, scale its flow by the remaining height and rechain the fragments from its start.
 void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coord_t z, const std::vector<Internal::Overlap> &overlapping, coord_t resolution);
 // Gather the lower support footprints whose top lies between the bottom and the current slab, sorted by Z.
 std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_handle *object, coord_t z, coord_t bottom, bool bottom_contact);
-// Move the children of src to the end of dst, leaving src with empty children.
-void move_children(MutableExtrusionEntity dst, MutableExtrusionEntity src);
-// Fill every area with the recipe, or with the perimeter-wrapped fill, and append the paths to out. The layer's region 0
-// supplies the pattern settings, as the native default region config did.
-void fill_paths(const run_ctx_support_toolpath &payload, storage_handle *storage, MutableExtrusionEntity out, const ExPolygonCollection &areas,
-                const layer_handle *layer, const raw_infill_pattern_params &recipe, bool perimeter, raw_extrusion_role role, const c_flow &flow,
-                double spacing);
 // Generate one role across a support layer and assign its paths to the islands they cross.
 void process_layer(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer);
-// Degrees to radians in float, as the native Geometry::deg2rad<float>().
-float radians(float degrees);
 
 PathParams::PathParams(const Print &print, const Object &object, const object_handle *handle) : geometry(print, object)
 {
@@ -188,7 +175,8 @@ Polys role_polygons(storage_handle *storage, const layer_region_island_handle *r
     for (uint32_t index = 0; index < layer_region_island_count_fill_surface(region); ++index) {
         const surface_handle *surface = layer_region_island_get_fill_surface(region, index);
         const raw_surface_type type = surface_get_type(surface);
-        if ((type & mask) != mask || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge))) continue;
+        // Branch bodies belong to the branch role, which no legacy role prints.
+        if ((type & mask) != mask || surface_type_is_branch(type) || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge))) continue;
         append_expolygon(result, ExPolygon(surface_get_expolygon(surface)));
     }
     return result;
@@ -258,26 +246,6 @@ EPropertyAttributes flow_attributes(raw_extrusion_role role, const c_flow &flow)
     EPropertyAttributes attributes;
     attributes.extrusion_role(int32_t(role)).mm3_per_mm(flow.mm3_per_mm).width(float(unscaled(flow.width))).height(float(unscaled(flow.height)));
     return attributes;
-}
-
-void append_paths(storage_handle *storage, MutableExtrusionEntity parent, const PointLists &lines, const EPropertyAttributes &attributes)
-{
-    for (const Points &points : lines) {
-        if (points.size() < 2) continue;
-        StoredExtrusionEntity path(storage, points);
-        path.set_flags(uint32_t(RAW_EXTRUSION_FLAG_REVERSIBLE));
-        path.get_or_add(EPropertyAttributes::key) = attributes;
-        const bool closed = points.front().x == points.back().x && points.front().y == points.back().y;
-        if (!closed) {
-            parent.append_child_move(path.mutable_view());
-            continue;
-        }
-        // A closed path is an ExtrusionLoop: neither sortable nor reversible.
-        StoredExtrusionEntity loop(storage);
-        loop.append_child_move(path.mutable_view());
-        loop.set_flags(0u);
-        parent.append_child_move(loop.mutable_view());
-    }
 }
 
 void leaf_lines(const ExtrusionEntity &entity, PointLists &out)
@@ -470,7 +438,7 @@ void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &c
     contact = as_polygons(clipper_diff(clipper(contact), clipper_offset_polylines(storage, loops, radius * 1.1)));
     contact.ensure_valid(resolution);
     loops.ensure_valid(resolution);
-    append_paths(storage, out, point_lists(loops), flow_attributes(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, flow));
+    Common::append_paths(storage, out, point_lists(loops), flow_attributes(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, flow), true);
 }
 
 std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area)
@@ -486,13 +454,6 @@ std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const Poi
             result.second.push_back(piece.points());
     }
     return result;
-}
-
-PointLists valid_lines(storage_handle *storage, const PointLists &lines, coord_t resolution)
-{
-    StoredPolylineCollection collection = polyline_collection(storage, lines);
-    collection.ensure_valid(resolution);
-    return point_lists(collection);
 }
 
 void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coord_t z, const std::vector<Internal::Overlap> &overlapping, coord_t resolution)
@@ -514,7 +475,7 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
         StoredExPolygonCollection trimming = clipper_offset(clipper(footprint), scale_d(0.5 * double(attributes.c_extrusion_property_attributes::width))).to_expolygon_collection();
         trimming.ensure_valid(resolution);
         std::pair<PointLists, PointLists> split = split_lines(storage, fragments.back().lines, trimming);
-        fragments[index].lines = valid_lines(storage, split.first, resolution);
+        fragments[index].lines = Common::valid_polylines(storage, split.first, resolution);
         fragments.back().lines = std::move(split.second);
         const float height = float(unscaled(z - overlapping[index].z));
         fragments[index].attributes.height(height);
@@ -545,7 +506,7 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
         if (!found_line) {
             // Disconnected rounding fragments remain printable rather than disappearing.
             for (Fragment &fragment : fragments)
-                append_paths(storage, result.mutable_view(), fragment.lines, fragment.attributes);
+                Common::append_paths(storage, result.mutable_view(), fragment.lines, fragment.attributes, true);
             break;
         }
         if (reverse) std::reverse(found_line->begin(), found_line->end());
@@ -590,37 +551,6 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_ha
     return result;
 }
 
-void move_children(MutableExtrusionEntity dst, MutableExtrusionEntity src)
-{
-    for (uint32_t index = 0; index < src.readonly().child_count(); ++index)
-        dst.append_child_move(src.child_mutable(index));
-}
-
-void fill_paths(const run_ctx_support_toolpath &payload, storage_handle *storage, MutableExtrusionEntity out, const ExPolygonCollection &areas,
-                const layer_handle *layer, const raw_infill_pattern_params &recipe, bool perimeter, raw_extrusion_role role, const c_flow &flow,
-                double spacing)
-{
-    const Common::InnerFill inner = Common::pattern_service_fill(payload, recipe.pattern_id, recipe, layer, nullptr, nullptr,
-                                                                 layer_get_region(layer, 0));
-    const raw_surface_type surface_type = raw_surface_type(RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE);
-    for (const ExPolygon area : areas) {
-        if (perimeter) {
-            Common::PerimeterFillSettings settings;
-            settings.spacing = spacing;
-            settings.ratio_fill_inside = 0.2f;
-            settings.role = role;
-            settings.flow = flow;
-            Common::fill_with_perimeter(storage, Surface(area, surface_type), settings, inner, out);
-            continue;
-        }
-        StoredSurfaceCollection surfaces(storage);
-        surfaces.append(area, surface_type);
-        StoredExtrusionEntity pattern_output(storage);
-        inner(surface_collection_at(surfaces.handle(), 0), pattern_output.mutable_view());
-        move_children(out, pattern_output.mutable_view());
-    }
-}
-
 void process_layer(const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer)
 {
     const Common::SupportParams &geometry = params.geometry;
@@ -642,7 +572,7 @@ void process_layer(const run_ctx_support_toolpath &payload, storage_handle *stor
     if (geometry.interface_angle_increment == 0 && geometry.style == Common::SupportStyle::Snug)
         angle += property.interface_id & 1 ? float(-M_PI / 4.) : float(M_PI / 4.);
     else if (geometry.interface_angle_increment > 0)
-        angle += interface_angle + property.interface_id * radians(float(geometry.interface_angle_increment));
+        angle += interface_angle + property.interface_id * Common::radians(float(geometry.interface_angle_increment));
     const std::string &contact_pattern = role == SurfaceRole::Top ? geometry.top_pattern_id : geometry.bottom_pattern_id;
     const bool top_as_base = !params.top_enabled, bottom_as_base = !params.bottom_enabled;
     std::vector<Pass> passes;
@@ -690,7 +620,7 @@ void process_layer(const run_ctx_support_toolpath &payload, storage_handle *stor
             spacing = geometry.first_flow_mm.spacing;
             density = float(geometry.raft_first_layer_density);
             if (base_filler) {
-                filler_angle = radians(float(params.base_angle_degrees + 90.));
+                filler_angle = Common::radians(float(params.base_angle_degrees + 90.));
                 filler_z = 0.;
             } else {
                 filler_angle = 0;
@@ -700,39 +630,20 @@ void process_layer(const run_ctx_support_toolpath &payload, storage_handle *stor
         const bool sheath = base_filler && geometry.with_sheath;
         const bool perimeter = flange || sheath;
         const std::string inner = flange ? std::string("rectilinear") : pattern;
-        raw_infill_pattern_params recipe = {};
-        recipe.pattern_id = payload.resolve_pattern_id(&payload, perimeter ? inner.c_str() : pattern.c_str());
-        recipe.surface_type = raw_surface_type(RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE);
         const raw_extrusion_role fill_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-        recipe.extrusion_role = fill_role;
-        recipe.flow = flow;
-        recipe.density = density;
-        recipe.flow_mult = 1.f;
-        recipe.connection = C_INFILL_CONNECTION_CONNECTED;
-        // The legacy fills keep Fill's default can_angle_cross, so a smooth ironing pass turns a quarter turn.
-        recipe.infill_flags = C_INFILL_FLAG_DONT_ADJUST | C_INFILL_FLAG_CAN_ANGLE_CROSS;
-        recipe.spacing = spacing;
-        recipe.angle = filler_angle;
-        recipe.bridge_angle = -1.;
-        recipe.z = filler_z;
-        recipe.layer_height = unscaled(flow.height);
-        recipe.bridge_offset = -1;
-        recipe.fill_resolution = scale_i(0.0125);
-        recipe.anchor_length = 1000.f;
-        recipe.anchor_length_max = 1000.f;
-        recipe.object_bounding_box.min = c_point{-scale_i(1.), -scale_i(1.)};
-        recipe.object_bounding_box.max = c_point{scale_i(1.), scale_i(1.)};
+        const raw_infill_pattern_params recipe = Common::base_fill_recipe(payload, perimeter ? inner : pattern, fill_role, flow, spacing,
+                                                                          density, filler_angle, filler_z);
         if (pass.contact && !overhang.empty()) contact_loops(storage, out.mutable_view(), pass.polygons, overhang, flow, geometry.resolution);
         StoredExPolygonCollection fused = sparse_filler ?
             clipper_offset2(clipper(pass.polygons), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection() :
             clipper_union_with_safety_offset(clipper(pass.polygons)).to_expolygon_collection();
         fused.ensure_valid(geometry.resolution);
         StoredExtrusionEntity paths(storage);
-        fill_paths(payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter, fill_role, flow, spacing);
+        Common::fill_base_areas(payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
         // A bottom contact also overlaps sparse and interface slabs, so it collects them for modulation.
         const bool bottom_contact_pass = role == SurfaceRole::Bottom && &pass == &passes.front();
         Internal::modulate(storage, paths.mutable_view(), z, overlaps(storage, payload.object, z, bottom, bottom_contact_pass), geometry.resolution);
-        move_children(out.mutable_view(), paths.mutable_view());
+        Common::move_children(out.mutable_view(), paths.mutable_view());
     }
     // A part printed as base joins the support bucket and the support extruder, on this role's own
     // surface; otherwise the role keeps its interface bucket and extruder.
@@ -757,11 +668,6 @@ void process_layer(const run_ctx_support_toolpath &payload, storage_handle *stor
         if (extrusion_insert_child_move(destination, extrusion_child_count(destination), entity.mutable_handle()) == EXTRUSION_INDEX_INVALID)
             throw std::runtime_error("Cannot publish support extrusion");
     }
-}
-
-float radians(float degrees)
-{
-    return float(PI) * degrees / float(180.0);
 }
 
 } // namespace

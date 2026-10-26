@@ -199,7 +199,7 @@ public:
         setup_records.clear();
         setup_run_records.clear();
         run_records.clear();
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
             REQUIRE(Orchestrator::instance().set_plugin_active(id, false));
         for (SupportToolpathProbe *probe : probes())
             REQUIRE(Orchestrator::instance().set_plugin_active(probe->id(), true));
@@ -209,7 +209,7 @@ public:
     {
         for (SupportToolpathProbe *probe : probes())
             Orchestrator::instance().set_plugin_active(probe->id(), false);
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
             Orchestrator::instance().set_plugin_active(id, true);
     }
 };
@@ -511,7 +511,8 @@ public:
         Test::Plugins::ensure_plugin_test_runtime_initialized();
         pattern_records.clear();
         m_supportbase_was_active = Orchestrator::instance().is_plugin_active("supportbase");
-
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+            REQUIRE(Orchestrator::instance().set_plugin_active(id, false));
         REQUIRE(Orchestrator::instance().set_plugin_active(SupportPatternProbe::k_id, true));
         REQUIRE(Orchestrator::instance().set_plugin_active("supportbase", true));
     }
@@ -520,7 +521,7 @@ public:
     {
         Orchestrator::instance().set_plugin_active("supportbase", m_supportbase_was_active);
         Orchestrator::instance().set_plugin_active(SupportPatternProbe::k_id, false);
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
             Orchestrator::instance().set_plugin_active(id, true);
     }
 

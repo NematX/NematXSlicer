@@ -16,9 +16,11 @@
    raw slice is their union in object region zero, without modifier splitting. Rebuilding slices
    creates islands before region membership is locked. Each island then gets one work region per
    extruder that prints on it, holding dense top or bottom surfaces, or sparse internal support
-   surfaces, each typed by its role. Publication gives each area one owner: the lower surfaces lose
-   the areas the upper ones print, and the base loses the areas any interface covers. It does not
-   separate bridged lower slabs from non-bridged ones, so the family must keep those two disjoint.
+   surfaces (base slabs, and branch slabs typed as branch surfaces), each typed by its role.
+   Publication gives each area one owner: the lower surfaces lose the areas the upper ones print,
+   the branch and the base lose the areas any interface covers, and the base also loses the areas a
+   branch prints. It does not separate bridged lower slabs from non-bridged ones, so the family must
+   keep those two disjoint.
    Extruder zero
    means the current extruder, stored as EXTRUDER_ID_UNKNOWN. Temporary API collections use shared
    plugin storage but are released individually; a run never clears that shared storage. Groups of
@@ -68,7 +70,7 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
             for (size_t j = end; j < group_end; ++j) {
                 const GeneratorLayer &slab = *sorted[j];
                 if (slab.polygons.empty()) continue;
-                if (slab.type == LayerType::Base || slab.type == LayerType::Intermediate) z_has_base = true;
+                if (slab.type == LayerType::Base || slab.type == LayerType::Intermediate || slab.type == LayerType::Branch) z_has_base = true;
                 else ++interface_count;
                 z_min_height = z_min_height == 0 ? slab.height : std::min(z_min_height, slab.height);
                 if (slab.type == LayerType::TopContact) { ++top_count; contact_bottom = slab.bottom_z; }
@@ -103,12 +105,14 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
             for (uint32_t island_idx = 0; island_idx < layer_count_island(layer); ++island_idx) {
                 layer_island_handle *island = layer_get_island_mutable(layer, island_idx);
                 const ExPolygon island_slice(layer_island_get_slice(island));
-                // Clip every slab of this layer to the island and collect the three role surfaces:
-                // upper (top), lower (bottom, bridged or not) and sparse base.
-                StoredPolygonCollection top_surfaces(storage), bridge_surfaces(storage), bottom_surfaces(storage), sparse_surfaces(storage);
+                // Clip every slab of this layer to the island and collect the role surfaces: upper
+                // (top), lower (bottom, bridged or not), sparse base and branch bodies.
+                StoredPolygonCollection top_surfaces(storage), bridge_surfaces(storage), bottom_surfaces(storage),
+                    sparse_surfaces(storage), branch_surfaces(storage);
                 for (size_t j = begin; j < end; ++j) {
                     const GeneratorLayer &slab = *sorted[j];
                     const bool base = slab.type == LayerType::Base || slab.type == LayerType::Intermediate;
+                    const bool branch = slab.type == LayerType::Branch;
                     const bool top = slab.type == LayerType::TopContact || slab.type == LayerType::TopInterface;
                     const bool bridge = slab.type == LayerType::BottomContact && slab.bridging;
                     /* A contact is typed as base when no interface layer is configured on its side
@@ -130,20 +134,24 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
                     const bool typed_as_base = mergeable_contact &&
                         Internal::merged_into_base(merge_regions, base_takes_contact, z_has_base, slab.bridging);
                     StoredPolygonCollection clipped = clipper_intersection(clipper(slab.polygons), clipper(island_slice)).to_polygon_collection();
-                    if (base || typed_as_base) sparse_surfaces.append_move_from(clipped);
+                    if (branch) branch_surfaces.append_move_from(clipped);
+                    else if (base || typed_as_base) sparse_surfaces.append_move_from(clipped);
                     else if (top) top_surfaces.append_move_from(clipped);
                     else if (bridge) bridge_surfaces.append_move_from(clipped);
                     else bottom_surfaces.append_move_from(clipped);
                 }
                 // One owner per area: the upper surfaces keep every area they share with a lower
-                // one, and the base keeps only the areas no interface covers.
+                // one, the branch keeps the areas no interface covers, and the base keeps only the
+                // areas that neither an interface nor a branch covers.
                 const StoredPolygonCollection top_union = clipper_union(clipper(top_surfaces)).to_polygon_collection();
                 bridge_surfaces = Internal::resolve_overlap(bridge_surfaces, top_union);
                 bottom_surfaces = Internal::resolve_overlap(bottom_surfaces, top_union);
                 const StoredPolygonCollection lower_union =
                     clipper_union2(clipper(bridge_surfaces), clipper(bottom_surfaces)).to_polygon_collection();
                 const StoredPolygonCollection covered = clipper_union2(clipper(top_union), clipper(lower_union)).to_polygon_collection();
+                branch_surfaces = Internal::resolve_overlap(branch_surfaces, covered);
                 sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, covered);
+                sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, branch_surfaces);
                 // Surfaces of one extruder, in the native order of their types.
                 std::map<extruder_index_t, std::vector<std::pair<StoredExPolygonCollection, raw_surface_type>>> surfaces;
                 const auto add = [&](extruder_index_t extruder, const StoredPolygonCollection &area, raw_surface_type type) {
@@ -154,6 +162,7 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
                 add(interface_extruder, bridge_surfaces, srf_type().bottom().solid().bridge().support().raw());
                 add(interface_extruder, bottom_surfaces, srf_type().bottom().solid().support().raw());
                 add(base_extruder, sparse_surfaces, srf_type().internal().sparse().support().raw());
+                add(base_extruder, branch_surfaces, srf_type().internal().sparse().support().branch().raw());
                 for (const auto &[extruder, collection] : surfaces) {
                     StoredSurfaceCollection stored(storage);
                     for (const auto &[expolygons, type] : collection)

@@ -151,6 +151,7 @@ after the available plugin set is known.
 #include "libslic3r/Plugins/WipeTower/ToolChangeWipe.hpp"
 #include "libslic3r/Plugins/WipeTower/WipeTowerManager.hpp"
 #include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
+#include "libslic3r/Plugins/Support/Toolpath/SupportToolpathBranch.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/SupportToolpathLegacy.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandBuildplateOnly.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandModifiers.hpp"
@@ -967,6 +968,8 @@ void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Support::Toolpath::register_support_toolpath_bottom_plugin);
     register_builtin_plugin(orchestrator, "support.toolpath.legacy_top",
         slic3r_api::Support::Toolpath::register_support_toolpath_top_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.branch_sheath",
+        slic3r_api::Support::Toolpath::register_support_toolpath_branch_plugin);
 }
 
 bool resolve_plugin_startup_activation_config(const boost::filesystem::path &data_directory,

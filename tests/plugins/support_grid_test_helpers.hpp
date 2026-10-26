@@ -64,6 +64,7 @@ inline DynamicPrintConfig config(const char *style = "grid", bool soluble = fals
         {"raft_first_layer_expansion", "0"}, {"brim_width", "0"}, {"skirts", "0"}});
     for (const std::pair<const char *, const char *> &provider : {
         std::pair<const char *, const char *>{"support_toolpath_sparse", "support.toolpath.legacy_sparse"},
+        {"support_toolpath_branch", "support.toolpath.branch_sheath"},
         {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom"},
         {"support_toolpath_top_interface", "support.toolpath.legacy_top"}}) {
         const std::string key = Steps::plugin_exclusive_group_option_key(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, provider.first);
