@@ -1,3 +1,6 @@
+#include <cmath>
+
+#include "libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 
 /*
@@ -37,5 +40,9 @@ extern "C" PROBE_EXPORT int gcode_sdk_probe();
 extern "C" PROBE_EXPORT int gcode_sdk_probe()
 {
     ExternalFirmware firmware;
-    return firmware.probe() == "A[SET_POSITION POS=0]\n" ? 0 : 1;
+    if (firmware.probe() != "A[SET_POSITION POS=0]\n")
+        return 1;
+    // The arc helper is header-only: an external firmware uses it directly.
+    const c_vec2d center = arc_center(c_vec2d{ 5.0, 0.0 }, c_vec2d{ 0.0, 5.0 }, 5.0, true);
+    return std::abs(center.x) < 1e-9 && std::abs(center.y) < 1e-9 ? 0 : 2;
 }

@@ -34,6 +34,12 @@ required syntax encoders and startup hooks. The SDK also contains
 `SingleAccelerationRegisterGCodeFirmwareSession` for dialects sharing one
 print/travel acceleration register.
 
+For firmwares that only accept center-form arcs (`G2`/`G3` with `I`/`J`), include
+`libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp` and call
+`arc_center(start, end, move.radius_mm, ccw)` in `encode_move()`; `I`/`J` are the
+center minus the start. The helper is header-only, uses the same signed-radius
+convention as `PreparedMove`, and is also used by the built-in Klipper firmware.
+
 Publish a fresh session through `make_gcode_firmware_instance()` from a
 `GCODE_FIRMWARE` provider. The session owns export-local state. Select the provider
 through `gcode_firmware_plugin`; no `gcode_flavor` compatibility is introduced here.

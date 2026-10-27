@@ -76,6 +76,7 @@ add_executable(${_TEST_NAME}_tests
     test_gcode_custom_gcode_per_print_z.cpp
     test_gcode_feature_gcode.cpp
     test_gcode_firmware_dialects.cpp
+    test_arc_geometry.cpp
     test_gcode_firmware_state.cpp
     test_gcode_line_parser.cpp
     test_gcode_layer_height_slider.cpp
