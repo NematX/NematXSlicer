@@ -676,7 +676,10 @@ public:
                              GCodeProcessorResult *result);
 
     // Resolve and query the exporter using stable borrowed Print data and settings from config; return its ID/extension or throw, without rendering or writing.
-    GCodeExporterSelection select_gcode_exporter(const Print &print, const DynamicPrintConfig &config);
+    // A non-empty explicit_id selects that active exporter provider instead of the one named by the `gcode_exporter_plugin`
+    // setting of config, which is then not read for the exporter nor modified; empty keeps the setting.
+    GCodeExporterSelection select_gcode_exporter(const Print &print, const DynamicPrintConfig &config,
+                                                 const std::string &explicit_id = std::string());
     // Run the exporter chosen by `selection` (from select_gcode_exporter(), which ran QUERY) on a borrowed reference, with
     // configuration, sliced-width and (when available) statistics metadata. The exporter reads its destination from the
     // `output_path` setting of `config` and publishes its output itself; it reports what it wrote, and the host keeps

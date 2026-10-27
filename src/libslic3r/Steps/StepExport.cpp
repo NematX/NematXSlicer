@@ -22,7 +22,8 @@ STEP_EXPORT runner implementation
 
 The runner is the only reader of the export request. It moves the request out of
 the Print first, so that every attempt consumes it whatever its outcome, checks
-the reference, queries the exporter with the request settings and delegates
+the reference, queries the exporter (the one named by the request's exporter_id, or
+the one of its configuration when that is empty) with the request settings and delegates
 the run to Orchestrator::export_print. For file exporters it sets the request's
 output_path_suggestion from the optional directory and filename base; a directory
 that is not present is ignored, leaving the model-derived directory in use. When
@@ -86,7 +87,8 @@ void run_step(Orchestrator &orchestrator, Print &print)
         !boost::filesystem::is_regular_file(boost::filesystem::path(reference), filesystem_error) || filesystem_error)
         throw RuntimeError("The G-code reference is not ready: slice again before exporting.");
 
-    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, request->config);
+    const Orchestrator::GCodeExporterSelection selection =
+        orchestrator.select_gcode_exporter(print, request->config, request->exporter_id);
 
     // STEP_GCODE is done, so output_filepath formats the final statistics. Use the proposed directory only while it exists;
     // otherwise output_filepath falls back to its current model-derived directory.

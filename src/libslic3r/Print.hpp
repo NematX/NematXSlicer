@@ -343,7 +343,8 @@ public:
     It is single-use: the runner moves it out of the Print when it starts, so a later export needs a
     new request. config is a private copy of full_print_config() plus the request-only entries
     (output_path, output_path_suggestion); it never takes part in Print::apply(). The optional suggestion directory and
-    filename base let the caller influence the exporter's proposed path without setting its destination. thumbnails renders
+    filename base let the caller influence the exporter's proposed path without setting its destination. exporter_id lets the
+    caller name the exporter of this request without touching the configuration. thumbnails renders
     the images the exporter asks for, and stays empty when no graphical renderer exists (command line). inputs asks the
     requester for the values that the exporter needs (see ExportInputForm); it stays empty when the requester cannot be
     asked, which fails an exporter that asks.
@@ -359,6 +360,9 @@ public:
         std::string output_path_suggestion_filename_base;
         // Fold accents in the suggested filename for outputs intended for legacy firmware.
         bool output_path_suggestion_ascii_fallback = false;
+        // ID of the G-code exporter to use for this request only; empty uses the `gcode_exporter_plugin` setting of config.
+        // The setting itself is never changed by it.
+        std::string exporter_id;
 
         // Destination of the export, or an empty string when none was set.
         std::string output_path() const

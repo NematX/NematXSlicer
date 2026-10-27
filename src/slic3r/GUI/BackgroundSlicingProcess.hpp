@@ -172,9 +172,11 @@ public:
 	// Schedule the complete output path used by the SLA export step.
 	void schedule_export(const std::string &path);
 	// Schedule FFF output using a proposed directory, filename base, and optional ASCII fallback without choosing its destination.
+	// A non-empty exporter_id names the G-code exporter of this export instead of the printer setting; empty uses the setting.
 	void schedule_fff_export(const std::string &suggestion_directory,
 	                         const std::string &suggestion_filename_base,
-	                         bool ascii_fallback);
+	                         bool ascii_fallback,
+	                         const std::string &exporter_id);
 	// Move an upload job into the pending request to enqueue it after print slicing completes.
 	void schedule_upload(Slic3r::PrintHostJob upload_job);
 	// Clear the pending SLA or FFF export request and its suggestion values.
@@ -268,6 +270,8 @@ private:
 	std::string                     m_fff_export_suggestion_directory;
 	std::string                     m_fff_export_suggestion_filename_base;
 	bool                            m_fff_export_suggestion_ascii_fallback = false;
+	// Exporter ID requested for the scheduled FFF export; empty means the printer setting.
+	std::string                     m_fff_export_exporter_id;
 	// Print host upload job to schedule after slicing is complete, used by schedule_upload(),
 	// empty by default (ie. no upload to schedule)
 	PrintHostJob                m_upload_job;

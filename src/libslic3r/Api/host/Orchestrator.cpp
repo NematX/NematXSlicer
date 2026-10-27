@@ -3605,22 +3605,29 @@ static void require_exporter_extension(const Orchestrator::GCodeExporterSelectio
                            "' does not support the destination extension '" + suffix + "'.");
 }
 
-// Resolve the exporter named by the borrowed configuration, strictly: a missing key means the built-in exporter, and an
-// unknown, inactive or differently resolved ID throws with its own message. Then run QUERY, which executes on the calling
-// thread with the borrowed Print in the payload only, without cancellation or cleanup registration on that Print.
+// Resolve the exporter, strictly, then run QUERY, which executes on the calling thread with the borrowed Print in the
+// payload only, without cancellation or cleanup registration on that Print. A non-empty `explicit_id` names the exporter
+// directly (a caller-side choice such as a GUI session choice): it must be a registered, active provider of the exporter
+// group, and the configuration setting is neither read for the exporter nor modified. An empty `explicit_id` uses the
+// borrowed configuration: a missing key means the built-in exporter, and an unknown, inactive or differently resolved ID
+// throws with its own message. The firmware is always resolved from the configuration.
 // Return owned ID and extension; no file is created, and invalid selection or incompatible answers throw.
-Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const Print &print, const DynamicPrintConfig &config)
+Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const Print &print, const DynamicPrintConfig &config,
+                                                                         const std::string &explicit_id)
 {
     const ConfigOption *selector = config.option(k_gcode_exporter_option_key);
-    const std::string plugin_id = selector == nullptr ? k_default_gcode_exporter_id : selector->serialize();
+    const std::string plugin_id = !explicit_id.empty() ? explicit_id :
+        selector == nullptr ? std::string(k_default_gcode_exporter_id) : selector->serialize();
     Plugin *plugin = this->get_plugin(plugin_id);
     if (plugin == nullptr || plugin->get_step() != STEP_EXPORT ||
         plugin->get_exclusive_group() != k_gcode_exporter_option_key)
         throw RuntimeError("The configured G-code exporter '" + plugin_id + "' is not registered.");
     if (!this->is_plugin_active(plugin))
         throw RuntimeError("The configured G-code exporter '" + plugin_id + "' is inactive.");
-    // The same strict resolution is used by orchestrator_select_plugin() and Print::validate().
-    if (Steps::selected_active_plugin_from_group(*this, STEP_EXPORT, k_gcode_exporter_option_key, &config) != plugin)
+    // The same strict resolution is used by orchestrator_select_plugin() and Print::validate(); an explicit choice
+    // bypasses the setting, so it has no setting to agree with.
+    if (explicit_id.empty() &&
+        Steps::selected_active_plugin_from_group(*this, STEP_EXPORT, k_gcode_exporter_option_key, &config) != plugin)
         throw RuntimeError("The configured G-code exporter '" + plugin_id + "' cannot be selected.");
 
     Plugin *firmware = Steps::selected_active_plugin_from_group(

@@ -756,10 +756,11 @@ void BackgroundSlicingProcess::schedule_export(const std::string &path)
 	m_export_path = path;
 }
 
-// Copy the FFF suggestion directory and base, store the ASCII-fallback flag, and invalidate finalization under the print state lock; leave pending work unchanged when another export or upload is queued.
+// Copy the FFF suggestion directory and base, store the ASCII-fallback flag and the requested exporter ID (empty: the printer setting), and invalidate finalization under the print state lock; leave pending work unchanged when another export or upload is queued.
 void BackgroundSlicingProcess::schedule_fff_export(const std::string &suggestion_directory,
                                                    const std::string &suggestion_filename_base,
-                                                   bool ascii_fallback)
+                                                   bool ascii_fallback,
+                                                   const std::string &exporter_id)
 {
 	assert(!this->is_export_scheduled() && m_upload_job.empty());
 	if (this->is_export_scheduled() || !m_upload_job.empty())
@@ -770,6 +771,7 @@ void BackgroundSlicingProcess::schedule_fff_export(const std::string &suggestion
 	m_fff_export_suggestion_directory = suggestion_directory;
 	m_fff_export_suggestion_filename_base = suggestion_filename_base;
 	m_fff_export_suggestion_ascii_fallback = ascii_fallback;
+	m_fff_export_exporter_id = exporter_id;
 	m_fff_export_scheduled = true;
 }
 
@@ -785,7 +787,7 @@ void BackgroundSlicingProcess::schedule_upload(Slic3r::PrintHostJob upload_job)
 	m_upload_job = std::move(upload_job);
 }
 
-// When the worker is idle, clear the SLA destination and FFF suggestions and invalidate finalization under the print state lock; leave them unchanged while the worker is running.
+// When the worker is idle, clear the SLA destination, the FFF suggestions and the requested exporter ID, and invalidate finalization under the print state lock; leave them unchanged while the worker is running.
 void BackgroundSlicingProcess::reset_export()
 {
 	bool running = true;
@@ -802,6 +804,7 @@ void BackgroundSlicingProcess::reset_export()
 		m_fff_export_suggestion_directory.clear();
 		m_fff_export_suggestion_filename_base.clear();
 		m_fff_export_suggestion_ascii_fallback = false;
+		m_fff_export_exporter_id.clear();
 		// invalidate_step expects the mutex to be locked.
 		std::scoped_lock<std::mutex> lock(m_print->state_mutex());
 		this->invalidate_step(bspsGCodeFinalize);
@@ -834,7 +837,7 @@ bool BackgroundSlicingProcess::invalidate_all_steps()
 	return m_step_state.invalidate_all([this](){ this->stop_internal(); });
 }
 
-// Build a single-use STEP_EXPORT request from the FFF Print's configuration and a renderer borrowing this process; attach the GUI input callback and path suggestions, deposit it on the Print, and propagate export failures.
+// Build a single-use STEP_EXPORT request from the FFF Print's configuration and a renderer borrowing this process; attach the GUI input callback, path suggestions and requested exporter ID (empty: the printer setting), deposit it on the Print, and propagate export failures.
 void BackgroundSlicingProcess::finalize_gcode()
 {
 	Print::ExportRequest request = m_fff_print->make_export_request(
@@ -843,6 +846,7 @@ void BackgroundSlicingProcess::finalize_gcode()
 	request.output_path_suggestion_directory = m_fff_export_suggestion_directory;
 	request.output_path_suggestion_filename_base = m_fff_export_suggestion_filename_base;
 	request.output_path_suggestion_ascii_fallback = m_fff_export_suggestion_ascii_fallback;
+	request.exporter_id = m_fff_export_exporter_id;
 	m_fff_print->request_export(std::move(request));
 	Orchestrator::instance().export_requested(*m_fff_print);
 	m_print->set_status(100, _u8L("G-code export finished."));

@@ -334,6 +334,10 @@ public:
     std::string get_export_path();
     // Schedule FFF export with a deferred destination or show the SLA save dialog, preferring removable media when requested.
     void export_gcode(bool prefer_removable);
+    // Open the menu of the compatible G-code exporters (right click on "Export G-code"); a pick becomes the session choice and exports.
+    void show_gcode_exporter_menu();
+    // Forget the session exporter choice: the printer's gcode_exporter_plugin setting applies again.
+    void reset_gcode_exporter_choice();
     void export_platter();
     void export_stl_obj(std::string path, bool extended = false, bool selection_only = false);
     void export_amf();
