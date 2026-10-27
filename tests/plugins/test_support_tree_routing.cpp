@@ -221,7 +221,7 @@ TEST_CASE("Tree branch radius grows with the real height between layers", "[plug
                 continue;
             const double height_mm = object.layer(upper.layer).unscaled_height();
             const double growth = double(lower.radius - upper.radius) / (upper.print_z - lower.print_z) / 1e6;
-            CHECK_FALSE((lower.lost || lower.verylost || upper.lost || upper.verylost));
+            CHECK_FALSE((lower.verylost || upper.verylost));
             CAPTURE(lower.layer, height_mm, lower.radius, upper.radius, growth, slope);
             CHECK(growth == Approx(slope).margin(0.002));
             thin_pairs += height_mm < 0.1;
@@ -518,7 +518,7 @@ TEST_CASE("Tips are sampled with the rectilinear and the supportbase patterns", 
     if (sparse)
         config.set_deserialize_strict({{"support_material_with_sheath", "0"}});
     // One thread, as the dump does: the tip counts below do not depend on the interleaving of the jobs (the first point inserted by
-    // TipPlacer wins a duplicate).
+    // TipPlacement wins a duplicate).
     tbb::global_control limit(tbb::global_control::max_allowed_parallelism, 1);
     tbb::task_arena arena(1);
     arena.execute([&] {
@@ -560,7 +560,7 @@ TEST_CASE("Tips of a honeycomb base lie under the overhang", "[plugins][support-
     DynamicPrintConfig config = SG::config("tree", false, 3);
     config.set_deserialize_strict({{"support_material_pattern", "honeycomb"}});
     // One thread, as the dump does: the tip counts below do not depend on the interleaving of the jobs (the first point inserted by
-    // TipPlacer wins a duplicate).
+    // TipPlacement wins a duplicate).
     tbb::global_control limit(tbb::global_control::max_allowed_parallelism, 1);
     tbb::task_arena arena(1);
     arena.execute([&] {
@@ -692,7 +692,7 @@ namespace {
 // distance: the walls take the room the foot needs (a lone wall would let the branches drift away from it). The walls are thick
 // and the plate is small, so the branches of its tips merge into one trunk long before the foot zone. room_mm is the free room
 // for the foot at the bed. Returns the widest root radius (scaled), counts the trees, gives in table_limit the largest radius
-// below the room that the cache steps allow (the limit of the last step of the regular XY variant that is not above the room) and
+// below the room that the cache steps allow (the last step of the cache radius table that is not above the room) and
 // in foot_step the spacing of the cache steps in the foot band.
 double slot_root_radius(const char *xy_spacing, const double room_mm, size_t &tree_count, coord_t &table_limit, coord_t &foot_step)
 {
@@ -726,7 +726,7 @@ double slot_root_radius(const char *xy_spacing, const double room_mm, size_t &tr
     PluginStorage storage;
     const TF::TreeVolumes volumes(SG::object_view(print.object(0)), SG::print_view(print), routed.settings, SG::handle(storage), nullptr);
     table_limit = 0;
-    for (coord_t radius = 1, limit; (limit = volumes.getRadiusNextCeil(radius, false)) <= scale_i(room_mm); radius = limit + 1)
+    for (coord_t radius = 1, limit; (limit = volumes.ceilRadius(radius)) <= scale_i(room_mm); radius = limit + 1)
         table_limit = limit;
     double widest = 0.;
     for (const TF::RoutedTree &tree : routed.trees) {
@@ -742,7 +742,7 @@ double slot_root_radius(const char *xy_spacing, const double room_mm, size_t &tr
 // bed ends in the last cache step that fits in the free room of 3.05 mm (above the limit of the step before, up to the limit of that
 // step: the widening of the last layers can stop inside a step that is valid), and never exceeds the room. The table must offer a
 // step from 2.85 mm on in the room (REQUIRE below): the plain scale of the tips does not (its last limit below the room is 2.6 mm).
-// The minimum and the regular XY distances are equal in both cases, so the XY delta is zero.
+// The XY spacing is generated so that the foot must stop at the same cache step whatever the XY distance.
 TEST_CASE("A branch foot widens to the room it has at the resolution of the cache steps", "[plugins][support-tree-routing]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();

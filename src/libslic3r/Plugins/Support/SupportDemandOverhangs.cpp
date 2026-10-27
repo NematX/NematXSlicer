@@ -5,7 +5,6 @@
 
 #include "SupportDemandOverhangs.hpp"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -56,6 +55,9 @@ namespace {
 const char *k_support_demand_overhangs_id = "support.demand.overhangs";
 const char *k_no_dependencies[] = { nullptr };
 
+// Reads the smallest positive external-perimeter flow width, falling back to 0.4 mm.
+coord_t island_external_perimeter_width(const LayerIsland &island);
+
 struct ObjectSupportDemandConfig
 {
     bool support_material = false;
@@ -98,13 +100,14 @@ bool enforced_support_layer(const ObjectSupportDemandConfig &config, uint32_t la
     return config.support_material_enforce_layers > 0 && layer_idx < uint32_t(config.support_material_enforce_layers);
 }
 
+// Reads the smallest positive external-perimeter flow width of the borrowed island, or 0.4 mm when none exists; returns scaled units without changing the island.
 coord_t island_external_perimeter_width(const LayerIsland &island)
 {
     coord_t width = std::numeric_limits<coord_t>::max();
     for (uint32_t region_idx = 0; region_idx < island.region_count(); ++region_idx) {
         const c_flow flow = island.region(region_idx).flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
-        if (flow.width > 0 && (width == 0 || flow.width < width))
-            width = std::min(width, flow.width);
+        if (flow.width > 0 && flow.width < width)
+            width = flow.width;
     }
     return width < std::numeric_limits<coord_t>::max() ? width : scale_i(0.4);
 }

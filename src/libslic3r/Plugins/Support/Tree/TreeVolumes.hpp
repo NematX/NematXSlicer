@@ -25,7 +25,7 @@
 
        TreeVolumes volumes(object, print, settings, run_storage, context);
        volumes.precalculate(max_layer);
-       const StoredPolygonCollection &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false, min_xy_dist);
+       const StoredPolygonCollection &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false);
 
    Storage: the areas are StoredPolygonCollection values owned by the run storage given to the constructor, which must outlive the
    TreeVolumes (declare it first). A computation runs on a scratch storage of its own (slic3r_parallel_for_storage); its result is
@@ -109,9 +109,8 @@ public:
      * \brief Provides the areas that a node of the given radius must not enter on this layer, because they collide with the model.
      * \param radius The radius of the node of interest
      * \param layer_idx An object layer index, from zero through object layer count minus one.
-     * \param min_xy_dist Is the minimum xy distance used.
      */
-    const slic3r_api::StoredPolygonCollection& getCollision(const coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
+    const slic3r_api::StoredPolygonCollection& getCollision(const coord_t radius, LayerIndex layer_idx) const;
 
     /*!
      * \brief Provides the areas that a node of the given radius must avoid on this layer to still reach the build plate,
@@ -120,9 +119,8 @@ public:
      * \param layer_idx An object layer index, from zero through object layer count minus one.
      * \param type The avoidance speed and hole handling
      * \param to_model Does the avoidance allow good connections with the model.
-     * \param min_xy_dist is the minimum xy distance used.
      */
-    const slic3r_api::StoredPolygonCollection& getAvoidance(coord_t radius, LayerIndex layer_idx, AvoidanceType type, bool to_model, bool min_xy_dist) const;
+    const slic3r_api::StoredPolygonCollection& getAvoidance(coord_t radius, LayerIndex layer_idx, AvoidanceType type, bool to_model) const;
 
     /*!
      * \brief Provides the area where a branch of this radius completely fits on the model on this layer.
@@ -136,35 +134,13 @@ public:
     /*!
      * \brief Provides the abstract walls that a branch must not pass when it moves between two layers.
      * \param radius The radius of the node of interest.
-     * \param layer_idx An object layer index, from zero through object layer count minus one.
-     * \param min_xy_dist is the minimum xy distance used.
+     * \param layer_idx An object layer index, from one through object layer count minus one; the restriction is the wall between that layer and the one below, and layer zero has none.
      */
-    const slic3r_api::StoredPolygonCollection& getWallRestriction(coord_t radius, LayerIndex layer_idx, bool min_xy_dist) const;
+    const slic3r_api::StoredPolygonCollection& getWallRestriction(coord_t radius, LayerIndex layer_idx) const;
 
-    /*!
-     * \brief Round \p radius upwards to a step of the table of cached radii (see m_radius_steps).
-     * The XY distance delta between min_xy_dist and the regular distance is added when min_xy_dist is not used: the table is
-     * the one of the radii as the caches see them, so the regular variant looks up radius + delta, and its band of fine steps
-     * runs from the step of branch_radius + delta to bp_radius + delta.
-     */
-    coord_t ceilRadius(const coord_t radius, const bool min_xy_dist) const {
-        assert(radius >= 0);
-        return min_xy_dist ?
-            this->ceilRadius(radius) :
-            // A zero radius still needs the regular XY distance, so the collision stays as close to the configured values as possible.
-            radius > 0 ? this->ceilRadius(radius + m_current_min_xy_dist_delta) : m_current_min_xy_dist_delta;
-    }
-
-    /*!
-     * \brief Round \p radius upwards to the maximum that still rounds up to the same value as the provided one.
-     */
-    coord_t getRadiusNextCeil(coord_t radius, bool min_xy_dist) const {
-        assert(radius > 0);
-        return min_xy_dist ?
-            this->ceilRadius(radius) :
-            this->ceilRadius(radius + m_current_min_xy_dist_delta) - m_current_min_xy_dist_delta;
-    }
-
+    // Rounds a radius up to the smallest step of the table of cached radii (m_radius_steps) that is not below it; 0 stays 0. Above
+    // the last step of the table the steps keep growing by SUPPORT_TREE_EXPONENTIAL_FACTOR.
+    coord_t ceilRadius(const coord_t radius) const;
 private:
     // Areas of a range of layers computed on a scratch storage, indexed by layer. A collection stays in the storage that allocated it, so
     // the cache that receives them moves their content into new collections of the run storage when it publishes them; the range must
@@ -286,7 +262,7 @@ private:
     void calculateCollision(const std::vector<RadiusLayerPair> &keys);
     // Populate collisions through max_layer_idx using each layer's real-Z gap windows and their native XY ramp.
     void calculateCollision(const coord_t radius, const LayerIndex max_layer_idx);
-    // Collisions that additionally keep out the holes too small for a branch of the radius until which it always widens.
+    // Collisions that additionally keep out the holes too small for a branch of the branch radius.
     void calculateCollisionHolefree(const std::vector<RadiusLayerPair> &keys);
     void calculateCollisionHolefree(RadiusLayerPair key) { calculateCollisionHolefree(std::vector<RadiusLayerPair>{ RadiusLayerPair(key) }); }
     // Avoidances are propagated upwards from the collisions, with the maximum move of each layer.
@@ -308,10 +284,6 @@ private:
 
     // Return the collision of a radius and layer, computed on demand when precalculate() did not cover it.
     const slic3r_api::StoredPolygonCollection& getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const;
-    // Rounds a radius up to the smallest step of the table of cached radii (m_radius_steps) that is not below it; 0 stays 0. Above
-    // the last step of the table the steps keep growing by SUPPORT_TREE_EXPONENTIAL_FACTOR.
-    coord_t ceilRadius(const coord_t radius) const;
-
     RadiusLayerPolygonCache& avoidance_cache(const AvoidanceType type, const bool to_model) {
         if (to_model) {
             switch (type) {
@@ -342,19 +314,12 @@ private:
     std::vector<coord_t> m_max_move_slow;
     coord_t m_min_resolution;
     bool m_precalculated = false;
-    // Minimum XY distance between the model and the branches, and its difference from the regular distance.
-    coord_t m_current_min_xy_dist;
-    coord_t m_current_min_xy_dist_delta;
     // False when every object only allows branches on the build plate.
     bool m_support_rests_on_model;
-    // Radius from which the radius of a branch is always increased, even if the avoidance does not allow it.
-    coord_t m_increase_until_radius;
     // The radii that ceilRadius() rounds to, sorted and built once by the constructor (build_radius_steps()): the scale of the tips
     // (0.4; 1.5; 2.6 mm with the defaults, then a factor of 1.5), with a step every TreeSettings::foot_cache_step between the scale step
-    // that branch_radius + the XY delta rounds up to and bp_radius + the XY delta. In that band, where the branches widen into
-    // their foot on the build plate, a wider branch is checked at the resolution of foot_cache_step (half the largest support
-    // nozzle). Both ends of the band are in key space (the regular XY variant looks up radius + delta), so its start is shifted by the
-    // delta like its end.
+    // that branch_radius rounds up to and bp_radius. In that band, where the branches widen into their foot on the build plate, a
+    // wider branch is checked at the resolution of foot_cache_step (half the largest support nozzle).
     std::vector<coord_t> m_radius_steps;
     // Object outline of each layer.
     std::vector<slic3r_api::StoredPolygonCollection> m_layer_outlines;
@@ -370,12 +335,11 @@ private:
     RadiusLayerPolygonCache     m_avoidance_cache_to_model;
     RadiusLayerPolygonCache     m_avoidance_cache_to_model_slow;
     RadiusLayerPolygonCache     m_placeable_areas_cache;
-    // Avoidances that do not cross holes narrower than the radius until which the radius is always increased.
+    // Avoidances that do not cross holes narrower than the branch radius.
     RadiusLayerPolygonCache     m_avoidance_cache_holefree;
     RadiusLayerPolygonCache     m_avoidance_cache_holefree_to_model;
-    // Walls a branch must not pass, with and without the extra minimum XY distance.
+    // Walls a branch must not pass.
     RadiusLayerPolygonCache     m_wall_restrictions_cache;
-    RadiusLayerPolygonCache     m_wall_restrictions_cache_min;
 };
 
 } // namespace TreeFamily

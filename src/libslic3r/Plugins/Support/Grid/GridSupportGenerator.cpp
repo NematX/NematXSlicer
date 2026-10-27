@@ -74,8 +74,6 @@ struct Run {
     ClipperContext clipper;
     // The object layers, bottom first.
     std::vector<Layer> layers;
-    Common::SupportStyle style;
-    Common::ContactDistanceType distance_type;
     int32_t threshold, enforce_layers, interface_layers, bottom_interface_layers;
     bool synchronize, bottom_interface_enabled;
     // Build-plate-only support: support may stand only on the bed, so contacts and columns are cut by the area the object covers below.
@@ -142,7 +140,7 @@ void generate_support(const plugin_run_context *context, const Print &print, con
         for (const Common::GeneratorLayer *bottom : out.bottom)
             if (bottom->bottom_print_z() <= top->bottom_z && top->print_z <= bottom->print_z)
                 top->polygons = polygons(clipper_diff(run.clipper(top->polygons), run.clipper(bottom->polygons)));
-    Common::carve_interfaces(params, run.style == Common::SupportStyle::Snug, out);
+    Common::carve_interfaces(params, params.style == Common::SupportStyle::Snug, out);
     // The foot of the support is widened, as in every family. The support ignores the brim and the skirt.
     Common::expand_first_layer_foot(run.object, run.layers, params, out);
 }
@@ -155,8 +153,6 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
     for (uint32_t id = 0; id < object.layer_count(); ++id)
         layers.push_back(object.layer(id));
     const Config config = object.config();
-    style = Common::support_style(config);
-    distance_type = Common::contact_distance_type(config);
     threshold = config.get("support_material_threshold").get_int();
     enforce_layers = config.get("support_material_enforce_layers").get_int();
     interface_layers = config.get("support_material_interface_layers").get_int();
@@ -284,7 +280,7 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
         const Grid grid(run, contacts, margin);
         contact.contact_polygons.emplace(grid.extract(-3, true));
         contact.contact_polygons->ensure_valid(p.resolution);
-        if (run.style == Common::SupportStyle::Grid && !p.soluble) {
+        if (p.style == Common::SupportStyle::Grid && !p.soluble) {
             Polys dense = polygons(clipper_diff(clipper(overhangs), clipper_offset2(clipper(lower_polygons),
                 -(no_interface_offset * 0.5f), no_interface_offset * 1.1f, join_type, 0.)));
             if (!dense.empty()) {
@@ -333,7 +329,7 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
         Polys touching = polygons(clipper_intersection(clipper(top_surfaces), clipper(projection)));
         touching.ensure_valid(p.resolution);
         if (!touching.empty()) {
-            const Common::GeneratorLayer &contact = Common::add_bottom_contact(run.layers, p, run.distance_type, size_t(id), touching, top_surfaces, out);
+            const Common::GeneratorLayer &contact = Common::add_bottom_contact(run.layers, p, size_t(id), touching, top_surfaces, out);
             touching = polygons(clipper_offset(clipper(touching), double(SCALED_EPSILON)));
             for (size_t above = size_t(id + 1); above < run.layers.size() && run.layers[above].print_z() < contact.print_z; ++above)
                 areas[above] = polygons(clipper_diff(clipper(areas[above]), clipper(touching)));
@@ -460,7 +456,7 @@ Grid::Grid(const Run &run, const Polys &src, const Polys &trim)
     : run(run), source(src), mask(trim), angle(PI * run.angle / 180.), width(run.p.base_flow_mm.spacing),
       closing_radius(run.closing_radius), rotated_source(run.storage), rotated_mask(run.storage)
 {
-    if (run.style != Common::SupportStyle::Grid || source.empty()) return;
+    if (run.p.style != Common::SupportStyle::Grid || source.empty()) return;
     rotated_source.copy_from(source);
     rotated_mask.copy_from(mask);
     if (angle != 0) { rotate(rotated_source, -angle); rotate(rotated_mask, -angle); }
@@ -603,7 +599,7 @@ Polys Grid::extract(coord_t offset, bool fill_holes) const
 {
     const ClipperContext &clipper = run.clipper;
     if (source.empty()) return Polys(run.storage);
-    if (run.style == Common::SupportStyle::Snug) {
+    if (run.p.style == Common::SupportStyle::Snug) {
         Polys closed = polygons(clipper_offset2(clipper(source), scale_d(closing_radius), -scale_d(closing_radius), join_type, 0.));
         closed.smooth_outward(coord_t(scale_d(width)));
         return closed;

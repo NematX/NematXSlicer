@@ -53,8 +53,6 @@ struct TreeSettings
     // and the support flows. The views must be those params was built from.
     TreeSettings(const slic3r_api::Object &object, const slic3r_api::Print &print, const slic3r_api::Support::Common::SupportParams &params);
 
-    // Nominal layer height of the object (scaled).
-    coord_t layer_height = 0;
     // Simplification tolerance and smallest feature size of the object outlines (scaled).
     coord_t resolution = 0;
     coord_t min_feature_size = 0;
@@ -67,8 +65,6 @@ struct TreeSettings
     // Spacing of the cache radii (TreeVolumes::ceilRadius()) in the band where a branch widens into its foot: half the diameter of
     // the largest nozzle of the support (the support material and the support interface extruders), 0.2 mm for 0.4 mm nozzles.
     coord_t foot_cache_step = 0;
-    // Radius from which the radius is always increased.
-    coord_t increase_radius_until_radius = 0;
     // Radius gain (scaled, above min_radius) of a branch: it is gained step by step, a step going from a layer to the one
     // below it and being indexed by its upper layer L, whose height is h(L) = layer_print_z[L] - layer_print_z[L - 1]
     // (layer_print_z[-1] = 0). While the gain is below the tip total (branch_radius - min_radius) the branch is a tip and
@@ -105,10 +101,8 @@ struct TreeSettings
     // False when the object only allows branches on the build plate.
     bool support_rests_on_model = true;
     // XY distance from the object (scaled): the user's support_material_xy_spacing, at least 0.1 mm for a soluble support. The tree uses it
-    // everywhere, so xy_min_distance is kept equal to it; the min-XY variants of the routing and of the volumes are dormant code kept for
-    // a later cleanup.
+    // everywhere, from the routing to the final trim.
     coord_t xy_distance = 0;
-    coord_t xy_min_distance = 0;
     // Collision windows from real Z, indexed by object layer; the top continues virtually at the last layer height.
     // Clearances in [gap - eps, gap), with eps = scale_to_layer_coord(EPSILON), are deliberately excluded: Z rounding must not
     // add a layer when an exact-gap boundary is rounded slightly closer, preserving integer gap/height counts.

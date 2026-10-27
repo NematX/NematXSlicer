@@ -86,11 +86,13 @@ TopContactSlabs add_top_contacts(const std::vector<Layer> &layers, const Config 
 // slabs from out.top. Every top contact must already have its contact_polygons and overhang_polygons set, since the union reads them.
 void merge_contacts(const SupportParams &p, GeneratedSupport &out);
 // Create the bottom contact that stands on the top surfaces of object layer id and list it in out.bottom. Its polygons are the
-// touching area, grown by the bottom expansion and kept on the top surfaces. Its Z is the gap above the layer plus the bottom
-// flow height (the upper layer in soluble mode), and it snaps onto the first top contact that the minimum height allows.
-// top_surfaces and touching are polygon collections in the plugin storage; the layers must hold id + 1.
-GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const SupportParams &p, ContactDistanceType distance_type,
-                                   size_t id, const StoredPolygonCollection &touching, const StoredPolygonCollection &top_surfaces,
+// touching area, grown by the bottom expansion and kept on the top surfaces. Its Z is the gap below the layer plus its thickness:
+// the height of the upper layer (Plane distance type), filled up to the top of the upper layer (soluble), or the height of the
+// bottom contact flow, bottom_flow_mm (otherwise). It snaps onto the first top contact that the minimum height allows.
+// top_surfaces and touching are polygon collections in the plugin storage; the layers must hold id + 1. The returned reference
+// belongs to out.
+GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const SupportParams &p, size_t id,
+                                   const StoredPolygonCollection &touching, const StoredPolygonCollection &top_surfaces,
                                    GeneratedSupport &out);
 // Fill every interval between neighbouring extremes with slabs appended to out.base, bottom first. Without a splitter the
 // grid layout spaces the middle uniformly; with one, the handed-over layout gives the middle of each interval to it.

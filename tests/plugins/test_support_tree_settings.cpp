@@ -92,7 +92,6 @@ void check_case(const SettingsCase &item)
         const FFFTreeSupport::TreeSupportMeshGroupSettings mesh_group(object);
         const FFFTreeSupport::TreeSupportSettings native(mesh_group, object.slicing_parameters());
         CHECK(settings.support_line_width == native.support_line_width);
-        CHECK(settings.layer_height == native.layer_height);
         CHECK(settings.resolution == native.resolution);
         CHECK(settings.min_feature_size == native.min_feature_size);
         CHECK(settings.branch_radius == native.branch_radius);
@@ -102,7 +101,6 @@ void check_case(const SettingsCase &item)
         for (size_t layer = 1; layer < object.layer_count(); ++layer)
             if (object.layer(layer).scaled_height() == native.layer_height)
                 CHECK(settings.bp_gain[layer] == Approx(native.bp_radius_increase_per_layer).margin(1e-6));
-        CHECK(settings.increase_radius_until_radius == native.increase_radius_until_radius);
         CHECK(settings.min_height_to_model == scale_i(1.));
         // Uniform layers above the first: the physical test equals the native layer count, whatever the starting layer.
         bool uniform = item.profile.empty();
@@ -114,8 +112,8 @@ void check_case(const SettingsCase &item)
                     CHECK(settings.reaches_min_height_to_model(TF::LayerIndex(layer), dtt) == (dtt >= native.min_dtt_to_model));
             // lowest_layer_within is the layer count that the depth covers, from the layer down (an exact multiple counts), clamped at layer 0.
             const TF::LayerIndex top = TF::LayerIndex(object.layer_count() - 1);
-            for (const coord_t depth : {coord_t(0), settings.layer_height, scale_i(0.5), scale_i(1.), scale_i(1.3), scale_i(1000.)})
-                CHECK(settings.lowest_layer_within(top, depth) == std::max<TF::LayerIndex>(0, top - TF::LayerIndex(depth / settings.layer_height)));
+            for (const coord_t depth : {coord_t(0), native.layer_height, scale_i(0.5), scale_i(1.), scale_i(1.3), scale_i(1000.)})
+                CHECK(settings.lowest_layer_within(top, depth) == std::max<TF::LayerIndex>(0, top - TF::LayerIndex(depth / native.layer_height)));
             // The radius of a branch that grew at every step since its tip (min_radius + path_gain) is the native radius of the same
             // number of steps, within one unit. The steps above layer 0 all have the nominal height.
             for (size_t steps = 0; steps <= native.tip_layers + 5 && steps < object.layer_count(); ++steps) {
@@ -126,7 +124,6 @@ void check_case(const SettingsCase &item)
         CHECK(settings.max_to_model_radius_increase == native.max_to_model_radius_increase);
         CHECK(settings.support_rests_on_model == native.support_rests_on_model);
         CHECK(settings.xy_distance == native.xy_distance);
-        CHECK(settings.xy_min_distance == native.xy_min_distance);
         if (item.profile.empty()) {
             for (size_t layer = 0; layer < object.layer_count(); ++layer) {
                 CHECK(settings.z_distance_top_layers[layer] == native.z_distance_top_layers);
@@ -146,7 +143,7 @@ void check_case(const SettingsCase &item)
             }
         // A nominal height above the maximum layer height is never sliced (the layers are cut at the maximum): no layer is then comparable,
         // and the moves of the plugin follow the real heights, which the formula check below covers.
-        CHECK((nominal > 0) == (settings.layer_height <= scale_to_layer_coord(max_layer_mm)));
+        CHECK((nominal > 0) == (native.layer_height <= scale_to_layer_coord(max_layer_mm)));
     }
 
     if (! item.native) {
@@ -175,10 +172,11 @@ void check_case(const SettingsCase &item)
     REQUIRE(settings.z_distance_top_layers.size() == object.layer_count());
     REQUIRE(settings.z_distance_bottom_layers.size() == object.layer_count());
     size_t other_heights = 0;
+    const coord_t nominal_height = scale_to_layer_coord(object.config().layer_height.value);
     for (size_t layer = 0; layer < object.layer_count(); ++layer) {
         const coord_t height = object.layer(layer).scaled_height();
         CHECK(settings.max_move[layer] == coord_t(std::tan(settings.angle) * double(height)));
-        other_heights += height != settings.layer_height;
+        other_heights += height != nominal_height;
         // Independent enumeration checks strict clearance, including virtual layers above the last real layer.
         const coord_t eps = scale_to_layer_coord(EPSILON);
         const coord_t top_limit = object.layer(layer).scaled_print_z() + scale_to_layer_coord(params.gap_above) - eps;
@@ -458,7 +456,7 @@ TEST_CASE("Tree settings tip gain is limited by a third of a line width at the m
     const FFFTreeSupport::TreeSupportMeshGroupSettings mesh_group(object);
     const FFFTreeSupport::TreeSupportSettings native(mesh_group, object.slicing_parameters());
     const double third_line = double(settings.support_line_width) / 3.;
-    REQUIRE(settings.layer_height == scale_to_layer_coord(0.3));
+    REQUIRE(native.layer_height == scale_to_layer_coord(0.3));
     REQUIRE(object.layer_count() > 8);
     for (size_t layer = 1; layer < object.layer_count(); ++layer)
         CHECK(settings.tip_gain[layer] == Approx(std::min(third_line, double(object.layer(layer).scaled_height()) * settings.tip_total_gain / double(settings.branch_radius))).margin(1e-3));

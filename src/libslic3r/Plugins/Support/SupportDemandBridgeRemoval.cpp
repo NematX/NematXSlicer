@@ -74,8 +74,7 @@ const char *k_support_demand_bridge_removal_id = "support.demand.bridge_removal"
 const char *k_dependencies[] = { nullptr };
 const raw_used_config_key k_used_config_keys[] = {
     { "dont_support_bridges", RAW_CO_BOOL, RAW_CONTAINER_TYPE_OBJECT, RAW_PRESET_TYPE_FFF_PRINT },
-    { "support_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "raft_layers", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
+    { "support_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
 };
 
 struct BridgeRemovalConfig
@@ -413,10 +412,7 @@ void SupportDemandBridgeRemoval::inilialize_impl(storage_handle *) const
                                  0);
 
     GuiRule::activate("dont_support_bridges")
-        .when(any_of({
-            GuiCondition::true_("support_material"),
-            GuiCondition::non_zero("raft_layers")
-        }))
+        .when(GuiCondition::true_("support_material"))
         .add_to(m_orchestrator);
 }
 

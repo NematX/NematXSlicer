@@ -691,8 +691,8 @@ TEST_CASE("Grid family types a mergeable contact as base", "[plugins][support-gr
     CHECK_FALSE(merged_into_base(true, false, false, true));  // An empty base never takes a bridge.
 }
 
-// Dispatch a roof with a requested raft and count family warning messages while requiring geometric support, without expecting raft layers.
-TEST_CASE("Grid family ignores raft generation but emits one warning", "[plugins][support-grid]")
+// Dispatch a roof with a requested raft: the raft does not exist in this family, which generates geometric support without raft layers and without a warning.
+TEST_CASE("Grid family ignores a requested raft without a warning", "[plugins][support-grid]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = SG::config();
@@ -707,5 +707,5 @@ TEST_CASE("Grid family ignores raft generation but emits one warning", "[plugins
     size_t warnings = 0;
     for (const Orchestrator::PluginMessage &message : Orchestrator::instance().consume_plugin_messages())
         if (message.plugin_id == "support.family.grid" && message.level == Orchestrator::PluginMessageLevel::Warning) ++warnings;
-    CHECK(warnings == 1);
+    CHECK(warnings == 0);
 }

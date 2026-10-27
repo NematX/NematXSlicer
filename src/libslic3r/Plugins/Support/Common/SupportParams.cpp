@@ -6,6 +6,7 @@
 #include <limits>
 #include <set>
 
+#include "SupportPaths.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
@@ -20,11 +21,10 @@
    - an extruder index of -1 (configured extruder 0, "current extruder") is
      passed as an out-of-range index, which the host resolves to the first
      vector item exactly like the native get_at();
-   - flows through the host twice: object_get_support_flow / object_get_region_flow
-     give the scaled integer coordinates (c_flow), and their _mm twins give the
-     host's millimeter values; values the native code derives from a flow width
-     or spacing in millimeters (densities, the XY gap) read the _mm values, so
-     they are exact.
+   - flows through the host: the first, base and interface flows are read twice, with object_get_support_flow /
+     object_get_region_flow giving the scaled integer coordinates (c_flow) and their _mm twins the host's millimeter
+     values; the bottom contact flow is read in millimeters only (bottom_flow_mm). Values the native code derives from a
+     flow width or spacing in millimeters (densities, the XY gap) read the _mm values, so they are exact.
    The path fields reproduce the PathParams of the legacy toolpaths.
 
    The slicing helpers of the support modifier volumes (layer_slice_zs, support_modifier_slicing_params, slice_support_modifier_volume)
@@ -41,8 +41,6 @@ double min_layer_height_from_nozzle(const Config &print_config, uint32_t extrude
 double max_layer_height_from_nozzle(const Config &print_config, uint32_t extruder_idx, double z_step);
 // Zero-based index of a one-based extruder setting; 0 ("current") becomes an out-of-range index.
 uint32_t extruder_index(int32_t one_based);
-// Convert degrees to radians in float, as Geometry::deg2rad<float>().
-float deg2rad_float(float degrees);
 
 double nozzle_diameter(const Config &print_config, uint32_t extruder_idx)
 {
@@ -70,11 +68,6 @@ double max_layer_height_from_nozzle(const Config &print_config, uint32_t extrude
 uint32_t extruder_index(int32_t one_based)
 {
     return one_based > 0 ? uint32_t(one_based - 1) : std::numeric_limits<uint32_t>::max();
-}
-
-float deg2rad_float(float degrees)
-{
-    return float(PI) * degrees / float(180.0);
 }
 
 } // namespace
@@ -178,7 +171,6 @@ SupportParams::SupportParams(const Print &print, const Object &object)
     first_flow = object.support_flow(base_role, first_layer_height, 0., OBJECT_SUPPORT_FLOW_FIRST_LAYER);
     base_flow = object.support_flow(base_role, layer_height);
     interface_flow = object.support_flow(interface_role, layer_height);
-    bottom_flow = object.support_flow(interface_role, layer_height, 0., OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT);
     first_flow_mm = object.support_flow_mm(base_role, first_layer_height, 0., OBJECT_SUPPORT_FLOW_FIRST_LAYER);
     base_flow_mm = object.support_flow_mm(base_role, layer_height);
     interface_flow_mm = object.support_flow_mm(interface_role, layer_height);
@@ -223,8 +215,8 @@ SupportParams::SupportParams(const Print &print, const Object &object)
                                                      soluble, interface_density);
     bottom_pattern_id = bottom_interface_pattern_plugin_id(config.get("support_material_bottom_interface_pattern").serialize(),
                                                            top_pattern_id, soluble, interface_density);
-    base_angle = deg2rad_float(float(config.get("support_material_angle").get_float()));
-    interface_angle = deg2rad_float(float(config.get("support_material_interface_angle").get_float()));
+    base_angle = radians(float(config.get("support_material_angle").get_float()));
+    interface_angle = radians(float(config.get("support_material_interface_angle").get_float()));
     angle_height = config.get("support_material_angle_height").get_float();
     interface_angle_increment = config.get("support_material_interface_angle_increment").get_float();
     raft_first_layer_density = config.get("raft_first_layer_density").get_effective_value(1.);

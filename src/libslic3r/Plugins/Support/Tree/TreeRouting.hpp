@@ -50,9 +50,6 @@ struct TreeNode {
     coord_t radius = 0;
     // The branch reaches the build plate from this node, or rests on the model.
     bool to_buildplate = false;
-    bool to_model_gracious = false;
-    // The propagation lost track of the branch here; a diagnostic flag of the legacy tree.
-    bool lost = false;
     // The branch hangs in the air here; a root with this flag goes down to the bed, as the legacy tree does.
     bool verylost = false;
     // Indices into the same tree, of the nodes on the layer above that this node carries.

@@ -121,16 +121,18 @@ void merge_contacts(const SupportParams &p, GeneratedSupport &out)
     layers = std::move(merged);
 }
 
-// Place the bottom contact on object layer id. Its Z starts above the layer by the gap below, and its thickness is the bottom
-// flow height; a soluble contact fills the upper layer instead. Non-soluble contacts whose Z lands within the minimum height of a
-// top contact take that contact's Z, as the native generator does, so the list is searched from the first contact that can match.
-GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const SupportParams &p, ContactDistanceType distance_type,
-                                   size_t id, const StoredPolygonCollection &touching, const StoredPolygonCollection &top_surfaces,
+// Place the bottom contact on object layer id. Its Z starts above the layer by the gap below, and its thickness is, by case: the
+// height of the upper layer for the Plane distance type; for a soluble support, the contact is filled up to the top of the upper
+// layer; otherwise the height of the bottom contact flow (bottom_flow_mm). Non-soluble contacts whose Z lands within the minimum
+// height of a top contact take that contact's Z, as the native generator does, so the list is searched from the first contact that
+// can match. The returned reference belongs to out, which owns the layer.
+GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const SupportParams &p, size_t id,
+                                   const StoredPolygonCollection &touching, const StoredPolygonCollection &top_surfaces,
                                    GeneratedSupport &out)
 {
     const ClipperContext clipper(out.storage);
     const Layer &layer = layers[id];
-    const coord_t height_block = distance_type == ContactDistanceType::Plane ? layers[id + 1].height() :
+    const coord_t height_block = p.distance_type == ContactDistanceType::Plane ? layers[id + 1].height() :
         (p.soluble ? layers[id + 1].height() : scale_to_layer_coord(p.bottom_flow_mm.height));
     const coord_t bottom = layer.print_z() + scale_to_layer_coord(p.gap_below);
     const coord_t z = p.soluble ? layers[id + 1].print_z() : bottom + height_block;

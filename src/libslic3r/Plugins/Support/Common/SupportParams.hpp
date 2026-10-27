@@ -57,9 +57,9 @@ struct SupportParams
     // Interface layers between the contact and the base, the contact itself excluded.
     size_t top_interfaces = 0, bottom_interfaces = 0;
     // First-layer, base and interface flows at the nominal heights; the interface flow is the
-    // base flow when there is no interface layer. bottom_flow is the bottom-contact flow.
-    c_flow first_flow = {}, base_flow = {}, interface_flow = {}, bottom_flow = {};
-    // The same four flows in the host's millimeters. Computations that the native code does on the
+    // base flow when there is no interface layer.
+    c_flow first_flow = {}, base_flow = {}, interface_flow = {};
+    // The same flows and the bottom-contact flow in the host's millimeters. Computations that the native code does on the
     // float flow values (grid cell size, densities, widths in millimeters) read these, because the
     // scaled integers of c_flow are truncated.
     c_flow_mm first_flow_mm = {}, base_flow_mm = {}, interface_flow_mm = {}, bottom_flow_mm = {};

@@ -317,26 +317,6 @@ TEST_CASE("tree geometry scalars match the native ones", "[plugins][tree-geometr
     CHECK(TF::round_up_divide<int>(7, 2) == 4);
     CHECK(TF::round_up_divide<int>(8, 2) == 4);
     CHECK(TF::round_up_divide<int>(0, 5) == 0);
-
-    SECTION("sort_remove_duplicates")
-    {
-        std::uniform_int_distribution<int> value(-5, 5);
-        for (int i = 0; i < 100; ++i) {
-            std::vector<int> mine(size_t(i % 30)), native;
-            for (int &entry : mine)
-                entry = value(rng);
-            native = mine;
-            TF::sort_remove_duplicates(mine);
-            Slic3r::sort_remove_duplicates(native);
-            CHECK(mine == native);
-        }
-        std::vector<coord_t> empty;
-        TF::sort_remove_duplicates(empty);
-        CHECK(empty.empty());
-        std::vector<coord_t> same{ 3, 3, 3 };
-        TF::sort_remove_duplicates(same);
-        CHECK(same == std::vector<coord_t>{ 3 });
-    }
 }
 
 TEST_CASE("tree geometry point conversions, products and hash match the native ones", "[plugins][tree-geometry]")

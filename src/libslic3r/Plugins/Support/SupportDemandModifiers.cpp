@@ -56,6 +56,9 @@ namespace {
 const char *k_support_demand_modifiers_id = "support.demand.modifiers";
 const char *k_dependencies[] = { nullptr };
 
+// Validates the operand polygons and moves them into the island's support demand after checking cancellation.
+void set_demand_from_operand(const LayerIsland &island, ClipperOperand &&operand, const plugin_run_context *run_ctx);
+
 bool is_support_modifier_type(raw_volume_type type)
 {
     return type == RAW_VOLUME_TYPE_SUPPORT_ENFORCER || type == RAW_VOLUME_TYPE_SUPPORT_BLOCKER;
@@ -133,17 +136,15 @@ ClipperOperand clip_layer_slices(const std::vector<StoredExPolygonCollection> &b
     return clipper(by_layer[layer_idx]);
 }
 
+// Converts the operand to valid polygons and moves them into the borrowed island's demand; the context must provide mutable demand for that island, and cancellation after conversion and validation throws before the island's demand is replaced.
 void set_demand_from_operand(const LayerIsland &island,
                              ClipperOperand &&operand,
                              const plugin_run_context *run_ctx)
 {
-    throw_if_cancelled(run_ctx);
     StoredExPolygonCollection polygons = operand.to_expolygon_collection();
-    throw_if_cancelled(run_ctx);
     polygons.ensure_valid();
     throw_if_cancelled(run_ctx);
     expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), polygons.mutable_handle());
-    throw_if_cancelled(run_ctx);
 }
 
 void add_enforcers_to_island(const LayerIsland &island,

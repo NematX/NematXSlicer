@@ -604,7 +604,6 @@ TEST_CASE("Support params equal the native grid support parameters", "[plugins][
         check_flow(params.first_flow, native.first_flow);
         check_flow(params.base_flow, native.base_flow);
         check_flow(params.interface_flow, native.interface_flow);
-        check_flow(params.bottom_flow, native.bottom_flow);
         CHECK(params.bottom_expansion.value == native.bottom_expansion.value);
         CHECK((params.bottom_expansion.percent != 0) == native.bottom_expansion.percent);
         CHECK(params.min_height == native.min_height);
@@ -783,6 +782,21 @@ TEST_CASE("Support plugins declare their keys from the Common library", "[plugin
     REQUIRE(family != nullptr);
     declares(*family, geometry);
     CHECK(family->get_used_config_keys().size() == geometry.size);
+    // The raft does not exist in the support plugins: no list and no family declares raft_layers.
+    const auto declares_raft = [](const Plugin &plugin) {
+        return std::any_of(plugin.get_used_config_keys().begin(), plugin.get_used_config_keys().end(),
+                           [](const Plugin::UsedConfigKey &used) { return used.key == "raft_layers"; });
+    };
+    for (size_t idx = 0; idx < geometry.size; ++idx)
+        CHECK(std::string(geometry.keys[idx].key) != "raft_layers");
+    for (size_t idx = 0; idx < path.size; ++idx)
+        CHECK(std::string(path.keys[idx].key) != "raft_layers");
+    for (const char *id : {"support.family.grid", "support.family.tree", "support.demand.bridge_removal"}) {
+        const Plugin *plugin = Orchestrator::instance().get_plugin(id);
+        REQUIRE(plugin != nullptr);
+        CAPTURE(id);
+        CHECK_FALSE(declares_raft(*plugin));
+    }
     for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"}) {
         const Plugin *toolpath = Orchestrator::instance().get_plugin(id);
         REQUIRE(toolpath != nullptr);

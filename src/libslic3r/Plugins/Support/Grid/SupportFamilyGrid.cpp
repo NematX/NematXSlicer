@@ -25,7 +25,7 @@ int32_t SupportFamilyGrid::used_config_keys(raw_used_config_key *keys) const noe
     return Common::append_used_config_keys(keys, 0, Common::support_geometry_keys());
 }
 
-// Skip unsupported styles or empty demand, warn once for a requested raft, and publish geometric support; host cancellation and calculation errors are reported by PluginBase.
+// Skip unsupported styles or empty demand, and publish geometric support; host cancellation and calculation errors are reported by PluginBase.
 void SupportFamilyGrid::run_impl(const plugin_run_context *context) const
 {
     throw_if_cancelled(context);
@@ -49,8 +49,6 @@ void SupportFamilyGrid::run_impl(const plugin_run_context *context) const
         progress().finish_run();
         return;
     }
-    if (config.get("raft_layers").get_int() > 0 && context->report_warning)
-        context->report_warning(context->host_context, "Grid support is generated without a raft; raft layers are not implemented by this family.");
     const Common::SupportParams params(print, object);
     Common::GeneratedSupport support(context->plugin_storage);
     generate_support(context, print, object, params, support);

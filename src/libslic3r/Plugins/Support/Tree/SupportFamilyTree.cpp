@@ -10,7 +10,7 @@
 #include "libslic3r/Plugins/Support/Tree/TreeSupportGenerator.hpp"
 
 /* Tree and organic support family run. It skips objects whose style is neither tree nor organic, or that have no demand,
-   warns once for a requested raft, and generates the branch slabs with generate_tree_support(). Organic objects publish
+   and generates the branch slabs with generate_tree_support(). Organic objects publish
    their slabs as branch surfaces; tree objects publish sparse base surfaces. The publication
    (Common/SupportPublication.hpp) creates the auxiliary layers. */
 
@@ -45,7 +45,7 @@ int32_t SupportFamilyTree::used_config_keys(raw_used_config_key *keys) const noe
     return Common::append_used_config_keys(keys, count, Common::UsedKeyList{k_tree_keys, std::size(k_tree_keys)});
 }
 
-// Skip other styles and empty demand, warn once for a requested raft, and publish the generated branch slabs; host cancellation and calculation errors are reported by PluginBase.
+// Skip other styles and empty demand, and publish the generated branch slabs; host cancellation and calculation errors are reported by PluginBase.
 void SupportFamilyTree::run_impl(const plugin_run_context *context) const
 {
     throw_if_cancelled(context);
@@ -68,8 +68,6 @@ void SupportFamilyTree::run_impl(const plugin_run_context *context) const
         progress().finish_run();
         return;
     }
-    if (config.get("raft_layers").get_int() > 0 && context->report_warning)
-        context->report_warning(context->host_context, "Tree and organic support are generated without a raft; raft layers are not implemented by this family.");
     Common::GeneratedSupport support(context->plugin_storage);
     Slic3r::TreeFamily::generate_tree_support(context, Print(payload->print), object, style == Common::SupportStyle::Organic, support);
     Common::publish(context, object, support, m_orchestrator);

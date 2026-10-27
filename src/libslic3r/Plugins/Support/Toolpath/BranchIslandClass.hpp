@@ -62,8 +62,7 @@ constexpr double compactness_limit = 2. * PI / 9.;
 
 // Largest relative widening of a centreline part. A part whose extrusion width l is below nozzle diameter b may be widened
 // to b when Delta = b - l is under this share of l (Delta / l < 0.1) and Delta / 2 does not exceed gap_xy, the nominal
-// support XY budget selected for widening. This is not a geometric clearance guarantee: tree routing can use the smaller
-// xy_min_distance when the Z-distance rule overrides its regular XY offset. Growth skips points inside anchors = diff_ex(bounds,
+// support XY budget selected for widening. This is not a geometric clearance guarantee. Growth skips points inside anchors = diff_ex(bounds,
 // m_expolygon). With no separate extension bounds, bounds is the island and m_expolygon is its frontier after
 // simplify_polygon_frontier() applies remove_collinear_angle(1 degree). A point in a resulting contour sliver, such as an
 // endpoint extended onto the contour, is skipped by growth and keeps its then-current width (at least the trim threshold before

@@ -879,7 +879,7 @@ TEST_CASE("Tree slabs keep the XY distance from the object", "[plugins][support-
         for (size_t id = 0; id < object.layer_count(); ++id) {
             const Layer &layer = object.layer(id);
             if (layer.scaled_bottom_z() >= slab.print_z || layer.scaled_print_z() <= slab.bottom_z) continue;
-            const Polygons keep_out = to_polygons(offset_ex(layer.lslices(), float(settings.xy_min_distance - scale_d(tolerance_mm))));
+            const Polygons keep_out = to_polygons(offset_ex(layer.lslices(), float(settings.xy_distance - scale_d(tolerance_mm))));
             CHECK(intersection(area, keep_out).empty());
         }
     };
@@ -1013,7 +1013,7 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
         [](const ExPolygon &a, const ExPolygon &b) { return a.area() < b.area(); });
     const Point centre = get_extents(block_slice).center();
-    CAPTURE(block_top, root_layer, centre.x(), centre.y(), settings.branch_radius, settings.layer_height);
+    CAPTURE(block_top, root_layer, centre.x(), centre.y(), settings.branch_radius);
     TF::TreeNode upper;
     upper.layer = root_layer + 1;
     upper.print_z = object.layer(root_layer + 1).unscaled_print_z();
@@ -1070,7 +1070,7 @@ TEST_CASE("Tree roots in thin layers go down five root radii of real Z", "[plugi
     while (expected > 0 && object.layer(root_layer).scaled_print_z() - object.layer(expected - 1).scaled_print_z() <= depth)
         --expected;
     // The nominal reconstruction counts the nominal layer heights instead.
-    const size_t nominal = root_layer - size_t(5. * double(radius) / double(settings.layer_height));
+    const size_t nominal = root_layer - size_t(5. * double(radius) / double(scale_to_layer_coord(object.config().layer_height.value)));
     CAPTURE(root_layer, expected, nominal);
     REQUIRE(expected + 20 < nominal);
     REQUIRE(expected > 0);
@@ -1538,8 +1538,8 @@ TEST_CASE("Tree and organic prints export support and interface paths", "[plugin
     CHECK(types.count(";TYPE:Support material interface") == (interfaces > 0 ? 1u : 0u));
 }
 
-// The family declares its geometry and tree branch keys, and it warns once for a requested raft without generating raft layers.
-TEST_CASE("Tree family declares its keys and warns once for a raft", "[plugins][support-tree-family][family]")
+// The family declares its geometry and tree branch keys, and it ignores a requested raft without a warning and without raft layers.
+TEST_CASE("Tree family declares its keys and ignores a raft without a warning", "[plugins][support-tree-family][family]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     REQUIRE(Orchestrator::instance().is_plugin_active("support.family.tree"));
@@ -1562,7 +1562,7 @@ TEST_CASE("Tree family declares its keys and warns once for a raft", "[plugins][
     size_t warnings = 0;
     for (const Orchestrator::PluginMessage &message : Orchestrator::instance().consume_plugin_messages())
         if (message.plugin_id == "support.family.tree" && message.level == Orchestrator::PluginMessageLevel::Warning) ++warnings;
-    CHECK(warnings == 1);
+    CHECK(warnings == 0);
 }
 
 // The outline of every layer of the object grown by the XY distance, which the branches keep clear of.
@@ -1734,7 +1734,7 @@ TEST_CASE("Organic smoothing moves the nodes of a bent branch and keeps them out
     SG::prefix(print);
     const Routed routed(print);
     const PrintObject &object = print.object(0);
-    const std::vector<Polygons> keep_out = keep_out_outlines(object, routed.settings.xy_min_distance);
+    const std::vector<Polygons> keep_out = keep_out_outlines(object, routed.settings.xy_distance);
     PluginStorage storage;
     const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
     std::vector<TF::RoutedTree> smoothed = routed.trees;

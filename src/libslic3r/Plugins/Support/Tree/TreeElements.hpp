@@ -2,7 +2,7 @@
 /* State of the tree branch elements while the influence areas are propagated down the object layers.
 
    A SupportElement is one influence area of a branch on one object layer: its SupportElementState says where the
-   branch must end up (target_position, target_height), how it reaches the bed or the model (to_buildplate,
+   branch must reach its tip layer (target_height), how it reaches the bed or the model (to_buildplate,
    to_model_gracious), how far it is from its tip (distance_to_top) and how its radius grows. The influence area is
    the polygon the branch centre may occupy on its layer. Elements of the layer above that rest on an element are
    listed in its parents, so the branches form a forest that is read back when the nodes are placed.
@@ -36,7 +36,6 @@ namespace Slic3r::TreeFamily {
 
 enum class LineStatus
 {
-    INVALID,
     TO_MODEL,
     TO_MODEL_GRACIOUS,
     TO_MODEL_GRACIOUS_SAFE,
@@ -57,15 +56,14 @@ struct AreaIncreaseSettings
 {
     AreaIncreaseSettings(
         TreeVolumes::AvoidanceType type = TreeVolumes::AvoidanceType::Fast, coord_t increase_speed = 0,
-        bool increase_radius = false, bool no_error = false, bool use_min_distance = false, bool move = false) :
-        increase_speed{ increase_speed }, type{ type }, increase_radius{ increase_radius }, no_error{ no_error }, use_min_distance{ use_min_distance }, move{ move } {}
+        bool increase_radius = false, bool no_error = false, bool move = false) :
+        increase_speed{ increase_speed }, type{ type }, increase_radius{ increase_radius }, no_error{ no_error }, move{ move } {}
 
     coord_t         increase_speed;
     // Packing for smaller memory footprint of SupportElementState && SupportElementMerging
     TreeVolumes::AvoidanceType type;
     bool            increase_radius  : 1;
     bool            no_error         : 1;
-    bool            use_min_distance : 1;
     bool            move             : 1;
     bool operator==(const AreaIncreaseSettings& other) const
     {
@@ -73,20 +71,17 @@ struct AreaIncreaseSettings
                increase_speed   == other.increase_speed     &&
                increase_radius  == other.increase_radius    &&
                no_error         == other.no_error           &&
-               use_min_distance == other.use_min_distance   &&
                move             == other.move;
     }
 };
 
 // C++17 does not support in place initializers of bit values, thus a constructor zeroing the bits is provided.
 struct SupportElementStateBits {
+    // Initializes every routing flag to false.
     SupportElementStateBits() :
         to_buildplate(false),
         to_model_gracious(false),
-        use_min_xy_dist(false),
         can_use_safe_radius(false),
-        skip_ovalisation(false),
-        lost(false),
         verylost(false),
         deleted(false),
         marked(false)
@@ -103,22 +98,11 @@ struct SupportElementStateBits {
     bool to_model_gracious : 1;
 
     /*!
-     * \brief Whether the min_xy_distance can be used to get avoidance or similar. Will only be true if support_xy_overrides_z=Z overrides X/Y.
-     */
-    bool use_min_xy_dist : 1;
-
-    /*!
      * \brief An influence area is considered safe when it can use the holefree avoidance <=> It will not have to encounter holes on its way downward.
      */
     bool can_use_safe_radius : 1;
 
-    /*!
-     * \brief Skip the ovalisation to parent and children when generating the final circles.
-     */
-    bool skip_ovalisation : 1;
-
-    // Likely a lost branch, debugging information.
-    bool lost : 1;
+    // The branch hangs in the air here (no influence area could be found for it).
     bool verylost : 1;
 
     // Not valid anymore, to be deleted.
@@ -134,11 +118,6 @@ struct SupportElementState : public SupportElementStateBits
      * \brief The layer this support elements wants reach
      */
     LayerIndex  target_height;
-
-    /*!
-     * \brief The position this support elements wants to support on layer=target_height
-     */
-    c_point     target_position{ 0, 0 };
 
     /*!
      * \brief The next position this support elements wants to reach. NOTE: This is mainly a suggestion regarding direction inside the influence area.
@@ -191,7 +170,7 @@ struct SupportElementState : public SupportElementStateBits
      */
     AreaIncreaseSettings last_area_increase;
 
-    // called by increase_single_area() and increaseAreas()
+    // Copies the state onto the layer below, advancing the tip distance and clearing its placement.
     [[nodiscard]] static SupportElementState propagate_down(const SupportElementState &src)
     {
         SupportElementState dst{ src };
@@ -199,7 +178,6 @@ struct SupportElementState : public SupportElementStateBits
         -- dst.layer_idx;
         // set to invalid as we are a new node on a new layer
         dst.result_on_layer_reset();
-        dst.skip_ovalisation = false;
         return dst;
     }
 
@@ -289,13 +267,13 @@ struct SupportElementState : public SupportElementStateBits
  * The collision radius of a branch only has to be validated when it moves to another cache step (ceilRadius()); inside the
  * current step it shares the key, and so the areas, of the branch as it is. When the full widening is refused, the foot fills the
  * current step (no validation needed) and then tries the limit of each following step that the planned widening crosses
- * (never beyond it), keeping the largest limit that is valid. The limit of a step is the largest radius that rounds to it.
+ * (never beyond it), keeping the largest limit that is valid. The limit of a step is the cache step of the radius (TreeVolumes::ceilRadius()), the largest radius that rounds to it.
  * The radius that is validated is always the collision radius the branch gets from the widening (radius_of), not the limit.
  * \param base_radius[in] The collision radius before the widening (scaled, not rounded to coord_t).
  * \param planned_gain[in] The widening to add (scaled, > 0).
  * \param radius_of[in] double -> coord_t: the collision radius of the branch after a foot widening of the given size.
- * \param next_ceil[in] coord_t -> coord_t: the largest radius that rounds up to the same cache step as its argument
- *        (TreeVolumes::getRadiusNextCeil() with the XY variant of the step).
+ * \param next_ceil[in] coord_t -> coord_t: the cache step of a radius, the largest radius that rounds up to the same step
+ *        (TreeVolumes::ceilRadius()).
  * \param valid[in] coord_t -> bool: whether a branch of this collision radius can keep an influence area (the caller's check of
  *        the areas of the cache step of the radius).
  * \return The widening to add, between 0 and planned_gain.
@@ -321,7 +299,7 @@ template<typename RadiusOf, typename NextCeil, typename Valid>
  * \brief True when merging two elements must be refused because the collision radius of the merged state needs a higher cache step
  * (ceilRadius()) than both elements: their areas were validated with their own collision radii only.
  *
- * The three radii are the ceiled collision radii, all taken with the same XY variant (use_min_xy_dist) of the merge.
+ * The three radii are the ceiled collision radii.
  */
 [[nodiscard]] inline bool merge_crosses_cache_step(const coord_t merged_ceil_radius, const coord_t first_ceil_radius, const coord_t second_ceil_radius)
 {
@@ -334,8 +312,9 @@ template<typename RadiusOf, typename NextCeil, typename Valid>
  * The radius gain and the distance to top are the larger ones. The foot is what the merged gain and path do not give of the
  * largest drawn radius of the two elements, so the drawn radius never decreases through a merge. to_buildplate and
  * to_model_gracious are conjunctions: the merged branch may lose its access to the bed. last_area_increase takes the smaller type
- * and speed and the or / and of the flags, as the best out of both elements. The caller sets increased_to_model_radius.
+ * and speed and the or of the flags, as the best out of both elements. The caller sets increased_to_model_radius.
  */
+// Combines two states on the same layer while preserving their largest drawn radius and tip height.
 [[nodiscard]] inline SupportElementState merge_support_element_states(
     const SupportElementState &first, const SupportElementState &second, const c_point &next_position, const coord_t layer_idx,
     const TreeSettings &config)
@@ -343,16 +322,8 @@ template<typename RadiusOf, typename NextCeil, typename Valid>
     SupportElementState out;
     out.next_position   = next_position;
     out.layer_idx       = layer_idx;
-    out.use_min_xy_dist = first.use_min_xy_dist || second.use_min_xy_dist;
     out.can_use_safe_radius = first.can_use_safe_radius || second.can_use_safe_radius;
-    out.skip_ovalisation = false;
-    if (first.target_height > second.target_height) {
-        out.target_height   = first.target_height;
-        out.target_position = first.target_position;
-    } else {
-        out.target_height   = second.target_height;
-        out.target_position = second.target_position;
-    }
+    out.target_height = std::max(first.target_height, second.target_height);
     out.radius_gain = std::max(first.radius_gain, second.radius_gain);
     out.distance_to_top = std::max(first.distance_to_top, second.distance_to_top);
 
@@ -370,7 +341,6 @@ template<typename RadiusOf, typename NextCeil, typename Valid>
         std::min(first.last_area_increase.increase_speed, second.last_area_increase.increase_speed),
         first.last_area_increase.increase_radius || second.last_area_increase.increase_radius,
         first.last_area_increase.no_error || second.last_area_increase.no_error,
-        first.last_area_increase.use_min_distance && second.last_area_increase.use_min_distance,
         first.last_area_increase.move || second.last_area_increase.move };
 
     return out;

@@ -10,7 +10,6 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 #include <algorithm>
 #include <cmath>
 #include <stdexcept>
-#include <string_view>
 #include <unordered_map>
 
 #include <boost/log/trivial.hpp>
@@ -23,9 +22,6 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "TreeGeometry.hpp"
-
-// Errors about a missing cache entry are logged at the error level.
-#define error_level_not_in_cache error
 
 /* Collision, avoidance and placeable areas of the tree branches, computed per object layer and branch radius.
 
@@ -55,7 +51,6 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 
 namespace Slic3r::TreeFamily {
 
-using namespace std::literals;
 using slic3r_api::PolygonCollection;
 using slic3r_api::StoredExPolygonCollection;
 using slic3r_api::StoredPolygonCollection;
@@ -83,29 +78,28 @@ MoveSteps split_move(const float max_move, const float move_step)
     return steps;
 }
 
-// The table of the radii that TreeVolumes::ceilRadius() rounds to (sorted, ascending), in key space: the regular XY variant looks
-// up radius + xy_delta, the minimum one looks up the radius itself.
+// The table of the radii that TreeVolumes::ceilRadius() rounds to (sorted, ascending).
 //
 // It starts from the scale of the tips: min_radius, then steps of equal size up to and including the first step beyond
 // SUPPORT_TREE_EXPONENTIAL_THRESHOLD (0.4; 1.5; 2.6 mm with the defaults, steps of 1.1 mm), then a factor of 1.5 for each
-// following step (3.9; 5.85; 8.775 mm ...). The scale is generated until it passes both band_end and branch_radius + xy_delta.
+// following step (3.9; 5.85; 8.775 mm ...). The scale is generated until it passes both band_end and branch_radius.
 //
 // The branches widen into their foot on the build plate between branch_radius and bp_radius. The validity of a foot (and of the
 // cone that leads to it) is checked on the table steps, so the table has a step every foot_step in the band [band_start, band_end].
 // foot_step is TreeSettings::foot_cache_step, half the diameter of the largest support nozzle (0.2 mm for 0.4 mm nozzles).
 // Without a positive foot_step there is no band. The band is delimited by:
-// - band_end = bp_radius + xy_delta: the foot is at most bp_radius and the regular variant adds the delta;
-// - band_start = the scale step that branch_radius + xy_delta rounds up to (1.5 mm with the defaults and no delta). It is
-//   shifted by the delta as the band end is, so that a branch of radius branch_radius never has fine steps in either variant.
+// - band_end = bp_radius: the foot is at most bp_radius;
+// - band_start = the scale step that branch_radius rounds up to (1.5 mm with the defaults), so that a branch of radius branch_radius
+//   never has fine steps.
 // The table is the scale steps strictly below band_start (the radii below it keep the scale steps, which the merging and the
 // radius growth of the tips are tuned on), then band_start, band_start + foot_step, ... up to band_end inclusive (the last step is
 // band_end even when it is not aligned), then the scale steps strictly above band_end.
 // Without a band (bp_radius <= branch_radius, or band_start >= band_end) the table is the scale.
-std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t branch_radius, const coord_t bp_radius, const coord_t xy_delta, const coord_t foot_step);
+std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t branch_radius, const coord_t bp_radius, const coord_t foot_step);
 
-std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t branch_radius, const coord_t bp_radius, const coord_t xy_delta, const coord_t foot_step)
+std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t branch_radius, const coord_t bp_radius, const coord_t foot_step)
 {
-    const coord_t band_end = bp_radius + xy_delta;
+    const coord_t band_end = bp_radius;
     // The scale is generated a step beyond the band: the lookup continues the factor of 1.5 itself above the table.
     std::vector<coord_t> scale{ min_radius };
     const coord_t initial_radius_delta = SUPPORT_TREE_EXPONENTIAL_THRESHOLD - min_radius;
@@ -122,14 +116,14 @@ std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t 
         out += SUPPORT_TREE_COLLISION_RESOLUTION;
         scale.emplace_back(out);
     }
-    while (out <= std::max(band_end, branch_radius + xy_delta)) {
+    while (out <= std::max(band_end, branch_radius)) {
         out = coord_t(out * SUPPORT_TREE_EXPONENTIAL_FACTOR);
         scale.emplace_back(out);
     }
     if (bp_radius <= branch_radius || foot_step <= 0)
         return scale;
-    // The scale step that branch_radius + xy_delta rounds up to (the scale was generated beyond it).
-    const coord_t band_start = *std::lower_bound(scale.begin(), scale.end(), branch_radius + xy_delta);
+    // The scale step that branch_radius rounds up to (the scale was generated beyond it).
+    const coord_t band_start = *std::lower_bound(scale.begin(), scale.end(), branch_radius);
     if (band_start >= band_end)
         return scale;
 
@@ -153,12 +147,9 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
                          const plugin_run_context *context) :
     m_context(context),
     m_min_resolution(settings.resolution),
-    m_current_min_xy_dist(settings.xy_min_distance),
-    m_current_min_xy_dist_delta(settings.xy_distance - settings.xy_min_distance),
     m_support_rests_on_model(settings.support_rests_on_model),
-    m_increase_until_radius(settings.increase_radius_until_radius),
     m_radius_steps(build_radius_steps(settings.min_radius, settings.branch_radius, settings.bp_radius,
-                                      settings.xy_distance - settings.xy_min_distance, settings.foot_cache_step)),
+                                      settings.foot_cache_step)),
     m_settings(settings),
     m_collision_cache(run_storage),
     m_collision_cache_holefree(run_storage),
@@ -169,8 +160,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
     m_placeable_areas_cache(run_storage),
     m_avoidance_cache_holefree(run_storage),
     m_avoidance_cache_holefree_to_model(run_storage),
-    m_wall_restrictions_cache(run_storage),
-    m_wall_restrictions_cache_min(run_storage)
+    m_wall_restrictions_cache(run_storage)
 {
     // The constructor does the two once-only readings of the object, in the run storage: it slices the support blockers and it
     // simplifies the outline of every layer. Nothing else is computed until precalculate().
@@ -233,7 +223,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
 // computed from the lowest layer up to the highest layer where it can occur. For each layer L, the radii a branch can have there
 // run from the path radius (TreeSettings::path_gain() on the real layer heights: a tip on max_layer that grew at every step) to
 // that radius plus the foot excess (foot_target[L] - branch_radius, 0 away from the bed); every step of the table (ceilRadius())
-// in that range is a key, with and without the XY delta. The range covers the catch-up of a branch and the partial widening of
+// in that range is a key. The range covers the catch-up of a branch and the partial widening of
 // its foot, which stop on table steps. A branch that pauses its growth has a radius below the path radius: those keys, and any
 // other that the range misses, are computed on demand by the getter. The function also sets the members that the getters read
 // without a lock (m_precalculated), so it must complete before the getters are called concurrently. The areas stay in the
@@ -268,15 +258,13 @@ void TreeVolumes::precalculate(const coord_t max_layer)
         const coord_t foot_excess = config.foot_target[current_layer] > double(config.branch_radius) && path_radius >= config.branch_radius ?
             coord_t(config.foot_target[current_layer]) - config.branch_radius : 0;
         const coord_t upper_radius = path_radius + foot_excess + 2;
-        // Every step of the table between the path radius and the bound, with and without the XY delta: the catch-up and the
-        // partial foot of a branch can stop on any of them.
-        for (const coord_t delta : { m_current_min_xy_dist_delta, coord_t(0) }) {
-            const coord_t last_step = ceilRadius(upper_radius + delta);
-            for (coord_t step = ceilRadius(path_radius + delta); ; step = ceilRadius(step + 1)) {
-                update_radius_until_layer(step);
-                if (step >= last_step)
-                    break;
-            }
+        // Every step of the table between the path radius and the bound: the catch-up and the partial foot of a branch can stop on any
+        // of them.
+        const coord_t last_step = ceilRadius(upper_radius);
+        for (coord_t step = ceilRadius(path_radius); ; step = ceilRadius(step + 1)) {
+            update_radius_until_layer(step);
+            if (step >= last_step)
+                break;
         }
     }
 
@@ -284,18 +272,16 @@ void TreeVolumes::precalculate(const coord_t max_layer)
 
     std::vector<RadiusLayerPair> relevant_avoidance_radiis{ radius_until_layer.begin(), radius_until_layer.end() };
 
-    // The collision of the increase radius is needed for the holefree collisions, and the one of radius 0 for the xy distance checks.
-    radius_until_layer[ceilRadius(m_increase_until_radius + m_current_min_xy_dist_delta)] = max_layer;
+    // The collision of the branch radius is needed for the holefree collisions, and the one of radius 0 for the xy distance checks.
+    radius_until_layer[ceilRadius(m_settings.branch_radius)] = max_layer;
     radius_until_layer[0] = max_layer;
-    if (m_current_min_xy_dist_delta != 0)
-        radius_until_layer[m_current_min_xy_dist_delta] = max_layer;
 
     std::vector<RadiusLayerPair> relevant_collision_radiis{ radius_until_layer.begin(), radius_until_layer.end() };
     calculateCollision(relevant_collision_radiis);
 
     std::vector<RadiusLayerPair> relevant_hole_collision_radiis;
     for (RadiusLayerPair key : relevant_avoidance_radiis)
-        if (key.first < m_increase_until_radius + m_current_min_xy_dist_delta)
+        if (key.first < m_settings.branch_radius)
             relevant_hole_collision_radiis.emplace_back(key);
     calculateCollisionHolefree(relevant_hole_collision_radiis);
 
@@ -341,7 +327,7 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
     // the loops and hold them until they are published.
     with_scratch_storage([&](storage_handle *result_storage) {
         const std::vector<StoredPolygonCollection> &outlines = m_layer_outlines;
-        const coord_t xy_distance = m_current_min_xy_dist;
+        const coord_t xy_distance = m_settings.xy_distance;
         const std::vector<uint32_t> &bottom_windows = m_settings.z_distance_bottom_layers;
         const std::vector<uint32_t> &top_windows = m_settings.z_distance_top_layers;
         assert(max_layer_idx >= 0 && max_layer_idx < LayerIndex(top_windows.size()) && max_layer_idx < LayerIndex(bottom_windows.size()));
@@ -454,15 +440,15 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
 }
 
 // Computes, for each key (radius, last layer), the collision of that radius on layers 0 to the last layer without the holes too small
-// for a branch of the radius until which it always widens. The radii are ceiled and smaller than m_increase_until_radius plus the
-// XY distance delta. The layers are published in chunks, each chunk with the layers of all the keys; a cancellation of the
-// context (PluginCancelled) propagates, and the chunks published before it stay (a missing layer is computed by getCollisionHolefree).
+// for a branch of the branch radius. The radii are ceiled and smaller than the branch radius. The layers are published in chunks, each
+// chunk with the layers of all the keys; a cancellation of the context (PluginCancelled) propagates, and the chunks published before
+// it stay (a missing layer is computed by getCollisionHolefree).
 void TreeVolumes::calculateCollisionHolefree(const std::vector<RadiusLayerPair> &keys)
 {
     // Without any key nothing is to compute, and the key count is the grainsize of the parallel loop below, which TBB requires to be
-    // positive. There is no key when every radius reaches m_increase_until_radius plus the XY distance delta. For instance, the tip
-    // radius is clamped to the branch radius when the tip diameter is at least the branch diameter (TreeSettings.cpp), so every
-    // radius is at least the branch radius, which is m_increase_until_radius, and the delta is 0.
+    // positive. There is no key when every radius reaches the branch radius. For instance, the tip radius is clamped to the
+    // branch radius when the tip diameter is at least the branch diameter (TreeSettings.cpp), so every radius is at least the
+    // branch radius.
     if (keys.empty())
         return;
 
@@ -470,9 +456,9 @@ void TreeVolumes::calculateCollisionHolefree(const std::vector<RadiusLayerPair> 
     for (size_t i = 0; i < keys.size(); i++)
         max_layer = std::max(max_layer, keys[i].second);
 
-    // The layers below grow the collision of m_increase_until_radius. When it is not cached, one computation of its whole range
+    // The layers below grow the collision of the branch radius. When it is not cached, one computation of its whole range
     // fills it, instead of one computation per layer in the loop below.
-    getCollision(m_increase_until_radius, max_layer, false);
+    getCollision(m_settings.branch_radius, max_layer);
 
     // FIXME(perf): kept on tbb::parallel_for with the grain of the key count, so that a chunk holds the layers of all the
     // keys and publishes them together. slic3r_parallel_for has no grain; moving to it would change the balancing without a
@@ -486,15 +472,15 @@ void TreeVolumes::calculateCollisionHolefree(const std::vector<RadiusLayerPair> 
             for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
                 for (RadiusLayerPair key : keys)
                     if (layer_idx <= key.second) {
-                        // Logically increase the collision by m_increase_until_radius
+                        // Logically increase the collision by the branch radius
                         coord_t radius = key.first;
                         assert(radius == this->ceilRadius(radius));
-                        assert(radius < m_increase_until_radius + m_current_min_xy_dist_delta);
-                        coord_t increase_radius_ceil = ceilRadius(m_increase_until_radius, false) - radius;
+                        assert(radius < m_settings.branch_radius);
+                        coord_t increase_radius_ceil = ceilRadius(m_settings.branch_radius) - radius;
                         assert(increase_radius_ceil > 0);
                         // this union is important as otherwise holes(in form of lines that will increase to holes in a later step) can get unioned onto the area.
                         data.emplace_back(RadiusLayerPair(radius, layer_idx), StoredPolygonCollection(storage));
-                        const StoredExPolygonCollection regions = expolygons_union(storage, this->getCollision(m_increase_until_radius, layer_idx, false));
+                        const StoredExPolygonCollection regions = expolygons_union(storage, this->getCollision(m_settings.branch_radius, layer_idx));
                         const StoredPolygonCollection shrunk = polygons_offset(storage, regions, 5 - increase_radius_ceil, CLIPPER_JOIN_ROUND, m_min_resolution);
                         data.back().second.move_from(slic3r_api::polygons_simplify(storage, shrunk, double(m_min_resolution)));
                         slic3r_api::throw_if_cancelled(m_context);
@@ -540,7 +526,7 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
         if (task.max_required_layer < first_layer)
             continue;
         if ((task.to_model ? to_model : to_build_plate) &&
-            (! task.holefree() || task.radius < m_increase_until_radius + m_current_min_xy_dist_delta))
+            (! task.holefree() || task.radius < m_settings.branch_radius))
             avoidance_tasks.emplace_back(task);
     }
 
@@ -553,21 +539,21 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
         [this, &avoidance_tasks, first_layer](const tbb::blocked_range<size_t> &range) {
         for (size_t task_idx = range.begin(); task_idx < range.end(); ++ task_idx) {
             const AvoidanceTask &task = avoidance_tasks[task_idx];
-            assert(! task.holefree() || task.radius < m_increase_until_radius + m_current_min_xy_dist_delta);
+            assert(! task.holefree() || task.radius < m_settings.branch_radius);
             if (task.to_model)
                 getPlaceableAreas(task.radius, task.max_required_layer);
             // The following loop propagating avoidance regions bottom up is inherently serial.
-            const bool collision_holefree = (task.slow() || task.holefree()) && task.radius < m_increase_until_radius + m_current_min_xy_dist_delta;
+            const bool collision_holefree = (task.slow() || task.holefree()) && task.radius < m_settings.branch_radius;
             // The collision that the avoidance of this task merges with, on a layer.
             const auto collision_of_layer = [this, &task, collision_holefree](LayerIndex layer_idx) -> const StoredPolygonCollection& {
-                return collision_holefree ? getCollisionHolefree(task.radius, layer_idx) : getCollision(task.radius, layer_idx, true);
+                return collision_holefree ? getCollisionHolefree(task.radius, layer_idx) : getCollision(task.radius, layer_idx);
             };
             // When the collisions are not cached, one computation of their whole range fills them, instead of one per layer below.
             collision_of_layer(task.max_required_layer);
             const std::vector<coord_t> &max_moves = task.slow() ? m_max_move_slow : m_max_move;
             // Limiting the offset step so that unioning the shrunk latest_avoidance with the current layer collisions
             // will not create gaps in the resulting avoidance region letting a tree support branch tunneling through an object wall.
-            const float move_step = 1.9f * float(std::max(task.radius, m_current_min_xy_dist));
+            const float move_step = 1.9f * float(std::max(task.radius, m_settings.xy_distance));
             // Threshold must be >= 0.5 to prevent division by zero when move_step is cast to int in round_up_divide. A branch below
             // it (no radius and no XY distance) has no step to propagate with: its avoidance is its collision. It is published
             // like the others, as the getter that asked for it reads it back.
@@ -577,8 +563,8 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
             with_scratch_storage([&](storage_handle *storage) {
                 std::vector<std::pair<RadiusLayerPair, StoredPolygonCollection>> data;
                 data.reserve(task.max_required_layer + 1 - first_layer);
-                // minDist as the delta was already added, also avoidance for layer 0 will return the collision.
-                StoredPolygonCollection latest_avoidance = getAvoidance(task.radius, first_layer - 1, task.type, task.to_model, true).readonly().clone(storage);
+                // The avoidance of layer 0 is the collision.
+                StoredPolygonCollection latest_avoidance = getAvoidance(task.radius, first_layer - 1, task.type, task.to_model).readonly().clone(storage);
                 for (LayerIndex layer_idx = first_layer; layer_idx <= task.max_required_layer; ++ layer_idx) {
                     // Merge current layer collisions with shrunk last_avoidance.
                     const StoredPolygonCollection &current_layer_collisions = collision_of_layer(layer_idx);
@@ -627,7 +613,7 @@ void TreeVolumes::calculatePlaceables(const std::vector<RadiusLayerPair> &keys)
 }
 
 // Computes the placeable areas of one radius on layers 0 to max_required_layer, from the ones of radius 0 shrunk by the radius and
-// by the regular XY distance. Layer 0 has no placeable area, as nothing lies below it: its entry stays empty, so that a request for
+// by the XY distance. Layer 0 has no placeable area, as nothing lies below it: its entry stays empty, so that a request for
 // it finds its key.
 void TreeVolumes::calculatePlaceables(const coord_t radius, const LayerIndex max_required_layer)
 {
@@ -652,7 +638,7 @@ void TreeVolumes::calculatePlaceables(const coord_t radius, const LayerIndex max
                             // As a placeable area is calculated by (collision of the layer below) - (collision of the current layer) and the collision is offset by xy_distance,
                             // it can happen that a small line is considered a flat area to place something onto, even though it is mostly
                             // xy_distance that cant support it. Making the area smaller by xy_distance fixes this.
-                            - (radius + m_current_min_xy_dist + m_current_min_xy_dist_delta),
+                            - (radius + m_settings.xy_distance),
                             CLIPPER_JOIN_MITER, 1.2));
                         slic3r_api::throw_if_cancelled(m_context);
                     }
@@ -664,8 +650,7 @@ void TreeVolumes::calculatePlaceables(const coord_t radius, const LayerIndex max
     });
 }
 
-// Computes, for each key (radius, last layer), the wall restrictions of that radius on layers 1 to the last layer, with the regular
-// XY distance and, when it differs from the minimum one, with the minimum XY distance as well. The radii are ceiled. A key is
+// Computes, for each key (radius, last layer), the wall restrictions of that radius on layers 1 to the last layer. The radii are ceiled. A key is
 // published whole, after its loop; a cancellation of the context propagates, and the keys published before it stay.
 void TreeVolumes::calculateWallRestrictions(const std::vector<RadiusLayerPair> &keys)
 {
@@ -716,36 +701,22 @@ void TreeVolumes::calculateWallRestrictions(const std::vector<RadiusLayerPair> &
             if (max_required_layer < first_layer)
                 continue;
             const size_t     buffer_size        = max_required_layer + 1 - first_layer;
-            const bool       with_min           = m_current_min_xy_dist_delta > 0;
             // When the collisions are not cached, one computation of their whole range fills them, instead of one per layer below.
-            getCollision(0, max_required_layer, false);
-            if (with_min)
-                getCollision(0, max_required_layer, true);
-            getCollision(radius, max_required_layer - 1, true);
+            getCollision(0, max_required_layer);
+            getCollision(radius, max_required_layer - 1);
             with_scratch_storage([&](storage_handle *result_storage) {
                 std::vector<StoredPolygonCollection> data;
-                std::vector<StoredPolygonCollection> data_min;
                 data.reserve(buffer_size);
                 for (size_t idx = 0; idx < buffer_size; ++ idx)
                     data.emplace_back(result_storage);
-                if (with_min) {
-                    data_min.reserve(buffer_size);
-                    for (size_t idx = 0; idx < buffer_size; ++ idx)
-                        data_min.emplace_back(result_storage);
-                }
                 // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
                 // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
                 tbb::parallel_for(tbb::blocked_range<LayerIndex>(first_layer, max_required_layer + 1),
-                    [this, &data, &data_min, radius, first_layer](const tbb::blocked_range<LayerIndex> &range) {
+                    [this, &data, radius, first_layer](const tbb::blocked_range<LayerIndex> &range) {
                     with_scratch_storage([&](storage_handle *storage) {
                         for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
-                            // radius contains m_current_min_xy_dist_delta already if required
-                            const StoredPolygonCollection walls = polygons_intersection(storage, getCollision(0, layer_idx, false), getCollision(radius, layer_idx - 1, true));
+                            const StoredPolygonCollection walls = polygons_intersection(storage, getCollision(0, layer_idx), getCollision(radius, layer_idx - 1));
                             data[layer_idx - first_layer].move_from(slic3r_api::polygons_simplify(storage, walls, double(m_min_resolution)));
-                            if (! data_min.empty()) {
-                                const StoredPolygonCollection walls_min = polygons_intersection(storage, getCollision(0, layer_idx, true), getCollision(radius, layer_idx - 1, true));
-                                data_min[layer_idx - first_layer].move_from(slic3r_api::polygons_simplify(storage, walls_min, double(m_min_resolution)));
-                            }
                             slic3r_api::throw_if_cancelled(m_context);
                         }
                     });
@@ -753,8 +724,6 @@ void TreeVolumes::calculateWallRestrictions(const std::vector<RadiusLayerPair> &
                 // The inner loop is skipped, not failed, when the enclosing TBB group is cancelled: it must not publish its empty layers.
                 throw_if_interrupted();
                 m_wall_restrictions_cache.insert(std::move(data), first_layer, radius);
-                if (! data_min.empty())
-                    m_wall_restrictions_cache_min.insert(std::move(data_min), first_layer, radius);
             });
         }
     });
@@ -773,42 +742,47 @@ void TreeVolumes::throw_if_interrupted() const
         throw std::runtime_error("TreeVolumes: the enclosing TBB task group is cancelled");
 }
 
-const StoredPolygonCollection& TreeVolumes::getCollision(const coord_t orig_radius, LayerIndex layer_idx, bool min_xy_dist) const
+// Gives the collision of a branch of orig_radius (>= 0), rounded up to its cache step by ceilRadius(), on the object layer layer_idx
+// (0 to the layer count minus one). The reference is owned by the cache and stays valid until the TreeVolumes is destroyed. On a cache
+// miss it computes the whole range of the key, from layer 0 to layer_idx, then reads the cache again; a cancellation of the context
+// propagates, and what was published before it stays.
+const StoredPolygonCollection& TreeVolumes::getCollision(const coord_t orig_radius, LayerIndex layer_idx) const
 {
-    const coord_t radius = this->ceilRadius(orig_radius, min_xy_dist);
+    const coord_t radius = this->ceilRadius(orig_radius);
     if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result = m_collision_cache.getArea({ radius, layer_idx }); result)
         return (*result).get();
-    if (m_precalculated) {
-        BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate collision at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
-        BOOST_LOG_TRIVIAL(error) << "Not precalculated Collision requested."sv;
-    }
+    if (m_precalculated)
+        BOOST_LOG_TRIVIAL(error) << "Had to calculate collision at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
     const_cast<TreeVolumes*>(this)->calculateCollision(radius, layer_idx);
     throw_if_interrupted();
-    return getCollision(orig_radius, layer_idx, min_xy_dist);
+    return getCollision(orig_radius, layer_idx);
 }
 
 const StoredPolygonCollection& TreeVolumes::getCollisionHolefree(coord_t radius, LayerIndex layer_idx) const
 {
     assert(radius == this->ceilRadius(radius));
-    assert(radius < m_increase_until_radius + m_current_min_xy_dist_delta);
+    assert(radius < m_settings.branch_radius);
     if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result = m_collision_cache_holefree.getArea({ radius, layer_idx }); result)
         return (*result).get();
-    if (m_precalculated) {
-        BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate collision holefree at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
-        BOOST_LOG_TRIVIAL(error) << "Not precalculated Holefree Collision requested."sv;
-    }
+    if (m_precalculated)
+        BOOST_LOG_TRIVIAL(error) << "Had to calculate collision holefree at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
     const_cast<TreeVolumes*>(this)->calculateCollisionHolefree({ radius, layer_idx });
     throw_if_interrupted();
     return getCollisionHolefree(radius, layer_idx);
 }
 
-const StoredPolygonCollection& TreeVolumes::getAvoidance(const coord_t orig_radius, LayerIndex layer_idx, AvoidanceType type, bool to_model, bool min_xy_dist) const
+// Gives the avoidance of a branch of orig_radius (>= 0), rounded up to its cache step by ceilRadius(), on the object layer layer_idx
+// (0 to the layer count minus one), to the build plate or, with to_model, to the model. Layer 0 gives the collision, and FastSafe falls
+// back to Fast from the branch radius up, where there is no hole left. The reference is owned by the cache and stays valid until the
+// TreeVolumes is destroyed. On a cache miss it computes the key from layer 1 to layer_idx, then reads the cache again; a cancellation of
+// the context propagates, and what was published before it stays.
+const StoredPolygonCollection& TreeVolumes::getAvoidance(const coord_t orig_radius, LayerIndex layer_idx, AvoidanceType type, bool to_model) const
 {
     if (layer_idx == 0) // What on the layer directly above buildplate do i have to avoid to reach the buildplate ...
-        return getCollision(orig_radius, layer_idx, min_xy_dist);
+        return getCollision(orig_radius, layer_idx);
 
-    const coord_t radius = this->ceilRadius(orig_radius, min_xy_dist);
-    if (type == AvoidanceType::FastSafe && radius >= m_increase_until_radius + m_current_min_xy_dist_delta)
+    const coord_t radius = this->ceilRadius(orig_radius);
+    if (type == AvoidanceType::FastSafe && radius >= m_settings.branch_radius)
         // no holes anymore by definition at this request
         type = AvoidanceType::Fast;
 
@@ -819,20 +793,18 @@ const StoredPolygonCollection& TreeVolumes::getAvoidance(const coord_t orig_radi
 
     if (m_precalculated) {
         if (to_model) {
-            BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate Avoidance to model at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
-            BOOST_LOG_TRIVIAL(error) << "Not precalculated Avoidance(to model) requested."sv;
+            BOOST_LOG_TRIVIAL(error) << "Had to calculate Avoidance to model at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
         } else {
-            BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate Avoidance at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
-            BOOST_LOG_TRIVIAL(error) << "Not precalculated Avoidance(to buildplate) requested."sv;
+            BOOST_LOG_TRIVIAL(error) << "Had to calculate Avoidance at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
         }
     }
     const_cast<TreeVolumes*>(this)->calculateAvoidance({ radius, layer_idx }, ! to_model, to_model);
     throw_if_interrupted();
     // Retrive failed and correct result was calculated. Now it has to be retrived.
-    return getAvoidance(orig_radius, layer_idx, type, to_model, min_xy_dist);
+    return getAvoidance(orig_radius, layer_idx, type, to_model);
 }
 
-// Gives the placeable areas of a branch of orig_radius (rounded as the other getters do, without the XY distance delta) on layer
+// Gives the placeable areas of a branch of orig_radius (rounded as the other getters do) on layer
 // layer_idx >= 0. On a cache miss it computes the key, from layer 0 to layer_idx, then reads the cache again; the reference is
 // owned by the cache. A cancellation of the context propagates, and what was published before it stays.
 const StoredPolygonCollection& TreeVolumes::getPlaceableAreas(const coord_t orig_radius, LayerIndex layer_idx) const
@@ -840,10 +812,8 @@ const StoredPolygonCollection& TreeVolumes::getPlaceableAreas(const coord_t orig
     const coord_t radius = ceilRadius(orig_radius);
     if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result = m_placeable_areas_cache.getArea({ radius, layer_idx }); result)
         return (*result).get();
-    if (m_precalculated) {
-        BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate Placeable Areas at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
-        BOOST_LOG_TRIVIAL(error) << "Not precalculated Placeable areas requested, radius " << radius << ", layer " << layer_idx;
-    }
+    if (m_precalculated)
+        BOOST_LOG_TRIVIAL(error) << "Had to calculate Placeable Areas at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
     if (orig_radius == 0) {
         // Placeable areas for radius 0 are calculated in the general collision code, which inserts them with the collisions. The
         // collision may be cached already while the thread that computed it is still inserting the placeable areas, so this runs
@@ -851,7 +821,7 @@ const StoredPolygonCollection& TreeVolumes::getPlaceableAreas(const coord_t orig
         if (! m_support_rests_on_model)
             // Nothing rests on the model, so that code computes no placeable areas, and the routing does not ask for them: the
             // collision is returned, which ends the request.
-            return this->getCollision(0, layer_idx, true);
+            return this->getCollision(0, layer_idx);
         const_cast<TreeVolumes*>(this)->calculateCollision(0, layer_idx);
     } else
         const_cast<TreeVolumes*>(this)->calculatePlaceables(radius, layer_idx);
@@ -860,32 +830,25 @@ const StoredPolygonCollection& TreeVolumes::getPlaceableAreas(const coord_t orig
     return getPlaceableAreas(orig_radius, layer_idx);
 }
 
-const StoredPolygonCollection& TreeVolumes::getWallRestriction(const coord_t orig_radius, LayerIndex layer_idx, bool min_xy_dist) const
+// Returns a cache-owned wall restriction for a nonnegative radius on layer > 0; missing entries are computed, and interruption propagates through the cache calculation.
+const StoredPolygonCollection& TreeVolumes::getWallRestriction(const coord_t orig_radius, LayerIndex layer_idx) const
 {
     assert(layer_idx > 0);
-    if (layer_idx == 0)
-        // Should never be requested as there will be no going below layer 0 ...,
-        // but just to be sure some semi-sane catch. Alternative would be empty Polygon.
-        return getCollision(orig_radius, layer_idx, min_xy_dist);
-
-    min_xy_dist &= m_current_min_xy_dist_delta > 0;
 
     const coord_t radius = ceilRadius(orig_radius);
     if (std::optional<std::reference_wrapper<const StoredPolygonCollection>> result =
-        (min_xy_dist ? m_wall_restrictions_cache_min : m_wall_restrictions_cache).getArea({ radius, layer_idx });
+        m_wall_restrictions_cache.getArea({ radius, layer_idx });
         result)
         return (*result).get();
-    if (m_precalculated) {
-        BOOST_LOG_TRIVIAL(error_level_not_in_cache) << "Had to calculate Wall restrictions at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
-        BOOST_LOG_TRIVIAL(error) << (min_xy_dist ?
-            "Not precalculated Wall restriction of minimum xy distance requested )." :
-            "Not precalculated Wall restriction requested )."sv);
-    }
+    if (m_precalculated)
+        BOOST_LOG_TRIVIAL(error) << "Had to calculate Wall restrictions at radius " << radius << " and layer " << layer_idx << ", but precalculate was called. Performance may suffer!";
     const_cast<TreeVolumes*>(this)->calculateWallRestrictions({ radius, layer_idx });
     throw_if_interrupted();
-    return getWallRestriction(orig_radius, layer_idx, min_xy_dist); // Retrieve failed and correct result was calculated. Now it has to be retrieved.
+    return getWallRestriction(orig_radius, layer_idx); // Retrieve failed and correct result was calculated. Now it has to be retrieved.
 }
 
+// Rounds a radius (>= 0) up to the smallest step of the table of cache radii that is not below it; 0 stays 0. Above the last step of
+// the table the steps keep growing by SUPPORT_TREE_EXPONENTIAL_FACTOR. It reads the table only, so any thread may call it.
 coord_t TreeVolumes::ceilRadius(const coord_t radius) const
 {
     if (radius == 0)

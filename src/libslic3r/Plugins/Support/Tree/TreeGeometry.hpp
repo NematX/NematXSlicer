@@ -12,7 +12,7 @@
    - polygons_simplify: Api/plugin/cpp/PolygonOps.hpp; LineDistancer: Api/plugin/cpp/LineDistancer.hpp.
 
    Groups, in the order of the declarations below:
-   1. scalars: sqr, round_up_divide, sort_remove_duplicates;
+   1. scalars: sqr, round_up_divide;
    2. Eigen vector aliases (the same types as the native ones) and conversions between c_point and Eigen vectors;
    3. integer c_point products and the hash of a c_point;
    4. bounding boxes of polygon collections;
@@ -65,13 +65,6 @@ constexpr inline float sqr(float x) { return x * x; }
 template<typename INDEX_TYPE> inline INDEX_TYPE round_up_divide(const INDEX_TYPE dividend, const INDEX_TYPE divisor)
 {
     return (dividend + divisor - 1) / divisor;
-}
-
-// Sort a vector and drop the repeated values.
-template<typename T> inline void sort_remove_duplicates(std::vector<T> &vec)
-{
-    std::sort(vec.begin(), vec.end());
-    vec.erase(std::unique(vec.begin(), vec.end()), vec.end());
 }
 
 /* ============================== 2. Eigen vectors and c_point ============================== */

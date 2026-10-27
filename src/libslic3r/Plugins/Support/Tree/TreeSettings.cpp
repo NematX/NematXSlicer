@@ -69,7 +69,6 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
         external_perimeter_width = std::max(external_perimeter_width,
             object.region_flow_mm(region_id, raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER), layer_height_mm, 2).width);
 
-    layer_height = scale_to_layer_coord(layer_height_mm);
     resolution = scale_to_layer_coord(print_config.get("resolution_internal").get_float());
     min_feature_size = scale_to_layer_coord(external_perimeter_width * 0.25);
     const raw_extrusion_role support_role = raw_extrusion_role(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL);
@@ -78,13 +77,10 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     // The same option as tip_sources(): the interface layers under which the tips start.
     branches_carry_roof = config.get("support_material_interface_layers").get_int() > 0;
     xy_distance = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_perimeter_width));
-    // The tree keeps the user's XY spacing everywhere, from the routing to the final trim. xy_min_distance is kept equal to
-    // xy_distance, so the min-XY variants of the routing and of the volumes are never used.
     if (params.soluble) {
         // A soluble support touches the object, so its XY distance is its only separation: the safe offset steps by it and needs it above zero.
         xy_distance = std::max(xy_distance, scale_i(0.1));
     }
-    xy_min_distance = xy_distance;
     const coord_t gap_above = scale_to_layer_coord(params.gap_above);
     const coord_t gap_below = scale_to_layer_coord(params.gap_below);
     const coord_t eps = scale_to_layer_coord(EPSILON);
@@ -100,7 +96,6 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     const double diameter_angle = std::clamp<double>(config.get("support_tree_branch_diameter_angle").get_float() * PI / 180., 0., 0.5 * PI - EPSILON);
     cone_slope = std::tan(diameter_angle);
     tip_total_gain = double(branch_radius - min_radius);
-    increase_radius_until_radius = branch_radius;
 
     bp_radius = scale_i(bp_diameter_mm) / 2;
     foot_cache_step = scale_i(0.5 * std::max(params.base_flow_mm.nozzle_diameter, params.interface_flow_mm.nozzle_diameter));

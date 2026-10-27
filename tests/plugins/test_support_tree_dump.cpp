@@ -180,15 +180,15 @@ void dump_settings(Dump &dump, const std::string &prefix, const TF::TreeSettings
 {
     Record &record = dump.add(prefix + "/settings");
     record.lines = {
-        field("layer_height", (long long) s.layer_height), field("resolution", (long long) s.resolution),
+        field("resolution", (long long) s.resolution),
         field("min_feature_size", (long long) s.min_feature_size), field("support_line_width", (long long) s.support_line_width),
         field("branch_radius", (long long) s.branch_radius), field("min_radius", (long long) s.min_radius),
-        field("bp_radius", (long long) s.bp_radius), field("foot_cache_step", (long long) s.foot_cache_step), field("increase_radius_until_radius", (long long) s.increase_radius_until_radius),
+        field("bp_radius", (long long) s.bp_radius), field("foot_cache_step", (long long) s.foot_cache_step),
         field("min_height_to_model", (long long) s.min_height_to_model),
         field("max_to_model_radius_increase", (long long) s.max_to_model_radius_increase),
         field("support_rests_on_model", s.support_rests_on_model), field("xy_distance", (long long) s.xy_distance),
         field("z_distance_both_sides", s.z_distance_both_sides),
-        field("xy_min_distance", (long long) s.xy_min_distance), field("branch_distance", (long long) s.branch_distance),
+        field("branch_distance", (long long) s.branch_distance),
         field("top_rate", s.top_rate), field("angle", s.angle), field("max_overhang", (long long) s.max_overhang),
         field("min_slab_height", (long long) s.min_slab_height), field("max_slab_height", (long long) s.max_slab_height),
         field("dense_slab_height", (long long) s.dense_slab_height), field("z_step", (long long) s.z_step)};
@@ -249,21 +249,18 @@ void dump_volumes(Dump &dump, const std::string &prefix, const Print &print, con
     };
     for (const coord_t radius : radii) {
         const std::string r = "r" + std::to_string((long long) radius);
-        for (const bool min_xy : {true, false}) {
-            const std::string xy = min_xy ? "/minxy" : "/regxy";
-            for (TF::LayerIndex layer = 0; layer < layers; ++layer)
-                add("collision/" + r + xy + "/L" + std::to_string(layer), volumes.getCollision(radius, layer, min_xy));
-            for (TF::LayerIndex layer = 1; layer < layers; ++layer) {
-                const std::string at = "/L" + std::to_string(layer);
-                for (const std::pair<Volumes::AvoidanceType, const char *> &type : types)
-                    for (const bool to_model : {false, true})
-                        add(std::string("avoidance/") + type.second + (to_model ? "/model/" : "/plate/") + r + xy + at,
-                            volumes.getAvoidance(radius, layer, type.first, to_model, min_xy));
-                add("wall/" + r + xy + at, volumes.getWallRestriction(radius, layer, min_xy));
-            }
+        for (TF::LayerIndex layer = 0; layer < layers; ++layer)
+            add("collision/" + r + "/L" + std::to_string(layer), volumes.getCollision(radius, layer));
+        for (TF::LayerIndex layer = 1; layer < layers; ++layer) {
+            const std::string at = "/L" + std::to_string(layer);
+            for (const std::pair<Volumes::AvoidanceType, const char *> &type : types)
+                for (const bool to_model : {false, true})
+                    add(std::string("avoidance/") + type.second + (to_model ? "/model/" : "/plate/") + r + at,
+                        volumes.getAvoidance(radius, layer, type.first, to_model));
+            add("wall/" + r + at, volumes.getWallRestriction(radius, layer));
         }
     }
-    // The placeable areas have no XY distance variant: radius 0 (the top surfaces of the object) and the tip radius.
+    // The placeable areas: radius 0 (the top surfaces of the object) and the tip radius.
     for (const coord_t radius : {coord_t(0), settings.min_radius})
         for (TF::LayerIndex layer = 1; layer < layers; ++layer)
             add("placeable/r" + std::to_string((long long) radius) + "/L" + std::to_string(layer), volumes.getPlaceableAreas(radius, layer));
@@ -289,7 +286,6 @@ void dump_routing(Dump &dump, const std::string &base, const std::vector<TF::Rou
             record.lines.push_back("node " + std::to_string(n) + " layer=" + std::to_string(node.layer) + " print_z=" + ST::number(node.print_z) +
                 " x=" + std::to_string((long long) node.position.x) + " y=" + std::to_string((long long) node.position.y) +
                 " radius=" + std::to_string((long long) node.radius) + " to_buildplate=" + (node.to_buildplate ? "1" : "0") +
-                " to_model_gracious=" + (node.to_model_gracious ? "1" : "0") + " lost=" + (node.lost ? "1" : "0") +
                 " verylost=" + (node.verylost ? "1" : "0") + " carries=" + carries);
         }
     }

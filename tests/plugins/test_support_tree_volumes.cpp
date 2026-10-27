@@ -112,7 +112,7 @@ void check_physical_gap_ledge(bool variable, double band_z, const char *uniform_
             object_contains = object_contains || polygon.contains(probe);
         REQUIRE(object_contains == (layer == j));
         bool collision_contains = false;
-        for (const Polygon &polygon : SG::native(volumes.getCollision(0, TF::LayerIndex(layer), true)))
+        for (const Polygon &polygon : SG::native(volumes.getCollision(0, TF::LayerIndex(layer))))
             if (polygon.contains(probe))
                 collision_contains = !collision_contains;
         const coord_t eps = scale_to_layer_coord(EPSILON);
@@ -203,7 +203,7 @@ void check_collision_ramp(bool virtual_top)
         CHECK(settings.z_distance_bottom_layers[j] == 3);
     }
     const coord_t radius = settings.min_radius;
-    const coord_t xy = settings.xy_min_distance;
+    const coord_t xy = settings.xy_distance;
     REQUIRE(radius > 0);
     REQUIRE(xy > 0);
     const BoundingBox bounds = get_extents(object.layer(j).lslices());
@@ -213,7 +213,7 @@ void check_collision_ramp(bool virtual_top)
     PluginStorage storage;
     Volumes volumes(SG::object_view(object), SG::print_view(print), settings, SG::handle(storage), nullptr);
     bool correct_contains = false;
-    for (const Polygon &polygon : SG::native(volumes.getCollision(radius, layer, true)))
+    for (const Polygon &polygon : SG::native(volumes.getCollision(radius, layer)))
         if (polygon.contains(probe))
             correct_contains = !correct_contains;
     CHECK(correct_contains);
@@ -221,7 +221,7 @@ void check_collision_ramp(bool virtual_top)
     truncated.z_distance_top_layers[layer] = 1;
     Volumes one_layer(SG::object_view(object), SG::print_view(print), truncated, SG::handle(storage), nullptr);
     bool truncated_contains = false;
-    for (const Polygon &polygon : SG::native(one_layer.getCollision(radius, layer, true)))
+    for (const Polygon &polygon : SG::native(one_layer.getCollision(radius, layer)))
         if (polygon.contains(probe))
             truncated_contains = !truncated_contains;
     CHECK_FALSE(truncated_contains);
@@ -267,9 +267,7 @@ private:
     boost::shared_ptr<Sink> m_sink;
 };
 
-// The first object of a sliced print, with the tree settings read from it. Production keeps the minimum XY distance equal to the
-// XY distance; the scene builds a smaller one (0.21 mm, below the default XY spacing of 3 mm) to exercise the min-XY code, which is
-// kept until a cleanup. The difference makes the radii with and without the minimum XY distance fall into different buckets.
+// The first object of a sliced print, with the tree settings read from it.
 struct Scene {
     // The storage owns the areas of the volumes made from the scene, so it is declared first and destroyed last.
     PluginStorage    storage;
@@ -286,7 +284,6 @@ struct Scene {
         Test::init_print({SG::slab(true)}, print, model, config);
         SG::prefix(print);
         settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
-        settings.xy_min_distance = std::min(settings.xy_distance, scale_i(0.21));
     }
     const PrintObject &object() const { return print.object(0); }
     // New volumes over the first object, owning their areas in the storage of the scene; the context (nullptr never cancels) is the one they check.
@@ -299,7 +296,6 @@ struct Request {
     Kind                 kind;
     coord_t              radius;
     TF::LayerIndex       layer;
-    bool                 min_xy_dist = true;
     Volumes::AvoidanceType type      = Volumes::AvoidanceType::Fast;
     bool                 to_model    = false;
 };
@@ -308,24 +304,23 @@ struct Request {
 const slic3r_api::StoredPolygonCollection &fetch(const Volumes &volumes, const Request &request)
 {
     switch (request.kind) {
-    case Kind::Collision: return volumes.getCollision(request.radius, request.layer, request.min_xy_dist);
-    case Kind::Avoidance: return volumes.getAvoidance(request.radius, request.layer, request.type, request.to_model, request.min_xy_dist);
+    case Kind::Collision: return volumes.getCollision(request.radius, request.layer);
+    case Kind::Avoidance: return volumes.getAvoidance(request.radius, request.layer, request.type, request.to_model);
     case Kind::Placeable: return volumes.getPlaceableAreas(request.radius, request.layer);
-    case Kind::Wall:      return volumes.getWallRestriction(request.radius, request.layer, request.min_xy_dist);
+    case Kind::Wall:      return volumes.getWallRestriction(request.radius, request.layer);
     }
-    return volumes.getCollision(request.radius, request.layer, request.min_xy_dist);
+    return volumes.getCollision(request.radius, request.layer);
 }
 
 // The start of the log line that the getter writes when it has to compute the request, with the radius rounded as the getter does.
 std::string lazy_message(const Volumes &volumes, const Request &request)
 {
-    const std::string key = std::to_string(volumes.ceilRadius(request.radius, request.min_xy_dist)) + " and layer " + std::to_string(request.layer) + ",";
+    const std::string key = std::to_string(volumes.ceilRadius(request.radius)) + " and layer " + std::to_string(request.layer) + ",";
     switch (request.kind) {
     case Kind::Collision: return "Had to calculate collision at radius " + key;
     case Kind::Avoidance: return std::string(request.to_model ? "Had to calculate Avoidance to model at radius " : "Had to calculate Avoidance at radius ") + key;
-    // The placeable areas and the wall restrictions round the radius without the XY distance delta.
-    case Kind::Placeable: return "Had to calculate Placeable Areas at radius " + std::to_string(volumes.ceilRadius(request.radius, true)) + " and layer " + std::to_string(request.layer) + ",";
-    case Kind::Wall:      return "Had to calculate Wall restrictions at radius " + std::to_string(volumes.ceilRadius(request.radius, true)) + " and layer " + std::to_string(request.layer) + ",";
+    case Kind::Placeable: return "Had to calculate Placeable Areas at radius " + key;
+    case Kind::Wall:      return "Had to calculate Wall restrictions at radius " + key;
     }
     return {};
 }
@@ -338,8 +333,6 @@ std::string describe(const Request &request)
     std::string text = std::string(kinds[int(request.kind)]) + " radius " + std::to_string(request.radius) + " layer " + std::to_string(request.layer);
     if (request.kind == Kind::Avoidance)
         text += std::string(" ") + types[int(request.type)] + (request.to_model ? " to model" : " to plate");
-    if (request.kind != Kind::Placeable)
-        text += request.min_xy_dist ? " min xy" : " regular xy";
     return text;
 }
 
@@ -446,7 +439,7 @@ slic3r_api::StoredPolygonCollection blocker_collision(storage_handle *run_storag
     const TF::TreeSettings settings = ST::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
     Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, run_storage, nullptr);
     slic3r_api::StoredPolygonCollection copy(run_storage);
-    copy.copy_from(volumes.getCollision(0, layer, true));
+    copy.copy_from(volumes.getCollision(0, layer));
     return copy;
 }
 
@@ -533,12 +526,12 @@ TEST_CASE("Cold radius 0 placeable areas are placeable areas and not collisions"
     TF::LayerIndex layer = -1;
     for (TF::LayerIndex idx = 2; idx <= reference_layers && layer < 0; ++ idx) {
         const slic3r_api::StoredPolygonCollection &placeable = reference.getPlaceableAreas(0, idx);
-        if (placeable.size() > 0 && ! same(placeable, reference.getCollision(0, idx, true)))
+        if (placeable.size() > 0 && ! same(placeable, reference.getCollision(0, idx)))
             layer = idx;
     }
     REQUIRE(layer >= 0);
     const Rings expected  = rings(reference.getPlaceableAreas(0, layer));
-    const Rings collision = rings(reference.getCollision(0, layer, true));
+    const Rings collision = rings(reference.getCollision(0, layer));
 
     Volumes cold = scene.volumes();
     const Rings first  = rings(cold.getPlaceableAreas(0, layer));
@@ -558,7 +551,7 @@ TEST_CASE("Radius 0 placeable areas without resting on the model return the coll
     Volumes volumes = scene.volumes();
     const Rings placeable = rings(volumes.getPlaceableAreas(0, lazy_layer));
     Volumes other = scene.volumes();
-    CHECK(placeable == rings(other.getCollision(0, lazy_layer, true)));
+    CHECK(placeable == rings(other.getCollision(0, lazy_layer)));
 }
 
 // The caches promise that a returned reference stays valid while they grow. Hold one, ask the same cache for a later layer, which
@@ -598,16 +591,15 @@ TEST_CASE("The avoidance of a branch that cannot move is its collision", "[plugi
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Scene scene(false, "0");
-    REQUIRE(scene.settings.xy_min_distance == 0);
     REQUIRE(scene.settings.xy_distance == 0);
     for (Volumes::AvoidanceType type : { Volumes::AvoidanceType::Slow, Volumes::AvoidanceType::FastSafe, Volumes::AvoidanceType::Fast })
         for (bool to_model : { false, true }) {
-            Request request{ Kind::Avoidance, 0, lazy_layer, true, type, to_model };
+            Request request{ Kind::Avoidance, 0, lazy_layer, type, to_model };
             CAPTURE(describe(request));
             // Nothing is precalculated, and radius 0 is not a key that precalculate() computes.
             Volumes volumes = scene.volumes();
             const slic3r_api::StoredPolygonCollection &avoidance = fetch(volumes, request);
-            const slic3r_api::StoredPolygonCollection &collision = volumes.getCollision(0, lazy_layer, true);
+            const slic3r_api::StoredPolygonCollection &collision = volumes.getCollision(0, lazy_layer);
             // To the model, the places where a branch can stand are free.
             const slic3r_api::StoredPolygonCollection expected = to_model ?
                 TF::polygons_diff(SG::handle(scene.storage), collision, volumes.getPlaceableAreas(0, lazy_layer)) :
@@ -623,8 +615,7 @@ TEST_CASE("The avoidance of a branch that cannot move is its collision", "[plugi
         }
 }
 
-// With a branch diameter equal to the tip diameter and no difference between the regular and the minimum XY distance, no radius is
-// smaller than the radius until which a branch widens, so precalculate() gives no key to the holefree collisions. An empty list of
+// With a branch diameter equal to the tip diameter, no radius is smaller than the branch radius, so precalculate() gives no key to the holefree collisions. An empty list of
 // keys must be a no-op: its size is the grainsize of the TBB loop, which TBB rejects when it is not positive.
 TEST_CASE("Precalculation without holefree collision keys completes", "[plugins][support-tree-routing][tree-volumes]")
 {
@@ -638,14 +629,12 @@ TEST_CASE("Precalculation without holefree collision keys completes", "[plugins]
     Test::init_print({SG::slab(true)}, print, model, config);
     SG::prefix(print);
     const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, print.object(0), SG::params(print, print.object(0)));
-    REQUIRE(settings.xy_distance == settings.xy_min_distance);
     REQUIRE(settings.min_radius == settings.branch_radius);
-    REQUIRE(settings.increase_radius_until_radius == settings.branch_radius);
 
     PluginStorage storage;
     Volumes volumes(SG::object_view(print.object(0)), SG::print_view(print), settings, SG::handle(storage), nullptr);
     volumes.precalculate(reference_layers);
-    CHECK(volumes.getCollision(settings.branch_radius, 1, true).size() > 0);
+    CHECK(volumes.getCollision(settings.branch_radius, 1).size() > 0);
 }
 
 // Every kind of area, requested for a layer that precalculate() did not compute (asserted from the log), equals the area of a
@@ -656,18 +645,16 @@ TEST_CASE("Areas computed on demand equal the precalculated areas", "[plugins][s
     Scene scene;
     const coord_t tip = scene.settings.min_radius, branch = scene.settings.branch_radius;
     std::vector<Request> requests;
-    for (coord_t radius : { tip, branch })
-        for (bool min_xy_dist : { true, false }) {
-            requests.push_back(Request{ Kind::Collision, radius, lazy_layer, min_xy_dist });
-            requests.push_back(Request{ Kind::Wall,      radius, lazy_layer, min_xy_dist });
-        }
+    for (coord_t radius : { tip, branch }) {
+        requests.push_back(Request{ Kind::Collision, radius, lazy_layer });
+        requests.push_back(Request{ Kind::Wall,      radius, lazy_layer });
+    }
     // Radius 0 is computed with the collisions, the other radii from it.
     for (coord_t radius : { coord_t(0), tip, branch })
         requests.push_back(Request{ Kind::Placeable, radius, lazy_layer });
     for (Volumes::AvoidanceType type : { Volumes::AvoidanceType::Slow, Volumes::AvoidanceType::FastSafe, Volumes::AvoidanceType::Fast })
         for (bool to_model : { false, true })
-            for (bool min_xy_dist : { true, false })
-                requests.push_back(Request{ Kind::Avoidance, tip, lazy_layer, min_xy_dist, type, to_model });
+            requests.push_back(Request{ Kind::Avoidance, tip, lazy_layer, type, to_model });
 
     const LogCapture capture;
     Volumes reference = scene.volumes();
@@ -719,7 +706,7 @@ struct CancelHost {
 };
 
 // Requests for every kind of area on a layer that precalculate() does not compute. The Slow and FastSafe avoidances, which need the
-// holefree collisions, are asked for the radius of a tip, as only the radii below the increase radius have holefree collisions.
+// holefree collisions, are asked for the radius of a tip, as only the radii below the branch radius have holefree collisions.
 std::vector<Request> lazy_requests(const TF::TreeSettings &settings)
 {
     const coord_t tip = settings.min_radius, branch = settings.branch_radius;
@@ -727,11 +714,11 @@ std::vector<Request> lazy_requests(const TF::TreeSettings &settings)
         Request{ Kind::Collision, branch, lazy_layer },
         Request{ Kind::Wall,      branch, lazy_layer },
         Request{ Kind::Placeable, branch, lazy_layer },
-        Request{ Kind::Avoidance, branch, lazy_layer, true, Volumes::AvoidanceType::Fast, false },
-        Request{ Kind::Avoidance, branch, lazy_layer, true, Volumes::AvoidanceType::Fast, true } };
+        Request{ Kind::Avoidance, branch, lazy_layer, Volumes::AvoidanceType::Fast, false },
+        Request{ Kind::Avoidance, branch, lazy_layer, Volumes::AvoidanceType::Fast, true } };
     for (Volumes::AvoidanceType type : { Volumes::AvoidanceType::Slow, Volumes::AvoidanceType::FastSafe })
         for (bool to_model : { false, true })
-            requests.push_back(Request{ Kind::Avoidance, tip, lazy_layer, true, type, to_model });
+            requests.push_back(Request{ Kind::Avoidance, tip, lazy_layer, type, to_model });
     return requests;
 }
 
@@ -902,11 +889,10 @@ TEST_CASE("A TBB group that is cancelled during a lazy computation leaves no par
     }
 }
 
-// The routing can ask for the wider base of a branch near the build plate with the minimum XY distance, and caches hold exactly the
-// radii that precalculate() computes: the foot target of every layer where a branch can have it (its drawn radius reaches the branch
-// radius, which the foot needs) must be covered, or the routing computes it on demand from its parallel loops. The minimum XY
-// distance of the scene is smaller than its XY distance, so the minimum XY bucket of the base is not the regular one.
-TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY distance", "[plugins][support-tree-routing][tree-volumes]")
+// The routing can ask for the wider base of a branch near the build plate, and caches hold exactly the radii that precalculate()
+// computes: the foot target of every layer where a branch can have it (its drawn radius reaches the branch radius, which the foot
+// needs) must be covered, or the routing computes it on demand from its parallel loops.
+TEST_CASE("Precalculation covers the wider base of a branch", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Scene scene;
@@ -923,56 +909,47 @@ TEST_CASE("Precalculation covers the wider base of a branch at the minimum XY di
         ++ widened_layers;
         CAPTURE(layer, radius);
         const size_t lazy_before = capture.count("Had to calculate");
-        volumes.getCollision(radius, layer, true);
-        volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false, true);
-        volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, true, true);
+        volumes.getCollision(radius, layer);
+        volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false);
+        volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, true);
         CHECK(capture.count("Had to calculate") == lazy_before);
-        if (widened_layers == 1) {
-            // The regular XY variant of the same foot layer is covered as well.
-            volumes.getCollision(radius, layer, false);
-            volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false, false);
-            CHECK(capture.count("Had to calculate") == lazy_before);
-        }
     }
     // The scene has a base to cover on the layers considered.
     CHECK(widened_layers > 0);
 }
-// A merge is refused when the merged collision radius needs a higher cache step than both branches, with the cache step of the XY
-// variant of the merge (ceilRadius() differs between the minimum and the regular XY distance).
+
+// A merge is refused when the merged collision radius needs a higher cache step than both branches.
 TEST_CASE("Tree merge is refused only when the merged radius crosses a higher cache step", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Scene scene;
     const Volumes volumes = scene.volumes();
-    for (const bool use_min_xy_dist : { true, false }) {
-        CAPTURE(use_min_xy_dist);
-        const coord_t low = scene.settings.branch_radius;
-        const coord_t low_ceil = volumes.ceilRadius(low, use_min_xy_dist);
-        // The first radius, in steps of 0.01 mm, that needs a higher cache step than the branch radius.
-        coord_t high = low;
-        while (volumes.ceilRadius(high, use_min_xy_dist) == low_ceil)
-            high += scale_i(0.01);
-        const coord_t high_ceil = volumes.ceilRadius(high, use_min_xy_dist);
-        REQUIRE(high_ceil > low_ceil);
-        // Within one step: a slightly larger merged radius in the same step is accepted.
-        CHECK_FALSE(TF::merge_crosses_cache_step(volumes.ceilRadius(high - scale_i(0.01), use_min_xy_dist), low_ceil, low_ceil));
-        CHECK_FALSE(TF::merge_crosses_cache_step(low_ceil, low_ceil, low_ceil));
-        // A higher step than both parents: refused.
-        CHECK(TF::merge_crosses_cache_step(high_ceil, low_ceil, low_ceil));
-        // One parent already in the higher step: accepted, from either side.
-        CHECK_FALSE(TF::merge_crosses_cache_step(high_ceil, low_ceil, high_ceil));
-        CHECK_FALSE(TF::merge_crosses_cache_step(high_ceil, high_ceil, low_ceil));
-        // A smaller merged step is accepted too.
-        CHECK_FALSE(TF::merge_crosses_cache_step(low_ceil, high_ceil, high_ceil));
-    }
+    const coord_t low = scene.settings.branch_radius;
+    const coord_t low_ceil = volumes.ceilRadius(low);
+    // The first radius, in steps of 0.01 mm, that needs a higher cache step than the branch radius.
+    coord_t high = low;
+    while (volumes.ceilRadius(high) == low_ceil)
+        high += scale_i(0.01);
+    const coord_t high_ceil = volumes.ceilRadius(high);
+    REQUIRE(high_ceil > low_ceil);
+    // Within one step: a slightly larger merged radius in the same step is accepted.
+    CHECK_FALSE(TF::merge_crosses_cache_step(volumes.ceilRadius(high - scale_i(0.01)), low_ceil, low_ceil));
+    CHECK_FALSE(TF::merge_crosses_cache_step(low_ceil, low_ceil, low_ceil));
+    // A higher step than both parents: refused.
+    CHECK(TF::merge_crosses_cache_step(high_ceil, low_ceil, low_ceil));
+    // One parent already in the higher step: accepted, from either side.
+    CHECK_FALSE(TF::merge_crosses_cache_step(high_ceil, low_ceil, high_ceil));
+    CHECK_FALSE(TF::merge_crosses_cache_step(high_ceil, high_ceil, low_ceil));
+    // A smaller merged step is accepted too.
+    CHECK_FALSE(TF::merge_crosses_cache_step(low_ceil, high_ceil, high_ceil));
 }
 
 namespace {
-// The steps of the table of cache radii from the first one up to max_radius, read through ceilRadius() of the XY variant.
-std::vector<coord_t> cache_steps(const Volumes &volumes, const bool min_xy_dist, const coord_t max_radius)
+// The steps of the table of cache radii from the first one up to max_radius, read through ceilRadius().
+std::vector<coord_t> cache_steps(const Volumes &volumes, const coord_t max_radius)
 {
     std::vector<coord_t> steps;
-    for (coord_t step = volumes.ceilRadius(1, min_xy_dist); step <= max_radius; step = volumes.ceilRadius(step + 1, min_xy_dist))
+    for (coord_t step = volumes.ceilRadius(1); step <= max_radius; step = volumes.ceilRadius(step + 1))
         steps.push_back(step);
     return steps;
 }
@@ -987,7 +964,7 @@ TF::TreeSettings with_bp_radius(const TF::TreeSettings &settings, const coord_t 
 }
 }
 
-// With the default settings (tip 0.4 mm, branch 1 mm, foot 3.75 mm, 0.4 mm nozzles, no XY delta) the table keeps the scale steps below the
+// With the default settings (tip 0.4 mm, branch 1 mm, foot 3.75 mm, 0.4 mm nozzles) the table keeps the scale steps below the
 // step that the branch radius rounds up to (0.4 mm, then 1.5 mm), has a step every 0.2 mm (half a nozzle) from that step to the radius of the
 // foot, then continues with the scale steps above.
 TEST_CASE("Tree cache radii have fine steps between the branch radius step and the foot", "[plugins][support-tree-routing][tree-volumes]")
@@ -998,112 +975,84 @@ TEST_CASE("Tree cache radii have fine steps between the branch radius step and t
     REQUIRE(scene.settings.branch_radius == scale_i(1.));
     REQUIRE(scene.settings.bp_radius == scale_i(3.75));
     REQUIRE(scene.settings.foot_cache_step == scale_i(0.2));
-    REQUIRE(scene.settings.xy_distance == scene.settings.xy_min_distance);
     const Volumes volumes = scene.volumes();
     // 1.5 mm + k * 0.2 mm up to 3.7 mm, then the radius of the foot (not aligned), then the scale steps above it.
     const std::vector<coord_t> expected{ scale_i(0.4), scale_i(1.5), scale_i(1.7), scale_i(1.9), scale_i(2.1), scale_i(2.3), scale_i(2.5), scale_i(2.7),
         scale_i(2.9), scale_i(3.1), scale_i(3.3), scale_i(3.5), scale_i(3.7), scale_i(3.75), scale_i(3.9), scale_i(5.85), scale_i(8.775) };
-    CHECK(cache_steps(volumes, true, scale_i(9.)) == expected);
-    CHECK(volumes.ceilRadius(0, true) == 0);
-    // Both variants give the same table when the XY delta is zero.
-    CHECK(cache_steps(volumes, false, scale_i(9.)) == expected);
+    CHECK(cache_steps(volumes, scale_i(9.)) == expected);
+    CHECK(volumes.ceilRadius(0) == 0);
 
     // Monotone, never below the radius, idempotent; the band steps are 0.2 mm apart.
     coord_t previous = 0;
     for (coord_t radius = 1; radius < scale_i(10.); radius += 3571) {
-        const coord_t ceiled = volumes.ceilRadius(radius, true);
+        const coord_t ceiled = volumes.ceilRadius(radius);
         CAPTURE(radius, ceiled);
         CHECK(ceiled >= radius);
         CHECK(ceiled >= previous);
-        CHECK(volumes.ceilRadius(ceiled, true) == ceiled);
-        CHECK(volumes.getRadiusNextCeil(radius, true) == ceiled);
+        CHECK(volumes.ceilRadius(ceiled) == ceiled);
         if (radius > scale_i(1.5) && radius <= scale_i(3.75))
             CHECK(ceiled - radius <= scene.settings.foot_cache_step);
         previous = ceiled;
     }
     // One nanometre on each side of the branch radius: the scale step above it (1.5 mm), the band is not entered.
     const coord_t branch = scene.settings.branch_radius;
-    CHECK(volumes.ceilRadius(branch - 1, true) == scale_i(1.5));
-    CHECK(volumes.ceilRadius(branch, true) == scale_i(1.5));
-    CHECK(volumes.ceilRadius(branch + 1, true) == scale_i(1.5));
-    CHECK(volumes.ceilRadius(scale_i(0.4) + 1, true) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(branch - 1) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(branch) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(branch + 1) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(scale_i(0.4) + 1) == scale_i(1.5));
     // One nanometre on each side of the start of the band.
-    CHECK(volumes.ceilRadius(scale_i(1.5), true) == scale_i(1.5));
-    CHECK(volumes.ceilRadius(scale_i(1.5) + 1, true) == scale_i(1.7));
+    CHECK(volumes.ceilRadius(scale_i(1.5)) == scale_i(1.5));
+    CHECK(volumes.ceilRadius(scale_i(1.5) + 1) == scale_i(1.7));
     // The same on each side of the radius of the foot, which is a step of the table.
     const coord_t foot = scene.settings.bp_radius;
-    CHECK(volumes.ceilRadius(foot - 1, true) == foot);
-    CHECK(volumes.ceilRadius(foot + 1, true) == scale_i(3.9));
+    CHECK(volumes.ceilRadius(foot - 1) == foot);
+    CHECK(volumes.ceilRadius(foot + 1) == scale_i(3.9));
 }
 
-// The band of fine steps ends at the radius of the foot + the XY delta even when that is not a multiple of the step above the start
-// of the band, and starts at the scale step that branch_radius + the delta rounds up to (key space: the regular XY variant looks up
-// radius + delta). Without a band (the foot radius not above the branch radius, or the start of the band not below the end) the
-// table is the scale alone.
+// The band of fine steps ends at the radius of the foot even when that is not a multiple of the step above the start of the band,
+// and starts at the scale step that branch_radius rounds up to. Without a band (the foot radius not above the branch radius, or the
+// start of the band not below the end) the table is the scale alone.
 TEST_CASE("Tree cache radii end the band at the foot radius and have no band without a foot", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    Scene scene(false, "3");
+    Scene scene(false, "0");
     const coord_t branch = scene.settings.branch_radius;
-    // The scene sets a minimum XY distance below the XY distance: production keeps them equal, and the code of the delta variant is
-    // kept until a cleanup.
-    const coord_t delta  = scene.settings.xy_distance - scene.settings.xy_min_distance;
-    REQUIRE(delta > 0);
-    // The scale step that branch_radius + delta rounds up to: the start of the band in key space (the scale is 0.4; 1.5; 2.6; 3.9).
-    const coord_t start = scale_i(3.9);
-    REQUIRE(branch + delta > scale_i(2.6));
-    REQUIRE(branch + delta <= start);
+    // The scale step that branch_radius rounds up to: the start of the band (the scale is 0.4; 1.5; 2.6; 3.9).
+    const coord_t start = scale_i(1.5);
+    REQUIRE(branch > scale_i(0.4));
+    REQUIRE(branch <= start);
     const std::vector<coord_t> scale{ scale_i(0.4), scale_i(1.5), scale_i(2.6), scale_i(3.9), scale_i(5.85), scale_i(8.775) };
-    SECTION("unaligned upper bound and start shifted by the delta") {
+    SECTION("unaligned upper bound") {
         const coord_t foot = scale_i(3.65);
         const Volumes volumes(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, foot), SG::handle(scene.storage), nullptr);
-        // The band is the same table for both variants: it ends at foot + delta, where the regular variant, which looks up
-        // radius + delta, ends at the foot radius itself.
-        CHECK(volumes.ceilRadius(foot + delta - 1, true) == foot + delta);
-        CHECK(volumes.ceilRadius(foot + delta + 1, true) > foot + delta + scale_i(0.1));
-        // Regular XY variant: the band ends at foot + delta.
-        CHECK(volumes.ceilRadius(foot, false) == foot + delta);
-        CHECK(volumes.ceilRadius(foot + 1, false) > foot + delta + scale_i(0.1));
-        // A branch of the branch radius is below the band in both variants: it keeps the scale step.
-        CHECK(volumes.ceilRadius(branch, false) == start);
-        CHECK(volumes.ceilRadius(branch, true) == scale_i(1.5));
-        // The band starts at the scale step in key space: the steps are foot_cache_step (0.2 mm) apart from there on, in the regular variant too.
-        CHECK(volumes.ceilRadius(start - delta, false) == start);
-        CHECK(volumes.ceilRadius(start - delta + 1, false) == start + scene.settings.foot_cache_step);
-        for (coord_t radius = start - delta + 1; radius <= foot; radius += scale_i(0.01)) {
+        // The end of the band is the foot radius: ... 3.5, then 3.65, then the scale steps above it.
+        CHECK(volumes.ceilRadius(scale_i(3.5)) == scale_i(3.5));
+        CHECK(volumes.ceilRadius(scale_i(3.5) + 1) == foot);
+        CHECK(volumes.ceilRadius(foot) == foot);
+        CHECK(volumes.ceilRadius(foot + 1) > foot + scale_i(0.1));
+        // A branch of the branch radius is below the band: it keeps the scale step.
+        CHECK(volumes.ceilRadius(branch) == start);
+        // The band starts at the scale step: the steps are foot_cache_step (0.2 mm) apart from there on.
+        CHECK(volumes.ceilRadius(start) == start);
+        CHECK(volumes.ceilRadius(start + 1) == start + scene.settings.foot_cache_step);
+        for (coord_t radius = start + 1; radius <= foot; radius += scale_i(0.01)) {
             CAPTURE(radius);
-            const coord_t gap = volumes.ceilRadius(radius, false) - (radius + delta);
+            const coord_t gap = volumes.ceilRadius(radius) - radius;
             CHECK(gap >= 0);
             CHECK(gap < scene.settings.foot_cache_step);
         }
-        // Without XY delta the end of the band is the foot radius: ... 3.5, then 3.65, then the scale steps above it.
-        Scene flat(false, "0");
-        const Volumes flat_volumes(SG::object_view(flat.object()), SG::print_view(flat.print), with_bp_radius(flat.settings, foot), SG::handle(flat.storage), nullptr);
-        CHECK(flat_volumes.ceilRadius(scale_i(3.5), true) == scale_i(3.5));
-        CHECK(flat_volumes.ceilRadius(scale_i(3.5) + 1, true) == foot);
-        CHECK(flat_volumes.ceilRadius(foot, true) == foot);
-        CHECK(flat_volumes.ceilRadius(foot + 1, true) > foot + scale_i(0.1));
     }
     SECTION("no band") {
-        // The foot radius not above the branch radius: the scale, whatever the delta.
-        for (const coord_t foot : { branch, branch / 2 }) {
+        // The foot radius not above the branch radius, or the start of the band not below its end: the scale.
+        for (const coord_t foot : { start, branch, branch / 2 }) {
             const Volumes volumes(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, foot), SG::handle(scene.storage), nullptr);
             CAPTURE(foot);
-            CHECK(cache_steps(volumes, true, scale_i(9.)) == scale);
+            CHECK(cache_steps(volumes, scale_i(9.)) == scale);
         }
-        // The start of the band not below its end (foot + delta): the scale too; one nanometre more of foot gives a band of one step.
-        const Volumes closed(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, start - delta), SG::handle(scene.storage), nullptr);
-        CHECK(cache_steps(closed, true, scale_i(9.)) == scale);
-        const Volumes opened(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, start - delta + 1), SG::handle(scene.storage), nullptr);
-        CHECK(opened.ceilRadius(start, true) == start);
-        CHECK(opened.ceilRadius(start + 1, true) == start + 1);
-        // Without XY delta: the foot at the start of the band (1.5 mm) or below it.
-        Scene flat(false, "0");
-        for (const coord_t foot : { scale_i(1.5), branch, branch / 2 }) {
-            const Volumes volumes(SG::object_view(flat.object()), SG::print_view(flat.print), with_bp_radius(flat.settings, foot), SG::handle(flat.storage), nullptr);
-            CAPTURE(foot);
-            CHECK(cache_steps(volumes, true, scale_i(9.)) == scale);
-        }
+        // One nanometre more of foot gives a band of one step.
+        const Volumes opened(SG::object_view(scene.object()), SG::print_view(scene.print), with_bp_radius(scene.settings, start + 1), SG::handle(scene.storage), nullptr);
+        CHECK(opened.ceilRadius(start) == start);
+        CHECK(opened.ceilRadius(start + 1) == start + 1);
     }
 }
 // The step of the band follows foot_cache_step: 0.4 mm for the steps of a 0.8 mm nozzle, and no band without a step.
@@ -1116,15 +1065,15 @@ TEST_CASE("Tree cache radii follow the step of the foot band", "[plugins][suppor
     const Volumes wide_volumes(SG::object_view(scene.object()), SG::print_view(scene.print), wide, SG::handle(scene.storage), nullptr);
     const std::vector<coord_t> expected{ scale_i(0.4), scale_i(1.5), scale_i(1.9), scale_i(2.3), scale_i(2.7), scale_i(3.1), scale_i(3.5),
         scale_i(3.75), scale_i(3.9), scale_i(5.85), scale_i(8.775) };
-    CHECK(cache_steps(wide_volumes, true, scale_i(9.)) == expected);
+    CHECK(cache_steps(wide_volumes, scale_i(9.)) == expected);
     TF::TreeSettings none = scene.settings;
     none.foot_cache_step = 0;
     const Volumes plain(SG::object_view(scene.object()), SG::print_view(scene.print), none, SG::handle(scene.storage), nullptr);
-    CHECK(cache_steps(plain, true, scale_i(9.)) == std::vector<coord_t>{ scale_i(0.4), scale_i(1.5), scale_i(2.6), scale_i(3.9), scale_i(5.85), scale_i(8.775) });
+    CHECK(cache_steps(plain, scale_i(9.)) == std::vector<coord_t>{ scale_i(0.4), scale_i(1.5), scale_i(2.6), scale_i(3.9), scale_i(5.85), scale_i(8.775) });
 }
 
 // precalculate() covers every step of the table between the path radius of a layer and the largest radius the layer allows (the path
-// plus the foot excess, foot_target - branch_radius), with and without the XY delta: the radii a catch-up or a partial foot can stop on.
+// plus the foot excess, foot_target - branch_radius): the radii a catch-up or a partial foot can stop on.
 TEST_CASE("Precalculation covers the fine cache steps a branch can stop on", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -1138,20 +1087,18 @@ TEST_CASE("Precalculation covers the fine cache steps a branch can stop on", "[p
         const coord_t path_radius = coord_t(scene.settings.min_radius + scene.settings.path_gain(layer, top_layer - layer));
         const coord_t foot_excess = scene.settings.foot_target[layer] > double(scene.settings.branch_radius) && path_radius >= scene.settings.branch_radius ?
             coord_t(scene.settings.foot_target[layer]) - scene.settings.branch_radius : 0;
-        for (const bool min_xy_dist : { true, false }) {
-            // Every radius from the path radius to the bound, one per cache step of the variant.
-            for (coord_t radius = path_radius; radius <= path_radius + foot_excess; radius = volumes.getRadiusNextCeil(radius, min_xy_dist) + 1) {
-                CAPTURE(layer, min_xy_dist, radius);
-                const size_t lazy_before = capture.count("Had to calculate");
-                volumes.getCollision(radius, layer, min_xy_dist);
-                volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false, min_xy_dist);
-                volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, true, min_xy_dist);
-                CHECK(capture.count("Had to calculate") == lazy_before);
-                ++ steps_checked;
-            }
+        // Every radius from the path radius to the bound, one per cache step.
+        for (coord_t radius = path_radius; radius <= path_radius + foot_excess; radius = volumes.ceilRadius(radius) + 1) {
+            CAPTURE(layer, radius);
+            const size_t lazy_before = capture.count("Had to calculate");
+            volumes.getCollision(radius, layer);
+            volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, false);
+            volumes.getAvoidance(radius, layer, Volumes::AvoidanceType::Fast, true);
+            CHECK(capture.count("Had to calculate") == lazy_before);
+            ++ steps_checked;
         }
     }
-    CHECK(steps_checked > 2 * size_t(top_layer));
+    CHECK(steps_checked > size_t(top_layer));
 }
 // Many threads request keys that are not precalculated at once, in their own order. Whatever the interleaving of the lazy
 // computations, every thread must get the reference areas and no computation may fail. The interleavings come from the timing of
@@ -1167,14 +1114,12 @@ TEST_CASE("Concurrent requests for areas that are not precalculated agree with t
     const coord_t radius = scene.settings.branch_radius;
     std::vector<Request> requests;
     for (TF::LayerIndex layer = lazy_layer - 1; layer <= lazy_layer + 1; ++ layer) {
-        requests.push_back(Request{ Kind::Collision, radius, layer, true });
-        requests.push_back(Request{ Kind::Collision, radius, layer, false });
-        requests.push_back(Request{ Kind::Avoidance, radius, layer, true, Volumes::AvoidanceType::Fast, false });
-        requests.push_back(Request{ Kind::Avoidance, radius, layer, true, Volumes::AvoidanceType::Slow, false });
-        requests.push_back(Request{ Kind::Avoidance, radius, layer, true, Volumes::AvoidanceType::Fast, true });
+        requests.push_back(Request{ Kind::Collision, radius, layer });
+        requests.push_back(Request{ Kind::Avoidance, radius, layer, Volumes::AvoidanceType::Fast, false });
+        requests.push_back(Request{ Kind::Avoidance, radius, layer, Volumes::AvoidanceType::Slow, false });
+        requests.push_back(Request{ Kind::Avoidance, radius, layer, Volumes::AvoidanceType::Fast, true });
         requests.push_back(Request{ Kind::Placeable, radius, layer });
-        requests.push_back(Request{ Kind::Wall,      radius, layer, false });
-        requests.push_back(Request{ Kind::Wall,      radius, layer, true });
+        requests.push_back(Request{ Kind::Wall,      radius, layer });
     }
 
     const LogCapture capture;
