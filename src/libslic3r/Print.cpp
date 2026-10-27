@@ -757,7 +757,8 @@ const PrintObject *Print::get_object(ObjectID object_id) const {
     return (it == m_objects.end()) ? nullptr : it->get();
 }
 
-// All FFF config scopes use the same declared first-consumer checkpoint.
+// Request the replay of each changed key from its checkpoint (Steps::config_option_replay_checkpoint)
+// and return true if finished or running work is affected. Keys without a replay are skipped.
 bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* new_config */,
                                                const std::vector<t_config_option_key> &opt_keys) {
     if (opt_keys.empty())
@@ -765,14 +766,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
 
     bool invalidated = false;
     for (const t_config_option_key &opt_key : opt_keys) {
-        const ConfigOptionDef *def = PrintConfigDef::instance().get(opt_key);
-        if (def == nullptr) {
-            invalidated |= this->request_replay_from(Steps::Checkpoint::None);
-            continue;
-        }
-        if (def->invalidates_step == STEP_NONE)
-            continue;
-        invalidated |= this->request_replay_from(Steps::checkpoint_before_step(def->invalidates_step));
+        const std::optional<Steps::Checkpoint> checkpoint = Steps::config_option_replay_checkpoint(opt_key);
+        if (checkpoint.has_value())
+            invalidated |= this->request_replay_from(*checkpoint);
     }
     if (invalidated)
         m_timestamp_last_change = std::time(0);

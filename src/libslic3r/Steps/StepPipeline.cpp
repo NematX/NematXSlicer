@@ -11,6 +11,7 @@
 #include "libslic3r/Api/internal/LayerRegionAccess.hpp"
 #include "libslic3r/Api/internal/PrintObjectAccess.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
+#include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/format.hpp"
@@ -148,6 +149,34 @@ std::string generated_plugin_exclusive_group_option_key(const Orchestrator &orch
 // Inputs are not retained or changed; lookup, comparison and formatting failures propagate.
 std::optional<std::string> unsupported_active_setting(const Orchestrator &orchestrator, const ConfigDef &definitions, const ConfigBase &config,
     const std::function<const Plugin *(const std::string &group_id)> &selected_plugin_of_group);
+// Resolve the replay checkpoint of a key from the print configuration catalogue (see the declaration).
+// This only reads the catalogue: the active plugin readers are looked up here because
+// tighten_used_config_key_invalidations() cannot record them for a bookkeeping key (it keeps
+// STEP_ANY, which is also the catalogue default), and it would have to rewrite the definition.
+std::optional<Checkpoint> config_option_replay_checkpoint(const std::string &key)
+{
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+    if (definition == nullptr)
+        return Checkpoint::None;
+    slicing_step_t step = definition->invalidates_step;
+    if (step == STEP_NONE)
+        return std::nullopt;
+    if (definition->nature == ConfigOptionNature::Bookkeeping) {
+        if (step == STEP_ANY)
+            step = STEP_NONE;
+        // Keep the earliest step among the active plugins that read the key; STEP_NONE means none found yet.
+        for (const Plugin *plugin : Orchestrator::instance().active_plugins()) {
+            for (const Plugin::UsedConfigKey &used_key : plugin->get_used_config_keys()) {
+                if (used_key.key != key)
+                    continue;
+                const slicing_step_t owner = plan_owner_step(*plugin);
+                if (owner != STEP_NONE && (step == STEP_NONE || executes_before(owner, step)))
+                    step = owner;
+            }
+        }
+    }
+    return step == STEP_NONE ? std::nullopt : std::optional<Checkpoint>(checkpoint_before_step(step));
+}
 
 const std::vector<slicing_step_t> &execution_order()
 {

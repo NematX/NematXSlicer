@@ -74,6 +74,15 @@ enum class Checkpoint : uint8_t
     GCode
 };
 
+// Checkpoint from which a change of the configuration key must replay the pipeline.
+// std::nullopt means no replay at all: a declared STEP_NONE, or a bookkeeping key left at
+// STEP_ANY that no active plugin with a producing step reads. Checkpoint::None means a full
+// replay: it is returned for an unknown key and for the STEP_ANY of every other nature
+// (LOCAL, PRESET_META, VOLATILE, NORMAL). A bookkeeping key replays from its explicit step
+// and from the step of each active plugin that reads it, whichever is earliest, unless it
+// is declared STEP_NONE.
+std::optional<Checkpoint> config_option_replay_checkpoint(const std::string &key);
+
 struct StepExclusiveGroup
 {
     std::string group_id;

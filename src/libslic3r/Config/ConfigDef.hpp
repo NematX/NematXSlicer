@@ -326,7 +326,8 @@ public:
     // orchestrator prunes values whose plugin is missing or inactive when
     // plugin option definitions are finalized.
     bool                                contains_plugin_id = false;
-    // Persistence and comparison policy, also checked when plugins redeclare a definition.
+    // Persistence and comparison policy, also checked when a plugin redefines the option
+    // (Orchestrator.cpp). A bookkeeping option at STEP_ANY replays only for its active plugin readers.
     ConfigOptionNature                  nature = ConfigOptionNature::Normal;
     // Host-only link (1-based, 0 = none) into the orchestrator GUI activation
     // pool. It lets the GUI ask for the activation rules of the settings a page

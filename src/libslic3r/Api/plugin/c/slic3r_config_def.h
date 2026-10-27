@@ -282,6 +282,10 @@ typedef struct raw_config_option_def {
     a plugin is initialized, the host replaces it with the plugin's own step.
     Use STEP_ANY to force conservative full invalidation. Outside plugin option
     registration, STEP_NONE still means no slicing invalidation.
+    For a BOOKKEEPING option, STEP_ANY is the same as the default: it replays
+    nothing by itself. Only a concrete step, or an active plugin with a producing
+    step that reads the option, makes a change replay the pipeline; STEP_NONE
+    always replays nothing.
     */
     slicing_step_t invalidates_step;
 

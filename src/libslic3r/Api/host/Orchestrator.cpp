@@ -1021,6 +1021,10 @@ static bool validate_used_config_key_definition(const Plugin &,
 // step. Service plugins use the executable step that owns them. A key without
 // a definition is skipped; this only happens for a plugin activated after
 // initialize_plugins() validated the used keys.
+// This rewrites the definitions. A bookkeeping key left at STEP_ANY is not changed here, because
+// tightening keeps STEP_ANY; Steps::config_option_replay_checkpoint() reads the active plugins
+// again to give such a key its reader's step. A bookkeeping key declared STEP_ANY explicitly
+// cannot be told from the default and is treated the same way.
 static void tighten_used_config_key_invalidations(ConfigDef &definition, const Plugin &plugin)
 {
     const slicing_step_t owner_step = plan_owner_step(plugin);
