@@ -44,7 +44,8 @@ function(nematx_plugin_platform_arch output_variable)
 endfunction()
 
 function(nematx_package_plugin)
-    cmake_parse_arguments(PKG "" "TARGET;PLUGIN_ID;PACKAGE_ID;PACKAGE_VERSION;NAME;DESCRIPTION;DATADIR;ACTIVATION_SCRIPT;ABI_SCRIPT;DESCRIPTION_TEMPLATE;VERSION_TEMPLATE;SLICER_VERSION;PLUGIN_REPOSITORY_DIR;DEFAULT_ACTIVATED_FILE;MODEL;CONFIG;DEBUGGER_COMMAND;DEBUGGER_WORKING_DIRECTORY;OUTPUT_SUBDIR" "" ${ARGN})
+    # EXTRA_PLUGIN_IDS: other plugins registered by the same library, activated too.
+    cmake_parse_arguments(PKG "" "TARGET;PLUGIN_ID;PACKAGE_ID;PACKAGE_VERSION;NAME;DESCRIPTION;DATADIR;ACTIVATION_SCRIPT;ABI_SCRIPT;DESCRIPTION_TEMPLATE;VERSION_TEMPLATE;SLICER_VERSION;PLUGIN_REPOSITORY_DIR;DEFAULT_ACTIVATED_FILE;MODEL;CONFIG;DEBUGGER_COMMAND;DEBUGGER_WORKING_DIRECTORY;OUTPUT_SUBDIR" "EXTRA_PLUGIN_IDS" ${ARGN})
 
     foreach(required_arg
             TARGET PLUGIN_ID PACKAGE_ID PACKAGE_VERSION NAME DESCRIPTION DATADIR
@@ -128,6 +129,11 @@ function(nematx_package_plugin)
             "${CMAKE_CURRENT_FUNCTION_LIST_DIR}/copy_if_exists.cmake")
     endif()
 
+    set(extra_plugin_arguments)
+    foreach(extra_plugin_id IN LISTS PKG_EXTRA_PLUGIN_IDS)
+        list(APPEND extra_plugin_arguments --plugin-id "${extra_plugin_id}")
+    endforeach()
+
     set(repository_commands)
     if(PKG_PLUGIN_REPOSITORY_DIR)
         list(APPEND repository_commands
@@ -166,6 +172,7 @@ function(nematx_package_plugin)
             --defaults "${PKG_DEFAULT_ACTIVATED_FILE}"
             --output "${PKG_DATADIR}/plugins/activated.ini"
             --plugin-id "${PKG_PLUGIN_ID}"
+            ${extra_plugin_arguments}
             --package-id "${PKG_PACKAGE_ID}"
             --plugin-version "${PKG_PACKAGE_VERSION}"
             --slicer-version "${PKG_SLICER_VERSION}"

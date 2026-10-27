@@ -42,12 +42,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--defaults", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
-    parser.add_argument("--plugin-id", required=True)
+    # Repeat --plugin-id when one package registers several plugins.
+    parser.add_argument("--plugin-id", required=True, action="append")
     parser.add_argument("--plugin-version", required=True)
     parser.add_argument("--package-id")
     parser.add_argument("--slicer-version", required=True)
     args = parser.parse_args()
-    package_id = args.package_id or args.plugin_id
+    package_id = args.package_id or args.plugin_id[0]
 
     if not args.defaults.is_file():
         raise SystemExit(f"Host default activation file not found: {args.defaults}")
@@ -63,8 +64,9 @@ def main():
         f"{package_id}.slicer_version",
         args.slicer_version,
     )
-    ensure_entry(lines, "activated", args.plugin_id, "1")
-    ensure_entry(lines, "plugin_packages", args.plugin_id, package_id)
+    for plugin_id in args.plugin_id:
+        ensure_entry(lines, "activated", plugin_id, "1")
+        ensure_entry(lines, "plugin_packages", plugin_id, package_id)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(newline.join(lines) + newline, encoding="utf-8")

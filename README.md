@@ -7,6 +7,7 @@ A collection of plugins for NematXSlicer.
 - [nematx_second_layer_flow](doc/nematx_second_layer_flow.md)
 - [nematx_corner_stretch](doc/nematx_corner_stretch.md)
 - [nematx_infill_aroundholes](plugins/infill_aroundholes/README.md)
+- [nematx-firmware](plugins/nematx_firmware/README.md): NematX G-code firmware and reader
 
 ## Build targets
 
