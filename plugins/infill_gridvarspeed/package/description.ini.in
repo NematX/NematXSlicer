@@ -1,0 +1,4 @@
+[plugin]
+id = @PLUGIN_ID@
+name = @PLUGIN_NAME@
+description = @PLUGIN_DESCRIPTION@
