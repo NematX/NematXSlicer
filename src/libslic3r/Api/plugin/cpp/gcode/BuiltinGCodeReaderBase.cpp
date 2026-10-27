@@ -22,7 +22,7 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_extrusions.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_reader.h"
-#include "libslic3r/ExtrusionRole.hpp"
+#include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 
 /*
 Built-in G-code reader base
@@ -81,9 +81,7 @@ std::optional<std::pair<double, double>> parse_seam_coordinates(
 // Validate the optional historical color-change payload without accepting
 // partial tool, RGB, or trailing-component parses.
 bool valid_color_change_payload(std::string_view payload);
-// Convert one legacy viewer role enum to the raw extrusion-role bitmask.
-uint32_t raw_extrusion_role(Slic3r::GCodeExtrusionRole role);
-// Resolve a TYPE name through the existing legacy role-name table.
+// Resolve a TYPE name through the public writer's role-name table.
 std::optional<uint32_t> raw_extrusion_role_from_name(std::string_view name);
 // Convert values expressed in the current input units to the millimetres used
 // by the normalized Reader state.
@@ -207,67 +205,30 @@ bool valid_color_change_payload(std::string_view payload)
     return true;
 }
 
-uint32_t raw_extrusion_role(Slic3r::GCodeExtrusionRole role)
-{
-    switch (role) {
-    case Slic3r::GCodeExtrusionRole::None:
-        return RAW_EXTRUSION_ROLE_NONE;
-    case Slic3r::GCodeExtrusionRole::Perimeter:
-        return RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER;
-    case Slic3r::GCodeExtrusionRole::ExternalPerimeter:
-        return RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER;
-    case Slic3r::GCodeExtrusionRole::OverhangPerimeter:
-        return RAW_EXTRUSION_ROLE_OVERHANG_PERIMETER;
-    case Slic3r::GCodeExtrusionRole::InternalInfill:
-        return RAW_EXTRUSION_ROLE_INTERNAL_INFILL;
-    case Slic3r::GCodeExtrusionRole::InternalBridgeInfill:
-        return RAW_EXTRUSION_ROLE_INTERNAL_BRIDGE_INFILL;
-    case Slic3r::GCodeExtrusionRole::SolidInfill:
-        return RAW_EXTRUSION_ROLE_SOLID_INFILL;
-    case Slic3r::GCodeExtrusionRole::TopSolidInfill:
-        return RAW_EXTRUSION_ROLE_TOP_SOLID_INFILL;
-    case Slic3r::GCodeExtrusionRole::Ironing:
-        return RAW_EXTRUSION_ROLE_IRONING_INFILL;
-    case Slic3r::GCodeExtrusionRole::BridgeInfill:
-        return RAW_EXTRUSION_ROLE_BRIDGE_INFILL;
-    case Slic3r::GCodeExtrusionRole::ThinWall:
-        return RAW_EXTRUSION_ROLE_THIN_WALL;
-    case Slic3r::GCodeExtrusionRole::GapFill:
-        return RAW_EXTRUSION_ROLE_GAP_FILL;
-    case Slic3r::GCodeExtrusionRole::Skirt:
-        return RAW_EXTRUSION_ROLE_SKIRT;
-    case Slic3r::GCodeExtrusionRole::SupportMaterial:
-        return RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL;
-    case Slic3r::GCodeExtrusionRole::SupportMaterialInterface:
-        return RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-    case Slic3r::GCodeExtrusionRole::WipeTower:
-        return RAW_EXTRUSION_ROLE_WIPE_TOWER_DEFAULT;
-    case Slic3r::GCodeExtrusionRole::Milling:
-        return RAW_EXTRUSION_ROLE_MILLING;
-    case Slic3r::GCodeExtrusionRole::Custom:
-        return RAW_EXTRUSION_ROLE_NONE;
-    case Slic3r::GCodeExtrusionRole::Travel:
-        return RAW_EXTRUSION_ROLE_TRAVEL;
-    case Slic3r::GCodeExtrusionRole::Count:
-        break;
-    }
-    return RAW_EXTRUSION_ROLE_NONE;
-}
-
 std::optional<uint32_t> raw_extrusion_role_from_name(std::string_view name)
 {
-    const uint32_t role_count =
-        static_cast<uint32_t>(Slic3r::GCodeExtrusionRole::Count);
-    for (uint32_t index = 0; index < role_count; ++index) {
-        const Slic3r::GCodeExtrusionRole role =
-            static_cast<Slic3r::GCodeExtrusionRole>(index);
-        if (Slic3r::gcode_extrusion_role_to_string(role) == name)
-            return raw_extrusion_role(role);
-    }
+    // Use the same public names as the writer. The reader no longer needs the
+    // host viewer's private role enum or its conversion functions.
+    static constexpr raw_extrusion_role roles[] = {
+        RAW_EXTRUSION_ROLE_NONE, RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER,
+        RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, RAW_EXTRUSION_ROLE_OVERHANG_PERIMETER,
+        RAW_EXTRUSION_ROLE_INTERNAL_INFILL, RAW_EXTRUSION_ROLE_INTERNAL_BRIDGE_INFILL,
+        RAW_EXTRUSION_ROLE_SOLID_INFILL, RAW_EXTRUSION_ROLE_TOP_SOLID_INFILL,
+        RAW_EXTRUSION_ROLE_IRONING_INFILL, RAW_EXTRUSION_ROLE_BRIDGE_INFILL,
+        RAW_EXTRUSION_ROLE_THIN_WALL, RAW_EXTRUSION_ROLE_GAP_FILL,
+        RAW_EXTRUSION_ROLE_SKIRT, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL,
+        RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, RAW_EXTRUSION_ROLE_WIPE_TOWER_DEFAULT,
+        RAW_EXTRUSION_ROLE_MILLING, RAW_EXTRUSION_ROLE_TRAVEL
+    };
+    for (raw_extrusion_role role : roles)
+        if (slic3r_api::extrusion_role_to_string(role) == name)
+            return role;
+    if (name == "Custom")
+        return RAW_EXTRUSION_ROLE_NONE;
     // The legacy decoder also accepts this pre-2.3 spelling, so keep it
     // compatible while canonical writer output continues to use Skirt/Brim.
     if (name == "Skirt")
-        return raw_extrusion_role(Slic3r::GCodeExtrusionRole::Skirt);
+        return RAW_EXTRUSION_ROLE_SKIRT;
     return std::nullopt;
 }
 

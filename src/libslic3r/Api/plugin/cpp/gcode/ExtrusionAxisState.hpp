@@ -146,6 +146,7 @@ public:
     void set_relative_mode(bool relative_mode);
 
     double filament_diameter() const { return m_filament_diameter; }
+    // Return the configured filament area in mm2 without depending on host geometry constants.
     double filament_crossection() const;
     bool uses_relative_e_distances() const { return m_use_relative_e_distances; }
     double retract_speed() const { return m_retract_speed; }

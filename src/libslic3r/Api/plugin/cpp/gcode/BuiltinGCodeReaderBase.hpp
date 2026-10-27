@@ -2,8 +2,8 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-#ifndef slic3r_Plugins_GCode_Reader_BuiltinGCodeReaderBase_hpp_
-#define slic3r_Plugins_GCode_Reader_BuiltinGCodeReaderBase_hpp_
+#ifndef slic3r_Api_plugin_cpp_gcode_BuiltinGCodeReaderBase_hpp_
+#define slic3r_Api_plugin_cpp_gcode_BuiltinGCodeReaderBase_hpp_
 
 #include <cstdint>
 #include <optional>
@@ -14,11 +14,13 @@
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeReaderPlugin.hpp"
 
 /*
-Built-in G-code reader base
-===========================
+Reusable G-code reader base (also used by built-in dialects)
+==========================================================
 
 BuiltinGCodeReaderBase implements the stream, portable command dispatcher and
-state machinery shared by the built-in Readers. Every derived dispatcher calls
+state machinery shared by built-in and external Readers. Link the public
+slic3r::plugin_sdk_cpp target; no host C++ headers are required.
+Every derived dispatcher calls
 its parent first, then handles only commands introduced at its own level:
 
     chunks -> complete physical line -> textual dialect hook
@@ -254,4 +256,4 @@ private:
 
 }}} // namespace slic3r_api::GCodeGeneration::Reader
 
-#endif // slic3r_Plugins_GCode_Reader_BuiltinGCodeReaderBase_hpp_
+#endif // slic3r_Api_plugin_cpp_gcode_BuiltinGCodeReaderBase_hpp_

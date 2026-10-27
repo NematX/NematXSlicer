@@ -5,7 +5,7 @@
 #ifndef slic3r_Plugins_GCode_Reader_RepRapGCodeReader_hpp_
 #define slic3r_Plugins_GCode_Reader_RepRapGCodeReader_hpp_
 
-#include "BuiltinGCodeReaderBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.hpp"
 
 /*
 RepRapFirmware G-code reader

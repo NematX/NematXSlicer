@@ -409,7 +409,8 @@ double ExtrusionAxisState::filament_per_mm3() const
 
 double ExtrusionAxisState::filament_crossection() const
 {
-    return m_filament_diameter * m_filament_diameter * 0.25 * PI;
+    constexpr double pi = 3.1415926535897932384626433832795;
+    return m_filament_diameter * m_filament_diameter * 0.25 * pi;
 }
 
 double ExtrusionAxisState::extruded_volume() const

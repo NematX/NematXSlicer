@@ -23,6 +23,7 @@ Developer guides:
 - [Plugin-defined Option Lists](../../../doc/plugins/plugin-option-lists.md)
 - [Writing an Infill Pattern Plugin](../../../doc/plugins/infill-pattern-plugin.md)
 - [Package ABI Compatibility](../../../doc/plugins/package-abi.md)
+- [External G-code Firmware and Reader SDK](../../../doc/plugins/gcode-sdk.md)
 
 Useful C++ entry points:
 

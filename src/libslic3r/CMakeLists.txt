@@ -194,6 +194,8 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/gcode/GCodePrivateFile.hpp
 	Api/plugin/cpp/gcode/GCodeTextEnvelope.cpp
 	Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp
+	Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.cpp
+	Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.hpp
 	Api/plugin/cpp/gcode/DefaultExtruder.cpp
 	Api/plugin/cpp/gcode/DefaultExtruder.hpp
 	Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.cpp
@@ -280,8 +282,6 @@ set(SLIC3R_SOURCES
 	Plugins/GCode/Reader/BambuGCodeReader.cpp
 	Plugins/GCode/Reader/BambuGCodeReader.hpp
 	Plugins/GCode/Reader/BambuGCodeReaderItems.hpp
-	Plugins/GCode/Reader/BuiltinGCodeReaderBase.cpp
-	Plugins/GCode/Reader/BuiltinGCodeReaderBase.hpp
 	Plugins/GCode/Reader/DefaultGCodeReader.cpp
 	Plugins/GCode/Reader/DefaultGCodeReader.hpp
 	Plugins/GCode/Reader/KlipperGCodeReader.cpp
@@ -1258,7 +1258,10 @@ set(SLIC3R_SOURCES
     StaticMap.hpp
 )
 
+add_subdirectory(Api/plugin)
+list(REMOVE_ITEM SLIC3R_SOURCES ${SLIC3R_PLUGIN_SDK_CPP_SOURCES})
 add_library(libslic3r STATIC ${SLIC3R_SOURCES})
+target_link_libraries(libslic3r slic3r_plugin_sdk_cpp_objects)
 
 # Only the data-tree host reads this switch; scope it so toggling rebuilds one file.
 if (SLIC3R_STRICT_FREEZE)

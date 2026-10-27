@@ -10,7 +10,7 @@
 #include <unordered_map>
 #include <utility>
 
-#include "BuiltinGCodeReaderBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.hpp"
 
 /*
 Klipper G-code reader
