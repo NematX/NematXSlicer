@@ -1,5 +1,6 @@
 #include <cmath>
 
+#include "libslic3r/Api/plugin/cpp/HoleCompensation.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 
@@ -7,9 +8,13 @@
 This fixture links a firmware session derived using only the copied public SDK.
 Its exported probe constructs the complete session and calls an overridden
 encoder, forcing the implementation and virtual table to resolve in a real DLL.
+The same probe retains a reference to the shared hole-compensation core and
+checks arc geometry without including any internal host header.
 
     gcode_sdk_probe()
-    `-- ExternalFirmware::probe(): dispatch to the fixture's E reset encoder
+    |-- ExternalFirmware::probe(): dispatch to the fixture's E reset encoder
+    |-- compensate_convex_holes: require resolution from the SDK archive
+    `-- arc_center(): check the public signed-radius calculation
 */
 
 using namespace slic3r_api::GCodeGeneration;
@@ -42,6 +47,13 @@ extern "C" PROBE_EXPORT int gcode_sdk_probe()
     ExternalFirmware firmware;
     if (firmware.probe() != "A[SET_POSITION POS=0]\n")
         return 1;
+    // The hole compensation core comes from the SDK archive: keep a real
+    // reference so that the link fails if it is missing.
+    std::vector<slic3r_api::StoredExPolygonCollection> (*volatile compensate)(
+        storage_handle *, const std::vector<slic3r_api::ExPolygonCollection> &,
+        const slic3r_api::ConvexHoleDelta &, bool &) = &slic3r_api::compensate_convex_holes;
+    if (compensate == nullptr)
+        return 3;
     // The arc helper is header-only: an external firmware uses it directly.
     const c_vec2d center = arc_center(c_vec2d{ 5.0, 0.0 }, c_vec2d{ 0.0, 5.0 }, 5.0, true);
     return std::abs(center.x) < 1e-9 && std::abs(center.y) < 1e-9 ? 0 : 2;

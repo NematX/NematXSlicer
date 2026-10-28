@@ -25,13 +25,13 @@
  *
  * A hole whose wall is shared by several regions: each region moves its own
  * part of the wall with its own value, so the wall can show a small step
- * (the difference of the two values) where the regions meet.
+ * (the difference of the two values) where the regions meet. The regional
+ * geometry rules are shared through HoleCompensation.hpp.
  *
  *   run_impl()
  *     |-- read regional distances and thresholds from the raw layer
- *     |-- detail::compensate_holes(): find convex voids of merged material
- *     |   |-- remove only each region's material when growing a void
- *     |   `-- assign new material beside the region forming a shrinking void
+ *     |-- detail::compensate_holes(): supply distances and thresholds
+ *     |   `-- compensate_convex_holes(): compute regional material replacements
  *     `-- publish_layer(): move replacements after checking all destinations
  *
  * Input views remain borrowed for the call; output polygons belong to caller
@@ -51,8 +51,8 @@
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_post_slicing.h"
-#include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
+#include "libslic3r/Api/plugin/cpp/HoleCompensation.hpp"
 #include "libslic3r/Api/plugin/cpp/HoleGeometry.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 
@@ -72,77 +72,7 @@ const raw_used_config_key k_used_config_keys[] = {
 
 const char *const k_defined_config_keys[] = { k_delta_key, k_threshold_key };
 
-// A region acts on a hole when its material lies within this distance of the
-// hole wall. The wall of a hole is the border of the merged layer material, so
-// the regions that form it touch it exactly; the margin only absorbs rounding.
-constexpr coord_t k_touch_margin = 10 * SCALED_EPSILON;
-
 using detail::RegionHoleSettings;
-
-// ---- Small Clipper helpers ----------------------------------------------------
-
-StoredExPolygonCollection union_of(storage_handle *storage, const std::vector<ExPolygonCollection> &collections)
-{
-    ClipperOperand combined(storage);
-    bool has_paths = false;
-    for (const ExPolygonCollection &collection : collections) {
-        if (collection.empty())
-            continue;
-        ClipperOperand next(storage, collection);
-        if (!has_paths) {
-            combined = std::move(next);
-            has_paths = true;
-        } else {
-            combined.concat_replace(next);
-        }
-    }
-    if (!has_paths)
-        return StoredExPolygonCollection(storage);
-    return clipper_union(storage, combined).to_expolygon_collection();
-}
-
-StoredExPolygonCollection offset_of(storage_handle *storage, const ExPolygonCollection &geometry, coord_t delta)
-{
-    if (geometry.empty())
-        return StoredExPolygonCollection(storage);
-    ClipperOperand subject(storage, geometry);
-    return clipper_offset(storage, subject, double(delta)).to_expolygon_collection();
-}
-
-StoredExPolygonCollection intersection_of(storage_handle *storage, const ExPolygonCollection &subject,
-                                          const ExPolygonCollection &clip)
-{
-    if (subject.empty() || clip.empty())
-        return StoredExPolygonCollection(storage);
-    ClipperOperand subject_operand(storage, subject);
-    ClipperOperand clip_operand(storage, clip);
-    return clipper_intersection(storage, subject_operand, clip_operand).to_expolygon_collection();
-}
-
-StoredExPolygonCollection difference_of(storage_handle *storage, const ExPolygonCollection &subject,
-                                        const ExPolygonCollection &clip)
-{
-    if (subject.empty())
-        return StoredExPolygonCollection(storage);
-    if (clip.empty())
-        return subject.clone(storage);
-    ClipperOperand subject_operand(storage, subject);
-    ClipperOperand clip_operand(storage, clip);
-    return clipper_diff(storage, subject_operand, clip_operand).to_expolygon_collection();
-}
-
-// The inside of a hole as a filled shape: the hole ring, reversed to the
-// counter-clockwise orientation of a contour.
-StoredExPolygonCollection hole_void(storage_handle *storage, const Polygon &hole)
-{
-    StoredPolygon filled(storage);
-    filled.copy_from(hole);
-    filled.make_counter_clockwise();
-    StoredPolygonCollection polygons(storage);
-    polygons.push_back(filled.readonly());
-    ClipperOperand operand(storage, polygons.readonly());
-    return clipper_union(storage, operand).to_expolygon_collection();
-}
 
 // Convert millimetres to a scaled distance, rejecting values that cannot be a
 // hole compensation (they would only come from a corrupted profile).
@@ -219,93 +149,22 @@ std::vector<StoredExPolygonCollection> compensate_holes(storage_handle *storage,
                                                          const std::vector<ExPolygonCollection> &region_slices,
                                                          bool &changed)
 {
-    if (storage == nullptr || settings.size() != region_slices.size())
-        throw std::invalid_argument("Hole compensation needs a storage and one setting per region.");
-    const size_t region_count = region_slices.size();
-    changed = false;
-
-    // The holes are those of the merged layer material: a region that only
-    // surrounds another region does not make a hole.
-    const StoredExPolygonCollection material = union_of(storage, region_slices);
-
-    // Per region: material to remove (around enlarged holes) and to add
-    // (inside shrunk holes).
-    std::vector<StoredExPolygonCollection> removed;
-    std::vector<StoredExPolygonCollection> added;
-    for (size_t idx = 0; idx < region_count; ++idx) {
-        removed.emplace_back(storage);
-        added.emplace_back(storage);
-    }
-
-    for (const ExPolygon island : material.readonly()) {
-        for (const Polygon hole : island.holes()) {
-            if (!is_convex_hole(hole))
-                continue;
-            const double area = std::abs(hole.area());
-            const StoredExPolygonCollection inside = hole_void(storage, hole);
-            if (inside.empty())
-                continue;
-            // The material along the hole wall, to find the regions forming it.
-            const StoredExPolygonCollection wall_zone = offset_of(storage, inside.readonly(), k_touch_margin);
-
-            for (size_t region = 0; region < region_count; ++region) {
-                if (settings[region].delta == 0 || region_slices[region].empty())
-                    continue;
-                const coord_t delta = coord_t(std::llround(
-                    double(settings[region].delta) * hole_threshold_factor(area, settings[region].threshold_area)));
-                if (delta == 0)
-                    continue;
-                const StoredExPolygonCollection wall =
-                    intersection_of(storage, wall_zone.readonly(), region_slices[region]);
-                if (wall.empty())
-                    continue; // this region does not form the wall of the hole
-
-                if (delta < 0) {
-                    // Enlarge: the ring between the hole and the hole grown by
-                    // |delta|. Only this region's material in it is removed.
-                    const StoredExPolygonCollection grown = offset_of(storage, inside.readonly(), -delta);
-                    StoredExPolygonCollection ring = difference_of(storage, grown.readonly(), inside.readonly());
-                    removed[region].append_move_from(ring);
-                } else {
-                    // Shrink: the ring between the hole and the hole shrunk by
-                    // delta, limited to what this region's wall can reach.
-                    const StoredExPolygonCollection shrunk = offset_of(storage, inside.readonly(), -delta);
-                    const StoredExPolygonCollection ring = difference_of(storage, inside.readonly(), shrunk.readonly());
-                    const StoredExPolygonCollection reach = offset_of(storage, wall.readonly(), delta + k_touch_margin);
-                    StoredExPolygonCollection part = intersection_of(storage, ring.readonly(), reach.readonly());
-                    added[region].append_move_from(part);
-                }
-            }
-        }
-    }
-
-    // Apply: removals first, then additions in region order. An addition never
-    // covers existing material (an island inside the hole, for example) nor
-    // material already given to an earlier region.
-    std::vector<StoredExPolygonCollection> result;
-    result.reserve(region_count);
-    StoredExPolygonCollection claimed = material.readonly().clone(storage);
-    for (size_t region = 0; region < region_count; ++region) {
-        StoredExPolygonCollection slices = removed[region].empty() ?
-            region_slices[region].clone(storage) :
-            difference_of(storage, region_slices[region], removed[region].readonly());
-        changed |= !removed[region].empty();
-        if (!added[region].empty()) {
-            const StoredExPolygonCollection new_material =
-                difference_of(storage, added[region].readonly(), claimed.readonly());
-            if (!new_material.empty()) {
-                changed = true;
-                slices = union_of(storage, { slices.readonly(), new_material.readonly() });
-                claimed = union_of(storage, { claimed.readonly(), new_material.readonly() });
-            }
-        }
-        result.push_back(std::move(slices));
-    }
-    return result;
+    if (settings.size() != region_slices.size())
+        throw std::invalid_argument("Hole compensation needs one setting per region.");
+    // The regional rules live in the SDK (HoleCompensation.hpp); this plugin
+    // only chooses the distance: the region's value reduced by its threshold.
+    return compensate_convex_holes(storage, region_slices,
+        [&settings](std::size_t region, const ConvexHoleInfo &hole) {
+            const RegionHoleSettings &region_settings = settings[region];
+            if (region_settings.delta == 0)
+                return coord_t(0);
+            return coord_t(std::llround(double(region_settings.delta) *
+                                        hole_threshold_factor(hole.area, region_settings.threshold_area)));
+        },
+        changed);
 }
 
 } // namespace detail
-
 // ---- Plugin -------------------------------------------------------------------------
 
 HoleSizeCompensation &HoleSizeCompensation::instance(orchestrator_handle *orch)

@@ -13,6 +13,7 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/internal/LayerAccess.hpp"
 #include "libslic3r/Api/internal/LayerRegionAccess.hpp"
+#include "libslic3r/Api/plugin/cpp/HoleCompensation.hpp"
 #include "libslic3r/Api/plugin/cpp/HoleGeometry.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -280,6 +281,44 @@ TEST_CASE("Hole compensation leaves an island inside the hole untouched", "[plug
         const ExPolygons inside = intersection_ex(out.front(), ExPolygons{ ExPolygon(rectangle(8., 8., 12., 12.)) });
         CHECK(area_of(inside) == Approx(area_of(ExPolygons{ island })));
     }
+}
+
+TEST_CASE("SDK hole compensation asks each region forming a convex hole wall for its distance",
+          "[plugins][hole-size-compensation]")
+{
+    TestStorage storage;
+    // Two holes: a round one (convex) and an L-shaped one (not convex), on a
+    // plate split in two regions through the round hole only.
+    const PolygonType l_shape{ Point(mm(14.), mm(14.)), Point(mm(18.), mm(14.)), Point(mm(18.), mm(15.)),
+                               Point(mm(15.), mm(15.)), Point(mm(15.), mm(18.)), Point(mm(14.), mm(18.)) };
+    ExPolygon plate = plate_with(round_hole(6., 6., 2.5));
+    plate.holes.push_back(clockwise(l_shape));
+    const ExPolygons source{ plate };
+    const ExPolygons left = intersection_ex(source, ExPolygons{ ExPolygon(rectangle(-1., -1., 6., 12.)) });
+    const ExPolygons right = diff_ex(source, left);
+
+    struct Call { std::size_t region; double area_mm2; double diameter_mm; };
+    std::vector<Call> calls;
+    bool changed = false;
+    const auto out = slic3r_api::compensate_convex_holes(storage.get(), { sdk_view(left), sdk_view(right) },
+        [&calls](std::size_t region, const slic3r_api::ConvexHoleInfo &hole) {
+            calls.push_back({ region, hole.area / scale_d(scale_d(1.)), unscaled(hole.diameter) });
+            CHECK(hole.hole.is_clockwise());
+            return region == 0 ? mm(-0.1) : coord_t(0);
+        },
+        changed);
+    CHECK(changed);
+    // Only the round hole is offered, once per region that has material.
+    REQUIRE(calls.size() == 2);
+    for (const Call &call : calls) {
+        CHECK(call.diameter_mm == Approx(5.).margin(1e-6));
+        CHECK(call.area_mm2 == Approx(PI * 2.5 * 2.5).epsilon(0.01));
+    }
+    CHECK(calls[0].region == 0);
+    CHECK(calls[1].region == 1);
+    REQUIRE(out.size() == 2);
+    CHECK(area_of(native_result(out[1])) == Approx(area_of(right)));
+    CHECK(area_of(native_result(out[0])) < area_of(left));
 }
 
 // ---- Settings and pipeline ---------------------------------------------------------

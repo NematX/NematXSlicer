@@ -27,6 +27,11 @@ own part of a shared wall; the first region wins where growth claims overlap.
 Islands inside a hole remain untouched. XY first-layer no-collapse protection
 does not account for the preceding hole compensation.
 
+The shared C++ SDK provides `compensate_convex_holes()` in
+`HoleCompensation.hpp`. Its synchronous callback selects a scaled distance for
+each material-bearing region and convex hole. The built-in provider supplies
+the threshold-adjusted regional setting through that same function.
+
 The geometry helpers operate on caller-owned SDK storage, without host headers.
 Clipper 2.1 adds variable inward offsets with one distance per ring vertex.
 Earlier Clipper 2.x packages remain compatible. Volume 2.0 and its

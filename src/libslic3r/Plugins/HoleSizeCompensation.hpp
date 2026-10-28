@@ -74,10 +74,9 @@ struct RegionHoleSettings
 };
 
 // Compensate the convex holes of one layer. region_slices[i] and settings[i]
-// describe region i. Each region moves only its own part of a hole wall, with
-// its own value: it removes its own material around an enlarged hole, or gets
-// the material that fills a shrunk hole next to it (the first region in order
-// wins where two regions could claim the same material).
+// describe region i: each region moves its part of a hole wall by its value,
+// reduced by its threshold. The regional rules are those of the SDK
+// compensate_convex_holes() (HoleCompensation.hpp).
 // Returns the new slices of every region, in the same order, and sets
 // `changed` to false when no region was modified (the result is then a copy).
 std::vector<StoredExPolygonCollection> compensate_holes(storage_handle *storage,
