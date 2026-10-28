@@ -38,6 +38,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_export.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeFilePublisher.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -166,9 +167,9 @@ static bool config_option_def_compatible(const ConfigOptionDef &existing, const 
 // Copy validated raw metadata and deserialize its default into a native definition.
 static void populate_config_option_def_from_raw(ConfigOptionDef &out, const raw_config_option_def *def, const std::string &translation_domain);
 
-// Throw the user-facing refusal when a typed destination suffix is not accepted by the selected exporter.
+// Reject an incompatible complete destination name with a user-facing suffix diagnostic.
 static void require_exporter_extension(const Orchestrator::GCodeExporterSelection &selection,
-                                       const std::string &suffix);
+                                       const std::string &destination);
 
 namespace {
 
@@ -178,6 +179,8 @@ struct GCodeExportQueryCapture
     raw_gcode_export_query_status status = RAW_GCODE_EXPORT_QUERY_UNSET;
     std::string extension;
     std::string message;
+    std::string action_label;
+    bool supports_removable_media = true;
     std::exception_ptr callback_exception;
 };
 
@@ -788,7 +791,7 @@ static raw_config_option_def config_option_def_with_resolved_invalidation(const 
 
 namespace {
 
-// Copy one borrowed QUERY answer into call-owned strings; reject short prefixes, repeated or malformed answers by saving an exception for the caller.
+// Copy one borrowed QUERY answer into call-owned strings, reading optional action fields only within struct_size and otherwise keeping empty text and removable suitability; reject short prefixes, repeated or malformed answers by saving an exception for the caller.
 void capture_gcode_export_query(void *callback_context,
                                 const raw_gcode_export_query_result *result)
 {
@@ -806,7 +809,7 @@ void capture_gcode_export_query(void *callback_context,
         const size_t minimum_size = offsetof(raw_gcode_export_query_result, message) +
             sizeof(result->message);
         if (result->struct_size < minimum_size)
-            throw std::invalid_argument("G-code exporter QUERY result is smaller than the version 1.0 prefix.");
+            throw std::invalid_argument("G-code exporter QUERY result is smaller than the minimum prefix (through message).");
 
         if (result->status == RAW_GCODE_EXPORT_QUERY_COMPATIBLE) {
             // The extension is optional: an exporter that writes no local file has none.
@@ -817,6 +820,11 @@ void capture_gcode_export_query(void *callback_context,
                 capture.extension.find('\\') != std::string::npos))
                 throw std::invalid_argument("G-code exporter QUERY returned an invalid extension.");
             capture.status = result->status;
+            if (result->struct_size >= offsetof(raw_gcode_export_query_result, action_label) + sizeof(result->action_label) &&
+                result->action_label != nullptr)
+                capture.action_label = result->action_label;
+            if (result->struct_size >= offsetof(raw_gcode_export_query_result, supports_removable_media) + sizeof(result->supports_removable_media))
+                capture.supports_removable_media = result->supports_removable_media != 0;
             if (result->message != nullptr)
                 capture.message = result->message;
             return;
@@ -3575,17 +3583,15 @@ std::string Orchestrator::export_gcode(Print &print,
     return path;
 }
 
-// Tell whether the borrowed suffix is the exporter's own extension, or `.g`/`.gco` for the built-in text exporter. An
-// exporter without extension imposes no suffix.
-bool Orchestrator::GCodeExporterSelection::accepts_extension(const std::string &suffix) const
+// Build the selected format and delegate the borrowed complete name to the shared suffix matcher, adding only the built-in text aliases; return acceptance without I/O or state changes, propagating allocation failures.
+bool Orchestrator::GCodeExporterSelection::accepts_extension(const std::string &destination) const
 {
-    if (extension.empty() || boost::iequals(suffix, extension))
-        return true;
-    if (plugin_id != k_default_gcode_exporter_id || extension != slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_extension)
-        return false;
-    return std::any_of(slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_aliases.begin(),
-                       slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_aliases.end(),
-                       [&suffix](const char *alias) { return boost::iequals(suffix, alias); });
+    slic3r_api::GCodeFileFormat format;
+    format.extension = extension;
+    if (plugin_id == k_default_gcode_exporter_id && extension == slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_extension)
+        format.aliases.assign(slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_aliases.begin(),
+                              slic3r_api::GCodeGeneration::Exporter::k_default_gcode_exporter_aliases.end());
+    return slic3r_api::gcode_destination_matches_format(destination, format);
 }
 
 // Build the path from the system temporary directory so that the exporter extension is the
@@ -3596,13 +3602,13 @@ std::string Orchestrator::GCodeExporterSelection::temporary_path(const std::stri
             boost::filesystem::unique_path(prefix + "%%%%-%%%%-%%%%-%%%%" + extension)).string();
 }
 
-// Throw the user-facing refusal for a typed suffix that the selected exporter cannot write.
+// Check the borrowed complete destination name and throw a suffix diagnostic on refusal; no files or selection state are changed and allocation errors propagate.
 static void require_exporter_extension(const Orchestrator::GCodeExporterSelection &selection,
-                                       const std::string &suffix)
+                                       const std::string &destination)
 {
-    if (!selection.accepts_extension(suffix))
+    if (!selection.accepts_extension(destination))
         throw RuntimeError("The G-code exporter '" + selection.plugin_id +
-                           "' does not support the destination extension '" + suffix + "'.");
+                            "' does not support the destination extension '" + boost::filesystem::path(destination).extension().string() + "'.");
 }
 
 // Resolve the exporter, strictly, then run QUERY, which executes on the calling thread with the borrowed Print in the
@@ -3611,7 +3617,7 @@ static void require_exporter_extension(const Orchestrator::GCodeExporterSelectio
 // group, and the configuration setting is neither read for the exporter nor modified. An empty `explicit_id` uses the
 // borrowed configuration: a missing key means the built-in exporter, and an unknown, inactive or differently resolved ID
 // throws with its own message. The firmware is always resolved from the configuration.
-// Return owned ID and extension; no file is created, and invalid selection or incompatible answers throw.
+// Return owned ID, extension and action text with removable-media suitability; absent optional fields retain empty text and suitability. No file is created, and invalid selection or incompatible answers throw.
 Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const Print &print, const DynamicPrintConfig &config,
                                                                          const std::string &explicit_id)
 {
@@ -3667,6 +3673,8 @@ Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const P
     GCodeExporterSelection selection;
     selection.plugin_id = plugin_id;
     selection.extension = std::move(capture.extension);
+    selection.action_label = std::move(capture.action_label);
+    selection.supports_removable_media = capture.supports_removable_media;
     return selection;
 }
 
@@ -3796,7 +3804,7 @@ std::string Orchestrator::export_gcode_cli(Print &print,
     const std::string requested_path = print.output_filepath(
         requested_output_path, std::string(), selection.extension);
     const boost::filesystem::path requested_file(requested_path);
-    require_exporter_extension(selection, requested_file.extension().string());
+    require_exporter_extension(selection, requested_file.string());
     const boost::filesystem::path reference_directory = requested_file.parent_path().empty() ?
         boost::filesystem::current_path() : requested_file.parent_path();
     const boost::filesystem::path reference = reference_directory /

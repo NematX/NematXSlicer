@@ -45,6 +45,7 @@ Representative direct calls (branches are not a timeline):
 #include <vector>
 
 #include <boost/dll/runtime_symbol_info.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 #include <boost/process/args.hpp>
@@ -100,7 +101,7 @@ constexpr const char *k_probe_option_key = "test.gcode_exporter_option";
 constexpr slicing_step_t k_probe_option_declared_step = STEP_GCODE;
 const char *const k_no_dependencies[] = {nullptr};
 
-enum class ProbeQueryMode { Compatible, Incompatible };
+enum class ProbeQueryMode { Compatible, Incompatible, NoRemovableMedia };
 // PublishThenCancel copies the reference, publishes and reports it, then raises the Print cancellation before returning.
 enum class ProbeExportMode { Copy, FailOpen, ReportErrorAfterWrite, CancelAfterWrite, FailingEncoder, PublishThenCancel, TamperAfterWrite };
 // What the exporter without local file reports: nothing, a label (whose buffer it overwrites afterwards), or two results.
@@ -108,6 +109,8 @@ enum class NoFileMode { ReportNothing, ReportLabel, ReportTwice };
 enum class RawQueryMode {
     MissingAnswer,
     Valid,
+    ActionFields,
+    Version40Prefix,
     RepeatedAnswer,
     ShortResult,
     UnknownStatus,
@@ -120,6 +123,7 @@ enum class RawQueryMode {
 
 struct ExporterProbeState
 {
+    std::string extension = ".probe";
     ProbeQueryMode query_mode = ProbeQueryMode::Compatible;
     ProbeExportMode export_mode = ProbeExportMode::Copy;
     RawQueryMode raw_query_mode = RawQueryMode::MissingAnswer;
@@ -138,6 +142,8 @@ struct ExporterProbeState
     std::string export_config_selector;
     // Destination the probe read from the EXPORT configuration (the output_path setting).
     std::string export_output_path;
+    // The host's statistics-finalized filename proposal, copied during EXPORT.
+    std::string export_output_suggestion;
     std::string query_firmware_id;
     const print_handle *query_print = nullptr;
     std::string query_notes;
@@ -376,7 +382,7 @@ private:
             throw std::runtime_error("Cannot register the test G-code exporter option.");
     }
 
-    // Read stable borrowed Print settings and record its handle and firmware identity; return owned compatibility text without rendering, with configuration failures propagated.
+    // Read stable borrowed Print settings and record its handle and firmware identity; return the state's owned suffix, compatibility/action text and removable suitability without rendering, propagating configuration failures.
     slic3r_api::GCodeExportQuery query_impl(const slic3r_api::Print &print, const slic3r_api::Config &, std::string_view firmware_plugin_id) const override
     {
         ++g_exporter_probe_state.query_count;
@@ -390,11 +396,15 @@ private:
             return query;
         }
         query.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
-        query.extension = ".probe";
+        query.extension = g_exporter_probe_state.extension;
+        if (g_exporter_probe_state.query_mode == ProbeQueryMode::NoRemovableMedia) {
+            query.action_label = "Export without removable media";
+            query.supports_removable_media = false;
+        }
         return query;
     }
 
-    // Copy borrowed metadata strings into probe state, read the UTF-8 reference, and publish the destination named by the request through the SDK helper; I/O errors, selected reports, and cancellation propagate through the host.
+    // Copy borrowed metadata into probe state and publish the request destination using the state's suffix and the SDK helper; reference I/O, selected reports and cancellation propagate through the host without transferring reference ownership.
     void export_impl(const plugin_run_context &run_context,
                      const slic3r_api::Print &print,
                      const slic3r_api::Config &config,
@@ -435,8 +445,9 @@ private:
         }
 
         slic3r_api::GCodeFileFormat format;
+        g_exporter_probe_state.export_output_suggestion = config.string_or_default("output_path_suggestion", "");
         format.exporter_id = k_probe_exporter_id;
-        format.extension = ".probe";
+        format.extension = g_exporter_probe_state.extension;
         const std::string published = slic3r_api::publish_gcode_file(
             run_context, format, g_exporter_probe_state.export_output_path, reference_path_utf8,
             [&run_context, reference_path_utf8](std::ostream &output) {
@@ -550,8 +561,19 @@ private:
         result.struct_size = sizeof(result);
         result.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
         result.extension = ".raw";
+        std::string action_label = "Raw export action";
+        if (g_exporter_probe_state.raw_query_mode == RawQueryMode::ActionFields ||
+            g_exporter_probe_state.raw_query_mode == RawQueryMode::Version40Prefix) {
+            result.action_label = action_label.c_str();
+            result.supports_removable_media = 0;
+        }
 
         switch (g_exporter_probe_state.raw_query_mode) {
+        case RawQueryMode::Version40Prefix:
+            result.struct_size = uint32_t(offsetof(raw_gcode_export_query_result, message) + sizeof(result.message));
+            break;
+        case RawQueryMode::ActionFields:
+            break;
         case RawQueryMode::RepeatedAnswer:
             context->emit_query_result(context->query_callback_context, &result);
             context->emit_query_result(context->query_callback_context, &result);
@@ -586,6 +608,7 @@ private:
             return;
         }
         context->emit_query_result(context->query_callback_context, &result);
+        action_label.assign(action_label.size(), 'x');
     }
 };
 
@@ -991,6 +1014,8 @@ TEST_CASE("G-code exporter is the visible FFF profile service", "[plugins][gcode
     const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
     CHECK(selection.plugin_id == "gcode.exporter.simple");
     CHECK(selection.extension == ".gcode");
+    CHECK(selection.action_label == "Export G-code");
+    CHECK(selection.supports_removable_media);
 
     plugin_run_context no_context = {};
     CHECK(plugin_ctx_as_gcode_export(nullptr) == nullptr);
@@ -1236,6 +1261,66 @@ TEST_CASE("CLI G-code export publishes the requested exporter extension", "[plug
         CHECK(file.first.find(".slic3r-cli-reference-") == std::string::npos);
 }
 
+// Select the raw provider with complete action fields; its overwritten source buffer must not affect the owned label, and its explicit false suitability must survive capture. Selection failures propagate.
+TEST_CASE("Exporter QUERY copies complete action fields", "[plugins][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation raw_query(orchestrator, k_raw_query_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_raw_query_exporter_id);
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::ActionFields;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selection.action_label == "Raw export action");
+    CHECK_FALSE(selection.supports_removable_media);
+}
+
+// Supply a 4.0 prefix with readable but excluded sentinel tail fields; the host must ignore both sentinels and return owned default action information without exporting.
+TEST_CASE("Exporter QUERY ignores action fields outside its size", "[plugins][exporter][export-contract][abi]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation raw_query(orchestrator, k_raw_query_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_raw_query_exporter_id);
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::Version40Prefix;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selection.action_label.empty());
+    CHECK(selection.supports_removable_media);
+}
+
+// Query the SDK provider that leaves action information unset; the SDK's default must survive its C adapter and host capture without modifying the borrowed Print.
+TEST_CASE("Exporter SDK defaults to removable media support", "[plugins][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selection.action_label.empty());
+    CHECK(selection.supports_removable_media);
+}
+
+// Query the SDK provider with removable export explicitly refused and owned action text; both fields must survive the synchronous C adapter and host capture without modifying the borrowed Print.
+TEST_CASE("Exporter SDK preserves explicit removable media refusal", "[plugins][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    g_exporter_probe_state.query_mode = ProbeQueryMode::NoRemovableMedia;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    CHECK_FALSE(selection.supports_removable_media);
+    CHECK(selection.action_label == "Export without removable media");
+}
+
 // Reject absent/repeated callbacks, short results, unsupported statuses, and invalid compatibility fields before any output action.
 TEST_CASE("G-code exporter QUERY rejects malformed synchronous answers", "[plugins][gcode][exporter]")
 {
@@ -1255,7 +1340,7 @@ TEST_CASE("G-code exporter QUERY rejects malformed synchronous answers", "[plugi
     CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY returned more than one result.");
     g_exporter_probe_state.raw_query_mode = RawQueryMode::ShortResult;
     CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()),
-                      "G-code exporter QUERY result is smaller than the version 1.0 prefix.");
+                      "G-code exporter QUERY result is smaller than the minimum prefix (through message).");
     g_exporter_probe_state.raw_query_mode = RawQueryMode::UnknownStatus;
     CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY returned an unknown status.");
     // The extension is optional: an exporter without local file answers without one.
@@ -1336,14 +1421,14 @@ TEST_CASE("Exporter QUERY borrows the Print only through its payload", "[plugins
     }
 }
 
-// The ABI registry exposes exporter 4.0, which requires a Print in QUERY, and rejects earlier majors and unsupported minors.
+// The ABI registry exposes exporter 4.1 (4.0 packages accepted), with optional action information and a required Print in QUERY, and rejects earlier majors and unsupported minors.
 TEST_CASE("G-code exporter header is part of the plugin ABI registry", "[plugins][gcode][exporter][abi][export-contract]")
 {
     const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
     REQUIRE(host.size() > size_t(SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT));
     CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].header == "steps/slic3r_step_gcode_export.h");
     CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.major == 4);
-    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.minor == 0);
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.minor == 1);
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.0\n"));
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.1\n"));
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.2\n"));
@@ -1365,7 +1450,8 @@ TEST_CASE("G-code exporter header is part of the plugin ABI registry", "[plugins
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=2.0\n"));
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=1.0\n"));
     CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.0\n"));
-    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.1\n"));
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.1\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.2\n"));
 
     // The step list lost the former service value and gained a minor version, so other step plugins are not refused.
     CHECK(SLIC3R_PLUGIN_API_SLICING_STEP_MAJOR == 2);
@@ -1668,6 +1754,124 @@ TEST_CASE("G-code exporter calls leave the global cancellation flag alone", "[pl
     CHECK(orchestrator.is_plugin_cancelled());
     orchestrator.reset_plugin_cancel();
     CHECK(snapshot_directory(directory.path()).size() == 1);
+}
+
+// Exercise one literal destination table through host selection and actual publication; temporary files stay owned by the scoped directory and validation failures must leave no destination.
+TEST_CASE("Destination names share the host and publisher suffix rule", "[plugins][gcode][exporter][export-contract][compound-extension]")
+{
+    ScopedTestDirectory directory;
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const plugin_run_context context = {};
+    struct NameCase { const char *extension; const char *name; bool accepted; bool text_aliases; };
+    const NameCase cases[] = {
+        {".gcode.3mf", "x", true, false},
+        {".gcode.3mf", "x.gcode.3mf", true, false},
+        {".gcode.3mf", "X.GCODE.3MF", true, false},
+        {".gcode.3mf", "x.3mf", true, false},
+        {".gcode.3mf", "X.3MF", true, false},
+        {".gcode.3mf", "x.gcode", false, false},
+        {".gcode.3mf", "x.3mf.bak", false, false},
+        {".gcode.3mf", "x3mf", true, false},
+        {".gcode.3mf", "x.foo.3mf", true, false},
+        {".gcode", "x.GCO", true, true},
+        {".gcode", "x.3mf", false, true},
+        {".gcode", "x.gcode.3mf", false, true},
+        {".gcode", "x.g", true, true},
+        {".gcode", "x.gcode", true, true},
+        {".gcode", "x.bgcode", false, true},
+        {".bgcode", "x.bgc", false, false},
+        {".bgcode", "x.BGCODE", true, false}
+    };
+    for (const NameCase &item : cases) {
+        CAPTURE(item.extension, item.name);
+        Orchestrator::GCodeExporterSelection selection;
+        selection.plugin_id = item.text_aliases ? "gcode.exporter.simple" : "test.compound";
+        selection.extension = item.extension;
+        slic3r_api::GCodeFileFormat format;
+        format.exporter_id = selection.plugin_id;
+        format.extension = item.extension;
+        if (item.text_aliases)
+            format.aliases = {".g", ".gco"};
+        const boost::filesystem::path destination = directory.path() / item.name;
+        const bool bare = destination.extension().empty();
+        // The host receives names after the existing suffixless-name appending step; the publisher performs that step itself.
+        const std::string expected = destination.string() + (bare ? item.extension : "");
+        CHECK(selection.accepts_extension(expected) == item.accepted);
+        bool wrote = false;
+        const slic3r_api::GCodeFileWriter writer = [&wrote](std::ostream &output) {
+            wrote = true;
+            output << "published\n";
+            return true;
+        };
+        if (item.accepted) {
+            const std::string published = slic3r_api::publish_gcode_file(context, format, destination.string(), reference.string(), writer);
+            CHECK(published == expected);
+            CHECK(read_binary_file(published) == "published\n");
+            CHECK(wrote);
+            boost::filesystem::remove(published);
+        } else {
+            CHECK_THROWS(slic3r_api::publish_gcode_file(context, format, destination.string(), reference.string(), writer));
+            CHECK_FALSE(wrote);
+            CHECK_FALSE(boost::filesystem::exists(destination));
+        }
+    }
+    CHECK(read_binary_file(reference) == "G1 X1\n");
+    CHECK(snapshot_directory(directory.path()).size() == 1);
+}
+
+// Format literal and placeholder suffixes in both directions without generating toolpaths; Print and scoped files remain locally owned and formatting failures are test failures.
+TEST_CASE("Composed output suffixes are replaced as one unit", "[plugins][gcode][exporter][output-filename][compound-extension]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    DynamicPrintConfig config = print.full_print_config();
+    const std::vector<std::string> templates = {
+        "{input_filename_base}.gcode.3mf", "{input_filename_base}.GCODE.3MF",
+        "{input_filename_base}.gcode", "{input_filename_base}.bgcode",
+        "{input_filename_base}{default_output_extension}"};
+    for (const std::string &pattern : templates) {
+        CAPTURE(pattern);
+        config.set_deserialize_strict("output_filename_format", pattern);
+        print.apply(model, config);
+        CHECK(print.output_filename("name", ".gcode") == "name.gcode");
+        CHECK(print.output_filename("name", ".bgcode") == "name.bgcode");
+        const std::string compound = print.output_filename("name", ".gcode.3mf");
+        CHECK(boost::iequals(compound, "name.gcode.3mf"));
+        CHECK(boost::filesystem::path(print.output_filepath(directory.path().string(), "name", ".gcode.3mf")).filename().string() == compound);
+    }
+}
+
+// Run the existing probe with a composed suffix through CLI validation and STEP_EXPORT suggestions; files remain in the scoped project directory and the reset probe state owns no external resources.
+TEST_CASE("Composed exporters keep CLI aliases and temporary suffixes", "[plugins][gcode][exporter][compound-extension]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation activation(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    g_exporter_probe_state = ExporterProbeState{};
+    g_exporter_probe_state.extension = ".gcode.3mf";
+    print.process();
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::string temporary = selection.temporary_path(".f4a.upload.");
+    CHECK(boost::iends_with(temporary, ".gcode.3mf"));
+    CHECK(selection.accepts_extension(temporary));
+    CHECK_FALSE(boost::filesystem::exists(temporary));
+    for (const std::string &name : {std::string("cli.gcode.3mf"), std::string("cli.3mf")}) {
+        const std::string destination = (directory.path() / name).string();
+        std::istringstream input;
+        std::ostringstream output;
+        CHECK(orchestrator.export_gcode_cli(print, destination, input, output) == destination);
+        CHECK(boost::filesystem::exists(destination));
+    }
+    CHECK(print.output_filename("suggested", selection.extension) == "suggested.gcode.3mf");
+    g_exporter_probe_state = ExporterProbeState{};
 }
 
 // Generated names follow the exporter extension, whether it comes from the placeholder or from a suffix written in the template.
@@ -3125,6 +3329,24 @@ void reset_inputs_state(InputsMode mode)
 }
 
 } // namespace
+
+// Deposit a request with the same directory/base hints as disk export and inspect the proposal copied by the probe; scoped files and Print own all data, and pipeline failures fail the test.
+TEST_CASE("STEP_EXPORT proposes the composed suffix from directory and base hints", "[plugins][gcode][exporter][step-export][compound-extension]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    g_exporter_probe_state = ExporterProbeState{};
+    g_exporter_probe_state.extension = ".gcode.3mf";
+    InputsPrint cube(k_probe_exporter_id, directory.path(), false);
+    Print::ExportRequest request = cube.request(directory.path() / "published.gcode.3mf", ExportInputsCallback());
+    request.output_path_suggestion_directory = directory.path().string();
+    request.output_path_suggestion_filename_base = "suggested";
+    cube.export_with(std::move(request));
+    CHECK(g_exporter_probe_state.export_output_suggestion == (directory.path() / "suggested.gcode.3mf").string());
+    CHECK(cube.print.export_result().local_path == (directory.path() / "published.gcode.3mf").string());
+    g_exporter_probe_state = ExporterProbeState{};
+}
 
 // Cover the definition shape used by the GUI's direct file picker without constructing widgets.
 TEST_CASE("A single path input is one string-valued save or open definition", "[plugins][export-inputs]")

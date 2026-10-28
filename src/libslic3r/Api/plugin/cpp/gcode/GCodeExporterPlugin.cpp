@@ -73,7 +73,7 @@ void GCodeExporterPluginBase::setup_run_impl(const plugin_run_context *run_conte
     if (!context->request_export_inputs(context->input_callback_context, definitions.data(), definitions.size()))
         throw std::runtime_error("The export was stopped while its inputs were asked.");
 }
-// Validate borrowed run data including the payload Print, copy QUERY text during its callback, or dispatch EXPORT views with non-null metadata; invalid fields and provider failures throw without retaining caller storage.
+// Validate borrowed run data including the payload Print, lend owned QUERY text and suitability during its synchronous callback, or dispatch EXPORT views with non-null metadata; invalid fields and provider failures throw without retaining caller storage.
 void GCodeExporterPluginBase::run_impl(const plugin_run_context *run_context) const
 {
     throw_if_cancelled(run_context);
@@ -99,6 +99,10 @@ void GCodeExporterPluginBase::run_impl(const plugin_run_context *run_context) co
         result.status = query.status;
         result.extension = query.extension.empty() ? nullptr : query.extension.c_str();
         result.message = query.message.empty() ? nullptr : query.message.c_str();
+        if (query.status == RAW_GCODE_EXPORT_QUERY_COMPATIBLE) {
+            result.action_label = query.action_label.empty() ? nullptr : query.action_label.c_str();
+            result.supports_removable_media = query.supports_removable_media ? 1 : 0;
+        }
         context->emit_query_result(context->query_callback_context, &result);
         throw_if_cancelled(run_context);
         return;

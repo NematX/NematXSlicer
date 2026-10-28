@@ -17,6 +17,7 @@
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
+#include "libslic3r/I18N.hpp"
 
 /*
 Built-in G-code text exporter
@@ -144,12 +145,14 @@ void DefaultGCodeExporter::input_definitions(const Config &config, std::vector<r
     definition.default_serialized_value = default_value.c_str();
     definitions.push_back(definition);
 }
-// Ignore the borrowed Print, settings and firmware ID, returning the owned always-compatible `.gcode` result without changing Print state or failing.
+// Ignore the borrowed Print, settings and firmware ID, returning owned text-file action information suitable for removable media without changing Print state or failing.
 GCodeExportQuery DefaultGCodeExporter::query_impl(const Print &, const Config &, std::string_view) const
 {
     GCodeExportQuery query;
     query.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
     query.extension = k_default_gcode_exporter_extension;
+    query.action_label = L("Export G-code");
+    query.supports_removable_media = true;
     return query;
 }
 

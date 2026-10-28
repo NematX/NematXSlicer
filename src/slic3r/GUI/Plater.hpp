@@ -30,7 +30,8 @@ destination dialog does not discard a usable preview or the user's scene.
 
 Plater coordinates model editing and background slicing/export. Sidebar
 controls display measured print totals, times and object/wipe-tower length
-and cost shares without owning core results.
+and cost shares without owning core results. Export actions use cached provider
+text and removable-media suitability, leaving publication to the provider.
 */
 #ifndef slic3r_Plater_hpp_
 #define slic3r_Plater_hpp_
@@ -334,7 +335,7 @@ public:
     std::string get_export_path();
     // Schedule FFF export with a deferred destination or show the SLA save dialog, preferring removable media when requested.
     void export_gcode(bool prefer_removable);
-    // Open the menu of the compatible G-code exporters (right click on "Export G-code"); a pick becomes the session choice and exports.
+    // Open the compatible-exporter menu; a pick becomes the session choice, applies its queried action information and exports.
     void show_gcode_exporter_menu();
     // Forget the session exporter choice: the printer's gcode_exporter_plugin setting applies again.
     void reset_gcode_exporter_choice();
@@ -397,6 +398,8 @@ public:
     void update_menus();
     void show_action_buttons(const bool is_ready_to_slice) const;
     void show_action_buttons() const;
+    // Return whether the current exporter allows the removable-media action; SLA is always allowed.
+    bool supports_removable_media_export() const;
 
     wxString get_project_filename(const wxString& extension = wxEmptyString) const;
     void set_project_filename(const wxString& filename);
@@ -424,6 +427,7 @@ public:
 
     PrinterTechnology   printer_technology() const;
     const DynamicPrintConfig * config() const;
+    // Select the printer technology, reset cached export action information and update technology-specific UI.
     bool                set_printer_technology(PrinterTechnology printer_technology);
 
     void copy_selection_to_clipboard();

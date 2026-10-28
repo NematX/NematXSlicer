@@ -5,18 +5,6 @@
 #ifndef slic3r_step_gcode_export_h_
 #define slic3r_step_gcode_export_h_
 
-#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MAJOR 4u
-#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MINOR 0u
-
-#include <stddef.h>
-#include <stdint.h>
-
-#include "slic3r_step_common.h"
-#include "../slic3r_config_def.h"
-#include "../slic3r_gcode_thumbnail.h"
-
-#ifdef __cplusplus
-
 /*
 An exporter turns the generated G-code reference into the requested output.
 QUERY checks compatibility and describes the available action; EXPORT performs
@@ -26,7 +14,22 @@ can differ from the configuration currently attached to the source Print.
 Use the operation-specific payload below only during its synchronous callback.
 Copy any returned text that must outlive the call. The structure contracts keep
 the detailed rules for optional fields, result publication and input requests.
+
+STEP_EXPORT separates a synchronous compatibility/action QUERY from publication
+by the provider. Size-prefixed responses allow optional appended information.
 */
+
+#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MAJOR 4u
+#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MINOR 1u
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "slic3r_step_common.h"
+#include "../slic3r_config_def.h"
+#include "../slic3r_gcode_thumbnail.h"
+
+#ifdef __cplusplus
 extern "C" {
 #endif
 
@@ -68,6 +71,10 @@ typedef struct raw_gcode_export_query_result {
     raw_gcode_export_query_status status;
     const char *extension;
     const char *message;
+    /* Since 4.1: optional UTF-8 button text without ellipsis, translated by the GUI in the provider's domain. */
+    const char *action_label;
+    /* Since 4.1: 0 or 1, whether the removable-media export action is suitable. */
+    int supports_removable_media;
 } raw_gcode_export_query_result;
 
 /* Deliver a synchronous borrowed QUERY result to the host. */
@@ -140,10 +147,12 @@ and releasing another plugin's service session to inspect a capability is allowe
 without rendering or writing. QUERY calls emit_query_result exactly once. The host checks
 struct_size before reading any other member. The prefix through message is the
 minimum size; larger structures are accepted and fields added after this prefix
-are read only when they fit in the supplied size. COMPATIBLE may carry an
+are read only when they fit in the supplied size. Missing action_label defaults
+to empty (the GUI uses its ordinary export label); missing supports_removable_media
+defaults to 1. These fields describe only COMPATIBLE answers. COMPATIBLE may carry an
 extension: it is null or empty for an exporter that writes no local file, else it
 begins with a dot and contains neither slash nor backslash; message may be null.
-INCOMPATIBLE requires a non-null message. The host copies both strings during the
+INCOMPATIBLE requires a non-null message. The host copies returned strings during the
 callback, rejects missing or repeated answers and contains callback exceptions.
 An incompatible answer is a normal result; operational failures use report_error
 or a contained C++ exception.

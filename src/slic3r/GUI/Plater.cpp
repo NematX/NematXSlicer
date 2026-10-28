@@ -35,7 +35,9 @@ Plater owns model/config UI state and schedules background processing. Tower
 move events encode the owner index+1 in Z (zero for global); instance XY values
 are offsets from ModelInstance translation, shared by every owner instance.
 The sliced-info panel formats measured whole-print/per-tool totals and times,
-including object/wipe-tower filament-length and material-cost shares.
+ including object/wipe-tower filament-length and material-cost shares.
+ Export action information is the translated button text and removable-media
+ suitability returned by the selected FFF provider's synchronous QUERY.
 
 Representative direct calls (branches are not a timeline):
 
@@ -2104,6 +2106,7 @@ struct Plater::priv
         UPDATE_BACKGROUND_PROCESS_FORCE_EXPORT = 16,
     };
     // returns bit mask of UpdateBackgroundProcessReturnState
+    // Apply pending model/configuration data, validate it and refresh the current FFF export action on valid updates.
     unsigned int update_background_process(bool force_validation = false, bool postpone_error_messages = false);
     // Restart background processing thread based on a bitmask of UpdateBackgroundProcessReturnState.
     bool restart_background_process(unsigned int state);
@@ -2127,6 +2130,9 @@ struct Plater::priv
     bool can_start_export();
     // G-code exporter chosen for this session from the export button menu; empty means the printer's gcode_exporter_plugin setting.
     std::string                 gcode_exporter_choice;
+    // Current FFF action information; an empty label and true suitability preserve the ordinary export action.
+    wxString                    gcode_export_action_label;
+    bool                        gcode_export_supports_removable_media = true;
     void reload_from_disk();
     bool replace_volume_with_stl(int object_idx, int volume_idx, const fs::path& new_path, const wxString& snapshot = "");
     void replace_with_stl();
@@ -2169,6 +2175,9 @@ struct Plater::priv
     void on_3dcanvas_mouse_dragging_started(SimpleEvent&);
     void on_3dcanvas_mouse_dragging_finished(SimpleEvent&);
 
+    // Apply owned QUERY action information to the button and immediately refresh visibility when it changes.
+    void apply_gcode_export_action(const Orchestrator::GCodeExporterSelection &selection);
+    // Show slicing, export and removable-media actions according to the cached readiness and exporter suitability.
     void show_action_buttons(const bool is_ready_to_slice) const;
 
     // Set the bed shape to a single closed 2D polygon(array of two element arrays),
@@ -3654,8 +3663,7 @@ void Plater::priv::process_validation_warning(const std::vector<std::string>& wa
 }
 
 
-// Update background processing thread from the current config and Model.
-// Returns a bitmask of UpdateBackgroundProcessReturnState.
+// Apply a local model/configuration copy with the validation/error-display flags and return update-state bits; Print retains its own configuration, cleanup failure marks data invalid, and valid FFF data queries cached action information with ordinary-action fallback on query failure. QUERY does not retain borrowed model data.
 unsigned int Plater::priv::update_background_process(bool force_validation, bool postpone_error_messages)
 {
     // bitmap of enum UpdateBackgroundProcessReturnState
@@ -3807,7 +3815,18 @@ unsigned int Plater::priv::update_background_process(bool force_validation, bool
             (return_state & UPDATE_BACKGROUND_PROCESS_REFRESH_SCENE) != 0 )
             notification_manager->set_slicing_progress_hidden();
 
-        sidebar->set_btn_label(ActionButtonType::abExport, _(label_btn_export));
+        if (printer_technology == ptFFF) {
+            Orchestrator::GCodeExporterSelection selection;
+            try {
+                selection = Orchestrator::instance().select_gcode_exporter(
+                    *background_process.fff_print(), background_process.fff_print()->full_print_config(), gcode_exporter_choice);
+            } catch (const std::exception &) {
+                // Keep the ordinary action on refusal; clicking export still shows the provider's error.
+            }
+            apply_gcode_export_action(selection);
+        }
+        sidebar->set_btn_label(ActionButtonType::abExport,
+            (gcode_export_action_label.empty() ? _(label_btn_export) : gcode_export_action_label) + dots);
         sidebar->set_btn_label(ActionButtonType::abSendGCode, _(label_btn_send));
         dirty_state.update_from_preview();
 
@@ -5495,6 +5514,25 @@ bool Plater::priv::can_layers_editing() const
     return layers_height_allowed();
 }
 
+// Translate the borrowed selection's owned UTF-8 label in its provider domain and cache suitability; update text and visibility immediately on change, without retaining plugin pointers or querying again. Empty labels use the ordinary export text.
+void Plater::priv::apply_gcode_export_action(const Orchestrator::GCodeExporterSelection &selection)
+{
+    wxString label;
+    if (!selection.action_label.empty()) {
+        const Plugin *plugin = Orchestrator::instance().get_plugin(selection.plugin_id);
+        if (plugin != nullptr)
+            label = I18N::translate_in_domain(selection.action_label, plugin->get_translation_domain());
+    }
+    if (label == gcode_export_action_label && selection.supports_removable_media == gcode_export_supports_removable_media)
+        return;
+    gcode_export_action_label = label;
+    gcode_export_supports_removable_media = selection.supports_removable_media;
+    sidebar->set_btn_label(ActionButtonType::abExport,
+        (label.empty() ? _(label_btn_export) : label) + dots);
+    show_action_buttons(ready_to_slice);
+}
+
+// Cache the caller's readiness and update GUI visibility from background-processing settings, host presence and removable-drive status; exporter suitability gates only FFF removable actions, without querying or changing the selected provider.
 void Plater::priv::show_action_buttons(const bool ready_to_slice_) const
 {
 	// Cache this value, so that the callbacks from the RemovableDriveManager may repeat that value when calling show_action_buttons().
@@ -5513,7 +5551,7 @@ void Plater::priv::show_action_buttons(const bool ready_to_slice_) const
 		if (sidebar->show_reslice(false) |
 			sidebar->show_export(true) |
 			sidebar->show_send(send_gcode_shown) |
-			sidebar->show_export_removable(removable_media_status.has_removable_drives))
+			sidebar->show_export_removable(removable_media_status.has_removable_drives && q->supports_removable_media_export()))
 //			sidebar->show_eject(removable_media_status.has_eject))
             sidebar->Layout();
     }
@@ -5525,7 +5563,7 @@ void Plater::priv::show_action_buttons(const bool ready_to_slice_) const
         if (sidebar->show_reslice(ready_to_slice) |
             sidebar->show_export(!ready_to_slice) |
             sidebar->show_send(send_gcode_shown && !ready_to_slice) |
-			sidebar->show_export_removable(!ready_to_slice && removable_media_status.has_removable_drives))
+			sidebar->show_export_removable(!ready_to_slice && removable_media_status.has_removable_drives && q->supports_removable_media_export()))
 //            sidebar->show_eject(!ready_to_slice && removable_media_status.has_eject))
             sidebar->Layout();
     }
@@ -7312,12 +7350,13 @@ void Plater::apply_cut_object_to_model(size_t obj_idx, const ModelObjectPtrs& ne
 
 
 
-// Compare the borrowed suffix with the selected provider's extension; return no message for accepted aliases or a localized mismatch diagnostic.
+// Keep a borrowed suffixless upload name for later extension appending, otherwise match the complete name through the selection; return a localized refusal without I/O or ownership transfer, propagating formatting failures.
 static wxString check_gcode_exporter_extension(
     const Orchestrator::GCodeExporterSelection &selection,
-    const std::string &extension)
+    const std::string &destination)
 {
-    if (extension.empty() || selection.accepts_extension(extension))
+    const std::string extension = fs::path(destination).extension().string();
+    if (extension.empty() || selection.accepts_extension(destination))
         return wxString();
     return format_wxstr(_L("The selected G-code exporter supports %1% files, not %2%."),
                         selection.extension, extension);
@@ -8181,7 +8220,7 @@ void Plater::reset_gcode_exporter_choice()
 
 // Right click on "Export G-code": apply the configuration like an export does, keep the G-code exporters whose QUERY accepts the
 // current Print, and let the user pick one of them in a menu when at least two are compatible; a pick becomes the session
-// choice (the setting is not modified) and starts the export. Picking the exporter of the setting clears the choice, so that
+// choice (the setting is not modified), applies its already queried action information, and starts the export. Picking the exporter of the setting clears the choice, so that
 // later edits of the setting are still followed. An exporter whose QUERY fails is treated as incompatible and left out.
 void Plater::show_gcode_exporter_menu()
 {
@@ -8190,6 +8229,7 @@ void Plater::show_gcode_exporter_menu()
 
     Orchestrator &orchestrator = Orchestrator::instance();
     std::vector<Plugin *> compatible;
+    std::vector<Orchestrator::GCodeExporterSelection> selections;
     try {
         if (p->update_restart_background_process(false, false) & priv::UPDATE_BACKGROUND_PROCESS_INVALID)
             return;
@@ -8197,8 +8237,10 @@ void Plater::show_gcode_exporter_menu()
             if (plugin->get_exclusive_group() != k_gcode_exporter_option_key)
                 continue;
             try {
-                orchestrator.select_gcode_exporter(fff_print(), fff_print().full_print_config(), plugin->get_id());
+                const Orchestrator::GCodeExporterSelection selection =
+                    orchestrator.select_gcode_exporter(fff_print(), fff_print().full_print_config(), plugin->get_id());
                 compatible.push_back(plugin);
+                selections.push_back(selection);
             } catch (const std::exception &) {
                 // Incompatible with this Print (or unusable): not offered.
             }
@@ -8233,10 +8275,16 @@ void Plater::show_gcode_exporter_menu()
         return;
 
     p->gcode_exporter_choice = picked_id == setting_id ? std::string() : picked_id;
+    for (const Orchestrator::GCodeExporterSelection &selection : selections) {
+        if (selection.plugin_id == picked_id) {
+            p->apply_gcode_export_action(selection);
+            break;
+        }
+    }
     this->export_gcode(false);
 }
 
-// Resolve and validate the FFF exporter before opening the upload dialog, then queue its finalized path; SLA keeps its existing flow and errors remain visible.
+// With a selected physical printer and nonempty plate, query FFF compatibility, validate the dialog's complete destination name and queue the upload, transferring its job to the background process; SLA keeps its raster flow and dialog/export errors stay visible without queueing a refused job.
 void Plater::send_gcode()
 {
     // if physical_printer is selected, send gcode for this printer
@@ -8298,8 +8346,7 @@ void Plater::send_gcode()
     if (dlg.ShowModal() == wxID_OK) {
 
         if (printer_technology() == ptFFF) {
-            const std::string ext = boost::algorithm::to_lower_copy(dlg.filename().extension().string());
-            const wxString error_str = check_gcode_exporter_extension(exporter_selection, ext);
+            const wxString error_str = check_gcode_exporter_extension(exporter_selection, dlg.filename().string());
             if (! error_str.IsEmpty()) {
                 ErrorDialog(this, error_str, std::function<void(const std::string&)>([](const std::string& key) -> void { wxGetApp().sidebar().jump_to_option(key); })).ShowModal();
                 return;
@@ -8797,6 +8844,7 @@ PrinterTechnology Plater::printer_technology() const
 
 const DynamicPrintConfig * Plater::config() const { return p->config; }
 
+// Select FFF or SLA for the background process, reset cached action text and removable suitability, and immediately refresh action visibility using cached readiness; return the background process's technology-change result without retaining caller data.
 bool Plater::set_printer_technology(PrinterTechnology printer_technology)
 {
     p->printer_technology = printer_technology;
@@ -8814,6 +8862,9 @@ bool Plater::set_printer_technology(PrinterTechnology printer_technology)
     }
 
     p->label_btn_export = printer_technology == ptFFF ? L("Export G-code") : L("Export");
+    p->gcode_export_action_label.clear();
+    p->gcode_export_supports_removable_media = true;
+    show_action_buttons();
     p->label_btn_send   = printer_technology == ptFFF ? L("Send G-code")   : L("Send to printer");
 
     if (wxGetApp().mainframe != nullptr)
@@ -8980,6 +9031,12 @@ void Plater::split_volume()         { p->split_volume(); }
 void Plater::update_menus()         { p->menus.update(); }
 void Plater::show_action_buttons(const bool ready_to_slice) const   { p->show_action_buttons(ready_to_slice); }
 void Plater::show_action_buttons() const                            { p->show_action_buttons(p->ready_to_slice); }
+
+// Read cached FFF suitability without querying or touching worker data; SLA preserves its existing removable-media action.
+bool Plater::supports_removable_media_export() const
+{
+    return p->printer_technology != ptFFF || p->gcode_export_supports_removable_media;
+}
 
 void Plater::copy_selection_to_clipboard()
 {

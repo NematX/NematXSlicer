@@ -44,6 +44,23 @@ Representative direct calls (branches are not a timeline):
 */
 
 namespace slic3r_api {
+
+// Compare the borrowed name's ending with dotted suffixes without case, including the last component of a composed main suffix; no I/O or ownership transfer occurs, suffixless names remain the caller's decision and substring allocation failures propagate.
+bool gcode_destination_matches_format(std::string_view destination, const GCodeFileFormat &format)
+{
+    if (format.extension.empty() || boost::iends_with(destination, format.extension))
+        return true;
+    const std::size_t last_dot = format.extension.rfind('.');
+    if (last_dot != std::string::npos && last_dot > 0 &&
+        boost::iends_with(destination, format.extension.substr(last_dot)))
+        return true;
+    for (const std::string &alias : format.aliases) {
+        if (boost::iends_with(destination, alias))
+            return true;
+    }
+    return false;
+}
+
 namespace {
 
 // Byte count and CRC-32 calculated for one complete file stream, kept internal to the publisher.
@@ -114,7 +131,7 @@ bool write_and_verify_sibling(const plugin_run_context &run_context,
                               const boost::filesystem::path &sibling,
                               const GCodeFileWriter &write);
 
-// Build the destination path. An empty path, or a suffix that is neither the main one nor an alias, is refused.
+// Build an owned path from the borrowed destination, append the main suffix only to a suffixless name, and otherwise use the shared name matcher; empty or incompatible destinations throw without I/O.
 boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, std::string_view destination_utf8)
 {
     if (destination_utf8.empty())
@@ -125,10 +142,7 @@ boost::filesystem::path destination_with_suffix(const GCodeFileFormat &format, s
         return destination += format.extension;
 
     const std::string suffix = destination.extension().string();
-    bool accepted = boost::iequals(suffix, format.extension);
-    for (const std::string &alias : format.aliases)
-        accepted = accepted || boost::iequals(suffix, alias);
-    if (!accepted)
+    if (!gcode_destination_matches_format(destination_utf8, format))
         throw std::runtime_error("The G-code exporter '" + format.exporter_id +
                                  "' does not support the destination extension '" + suffix + "'.");
     return destination;

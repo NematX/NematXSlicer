@@ -5,6 +5,9 @@
 #ifndef slic3r_Api_plugin_cpp_gcode_GCodeExporterPlugin_hpp_
 #define slic3r_Api_plugin_cpp_gcode_GCodeExporterPlugin_hpp_
 
+// The provider adapter lends Print/configuration views for synchronous QUERY and
+// EXPORT calls. Query values own their text and default to removable-media suitability.
+
 #include <string>
 #include <string_view>
 #include <vector>
@@ -24,6 +27,9 @@ struct GCodeExportQuery
     // Empty for an exporter that writes no local file.
     std::string extension;
     std::string message;
+    // Optional untranslated UTF-8 button text without ellipsis, in this provider's translation domain.
+    std::string action_label;
+    bool supports_removable_media = true;
 };
 
 // Return the destination that the requester set for this export (the `output_path` setting of the export
@@ -77,7 +83,7 @@ protected:
     // Construct a provider bound to the borrowed host handle used for registration and run callbacks.
     explicit GCodeExporterPluginBase(orchestrator_handle *orchestrator) : PluginBase(orchestrator) {}
 
-    // Inspect stable borrowed Print data, settings from config and firmware ID, returning owned compatibility text without rendering or writing.
+    // Inspect stable borrowed Print data, config and firmware ID, returning owned compatibility and action text with removable suitability without rendering or writing.
     virtual GCodeExportQuery query_impl(const Print &print, const Config &config,
                                         std::string_view firmware_plugin_id) const = 0;
 

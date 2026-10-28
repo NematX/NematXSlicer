@@ -1954,7 +1954,7 @@ std::string Print::output_filename(const std::string &filename_base) const
 }
 
 // Format the FFF output template with print statistics (or their placeholders) and the borrowed exporter extension,
-// then replace a literal G-code-family suffix written in the template by that extension, unless it is a text alias
+// then replace a literal G-code-family suffix (including the complete .gcode.3mf suffix) by that extension, unless it is a text alias
 // (.g, .gco) of the .gcode extension, which stays as written. Return an owned filename; Print state is unchanged and
 // placeholder-format errors propagate.
 std::string Print::output_filename(const std::string &filename_base,
@@ -1975,12 +1975,14 @@ std::string Print::output_filename(const std::string &filename_base,
     // replace any G-code-family suffix that the exporter would refuse. The text aliases .g and .gco stay when the
     // extension is .gcode, because the built-in exporter accepts them.
     boost::filesystem::path filepath(filename);
-    const std::string suffix = filepath.extension().string();
+    const bool composed = boost::iends_with(filename, ".gcode.3mf");
+    const std::string suffix = composed ? ".gcode.3mf" : filepath.extension().string();
     const bool text_alias = default_extension == ".gcode" && (boost::iequals(suffix, ".g") || boost::iequals(suffix, ".gco"));
     if (!boost::iequals(suffix, default_extension) && !text_alias &&
-        (boost::iequals(suffix, ".gcode") || boost::iequals(suffix, ".bgcode") ||
+         (composed || boost::iequals(suffix, ".gcode") || boost::iequals(suffix, ".bgcode") ||
          boost::iequals(suffix, ".bgc") || boost::iequals(suffix, ".g") || boost::iequals(suffix, ".gco")))
-        filename = filepath.replace_extension(default_extension).string();
+        filename = composed ? filename.substr(0, filename.size() - suffix.size()) + default_extension :
+                              filepath.replace_extension(default_extension).string();
     return filename;
 }
 

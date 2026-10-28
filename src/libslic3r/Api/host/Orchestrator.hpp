@@ -343,8 +343,12 @@ public:
         // Suffix with its dot for an exporter that writes a local file; empty otherwise.
         std::string extension;
 
-        // Tell whether a typed suffix (with its dot, any case) is this exporter's extension or a text alias of the built-in exporter; true for an exporter without extension.
-        bool accepts_extension(const std::string &suffix) const;
+        // Owned untranslated button text; absent labels use the GUI's ordinary export label.
+        std::string action_label;
+        bool supports_removable_media = true;
+
+        // Match a complete destination name against the exporter suffix, its final component or built-in text aliases, ignoring case; no extension imposes no restriction.
+        bool accepts_extension(const std::string &destination) const;
         // Return a unique path in the system temporary directory, `prefix` + random part + the exporter extension; nothing is created.
         std::string temporary_path(const std::string &prefix) const;
     };
@@ -675,7 +679,7 @@ public:
                              const std::string &path_template,
                              GCodeProcessorResult *result);
 
-    // Resolve and query the exporter using stable borrowed Print data and settings from config; return its ID/extension or throw, without rendering or writing.
+    // Resolve and query the exporter from stable Print data and config, returning owned ID, extension, action text and removable suitability or throwing without rendering or writing.
     // A non-empty explicit_id selects that active exporter provider instead of the one named by the `gcode_exporter_plugin`
     // setting of config, which is then not read for the exporter nor modified; empty keeps the setting.
     GCodeExporterSelection select_gcode_exporter(const Print &print, const DynamicPrintConfig &config,

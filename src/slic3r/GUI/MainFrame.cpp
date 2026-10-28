@@ -12,6 +12,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/* MainFrame connects application menus to Plater actions. Menu availability reads
+   Plater's cached exporter suitability; it does not run a provider query. */
 #include "MainFrame.hpp"
 
 #include <wx/debug.h>
@@ -1515,6 +1517,7 @@ bool MainFrame::can_send_gcode() const
     return false;
 }
 
+// Read GUI readiness and cached exporter suitability before checking connected drives; no QUERY or export is started, and absent models, scheduled exports or unsuitable FFF providers disable the menu action.
 bool MainFrame::can_export_gcode_sd() const
 {
 	if (m_plater == nullptr)
@@ -1526,7 +1529,8 @@ bool MainFrame::can_export_gcode_sd() const
 	if (m_plater->is_export_gcode_scheduled())
 		return false;
 
-	// TODO:: add other filters
+	if (!m_plater->supports_removable_media_export())
+		return false;
 
 	return wxGetApp().removable_drive_manager()->status().has_removable_drives;
 }

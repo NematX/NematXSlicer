@@ -63,6 +63,9 @@ struct GCodeFileFormat
     std::vector<std::string> aliases;
 };
 
+// Match a complete destination name against the main suffix, its final component and explicit aliases, without case; an empty main suffix imposes no restriction.
+bool gcode_destination_matches_format(std::string_view destination, const GCodeFileFormat &format);
+
 // Write the complete file into the helper-owned sibling stream; return false after reporting a failure, or throw on I/O failure or cancellation.
 using GCodeFileWriter = std::function<bool(std::ostream &output)>;
 

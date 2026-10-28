@@ -14,7 +14,7 @@ slic3r_slicing_step.h = 2.4
 slic3r_config_def.h = 1.6
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
-steps/slic3r_step_gcode_export.h = 4.0
+steps/slic3r_step_gcode_export.h = 4.1
 slic3r_gcode_thumbnail.h = 2.0
 ```
 
@@ -51,13 +51,21 @@ Data-tree 5.0 removes the branch surface modifier and reserves bit 10. Support-t
 shares the sparse selector. Packages requiring data-tree 4.x or support-toolpath 1.x
 must be rebuilt. Support-step remains 1.3; its publication payload is unchanged.
 
-The G-code exporter step is at 4.0: QUERY requires a borrowed Print in its
+The G-code exporter step is at 4.1: QUERY requires a borrowed Print in its
 payload, while the generic execution-context Print remains null. Exporter 3.x
 packages are incompatible. QUERY reads settings from its configuration argument
 and only computation-stable Print data (applied configuration and selected
 services), never geometry or layers. It may acquire a service to inspect a
 capability, but must stay quick, without rendering or writing, including on the
 GUI thread. Compatibility cannot depend on request-only destination settings.
+Compatible QUERY answers may append `action_label` (optional UTF-8 text without
+ellipsis, translated by the GUI in the provider's domain) and
+`supports_removable_media` (0 or 1). The host reads each field only when covered
+by `struct_size`; a 4.0 provider retains an empty label and removable-media
+support. The C++ provider view also defaults to removable-media support.
+An empty label uses the GUI's ordinary export label. Incompatible answers do not
+provide action information. The GUI adds the ellipsis and uses suitability only
+for the FFF removable-media action, not as a restriction on chosen file paths.
 
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the
