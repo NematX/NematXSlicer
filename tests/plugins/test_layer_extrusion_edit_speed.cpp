@@ -40,6 +40,8 @@
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
+#include "libslic3r/Api/plugin/cpp/DefaultSpeedLimits.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanTimeEstimator.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -82,6 +84,11 @@ Fan replay changes the standard reference, cooling threshold, geometry graph and
 first-layer ramp on one Print, restoring its ordering checkpoint each time. A
 coexisting fresh Print must match every context field, duration, speed and fan
 pair; returning to the initial configuration must recover the initial result.
+
+The late-editor replay test registers a test-only speed editor with no package
+dependency. It scales cloned flow and respects the published absolute ceiling.
+Ordering checkpoints must restore clean flow and metadata on the same Print;
+fresh Prints provide an independent comparison after each configuration change.
 
 Representative direct calls (branches are not a timeline):
 
@@ -139,6 +146,7 @@ struct ObservedLeaf
     float fan_speed = -1.f;
     const ExtrusionPropertySpeed *direct_process = nullptr;
     size_t direct_property_count = 0;
+    double first_layer_limit = -1.;
     const ExtrusionPropertyFan *direct_fan = nullptr;
 };
 
@@ -493,12 +501,15 @@ void collect_observed_leaves(const ExtrusionEntity &entity,
     }
 
     const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
-    if (attributes != nullptr && entity.has_polyline())
+    if (attributes != nullptr && entity.has_polyline()) {
+        const auto key = slic3r_api::default_speed_limits_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+        const auto *limits = slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&entity)).get(key);
         out.push_back(ObservedLeaf{
             attributes->extrusion_role(), state.speed, state.acceleration, state.fan_speed,
             process,
             slic3r_api::ExtrusionEntity(
-                reinterpret_cast<const extrusion_entity_handle *>(&entity)).property_count(), fan});
+                reinterpret_cast<const extrusion_entity_handle *>(&entity)).property_count(), limits ? limits->first_layer_mm_per_s : -1., fan});
+    }
 }
 
 // Collect every plan leaf. This helper intentionally preserves duplicate roles
@@ -1020,10 +1031,10 @@ TEST_CASE("Layer speed follows final values across region boundaries",
         CHECK(source_process->accel_mm_per_s2 == 321.f);
     }
 
-    SECTION("different raw settings capped to one final float do not split") {
+    SECTION("different raw settings with equal final speed and ceiling do not split") {
         PreparedSpeedPrint prepared;
         const DynamicPrintConfig config = speed_config({
-            {"perimeter_speed", "100"}, {"first_layer_speed", "100%"},
+            {"perimeter_speed", "100"}, {"first_layer_speed", "200"},
             {"max_print_speed", "50"}, {"max_volumetric_speed", "0"},
             {"filament_max_speed", "0"}, {"filament_max_volumetric_speed", "0"}
         });
@@ -1154,7 +1165,7 @@ TEST_CASE("Layer speed follows final values across region boundaries",
     SECTION("flow-dependent caps produce distinct cached partitions") {
         PreparedSpeedPrint prepared;
         const DynamicPrintConfig config = speed_config({
-            {"perimeter_speed", "100"}, {"first_layer_speed", "100%"},
+            {"perimeter_speed", "100"}, {"first_layer_speed", "200"},
             {"max_print_speed", "100"}, {"max_volumetric_speed", "12"},
             {"filament_max_speed", "0"}, {"filament_max_volumetric_speed", "0"}
         });
@@ -2217,6 +2228,169 @@ TEST_CASE("First-layer infill speed zero falls back to the general first-layer l
     }
 }
 
+TEST_CASE("Default speed publishes percentage ceilings before physical caps and minimums",
+          "[plugins][layer-extrusion-edit][speed][resolved-limits]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const auto config = speed_config({{"infill_speed", "200"}, {"first_layer_infill_speed", "50%"},
+        {"first_layer_min_speed", "0"}, {"max_print_speed", "40"}, {"max_volumetric_speed", "0"},
+        {"filament_max_speed", "0"}, {"filament_max_volumetric_speed", "0"}});
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::InternalInfill,0.2}}});
+    run_editors(prepared, {DEFAULT_SPEED_PLUGIN});
+    const auto leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size()==1);
+    CHECK(leaves.front().speed==40.f);
+    CHECK(leaves.front().first_layer_limit==100.);
+}
+
+TEST_CASE("Autospeed publishes per-flow first-layer ceilings before minimums and filament caps",
+          "[plugins][layer-extrusion-edit][speed][resolved-limits][autospeed]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const auto config=speed_config({{"infill_speed","0"}, {"solid_infill_speed","0"},
+        {"first_layer_infill_speed","50%"}, {"first_layer_min_speed","60"},
+        {"max_print_speed","100"}, {"max_volumetric_speed","50"},
+        {"autospeed_min_thin_flow","!0"}, {"filament_max_speed","20"}, {"filament_max_volumetric_speed","0"}});
+    prepare_ordered_plan(prepared,config,{{{ExtrusionRole::InternalInfill,0.2},{ExtrusionRole::InternalInfill,0.4}}});
+    run_editors(prepared,{DEFAULT_SPEED_PLUGIN});
+    const auto leaves=observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size()==2);
+    CHECK(leaves[0].speed==20.f);
+    CHECK(leaves[1].speed==20.f);
+    CHECK(leaves[0].first_layer_limit==50.);
+    CHECK(leaves[1].first_layer_limit==25.);
+}
+
+TEST_CASE("Regional speed projection keeps distinct ceilings even when final speeds match",
+          "[plugins][layer-extrusion-edit][speed][resolved-limits]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const auto config = speed_config({{"infill_speed", "100"}, {"first_layer_infill_speed", "50%"},
+        {"first_layer_min_speed", "0"}, {"max_print_speed", "40"}, {"max_volumetric_speed", "0"},
+        {"filament_max_speed", "0"}, {"filament_max_volumetric_speed", "0"}});
+    prepare_regional_process_plan(prepared, config, {{"infill_speed","200"}}, "infill_speed",
+                                  {{ExtrusionRole::InternalInfill,0.2}});
+    run_editors(prepared, {DEFAULT_SPEED_PLUGIN});
+    const auto leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size()==3);
+    CHECK(leaves[0].first_layer_limit==50.);
+    CHECK(leaves[1].first_layer_limit==100.);
+    CHECK(leaves[2].first_layer_limit==50.);
+    for (const auto &leaf:leaves) CHECK(leaf.speed==40.f);
+}
+
+TEST_CASE("Late speed editing replays from fresh ordering clones on the same Print",
+          "[plugins][layer-extrusion-edit][speed][resolved-limits][replay-options]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    class LateSpeedEditor final : public slic3r_api::PluginBase {
+    public:
+        // Bind the test editor to the same host as the production speed provider.
+        explicit LateSpeedEditor(orchestrator_handle *host) : PluginBase(host) {}
+    private:
+        // Identify the fixture independently of any external plugin package.
+        const char *id_impl() const noexcept override { return "test.layer_edit.late_speed"; }
+        // Run on ordering clones after the default speed provider.
+        slicing_step_t step_impl() const noexcept override { return STEP_LAYER_EXTRUSION_EDIT; }
+        // No dependency is required; priority orders the two explicitly selected editors.
+        const char *const *dependencies_impl() const noexcept override {
+            static const char *none[] = {nullptr};
+            return none;
+        }
+        // Consume the resolved metadata only after default speed has published it.
+        int32_t priority_impl() const noexcept override { return 20; }
+        // Scale each cloned leaf once and preserve all unrelated process fields.
+        void run_impl(const plugin_run_context *context) const override {
+            const run_ctx_layer_extrusion_edition *payload = plugin_ctx_as_layer_extrusion_edition(context);
+            if (payload == nullptr || payload->layer_group == nullptr)
+                throw std::runtime_error("Missing late-editor layer context.");
+            PrintingLayerGroup &layer = *reinterpret_cast<PrintingLayerGroup *>(payload->layer_group);
+            const auto key = slic3r_api::default_speed_limits_key(
+                reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+            for (PrintingToolGroup &tool : layer.tool_groups)
+                for (PrintingExtrusion &extrusion : tool.extrusions) {
+                    if (extrusion.root == nullptr)
+                        continue;
+                    // The fixture has one flat tree; inherit the hoisted speed from its root.
+                    const ExtrusionPropertySpeed *parent = extrusion.root->get_property<ExtrusionPropertySpeed>();
+                    for (size_t idx = 0; idx < extrusion.root->child_count(); ++idx) {
+                        ExtrusionEntity &leaf = extrusion.root->child(idx);
+                        const slic3r_api::ExtrusionEntity view(reinterpret_cast<const extrusion_entity_handle *>(&leaf));
+                        const slic3r_api::DefaultSpeedLimits *limits = view.get(key);
+                        if (limits == nullptr || limits->version != 1)
+                            throw std::runtime_error("Missing resolved first-layer ceiling.");
+                        ExtrusionPropertySpeed &process = leaf.get_or_add_property<ExtrusionPropertySpeed>();
+                        const double speed = process.speed_mm_per_s > 0. ? process.speed_mm_per_s :
+                                             parent != nullptr ? parent->speed_mm_per_s : -1.;
+                        if (speed <= 0.)
+                            throw std::runtime_error("Missing resolved speed.");
+                        process.speed_mm_per_s = float(limits->first_layer_mm_per_s > 0. ?
+                            std::min(speed * 2., limits->first_layer_mm_per_s) : speed * 2.);
+                        ExtrusionAttributes *attributes = leaf.get_property<ExtrusionAttributes>();
+                        if (attributes == nullptr)
+                            throw std::runtime_error("Missing leaf flow.");
+                        attributes->mm3_per_mm *= 0.5;
+                    }
+                }
+        }
+    };
+    static LateSpeedEditor editor(reinterpret_cast<orchestrator_handle *>(&orchestrator));
+    if (orchestrator.get_plugin("test.layer_edit.late_speed") == nullptr)
+        REQUIRE(orchestrator.register_plugin(editor.c_instance()));
+    PreparedSpeedPrint prepared;
+    DynamicPrintConfig config=speed_config({{"infill_speed","30"}, {"first_layer_infill_speed","200%"},
+        {"first_layer_min_speed","40"}, {"max_print_speed","300"}, {"max_volumetric_speed","0"},
+        {"filament_max_speed","0"}, {"filament_max_volumetric_speed","0"}});
+    prepare_ordered_plan(prepared,config,{{{ExtrusionRole::InternalInfill,0.04}}});
+    Steps::StepExtrusionOrdering::clear(prepared.print);
+    Steps::StepExtrusionOrdering::prepare(prepared.print);
+    Steps::StepExtrusionOrdering::run_step(orchestrator,prepared.print);
+    for (auto step:Steps::execution_order()) {
+        prepared.print.mark_step_executed(step);
+        if (step==STEP_ORDERING) break;
+    }
+    REQUIRE(prepared.print.save_ordering_checkpoint());
+    bool first_run=true;
+    for (double role_speed:{30.,40.,30.}) {
+        if (!first_run) {
+            config.set_deserialize_strict("infill_speed",std::to_string(role_speed));
+            REQUIRE(prepared.print.apply(prepared.model,config)==Print::APPLY_STATUS_INVALIDATED);
+            REQUIRE(prepared.print.has_ordering_checkpoint());
+            prepared.print.prepare_checkpoint_resume();
+        }
+        run_editors(prepared,{DEFAULT_SPEED_PLUGIN,"test.layer_edit.late_speed"});
+        prepared.print.mark_step_executed(STEP_LAYER_EXTRUSION_EDIT);
+        const auto leaves=observed_plan_leaves(prepared.print);
+        REQUIRE(leaves.size()==1);
+        CHECK(leaves.front().speed==float(role_speed*2.));
+        CHECK(leaves.front().first_layer_limit==role_speed*2.);
+        const std::vector<ObservedFlow> flows = observed_plan_flows(prepared.print);
+        REQUIRE(flows.size() == 1);
+        CHECK(flows.front().mm3_per_mm == Approx(0.02));
+        REQUIRE(prepared.source_roots.front()->child_count() == 1);
+        const ExtrusionEntity &source = prepared.source_roots.front()->child(0);
+        REQUIRE(source.get_property<ExtrusionAttributes>() != nullptr);
+        CHECK(source.get_property<ExtrusionAttributes>()->mm3_per_mm == Approx(0.04));
+        CHECK(source.get_property<ExtrusionPropertySpeed>() == nullptr);
+
+        PreparedSpeedPrint fresh;
+        prepare_ordered_plan(fresh, config, {{{ExtrusionRole::InternalInfill, 0.04}}});
+        run_editors(fresh, {DEFAULT_SPEED_PLUGIN, "test.layer_edit.late_speed"});
+        const std::vector<ObservedLeaf> fresh_leaves = observed_plan_leaves(fresh.print);
+        REQUIRE(fresh_leaves.size() == 1);
+        CHECK(fresh_leaves.front().speed == leaves.front().speed);
+        CHECK(fresh_leaves.front().first_layer_limit == leaves.front().first_layer_limit);
+        const std::vector<ObservedFlow> fresh_flows = observed_plan_flows(fresh.print);
+        REQUIRE(fresh_flows.size() == 1);
+        CHECK(fresh_flows.front().mm3_per_mm == flows.front().mm3_per_mm);
+        first_run=false;
+    }
+}
+
 TEST_CASE("Layer extrusion editor caps explicit role speed with max print speed",
           "[plugins][layer-extrusion-edit][speed][limits]")
 {
@@ -2612,7 +2786,7 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
     CHECK(std::count_if(leaves.begin(), leaves.end(), [](const ObservedLeaf &leaf) {
         return leaf.direct_fan != nullptr && leaf.direct_fan->percent == 35.f &&
                leaf.direct_fan->mode == FAN_REQUEST_MODE_OVERRIDE &&
-               leaf.direct_property_count == 2;
+               leaf.direct_property_count == 3 && leaf.first_layer_limit > 0.;
     }) == 1);
 
     // A second execution removes only values marked by the first fan pass,
@@ -2628,7 +2802,7 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
     CHECK(std::count_if(leaves.begin(), leaves.end(), [](const ObservedLeaf &leaf) {
         return leaf.direct_fan != nullptr && leaf.direct_fan->percent == 35.f &&
                leaf.direct_fan->mode == FAN_REQUEST_MODE_OVERRIDE &&
-               leaf.direct_property_count == 2;
+               leaf.direct_property_count == 3 && leaf.first_layer_limit > 0.;
     }) == 1);
 
     REQUIRE(prepared.print.printing_plan() != nullptr);

@@ -20,9 +20,14 @@ must belong to the same layer and object. Editors may therefore resolve the
 source layer through any region. Region-less service work stays outside this
 first-layer flow pass.
 
-First-layer speed percentages use the original role or per-flow autospeed base,
+The default speed provider publishes `DefaultSpeedLimits` on the first-layer
+leaves it resolves. Percentages use the original role or per-flow autospeed base,
 before the first-layer minimum and physical print/filament caps. A zero
 `first_layer_infill_speed` (absolute or percent) falls back to `first_layer_speed`.
+Late editors read the absolute ceiling instead of applying a percentage to an
+already capped speed. No metadata is invented for an explicit upstream override.
+Equal final speeds with different ceilings remain distinct regional fragments;
+stationary deposits choose one speed/ceiling pair without duplicating a command.
 
 An explicit zero (including `0%`) selects autospeed for external perimeters,
 gap fill, thin walls, top solid infill, internal bridges, ordinary infill and

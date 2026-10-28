@@ -45,6 +45,7 @@ and hoist acceleration without depending on this strategy.
 #include "libslic3r/Api/plugin/cpp/GuiRuleHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/DefaultSpeedLimits.hpp"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultSpeedPlugin {
 // Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
@@ -661,7 +662,13 @@ struct SpeedPartitionKey
 };
 
 using AutospeedPartitions = std::map<AutospeedPartitionKey, RegionalProcessPartition>;
-using SpeedPartitions = std::map<SpeedPartitionKey, RegionalProcessPartition>;
+struct SpeedResult { float speed; double first_layer_limit; };
+struct SpeedPartition {
+    // Geometry values are exact float-encoded result indices, not speeds.
+    RegionalProcessPartition geometry;
+    std::vector<SpeedResult> results;
+};
+using SpeedPartitions = std::map<SpeedPartitionKey, SpeedPartition>;
 
 // Resolve mm/s from borrowed regional/object settings. Percentages use their
 // parent role, or the per-flow autospeed base when that parent is zero. Return
@@ -692,7 +699,7 @@ float resolved_speed(const ExtrusionSettingsContext &context,
                      bool full_overhang_speed,
                      double mm3_per_mm,
                      bool has_volumetric_flow,
-                     double autospeed_target);
+                     double autospeed_target, double *first_layer_limit = nullptr);
 
 // Resolve travel speed independently from printable-role and volumetric rules.
 float resolved_travel_speed(const ExtrusionSettingsContext &context);
@@ -731,7 +738,8 @@ void collect_speed_partitions(MutableExtrusionEntity entity,
                               SpeedPartitions &speed_partitions,
                               const plugin_run_context *run_ctx);
 
-// Assign missing speed recursively while preserving inherited overrides.
+// Assign missing speeds and publish resolved ceilings without changing inherited
+// overrides. Deposits select one regional value; ordinary paths may split.
 void assign_speed_tree(MutableExtrusionEntity entity,
                        const EffectiveTreeState &parent_state,
                        const ExtrusionSettingsContext &context,
@@ -739,6 +747,7 @@ void assign_speed_tree(MutableExtrusionEntity entity,
                        const RegionalSourceKey &source,
                        double autospeed_target,
                        const SpeedPartitions &speed_partitions,
+                       const PluginPropertyKey<DefaultSpeedLimits> &limits_key,
                        EPropertySpeedFieldEditor &editor,
                        const plugin_run_context *run_ctx);
 
@@ -760,6 +769,7 @@ void edit_extrusion(const Print &print,
                     uint32_t group_idx,
                     double target,
                     const SpeedPartitions &speed_partitions,
+                    const PluginPropertyKey<DefaultSpeedLimits> &limits_key,
                     const plugin_run_context *run_ctx);
 
 class DefaultSpeed : public PluginBase
@@ -786,6 +796,7 @@ private:
 
     mutable AutospeedTargets m_autospeed_targets;
     mutable SpeedPartitions m_speed_partitions;
+    PluginPropertyKey<DefaultSpeedLimits> m_limits_key;
     mutable bool m_setup_valid = false;
 };
 
@@ -952,7 +963,7 @@ float resolved_speed(const ExtrusionSettingsContext &context,
                      bool full_overhang_speed,
                      double mm3_per_mm,
                      bool has_volumetric_flow,
-                     double autospeed_target_value)
+                     double autospeed_target_value, double *first_layer_limit)
 {
     double speed = role_speed(context, role, full_overhang_speed, 0.0);
 
@@ -975,6 +986,8 @@ float resolved_speed(const ExtrusionSettingsContext &context,
     if (speed <= 0.0 || !std::isfinite(speed))
         throw std::runtime_error("Unable to resolve a positive finite extrusion speed.");
 
+    if (first_layer_limit != nullptr)
+        *first_layer_limit = first_layer_ceiling(context, role, speed);
     if (!RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_MILL))
         speed = finalize_speed(context, role, mm3_per_mm, has_volumetric_flow, speed);
     if (speed <= 0.0 || !std::isfinite(speed))
@@ -1253,20 +1266,30 @@ void collect_speed_partitions(MutableExtrusionEntity entity,
         return;
 
     // Resolve every regional tuple with the same flow and autospeed inputs as
-    // the future leaf. Equal final floats are united by the common projector.
-    RegionalProcessPartition partition = project_regional_process_values(
+    // the future leaf. Only equal (speed, first-layer ceiling) tuples unite.
+    SpeedPartition partition;
+    std::map<std::pair<float,double>,uint32_t> result_ids;
+    partition.geometry = project_regional_process_values(
         storage, regional_settings,
-        [&context, role, &state, mm3_per_mm, has_volumetric_flow,
+        [&context, role, &state, mm3_per_mm, has_volumetric_flow, &partition, &result_ids,
          autospeed_target_value](const Config &region_config) {
             ExtrusionSettingsContext regional_context = context;
             regional_context.region_config = region_config;
-            return resolved_speed(
+            double limit = 0.;
+            const float speed = resolved_speed(
                 regional_context, role, state.full_overhang_speed, mm3_per_mm,
-                has_volumetric_flow, autospeed_target_value);
+                has_volumetric_flow, autospeed_target_value, &limit);
+            // Partition by BOTH values: equal final speeds can hide different
+            // percentage ceilings after a physical cap or first-layer minimum.
+            const auto inserted = result_ids.emplace(std::make_pair(speed, limit), uint32_t(partition.results.size()));
+            if (inserted.second)
+                partition.results.push_back({speed, limit});
+            if (inserted.first->second >= (1u << 24))
+                throw std::runtime_error("Too many regional speed tuples.");
+            return float(inserted.first->second);
         });
     throw_if_cancelled(run_ctx);
-    if (partition.requires_split())
-        speed_partitions.emplace(key, std::move(partition));
+    speed_partitions.emplace(key, std::move(partition));
 }
 
 void assign_speed_tree(MutableExtrusionEntity entity,
@@ -1276,6 +1299,7 @@ void assign_speed_tree(MutableExtrusionEntity entity,
                        const RegionalSourceKey &source,
                        double autospeed_target_value,
                        const SpeedPartitions &speed_partitions,
+                       const PluginPropertyKey<DefaultSpeedLimits> &limits_key,
                        EPropertySpeedFieldEditor &editor,
                        const plugin_run_context *run_ctx)
 {
@@ -1288,7 +1312,7 @@ void assign_speed_tree(MutableExtrusionEntity entity,
             throw_if_cancelled(run_ctx);
             assign_speed_tree(entity.child_mutable(child_idx), state, context,
                               group_idx, source, autospeed_target_value,
-                              speed_partitions, editor, run_ctx);
+                               speed_partitions, limits_key, editor, run_ctx);
         }
         return;
     }
@@ -1323,14 +1347,33 @@ void assign_speed_tree(MutableExtrusionEntity entity,
         // The common splitter applies the already-final values to only the
         // regional fragments touched by this leaf.
         throw_if_cancelled(run_ctx);
-        apply_regional_process_partition(entity, partition_it->second, editor);
+        const SpeedPartition &partition = partition_it->second;
+        const auto assign = [&](MutableExtrusionEntity leaf, float index) {
+            const SpeedResult &result = partition.results.at(size_t(index));
+            editor.set_value(leaf, result.speed);
+            if (context.first_layer)
+                leaf.get_or_add(limits_key) = DefaultSpeedLimits{result.first_layer_limit,1};
+        };
+        if (!partition.geometry.requires_split()) {
+            assign(entity, partition.geometry.uniform_value);
+        } else if (entity.is_deposit()) {
+            assign(entity, deposit_value(entity.readonly(), partition.geometry));
+        } else {
+            std::vector<ExPolygonCollection> areas;
+            for (const auto &area : partition.geometry.areas) areas.push_back(area.readonly());
+            for (const auto &fragment : entity.split_leaf_by_areas(areas))
+                assign(fragment.entity, partition.geometry.values.at(fragment.area_index));
+        }
         return;
     }
 
     throw_if_cancelled(run_ctx);
+    double limit = 0.;
     editor.set_value(entity, resolved_speed(
         context, role, state.full_overhang_speed, mm3_per_mm,
-        has_volumetric_flow, autospeed_target_value));
+        has_volumetric_flow, autospeed_target_value, &limit));
+    if (context.first_layer)
+        entity.get_or_add(limits_key) = DefaultSpeedLimits{limit, 1};
 }
 
 double autospeed_target(const AutospeedTargets &targets,
@@ -1371,6 +1414,7 @@ void edit_extrusion(const Print &print,
                     uint32_t group_idx,
                     double target,
                     const SpeedPartitions &speed_partitions,
+                    const PluginPropertyKey<DefaultSpeedLimits> &limits_key,
                     const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
@@ -1391,7 +1435,7 @@ void edit_extrusion(const Print &print,
     MutableExtrusionEntity root = extrusion.mutable_root();
     EPropertySpeedFieldEditor editor(EPropertySpeedField::Speed);
     assign_speed_tree(root, EffectiveTreeState{}, context, group_idx, source, target,
-                      speed_partitions, editor, run_ctx);
+                      speed_partitions, limits_key, editor, run_ctx);
     throw_if_cancelled(run_ctx);
     editor.hoist(root);
 }
@@ -1402,7 +1446,7 @@ DefaultSpeed &DefaultSpeed::instance(orchestrator_handle *orch)
     return singleton;
 }
 
-DefaultSpeed::DefaultSpeed(orchestrator_handle *orch) : PluginBase(orch) {}
+DefaultSpeed::DefaultSpeed(orchestrator_handle *orch) : PluginBase(orch), m_limits_key(default_speed_limits_key(orch)) {}
 
 const char *DefaultSpeed::id_impl() const noexcept
 {
@@ -1521,7 +1565,7 @@ void DefaultSpeed::run_impl(const plugin_run_context *run_ctx) const
         for (uint32_t extrusion_idx = 0; extrusion_idx < tool_group.extrusion_count(); ++extrusion_idx) {
             throw_if_cancelled(run_ctx);
             edit_extrusion(print, plan, tool_group, tool_group.extrusion(extrusion_idx),
-                           ctx->group_idx, target, m_speed_partitions, run_ctx);
+                           ctx->group_idx, target, m_speed_partitions, m_limits_key, run_ctx);
             progress().increment();
         }
     }
