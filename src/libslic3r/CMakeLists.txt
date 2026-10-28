@@ -489,6 +489,8 @@ set(SLIC3R_SOURCES
 	Plugins/Slicing/VaseMultiIslandConnector.hpp
 	Plugins/ElephantFootCompensation.cpp
 	Plugins/ElephantFootCompensation.hpp
+	Plugins/HoleSizeCompensation.cpp
+	Plugins/HoleSizeCompensation.hpp
 	Plugins/XYSizeCompensation.cpp
 	Plugins/XYSizeCompensation.hpp
 	Plugins/XYSizeCompensationHelpers.cpp

@@ -29,9 +29,6 @@ private:
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
     const char *progress_message_format_impl() const noexcept override;
-    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
-    int32_t defined_config_keys(const char **keys) const noexcept override;
-    void inilialize_impl(storage_handle *) const override;
     void setup_run_impl(const plugin_run_context *run_ctx) const override;
     void run_impl(const plugin_run_context *run_ctx) const override;
 };

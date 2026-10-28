@@ -285,7 +285,7 @@ std::string read_text(const std::string &path)
 
 } // namespace
 
-TEST_CASE("Slice volume retains only the pending hole compensation profile key",
+TEST_CASE("Slice volume defines no dimensional settings",
           "[plugins][slice-volume][config]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -293,28 +293,10 @@ TEST_CASE("Slice volume retains only the pending hole compensation profile key",
 
     Plugin *plugin = orchestrator.get_plugin("slice_volume");
     REQUIRE(plugin != nullptr);
+    // Hole compensation moved to slicing.hole_size_compensation, XY
+    // compensation to slicing.xy_size_compensation.
+    CHECK(plugin->get_defined_config_keys().empty());
 
-    std::vector<std::string> defined_keys;
-    for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys())
-        defined_keys.push_back(key.key);
-    CHECK(defined_keys.size() == 1);
-    for (const char *expected : { "hole_size_compensation" })
-        CHECK(std::find(defined_keys.begin(), defined_keys.end(), expected) != defined_keys.end());
-
-    for (const char *key : { "hole_size_compensation" }) {
-        const ConfigOptionDef *def = PrintConfigDef::instance().get(key);
-        REQUIRE(def != nullptr);
-        CHECK(def->type == coFloat);
-        CHECK(def->container_type == ConfigOptionContainerType::Object);
-        CHECK(def->option_preset_type == RAW_PRESET_TYPE_FFF_PRINT);
-        CHECK(def->invalidates_step == STEP_SLICING);
-        CHECK(def->sidetext == "mm");
-        CHECK(def->default_value->serialize() == "0");
-        CHECK(PrintObjectConfig::defaults().option(key) != nullptr);
-        CHECK(PrintConfig::defaults().option(key) == nullptr);
-    }
-
-    // SliceVolume owns no GUI rule for the retained profile key.
     for (const Orchestrator::PluginGuiRule &rule : orchestrator.gui_rules().rules())
         CHECK(rule.owner != "slice_volume");
 }

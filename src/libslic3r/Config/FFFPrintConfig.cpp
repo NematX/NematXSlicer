@@ -7457,17 +7457,8 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comExpert |comPrusa;
     def->set_default_value(new ConfigOptionInt(0));
 
-    def = definition.add("hole_size_threshold", coFloat, ptFFF);
-    def->label = L("Threshold");
-    def->full_label = L("XY holes threshold");
-    def->category = OptionCategory::slicing;
-    def->invalidates_step = STEP_SLICING;
-    def->tooltip = L("Maximum area for the hole where the hole_size_compensation will apply fully."
-            " After that, it will decrease down to 0 for four times this area."
-            " Set to 0 to let the hole_size_compensation apply fully for all detected holes");
-    def->sidetext = L("mm²");
-    def->mode = comExpert | comSuSi;
-    def->set_default_value(new ConfigOptionFloat(100));
+    // hole_size_compensation and hole_size_threshold are defined by the
+    // regional hole compensation plugin.
 
     def = definition.add("z_offset", coFloat, ptFFF);
     def->label = L("Z offset");

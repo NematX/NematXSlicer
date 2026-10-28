@@ -60,18 +60,6 @@ namespace {
 const char *k_slice_volume_id = "slice_volume";
 const char *k_no_dependencies[] = {nullptr};
 
-const raw_used_config_key k_used_config_keys[] = {
-    { "hole_size_compensation", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
-};
-
-const char *const k_defined_config_keys[] = {
-    "hole_size_compensation"
-};
-
-// Register the option definitions owned by this plugin; it runs once from
-// inilialize_impl().
-void initialize_slice_volume_settings(orchestrator_handle *orchestrator);
-
 // Raw mesh slicing result for one ModelVolume. The slicer returns simple
 // polygon loops per layer; region assignment and boolean clipping are handled
 // later because they depend on layer ranges and volume relationships.
@@ -620,38 +608,6 @@ void write_region_slices(const run_ctx_slicing &ctx,
     }
 }
 
-void initialize_slice_volume_settings(orchestrator_handle *orchestrator)
-{
-    /*
-    Option definitions owned by this module. Each entry fixes the option type,
-    override scope, default and GUI metadata; defined keys are published in the
-    print presets, so profiles read and write them by name like any built-in
-    setting. Called once from inilialize_impl().
-    */
-    raw_config_option_def def = raw_config_option_def_init();
-    // Compatibility definition retained until the separate hole plugin
-    // takes ownership. SliceVolume no longer applies dimensional offsets.
-    def.opt_key = "hole_size_compensation";
-    def.type = RAW_CO_FLOAT;
-    def.container_type = RAW_CONTAINER_TYPE_OBJECT;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_SLICING;
-    def.category = RAW_OPTION_CATEGORY_SLICING;
-    def.label = "XY compensation";
-    def.full_label = "XY holes compensation";
-    def.tooltip = "The convex holes will be grown / shrunk in the XY plane by the configured value"
-        " (negative = inwards = remove area, positive = outwards = add area, should be negative as the holes are always a bit smaller irl)."
-        " This might be useful for fine-tuning hole sizes."
-        "\nThis setting behaves the same as 'Inner XY size compensation' but only for convex shapes. It's added to 'Inner XY size compensation', it does not replace it. ";
-    def.sidetext = "mm";
-    def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.default_serialized_value = "0";
-    orchestrator_create_option_def(orchestrator, &def);
-
-
-}
-
 } // namespace
 
 SliceVolume &SliceVolume::instance(orchestrator_handle *orch)
@@ -693,26 +649,6 @@ int32_t SliceVolume::priority_impl() const noexcept
 const char *SliceVolume::progress_message_format_impl() const noexcept
 {
     return "Slicing volumes: %u / %u layers";
-}
-
-int32_t SliceVolume::used_config_keys(raw_used_config_key *keys) const noexcept
-{
-    if (keys != nullptr)
-        std::copy(std::begin(k_used_config_keys), std::end(k_used_config_keys), keys);
-    return int32_t(std::size(k_used_config_keys));
-}
-
-int32_t SliceVolume::defined_config_keys(const char **keys) const noexcept
-{
-    if (keys != nullptr)
-        for (size_t idx = 0; idx < std::size(k_defined_config_keys); ++idx)
-            keys[idx] = k_defined_config_keys[idx];
-    return int32_t(std::size(k_defined_config_keys));
-}
-
-void SliceVolume::inilialize_impl(storage_handle *) const
-{
-    initialize_slice_volume_settings(m_orchestrator);
 }
 
 void SliceVolume::setup_run_impl(const plugin_run_context *run_ctx) const

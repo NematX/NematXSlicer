@@ -18,6 +18,15 @@ candidates; any unclaimed remainder is assigned by contact with the regional
 masks. Significant remainders generate a warning rather than disappearing.
 Different regional deltas can leave small notches or steps at their boundary.
 
+`slicing.hole_size_compensation` runs first, at priority -1100. It changes only
+convex holes of the merged material. Negative `hole_size_compensation` enlarges
+them; positive values shrink them. `hole_size_threshold` gives the full distance
+up to its area and fades to zero at four times that area; zero disables the
+threshold. Inner XY offsets then add to this result. Regions move only their
+own part of a shared wall; the first region wins where growth claims overlap.
+Islands inside a hole remain untouched. XY first-layer no-collapse protection
+does not account for the preceding hole compensation.
+
 The geometry helpers operate on caller-owned SDK storage, without host headers.
 Clipper 2.1 adds variable inward offsets with one distance per ring vertex.
 Earlier Clipper 2.x packages remain compatible. Volume 2.0 and its

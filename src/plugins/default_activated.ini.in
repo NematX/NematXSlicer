@@ -9,6 +9,7 @@
 standard_layer_height_generator = 1
 gui_rules.core = 1
 slice_volume = 1
+slicing.hole_size_compensation = 1
 slicing.xy_size_compensation = 1
 polyholes = 1
 overhang_slope_fill = 1

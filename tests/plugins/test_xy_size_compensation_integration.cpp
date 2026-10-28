@@ -115,7 +115,7 @@ TEST_CASE("XY declared settings pass a linear STL slicing and export matrix",
     DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
     baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
         {"xy_size_compensation", "0.1"}, {"xy_inner_size_compensation", "0.05"},
-        {"first_layer_size_compensation", "-0.05"},
+        {"first_layer_size_compensation", "-0.05"}, {"hole_size_compensation", "-0.05"},
         {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
         {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
     const std::string ordering_key = Steps::plugin_exclusive_group_option_key(
@@ -149,7 +149,9 @@ TEST_CASE("XY declared settings pass a linear STL slicing and export matrix",
     add("extrusion_spacing", {"0", "100%"});
     add("filament_max_overlap", {"50%", "100%"});
     add("raft_layers", {"0", "2"});
-    const std::vector<std::string> ids{"slicing.xy_size_compensation"};
+    add("hole_size_compensation", {"-0.1", "0", "0.1"});
+    add("hole_size_threshold", {"0", "8", "100"});
+    const std::vector<std::string> ids{"slicing.xy_size_compensation", "slicing.hole_size_compensation"};
     const std::vector<E2E::Case> cases = E2E::linear_cases(host, ids, baseline, domains);
     const TriangleMesh mesh = E2E::stl_fixture(true);
     for (const E2E::Case &test : cases) {

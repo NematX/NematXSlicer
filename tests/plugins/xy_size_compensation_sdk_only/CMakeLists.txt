@@ -9,7 +9,7 @@ set(_sandbox "${CMAKE_CURRENT_BINARY_DIR}/sandbox")
 file(COPY "${_slicer_root}/src/libslic3r/Api/plugin"
      DESTINATION "${_sandbox}/libslic3r/Api")
 set(_plugin_sources)
-foreach(_name XYSizeCompensation XYSizeCompensationHelpers ElephantFootCompensation)
+foreach(_name XYSizeCompensation XYSizeCompensationHelpers ElephantFootCompensation HoleSizeCompensation)
     foreach(_extension cpp hpp)
         configure_file("${_slicer_root}/src/libslic3r/Plugins/${_name}.${_extension}"
                        "${_sandbox}/libslic3r/Plugins/${_name}.${_extension}" COPYONLY)

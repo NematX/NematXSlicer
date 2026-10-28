@@ -151,6 +151,7 @@ test_support_tree_family.cpp
     test_printing_plan.cpp
     test_print_status_queue.cpp
     test_skirt_brim_default_generator.cpp
+    test_hole_size_compensation.cpp
     test_slice_volume.cpp
     test_xy_size_compensation_geometry.cpp
     test_xy_size_compensation_integration.cpp

@@ -280,7 +280,6 @@ PRINT_CONFIG_CLASS_DEFINE_WITH_SCOPE(
     ((ConfigOptionFloatOrPercent,       first_layer_infill_extrusion_spacing))
     ((ConfigOptionFloatOrPercent,       first_layer_speed_over_raft))
     ((ConfigOptionPercent,              first_layer_strong_start))
-    ((ConfigOptionFloat,                hole_size_threshold))
     //((ConfigOptionBool,                 infill_only_where_needed))
     // Force the generation of solid shells between adjacent materials/volumes.
     ((ConfigOptionBool,                 interface_shells))
