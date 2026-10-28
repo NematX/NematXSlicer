@@ -1,5 +1,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 #include "SupportPublication.hpp"
+#include "SupportCounters.hpp"
 
 #include <algorithm>
 #include <map>
@@ -39,6 +40,7 @@ namespace slic3r_api::Support::Common {
 // cancellation), otherwise std::runtime_error.
 void publish(const plugin_run_context *context, const Object &object, const SupportParams &params, GeneratedSupport &support, orchestrator_handle *orchestrator)
 {
+    Counters::add(Counters::totals.publication_calls);
     storage_handle *storage = support.storage;
     const ClipperContext clipper(storage);
     GeneratorLayers sorted = support.top;
@@ -112,6 +114,12 @@ void publish(const plugin_run_context *context, const Object &object, const Supp
             expolygons_copy(layer_region_borrow_mutable_slices(layer_get_region_mutable(layer, 0)), slices.handle());
             layer_recompute_slices_and_islands_from_layer_regions(layer);
             layer_add_regions_to_islands(layer);
+            if (Counters::enabled) {
+                Counters::add(Counters::totals.groups);
+                Counters::add(Counters::totals.slabs, end - begin);
+                Counters::add(Counters::totals.islands, layer_count_island(layer));
+                Counters::maximum(Counters::totals.max_islands_slabs, uint64_t(layer_count_island(layer)) * (end - begin));
+            }
             for (uint32_t island_idx = 0; island_idx < layer_count_island(layer); ++island_idx) {
                 layer_island_handle *island = layer_get_island_mutable(layer, island_idx);
                 const ExPolygon island_slice(layer_island_get_slice(island));
@@ -143,6 +151,7 @@ void publish(const plugin_run_context *context, const Object &object, const Supp
                     const bool base_takes_contact = z_has_base && slab.height == z_min_height;
                     const bool typed_as_base = mergeable_contact &&
                         Internal::merged_into_base(merge_regions, base_takes_contact, z_has_base, slab.bridging);
+                    Counters::add(Counters::totals.intersections);
                     StoredPolygonCollection clipped = clipper_intersection(clipper(slab.polygons), clipper(island_slice)).to_polygon_collection();
                     if (branch) branch_surfaces.append_move_from(clipped);
                     else if (base || typed_as_base) sparse_surfaces.append_move_from(clipped);
@@ -153,20 +162,27 @@ void publish(const plugin_run_context *context, const Object &object, const Supp
                 // One owner per area: the upper surfaces keep every area they share with a lower
                 // one, the branch keeps the areas no interface covers, and the base keeps only the
                 // areas that neither an interface nor a branch covers.
+                Counters::add(Counters::totals.unions);
                 const StoredPolygonCollection top_union = clipper_union(clipper(top_surfaces)).to_polygon_collection();
                 bridge_surfaces = Internal::resolve_overlap(bridge_surfaces, top_union);
                 bottom_surfaces = Internal::resolve_overlap(bottom_surfaces, top_union);
+                Counters::add(Counters::totals.unions);
                 const StoredPolygonCollection lower_union =
                     clipper_union2(clipper(bridge_surfaces), clipper(bottom_surfaces)).to_polygon_collection();
+                Counters::add(Counters::totals.unions);
                 const StoredPolygonCollection covered = clipper_union2(clipper(top_union), clipper(lower_union)).to_polygon_collection();
                 branch_surfaces = Internal::resolve_overlap(branch_surfaces, covered);
                 sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, covered);
                 sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, branch_surfaces);
                 // Surfaces of one extruder, in the native order of their types.
                 std::map<extruder_index_t, std::vector<std::pair<StoredExPolygonCollection, raw_surface_type>>> surfaces;
+                // Borrows role rings, counts a nonempty union and stores its converted result by extruder/type; storage owns geometry and allocation/Clipper failures propagate.
                 const auto add = [&](extruder_index_t extruder, const StoredPolygonCollection &area, raw_surface_type type) {
-                    if (!area.empty())
+                    if (!area.empty()) {
+                        // The explicit union and native_expolygons' normalization each call Clipper.
+                        Counters::add(Counters::totals.unions, 2);
                         surfaces[extruder].emplace_back(native_expolygons(clipper_union(clipper(area))), type);
+                    }
                 };
                 add(interface_extruder, top_surfaces, srf_type().top().solid().support().raw());
                 add(interface_extruder, bridge_surfaces, srf_type().bottom().solid().bridge().support().raw());
@@ -227,6 +243,7 @@ bool Internal::merged_into_base(bool merge, bool base_takes_contact, bool z_has_
 StoredPolygonCollection Internal::resolve_overlap(const StoredPolygonCollection &surfaces, const StoredPolygonCollection &covering)
 {
     if (surfaces.empty() || covering.empty()) return surfaces.readonly().clone(surfaces.storage());
+    Counters::add(Counters::totals.differences);
     return clipper_diff(ClipperOperand(surfaces.storage(), surfaces.readonly()),
                         ClipperOperand(surfaces.storage(), covering.readonly())).to_polygon_collection();
 }

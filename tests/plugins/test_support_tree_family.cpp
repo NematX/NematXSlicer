@@ -7,6 +7,7 @@
 #include "libslic3r/Api/internal/LayerAccess.hpp"
 #include "libslic3r/Steps/StepGenerateSupport.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/BranchIslandClass.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
@@ -3270,6 +3271,45 @@ double perf_ms(const std::chrono::steady_clock::time_point &from, const std::chr
     return std::chrono::duration<double, std::milli>(to - from).count();
 }
 } // namespace
+
+// Runs only the plugin support and toolpath steps after the slicing prefix, using the benchmark's model loading and optional
+// SLIC3R_PERF_MODELS / SLIC3R_PERF_STYLES filters. Each joined run resets process counters and prints every named total;
+// the print owns its support and temporaries, loading/generation failures propagate, and only support existence is asserted.
+TEST_CASE("Support work counters on comparison models", "[.][support-counters]")
+{
+    if (!Common::Counters::enabled) {
+        WARN("Support counters are disabled: SLIC3R_SUPPORT_COUNTERS=1 must be set before the process starts");
+        return;
+    }
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::vector<std::string> model_filter = perf_list("SLIC3R_PERF_MODELS"), style_filter = perf_list("SLIC3R_PERF_STYLES");
+    std::vector<PerfModel> models;
+    if (perf_selected(model_filter, "frog_legs"))
+        models.push_back({"frog_legs", perf_obj("frog_legs.obj")});
+    if (perf_selected(model_filter, "comparison2"))
+        models.push_back({"comparison2", Slic3r::Test::SupportTree::comparison_mesh(2)});
+    if (perf_selected(model_filter, "A_upsidedown"))
+        models.push_back({"A_upsidedown", perf_obj("A_upsidedown.obj")});
+    for (const PerfModel &entry : models) {
+        for (const char *style : {"grid", "snug", "tree", "organic"}) {
+            if (!perf_selected(style_filter, style)) continue;
+            Print print;
+            Model model;
+            Test::init_print({entry.mesh}, print, model, SG::config(style, false, 3, false));
+            SG::prefix(print);
+            Common::Counters::reset();
+            SG::family(print);
+            SG::toolpaths(print);
+            const std::vector<std::pair<const char *, uint64_t>> counts = Common::Counters::snapshot();
+            std::printf("SUPPORT-COUNTERS model=%s style=%s", entry.name.c_str(), style);
+            for (const std::pair<const char *, uint64_t> &count : counts)
+                std::printf(" %s=%llu", count.first, static_cast<unsigned long long>(count.second));
+            std::printf("\n");
+            std::fflush(stdout);
+            CHECK_FALSE(print.object(0).auxiliary_layers().empty());
+        }
+    }
+}
 
 // Hidden benchmark of the support generation on large objects, the plugin (the STEP_SUPPORT family run and its print Z host pass, then
 // the STEP_SUPPORT_TOOLPATH run) against the native legacy generator, in the same binary. Models: frog_legs.obj and A_upsidedown.obj of

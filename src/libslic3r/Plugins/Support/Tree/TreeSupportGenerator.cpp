@@ -16,6 +16,7 @@
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportInterfaces.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "TreeBranchMesh.hpp"
@@ -282,10 +283,15 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
 // never lie within the tolerance of each other. Each bound moves by at most the tolerance (about 0.5 um), so a slab changes its
 // height by about 1 um at most; the minimum and maximum heights hold within that, an accepted limit. Slabs whose two bounds end
 // on one Z collapse, and merge_collapsed_slabs() moves their polygons to a neighbor.
+// Borrows sorted object Z values, updates caller-owned slab bounds and counts changed bounds in each pass; collapsed polygons move to neighboring slabs, and allocation failures propagate.
 void align_slab_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedSupport &out)
 {
     for (Common::GeneratorLayer &slab : out.slabs) {
         const coord_t bottom_print_z = aligned_z(object_zs, slab.bottom_print_z());
+        if (Common::Counters::enabled)
+            Common::Counters::add(Common::Counters::totals.tree_bounds_moved,
+                uint64_t(bottom_print_z != slab.bottom_print_z()) + uint64_t(aligned_z(object_zs, slab.print_z) != slab.print_z) +
+                uint64_t(aligned_z(object_zs, slab.bottom_z) != slab.bottom_z));
         slab.print_z = aligned_z(object_zs, slab.print_z);
         slab.bottom_z = aligned_z(object_zs, slab.bottom_z);
         slab.height = slab.print_z - bottom_print_z;
@@ -595,12 +601,14 @@ std::vector<Common::GeneratorLayer *> place_slabs(const LayerList &layers, const
 
 // Each round draws the sections at the slab middles, which are the sections that get printed. An offending pair cuts its upper slab,
 // or else its lower one, and a round that cuts nothing ends the refinement. A pair that no cut can help stays, without assertion.
+// Borrows routed geometry and settings, counts check rounds and adds cuts to caller-owned slabs using scratch sections; generation/cancellation/allocation failures propagate.
 void refine_branch_slabs(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, const TreeSettings &settings,
                          std::vector<Common::GeneratorLayer *> &branch_slabs, storage_handle *scratch,
                          const plugin_run_context *context, Common::GeneratedSupport &out)
 {
     const coord_t grid = planning_grid(settings.z_step);
     for (;;) {
+        Common::Counters::add(Common::Counters::totals.refine_rounds);
         std::vector<coord_t> middles;
         middles.reserve(out.base.size());
         for (const Common::GeneratorLayer *slab : out.base)
@@ -709,6 +717,10 @@ void merge_close_bounds(const std::vector<coord_t> &object_zs, Common::Generated
     for (Common::GeneratorLayer *slab : listed) {
         const coord_t print_z = target(slab->print_z);
         const coord_t bottom_print_z = target(slab->bottom_print_z());
+        if (Common::Counters::enabled)
+            Common::Counters::add(Common::Counters::totals.tree_bounds_moved,
+                uint64_t(print_z != slab->print_z) + uint64_t(bottom_print_z != slab->bottom_print_z()) +
+                uint64_t(target(slab->bottom_z) != slab->bottom_z));
         slab->bottom_z = target(slab->bottom_z);
         slab->height = print_z - bottom_print_z;
         slab->print_z = print_z;

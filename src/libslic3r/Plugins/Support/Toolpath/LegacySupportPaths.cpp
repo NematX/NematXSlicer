@@ -19,6 +19,7 @@
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 #include "libslic3r/Plugins/Support/Common/ExtrusionLines.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 
@@ -395,6 +396,7 @@ std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const Poi
     return result;
 }
 
+// Recursively splits the borrowed entity against ascending lower-Z footprints, replaces its paths with storage-owned height-scaled fragments and counts changed nonempty fragments; missing flow attributes, geometry/allocation failures propagate.
 void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coord_t z, const std::vector<Internal::Overlap> &overlapping, coord_t resolution)
 {
     if (!entity.readonly().has_polyline()) {
@@ -417,6 +419,8 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
         fragments[index].lines = Common::valid_polylines(storage, split.first, resolution);
         fragments.back().lines = std::move(split.second);
         const float height = float(unscaled(z - overlapping[index].z));
+        if (Common::Counters::enabled && !fragments[index].lines.empty() && height != attributes.c_extrusion_property_attributes::height)
+            Common::Counters::add(Common::Counters::totals.height_changes);
         fragments[index].attributes.height(height);
         fragments[index].attributes.mm3_per_mm(fragments[index].attributes.mm3_per_mm() * (height / attributes.c_extrusion_property_attributes::height));
     }
@@ -464,6 +468,7 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
     extrusion_move_from(entity.mutable_handle(), result.mutable_handle());
 }
 
+// Collects marked layer footprints strictly between bottom and z into an owned sorted list backed by borrowed storage; bottom contacts include sparse/bottom roles, each collected pair is counted, and geometry/allocation failures propagate.
 std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_handle *object, coord_t z, coord_t bottom, bool bottom_contact)
 {
     const ClipperContext clipper(storage);
@@ -484,7 +489,10 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_ha
                 }
             }
         }
-        if (!polygons.empty()) result.push_back(Internal::Overlap{other_z, as_polygons(clipper_union(clipper(polygons)))});
+        if (!polygons.empty()) {
+            Common::Counters::add(Common::Counters::totals.overlap_pairs);
+            result.push_back(Internal::Overlap{other_z, as_polygons(clipper_union(clipper(polygons)))});
+        }
     }
     std::sort(result.begin(), result.end(), [](const Internal::Overlap &a, const Internal::Overlap &b) { return a.z < b.z; });
     return result;
@@ -498,6 +506,7 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_ha
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
                    const std::vector<coord_t> &support_z, SurfaceRole role, layer_handle *layer)
 {
+    Common::Counters::add(Common::Counters::totals.modulation_layers);
     const Common::SupportParams &geometry = params.geometry;
     const coord_t z = layer_get_print_z(layer), height = layer_get_height(layer), bottom = z - height;
     const bool bridging = !geometry.soluble;

@@ -499,6 +499,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/PatternService.hpp
 	Plugins/Support/Common/PerimeterFill.cpp
 	Plugins/Support/Common/PerimeterFill.hpp
+	Plugins/Support/Common/SupportCounters.cpp
+	Plugins/Support/Common/SupportCounters.hpp
 	Plugins/Support/Common/SupportDemand.cpp
 	Plugins/Support/Common/SupportDemand.hpp
 	Plugins/Support/Common/SupportInterfaces.cpp

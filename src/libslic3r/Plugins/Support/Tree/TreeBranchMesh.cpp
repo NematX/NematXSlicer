@@ -13,6 +13,7 @@
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/VolumeViews.hpp"
 #include "TreeGeometry.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 
 /* Implementation of the organic branch meshes (see TreeBranchMesh.hpp).
 
@@ -114,11 +115,13 @@ void slice_tree(uint32_t tree_idx, storage_handle *scratch, TreeSlicing *slicing
     }
 }
 
+// Builds a mesh for a valid borrowed node path and counts construction/slices; temporary sliced polygons use scratch storage, kept sections use slicing.out_storage which must outlive them, and slicing/cancellation/allocation failures propagate.
 void slice_path(storage_handle *scratch, const TreeSlicing &slicing, const RoutedTree &tree, const std::vector<size_t> &path,
                 std::vector<TreeSection> &tree_sections)
 {
     BranchMesh mesh;
     const std::pair<float, float> span = extrude_branch(tree, path, path_ring_normals(tree, path), mesh);
+    slic3r_api::Support::Common::Counters::add(slic3r_api::Support::Common::Counters::totals.meshes);
     // The slice Z values inside the Z span of the mesh, with the index of the slice Z they come from.
     std::vector<std::pair<float, size_t>> cuts;
     for (size_t idx = 0; idx < slicing.slice_z.size(); ++idx) {
@@ -143,6 +146,8 @@ void slice_path(storage_handle *scratch, const TreeSlicing &slicing, const Route
     // The identity transform is required (a zeroed matrix would crush the mesh). mode_below is inert here (slicing_mode_normal_below_layer
     // stays 0); closing_radius, extra_offset and the resolutions are left 0 and have no effect on this path: the host slices with the
     // base MeshSlicingParams and gives the raw loops, as the legacy slice_mesh() did.
+    slic3r_api::Support::Common::Counters::add(slic3r_api::Support::Common::Counters::totals.slicing_calls);
+    slic3r_api::Support::Common::Counters::add(slic3r_api::Support::Common::Counters::totals.z_slices, zs.size());
     std::vector<slic3r_api::StoredPolygonCollection> cut_sections = stored_mesh.slice_to_polygons(scratch, params, zs, slicing.context);
     for (size_t cut = 0; cut < cuts.size(); ++cut) {
         if (cut_sections[cut].empty())

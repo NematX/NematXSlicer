@@ -2,6 +2,7 @@
 
 #include "support_grid_test_helpers.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 
 /* Publication of hand-typed slabs, without a support family. Each test fills a GeneratedSupport with slabs of chosen
    types, publishes it through Common::publish and reads the auxiliary layers back. A branch slab is published as a
@@ -126,6 +127,37 @@ private:
     const char *m_id;
 };
 } // namespace
+
+// Publishes two separated role islands plus an empty slab with counters enabled between joined runs; verifies every
+// per-island union, including empty-input unions and normalization, while scoped restoration preserves enablement on failure.
+TEST_CASE("Publication counts role normalization unions", "[plugins][support-publication][support-counters-check]")
+{
+    namespace Counters = slic3r_api::Support::Common::Counters;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    slice_cube(print);
+    PluginStorage storage;
+    GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    add_slab(support, support.interfaces, LayerType::TopInterface, rect_polygon(2., 2., 6., 6.));
+    add_slab(support, support.base, LayerType::Base, rect_polygon(12., 2., 16., 6.));
+    add_slab(support, support.base, LayerType::Branch, rect_polygon(2., 2., 6., 6.));
+    support.slabs.back().polygons.clear();
+    struct RestoreCounters {
+        bool previous;
+        // Restores the borrowed process enable state after joined publication, including assertion/exception exits, without failure.
+        ~RestoreCounters() { Counters::set_enabled_for_tests(previous); }
+    } restore{Counters::set_enabled_for_tests(true)};
+    Counters::reset();
+    publish_support(print, support);
+    REQUIRE(print.object(0).auxiliary_layers().size() == 1);
+    CHECK(Counters::totals.groups.load(std::memory_order_relaxed) == 1);
+    CHECK(Counters::totals.islands.load(std::memory_order_relaxed) == 2);
+    CHECK(Counters::totals.slabs.load(std::memory_order_relaxed) == 3);
+    CHECK(Counters::totals.intersections.load(std::memory_order_relaxed) == 6);
+    CHECK(Counters::totals.differences.load(std::memory_order_relaxed) == 0);
+    // Each island makes three role-combination unions and two calls for its one nonempty role: union plus normalization.
+    CHECK(Counters::totals.unions.load(std::memory_order_relaxed) == 2 * (3 + 2));
+}
 
 // A slab without polygons publishes nothing: no auxiliary layer, island or extrusion is created for it.
 TEST_CASE("Empty slab publishes nothing and prints nothing", "[plugins][support-publication]")

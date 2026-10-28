@@ -25,6 +25,8 @@
 #include "libslic3r/PrintObject.hpp"
 #include "InfillPatternService.hpp"
 #include "SupportPatternCallbacks.hpp"
+// Host moved-bound diagnostics use the support counters module; it lives on the support side because support plugins use only the plugin API.
+#include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 #include "StepRunner.hpp"
 
 /* STEP_SUPPORT calls every active support family once per object. A family may
@@ -179,6 +181,7 @@ namespace {
 // movable ones the tops and bottoms of the auxiliary layers. A layer that collapses is an error (the families publish layers far
 // thicker than 1 um; the limit is the minimum height of the Layer constructor). The container is then sorted again (sort_support_layers()). The
 // interface ids of LayerSupportProperty and Layer::id are creation identifiers, not renumbered.
+// Borrows objects, counts each moved auxiliary-layer bound and updates their owned layers; allocation and collapsed-layer errors propagate.
 void align_support_z(const std::vector<PrintObject *> &objects)
 {
     std::vector<coord_t> fixed, movable;
@@ -203,6 +206,9 @@ void align_support_z(const std::vector<PrintObject *> &objects)
                 throw std::runtime_error("A support layer of the object '" + object->model_object()->name + "' at z = " +
                     std::to_string(unscaled(layer->scaled_print_z())) + " mm would be only " + std::to_string(unscaled(print_z - bottom)) +
                     " mm thick after its print z were kept 0.5 um apart from the others.");
+            if (slic3r_api::Support::Common::Counters::enabled)
+                slic3r_api::Support::Common::Counters::add(slic3r_api::Support::Common::Counters::totals.host_bounds_moved,
+                    uint64_t(print_z != layer->scaled_print_z()) + uint64_t(bottom != layer->scaled_bottom_z()));
             ApiInternal::LayerAccess::set_z(*layer, print_z, print_z - bottom);
         }
         Detail::sort_support_layers(object->mutable_auxiliary_layers());
