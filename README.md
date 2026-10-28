@@ -9,6 +9,7 @@ A collection of plugins for NematXSlicer.
 - [nematx_infill_aroundholes](plugins/infill_aroundholes/README.md)
 - [nematx_infill_gridvarspeed](plugins/infill_gridvarspeed/README.md)
 - [nematx-firmware](plugins/nematx_firmware/README.md): NematX G-code firmware and reader
+- [nematx_hole_size_curve](plugins/hole_size_curve/README.md): hole compensation by diameter
 
 ## Build targets
 
