@@ -164,6 +164,14 @@ GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const Suppo
     return contact;
 }
 
+// Copies effective nonnegative contact-inclusive counts into borrowed spacing; the disabled bottom option follows the top, and this writes only the two counters of SlabSpacing.
+void set_interface_counts(SlabSpacing &spacing, const SupportParams &params)
+{
+    spacing.interface_layers = std::max(0, params.top_interface_layers);
+    spacing.bottom_interface_layers = params.bottom_interface_count_enabled ?
+        std::max(0, params.bottom_interface_layers) : spacing.interface_layers;
+}
+
 // Divide the owned contact intervals into printable slabs, bottom first. Synchronized slabs follow the object layers; a splitter
 // selects the handed-over layout; otherwise the native grid arithmetic spaces each interval in one pass.
 // Borrow spacing, layers and splitter; append slabs owned by out and set contact thicknesses. Invalid spacing asserts; allocation failures propagate.

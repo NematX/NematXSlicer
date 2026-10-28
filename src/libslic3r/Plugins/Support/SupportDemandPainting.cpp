@@ -12,6 +12,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 
 /*
 SupportDemandPainting
@@ -52,6 +53,13 @@ namespace {
 const char *k_support_demand_painting_id = "support.demand.painting";
 const char *k_dependencies[] = { nullptr };
 
+// Clips layer painting to an island and adds it through the common demand publisher.
+void add_painting_to_island(const plugin_run_context *run_ctx, const LayerIsland &island, const ClipperContext &clipper,
+                            const std::vector<StoredPolygonCollection> &painting, uint32_t layer_idx);
+// Removes layer blocker painting through the common enlarged subtraction.
+void remove_painting_from_island(const plugin_run_context *run_ctx, const LayerIsland &island, const ClipperContext &clipper,
+                                 const std::vector<StoredPolygonCollection> &painting, uint32_t layer_idx);
+
 bool object_has_support_painting(const Object &object)
 {
     for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++volume_idx)
@@ -60,28 +68,12 @@ bool object_has_support_painting(const Object &object)
     return false;
 }
 
-uint32_t island_work_count(const Object &object)
-{
-    uint32_t count = 0;
-    for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx)
-        count += object.layer(layer_idx).island_count();
-    return count;
-}
-
 bool has_layer_painting(const std::vector<StoredPolygonCollection> &by_layer, uint32_t layer_idx)
 {
     return layer_idx < by_layer.size() && !by_layer[layer_idx].empty();
 }
 
-void set_demand_from_operand(const plugin_run_context *run_ctx,
-                             const LayerIsland &island,
-                             ClipperOperand &&operand)
-{
-    StoredExPolygonCollection polygons = operand.to_expolygon_collection();
-    polygons.ensure_valid();
-    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), polygons.mutable_handle());
-}
-
+// Intersects borrowed painting for a valid layer with its island, then publishes its union with demand through Common; missing painting leaves demand unchanged and cancellation/geometry/allocation failures propagate.
 void add_painting_to_island(const plugin_run_context *run_ctx,
                             const LayerIsland &island,
                             const ClipperContext &clipper,
@@ -92,16 +84,10 @@ void add_painting_to_island(const plugin_run_context *run_ctx,
         return;
 
     ClipperOperand enforced = clipper_intersection(clipper(island.slice()), clipper(painting[layer_idx]));
-    if (enforced.empty())
-        return;
-
-    const ExPolygonCollection existing = island.support_demand();
-    if (!existing.empty()) {
-        enforced = clipper_union2(clipper(existing), enforced);
-    }
-    set_demand_from_operand(run_ctx, island, std::move(enforced));
+    Common::add_to_demand(run_ctx, island, clipper, std::move(enforced));
 }
 
+// Passes a borrowed layer's blocker painting to Common's enlarged subtraction; missing painting leaves demand unchanged, context must allow demand mutation, and cancellation/geometry/allocation failures propagate.
 void remove_painting_from_island(const plugin_run_context *run_ctx,
                                  const LayerIsland &island,
                                  const ClipperContext &clipper,
@@ -111,13 +97,7 @@ void remove_painting_from_island(const plugin_run_context *run_ctx,
     if (!has_layer_painting(painting, layer_idx))
         return;
 
-    const ExPolygonCollection existing = island.support_demand();
-    if (existing.empty())
-        return;
-
-    ClipperOperand blocked = clipper_offset(clipper(painting[layer_idx]), 1000. * double(SCALED_EPSILON));
-    ClipperOperand remaining = clipper_diff(clipper(existing), blocked);
-    set_demand_from_operand(run_ctx, island, std::move(remaining));
+    Common::remove_from_demand(run_ctx, island, clipper, clipper(painting[layer_idx]));
 }
 
 } // namespace
@@ -164,6 +144,7 @@ const char *SupportDemandPainting::progress_message_format_impl() const noexcept
     return "Support demand painting: %u / %u islands";
 }
 
+// Borrows a demand payload and reserves progress for all object islands when painting exists; missing payload does nothing and cancellation propagates.
 void SupportDemandPainting::setup_run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
@@ -173,7 +154,7 @@ void SupportDemandPainting::setup_run_impl(const plugin_run_context *run_ctx) co
 
     const Object object(ctx->object);
     if (object_has_support_painting(object))
-        progress().add_max(island_work_count(object));
+        progress().add_max(Common::island_work_count(object));
 }
 
 void SupportDemandPainting::run_impl(const plugin_run_context *run_ctx) const

@@ -22,12 +22,14 @@ void clear(Print &print)
 
 void prepare(Print &) {}
 
-bool validate_pre(const Print &, std::string &)
+// Accepts borrowed input without modifying the optional error string; always returns true without failure.
+bool validate_pre(const Print &, std::string *)
 {
     return true;
 }
 
-bool validate_post(const Print &, std::string &)
+// Accepts borrowed output without modifying the optional error string; always returns true without failure.
+bool validate_post(const Print &, std::string *)
 {
     return true;
 }

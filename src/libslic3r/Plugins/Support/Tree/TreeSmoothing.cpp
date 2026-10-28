@@ -12,7 +12,6 @@
 #include <vector>
 
 #include "libslic3r/Api/plugin/c/slic3r_utils.h"
-#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/DeferredCallbackException.hpp"
 #include "libslic3r/Api/plugin/cpp/LineDistancer.hpp"
 
@@ -55,8 +54,7 @@ constexpr size_t max_iterations = 100;
 // measured against the outline, so the circle of a free sphere can reach up to this distance into the keep-out (the legacy stop
 // has the same gap); the final pass of smooth_organic_branches() pushes such a sphere out.
 constexpr double settled_displacement = 0.01;
-// Number of spheres moved by one job of the relaxation. The relaxation time was measured flat from 1 to 64 spheres per job (5000
-// spheres, 16 threads) and only degrades above that, when there are fewer jobs than threads; 16 is a middle value, with no gain claimed.
+// Number of spheres moved by one job of the relaxation.
 constexpr size_t spheres_per_job = 16;
 
 // The outline of one layer as lines in scaled units, and an index over the same lines that finds the lines near a point.
@@ -84,8 +82,6 @@ struct Sphere {
     bool locked = false;
 };
 
-// The print Z of every layer of the object, in millimeters.
-std::vector<double> layer_print_zs(const slic3r_api::Object &object);
 // One sphere per node of every tree, the nodes of a tree following the nodes of the tree before it.
 std::vector<Sphere> make_spheres(const std::vector<RoutedTree> &trees, const std::vector<double> &print_z);
 // The Z span and the layers of every sphere, see the file header.
@@ -119,17 +115,17 @@ void write_back(const std::vector<Sphere> &spheres, std::vector<RoutedTree> &tre
 // Relaxes the free nodes of the trees and returns the number of iterations that ran. The spheres are built from the trees,
 // relaxed, pushed out of the outline once more, and only then written back. The context is checked after every iteration and after
 // the final pass, so a cancellation leaves the trees unchanged.
-size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
+// Borrows the run's millimeter layer tops and keep-out outlines to relax nodes, returning iteration count; all node layers must index both tables, and cancellation/allocation failures leave tree positions unchanged.
+size_t smooth_organic_branches(const std::vector<double> &print_z, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
                                std::vector<RoutedTree> &trees, const plugin_run_context *context)
 {
-    const std::vector<double> print_z = layer_print_zs(object);
     std::vector<Sphere> spheres = make_spheres(trees, print_z);
     set_layer_spans(spheres, print_z);
     const std::vector<LayerCollision> collisions = layer_collisions(keep_out);
     const size_t iterations = relax(spheres, print_z, collisions, context);
     // Final pass: the last pull of the relaxation was not measured against the outline, so a free sphere can still overlap it. Push it
-    // out once. TODO: a push is capped (max_nudge_collision_avoidance) and can leave the circle in another part of the outline (a
-    // concave corner, another layer of its window); such a sphere is left as it is. The printed geometry is still trimmed by the
+    // out once. A capped push (max_nudge_collision_avoidance) may leave the sphere inside another part of the outline (a
+    // concave corner, another layer of its window); it is then left there. The printed geometry is still trimmed by the
     // object outline grown by the XY distance (trim_slab).
     for (Sphere &sphere : spheres)
         if (! sphere.locked)
@@ -154,15 +150,6 @@ Vec2d push_sphere_out_of_outline(size_t layer, double radius, const Vec2d &posit
 }
 
 namespace {
-std::vector<double> layer_print_zs(const slic3r_api::Object &object)
-{
-    std::vector<double> print_z;
-    print_z.reserve(object.layer_count());
-    for (uint32_t id = 0; id < object.layer_count(); ++id)
-        print_z.push_back(unscaled(object.layer(id).print_z()));
-    return print_z;
-}
-
 std::vector<Sphere> make_spheres(const std::vector<RoutedTree> &trees, const std::vector<double> &print_z)
 {
     std::vector<Sphere> spheres;
@@ -282,10 +269,6 @@ bool push_out_of_outline(Sphere &sphere, const std::vector<double> &print_z, con
         if (r2 <= 0. || collision.lines.empty())
             continue;
         // The lines are in scaled units: the query point and the limit are scaled, the distance and the hit point are unscaled.
-        // Measured (5000 spheres, median of 5): this search is slower than the native AABB tree only in multithreaded Debug, where the
-        // checked iterators of MSVC take a global lock (12.4 s against 2.5 s on 16 threads); in Release it is faster than native on 1 and
-        // 16 threads (92.6 against 134 ms, 18.7 against 24.8 ms). A reusable candidate buffer, a nearest-only LineDistancer search and a
-        // fast rejection were measured and rejected: none of them helped in Release or in single-thread Debug enough to justify API code.
         const std::optional<LineHit> hit = nearest_on_lines(collision.index, collision.lines, sphere.position * UNSCALING_FACTOR, r2 * sqr(UNSCALING_FACTOR));
         if (hit) {
             const double depth = std::sqrt(r2) - unscaled(std::sqrt(hit->squared_distance));

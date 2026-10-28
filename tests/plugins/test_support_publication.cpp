@@ -56,10 +56,10 @@ void slice_cube(Print &print)
     SG::prefix(print);
 }
 
-// Publish the slabs on the first object through Common::publish, as a support family does.
+// Derives one parameter set and publishes borrowed slabs on the sliced print's first object; the object owns published layers, and publication/allocation failures propagate.
 void publish_support(Print &print, GeneratedSupport &support)
 {
-    slic3r_api::Support::Common::publish(nullptr, SG::object_view(print.object(0)), support,
+    slic3r_api::Support::Common::publish(nullptr, SG::object_view(print.object(0)), SG::params(print, print.object(0)), support,
                                          reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
 }
 

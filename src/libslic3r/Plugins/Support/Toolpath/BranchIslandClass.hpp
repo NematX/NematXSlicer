@@ -29,7 +29,7 @@
    centreline_max_widening) and within the nominal support XY budget; narrower parts are trimmed; an island left with no line prints a deposit (BranchSheathPaths.cpp). The widest island part
    the line covers is 1.5 w.
 
-   Every limit is a named constant below. They are first limits that may be tuned: no other file repeats their values.
+   These limits are tunable named constants below; no other copy of their values exists.
 
        const BranchIslandMeasure measure = classify_island(storage, island, flow.width);
        if (measure.kind == BranchIslandClass::Centreline) {
@@ -47,17 +47,17 @@ namespace slic3r_api::Support::Toolpath {
 // Radius r of the opening that finds the thin part of an island, as a multiple of the support extrusion width w. It decides
 // what counts as thin: every part narrower than 2 r = 1.5 w, where the two sides of a sheath loop would overlap each other.
 // It stays above 0.5, the half width at which the sheath is offset from the outline: a sheath-mode island then always has a
-// sheath (see BranchSheathPaths.cpp). A first limit that may be tuned.
+// sheath (see BranchSheathPaths.cpp).
 constexpr double thin_radius_over_width = 0.75;
 
 // Share of the island area that the thin part must reach for the island to be thin as a whole. It decides that an island
 // gets one method: below it the sheath prints and its small thin leftovers stay unfilled, from it on the medial axis or the
-// blob prints for the whole island. A first limit that may be tuned.
+// blob prints for the whole island.
 constexpr double thin_fraction_limit = 0.5;
 
 // Compactness Q = 4 pi A / P^2 under which a thin island is elongated. It decides between the centreline and the blob: the
 // value is the Q of a rectangle twice as long as wide (2 pi / 9), so a thin island longer than 2:1 gets a centreline and a
-// more compact one a blob. A first limit that may be tuned.
+// more compact one a blob.
 constexpr double compactness_limit = 2. * PI / 9.;
 
 // Largest relative widening of a centreline part. A part whose extrusion width l is below nozzle diameter b may be widened
@@ -67,15 +67,13 @@ constexpr double compactness_limit = 2. * PI / 9.;
 // simplify_polygon_frontier() applies remove_collinear_angle(1 degree). A point in a resulting contour sliver, such as an
 // endpoint extended onto the contour, is skipped by growth and keeps its then-current width (at least the trim threshold before
 // volume scaling) instead of reaching b. ensure_not_overextrude() scales widths only when the line volume exceeds a bound based
-// on island area times layer height plus contour and hole gap terms. A width reduction of roughly 5% and an overall widening of
-// roughly 15% at the limit are examples for one island, not fixed factors. A narrower part is trimmed, and an island narrower
+// on island area times layer height plus contour and hole gap terms. A narrower part is trimmed, and an island narrower
 // everywhere has no line and prints a stationary deposit instead (BranchSheathPaths.cpp). The nozzle sets b; the extrusion width w sets the case.
-// A first limit that may be tuned.
 constexpr double centreline_max_widening = 0.1;
 
 // Widest island part that the centreline covers, as a multiple of w: the diameter 2 r of the opening. It bounds the width of
 // the island (a spacing), so the extrusion width of the line may reach 1.5 w + h (1 - pi / 4) sr. Wider parts of a thin island
-// (under half of its area) get no line, or a line capped to this width. A first limit that may be tuned.
+// (under half of its area) get no line, or a line capped to this width.
 constexpr double centreline_max_width_over_width = 2. * thin_radius_over_width;
 
 // The method that prints a fused island.

@@ -19,8 +19,12 @@
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Layer.hpp"
+#include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 #include "libslic3r/Plugins/Support/Common/PerimeterFill.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
@@ -237,6 +241,8 @@ std::vector<ParamsCase> params_cases()
     cases.push_back({"grid", false, 3, false, {}, {"max_layer_height"}});
     cases.push_back({"grid", false, 3, false, {}, {"support_material_bottom_interface_layers"}});
     cases.push_back({"grid", false, 3, false, {{"support_material_bottom_interface_layers", "-1"}}});
+    cases.push_back({"grid", false, 0, false, {{"support_material_bottom_interface_layers", "2"}}});
+    cases.push_back({"grid", false, 3, false, {{"support_material_bottom_interface_layers", "0"}}});
     cases.push_back({"grid", false, 3, false, {{"nozzle_diameter", "0.6,0.4"}, {"first_layer_height", "75%"}, {"perimeter_extruder", "1"},
                                                {"infill_extruder", "2"}, {"solid_infill_extruder", "2"},
                                                {"support_material_extruder", "0"}, {"support_material_interface_extruder", "0"}}});
@@ -285,6 +291,7 @@ InfillPattern native_auto_interface(bool soluble, double interface_density)
     return soluble ? ipConcentric : interface_density > 0.95 ? ipRectilinear : ipSupportBase;
 }
 
+// Recursively compares borrowed trees and their attributes without mutation, requiring matching shape and zero no_seam on published paths; structural failures stop the check and value differences fail assertions at node.
 void check_same_tree(const ExtrusionEntity &actual, const ExtrusionEntity &expected,
                      const std::string &node)
 {
@@ -301,6 +308,7 @@ void check_same_tree(const ExtrusionEntity &actual, const ExtrusionEntity &expec
     REQUIRE((actual_attributes == nullptr) == (expected_attributes == nullptr));
     if (expected_attributes != nullptr) {
         CHECK(actual_attributes->role == expected_attributes->role);
+        CHECK(actual_attributes->no_seam == 0);
         CHECK(actual_attributes->mm3_per_mm == expected_attributes->mm3_per_mm);
         // Width and height go through the scaled integers of c_flow: allow one scaled unit,
         // unscaled(1) = SCALING_FACTOR mm.
@@ -569,6 +577,84 @@ size_t native_small_intersection_rings(const ExPolygon &surface, double spacing)
 }
 } // namespace
 
+// The explicit angle guard must retain the demand/grid difference at the threshold's 90-degree boundary.
+TEST_CASE("Support overhang margins retain guarded and unguarded angle rules", "[plugins][support-common]")
+{
+    const coord_t height = scale_to_layer_coord(0.2);
+    const coord_t width = scale_i(0.4);
+    for (const bool guard : {false, true}) {
+        CHECK(Common::overhang_margin(0, height, width, guard) == width / 2);
+        CHECK(Common::overhang_margin(45, height, width, guard) ==
+              scale_to_layer_coord(unscaled(height) / std::tan(PI * 46. / 180.)));
+    }
+    CHECK(Common::overhang_margin(89, height, width, true) == width / 2);
+    CHECK(Common::overhang_margin(89, height, width, false) ==
+          scale_to_layer_coord(unscaled(height) / std::tan(PI * 90. / 180.)));
+    CHECK(Common::overhang_margin(90, height, width, true) == width / 2);
+    // At 91 degrees the raw allowance is negative: calling the unguarded helper would assert in scale_to_layer_coord().
+    CHECK(unscaled(height) / std::tan(PI * 91. / 180.) < 0.);
+}
+
+// Shared attributes and stored deposits must allow seam placement, with the physical flow values retained.
+TEST_CASE("Support path attributes and deposits initialize no_seam to zero", "[plugins][support-common]")
+{
+    c_flow flow{};
+    flow.width = scale_i(0.4);
+    flow.height = scale_i(0.2);
+    flow.mm3_per_mm = 0.08;
+    const slic3r_api::EPropertyAttributes attributes = Common::path_attributes(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, flow);
+    CHECK(attributes.no_seam == 0);
+    CHECK(attributes.mm3_per_mm() == flow.mm3_per_mm);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const ExPolygon area(Polygon::new_scale({Vec2d(0, 0), Vec2d(1, 0), Vec2d(1, 1), Vec2d(0, 1)}));
+    slic3r_api::StoredExtrusionEntity output(handle);
+    Common::append_deposit(handle, output.mutable_view(), slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&area)), flow);
+    REQUIRE(output.readonly().child_count() == 1);
+    const slic3r_api::EPropertyAttributes *stored = output.readonly().child(0).get(slic3r_api::EPropertyAttributes::key);
+    REQUIRE(stored != nullptr);
+    CHECK(stored->no_seam == 0);
+    CHECK(stored->mm3_per_mm() == flow.mm3_per_mm);
+}
+
+// Ordered copies must preserve ring starts and orientation, including appends after existing destination rings.
+TEST_CASE("Support ring copies preserve contour then holes and area order", "[plugins][support-common]")
+{
+    const Polygon contour = Polygon::new_scale({Vec2d(0, 0), Vec2d(100, 0), Vec2d(100, 100), Vec2d(0, 100)});
+    const Polygon hole = Polygon::new_scale({Vec2d(10, 10), Vec2d(10, 20), Vec2d(20, 20), Vec2d(20, 10)});
+    const Polygon second_hole = Polygon::new_scale({Vec2d(30, 30), Vec2d(30, 40), Vec2d(40, 40), Vec2d(40, 30)});
+    const Polygon other = Polygon::new_scale({Vec2d(200, 0), Vec2d(300, 0), Vec2d(300, 100), Vec2d(200, 100)});
+    const ExPolygons areas{ExPolygon(contour, Polygons{hole, second_hole}), ExPolygon(other)};
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const slic3r_api::ExPolygonCollection view(reinterpret_cast<const expolygon_collection_handle *>(&areas));
+    const slic3r_api::StoredPolygonCollection rings = Common::to_polygons(handle, view);
+    CHECK(SG::native(rings) == Polygons{contour, hole, second_hole, other});
+    slic3r_api::StoredPolygonCollection appended(handle);
+    appended.push_back(slic3r_api::Polygon(reinterpret_cast<const polygon_handle *>(&other)));
+    Common::append_polygons(appended, view.at(0));
+    Common::append_polygons(appended, view);
+    CHECK(SG::native(appended) == Polygons{other, contour, hole, second_hole, contour, hole, second_hole, other});
+    const ExPolygons empty;
+    const slic3r_api::ExPolygonCollection empty_view(reinterpret_cast<const expolygon_collection_handle *>(&empty));
+    CHECK(Common::to_polygons(handle, empty_view).empty());
+    // A near-closing last vertex survives host flattening but native individual insertion removes it on move.
+    ExPolygons tiny(1);
+    tiny.front().contour.points = {Point(0, 0), Point(1000, 0), Point(1000, 1000), Point(0, 10)};
+    const slic3r_api::ExPolygon tiny_view(reinterpret_cast<const expolygon_handle *>(&tiny.front()));
+    slic3r_api::StoredPolygonCollection expected(handle);
+    expected.push_back(tiny_view.contour());
+    for (const slic3r_api::Polygon ring : tiny_view.holes())
+        expected.push_back(ring);
+    CHECK(SG::native(Common::expolygon_rings(handle, tiny_view)) == SG::native(expected));
+    const std::vector<slic3r_api::Polygon> tiny_rings = Common::polygon_rings(tiny_view);
+    REQUIRE(tiny_rings.size() == 1);
+    CHECK(tiny_rings.front().size() == 4);
+    CHECK(expected.at(0).size() == 3);
+    const slic3r_api::ExPolygonCollection tiny_areas(reinterpret_cast<const expolygon_collection_handle *>(&tiny));
+    CHECK(Common::to_polygons(handle, tiny_areas).at(0).size() == 4);
+}
+
 TEST_CASE("Support params equal the native grid support parameters", "[plugins][support-common]")
 {
     for (const ParamsCase &test : params_cases()) {
@@ -618,6 +704,41 @@ TEST_CASE("Support params equal the native grid support parameters", "[plugins][
 
         // Path settings, as the legacy support code (SupportParameters.cpp) derives them.
         const PrintObjectConfig &object_config = object.config();
+        const int32_t top_count = object_config.support_material_interface_layers.value;
+        const int32_t bottom_count = object_config.support_material_bottom_interface_layers.value;
+        const bool bottom_count_enabled = object_config.support_material_bottom_interface_layers.is_enabled();
+        CHECK(params.top_interface_layers == top_count);
+        CHECK(params.bottom_interface_layers == bottom_count);
+        CHECK(params.bottom_interface_count_enabled == bottom_count_enabled);
+        CHECK(params.top_interfaces_enabled == (top_count > 0));
+        CHECK(params.bottom_interfaces_enabled == ((bottom_count_enabled ? bottom_count : top_count) > 0));
+        CHECK(params.top_published_interfaces_enabled == (top_count != 0));
+        CHECK(params.bottom_published_interfaces_enabled == (top_count != 0 && (!bottom_count_enabled || bottom_count != 0)));
+        CHECK(params.base_tool == object_config.support_material_extruder.value);
+        CHECK(params.interface_tool == object_config.support_material_interface_extruder.value);
+        CHECK(params.base_angle_degrees == object_config.support_material_angle.value);
+        Common::SlabSpacing spacing;
+        spacing.base_step = 123;
+        spacing.interface_step = 456;
+        Common::set_interface_counts(spacing, params);
+        CHECK(spacing.interface_layers == std::max(0, top_count));
+        CHECK(spacing.bottom_interface_layers == std::max(0, bottom_count_enabled ? bottom_count : top_count));
+        CHECK(spacing.base_step == 123);
+        CHECK(spacing.interface_step == 456);
+        // An explicit zero enables the option but disables both bottom interface roles and their slab counts.
+        if (std::find(test.overrides.begin(), test.overrides.end(),
+                std::pair<std::string, std::string>{"support_material_bottom_interface_layers", "0"}) != test.overrides.end()) {
+            REQUIRE(bottom_count_enabled);
+            CHECK_FALSE(params.bottom_interfaces_enabled);
+            CHECK_FALSE(params.bottom_published_interfaces_enabled);
+            CHECK(params.bottom_interfaces == 0);
+            CHECK(spacing.bottom_interface_layers == 0);
+        }
+        const std::vector<slic3r_api::Layer> layers = Common::object_layers(SG::object_view(object));
+        REQUIRE(layers.size() == object.layer_count());
+        for (size_t id = 0; id < layers.size(); ++id)
+            CHECK(layers[id].print_z() == object.layer(id).scaled_print_z());
+        CHECK_FALSE(Common::object_has_support_demand(SG::object_view(object)));
         const double native_density = std::min(1., native.base_flow.spacing() /
             (object_config.support_material_spacing.value + native.base_flow.spacing()));
         CHECK(params.base_density == native_density);

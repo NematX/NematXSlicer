@@ -66,6 +66,9 @@ struct SlabSpacing {
     bool synchronize = false;
 };
 
+// Fills the contact-inclusive interface counts from shared parameters, leaving family-specific steps unchanged.
+void set_interface_counts(SlabSpacing &spacing, const SupportParams &params);
+
 // Receives the middle span [from, to] of an interval, with to > from and to - from at least min_height. It must append
 // slabs that tile [from, to] in increasing Z to out.base, and nothing else. The appended slabs belong to out.slabs.
 using MiddleSplitter = std::function<void(coord_t from, coord_t to)>;

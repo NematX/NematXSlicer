@@ -14,6 +14,7 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 
 /*
 SupportDemandModifiers
@@ -56,8 +57,14 @@ namespace {
 const char *k_support_demand_modifiers_id = "support.demand.modifiers";
 const char *k_dependencies[] = { nullptr };
 
-// Validates the operand polygons and moves them into the island's support demand after checking cancellation.
-void set_demand_from_operand(const LayerIsland &island, ClipperOperand &&operand, const plugin_run_context *run_ctx);
+// Clips layer enforcer slices to an island and adds them through the common demand publisher.
+void add_enforcers_to_island(const LayerIsland &island, const ClipperContext &clipper,
+                             const std::vector<StoredExPolygonCollection> &enforcers, uint32_t layer_idx,
+                             const plugin_run_context *run_ctx);
+// Removes layer blocker slices through the common enlarged subtraction.
+void remove_blockers_from_island(const LayerIsland &island, const ClipperContext &clipper,
+                                 const std::vector<StoredExPolygonCollection> &blockers, uint32_t layer_idx,
+                                 const plugin_run_context *run_ctx);
 
 bool is_support_modifier_type(raw_volume_type type)
 {
@@ -70,14 +77,6 @@ bool object_has_support_modifier_volume(const Object &object)
         if (is_support_modifier_type(object.volume(volume_idx).type()))
             return true;
     return false;
-}
-
-uint32_t island_work_count(const Object &object)
-{
-    uint32_t count = 0;
-    for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx)
-        count += object.layer(layer_idx).island_count();
-    return count;
 }
 
 struct SlicedSupportModifier
@@ -136,61 +135,32 @@ ClipperOperand clip_layer_slices(const std::vector<StoredExPolygonCollection> &b
     return clipper(by_layer[layer_idx]);
 }
 
-// Converts the operand to valid polygons and moves them into the borrowed island's demand; the context must provide mutable demand for that island, and cancellation after conversion and validation throws before the island's demand is replaced.
-void set_demand_from_operand(const LayerIsland &island,
-                             ClipperOperand &&operand,
-                             const plugin_run_context *run_ctx)
-{
-    StoredExPolygonCollection polygons = operand.to_expolygon_collection();
-    polygons.ensure_valid();
-    throw_if_cancelled(run_ctx);
-    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), polygons.mutable_handle());
-}
-
+// Intersects borrowed modifier slices with an island, then publishes their union with demand through Common; absent layer slices do nothing, context must allow demand mutation, and cancellation/geometry/allocation failures propagate.
 void add_enforcers_to_island(const LayerIsland &island,
                              const ClipperContext &clipper,
                              const std::vector<StoredExPolygonCollection> &enforcers,
                              uint32_t layer_idx,
                              const plugin_run_context *run_ctx)
 {
-    throw_if_cancelled(run_ctx);
     if (!has_layer_slices(enforcers, layer_idx))
         return;
 
     ClipperOperand enforced =
         clipper_intersection(clipper(island.slice()), clip_layer_slices(enforcers, layer_idx, clipper));
-    throw_if_cancelled(run_ctx);
-    if (enforced.empty())
-        return;
-
-    const ExPolygonCollection existing = island.support_demand();
-    if (!existing.empty()) {
-        enforced = clipper_union2(clipper(existing), enforced);
-        throw_if_cancelled(run_ctx);
-    }
-    set_demand_from_operand(island, std::move(enforced), run_ctx);
+    Common::add_to_demand(run_ctx, island, clipper, std::move(enforced));
 }
 
+// Passes borrowed modifier blockers to Common's enlarged subtraction; absent layer slices do nothing, context must allow demand mutation, and cancellation/geometry/allocation failures propagate.
 void remove_blockers_from_island(const LayerIsland &island,
                                  const ClipperContext &clipper,
                                  const std::vector<StoredExPolygonCollection> &blockers,
                                  uint32_t layer_idx,
                                  const plugin_run_context *run_ctx)
 {
-    throw_if_cancelled(run_ctx);
     if (!has_layer_slices(blockers, layer_idx))
         return;
 
-    const ExPolygonCollection existing = island.support_demand();
-    if (existing.empty())
-        return;
-
-    ClipperOperand blocked =
-        clipper_offset(clip_layer_slices(blockers, layer_idx, clipper), 1000. * double(SCALED_EPSILON));
-    throw_if_cancelled(run_ctx);
-    ClipperOperand remaining = clipper_diff(clipper(existing), blocked);
-    throw_if_cancelled(run_ctx);
-    set_demand_from_operand(island, std::move(remaining), run_ctx);
+    Common::remove_from_demand(run_ctx, island, clipper, clip_layer_slices(blockers, layer_idx, clipper));
 }
 
 } // namespace
@@ -237,6 +207,7 @@ const char *SupportDemandModifiers::progress_message_format_impl() const noexcep
     return "Support demand modifiers: %u / %u islands";
 }
 
+// Borrows a demand payload and reserves progress for all object islands when modifier volumes exist; missing payload does nothing and cancellation propagates.
 void SupportDemandModifiers::setup_run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
@@ -246,7 +217,7 @@ void SupportDemandModifiers::setup_run_impl(const plugin_run_context *run_ctx) c
 
     const Object object(ctx->object);
     if (object_has_support_modifier_volume(object))
-        progress().add_max(island_work_count(object));
+        progress().add_max(Common::island_work_count(object));
 }
 
 void SupportDemandModifiers::run_impl(const plugin_run_context *run_ctx) const

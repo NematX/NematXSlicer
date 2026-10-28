@@ -46,15 +46,20 @@ namespace {
 // Tolerance of the geometric checks, in millimeters.
 constexpr double tolerance_mm = 0.01;
 
+// Supplies the native layer-top table to isolated smoothing tests, without routing support.
+std::vector<double> layer_print_z_mm(const PrintObject &object);
+
 // The tree slabs of the first object of a sliced print, generated directly. The storage is declared first so that it
 // outlives the slabs that live in it.
 struct TreeSlabs {
     PluginStorage storage;
     Common::GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    // Borrows a sliced print and fills owned slabs using one parameter construction; organic selects the branch style and generation failures propagate.
     TreeSlabs(Print &print, bool organic)
     {
         const Slic3r::Test::SupportTree::SupportPatternContext patterns(print, reinterpret_cast<storage_handle *>(&storage));
-        TF::generate_tree_support(patterns.context(), SG::print_view(print), SG::object_view(print.object(0)), organic, support);
+        const Common::SupportParams params = SG::params(print, print.object(0));
+        TF::generate_tree_support(patterns.context(), SG::print_view(print), SG::object_view(print.object(0)), params, organic, support);
     }
 };
 
@@ -441,7 +446,7 @@ TEST_CASE("Tree contacts without interface layers publish the branches under the
     SG::prefix(print);
     const PrintObject &object = print.object(0);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
     REQUIRE_FALSE(routed.support.top.empty());
     double overhang_mm2 = 0.;
     for (size_t id = 1; id < object.layer_count(); ++id)
@@ -506,11 +511,11 @@ TEST_CASE("Tips below a thin contact are published at its Z", "[plugins][support
     SG::prefix(print);
     PrintObject &object = print.object(0);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
     REQUIRE_FALSE(routed.support.top.empty());
     const coord_t contact_z = routed.support.top.front()->print_z;
     REQUIRE(unscaled(contact_z) == Approx(4.05));
-    Common::publish(nullptr, SG::object_view(object), routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    Common::publish(nullptr, SG::object_view(object), routed.params, routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     Polygons published;
     for (const Layer &layer : object.auxiliary_layers())
         if (layer.scaled_print_z() == contact_z)
@@ -658,8 +663,8 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
     // The routing varies from run to run, so the tips and the slabs come from the same routing: the trees are routed once, their
     // slabs are published, and the support toolpaths run on those layers.
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.trees, true, routed.support, routed.resting);
-    Common::publish(nullptr, SG::object_view(print.object(0)), routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.params, routed.settings, routed.trees, true, routed.support, routed.resting);
+    Common::publish(nullptr, SG::object_view(print.object(0)), routed.params, routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     SG::toolpaths(print);
     const double process_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     const PrintObject &object = print.object(0);
@@ -1000,7 +1005,8 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     place_print({ { block, Vec3d(100., 100., 0.), "" } }, config, print, model);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
+    const Common::SupportParams params = SG::params(print, object);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, params);
     const auto layer_at = [&object](double z_mm) {
         size_t id = 0;
         while (id + 1 < object.layer_count() && std::abs(object.layer(id).unscaled_print_z() - z_mm) > 0.01)
@@ -1028,7 +1034,7 @@ TEST_CASE("Tree roots over free air extend down to the layer they rest on", "[pl
     PluginStorage storage;
     Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
     std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support, std::vector<TF::RestingPart>{});
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), params, settings, trees, false, support, std::vector<TF::RestingPart>{});
     const coord_t block_z = object.layer(block_top).scaled_print_z(), root_z = object.layer(root_layer).scaled_print_z();
     REQUIRE_FALSE(support.bottom.empty());
     for (const Common::GeneratorLayer *contact : support.bottom) {
@@ -1057,7 +1063,8 @@ TEST_CASE("Tree roots in thin layers go down five root radii of real Z", "[plugi
     SG::init_print_with_profile(print, model, std::move(column), std::vector<coordf_t>{0., 0.2, 2.9, 0.2, 3., 0.05, 6., 0.05, 6.1, 0.2, 7., 0.2}, config);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
+    const Common::SupportParams params = SG::params(print, object);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, params);
     // The root layer is the last thin layer under z = 5.5 mm, 2.5 mm of thin layers above the start of the band.
     size_t root_layer = 0;
     for (size_t id = 0; id < object.layer_count(); ++id)
@@ -1095,7 +1102,7 @@ TEST_CASE("Tree roots in thin layers go down five root radii of real Z", "[plugi
     tip_circle.translate(to_point(upper.position));
     assign_native(contact.polygons, Polygons{ tip_circle });
     std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support, std::vector<TF::RestingPart>{});
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), params, settings, trees, false, support, std::vector<TF::RestingPart>{});
     REQUIRE_FALSE(support.base.empty());
     // The lowest slab that draws the stem: its middle lies within the stem, so the slab below it has its middle under the stem
     // bottom. The slabs are at most the maximum slab height thick.
@@ -1237,7 +1244,7 @@ TEST_CASE("Slab bounds that snap onto one object top keep their slabs printable"
     }
     CHECK(lower.print_z == top);
     CHECK(upper.bottom_z == top);
-    Common::publish(nullptr, SG::object_view(object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    Common::publish(nullptr, SG::object_view(object), SG::params(print, object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     const SurfaceType sparse_type = stModSupport | stPosInternal | stDensSparse;
     bool thin_published = false;
     for (const Layer &layer : object.auxiliary_layers()) {
@@ -1285,7 +1292,7 @@ TEST_CASE("Support bounds of one object closer than the merge tolerance share on
     assign_native(floor_contact.polygons, Polygons{ floor_circle });
     assign_native(overhang_contact.polygons, Polygons{ overhang_circle });
     TF::align_slab_bounds(object_zs, support);
-    Common::publish(nullptr, SG::object_view(object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    Common::publish(nullptr, SG::object_view(object), SG::params(print, object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     SG::toolpaths(print);
     REQUIRE(object.auxiliary_layers().size() >= 2);
     std::vector<coord_t> zs = object_zs;
@@ -1338,7 +1345,8 @@ TEST_CASE("Tree floors keep the gap and the contact footprint free of branch sur
     place_print({ { block, Vec3d(100., 100., 0.), "" } }, config, print, model);
     SG::prefix(print);
     const PrintObject &object = print.object(0);
-    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
+    const Common::SupportParams params = SG::params(print, object);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, params);
     const ExPolygons block_slices = object.layer(layer_at_height(object, 4.)).lslices();
     const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
         [](const ExPolygon &a, const ExPolygon &b) { return a.area() < b.area(); });
@@ -1358,7 +1366,7 @@ TEST_CASE("Tree floors keep the gap and the contact footprint free of branch sur
     PluginStorage storage;
     Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
     std::vector<TF::RoutedTree> trees{ TF::RoutedTree{ { upper, root } } };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, false, support, std::vector<TF::RestingPart>{});
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), params, settings, trees, false, support, std::vector<TF::RestingPart>{});
     REQUIRE_FALSE(support.bottom.empty());
     const Common::GeneratorLayer &floor = *support.bottom.front();
     const Polygons footprint = to_native(floor.polygons);
@@ -1390,7 +1398,8 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
     place_print({ { block, Vec3d(100., 100., 0.), "" } }, SG::config("organic", false, 0), print, model);
     SG::prefix(print);
     PrintObject &object = print.object(0);
-    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, SG::params(print, object));
+    const Common::SupportParams params = SG::params(print, object);
+    const TF::TreeSettings settings = Slic3r::Test::SupportTree::tree_settings(print, object, params);
     const size_t foot_layer = layer_at_height(object, 4.4), tip_layer = layer_at_height(object, 4.6);
     const ExPolygons block_slices = object.layer(layer_at_height(object, 4.)).lslices();
     const ExPolygon &block_slice = *std::max_element(block_slices.begin(), block_slices.end(),
@@ -1424,7 +1433,7 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
     PluginStorage probe_storage;
     Common::GeneratedSupport probe{ reinterpret_cast<storage_handle *>(&probe_storage) };
     std::vector<TF::RoutedTree> probe_trees = make_trees();
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), probe_trees, true, probe, std::vector<TF::RestingPart>{});
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), params, settings, probe_trees, true, probe, std::vector<TF::RestingPart>{});
     REQUIRE(probe.bottom.size() == 1);
     const coord_t floor_top = probe.bottom.front()->print_z, floor_height = probe.bottom.front()->height;
     REQUIRE(unscaled(floor_top) == Approx(4.4));
@@ -1434,8 +1443,8 @@ TEST_CASE("Tip contacts keep out of the footprints of floors that share their pr
         floor_top - floor_height - scale_to_layer_coord(0.1), floor_height + scale_to_layer_coord(0.1));
     support.top = { &other };
     std::vector<TF::RoutedTree> trees = make_trees();
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), trees, true, support, std::vector<TF::RestingPart>{});
-    Common::publish(nullptr, SG::object_view(object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), params, settings, trees, true, support, std::vector<TF::RestingPart>{});
+    Common::publish(nullptr, SG::object_view(object), params, support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     const auto surfaces_of = [](const Layer &layer) {
         ExPolygons surfaces;
         for (const LayerSliceIsland &island : layer.islands())
@@ -1631,6 +1640,16 @@ std::vector<slic3r_api::StoredPolygonCollection> stored_outlines(PluginStorage &
     }
     return stored;
 }
+// Copies native layer tops into an owned millimeter table for borrowed sliced objects; layer order is preserved and allocation failures propagate.
+std::vector<double> layer_print_z_mm(const PrintObject &object)
+{
+    std::vector<double> tops;
+    tops.reserve(object.layer_count());
+    for (size_t id = 0; id < object.layer_count(); ++id)
+        tops.push_back(object.layer(id).unscaled_print_z());
+    return tops;
+}
+
 // A node of a chain in millimeters: its XY position and the object layer it lies on.
 struct ChainPoint {
     double x_mm, y_mm;
@@ -1738,7 +1757,7 @@ TEST_CASE("Organic smoothing moves the nodes of a bent branch and keeps them out
     PluginStorage storage;
     const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
     std::vector<TF::RoutedTree> smoothed = routed.trees;
-    TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, smoothed, nullptr);
+    TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, smoothed, nullptr);
     size_t moved = 0;
     double largest_move_mm = 0.;
     for (size_t tree_id = 0; tree_id < smoothed.size(); ++tree_id) {
@@ -1782,7 +1801,7 @@ TEST_CASE("Organic relaxation smooths a collision-free bent branch until its ben
         REQUIRE(distance_to_region_mm(to_point(node.position), keep_out[node.layer]) > unscaled(node.radius));
     const std::vector<TF::TreeNode> raw = trees.front().nodes;
     const double bend_before = sharpest_bend_deg(trees.front());
-    const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+    const size_t iterations = TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, nullptr);
     const double bend_after = sharpest_bend_deg(trees.front());
     size_t moved = 0;
     for (size_t idx = 0; idx < raw.size(); ++idx)
@@ -1813,7 +1832,7 @@ double straight_branch_drift_mm(const Print &print, const std::vector<size_t> &l
         REQUIRE(below[idx] != TF::no_node);
     }
     const std::vector<TF::TreeNode> raw = trees.front().nodes;
-    TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+    TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, nullptr);
     double drift_mm = 0.;
     for (size_t idx = 0; idx < raw.size(); ++idx)
         drift_mm = std::max(drift_mm, unscaled((to_point(trees.front().nodes[idx].position) - to_point(raw[idx].position)).cast<double>().norm()));
@@ -1875,13 +1894,13 @@ TEST_CASE("Organic relaxation stops once the nodes settle and never runs past it
     // The count is exact: the relaxation is deterministic, so a change of the threshold or of the rule moves it.
     SECTION("a bend that settles stops after its exact count") {
         std::vector<TF::RoutedTree> trees{ bent_branch(object) };
-        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+        const size_t iterations = TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, nullptr);
         CAPTURE(iterations);
         CHECK(iterations == 33);
     }
     SECTION("a node that keeps moving runs to the cap") {
         std::vector<TF::RoutedTree> trees{ stray_node_branch(object) };
-        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+        const size_t iterations = TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, nullptr);
         const double x_mm = unscaled(trees.front().nodes[1].position.x);
         CAPTURE(iterations, x_mm);
         CHECK(iterations == 100);
@@ -1908,7 +1927,7 @@ TEST_CASE("Organic relaxation leaves the trees unchanged when the context is can
     plugin_run_context context = {};
     context.host_context = reinterpret_cast<plugin_host_context *>(&calls);
     context.is_cancelled = [](plugin_host_context *host_context) { return ++*reinterpret_cast<int *>(host_context) >= 2 ? 1 : 0; };
-    REQUIRE_THROWS_AS(TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, &context), slic3r_api::PluginCancelled);
+    REQUIRE_THROWS_AS(TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, &context), slic3r_api::PluginCancelled);
     CHECK(calls == 2);
     for (size_t idx = 0; idx < raw.size(); ++idx)
         CHECK(to_point(trees.front().nodes[idx].position) == to_point(raw[idx].position));
@@ -1931,7 +1950,7 @@ TEST_CASE("Organic smoothing pushes out a node that the last pull left inside th
     const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
     std::vector<TF::RoutedTree> trees{ stray_node_branch(object) };
     const TF::TreeNode &free_node = trees.front().nodes[1];
-    const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+    const size_t iterations = TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, nullptr);
     const double clearance_mm = distance_to_region_mm(to_point(free_node.position), keep_out[free_node.layer]);
     CAPTURE(iterations, unscaled(free_node.position.x), clearance_mm);
     // The cap ended the relaxation, so the last pull was the one that went into the wall.
@@ -1953,7 +1972,7 @@ TEST_CASE("Organic smoothing leaves the trees unchanged when cancelled after its
     const std::vector<slic3r_api::StoredPolygonCollection> stored_keep_out = stored_outlines(storage, keep_out);
     // The relaxation of this branch settles after a known number of iterations, each of them followed by one check.
     std::vector<TF::RoutedTree> reference{ bent_branch(object) };
-    const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, reference, nullptr);
+    const size_t iterations = TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, reference, nullptr);
     REQUIRE(iterations > 1);
     std::vector<TF::RoutedTree> trees{ bent_branch(object) };
     const std::vector<TF::TreeNode> raw = trees.front().nodes;
@@ -1964,7 +1983,7 @@ TEST_CASE("Organic smoothing leaves the trees unchanged when cancelled after its
         Counter &c = *reinterpret_cast<Counter *>(host_context);
         return ++c.calls >= c.cancel_at ? 1 : 0;
     };
-    REQUIRE_THROWS_AS(TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, &context), slic3r_api::PluginCancelled);
+    REQUIRE_THROWS_AS(TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, &context), slic3r_api::PluginCancelled);
     CHECK(counter.calls == iterations + 1);
     for (size_t idx = 0; idx < raw.size(); ++idx)
         CHECK(to_point(trees.front().nodes[idx].position) == to_point(raw[idx].position));
@@ -2377,7 +2396,7 @@ TEST_CASE("Tree slabs keep the bridge footprint out of the bridge thread band", 
     REQUIRE(band.start < object.layer(thin_layer).scaled_bottom_z());
     REQUIRE_FALSE(band.footprint.empty());
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
     // Both contacts of the roof layer survive the merge: one at the bridge height, one at the normal contact distance.
     const coord_t bridge_z = band.start - gap_above, normal_z = object.layer(thin_layer).scaled_bottom_z() - gap_above;
     const Common::GeneratorLayer *bridge_contact = nullptr, *normal_contact = nullptr;
@@ -2455,7 +2474,7 @@ TEST_CASE("Tree floors keep the bridge footprint out of the bridge thread band",
     }
     Routed routed(print);
     routed.trees = { branch };
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
     REQUIRE_FALSE(routed.support.bottom.empty());
     for (const Common::GeneratorLayer *floor : routed.support.bottom)
         REQUIRE(in_thread_band(*floor, band, gap_above));
@@ -2482,7 +2501,7 @@ TEST_CASE("Tree interface slabs keep the bridge footprint out of the bridge thre
     const ThreadBand band = thread_band(print, object, thin_layer);
     REQUIRE_FALSE(band.footprint.empty());
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
     size_t interfaces_in_band = 0;
     for (const Common::GeneratorLayer *slab : routed.support.interfaces)
         interfaces_in_band += in_thread_band(*slab, band, gap_above) && !slab->polygons.empty() ? 1 : 0;
@@ -2600,7 +2619,7 @@ void check_final_slab_clearance(TriangleMesh mesh, const char *style, int interf
     const coord_t snap_tolerance = 4 * SCALED_EPSILON;
     const coord_t thin_start = scale_to_layer_coord(thin_band_start_mm), thin_end = scale_to_layer_coord(thin_band_end_mm);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, std::string(style) == "organic", routed.support, routed.resting);
     const std::vector<std::pair<const char *, const Common::GeneratorLayers *>> roles{
         {"base", &routed.support.base}, {"interfaces", &routed.support.interfaces}, {"top", &routed.support.top}, {"bottom", &routed.support.bottom}};
     constexpr double overlap_tolerance_mm2 = 1e-6;
@@ -2754,7 +2773,7 @@ TEST_CASE("Final tree and organic slabs keep the normal XY distance from the obj
     const coord_t eps = scale_to_layer_coord(EPSILON);
     const coord_t above = gap_above > eps ? gap_above - eps : 0, below = gap_below > eps ? gap_below - eps : 0;
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, std::string(style) == "organic", routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, std::string(style) == "organic", routed.support, routed.resting);
     // The outline of every layer grown by the normal distance, less the tolerance of the drawn checks.
     const std::vector<Polygons> keep_out = keep_out_outlines(object, settings.xy_distance - coord_t(scale_d(tolerance_mm)));
     const std::vector<std::pair<const char *, const Common::GeneratorLayers *>> roles{
@@ -2900,7 +2919,7 @@ struct BrimRun {
         Test::init_print({std::move(mesh)}, print, model, config);
         SG::prefix(print);
         routed = std::make_unique<Routed>(print);
-        TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed->trees, organic, routed->support, routed->resting);
+        TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed->params, routed->settings, routed->trees, organic, routed->support, routed->resting);
     }
 };
 
@@ -3146,7 +3165,7 @@ TEST_CASE("Organic smoothing relaxation benchmark", "[.][smoothing-benchmark]")
             trees.push_back(chain_tree(object, { { x, 0., 20 }, { x, 0., 16 }, { x, 0., 12 }, { x + 4., 0., 8 }, { x + 8., 0., 4 } }));
         }
         const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
-        const size_t iterations = TF::smooth_organic_branches(SG::object_view(object), stored_keep_out, trees, nullptr);
+        const size_t iterations = TF::smooth_organic_branches(layer_print_z_mm(object), stored_keep_out, trees, nullptr);
         times.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count());
         std::printf("SMOOTH-BENCH threads=%zu run=%d spheres=5000 iterations=%zu total_ms=%.1f\n", threads, run, iterations, times.back());
         CHECK(iterations > 0);
@@ -3182,7 +3201,7 @@ TEST_CASE("Tree routing and slab generation benchmark", "[.][tree-routing-benchm
                 const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
                 Routed routed(print);
                 const std::chrono::steady_clock::time_point routed_at = std::chrono::steady_clock::now();
-                TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.trees, organic, routed.support, routed.resting);
+                TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(print.object(0)), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
                 const std::chrono::steady_clock::time_point done = std::chrono::steady_clock::now();
                 route_times.push_back(std::chrono::duration<double, std::milli>(routed_at - start).count());
                 slab_times.push_back(std::chrono::duration<double, std::milli>(done - routed_at).count());
@@ -3348,9 +3367,9 @@ TEST_CASE("Support generation performance benchmark, plugin against legacy", "[.
                     const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
                     Routed routed(print);
                     const std::chrono::steady_clock::time_point routed_at = std::chrono::steady_clock::now();
-                    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, organic, routed.support, routed.resting);
+                    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
                     const std::chrono::steady_clock::time_point slabs_at = std::chrono::steady_clock::now();
-                    Common::publish(nullptr, SG::object_view(object), routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+                    Common::publish(nullptr, SG::object_view(object), routed.params, routed.support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
                     const std::chrono::steady_clock::time_point done = std::chrono::steady_clock::now();
                     routed_stat.add(perf_ms(start, routed_at));
                     slabs_stat.add(perf_ms(routed_at, slabs_at));
@@ -3457,7 +3476,7 @@ TEST_CASE("The islands of the layers of the downward point are ordered from outs
         object_violations += island_order_violation(object.layer(layer_idx).lslices(), earlier, later) ? 1 : 0;
     CHECK(object_violations == 0);
     Routed routed(print);
-    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.trees, true, routed.support, routed.resting);
+    TF::generate_tree_slabs(nullptr, SG::print_view(print), SG::object_view(object), routed.params, routed.settings, routed.trees, true, routed.support, routed.resting);
     Common::GeneratorLayers sorted = routed.support.top;
     for (const Common::GeneratorLayers *list : { &routed.support.bottom, &routed.support.base, &routed.support.interfaces })
         sorted.insert(sorted.end(), list->begin(), list->end());
@@ -3617,7 +3636,7 @@ std::vector<coord_t> close_z_generated(Print &print, size_t object_idx, const st
         slic3r_api::Support::Grid::generate_support(nullptr, SG::print_view(print), SG::object_view(object), SG::params(print, object), support);
     } else {
         const Slic3r::Test::SupportTree::SupportPatternContext patterns(print, reinterpret_cast<storage_handle *>(&storage));
-        TF::generate_tree_support(patterns.context(), SG::print_view(print), SG::object_view(object), style == "organic", support);
+        TF::generate_tree_support(patterns.context(), SG::print_view(print), SG::object_view(object), SG::params(print, object), style == "organic", support);
     }
     std::vector<coord_t> zs;
     for (const auto *list : { &support.top, &support.bottom, &support.base, &support.interfaces })
@@ -4394,7 +4413,7 @@ TEST_CASE("Tree resting part floors stop at the first support", "[plugins][suppo
         Slic3r::Test::SupportTree::Routed routed(fixture.print);
         CHECK(routed.trees.empty());
         REQUIRE(routed.resting.size() == 2);
-        TF::generate_tree_slabs(nullptr, SG::print_view(fixture.print), SG::object_view(fixture.print.object(0)), routed.trees, organic, routed.support, routed.resting);
+        TF::generate_tree_slabs(nullptr, SG::print_view(fixture.print), SG::object_view(fixture.print.object(0)), routed.params, routed.settings, routed.trees, organic, routed.support, routed.resting);
         const Common::GeneratorLayer *shelf = nullptr, *platform = nullptr;
         for (const Common::GeneratorLayer *floor : routed.support.bottom) {
             if (floor->print_z == scale_to_layer_coord(0.8))

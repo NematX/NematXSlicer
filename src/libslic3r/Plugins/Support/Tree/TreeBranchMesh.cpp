@@ -90,8 +90,7 @@ std::vector<slic3r_api::StoredPolygonCollection> slice_branch_meshes(storage_han
                                                                      const std::vector<coord_t> &slice_z, const plugin_run_context *context)
 {
     TreeSlicing slicing{ out_storage, trees, slice_z, context, std::vector<std::vector<TreeSection>>(trees.size()) };
-    // FIXME(perf): one job per tree, as the legacy loop did (a tree has many paths, so its job is not small); a scene with many
-    // tiny trees would call for chunks of trees. To measure.
+    // Each tree is a separate job that draws its branch paths.
     slic3r_api::parallel_for_storage_with_progress(0, uint32_t(trees.size()), context, nullptr, &slice_tree, &slicing);
 
     // Joins the sections in tree order, then in path order: the same order as a serial loop over the trees.

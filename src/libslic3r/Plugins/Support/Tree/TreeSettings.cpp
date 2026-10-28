@@ -23,7 +23,8 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    Then it computes the maximum move from each real layer height and the collision windows from the real layer Z.
    A window includes object layers closer than the gap, allowing EPSILON for Z rounding; its top extends virtually
    at the last layer height so the collision's XY ramp has its full physical extent near the top of the object.
-   It also stores the real top of every object layer (layer_print_z), which reaches_min_height_to_model and
+   It also stores the real top of every object layer in scaled units (layer_print_z) and its unscaled millimeter value
+   (layer_print_z_mm), shared by node placement and organic smoothing. reaches_min_height_to_model and
    lowest_layer_within read to measure the minimum height to the model and the root search depth in real Z. With top interface layers every
    branch is exempt from that minimum height (branches_carry_roof: the interface stack it carries plays the role of the legacy roof).
    The radius gain of a branch per layer step (tip_gain, cone_gain) comes from the real height of the upper layer of the
@@ -75,7 +76,7 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     support_line_width = object.support_flow(support_role, layer_height_mm).width;
     support_rests_on_model = ! config.get("support_material_buildplate_only").get_bool();
     // The same option as tip_sources(): the interface layers under which the tips start.
-    branches_carry_roof = config.get("support_material_interface_layers").get_int() > 0;
+    branches_carry_roof = params.top_interfaces_enabled;
     xy_distance = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_perimeter_width));
     if (params.soluble) {
         // A soluble support touches the object, so its XY distance is its only separation: the safe offset steps by it and needs it above zero.
@@ -127,6 +128,7 @@ TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::P
     for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++ layer_idx) {
         const coord_t height = object.layer(layer_idx).height();
         layer_print_z.push_back(object.layer(layer_idx).print_z());
+        layer_print_z_mm.push_back(unscaled(layer_print_z.back()));
         max_move.push_back(maximum_move(angle, height));
         max_move_slow.push_back(maximum_move(angle_slow, height));
         const coord_t top_limit = object.layer(layer_idx).print_z() + gap_above - eps;

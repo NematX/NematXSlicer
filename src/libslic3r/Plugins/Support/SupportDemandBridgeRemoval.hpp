@@ -35,6 +35,7 @@ private:
     int32_t defined_config_keys(const char **keys) const noexcept override;
     const char *progress_message_format_impl() const noexcept override;
     void inilialize_impl(storage_handle *storage) const override;
+    // Reserves one progress unit per island above the first layer when bridge removal is enabled.
     void setup_run_impl(const plugin_run_context *run_ctx) const override;
     void run_impl(const plugin_run_context *run_ctx) const override;
 };

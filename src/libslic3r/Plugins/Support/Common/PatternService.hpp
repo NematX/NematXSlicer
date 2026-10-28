@@ -25,15 +25,13 @@ Sampling the INFILL_PATTERN plugins from STEP_SUPPORT
 A support family that wants the lines of a fill pattern, for example to place the
 tips of a tree, calls the pattern callbacks of run_ctx_generate_support (ABI 1.2).
 The raw callbacks need a recipe (raw_infill_pattern_params), a surface, an output
-entity and the flattening of the result. PatternService does these four steps:
+entity and the flattening of the result. Common::fill_recipe (include SupportPaths.hpp directly) builds the recipe;
+PatternService resolves its pattern and fills a temporary surface, returning flattened lines:
 
     const slic3r_api::Support::Common::PatternService patterns(plugin_ctx_as_generate_support(context));
     const infill_pattern_runtime_id id = patterns.resolve("rectilinear");
-    PatternService::Fill fill;
-    fill.flow = params.base_flow;
-    fill.spacing = params.base_flow_mm.spacing;
-    fill.density = 0.25f;
-    const raw_infill_pattern_params recipe = PatternService::recipe(id, fill);
+    const raw_infill_pattern_params recipe = fill_recipe(id, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL,
+        params.base_flow, params.base_flow_mm.spacing, 0.25f, params.base_angle);
     for (const std::vector<c_point> &line : patterns.fill_lines(storage, expolygon, recipe)) ...
 
 Only the patterns that do not read the layer, island and region (rectilinear,
@@ -43,8 +41,8 @@ not exist yet, so the service passes NULL for them (see slic3r_step_support.h).
 Failure: a call that the host reports as failed returns 0 and gives no line, as an empty fill; an unknown runtime id is no explicit
 failure, it is such a call. A real error inside a pattern is fatal for the step (see StepGenerateSupport.cpp): the host
 records an error message and requests the cancellation, the call still returns 0, and the step stops at the end of the phase, once the
-family returns. A family should therefore call throw_if_cancelled() after each call. The legacy code ignored an InfillFailedException
-part by part: that is a known limit of the equivalence with the native filler.
+family returns. A family should therefore call throw_if_cancelled() after each call. The native filler ignores an InfillFailedException
+part by part: this limits equivalence with the native filler.
 
 Concurrency: the callbacks may be called from several threads at once; PatternService
 holds no state beyond the payload pointer, so one instance can be shared by the
@@ -54,21 +52,6 @@ worker threads of a family. The payload must outlive the instance.
 class PatternService
 {
 public:
-    // What changes between two fills; the other fields of the recipe are the ones of the legacy support.
-    struct Fill
-    {
-        // Support flow of the lines (the flow of the base for a tree).
-        c_flow flow = {};
-        // Spacing of the flow, in millimeters.
-        double spacing = 0.;
-        // Line density in (0, 1].
-        float density = 0.f;
-        // Direction of the lines, in radians.
-        float angle = 0.f;
-        // Object layer, from which the patterns alternate their direction.
-        uint32_t layer_id = 0;
-    };
-
     // The payload received by the family. Throws std::runtime_error when it is null (plugin_ctx_as_generate_support returns NULL in
     // the context of another step) or has no pattern callback. A plugin that requires slic3r_step_support.h 1.2 is not loaded by an
     // older host, whose payload has no such fields, so the callback checks reject a payload built by hand (the tests).
@@ -83,34 +66,6 @@ public:
     infill_pattern_runtime_id resolve(const std::string &pattern_plugin_id) const
     {
         return m_payload->resolve_pattern_id(m_payload, pattern_plugin_id.c_str());
-    }
-
-    // The recipe of a sparse support fill: an internal sparse surface, DONT_ADJUST (the legacy support never stretches the
-    // spacing) and CAN_ANGLE_CROSS (the legacy Fill keeps its default, so a rectilinear fill turns a quarter turn on every other
-    // layer_id), a flow multiplier of 1, no bridge, 1000 mm anchors and a 0.0125 mm resolution. The object bounding box is empty,
-    // so rectilinear and supportbase anchor their lines on the centre of the contour they fill (RectilinearFills.hpp, as the native
-    // FillBase.cpp), like the legacy filler that did not receive a bounding box; the alignment of honeycomb to the world is separate.
-    static raw_infill_pattern_params recipe(infill_pattern_runtime_id pattern_id, const Fill &fill)
-    {
-        raw_infill_pattern_params recipe = {};
-        recipe.pattern_id = pattern_id;
-        recipe.surface_type = raw_surface_type(RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE);
-        recipe.extrusion_role = RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL;
-        recipe.flow = fill.flow;
-        recipe.density = fill.density;
-        recipe.flow_mult = 1.f;
-        recipe.connection = C_INFILL_CONNECTION_CONNECTED;
-        recipe.infill_flags = C_INFILL_FLAG_DONT_ADJUST | C_INFILL_FLAG_CAN_ANGLE_CROSS;
-        recipe.spacing = fill.spacing;
-        recipe.angle = fill.angle;
-        recipe.bridge_angle = -1.;
-        recipe.layer_height = unscaled(fill.flow.height);
-        recipe.layer_id = fill.layer_id;
-        recipe.bridge_offset = -1;
-        recipe.fill_resolution = scale_i(0.0125);
-        recipe.anchor_length = 1000.f;
-        recipe.anchor_length_max = 1000.f;
-        return recipe;
     }
 
     // Fills one area with the recipe and returns the points of its lines, in the order the pattern generated them (the widths

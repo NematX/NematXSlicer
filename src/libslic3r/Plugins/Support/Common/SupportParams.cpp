@@ -27,6 +27,7 @@
      flow width or spacing in millimeters (densities, the XY gap) read the _mm values, so they are exact.
    The path fields reproduce the PathParams of the legacy toolpaths.
 
+   object_layers() lists borrowed object-layer views in layer-id order; object_has_support_demand() checks their islands for demand.
    The slicing helpers of the support modifier volumes (layer_slice_zs, support_modifier_slicing_params, slice_support_modifier_volume)
    are shared by the demand modifiers and the tree family, so that both slice the volumes alike. */
 
@@ -111,8 +112,10 @@ SupportParams::SupportParams(const Print &print, const Object &object)
     first_layer_height = check_z_step_mm(first_layer_height, z_step);
 
     // Layer limits of the support tools and of the object tools.
-    const int32_t base_extruder = config.get("support_material_extruder").get_int();
-    const int32_t interface_extruder = config.get("support_material_interface_extruder").get_int();
+    base_tool = config.get("support_material_extruder").get_int();
+    interface_tool = config.get("support_material_interface_extruder").get_int();
+    const int32_t base_extruder = base_tool;
+    const int32_t interface_extruder = interface_tool;
     const uint32_t base_id = extruder_index(base_extruder);
     const uint32_t interface_id = extruder_index(interface_extruder);
     const double interface_nozzle = nozzle_diameter(print_config, interface_id);
@@ -157,13 +160,20 @@ SupportParams::SupportParams(const Print &print, const Object &object)
         if (gap_below <= 0) gap_below = gap_above;
     }
 
-    // Interface counts exclude the contact layer; a disabled bottom count follows the top one.
-    const int32_t top = std::max(0, config.get("support_material_interface_layers").get_int());
+    top_interface_layers = config.get("support_material_interface_layers").get_int();
     const ConfigOption bottom_option = config.get("support_material_bottom_interface_layers");
-    const int32_t bottom = config_option_is_enabled(bottom_option.handle(), -1) != 0 ?
-        std::max(0, bottom_option.get_int()) : top;
-    top_interfaces = top > 0 ? size_t(top - 1) : 0;
-    bottom_interfaces = bottom > 0 ? size_t(bottom - 1) : 0;
+    bottom_interface_layers = bottom_option.get_int();
+    bottom_interface_count_enabled = config_option_is_enabled(bottom_option.handle(), -1) != 0;
+    const int32_t top = std::max(0, top_interface_layers);
+    const int32_t bottom = bottom_interface_count_enabled ? std::max(0, bottom_interface_layers) : top;
+    top_interfaces_enabled = top > 0;
+    bottom_interfaces_enabled = bottom > 0;
+    top_published_interfaces_enabled = top_interface_layers != 0;
+    bottom_published_interfaces_enabled = top_published_interfaces_enabled &&
+        (!bottom_interface_count_enabled || bottom_interface_layers != 0);
+    // Interface counts exclude the contact layer; a disabled bottom count follows the top one.
+    top_interfaces = top_interfaces_enabled ? size_t(top - 1) : 0;
+    bottom_interfaces = bottom_interfaces_enabled ? size_t(bottom - 1) : 0;
 
     // Flows at the nominal heights; without interface layers the interface uses the base flow.
     const raw_extrusion_role base_role = raw_extrusion_role(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL);
@@ -215,11 +225,34 @@ SupportParams::SupportParams(const Print &print, const Object &object)
                                                      soluble, interface_density);
     bottom_pattern_id = bottom_interface_pattern_plugin_id(config.get("support_material_bottom_interface_pattern").serialize(),
                                                            top_pattern_id, soluble, interface_density);
-    base_angle = radians(float(config.get("support_material_angle").get_float()));
+    base_angle_degrees = config.get("support_material_angle").get_float();
+    base_angle = radians(float(base_angle_degrees));
     interface_angle = radians(float(config.get("support_material_interface_angle").get_float()));
     angle_height = config.get("support_material_angle_height").get_float();
     interface_angle_increment = config.get("support_material_interface_angle_increment").get_float();
     raft_first_layer_density = config.get("raft_first_layer_density").get_effective_value(1.);
+}
+
+// Copies borrowed layer views in layer-id order; the object must outlive their use, and allocation failures propagate.
+std::vector<Layer> object_layers(const Object &object)
+{
+    std::vector<Layer> layers;
+    layers.reserve(object.layer_count());
+    for (uint32_t id = 0; id < object.layer_count(); ++id)
+        layers.push_back(object.layer(id));
+    return layers;
+}
+
+// Reads island demand until a nonempty collection is found, without taking ownership or changing the object; valid object views are required.
+bool object_has_support_demand(const Object &object)
+{
+    for (uint32_t id = 0; id < object.layer_count(); ++id) {
+        const Layer layer = object.layer(id);
+        for (uint32_t island = 0; island < layer.island_count(); ++island)
+            if (!layer.island(island).support_demand().empty())
+                return true;
+    }
+    return false;
 }
 
 std::vector<float> layer_slice_zs(const Object &object)

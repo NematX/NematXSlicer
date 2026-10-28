@@ -1,8 +1,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
 /* Geometry helpers of the tree support family, written on the plugin API types (c_point, polygon views, storage-owned collections).
 
-   The tree routing and the organic smoothing were written on the native libslic3r types (Point, Polygons, ClipperUtils, AABB trees).
-   This header holds the small pieces they need once they use the plugin API only. What the API already provides is not repeated here:
+   Tree routing and organic smoothing use these helpers to work entirely through the plugin API.
+   What the API already provides is not repeated here:
    - EPSILON, SCALED_EPSILON, scale_i/scale_d/unscaled: Api/plugin/c/slic3r_def.h;
    - c_point arithmetic (+ - * /, midpoint, norm, norm_square), c_bounding_box merge/size/center: GeometryViews.hpp
      (the operators live in slic3r_api and c_point is a C struct, so the using-declarations below make them visible here);
@@ -141,8 +141,8 @@ struct LineSegment
 // Every edge of every ring, closing edge included, ring after ring, like to_lines(Polygons). A ring under 2 points gives no line.
 std::vector<LineSegment> to_lines(const slic3r_api::PolygonCollection &polygons);
 
-// The contour then the holes of every expolygon, in a flat list, like to_polygons(ExPolygons).
-slic3r_api::StoredPolygonCollection to_polygons(storage_handle *storage, const slic3r_api::ExPolygonCollection &expolygons);
+// Expose the common contour-then-holes copying helper to tree geometry callers.
+using slic3r_api::Support::Common::to_polygons;
 
 /* ============================== 6. point in polygons ============================== */
 
@@ -174,7 +174,7 @@ struct LineHit
 // close at different points: the centre of a square is as close to its four sides, and the hit point is the middle of the first side
 // here, of another side natively (test "nearest_on_lines on an exact tie"). Its caller, push_out_of_outline() in TreeSmoothing.cpp (shared by
 // smooth_organic_branches() and push_sphere_out_of_outline()), pushes the sphere away from that point, so the push direction may differ on
-// such a tie. Measured on the dump, organic and family scenes (about 4000 real hits): no tie met, no hit differs.
+// such a tie.
 //
 // `index` must hold the same segments as `lines`, appended in the same order (LineDistancer::append_segment(), then build_index()
 // before calling this function from several threads). It is only used to skip the lines that are too far: the distances are

@@ -499,6 +499,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/PatternService.hpp
 	Plugins/Support/Common/PerimeterFill.cpp
 	Plugins/Support/Common/PerimeterFill.hpp
+	Plugins/Support/Common/SupportDemand.cpp
+	Plugins/Support/Common/SupportDemand.hpp
 	Plugins/Support/Common/SupportInterfaces.cpp
 	Plugins/Support/Common/SupportInterfaces.hpp
 	Plugins/Support/Common/SupportLayers.hpp
@@ -622,6 +624,7 @@ set(SLIC3R_SOURCES
 	Steps/StepSupportToolpath.hpp
 	Steps/StepSurfaceGeneration.cpp
 	Steps/StepSurfaceGeneration.hpp
+	Steps/SupportPatternCallbacks.hpp
 	Updater/Http.cpp
 	Updater/Http.hpp
 	Updater/PluginUpdater.cpp

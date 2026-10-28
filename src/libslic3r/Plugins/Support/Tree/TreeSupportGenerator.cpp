@@ -95,8 +95,6 @@ struct RootRest {
     coord_t radius = 0;
 };
 
-// The object layer views, in the order of the layer ids.
-LayerList object_layers(const slic3r_api::Object &object);
 // The object outline of every layer grown by the XY distance, in the scratch storage; the slabs keep clear of it.
 PolygonList keep_out_outlines(const LayerList &layers, storage_handle *scratch, coord_t gap_xy);
 // Indices of the nodes that no node carries: the lowest nodes of the branches, where they stop.
@@ -141,7 +139,7 @@ void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, con
 // Places the slabs of every interval between extremes; the middle of each interval is planned from the branch overhangs. Returns the
 // middle slabs, the ones that carry branches; the dense interface slabs are not among them.
 std::vector<Common::GeneratorLayer *> place_slabs(const LayerList &layers, const Common::SupportParams &params, const TreeSettings &settings,
-                                                  const std::vector<OverhangLayer> &overhang, const slic3r_api::Config &config,
+                                                  const std::vector<OverhangLayer> &overhang,
                                                   Common::GeneratedSupport &out);
 // Cuts the middle slabs where the sections drawn at their middles overhang more than the limit, as far as the minimum height allows.
 void refine_branch_slabs(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, const TreeSettings &settings,
@@ -206,30 +204,29 @@ void clear_under_floors(const LayerList &layers, const Common::GeneratorLayers &
 } // namespace
 
 // Route the branches of one object, then build its slabs from the routed trees.
-void generate_tree_support(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object, bool organic,
+// Borrows the run's parameters, derives tree settings once, then routes and draws into caller-owned slabs; object layers must be sliced, and cancellation or geometry/allocation failures propagate.
+void generate_tree_support(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
+                           const Common::SupportParams &params, bool organic,
                            Common::GeneratedSupport &out)
 {
-    const Common::SupportParams params(print, object);
     const TreeSettings settings(object, print, params);
     std::vector<RestingPart> resting;
     std::vector<RoutedTree> trees = route_trees(print, object, params, settings, out, context, resting);
-    generate_tree_slabs(context, print, object, trees, organic, out, resting);
+    generate_tree_slabs(context, print, object, params, settings, trees, organic, out, resting);
 }
 
 // Build the slabs of the given routed trees in the order of the file header; organic trees are smoothed in place first. resting_parts are the resting
 // parts that route_trees() returned with the trees (the parts of the contacts over the object on their tip layer, which have no tip): add_floors()
 // gives them their floors, and the stacks of their contacts shorten down to those floors, as in the grid. Trees built by hand pass an empty collection.
-// Borrows the object's routed trees, builds owned slabs in out and smooths organic nodes in place; resting parts must come from the same routing, and cancellation or geometry/allocation failures propagate.
+// Borrows matching run parameters, tree settings and routed nodes, builds owned slabs in out and smooths organic nodes in place; resting parts must come from the same routing, and cancellation or geometry/allocation failures propagate.
 void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
+                         const Common::SupportParams &params, const TreeSettings &settings,
                          std::vector<RoutedTree> &trees, bool organic, Common::GeneratedSupport &out, const std::vector<RestingPart> &resting_parts)
 {
-    const Common::SupportParams params(print, object);
-    const TreeSettings settings(object, print, params);
-    const LayerList layers = object_layers(object);
-    const slic3r_api::Config config = object.config();
+    const LayerList layers = Common::object_layers(object);
     const slic3r_api::Config print_config = print.config();
     // Without interface layers the contacts are rebuilt below from the branches, and trimmed again there.
-    const bool without_interfaces = config.get("support_material_interface_layers").get_int() <= 0;
+    const bool without_interfaces = !params.top_interfaces_enabled;
     // The Z gaps between the support and the object, with which the drawn branches are trimmed.
     const coord_t gap_above = scale_to_layer_coord(params.gap_above);
     const coord_t gap_below = scale_to_layer_coord(params.gap_below);
@@ -237,14 +234,14 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
     with_scratch_storage([&](storage_handle *scratch) {
         const PolygonList keep_out = keep_out_outlines(layers, scratch, settings.xy_distance);
         if (organic)
-            smooth_organic_branches(object, keep_out, trees, context);
+            smooth_organic_branches(settings.layer_print_z_mm, keep_out, trees, context);
         std::vector<RootRest> rests = root_rests(layers, trees, keep_out, settings, scratch);
         add_floors(layers, rests, resting_parts, keep_out, params, scratch, out);
         raise_stems_onto_floors(out, rests);
         const std::vector<Segment> segments = branch_segments(layers, trees, rests);
         const std::vector<OverhangLayer> overhang = organic ? section_overhang_layers(layers, trees, segments, scratch, context)
                                                             : overhang_layers(layers, segments);
-        std::vector<Common::GeneratorLayer *> branch_slabs = place_slabs(layers, params, settings, overhang, config, out);
+        std::vector<Common::GeneratorLayer *> branch_slabs = place_slabs(layers, params, settings, overhang, out);
         if (organic)
             refine_branch_slabs(segments, trees, settings, branch_slabs, scratch, context, out);
         align_slab_bounds(object_print_zs(print), out);
@@ -255,20 +252,15 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
             trim_slab(*contact, layers, keep_out, gap_above, gap_below, contact->object_above, scratch);
         for (Common::GeneratorLayer *contact : out.bottom)
             trim_slab(*contact, layers, keep_out, gap_above, gap_below, contact->object_below, scratch);
-        // The top contacts and the floors lose the bridge footprint before publication, for themselves. Trimming the contacts before the
-        // projection keeps the projected areas aligned with the grid, which trims its contacts before carving the interfaces; the later
-        // trim of the base slabs also keeps the slabs of the thread band free of the footprint.
+        // Trim contacts before projection so the projected areas follow the grid's order: it trims before carving interfaces.
         if (!without_interfaces)
             trim_bridge_footprints(out.top, layers, print_config, params, scratch);
         trim_bridge_footprints(out.bottom, layers, print_config, params, scratch);
         Common::project_interface_contacts(params, out);
         slic3r_api::throw_if_cancelled(context);
         draw_branches(segments, trees, organic, layers, keep_out, gap_above, gap_below, scratch, context, out);
-        // The branches drawn in the base and branch slabs are trimmed too: a slab can reach into the thread band when the bridge is
-        // thicker than a layer (thin support layers, high bridge flow ratio). The interfaces are carved out of these slabs afterwards.
-        // The bridge search starts at the slab top, not at the gap limit, so the bridges of the layers inside the gap window are
-        // removed too, with the same XY gap as the keep_out outline that trim_slab() removes (the bridge pass is still needed: it
-        // searches from the slab top in the Z window).
+        // Trim slabs too: a bridge thicker than one layer can reach into their Z span.
+        // The search starts from the slab top and uses the bridges of the gap window and the keep-out XY gap.
         trim_bridge_footprints(out.base, layers, print_config, params, scratch);
         Common::GeneratorLayers drawn_slabs = out.base;
         if (without_interfaces) {
@@ -303,15 +295,6 @@ void align_slab_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedS
 }
 
 namespace {
-LayerList object_layers(const slic3r_api::Object &object)
-{
-    LayerList layers;
-    layers.reserve(object.layer_count());
-    for (uint32_t id = 0; id < object.layer_count(); ++id)
-        layers.push_back(object.layer(id));
-    return layers;
-}
-
 // Each outline is the rings of the slices of the layer offset with round joins, as the legacy tree grows them.
 PolygonList keep_out_outlines(const LayerList &layers, storage_handle *scratch, coord_t gap_xy)
 {
@@ -510,7 +493,7 @@ double section_overhang(const PolygonCollection &upper, const PolygonCollection 
 
 // Each ring answers with the contains() of the host (border inside), and the answers are counted, so a point in a hole is outside.
 // It is kept beside point_in_polygons() on purpose: on a hole border it counts two rings and answers false, so section_overhang()
-// still measures the distance (with its residue of about 7e-9 unit from the projection in doubles), where point_in_polygons(border = true)
+// still computes the distance, including floating-point projection rounding, where point_in_polygons(border = true)
 // would answer true and skip it.
 bool inside_section(const PolygonCollection &section, c_point point)
 {
@@ -583,21 +566,18 @@ void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, con
     }
 }
 
+// Splits contact intervals with the borrowed run's shared counts and tree-specific steps, appending owned slabs in order; layers and settings.layer_print_z_mm each have one entry per object layer with the same indices, and geometry/allocation failures propagate.
 std::vector<Common::GeneratorLayer *> place_slabs(const LayerList &layers, const Common::SupportParams &params, const TreeSettings &settings,
-                                                  const std::vector<OverhangLayer> &overhang, const slic3r_api::Config &config,
+                                                  const std::vector<OverhangLayer> &overhang,
                                                   Common::GeneratedSupport &out)
 {
-    const int32_t interfaces = std::max(0, config.get("support_material_interface_layers").get_int());
-    const slic3r_api::ConfigOption bottom_option = config.get("support_material_bottom_interface_layers");
-    const bool bottom_enabled = config_option_is_enabled(bottom_option.handle(), -1) != 0;
     Common::SlabSpacing spacing;
     spacing.first_z = scale_to_layer_coord(params.first_layer_height);
     spacing.min_height = settings.min_slab_height;
     spacing.machine_step = settings.z_step;
     spacing.base_step = settings.max_slab_height;
-    spacing.interface_step = interfaces > 0 ? settings.dense_slab_height : settings.max_slab_height;
-    spacing.interface_layers = interfaces;
-    spacing.bottom_interface_layers = bottom_enabled ? std::max(0, bottom_option.get_int()) : interfaces;
+    spacing.interface_step = params.top_interfaces_enabled ? settings.dense_slab_height : settings.max_slab_height;
+    Common::set_interface_counts(spacing, params);
     spacing.soluble = params.soluble;
     std::vector<Common::GeneratorLayer *> branch_slabs;
     const Common::MiddleSplitter split_middle = [&](coord_t from, coord_t to) {

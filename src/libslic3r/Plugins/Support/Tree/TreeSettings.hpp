@@ -96,6 +96,8 @@ struct TreeSettings
     bool branches_carry_roof = false;
     // Real top Z (scaled) of every object layer, bottom first.
     std::vector<coord_t> layer_print_z;
+    // The same tops converted with unscaled(), shared by node placement and organic smoothing (millimeters).
+    std::vector<double> layer_print_z_mm;
     // Radius increase allowed when a model branch merges with branches that reach the bed.
     coord_t max_to_model_radius_increase = 0;
     // False when the object only allows branches on the build plate.

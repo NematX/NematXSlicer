@@ -290,9 +290,7 @@ void TreeVolumes::precalculate(const coord_t max_layer)
         calculatePlaceables(relevant_avoidance_radiis);
 
     {
-        // FIXME(perf): kept on tbb::task_group: the two tasks are heterogeneous (avoidance and wall restrictions) and there is
-        // nothing to index. They wait here with no lock held. slic3r_parallel_for would add nothing without a measured gain.
-        // Revisit with real performance tests.
+        // Avoidance and wall restrictions run as separate tasks and join here with no lock held.
         tbb::task_group task_group;
         task_group.run([this, relevant_avoidance_radiis]{ calculateAvoidance(relevant_avoidance_radiis, true, m_support_rests_on_model); });
         task_group.run([this, relevant_avoidance_radiis]{ calculateWallRestrictions(relevant_avoidance_radiis); });
@@ -302,9 +300,7 @@ void TreeVolumes::precalculate(const coord_t max_layer)
 
 void TreeVolumes::calculateCollision(const std::vector<RadiusLayerPair> &keys)
 {
-    // FIXME(perf): kept on tbb::parallel_for: the cost of a key varies a lot with its layer range, and the default
-    // partitioner balances it. Moving to slic3r_parallel_for would change the balancing without a measured gain. Revisit
-    // with real performance tests.
+    // Work per radius key varies with its layer range; the default partitioner balances these ranges.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
         [&](const tbb::blocked_range<size_t> &range) {
         for (size_t ikey = range.begin(); ikey != range.end(); ++ ikey) {
@@ -348,8 +344,6 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
         collision_areas_offsetted.allocate(result_storage,
             std::max<LayerIndex>(0, data.begin() - max_bottom),
             std::min<LayerIndex>(LayerIndex(outlines.size()), data.end() + max_top));
-        // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
-        // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
         tbb::parallel_for(tbb::blocked_range<LayerIndex>(collision_areas_offsetted.begin(), collision_areas_offsetted.end()),
             [&outlines, offset_value = radius + xy_distance, &collision_areas_offsetted, this]
             (const tbb::blocked_range<LayerIndex> &range) {
@@ -371,7 +365,6 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
         // layer distance, so that a branch may come as close to the layers above as the xy distance of the overhang requires.
         // Each real-Z window includes layers closer than the gap, within Z rounding tolerance;
         // the native XY ramp uses n = top[L], virtual layers included, as its denominator.
-        // FIXME(perf): same as the loop above (default partitioner, no measured gain from slic3r_parallel_for).
         tbb::parallel_for(tbb::blocked_range<LayerIndex>(data.begin(), data.end()),
             [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, radius, xy_distance, &bottom_windows, &top_windows,
                 min_resolution = m_min_resolution, &data, this]
@@ -406,7 +399,6 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
 
         // 3) The placeable areas: the top surface of the layer below, minus the collision of this layer, inset by the XY distance.
         if (calculate_placable) {
-            // FIXME(perf): same as the loop above (default partitioner, no measured gain from slic3r_parallel_for).
             tbb::parallel_for(tbb::blocked_range<LayerIndex>(data.begin(), data.end()),
                 [&collision_areas_offsetted, &outlines, &anti_overhang = m_anti_overhang, min_resolution = m_min_resolution,
                     &bottom_windows, xy_distance, &data_placeable, this]
@@ -460,9 +452,7 @@ void TreeVolumes::calculateCollisionHolefree(const std::vector<RadiusLayerPair> 
     // fills it, instead of one computation per layer in the loop below.
     getCollision(m_settings.branch_radius, max_layer);
 
-    // FIXME(perf): kept on tbb::parallel_for with the grain of the key count, so that a chunk holds the layers of all the
-    // keys and publishes them together. slic3r_parallel_for has no grain; moving to it would change the balancing without a
-    // measured gain. Revisit with real performance tests.
+    // The grain is the key count; each chunk computes and publishes its layer results together.
     tbb::parallel_for(tbb::blocked_range<LayerIndex>(0, max_layer + 1, keys.size()),
         [&](const tbb::blocked_range<LayerIndex> &range) {
         // The scratch storage of the chunk holds its results and its temporaries; the cache moves the results to the run storage.
@@ -532,9 +522,7 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
 
     slic3r_api::throw_if_cancelled(m_context);
 
-    // FIXME(perf): kept on tbb::parallel_for with grain 1: the tasks (one whole propagation each) differ a lot in length,
-    // and the default partitioner balances them. Moving to slic3r_parallel_for would change the balancing without a measured
-    // gain. Revisit with real performance tests.
+    // Grain-one ranges let the default partitioner distribute whole propagation tasks.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, avoidance_tasks.size(), 1),
         [this, &avoidance_tasks, first_layer](const tbb::blocked_range<size_t> &range) {
         for (size_t task_idx = range.begin(); task_idx < range.end(); ++ task_idx) {
@@ -602,9 +590,7 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
 
 void TreeVolumes::calculatePlaceables(const std::vector<RadiusLayerPair> &keys)
 {
-    // FIXME(perf): kept on tbb::parallel_for: the cost of a key varies a lot with its layer range, and the default
-    // partitioner balances it. Moving to slic3r_parallel_for would change the balancing without a measured gain. Revisit
-    // with real performance tests.
+    // The default partitioner balances radius keys whose layer ranges have unequal cost.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
         [&, keys](const tbb::blocked_range<size_t>& range) {
             for (size_t key_idx = range.begin(); key_idx < range.end(); ++ key_idx)
@@ -627,8 +613,6 @@ void TreeVolumes::calculatePlaceables(const coord_t radius, const LayerIndex max
         // collision of radius 0), instead of one per layer in the loop below.
         getPlaceableAreas(0, max_required_layer);
 
-        // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
-        // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
         tbb::parallel_for(tbb::blocked_range<LayerIndex>(1, max_required_layer + 1),
             [this, &data, radius](const tbb::blocked_range<LayerIndex>& range) {
                 with_scratch_storage([&](storage_handle *storage) {
@@ -688,9 +672,7 @@ void TreeVolumes::calculateWallRestrictions(const std::vector<RadiusLayerPair> &
      *  layer z-1: ixiiiiiiiiiii
      */
 
-    // FIXME(perf): kept on tbb::parallel_for: the cost of a key varies a lot with its layer range, and the default
-    // partitioner balances it. Moving to slic3r_parallel_for would change the balancing without a measured gain. Revisit
-    // with real performance tests.
+    // The default partitioner balances radius keys whose layer ranges have unequal cost.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, keys.size()),
         [&, keys](const tbb::blocked_range<size_t> &range) {
         for (size_t key_idx = range.begin(); key_idx < range.end(); ++ key_idx) {
@@ -709,8 +691,6 @@ void TreeVolumes::calculateWallRestrictions(const std::vector<RadiusLayerPair> &
                 data.reserve(buffer_size);
                 for (size_t idx = 0; idx < buffer_size; ++ idx)
                     data.emplace_back(result_storage);
-                // FIXME(perf): kept on tbb::parallel_for: the default partitioner balances layers of unequal cost. Moving to
-                // slic3r_parallel_for would change the balancing without a measured gain. Revisit with real performance tests.
                 tbb::parallel_for(tbb::blocked_range<LayerIndex>(first_layer, max_required_layer + 1),
                     [this, &data, radius, first_layer](const tbb::blocked_range<LayerIndex> &range) {
                     with_scratch_storage([&](storage_handle *storage) {

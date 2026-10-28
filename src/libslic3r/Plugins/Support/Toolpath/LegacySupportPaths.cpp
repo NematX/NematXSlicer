@@ -52,22 +52,7 @@ using SplitPoints = std::map<PointKey, int>;
 // match another layer. It applies to every print: a layer that close to the exact contact position is the contact.
 constexpr coord_t CONTACT_MATCH_TOLERANCE = SCALED_EPSILON + 2 * (4 * SCALED_EPSILON);
 
-// Settings that every layer of one support role reads, derived once per callback from the object.
-struct PathParams {
-    PathParams(const Print &print, const Object &object, const object_handle *handle);
-    Common::SupportParams geometry;
-    // Interface layers exist on each side: the top count is nonzero, the bottom one follows it when disabled.
-    bool top_enabled = false, bottom_enabled = false;
-    // Flow role of the interfaces: the base role when the top interface count is zero.
-    raw_extrusion_role interface_role = RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-    // One-based tools of the base and of the interfaces, as configured.
-    int32_t base_tool = 0, interface_tool = 0;
-    // Base angle in degrees, needed for the first-layer flange turned by a quarter turn.
-    double base_angle_degrees = 0;
-    // Distinct print Z values of the support layers, ascending: a layer's rank replaces the
-    // native support layer index, which counts one layer per print Z.
-    std::vector<coord_t> support_z;
-};
+using PathParams = Common::ToolpathParams;
 // Parts of one support layer's surfaces that are filled separately.
 struct LayerParts {
     explicit LayerParts(storage_handle *storage) : base(storage), top_contact(storage), top_interface(storage), bottom_contact(storage), bottom_interface(storage) {}
@@ -93,10 +78,6 @@ struct Fragment {
 
 // Convert a Clipper result into a flat polygon collection, like the native polygon booleans.
 Polys as_polygons(ClipperOperand &&result);
-// Copy the contours and holes of one area into dst, like the native polygons_append().
-void append_expolygon(Polys &dst, const ExPolygon &expolygon);
-// Copy the contours and holes of every area of a collection into dst.
-void append_expolygons(Polys &dst, const ExPolygonCollection &expolygons);
 // Read the fill surfaces of one role in a region island; bridge 1 or 0 keeps only bridge or non-bridge surfaces.
 Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge = -1);
 // Collect one role across the islands of a support layer before any union.
@@ -105,8 +86,6 @@ Polys layer_polygons(storage_handle *storage, const layer_handle *layer, Surface
 LayerParts layer_parts(storage_handle *storage, const Object &object, const layer_handle *layer, const PathParams &params);
 // Join the upper contact and its intermediate interfaces, which the top role fills in one pass.
 void fuse_parts(LayerParts &parts);
-// The attributes of paths with this role and flow: width, height and mm3 per mm.
-EPropertyAttributes flow_attributes(raw_extrusion_role role, const c_flow &flow);
 // Whether any of the polylines crosses the area.
 bool crosses(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area);
 // Convert point lists to a storage-owned polyline collection, and back.
@@ -131,46 +110,15 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
 // Gather the lower support footprints whose top lies between the bottom and the current slab, sorted by Z.
 std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_handle *object, coord_t z, coord_t bottom, bool bottom_contact);
 // Generate one role across a support layer and assign its paths to the islands they cross.
-void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer);
-
-PathParams::PathParams(const Print &print, const Object &object, const object_handle *handle) : geometry(print, object)
-{
-    const Config config = object.config();
-    const int32_t top = config.get("support_material_interface_layers").get_int();
-    top_enabled = top != 0;
-    const ConfigOption bottom_option = config.get("support_material_bottom_interface_layers");
-    bottom_enabled = config_option_is_enabled(bottom_option.handle(), -1) != 0 ? top_enabled && bottom_option.get_int() != 0 : top_enabled;
-    interface_role = std::max(0, top) == 0 ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-    base_tool = config.get("support_material_extruder").get_int();
-    interface_tool = config.get("support_material_interface_extruder").get_int();
-    base_angle_degrees = config.get("support_material_angle").get_float();
-    for (uint32_t index = 0; index < object_count_auxiliary_layer(handle); ++index) {
-        const layer_handle *layer = object_get_auxiliary_layer(handle, index);
-        if (plugin_property_has(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT))
-            support_z.push_back(layer_get_print_z(layer));
-    }
-    std::sort(support_z.begin(), support_z.end());
-    support_z.erase(std::unique(support_z.begin(), support_z.end()), support_z.end());
-}
+void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
+                   const std::vector<coord_t> &support_z, SurfaceRole role, layer_handle *layer);
 
 Polys as_polygons(ClipperOperand &&result)
 {
     return result.to_polygon_collection();
 }
 
-void append_expolygon(Polys &dst, const ExPolygon &expolygon)
-{
-    dst.push_back(expolygon.contour());
-    for (const Polygon hole : expolygon.holes())
-        dst.push_back(hole);
-}
-
-void append_expolygons(Polys &dst, const ExPolygonCollection &expolygons)
-{
-    for (const ExPolygon expolygon : expolygons)
-        append_expolygon(dst, expolygon);
-}
-
+// Filters borrowed region surfaces by support role and optional bridge bit, copying contour-then-holes rings into caller storage; branch bodies are excluded and allocation failures propagate.
 Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge)
 {
     Polys result(storage);
@@ -182,7 +130,7 @@ Polys role_polygons(storage_handle *storage, const layer_region_island_handle *r
         const raw_surface_type type = surface_get_type(surface);
         // Branch bodies belong to the branch role, which no legacy role prints.
         if ((type & mask) != mask || surface_type_is_branch(type) || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge))) continue;
-        append_expolygon(result, ExPolygon(surface_get_expolygon(surface)));
+        Common::append_polygons(result, ExPolygon(surface_get_expolygon(surface)));
     }
     return result;
 }
@@ -198,6 +146,7 @@ Polys layer_polygons(storage_handle *storage, const layer_handle *layer, Surface
     return result;
 }
 
+// Splits borrowed support-layer roles against the same object's adjacent slices into owned contact/interface areas; layer Z and parameters belong to that object, and geometry/allocation failures propagate.
 LayerParts layer_parts(storage_handle *storage, const Object &object, const layer_handle *layer, const PathParams &params)
 {
     const Common::SupportParams &geometry = params.geometry;
@@ -207,7 +156,7 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
     const Polys top = layer_polygons(storage, layer, SurfaceRole::Top);
     const Polys bottom = layer_polygons(storage, layer, SurfaceRole::Bottom);
     const coord_t z = layer_get_print_z(layer), layer_bottom = z - layer_get_height(layer);
-    if (!params.bottom_enabled) {
+    if (!geometry.bottom_published_interfaces_enabled) {
         // Without interface layers the published bottom surfaces are the contact alone.
         parts.bottom_contact.copy_from(bottom);
     } else if (!geometry.soluble) {
@@ -218,19 +167,19 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
         Polys adjacent(storage);
         for (uint32_t index = 0; index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
-            if (std::abs(object_layer.print_z() - layer_bottom) <= CONTACT_MATCH_TOLERANCE) append_expolygons(adjacent, object_layer.slices());
+            if (std::abs(object_layer.print_z() - layer_bottom) <= CONTACT_MATCH_TOLERANCE) Common::append_polygons(adjacent, object_layer.slices());
         }
         parts.bottom_contact = as_polygons(clipper_intersection(clipper(bottom), clipper(adjacent)));
         parts.bottom_interface = as_polygons(clipper_diff(clipper(bottom), clipper(parts.bottom_contact)));
     }
-    if (!params.top_enabled) {
+    if (!geometry.top_published_interfaces_enabled) {
         // Without interface layers the published top surfaces are the contact alone.
         parts.top_contact.copy_from(top);
     } else {
         Polys adjacent(storage);
         for (uint32_t index = 0; index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
-            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) <= CONTACT_MATCH_TOLERANCE) append_expolygons(adjacent, object_layer.slices());
+            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) <= CONTACT_MATCH_TOLERANCE) Common::append_polygons(adjacent, object_layer.slices());
         }
         parts.top_contact = as_polygons(clipper_intersection(clipper(top), clipper(adjacent)));
         parts.top_interface = as_polygons(clipper_diff(clipper(top), clipper(parts.top_contact)));
@@ -244,13 +193,6 @@ void fuse_parts(LayerParts &parts)
         // The contact and its intermediate interfaces share one filler and one union.
         parts.top_contact.append_move_from(parts.top_interface);
     }
-}
-
-EPropertyAttributes flow_attributes(raw_extrusion_role role, const c_flow &flow)
-{
-    EPropertyAttributes attributes;
-    attributes.extrusion_role(int32_t(role)).mm3_per_mm(flow.mm3_per_mm).width(float(unscaled(flow.width))).height(float(unscaled(flow.height)));
-    return attributes;
 }
 
 bool crosses(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area)
@@ -318,6 +260,7 @@ double squared_distance(c_point a, c_point b)
     return dx * dx + dy * dy;
 }
 
+// Offsets borrowed contact/overhang rings to form removable loops, appends storage-owned interface paths to out and subtracts their footprint from contact; resolution is scaled and geometry/allocation failures propagate.
 void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &contact, const Polys &overhang, const c_flow &flow, coord_t resolution)
 {
     const ClipperContext clipper(storage);
@@ -336,9 +279,8 @@ void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &c
     PointLists contours, circles;
     for (const ExPolygon polygon : inset) {
         std::vector<Points> rings;
-        rings.push_back(polygon.contour().points());
-        for (const Polygon hole : polygon.holes())
-            rings.push_back(hole.points());
+        for (const Polygon ring : Common::polygon_rings(polygon))
+            rings.push_back(ring.points());
         Points centers;
         c_point last{0, 0};
         for (Points &contour : rings) {
@@ -435,7 +377,7 @@ void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &c
     contact = as_polygons(clipper_diff(clipper(contact), clipper_offset_polylines(storage, loops, radius * 1.1)));
     contact.ensure_valid(resolution);
     loops.ensure_valid(resolution);
-    Common::append_paths(storage, out, point_lists(loops), flow_attributes(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, flow), true);
+    Common::append_paths(storage, out, point_lists(loops), Common::path_attributes(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE, flow), true);
 }
 
 std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area)
@@ -552,7 +494,9 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_ha
 // The context outlives the synchronous fill. Stopping exits through silent PluginCancelled (the cause has its message,
 // the step names it, or the runner rethrows the print cancellation); ordinary assignment, destination and pattern
 // refusals throw std::runtime_error.
-void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params, SurfaceRole role, layer_handle *layer)
+// support_z contains the same object's sorted unique marked auxiliary-layer tops; its rank selects the alternating support pattern.
+void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
+                   const std::vector<coord_t> &support_z, SurfaceRole role, layer_handle *layer)
 {
     const Common::SupportParams &geometry = params.geometry;
     const coord_t z = layer_get_print_z(layer), height = layer_get_height(layer), bottom = z - height;
@@ -564,7 +508,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     float base_angle = geometry.base_angle;
     const float interface_angle = geometry.interface_angle;
     // The native generator switches a rectilinear-grid base to the interface angle on every second support layer, and counts those layers per print Z.
-    const size_t z_index = size_t(std::lower_bound(params.support_z.begin(), params.support_z.end(), z) - params.support_z.begin());
+    const size_t z_index = size_t(std::lower_bound(support_z.begin(), support_z.end(), z) - support_z.begin());
     if (geometry.base_pattern == Common::BasePattern::RectilinearGrid && z_index % 2 == 1)
         base_angle = interface_angle;
     else if (geometry.angle_height > 0 && int(unscaled(z) / geometry.angle_height) % 2 == 1)
@@ -575,7 +519,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     else if (geometry.interface_angle_increment > 0)
         angle += interface_angle + property.interface_id * Common::radians(float(geometry.interface_angle_increment));
     const std::string &contact_pattern = role == SurfaceRole::Top ? geometry.top_pattern_id : geometry.bottom_pattern_id;
-    const bool top_as_base = !params.top_enabled, bottom_as_base = !params.bottom_enabled;
+    const bool top_as_base = !geometry.top_published_interfaces_enabled, bottom_as_base = !geometry.bottom_published_interfaces_enabled;
     std::vector<Pass> passes;
     if (role == SurfaceRole::Sparse) {
         if (!parts.base.empty()) passes.emplace_back(std::move(parts.base), false, true, false);
@@ -590,12 +534,12 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     if (passes.empty()) return;
     // Object demand directly above the layer: the removable loops of a top contact follow its outline.
     Polys overhang(storage);
-    if (role == SurfaceRole::Top && params.top_enabled && geometry.interface_contact_loops)
+    if (role == SurfaceRole::Top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops)
         for (uint32_t index = 0; index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
             if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) > CONTACT_MATCH_TOLERANCE) continue;
             for (uint32_t island = 0; island < object_layer.island_count(); ++island)
-                append_expolygons(overhang, object_layer.island(island).support_demand());
+                Common::append_polygons(overhang, object_layer.island(island).support_demand());
         }
     StoredExtrusionEntity out(storage);
     const ClipperContext clipper(storage);
@@ -603,9 +547,10 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
         const bool sparse_filler = role == SurfaceRole::Sparse;
         // Only the sparse role uses the base filler; a contact printed with the base settings keeps its own filler.
         const bool base_filler = pass.as_base && sparse_filler;
-        const raw_extrusion_role flow_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : params.interface_role;
+        const raw_extrusion_role interface_role = geometry.top_interfaces_enabled ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL;
+        const raw_extrusion_role flow_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : interface_role;
         // The native filler picks the bridging flow first, even for a contact printed with the base settings.
-        c_flow flow = pass.bridge ? object.support_flow(params.interface_role, geometry.layer_height, unscaled(height), OBJECT_SUPPORT_FLOW_BRIDGE)
+        c_flow flow = pass.bridge ? object.support_flow(interface_role, geometry.layer_height, unscaled(height), OBJECT_SUPPORT_FLOW_BRIDGE)
                                   : object.support_flow(flow_role, geometry.layer_height, unscaled(height));
         double spacing = pass.as_base ? geometry.base_flow_mm.spacing : geometry.interface_flow_mm.spacing;
         float density = float(pass.as_base ? geometry.base_density : geometry.interface_density);
@@ -620,10 +565,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
             flow = geometry.first_flow;
             spacing = geometry.first_flow_mm.spacing;
             density = float(geometry.raft_first_layer_density);
-            if (base_filler) {
-                filler_angle = Common::radians(float(params.base_angle_degrees + 90.));
-                filler_z = 0.;
-            } else {
+            if (!base_filler) {
                 filler_angle = 0;
             }
         }
@@ -632,15 +574,18 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
         const bool perimeter = flange || sheath;
         const std::string inner = flange ? std::string("rectilinear") : pattern;
         const raw_extrusion_role fill_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-        const raw_infill_pattern_params recipe = Common::base_fill_recipe(payload, perimeter ? inner : pattern, fill_role, flow, spacing,
-                                                                          density, filler_angle, filler_z);
+        const raw_infill_pattern_params recipe = flange && base_filler ? raw_infill_pattern_params{} :
+            Common::base_fill_recipe(payload, perimeter ? inner : pattern, fill_role, flow, spacing, density, filler_angle, filler_z);
         if (pass.contact && !overhang.empty()) contact_loops(storage, out.mutable_view(), pass.polygons, overhang, flow, geometry.resolution);
         StoredExPolygonCollection fused = sparse_filler ?
             clipper_offset2(clipper(pass.polygons), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection() :
             clipper_union_with_safety_offset(clipper(pass.polygons)).to_expolygon_collection();
         fused.ensure_valid(geometry.resolution);
         StoredExtrusionEntity paths(storage);
-        Common::fill_base_areas(context, payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
+        if (flange && base_filler)
+            Common::append_base_flange(context, payload, storage, paths.mutable_view(), fused, layer, geometry);
+        else
+            Common::fill_base_areas(context, payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
         // A bottom contact also overlaps sparse and interface slabs, so it collects them for modulation.
         const bool bottom_contact_pass = role == SurfaceRole::Bottom && &pass == &passes.front();
         Internal::modulate(storage, paths.mutable_view(), z, overlaps(storage, payload.object, z, bottom, bottom_contact_pass), geometry.resolution);
@@ -650,7 +595,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     // surface; otherwise the role keeps its interface bucket and extruder.
     const bool as_base = role == SurfaceRole::Sparse || (role == SurfaceRole::Top ? top_as_base : bottom_as_base);
     const raw_extrusion_role bucket = as_base ? RAW_EXTRUSION_ROLE_SUPPORT : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-    const int32_t tool = as_base ? params.base_tool : params.interface_tool;
+    const int32_t tool = as_base ? geometry.base_tool : geometry.interface_tool;
     for (uint32_t index = 0; index < out.readonly().child_count(); ++index) {
         MutableExtrusionEntity entity = out.child_mutable(index);
         PointLists lines;
@@ -705,17 +650,20 @@ std::string Internal::surface_pattern(bool as_base, bool contact, bool bridge, b
 // propagate std::runtime_error.
 void generate_paths(const plugin_run_context *context, SurfaceRole role)
 {
-    const run_ctx_support_toolpath *payload = plugin_ctx_as_support_toolpath(context);
-    if (!payload || !payload->object || !payload->print) throw std::runtime_error("Missing support toolpath payload");
-    if (object_count_auxiliary_layer(payload->object) == 0) return;
-    const Print print(payload->print);
-    const Object object(payload->object);
-    const PathParams params(print, object, payload->object);
-    for (uint32_t layer_index = 0; layer_index < object_count_auxiliary_layer(payload->object); ++layer_index) {
-        throw_if_cancelled(context);
-        layer_handle *layer = object_get_auxiliary_layer(payload->object, layer_index);
-        if (!plugin_property_has(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT)) continue;
-        process_layer(context, *payload, context->plugin_storage, object, params, role, layer);
-    }
+    std::vector<coord_t> support_z;
+    Common::for_support_layers(context, false,
+        // Collects owned layer ranks once on the first marked layer (so the table is nonempty), then publishes borrowed run inputs synchronously; allocation/generation failures propagate.
+        [context, role, &support_z](const run_ctx_support_toolpath &payload, const Object &object, const Common::ToolpathParams &params, layer_handle *layer) {
+            if (support_z.empty()) {
+                for (uint32_t index = 0; index < object_count_auxiliary_layer(payload.object); ++index) {
+                    const layer_handle *support_layer = object_get_auxiliary_layer(payload.object, index);
+                    if (plugin_property_has(layer_get_properties(support_layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT))
+                        support_z.push_back(layer_get_print_z(support_layer));
+                }
+                std::sort(support_z.begin(), support_z.end());
+                support_z.erase(std::unique(support_z.begin(), support_z.end()), support_z.end());
+            }
+            process_layer(context, payload, context->plugin_storage, object, params, support_z, role, layer);
+        });
 }
 } // namespace slic3r_api::Support::Toolpath

@@ -25,8 +25,10 @@ namespace Steps::StepSupportDemand {
 
 void clear(Print &print);
 void prepare(Print &print);
-bool validate_pre(const Print &print, std::string &error);
-bool validate_post(const Print &print, std::string &error);
+// Accepts demand inputs without algorithm-specific validation.
+bool validate_pre(const Print &print, std::string *error = nullptr);
+// Accepts demand outputs without algorithm-specific validation.
+bool validate_post(const Print &print, std::string *error = nullptr);
 void run_step(Orchestrator &orchestrator, Print &print);
 
 } // namespace Steps::StepSupportDemand

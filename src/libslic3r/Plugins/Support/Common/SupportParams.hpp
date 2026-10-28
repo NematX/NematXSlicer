@@ -11,15 +11,16 @@
 
    Units follow the native classes: heights, gaps and extrusion lengths in
    millimeters as double, XY distances (gap_xy, resolution, min_height) scaled,
-   angles in radians. Flows are c_flow values computed by the host
+   angles in radians except base_angle_degrees and interface_angle_increment (degrees). Flows are c_flow values computed by the host
    (object_get_support_flow(), object_get_region_flow()), with their millimeter
    twins (c_flow_mm) for the computations the native code does in millimeters.
 
        const SupportParams params(Print(payload->print), Object(payload->object));
        const double spacing = unscaled(params.base_flow.spacing);
 
-   Building one is cheap (a few config reads and host flow calls); keep one per
-   object and per step run, not per layer. A plugin using it declares
+   The family runner builds one SupportParams per object generation run and passes it down;
+   each toolpath execution builds its own. Never rebuild it per layer. Construction costs a few
+   config reads and host flow calls. A plugin using it declares
    support_geometry_keys() and, for the path fields, support_path_keys(). */
 #ifndef plugins_support_common_params_hpp_
 #define plugins_support_common_params_hpp_
@@ -56,6 +57,17 @@ struct SupportParams
     bool soluble = false;
     // Interface layers between the contact and the base, the contact itself excluded.
     size_t top_interfaces = 0, bottom_interfaces = 0;
+    // Raw configured counts, including the contact; a disabled bottom option follows the top count when used.
+    int32_t top_interface_layers = 0, bottom_interface_layers = 0;
+    // Whether the bottom count option itself is enabled, independently of its numeric value.
+    bool bottom_interface_count_enabled = false;
+    // Positive effective counts enable the geometry stacks; bottom geometry may exist without a top stack.
+    bool top_interfaces_enabled = false, bottom_interfaces_enabled = false;
+    // Publication and legacy paths use raw unclamped counts: top raw != 0 enables top surfaces; bottom surfaces require
+    // top raw != 0 and (bottom option disabled OR bottom raw != 0), unlike the positive-count geometry flags above.
+    bool top_published_interfaces_enabled = false, bottom_published_interfaces_enabled = false;
+    // One-based configured tools; 0 selects the current tool.
+    int32_t base_tool = 0, interface_tool = 0;
     // First-layer, base and interface flows at the nominal heights; the interface flow is the
     // base flow when there is no interface layer.
     c_flow first_flow = {}, base_flow = {}, interface_flow = {};
@@ -82,12 +94,19 @@ struct SupportParams
     bool with_sheath = false, interface_contact_loops = false;
     // Base and interface angles (radians, as float like the native fillers).
     float base_angle = 0.f, interface_angle = 0.f;
+    // Unconverted base angle for consumers whose calculations start in degrees.
+    double base_angle_degrees = 0;
     // Height period of the quarter-turn base rotation (mm, 0 disables) and per-layer interface
     // angle increment (degrees).
     double angle_height = 0, interface_angle_increment = 0;
     // Line density of the first-layer flange, in (0, 1].
     double raft_first_layer_density = 0;
 };
+
+// Returns borrowed object-layer views in increasing layer-id order.
+std::vector<Layer> object_layers(const Object &object);
+// Reports whether any island of the borrowed object has support demand.
+bool object_has_support_demand(const Object &object);
 
 /* ---- Support modifier volumes (enforcers and blockers) ----
    The demand modifiers and the tree family both slice these volumes at the slice Z of every object layer. The helpers below are

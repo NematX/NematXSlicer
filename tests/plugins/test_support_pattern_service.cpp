@@ -20,6 +20,7 @@
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -28,9 +29,11 @@
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Plugins/Infill/PatternPluginHelpers.hpp"
 #include "libslic3r/Plugins/Support/Common/PatternService.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Steps/StepGenerateSupport.hpp"
+#include "libslic3r/Steps/SupportPatternCallbacks.hpp"
 #include "libslic3r/Surface.hpp"
 
 /* A support family can sample INFILL_PATTERN plugins from STEP_SUPPORT through the pattern callbacks of
@@ -320,6 +323,22 @@ private:
     bool m_supportbase_was_active = false;
 };
 
+// A borrowed prebuilt service with controllable stop state and counters that expose the relay's refusal order.
+struct RelayTestPolicy {
+    Steps::InfillPatternService *service;
+    Orchestrator &host;
+    bool stopping = false;
+    size_t stop_checks = 0, service_reads = 0;
+    // Reports whether the borrowed service exists without changing it or throwing.
+    bool available() const noexcept { return service != nullptr; }
+    // Counts a stop check and returns the controlled state without accessing or modifying the borrowed print; never throws.
+    bool stop_requested(const print_handle *) noexcept { ++stop_checks; return stopping; }
+    // Counts service access and returns the borrowed nonnull service; available() must have succeeded and no allocation occurs.
+    Steps::InfillPatternService &get() noexcept { ++service_reads; return *service; }
+    // Returns the borrowed host that records contained failures without mutation or failure.
+    Orchestrator &orchestrator() const noexcept { return host; }
+};
+
 // Run STEP_SUPPORT on a print of the given test meshes.
 void run_support_step(Print &print, Model &model, std::initializer_list<Test::TestMesh> meshes)
 {
@@ -389,6 +408,76 @@ void register_support_pattern_service_test_provider(orchestrator_handle *orchest
         throw std::runtime_error("Cannot register the support pattern service test provider");
 }
 } // namespace Slic3r::Test::Plugins
+
+TEST_CASE("Support pattern relay preserves refusal order and contains probe failures", "[plugins][support-pattern-service]")
+{
+    const ScopedPatternFamily activation(ProbeMode::None);
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model);
+    Orchestrator &host = Orchestrator::instance();
+    Steps::InfillPatternService service(host, print, 1, Steps::InfillPatternService::SetupPatterns::Refuse);
+    RelayTestPolicy policy{nullptr, host};
+    using Callbacks = Steps::SupportPatternCallbacks<run_ctx_support_toolpath, RelayTestPolicy, STEP_SUPPORT_TOOLPATH>;
+    run_ctx_support_toolpath context{};
+    context.print = reinterpret_cast<const print_handle *>(&print);
+    context.object = reinterpret_cast<const object_handle *>(&print.object(0));
+    context.host_context = &policy;
+    const ExPolygon square = test_square();
+    const Surface surface(stPosInternal | stDensSparse, square);
+    const infill_pattern_runtime_id id = service.resolve_pattern_id(probe_pattern_id);
+    const raw_infill_pattern_params params = pattern_params(id, get_extents(square));
+    ExtrusionEntityCollection output;
+    output.append_child(ExtrusionEntity(true));
+    extrusion_entity_handle *out = reinterpret_cast<extrusion_entity_handle *>(&output);
+
+    // Unavailable wins over stopping and never touches the existing child or service.
+    policy.stopping = true;
+    CHECK(Callbacks::resolve(&context, probe_pattern_id) == INFILL_PATTERN_RUNTIME_ID_INVALID);
+    CHECK(Callbacks::generate(&context, id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &params, out) == 0);
+    CHECK(output.child_count() == 1);
+    CHECK(policy.stop_checks == 0);
+    CHECK(policy.service_reads == 0);
+
+    // Every refused pointer is checked before stopping; the existing child remains intact.
+    policy.service = &service;
+    CHECK(Callbacks::resolve(nullptr, probe_pattern_id) == INFILL_PATTERN_RUNTIME_ID_INVALID);
+    CHECK(Callbacks::generate(nullptr, id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &params, out) == 0);
+    run_ctx_support_toolpath missing_host = context;
+    missing_host.host_context = nullptr;
+    CHECK(Callbacks::resolve(&missing_host, probe_pattern_id) == INFILL_PATTERN_RUNTIME_ID_INVALID);
+    CHECK(Callbacks::generate(&missing_host, id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &params, out) == 0);
+    CHECK(Callbacks::generate(&context, id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, out) == 0);
+    CHECK(Callbacks::generate(&context, id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &params, nullptr) == 0);
+    CHECK(policy.stop_checks == 0);
+    CHECK(policy.service_reads == 0);
+    CHECK(output.child_count() == 1);
+
+    CHECK(Callbacks::resolve(&context, probe_pattern_id) == INFILL_PATTERN_RUNTIME_ID_INVALID);
+    CHECK(Callbacks::generate(&context, id, nullptr, nullptr, nullptr, nullptr, nullptr, nullptr, &params, out) == 0);
+    CHECK(output.child_count() == 0);
+    CHECK(policy.stop_checks == 2);
+    CHECK(policy.service_reads == 0);
+
+    // A null pattern id is forwarded to the service's fallback rather than refused by the relay.
+    policy.stopping = false;
+    CHECK(Callbacks::resolve(&context, nullptr) == service.resolve_pattern_id(nullptr));
+    CHECK(policy.service_reads == 1);
+    (void) host.consume_plugin_messages();
+    pattern_fail_run = 1;
+    int32_t result = -1;
+    REQUIRE_NOTHROW(result = Callbacks::generate(&context, id, nullptr, nullptr, nullptr, nullptr,
+        reinterpret_cast<const surface_handle *>(&surface), nullptr, &params, out));
+    CHECK(result == 0);
+    CHECK(pattern_wrote_before_failure);
+    CHECK(output.child_count() == 0);
+    CHECK(host.is_plugin_cancelled());
+    const std::vector<Orchestrator::PluginMessage> messages = host.consume_plugin_messages();
+    CHECK(has_error_message(messages, "probe pattern run failure", probe_pattern_id));
+    CHECK(std::count_if(messages.begin(), messages.end(), [](const Orchestrator::PluginMessage &message) {
+        return message.level == Orchestrator::PluginMessageLevel::Error;
+    }) == 1);
+}
 
 TEST_CASE("STEP_SUPPORT patterns fill a square with NULL island and region", "[plugins][support-pattern-service]")
 {
@@ -599,17 +688,13 @@ std::vector<std::vector<Point>> legacy_lines(InfillPattern pattern, const ExPoly
     return lines;
 }
 
-// The lines of the wrapper for the same fill.
+// Builds a shared recipe from borrowed native tip settings and samples its area, returning owned native point lines; layer identity is retained and pattern/allocation failures propagate.
 std::vector<std::vector<Point>> wrapper_lines(const Common::PatternService &patterns, storage_handle *storage, const char *pattern_id,
                                               const ExPolygon &area, const TipFill &tip)
 {
-    Common::PatternService::Fill fill;
-    fill.flow = to_c_flow(tip.flow);
-    fill.spacing = tip.flow.spacing();
-    fill.density = float(scale_d(tip.flow.spacing()) / (scale_d(tip.flow.spacing()) + float(tip.branch_distance)));
-    fill.angle = tip.angle;
-    fill.layer_id = tip.layer_id;
-    const raw_infill_pattern_params recipe = Common::PatternService::recipe(patterns.resolve(pattern_id), fill);
+    const float density = float(scale_d(tip.flow.spacing()) / (scale_d(tip.flow.spacing()) + float(tip.branch_distance)));
+    const raw_infill_pattern_params recipe = Common::fill_recipe(patterns.resolve(pattern_id), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL,
+        to_c_flow(tip.flow), tip.flow.spacing(), density, tip.angle, 0., tip.layer_id);
     std::vector<std::vector<Point>> lines;
     for (const std::vector<c_point> &line : patterns.fill_lines(storage, slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&area)), recipe)) {
         lines.emplace_back();
@@ -788,14 +873,14 @@ TEST_CASE("PatternService reports a failed call as no line and needs the callbac
     const Common::PatternService patterns(fixture.payload());
     const ExPolygon square = test_square();
     const slic3r_api::ExPolygon view(reinterpret_cast<const expolygon_handle *>(&square));
-    Common::PatternService::Fill fill;
-    fill.flow = to_c_flow(TipFill().flow);
-    fill.spacing = TipFill().flow.spacing();
-    fill.density = 0.25f;
+    raw_infill_pattern_params recipe = Common::fill_recipe(infill_pattern_runtime_id(100000), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL,
+        to_c_flow(TipFill().flow), TipFill().flow.spacing(), 0.25f, 0.f);
     // An id that no pattern has, and a pattern that needs the STEP_INFILL initialization pass.
-    CHECK(patterns.fill_lines(handle, view, Common::PatternService::recipe(infill_pattern_runtime_id(100000), fill)).empty());
-    CHECK(patterns.fill_lines(handle, view, Common::PatternService::recipe(patterns.resolve("lightning"), fill)).empty());
-    CHECK_FALSE(patterns.fill_lines(handle, view, Common::PatternService::recipe(patterns.resolve("rectilinear"), fill)).empty());
+    CHECK(patterns.fill_lines(handle, view, recipe).empty());
+    recipe.pattern_id = patterns.resolve("lightning");
+    CHECK(patterns.fill_lines(handle, view, recipe).empty());
+    recipe.pattern_id = patterns.resolve("rectilinear");
+    CHECK_FALSE(patterns.fill_lines(handle, view, recipe).empty());
 
     // A payload without callbacks (built by hand: a host older than ABI 1.2 does not load a plugin that requires it) or no payload
     // (not the support step) is refused.

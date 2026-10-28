@@ -12,6 +12,7 @@
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "InfillPatternService.hpp"
+#include "SupportPatternCallbacks.hpp"
 #include "StepPipeline.hpp"
 #include "StepRunner.hpp"
 
@@ -47,31 +48,27 @@ namespace {
 struct HostContext
 {
     InfillPatternService *service;
-    Orchestrator &orchestrator;
+    Orchestrator &owner;
+
+    // Reports whether this borrowed prebuilt service exists, without changing ownership or throwing.
+    bool available() const noexcept { return service != nullptr; }
+    // Returns the borrowed service after available() succeeds; no ownership changes or failures occur.
+    InfillPatternService &get() const noexcept { return *service; }
+    // Returns the borrowed orchestrator used for containment, without mutation or failure.
+    Orchestrator &orchestrator() const noexcept { return owner; }
+    // Reads plugin and optional payload-print stop flags without mutation or failure; a null print checks only the plugin flag.
+    bool stop_requested(const print_handle *handle) const noexcept
+    {
+        const Print *print = reinterpret_cast<const Print *>(handle);
+        return owner.is_plugin_cancelled() || (print != nullptr && print->canceled());
+    }
 };
 
 // Number of auxiliary fill surfaces of the print, advertised to the pattern
 // plugins as their maximum run count.
 size_t count_auxiliary_surfaces(const Print &print);
-// True when the plugin cancellation is requested or the print is cancelled: a pattern callback then
-// fails at once instead of working for a step that is stopping.
-bool step_is_stopping(const HostContext &host, const run_ctx_support_toolpath &ctx) noexcept;
-// Payload callback: resolve a pattern plugin id through the step's service. Never throws: a failure is
-// contained and gives INFILL_PATTERN_RUNTIME_ID_INVALID.
-infill_pattern_runtime_id resolve_pattern_id_callback(const run_ctx_support_toolpath *ctx,
-                                                      const char *pattern_plugin_id) noexcept;
-// Payload callback: fill one surface through the step's service. Never throws: a failure empties output,
-// is contained, and returns 0.
-int32_t generate_pattern_callback(const run_ctx_support_toolpath *ctx,
-                                  infill_pattern_runtime_id pattern_id,
-                                  const layer_handle *layer,
-                                  const layer_island_handle *island,
-                                  const layer_region_island_handle *region_island,
-                                  const layer_region_handle *primary_region,
-                                  const surface_handle *surface,
-                                  const expolygon_collection_handle *no_overlap_areas,
-                                  const raw_infill_pattern_params *params,
-                                  extrusion_entity_handle *output) noexcept;
+// Bind the shared noexcept relay to this step's prebuilt service policy.
+using PatternCallbacks = SupportPatternCallbacks<run_ctx_support_toolpath, HostContext, STEP_SUPPORT_TOOLPATH>;
 
 size_t count_auxiliary_surfaces(const Print &print)
 {
@@ -84,78 +81,6 @@ size_t count_auxiliary_surfaces(const Print &print)
     return count;
 }
 
-// The stop flags are two atomic reads; the print is the one of the payload (a null print only checks the plugin flag).
-bool step_is_stopping(const HostContext &host, const run_ctx_support_toolpath &ctx) noexcept
-{
-    const Print *print = reinterpret_cast<const Print *>(ctx.print);
-    return host.orchestrator.is_plugin_cancelled() || (print != nullptr && print->canceled());
-}
-
-// A null context, host context or service is an ordinary refusal. Only C++ code runs inside the try (the
-// service lookup and its warning message): a failure there is contained after the catch and gives INVALID.
-infill_pattern_runtime_id resolve_pattern_id_callback(const run_ctx_support_toolpath *ctx,
-                                                      const char *pattern_plugin_id) noexcept
-{
-    if (ctx == nullptr || ctx->host_context == nullptr)
-        return INFILL_PATTERN_RUNTIME_ID_INVALID;
-    const HostContext &host = *static_cast<const HostContext *>(ctx->host_context);
-    if (host.service == nullptr || step_is_stopping(host, *ctx))
-        return INFILL_PATTERN_RUNTIME_ID_INVALID;
-    try {
-        return host.service->resolve_pattern_id(pattern_plugin_id);
-    } catch (...) {
-        contain_pattern_callback_failure(host.orchestrator, STEP_SUPPORT_TOOLPATH, nullptr);
-        return INFILL_PATTERN_RUNTIME_ID_INVALID;
-    }
-}
-
-// Null arguments are refused with 0 and leave output untouched. A stopping step empties output and
-// returns 0 without a message. Otherwise the payload of the pattern plugin is copied from the algorithm's
-// arguments and the service runs it; the ordinary refusals (0 from the service) keep their service message
-// and let the step go on, while an exception (pattern error, cancellation of the print or of the plugins)
-// is contained: output is emptied and the plugin cancellation is requested. A PluginStopped adds no
-// diagnostic (a known cause already has its own message; an Unknown cause has none, and the final step error
-// says a stop was requested); any other exception is recorded as a host failure, unless the print was
-// cancelled. Only C++ code runs inside the try.
-int32_t generate_pattern_callback(const run_ctx_support_toolpath *ctx,
-                                  infill_pattern_runtime_id pattern_id,
-                                  const layer_handle *layer,
-                                  const layer_island_handle *island,
-                                  const layer_region_island_handle *region_island,
-                                  const layer_region_handle *primary_region,
-                                  const surface_handle *surface,
-                                  const expolygon_collection_handle *no_overlap_areas,
-                                  const raw_infill_pattern_params *params,
-                                  extrusion_entity_handle *output) noexcept
-{
-    if (ctx == nullptr || ctx->host_context == nullptr || params == nullptr || output == nullptr)
-        return 0;
-    const HostContext &host = *static_cast<const HostContext *>(ctx->host_context);
-    if (host.service == nullptr)
-        return 0;
-    if (step_is_stopping(host, *ctx)) {
-        empty_output(output);
-        return 0;
-    }
-
-    try {
-        run_ctx_infill_pattern payload = {};
-        payload.print = ctx->print;
-        payload.object = ctx->object;
-        payload.layer = layer;
-        payload.island = island;
-        payload.region_island = region_island;
-        payload.primary_region = primary_region;
-        payload.surface = surface;
-        payload.no_overlap_areas = no_overlap_areas;
-        payload.params = params;
-        payload.output = output;
-        return host.service->generate_pattern(pattern_id, payload);
-    } catch (...) {
-        contain_pattern_callback_failure(host.orchestrator, STEP_SUPPORT_TOOLPATH, output);
-        return 0;
-    }
-}
 } // namespace
 
 // Nothing to clear: the extrusions live in the support auxiliary layers, which a Slicing replay destroys.
@@ -164,19 +89,19 @@ void clear(Print &) {}
 // Nothing to prepare: the algorithms read the surfaces left by the support families.
 void prepare(Print &) {}
 
-// No common input check: input validation belongs to each algorithm.
-bool validate_pre(const Print &, std::string &)
+// Accepts borrowed input without algorithm-specific checks or modifying the optional error string; always returns true without failure.
+bool validate_pre(const Print &, std::string *)
 {
     return true;
 }
 
-// No common output check: output validation belongs to each algorithm.
-bool validate_post(const Print &, std::string &)
+// Accepts borrowed output without algorithm-specific checks or modifying the optional error string; always returns true without failure.
+bool validate_post(const Print &, std::string *)
 {
     return true;
 }
 
-// Run each selected toolpath algorithm, in priority order, on the objects whose own selector chose it.
+// Borrows print/orchestrator, builds a step-owned pattern service before joined object runs, and dispatches selected algorithms in priority order; algorithms publish layer-owned paths, and validation/runner/cancellation/allocation failures propagate.
 void run_step(Orchestrator &orchestrator, Print &print)
 {
     Detail::validate_or_report(validate_pre, print, "Support-toolpath pre-step validation");
@@ -198,13 +123,14 @@ void run_step(Orchestrator &orchestrator, Print &print)
                                        *entry.plugin,
                                        entry.object_indices,
                                        print.objects().size(),
-                                       [&print, &host_context](const size_t object_idx) {
+                                        // Builds a borrowed payload for a valid selected object index; the joined run owns its lifetime, and no geometry is copied.
+                                        [&print, &host_context](const size_t object_idx) {
             run_ctx_support_toolpath context = {};
             context.print = reinterpret_cast<const print_handle *>(&print);
             context.object = reinterpret_cast<const object_handle *>(&print.object(object_idx));
             context.host_context = &host_context;
-            context.resolve_pattern_id = &resolve_pattern_id_callback;
-            context.generate_pattern = &generate_pattern_callback;
+            context.resolve_pattern_id = &PatternCallbacks::resolve;
+            context.generate_pattern = &PatternCallbacks::generate;
             return context;
         });
         print.pipeline_progress().complete_plugin(STEP_SUPPORT_TOOLPATH, entry.plugin->get_id());

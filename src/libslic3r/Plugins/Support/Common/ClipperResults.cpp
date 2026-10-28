@@ -4,9 +4,50 @@
 #include <cmath>
 #include <cstdlib>
 
-/* Implementation of the native-like Clipper results (see ClipperResults.hpp). */
+/* Native-like Clipper results and ordered ring copying (see ClipperResults.hpp). The host flattens each area
+   as contour then holes; append operations insert each borrowed ring separately to retain native insertion's
+   near-closing-vertex handling. polygon_rings() supplies ordered views without copying their vertices. */
 
 namespace slic3r_api::Support::Common {
+// Borrows valid area views and copies rings through the host into caller storage; no sorting or geometry changes occur, and allocation failures propagate.
+StoredPolygonCollection to_polygons(storage_handle *storage, const ExPolygonCollection &areas)
+{
+    StoredPolygonCollection rings(storage);
+    ::expolygons_to_polygons(areas.handle(), rings.mutable_handle());
+    return rings;
+}
+
+// Inserts a borrowed area's rings individually into caller storage, retaining native ring insertion's vertex handling; the input is unchanged and allocation failures propagate.
+StoredPolygonCollection expolygon_rings(storage_handle *storage, const ExPolygon &area)
+{
+    StoredPolygonCollection rings(storage);
+    append_polygons(rings, area);
+    return rings;
+}
+
+// Lists borrowed contour and hole views without copying vertices; the area must outlive the returned vector and allocation failures propagate.
+std::vector<Polygon> polygon_rings(const ExPolygon &area)
+{
+    std::vector<Polygon> rings{area.contour()};
+    for (const Polygon hole : area.holes())
+        rings.push_back(hole);
+    return rings;
+}
+
+// Inserts each borrowed area's ordered rings after existing destination rings; native insertion may remove a near-closing vertex, views must be valid and allocation failures propagate.
+void append_polygons(StoredPolygonCollection &destination, const ExPolygonCollection &areas)
+{
+    for (const ExPolygon area : areas)
+        append_polygons(destination, area);
+}
+
+// Inserts borrowed ordered ring views into destination storage without an intermediate polygon collection; native insertion may remove a near-closing vertex, existing rings remain and allocation failures propagate.
+void append_polygons(StoredPolygonCollection &destination, const ExPolygon &area)
+{
+    for (const Polygon ring : polygon_rings(area))
+        destination.push_back(ring);
+}
+
 bool is_small_area(const std::vector<c_point> &ring)
 {
     // Signed area and centroid exactly as ClipperLib::Area() and ClipperLib::Centroid() compute them,

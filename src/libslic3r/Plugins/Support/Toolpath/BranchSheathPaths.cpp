@@ -20,6 +20,7 @@
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
+#include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 
@@ -77,15 +78,7 @@ Vec as_vec(c_point point) { return Vec{double(point.x), double(point.y)}; }
 // Rounds toward zero, as the legacy cast of an anchor point to coord_t does.
 c_point to_point(Vec v) { return c_point{coord_t(v.x), coord_t(v.y)}; }
 
-// Settings read once per callback from the object: the support geometry, the base angle and tool, and the area of the
-// double-wall circle in scaled units (zero when the double wall is disabled).
-struct BranchParams {
-    BranchParams(const Print &print, const Object &object);
-    Common::SupportParams geometry;
-    double base_angle_degrees = 0.;
-    int32_t base_tool = 0;
-    double double_wall_area = 0.;
-};
+using BranchParams = Common::ToolpathParams;
 
 // An anchor candidate ring: its points, and for each point the contour it came from, or -1 at a crossing of contours.
 struct CandidateRing {
@@ -124,8 +117,6 @@ void append_surface_paths(storage_handle *storage, const ExPolygon &surface, con
 PointLists perimeter_lines(storage_handle *storage, const ExPolygon &surface, double clip_length, coord_t resolution);
 // The sheaths of a surface: one per contour, then one per hole, each extended by its anchor when one is found.
 PointLists sheath_lines(storage_handle *storage, const ExPolygon &surface, double width, double spacing, coord_t resolution);
-// The rings of a surface: the contour first, then each hole.
-std::vector<Points> rings_of(const ExPolygon &surface);
 // The surface shrunk by one width, each ring clockwise like the sheaths, with the source contour of each point.
 std::vector<CandidateRing> anchor_candidates(storage_handle *storage, const ExPolygon &surface, double width);
 // The offset ring of each source contour on its own, with the parameters of the combined shrink: the contour shrinks, each hole grows.
@@ -148,15 +139,6 @@ Points clip_end(storage_handle *storage, const Points &points, double distance);
 // Publish the paths of one object island into the support bucket of its base-tool region island.
 void publish_paths(const plugin_run_context *context, layer_handle *layer, uint32_t island_index, MutableExtrusionEntity paths, int32_t tool);
 
-BranchParams::BranchParams(const Print &print, const Object &object) : geometry(print, object)
-{
-    const Config config = object.config();
-    base_angle_degrees = config.get("support_material_angle").get_float();
-    base_tool = config.get("support_material_extruder").get_int();
-    const double diameter = config.get("support_tree_branch_diameter_double_wall").get_float();
-    double_wall_area = 0.25 * scale_d(diameter) * scale_d(diameter) * PI;
-}
-
 // Borrow inputs and context for synchronous generation, moving temporary paths into layer-owned regions. Stopping
 // propagates silent PluginCancelled (the cause has its message, the step names it, or the runner rethrows the print
 // cancellation); ordinary refusals throw std::runtime_error.
@@ -167,7 +149,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
         StoredExtrusionEntity paths(storage);
         for (uint32_t region_index = 0; region_index < layer_island_count_region_island(island); ++region_index)
             append_region_paths(context, payload, storage, object, params, layer, layer_island_get_region_island(island, region_index), paths.mutable_view());
-        publish_paths(context, layer, island_index, paths.mutable_view(), params.base_tool);
+        publish_paths(context, layer, island_index, paths.mutable_view(), params.geometry.base_tool);
     }
 }
 
@@ -218,11 +200,7 @@ void append_flange(const plugin_run_context *context, const run_ctx_support_tool
     const ClipperContext clipper(storage);
     StoredExPolygonCollection fused = clipper_offset2(clipper(surfaces), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection();
     fused.ensure_valid(params.geometry.resolution);
-    const raw_infill_pattern_params recipe = Common::base_fill_recipe(payload, "rectilinear", RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL,
-                                                                      params.geometry.first_flow, params.geometry.first_flow_mm.spacing,
-                                                                      float(params.geometry.raft_first_layer_density),
-                                                                      Common::radians(float(params.base_angle_degrees + 90.)), 0.);
-    Common::fill_base_areas(context, payload, storage, out, fused, layer, recipe, true);
+    Common::append_base_flange(context, payload, storage, out, fused, layer, params.geometry);
 }
 
 // Classify valid disjoint fused islands using flow width, then move owned entities into out in closed-piece order. A piece
@@ -289,14 +267,13 @@ bool append_centreline(storage_handle *storage, const ExPolygon &island, const c
     out.append_child_move(centreline->mutable_view());
     return true;
 }
+// Builds sheaths from a borrowed closed surface and flow, moving storage-owned paths or a fixed inner-first double-wall group into out; area and threshold use squared scaled units, and geometry/allocation failures propagate.
 void append_surface_paths(storage_handle *storage, const ExPolygon &surface, const BranchParams &params, const c_flow &flow,
                           MutableExtrusionEntity out)
 {
     const double width = double(flow.width), spacing = double(flow.spacing);
     const coord_t resolution = params.geometry.resolution;
-    EPropertyAttributes attributes;
-    attributes.extrusion_role(int32_t(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL)).mm3_per_mm(flow.mm3_per_mm)
-        .width(float(unscaled(flow.width))).height(float(unscaled(flow.height)));
+    const EPropertyAttributes attributes = Common::path_attributes(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, flow);
     if (params.double_wall_area <= 0. || surface.area() <= params.double_wall_area) {
         Common::append_paths(storage, out, sheath_lines(storage, surface, width, spacing, resolution), attributes, false);
         return;
@@ -317,10 +294,13 @@ void append_surface_paths(storage_handle *storage, const ExPolygon &surface, con
     out.append_child_move(group.mutable_view());
 }
 
+// Copies ordered rings from a borrowed surface, reverses holes to counter-clockwise, closes and clips their ends, returning owned validated lines; clip_length and resolution are scaled and geometry/allocation failures propagate.
 PointLists perimeter_lines(storage_handle *storage, const ExPolygon &surface, double clip_length, coord_t resolution)
 {
     PointLists lines;
-    const std::vector<Points> rings = rings_of(surface);
+    std::vector<Points> rings;
+    for (const Polygon ring : Common::polygon_rings(surface))
+        rings.push_back(ring.points());
     for (size_t index = 0; index < rings.size(); ++index) {
         Points points = rings[index];
         points.push_back(points.front());
@@ -331,9 +311,12 @@ PointLists perimeter_lines(storage_handle *storage, const ExPolygon &surface, do
     return Common::valid_polylines(storage, lines, resolution);
 }
 
+// Copies ordered rings from a borrowed surface, clips clockwise seams and extends matching anchors before reversal, returning owned validated lines; dimensions are scaled and geometry/allocation failures propagate.
 PointLists sheath_lines(storage_handle *storage, const ExPolygon &surface, double width, double spacing, coord_t resolution)
 {
-    const std::vector<Points> rings = rings_of(surface);
+    std::vector<Points> rings;
+    for (const Polygon ring : Common::polygon_rings(surface))
+        rings.push_back(ring.points());
     const std::vector<CandidateRing> candidates = anchor_candidates(storage, surface, width);
     const double clip_length = spacing * 0.15, anchor_length = spacing * 6.;
     PointLists lines;
@@ -351,14 +334,6 @@ PointLists sheath_lines(storage_handle *storage, const ExPolygon &surface, doubl
         lines.push_back(path);
     }
     return Common::valid_polylines(storage, lines, resolution);
-}
-
-std::vector<Points> rings_of(const ExPolygon &surface)
-{
-    std::vector<Points> rings{surface.contour().points()};
-    for (const Polygon hole : surface.holes())
-        rings.push_back(hole.points());
-    return rings;
 }
 
 std::vector<CandidateRing> anchor_candidates(storage_handle *storage, const ExPolygon &surface, double width)
@@ -536,21 +511,11 @@ void publish_paths(const plugin_run_context *context, layer_handle *layer, uint3
 // message, the step names it, or the runner rethrows the print cancellation), while ordinary refusals propagate std::runtime_error.
 void generate_branch_paths(const plugin_run_context *context)
 {
-    const run_ctx_support_toolpath *payload = plugin_ctx_as_support_toolpath(context);
-    if (!payload || !payload->object || !payload->print)
-        throw std::runtime_error("Missing support toolpath payload");
-    if (object_count_auxiliary_layer(payload->object) == 0)
-        return;
-    const Print print(payload->print);
-    const Object object(payload->object);
-    const BranchParams params(print, object);
-    for (uint32_t layer_index = 0; layer_index < object_count_auxiliary_layer(payload->object); ++layer_index) {
-        throw_if_cancelled(context);
-        layer_handle *layer = object_get_auxiliary_layer(payload->object, layer_index);
-        if (!plugin_property_has(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT))
-            continue;
-        process_layer(context, *payload, context->plugin_storage, object, params, layer);
-    }
+    Common::for_support_layers(context, true,
+        // Borrows matching layer/run inputs synchronously and publishes branch methods; generation failures propagate.
+        [context](const run_ctx_support_toolpath &payload, const Object &object, const Common::ToolpathParams &params, layer_handle *layer) {
+            process_layer(context, payload, context->plugin_storage, object, params, layer);
+        });
 }
 
 } // namespace slic3r_api::Support::Toolpath

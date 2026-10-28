@@ -6,6 +6,9 @@
 #include <stdexcept>
 #include <utility>
 #include <vector>
+
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
+#include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/DataTreeProperties.hpp"
@@ -25,14 +28,16 @@
    means the current extruder, stored as EXTRUDER_ID_UNKNOWN. Temporary API collections use shared
    plugin storage but are released individually; a run never clears that shared storage. Groups of
    one print Z share the native interface id of that Z, and they are published thinnest first so the
-   host's ordered insertion keeps the thickest layer first at that Z. */
+   host's ordered insertion keeps the thickest layer first at that Z.
+   run_support_family() shares the style and demand filters, constructs one parameter object, calls the family's
+   slab generator, publishes the slabs and finishes progress for valid payloads. */
 
 namespace slic3r_api::Support::Common {
 // Group non-empty slabs by integer Z and thickness and publish their union before locking islands; equal-Z insertion precedes existing layers with unique creation ids, and rejected API writes throw.
 // Inputs and context are borrowed; the object owns published layers. Rejected writes exit through silent
 // PluginCancelled when stopping (the cause has its message, the step names it, or the runner rethrows the print
 // cancellation), otherwise std::runtime_error.
-void publish(const plugin_run_context *context, const Object &object, GeneratedSupport &support, orchestrator_handle *orchestrator)
+void publish(const plugin_run_context *context, const Object &object, const SupportParams &params, GeneratedSupport &support, orchestrator_handle *orchestrator)
 {
     storage_handle *storage = support.storage;
     const ClipperContext clipper(storage);
@@ -41,14 +46,10 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
     sorted.insert(sorted.end(), support.base.begin(), support.base.end());
     sorted.insert(sorted.end(), support.interfaces.begin(), support.interfaces.end());
     std::sort(sorted.begin(), sorted.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) { return *a < *b; });
-    const Config config = object.config();
-    const int32_t base_tool = config.get("support_material_extruder").get_int();
-    const int32_t interface_tool = config.get("support_material_interface_extruder").get_int();
-    const bool top_enabled = config.get("support_material_interface_layers").get_int() != 0;
-    const ConfigOption bottom_layers = config.get("support_material_bottom_interface_layers");
-    // Index -1 asks whether the option as a whole is enabled, like the native is_enabled().
-    const bool bottom_enabled = config_option_is_enabled(bottom_layers.handle(), -1) != 0 ?
-        top_enabled && bottom_layers.get_int() != 0 : top_enabled;
+    const int32_t base_tool = params.base_tool;
+    const int32_t interface_tool = params.interface_tool;
+    const bool top_enabled = params.top_published_interfaces_enabled;
+    const bool bottom_enabled = params.bottom_published_interfaces_enabled;
     const extruder_index_t base_extruder = base_tool > 0 ? base_tool - 1 : EXTRUDER_ID_UNKNOWN;
     const extruder_index_t interface_extruder = interface_tool > 0 ? interface_tool - 1 : EXTRUDER_ID_UNKNOWN;
     // The native generator only moves a contact into the base when both support roles share one
@@ -187,6 +188,26 @@ void publish(const plugin_run_context *context, const Object &object, GeneratedS
         }
         i = z_end;
     }
+}
+
+// Borrows a valid support payload, filters its style and demand, and publishes generated owned slabs before finishing progress; invalid payloads return unfinished, while cancellation and generation/publication failures propagate.
+void run_support_family(const plugin_run_context *context, orchestrator_handle *orchestrator, PluginProgress &progress,
+                        SupportStyle first_style, SupportStyle second_style, GenerateSupport generate)
+{
+    throw_if_cancelled(context);
+    const run_ctx_generate_support *payload = plugin_ctx_as_generate_support(context);
+    if (!payload || !payload->object || !payload->print)
+        return;
+    const Print print(payload->print);
+    const Object object(payload->object);
+    const SupportStyle style = support_style(object.config());
+    if ((style == first_style || style == second_style) && object_has_support_demand(object)) {
+        const SupportParams params(print, object);
+        GeneratedSupport support(context->plugin_storage);
+        generate(context, print, object, params, support);
+        publish(context, object, params, support, orchestrator);
+    }
+    progress.finish_run();
 }
 
 // Decide whether the native generator would have moved a contact area into the base layer: the

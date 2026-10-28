@@ -1,3 +1,7 @@
+///|/ Copyright (c) SuperSlicer 2026 Durand Remi @supermerill
+///|/
+///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
+///|/
 
 #include "StepGenerateSupport.hpp"
 
@@ -20,6 +24,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "InfillPatternService.hpp"
+#include "SupportPatternCallbacks.hpp"
 #include "StepRunner.hpp"
 
 /* STEP_SUPPORT calls every active support family once per object. A family may
@@ -94,9 +99,12 @@ public:
     // The orchestrator that receives the failures contained by the callbacks.
     Orchestrator &orchestrator() { return m_orchestrator; }
 
-    // True when the plugin cancellation is requested or the print is cancelled: the callbacks then fail at
-    // once, without building the service or adding a message, because the runner is about to stop the step.
-    bool stop_requested() const noexcept { return m_orchestrator.is_plugin_cancelled() || m_print.canceled(); }
+    // Reports lazy access as available without construction, mutation, ownership changes or failure.
+    bool available() const noexcept { return true; }
+
+    // Reads stop flags from the bound orchestrator/print, ignoring the payload print, without mutation or failure;
+    // callbacks then refuse without constructing the service or adding a message.
+    bool stop_requested(const print_handle *) const noexcept { return m_orchestrator.is_plugin_cancelled() || m_print.canceled(); }
 private:
     Orchestrator &m_orchestrator;
     Print &m_print;
@@ -104,97 +112,20 @@ private:
     std::optional<InfillPatternService> m_service;
 };
 
-// Payload callback: resolve a pattern plugin id through the step's service. Never throws; returns INVALID
-// at once, without building the service, when the step is already stopping.
-infill_pattern_runtime_id resolve_pattern_id_callback(const run_ctx_generate_support *ctx,
-                                                      const char *pattern_plugin_id) noexcept;
-// Payload callback: fill one surface through the step's service. Layer, island, region island, primary
-// region and no-overlap areas are forwarded as given, NULL included. Never throws: a failure empties
-// output, is recorded (no message for a PluginStopped), and returns 0; a step already stopping empties output and returns 0 without a message.
-int32_t generate_pattern_callback(const run_ctx_generate_support *ctx,
-                                  infill_pattern_runtime_id pattern_id,
-                                  const layer_handle *layer,
-                                  const layer_island_handle *island,
-                                  const layer_region_island_handle *region_island,
-                                  const layer_region_handle *primary_region,
-                                  const surface_handle *surface,
-                                  const expolygon_collection_handle *no_overlap_areas,
-                                  const raw_infill_pattern_params *params,
-                                  extrusion_entity_handle *output) noexcept;
-
-// A null context is an ordinary refusal. A stopping step gives INVALID before the service is touched, so a
-// failed construction is not retried. Only C++ code runs inside the try; a failure is contained after the
-// catch (recorded once, plugin cancellation requested).
-infill_pattern_runtime_id resolve_pattern_id_callback(const run_ctx_generate_support *ctx,
-                                                      const char *pattern_plugin_id) noexcept
-{
-    if (ctx == nullptr || ctx->host_context == nullptr)
-        return INFILL_PATTERN_RUNTIME_ID_INVALID;
-    LazyPatternService &patterns = *static_cast<LazyPatternService *>(ctx->host_context);
-    if (patterns.stop_requested())
-        return INFILL_PATTERN_RUNTIME_ID_INVALID;
-    try {
-        return patterns.get().resolve_pattern_id(pattern_plugin_id);
-    } catch (...) {
-        contain_pattern_callback_failure(patterns.orchestrator(), STEP_SUPPORT, nullptr);
-        return INFILL_PATTERN_RUNTIME_ID_INVALID;
-    }
-}
-
-// Null arguments are an ordinary refusal (0, output untouched). A stopping step empties output and returns 0
-// without a message. Otherwise the payload of the pattern plugin is copied from the arguments and the service
-// runs it; an exception is contained: output is emptied and the plugin cancellation is requested. A PluginStopped
-// adds no diagnostic (a known cause already has its own message; an Unknown cause has none, and the final step
-// error says a stop was requested); any other exception is recorded as a host failure. A print cancellation is
-// left to the runner. Only C++ code runs inside the try.
-int32_t generate_pattern_callback(const run_ctx_generate_support *ctx,
-                                  infill_pattern_runtime_id pattern_id,
-                                  const layer_handle *layer,
-                                  const layer_island_handle *island,
-                                  const layer_region_island_handle *region_island,
-                                  const layer_region_handle *primary_region,
-                                  const surface_handle *surface,
-                                  const expolygon_collection_handle *no_overlap_areas,
-                                  const raw_infill_pattern_params *params,
-                                  extrusion_entity_handle *output) noexcept
-{
-    if (ctx == nullptr || ctx->host_context == nullptr || params == nullptr || output == nullptr)
-        return 0;
-
-    LazyPatternService &patterns = *static_cast<LazyPatternService *>(ctx->host_context);
-    if (patterns.stop_requested()) {
-        empty_output(output);
-        return 0;
-    }
-    try {
-        run_ctx_infill_pattern payload = {};
-        payload.print = ctx->print;
-        payload.object = ctx->object;
-        payload.layer = layer;
-        payload.island = island;
-        payload.region_island = region_island;
-        payload.primary_region = primary_region;
-        payload.surface = surface;
-        payload.no_overlap_areas = no_overlap_areas;
-        payload.params = params;
-        payload.output = output;
-        return patterns.get().generate_pattern(pattern_id, payload);
-    } catch (...) {
-        contain_pattern_callback_failure(patterns.orchestrator(), STEP_SUPPORT, output);
-        return 0;
-    }
-}
+// Bind the shared noexcept relay to this step's lazy service policy.
+using PatternCallbacks = SupportPatternCallbacks<run_ctx_generate_support, LazyPatternService, STEP_SUPPORT>;
 
 } // namespace
 
 namespace Detail {
-// Mechanism (the contract is in the header). Both inputs are in scaled units (1 unit = 1 nm), unsorted and may repeat. Pass 1: a movable
+// Both inputs are in scaled units (1 unit = 1 nm), unsorted and may repeat. Pass 1: a movable
 // value within 4 * SCALED_EPSILON (inclusive) of a fixed value takes the nearest fixed value (the lower one on a tie). Pass 2: an ascending
 // sweep over the other movable values keeps the first, and each next value within 4 * SCALED_EPSILON of the last kept one takes its value;
 // otherwise it becomes the kept one. Hence, when the fixed values are more than 4 * SCALED_EPSILON apart, two distinct results (fixed values
 // included) are more than 4 * SCALED_EPSILON apart, and no value moves by more than 4 * SCALED_EPSILON.
 CloseZMapping close_z_mapping(std::vector<coord_t> fixed, std::vector<coord_t> movable)
-{    constexpr coord_t tolerance = 4 * SCALED_EPSILON;
+{
+    constexpr coord_t tolerance = 4 * SCALED_EPSILON;
     std::sort(fixed.begin(), fixed.end());
     fixed.erase(std::unique(fixed.begin(), fixed.end()), fixed.end());
     std::sort(movable.begin(), movable.end());
@@ -295,6 +226,7 @@ bool validate_post(const Print &, std::string *)
 // Call the active support families in priority order for each object; they publish auxiliary surfaces and runner errors stop the step.
 // Then align_support_z() keeps the support z apart from the other z of the print: per object when the print is printed object by object,
 // otherwise once for all objects.
+// Borrows the run inputs, owns the lazy pattern service until joined object runs finish, and propagates runner/cancellation/allocation failures; families publish surfaces, which the islands of the object's auxiliary layers own after publication.
 void run_step(Orchestrator &orchestrator, Print &print)
 {
     // Lives for the whole step; only built when a family calls a pattern callback.
@@ -304,13 +236,14 @@ void run_step(Orchestrator &orchestrator, Print &print)
                                    STEP_SUPPORT,
                                    &print.full_print_config(),
                                    print.objects().size(),
-                                   [&print, &patterns](const size_t object_idx) {
+                                    // Builds a borrowed payload for a valid object index; the joined run owns its lifetime, and no geometry is copied.
+                                    [&print, &patterns](const size_t object_idx) {
         run_ctx_generate_support context = {};
         context.print = reinterpret_cast<const print_handle *>(&print);
         context.object = reinterpret_cast<const object_handle *>(&print.object(object_idx));
         context.host_context = &patterns;
-        context.resolve_pattern_id = &resolve_pattern_id_callback;
-        context.generate_pattern = &generate_pattern_callback;
+        context.resolve_pattern_id = &PatternCallbacks::resolve;
+        context.generate_pattern = &PatternCallbacks::generate;
         return context;
     });
     print.throw_if_canceled();

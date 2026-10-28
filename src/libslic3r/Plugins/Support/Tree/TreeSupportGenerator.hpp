@@ -31,7 +31,9 @@ namespace TreeFamily {
 
 // Fill out with the slabs of the tree support of one object; organic selects branch slabs instead of base slabs. A null
 // context never cancels.
-void generate_tree_support(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object, bool organic,
+// Routes and draws one object using its borrowed per-run parameters and one derived tree settings object.
+void generate_tree_support(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
+                           const slic3r_api::Support::Common::SupportParams &params, bool organic,
                            slic3r_api::Support::Common::GeneratedSupport &out);
 
 // Fill out with the slabs of the given routed trees of one object, the contacts already in out.top. The same rules as
@@ -39,7 +41,9 @@ void generate_tree_support(const plugin_run_context *context, const slic3r_api::
 // the first base slab is widened by raft_first_layer_expansion when it starts on the bed (Common::expand_first_layer_foot()).
 // The brim and the skirt are ignored. The resting parts (RestingPart, from route_trees()) are the parts of the contacts that rest on the object: each gets
 // a floor on the object under it, and the stack of the contact then shortens down to that floor, as in the grid.
+// Builds slabs from routed nodes using the same borrowed parameters and tree settings that routed them.
 void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Print &print, const slic3r_api::Object &object,
+                         const slic3r_api::Support::Common::SupportParams &params, const TreeSettings &settings,
                          std::vector<RoutedTree> &trees, bool organic, slic3r_api::Support::Common::GeneratedSupport &out,
                          const std::vector<RestingPart> &resting);
 

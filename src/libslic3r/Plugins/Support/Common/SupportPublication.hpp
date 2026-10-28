@@ -7,7 +7,11 @@
    family publishes its slabs the same way. The grouping and numbering rules are
    explained in SupportPublication.cpp.
 
-       Common::publish(context, object, support, orchestrator); */
+   run_support_family() shares the style and demand filters, constructs the run's
+   parameters once, calls the family's slab generator, publishes its slabs and
+   finishes progress. The generated slabs live until publication returns.
+
+       Common::publish(context, object, params, support, orchestrator); */
 #ifndef plugins_support_common_publication_hpp_
 #define plugins_support_common_publication_hpp_
 
@@ -15,6 +19,9 @@
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportLayers.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
+
+namespace slic3r_api { class PluginProgress; }
 
 namespace slic3r_api::Support::Common {
 namespace Internal {
@@ -37,6 +44,12 @@ StoredPolygonCollection resolve_overlap(const StoredPolygonCollection &surfaces,
 // PluginCancelled when stopping (the cause has its message, the step names it, or the runner rethrows the print
 // cancellation), otherwise std::runtime_error. context is the calling plugin's borrowed run context, used only after
 // a host callback failure to exit through PluginCancelled when stopping; nullptr is accepted and disables this check.
-void publish(const plugin_run_context *context, const Object &object, GeneratedSupport &support, orchestrator_handle *orchestrator);
+// Publishes borrowed slabs using the same object's per-run tool and interface parameters.
+void publish(const plugin_run_context *context, const Object &object, const SupportParams &params, GeneratedSupport &support, orchestrator_handle *orchestrator);
+// A family fills the borrowed run's slabs using its single shared parameter object.
+using GenerateSupport = void (*)(const plugin_run_context *, const Print &, const Object &, const SupportParams &, GeneratedSupport &);
+// Filters styles and demand, constructs one parameter object, generates and publishes slabs, then finishes valid runs' progress.
+void run_support_family(const plugin_run_context *context, orchestrator_handle *orchestrator, PluginProgress &progress,
+                        SupportStyle first_style, SupportStyle second_style, GenerateSupport generate);
 } // namespace slic3r_api::Support::Common
 #endif

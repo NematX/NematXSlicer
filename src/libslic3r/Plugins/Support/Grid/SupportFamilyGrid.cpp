@@ -3,7 +3,6 @@
 #include "GridSupportGenerator.hpp"
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
-#include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 
@@ -28,32 +27,8 @@ int32_t SupportFamilyGrid::used_config_keys(raw_used_config_key *keys) const noe
 // Skip unsupported styles or empty demand, and publish geometric support; host cancellation and calculation errors are reported by PluginBase.
 void SupportFamilyGrid::run_impl(const plugin_run_context *context) const
 {
-    throw_if_cancelled(context);
-    const run_ctx_generate_support *payload = plugin_ctx_as_generate_support(context);
-    if (!payload || !payload->object || !payload->print) return;
-    const Print print(payload->print);
-    const Object object(payload->object);
-    const Config config = object.config();
-    const Common::SupportStyle style = Common::support_style(config);
-    if (style != Common::SupportStyle::Grid && style != Common::SupportStyle::Snug) {
-        progress().finish_run();
-        return;
-    }
-    bool has_demand = false;
-    for (uint32_t layer_idx = 0; layer_idx < object.layer_count() && !has_demand; ++layer_idx) {
-        const Layer layer = object.layer(layer_idx);
-        for (uint32_t island = 0; island < layer.island_count(); ++island)
-            has_demand = has_demand || !layer.island(island).support_demand().empty();
-    }
-    if (!has_demand) {
-        progress().finish_run();
-        return;
-    }
-    const Common::SupportParams params(print, object);
-    Common::GeneratedSupport support(context->plugin_storage);
-    generate_support(context, print, object, params, support);
-    Common::publish(context, object, support, m_orchestrator);
-    progress().finish_run();
+    Common::run_support_family(context, m_orchestrator, progress(), Common::SupportStyle::Grid, Common::SupportStyle::Snug,
+                               &generate_support);
 }
 
 // Register the static provider with the host, which manages activation and shared scratch storage.

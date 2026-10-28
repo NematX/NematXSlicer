@@ -1,8 +1,10 @@
-///|/ Copyright (c) SuperSlicer 2026 Durand R?mi @supermerill
+///|/ Copyright (c) SuperSlicer 2026 Durand Remi @supermerill
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/* Support families publish auxiliary surfaces for each object. Pattern callbacks share a lazy step-owned service;
+   the final host pass aligns support-layer Z values before toolpath generation. */
 #ifndef steps_stepgeneratesupport_hpp_
 #define steps_stepgeneratesupport_hpp_
 

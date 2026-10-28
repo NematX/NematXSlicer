@@ -6,6 +6,7 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 
 /* Buildplate-only support keeps demand only where a vertical column can reach
    the bed without crossing the object. For layer i, covered is the union
@@ -39,7 +40,7 @@ int32_t SupportDemandBuildplateOnly::used_config_keys(raw_used_config_key *keys)
     return 2;
 }
 
-// Subtract expanded lower slices from the demand of grid and snug objects; other styles, disabled filters and missing object contexts are skipped, and cancellation stops the filter.
+// Accumulates borrowed lower slices through Common and subtracts coverage from grid/snug island demand; the context supplies mutable demand, other styles/disabled filters/missing payloads are skipped, and cancellation/geometry/allocation failures propagate.
 void SupportDemandBuildplateOnly::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
@@ -61,7 +62,7 @@ void SupportDemandBuildplateOnly::run_impl(const plugin_run_context *run_ctx) co
     for (uint32_t layer_idx = 0; layer_idx < object.layer_count(); ++layer_idx) {
         throw_if_cancelled(run_ctx);
         if (layer_idx > 0)
-            covered = clipper_union2(covered, clipper_offset(clipper(object.layer(layer_idx - 1).slices()), scale_d(0.01)));
+            covered = Common::accumulate_lower_slices(clipper, covered, object.layer(layer_idx - 1));
 
         const Layer layer = object.layer(layer_idx);
         for (uint32_t island_idx = 0; island_idx < layer.island_count(); ++island_idx) {

@@ -9,6 +9,7 @@
 
 #include "ClipperResults.hpp"
 #include "ExtrusionLines.hpp"
+#include "SupportPaths.hpp"
 #include "libslic3r/Api/plugin/cpp/ClipperViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 
@@ -22,15 +23,12 @@
    and REVERSIBLE flags, and a closed polyline, which the native
    extrusion_entities_append_paths() wraps in an ExtrusionLoop, becomes a fixed
    node holding the closed path. Flags are set after the children are added:
-   adding the first child to an empty entity makes it sortable. */
+   adding the first child to an empty entity makes it sortable. SupportPaths supplies shared flow attributes
+   and path/loop construction; monotonic settings disallow reversal of the individual paths. */
 
 namespace slic3r_api::Support::Common {
 namespace {
 
-// Append one path to parent like extrusion_entities_append_paths(): fewer than 2 points are
-// skipped, and a closed polyline is wrapped in a fixed loop node.
-void append_path(storage_handle *storage, MutableExtrusionEntity parent, const std::vector<c_point> &points,
-                 const PerimeterFillSettings &settings);
 // Points of a polygon starting at its first point and closed by repeating it (Polygon::split_at_index(0)),
 // oriented counter-clockwise for a contour and clockwise for a hole.
 std::vector<c_point> closed_loop_points(const Polygon &polygon, bool counter_clockwise);
@@ -38,30 +36,6 @@ std::vector<c_point> closed_loop_points(const Polygon &polygon, bool counter_clo
 // Fill one perimeter area: its loops, then the inner pattern on its inset.
 void fill_area(storage_handle *storage, const ExPolygon &area, raw_surface_type surface_type,
                const PerimeterFillSettings &settings, const InnerFill &inner_fill, MutableExtrusionEntity area_entity);
-
-void append_path(storage_handle *storage, MutableExtrusionEntity parent, const std::vector<c_point> &points,
-                 const PerimeterFillSettings &settings)
-{
-    if (points.size() < 2)
-        return;
-    StoredExtrusionEntity path(storage, points);
-    path.set_flags(settings.monotonic ? 0u : uint32_t(RAW_EXTRUSION_FLAG_REVERSIBLE));
-    path.get_or_add(EPropertyAttributes::key)
-        .extrusion_role(int32_t(settings.role))
-        .mm3_per_mm(settings.flow.mm3_per_mm)
-        .width(float(unscaled(settings.flow.width)))
-        .height(float(unscaled(settings.flow.height)));
-    const bool closed = points.front().x == points.back().x && points.front().y == points.back().y;
-    if (!closed) {
-        parent.append_child_move(path.mutable_view());
-        return;
-    }
-    // ExtrusionLoop: neither sortable nor reversible, holding the path.
-    StoredExtrusionEntity loop(storage);
-    loop.append_child_move(path.mutable_view());
-    loop.set_flags(0u);
-    parent.append_child_move(loop.mutable_view());
-}
 
 std::vector<c_point> closed_loop_points(const Polygon &polygon, bool counter_clockwise)
 {
@@ -74,14 +48,16 @@ std::vector<c_point> closed_loop_points(const Polygon &polygon, bool counter_clo
     return points;
 }
 
+// Copies borrowed valid area rings into storage-owned perimeter paths, offsets an inset for the synchronous inner fill, and moves groups into area_entity; monotonic disables path reversal and allocation/callback failures propagate.
 void fill_area(storage_handle *storage, const ExPolygon &area, raw_surface_type surface_type,
                const PerimeterFillSettings &settings, const InnerFill &inner_fill, MutableExtrusionEntity area_entity)
 {
     // Perimeter loops, contour first, sortable and reversible as a group.
     StoredExtrusionEntity perimeters(storage);
-    append_path(storage, perimeters.mutable_view(), closed_loop_points(area.contour(), true), settings);
+    const EPropertyAttributes attributes = path_attributes(settings.role, settings.flow);
+    append_paths(storage, perimeters.mutable_view(), {closed_loop_points(area.contour(), true)}, attributes, !settings.monotonic);
     for (const Polygon hole : area.holes())
-        append_path(storage, perimeters.mutable_view(), closed_loop_points(hole, false), settings);
+        append_paths(storage, perimeters.mutable_view(), {closed_loop_points(hole, false)}, attributes, !settings.monotonic);
     perimeters.set_flags(RAW_EXTRUSION_FLAG_SORTABLE | RAW_EXTRUSION_FLAG_REVERSIBLE);
     area_entity.append_child_move(perimeters.mutable_view());
 
@@ -102,8 +78,7 @@ void fill_area(storage_handle *storage, const ExPolygon &area, raw_surface_type 
         if (polylines.empty())
             continue;
         StoredExtrusionEntity fill(storage);
-        for (const std::vector<c_point> &polyline : polylines)
-            append_path(storage, fill.mutable_view(), polyline, settings);
+        append_paths(storage, fill.mutable_view(), polylines, attributes, !settings.monotonic);
         fill.set_flags(RAW_EXTRUSION_FLAG_SORTABLE | RAW_EXTRUSION_FLAG_REVERSIBLE);
         area_entity.append_child_move(fill.mutable_view());
     }

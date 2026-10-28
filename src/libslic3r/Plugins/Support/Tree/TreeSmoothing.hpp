@@ -17,19 +17,16 @@
 #include "TreeGeometry.hpp"
 #include "TreeRouting.hpp"
 
-namespace slic3r_api {
-class Object;
-}
-
 namespace Slic3r::TreeFamily {
 
 // Relaxes the XY positions of the free nodes of the trees of one object in place and returns the number of iterations that ran.
 // Tips and roots that rest on the model are locked; every node keeps its layer and its links. The layer of each node must be a
-// layer of the object, keep_out must hold at least one outline per object layer, grown by the XY distance, and the links of a
+// layer indexed by print_z (the shared millimeter Z table), keep_out must hold one grown outline per layer, and the links of a
 // tree must index nodes of that same tree. The context is checked after every iteration of the relaxation and after the final pass
 // (nullptr never cancels); a cancellation throws PluginCancelled out of this function before anything is written back, so the trees
 // keep their input positions.
-size_t smooth_organic_branches(const slic3r_api::Object &object, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
+// Relaxes routed XY positions against borrowed millimeter layer tops and outlines, returning the iteration count.
+size_t smooth_organic_branches(const std::vector<double> &print_z, const std::vector<slic3r_api::StoredPolygonCollection> &keep_out,
                                std::vector<RoutedTree> &trees, const plugin_run_context *context);
 
 // Pushes a sphere that reaches only its own layer and returns its new center; the inputs are not changed.

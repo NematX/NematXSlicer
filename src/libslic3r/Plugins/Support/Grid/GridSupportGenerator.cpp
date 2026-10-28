@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cmath>
 #include <cstdlib>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -23,6 +24,7 @@
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportInterfaces.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
@@ -30,7 +32,8 @@
 /* A contact is a dense slab next to the object; a column is its projection
    towards the bed. Grid support rasterizes columns into small AGG pixels and
    fills larger grid cells without crossing the object mask. Snug support uses
-   closing and smoothing instead. Z slabs divide the distance between contacts, a placement
+   the free snug_contours() closing and smoothing instead; Grid holds only the raster representation.
+   Z slabs divide the distance between contacts, a placement
    shared with the tree family (Common/SupportZPlacement.hpp); interfaces take portions of
    base slabs near contacts. All geometry here is temporary and belongs to
    GeneratedSupport. Demand already includes painting,
@@ -74,32 +77,32 @@ struct Run {
     ClipperContext clipper;
     // The object layers, bottom first.
     std::vector<Layer> layers;
-    int32_t threshold, enforce_layers, interface_layers, bottom_interface_layers;
-    bool synchronize, bottom_interface_enabled;
+    int32_t threshold, enforce_layers;
+    bool synchronize;
     // Build-plate-only support: support may stand only on the bed, so contacts and columns are cut by the area the object covers below.
     bool buildplate_only;
     c_float_or_percent layer_height, interface_layer_height;
-    double angle, closing_radius, spacing;
+    double closing_radius, spacing;
 };
 struct Grid {
     const Run &run;
     const Polys &source, &mask;
-    double angle, width, closing_radius, pixel_size = 0;
+    double angle, width, pixel_size = 0;
     c_bounding_box bbox = bounding_box_empty();
     int size_x = 0, size_y = 0;
     Polys rotated_source, rotated_mask;
     std::vector<unsigned char> pixels;
-    // Prepare raster cells for grid support, or retain contours for snug support.
+    // Prepares raster cells for grid support.
     Grid(const Run &run, const Polys &source, const Polys &mask);
     // Extract expanded print contours or slightly shrunken propagation contours.
     Polys extract(coord_t offset, bool fill_holes) const;
 };
+// Closes and outward-smooths snug source contours without rasterization or mask trimming.
+Polys snug_contours(const Run &run, const Polys &source);
 // Materialize a Clipper result as a flat polygon collection, like the native Polygons booleans and offsets.
 Polys polygons(ClipperOperand &&result);
-// Append the contours and holes of expolygons to dst, like the native polygons_append(Polygons, ExPolygons).
-void append_polygons(Polys &dst, const ExPolygonCollection &expolygons);
-// Return the flat polygons of expolygons, like the native to_polygons(ExPolygons).
-Polys to_polygons(storage_handle *storage, const ExPolygonCollection &expolygons);
+// Share contour-then-holes copying without sorting the rings fed to Clipper.
+using Common::append_polygons;
 // Rotate every polygon around the origin, like the native polygons_rotate().
 void rotate(Polys &polys, double angle);
 // Bounding box of every point, like the native get_extents(Polygons); empty polys give an empty box.
@@ -146,25 +149,19 @@ void generate_support(const plugin_run_context *context, const Print &print, con
 }
 
 namespace {
+// Borrows the run inputs and stores ordered layer views and grid-only settings; the object and storage must outlive the run, and allocation failures propagate.
 Run::Run(const plugin_run_context *context, const Print &print, const Object &object, const Common::SupportParams &params,
          storage_handle *storage)
     : context(context), print_config(print.config()), object(object), p(params), storage(storage), clipper(storage)
 {
-    for (uint32_t id = 0; id < object.layer_count(); ++id)
-        layers.push_back(object.layer(id));
+    layers = Common::object_layers(object);
     const Config config = object.config();
     threshold = config.get("support_material_threshold").get_int();
     enforce_layers = config.get("support_material_enforce_layers").get_int();
-    interface_layers = config.get("support_material_interface_layers").get_int();
-    const ConfigOption bottom_interfaces = config.get("support_material_bottom_interface_layers");
-    // Index -1 asks whether the option as a whole is enabled, like the native is_enabled().
-    bottom_interface_enabled = config_option_is_enabled(bottom_interfaces.handle(), -1) != 0;
-    bottom_interface_layers = bottom_interfaces.get_int();
     synchronize = config.get("support_material_synchronize_layers").get_bool();
     buildplate_only = config.get("support_material_buildplate_only").get_bool();
     layer_height = config.get("support_material_layer_height").get_float_or_percent();
     interface_layer_height = config.get("support_material_interface_layer_height").get_float_or_percent();
-    angle = config.get("support_material_angle").get_float();
     closing_radius = config.get("support_material_closing_radius").get_float();
     spacing = config.get("support_material_spacing").get_float();
 }
@@ -172,22 +169,6 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
 Polys polygons(ClipperOperand &&result)
 {
     return result.to_polygon_collection();
-}
-
-void append_polygons(Polys &dst, const ExPolygonCollection &expolygons)
-{
-    for (const ExPolygon expolygon : expolygons) {
-        dst.push_back(expolygon.contour());
-        for (const Polygon hole : expolygon.holes())
-            dst.push_back(hole);
-    }
-}
-
-Polys to_polygons(storage_handle *storage, const ExPolygonCollection &expolygons)
-{
-    Polys out(storage);
-    append_polygons(out, expolygons);
-    return out;
 }
 
 void rotate(Polys &polys, double angle)
@@ -210,7 +191,7 @@ bool point_less(c_point a, c_point b)
     return a.x < b.x || (a.x == b.x && a.y < b.y);
 }
 
-// Accumulate the layer slices from the bottom up, each grown by 0.01 mm, so that entry id covers every object part below layer id.
+// Accumulates borrowed slices through Common, materializing owned polygon coverage per object layer without regrowing accumulated geometry; run layers are bottom-first, and cancellation/geometry/allocation failures propagate.
 std::vector<Polys> buildplate_covered(const Run &run)
 {
     const ClipperContext &clipper = run.clipper;
@@ -219,12 +200,12 @@ std::vector<Polys> buildplate_covered(const Run &run)
     covered.emplace_back(run.storage);
     for (size_t id = 1; id < run.layers.size(); ++id) {
         throw_if_cancelled(run.context);
-        covered.push_back(polygons(clipper_union2(clipper(covered.back()), clipper_offset(clipper(run.layers[id - 1].slices()), scale_d(0.01)))));
+        covered.push_back(polygons(Common::accumulate_lower_slices(clipper, clipper(covered.back()), run.layers[id - 1])));
     }
     return covered;
 }
 
-// Intersect demand with each region, apply the active lower-slice margin, and rasterize contacts; allocated slabs remain in out even when merging empties them.
+// Intersects borrowed demand with each region and subtracts the lower-slice margin, then rasterizes grid contacts or closes snug contours; covered has one entry per object layer only in buildplate_only mode (empty otherwise), out owns slabs, and geometry/allocation failures propagate.
 void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
@@ -238,13 +219,13 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
         for (uint32_t island = 0; island < layer.island_count(); ++island)
             demand += clipper(layer.island(island).support_demand());
         if (demand.empty()) continue;
-        const Polys lower_polygons = to_polygons(run.storage, lower.slices());
+        Polys lower_polygons(run.storage);
+        Common::append_polygons(lower_polygons, lower.slices());
         Polys overhangs(run.storage), contacts(run.storage), margin(run.storage);
         float no_interface_offset = FLT_MAX;
         for (uint32_t region = 0; region < layer.region_count(); ++region)
             no_interface_offset = std::min(no_interface_offset,
                 float(layer.region(region).flow(raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER)).width));
-        const double threshold = run.threshold > 0 ? PI * double(run.threshold + 1) / 180. : 0.;
         float cached_offset = -1;
         for (uint32_t region_idx = 0; region_idx < layer.region_count(); ++region_idx) {
             const LayerRegion region = layer.region(region_idx);
@@ -252,8 +233,8 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
             if (raw.empty()) continue;
             append_polygons(overhangs, raw);
             const coord_t lower_offset = id < size_t(run.enforce_layers) ? 0 :
-                threshold > 0 ? scale_to_layer_coord(unscaled(lower.height()) / std::tan(threshold)) :
-                region.flow(raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER)).width / 2;
+                Common::overhang_margin(run.threshold, lower.height(),
+                    region.flow(raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER)).width, false);
             const float offset = float(std::min(lower_offset, p.gap_xy));
             if (offset != cached_offset) {
                 cached_offset = offset;
@@ -277,8 +258,10 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
         const Common::TopContactSlabs slabs = Common::add_top_contacts(run.layers, run.print_config, p, id, out);
         if (!slabs.contact) continue;
         Common::GeneratorLayer &contact = *slabs.contact;
-        const Grid grid(run, contacts, margin);
-        contact.contact_polygons.emplace(grid.extract(-3, true));
+        std::optional<Grid> grid;
+        if (p.style == Common::SupportStyle::Grid)
+            grid.emplace(run, contacts, margin);
+        contact.contact_polygons.emplace(grid ? grid->extract(-3, true) : snug_contours(run, contacts));
         contact.contact_polygons->ensure_valid(p.resolution);
         if (p.style == Common::SupportStyle::Grid && !p.soluble) {
             Polys dense = polygons(clipper_diff(clipper(overhangs), clipper_offset2(clipper(lower_polygons),
@@ -289,7 +272,7 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
                 contact.polygons = Grid(run, trimmed, margin).extract(p.base_flow.spacing / 2 + 5, false);
             }
         } else
-            contact.polygons = grid.extract(p.base_flow.spacing / 2 + 5, true);
+            contact.polygons = grid ? grid->extract(p.base_flow.spacing / 2 + 5, true) : snug_contours(run, contacts);
         contact.polygons.ensure_valid(p.resolution);
         contact.overhang_polygons.emplace(std::move(overhangs));
         if (slabs.bridge) {
@@ -302,7 +285,7 @@ void top_contacts(const Run &run, const std::vector<Polys> &covered, Common::Gen
     Common::merge_contacts(p, out);
 }
 
-// Project a sliced object's owned contacts into one area per object layer; bottom collision spans use the next object height for plane gaps or initial contact height otherwise, unchanged by Z alignment; cancellation propagates.
+// Projects contacts into owned areas indexed by object layer using raster grid or closed snug contours and subtracts object masks; covered shares those indices only in buildplate_only mode (empty otherwise), out owns bottom slabs, bottom collision spans use the next object height for plane gaps or initial contact height otherwise, and cancellation/geometry/allocation failures propagate.
 std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &covered, Common::GeneratedSupport &out)
 {
     const Common::SupportParams &p = run.p;
@@ -340,9 +323,14 @@ std::vector<Polys> project_columns(const Run &run, const std::vector<Polys> &cov
         Polys raw = polygons(clipper_diff(clipper(projection), clipper(mask)));
         raw.remove_sticks();
         raw.remove_degenerate();
-        const Grid grid(run, raw, mask);
-        areas[id] = grid.extract(p.base_flow.spacing / 2 + 5, true);
-        projection = grid.extract(-3, true);
+        if (p.style == Common::SupportStyle::Snug) {
+            areas[id] = snug_contours(run, raw);
+            projection = snug_contours(run, raw);
+        } else {
+            const Grid grid(run, raw, mask);
+            areas[id] = grid.extract(p.base_flow.spacing / 2 + 5, true);
+            projection = grid.extract(-3, true);
+        }
     }
     std::reverse(out.bottom.begin(), out.bottom.end());
     trim_by_object(run, out.bottom);
@@ -362,8 +350,7 @@ void intermediate_layers(const Run &run, Common::GeneratedSupport &out)
     spacing.machine_step = scale_to_layer_coord(p.z_step);
     spacing.base_step = base_step;
     spacing.interface_step = interface_step;
-    spacing.interface_layers = std::max(0, run.interface_layers);
-    spacing.bottom_interface_layers = run.bottom_interface_enabled ? run.bottom_interface_layers : std::max(0, run.interface_layers);
+    Common::set_interface_counts(spacing, p);
     spacing.soluble = p.soluble;
     spacing.synchronize = run.synchronize;
     Common::place_intermediate_slabs(spacing, run.layers, out);
@@ -451,12 +438,12 @@ std::vector<unsigned char> rasterize(int size_x, int size_y, double pixel, c_poi
     return data;
 }
 
-// Rotate grid inputs, oversample each support cell, and propagate occupied pixels while avoiding the eroded object mask; input contours must outlive this temporary grid.
+// Rotates borrowed grid inputs, oversamples cells and propagates occupied pixels outside the eroded mask; inputs and run storage must outlive this owned temporary grid, and geometry/allocation failures propagate.
 Grid::Grid(const Run &run, const Polys &src, const Polys &trim)
-    : run(run), source(src), mask(trim), angle(PI * run.angle / 180.), width(run.p.base_flow_mm.spacing),
-      closing_radius(run.closing_radius), rotated_source(run.storage), rotated_mask(run.storage)
+    : run(run), source(src), mask(trim), angle(PI * run.p.base_angle_degrees / 180.), width(run.p.base_flow_mm.spacing),
+      rotated_source(run.storage), rotated_mask(run.storage)
 {
-    if (run.p.style != Common::SupportStyle::Grid || source.empty()) return;
+    if (source.empty()) return;
     rotated_source.copy_from(source);
     rotated_mask.copy_from(mask);
     if (angle != 0) { rotate(rotated_source, -angle); rotate(rotated_mask, -angle); }
@@ -594,16 +581,20 @@ Polys contours(const Grid &grid, coord_t offset, bool fill_holes)
     return out;
 }
 
-// Extract grid contours, trim by the object and retain only islands containing source samples; snug contours instead undergo closing and outward smoothing.
+// Closes borrowed snug contours with the configured radius and smooths outward by base spacing, returning storage-owned rings without using a mask; empty input returns empty and geometry/allocation failures propagate.
+Polys snug_contours(const Run &run, const Polys &source)
+{
+    if (source.empty()) return Polys(run.storage);
+    Polys closed = polygons(clipper_offset2(run.clipper(source), scale_d(run.closing_radius), -scale_d(run.closing_radius), join_type, 0.));
+    closed.smooth_outward(coord_t(scale_d(run.p.base_flow_mm.spacing)));
+    return closed;
+}
+
+// Extracts storage-owned raster contours, trims by the borrowed object mask and keeps islands containing source samples; offset uses scaled units, fill_holes controls raster holes, and geometry/allocation failures propagate.
 Polys Grid::extract(coord_t offset, bool fill_holes) const
 {
     const ClipperContext &clipper = run.clipper;
     if (source.empty()) return Polys(run.storage);
-    if (run.p.style == Common::SupportStyle::Snug) {
-        Polys closed = polygons(clipper_offset2(clipper(source), scale_d(closing_radius), -scale_d(closing_radius), join_type, 0.));
-        closed.smooth_outward(coord_t(scale_d(width)));
-        return closed;
-    }
     const Polys rings = contours(*this, offset, fill_holes);
     const ExPolys islands = Common::native_expolygons(clipper_diff(clipper(rings), clipper(rotated_mask)));
     const ExPolys sample_source = offset > 0 ? Common::native_expolygons(clipper_union(clipper(rotated_source))) :
@@ -628,8 +619,7 @@ Polys Grid::extract(coord_t offset, bool fill_holes) const
         for (auto sample = begin; sample != end; ++sample)
             if (sample->x >= bounds.min.x && sample->x <= bounds.max.x && sample->y >= bounds.min.y && sample->y <= bounds.max.y &&
                 island.contains(*sample)) {
-                result.push_back(island.contour());
-                for (const Polygon hole : island.holes()) result.push_back(hole);
+                Common::append_polygons(result, island);
                 break;
             }
     }

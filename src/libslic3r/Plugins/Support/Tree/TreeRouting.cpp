@@ -30,6 +30,7 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PolygonOps.hpp"
 #include "libslic3r/Plugins/Support/Common/PatternService.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportLayers.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportZPlacement.hpp"
@@ -133,10 +134,8 @@ static void store_top_contact(Common::GeneratorLayer &slab, storage_handle *stor
                               const ExPolygonCollection &overhang);
 // Lists the tip sources of the top contacts: one per connected part of the contact areas, each with the object layer where its tips start. With top
 // interface layers, the area of a part that lies over the object on that layer is not a tip source: it is appended to resting (see RestingPart).
-static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, const TreeSettings &settings, const slic3r_api::Config &config,
+static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, const TreeSettings &settings, const Common::SupportParams &params,
                                           const Common::GeneratedSupport &support, std::vector<RestingPart> &resting);
-// The contour then the holes of an expolygon, as rings of the storage.
-static StoredPolygonCollection expolygon_rings(storage_handle *storage, const slic3r_api::ExPolygon &expolygon);
 // Keeps on each top contact only the components that a placed tip reaches and the resting parts, and drops the contacts left empty.
 static void trim_contacts_to_placed_tips(const std::vector<SupportElements> &move_bounds, const std::vector<TipSource> &sources,
                                          const std::vector<RestingPart> &resting, const slic3r_api::Object &object, Common::GeneratedSupport &support);
@@ -243,7 +242,7 @@ static void set_to_model_contact_to_model_gracious(
 // Removes the deleted elements and renumbers the parents of the others.
 static void remove_deleted_elements(std::vector<SupportElements> &move_bounds);
 // Gathers the placed elements into routed trees, from the top layer down.
-static std::vector<RoutedTree> build_trees(const slic3r_api::Object &object, const TreeSettings &config, const std::vector<SupportElements> &move_bounds);
+static std::vector<RoutedTree> build_trees(const TreeSettings &config, const std::vector<SupportElements> &move_bounds);
 // Finds the representative of an element in the union-find forest.
 static size_t find_root(std::vector<size_t> &forest, size_t idx);
 
@@ -260,7 +259,7 @@ std::vector<RoutedTree> route_trees(const slic3r_api::Print &print, const slic3r
 {
     generate_contacts(print, object, params, settings, support);
     resting.clear();
-    const std::vector<TipSource> sources = tip_sources(object, settings, object.config(), support, resting);
+    const std::vector<TipSource> sources = tip_sources(object, settings, params, support, resting);
     if (sources.empty()) {
         // Contacts that rest on the object entirely have no tip: they are kept as they are, without any branch.
         if (! resting.empty())
@@ -278,19 +277,18 @@ std::vector<RoutedTree> route_trees(const slic3r_api::Print &print, const slic3r
     create_layer_pathing(volumes, settings, move_bounds, support.storage, context);
     create_nodes_from_area(volumes, settings, move_bounds, context);
     trim_contacts_to_placed_tips(move_bounds, sources, resting, object, support);
-    return build_trees(object, settings, move_bounds);
+    return build_trees(settings, move_bounds);
 }
 
 // Creates the top contact of every object layer that has support demand. The contact area is the demand minus the
 // object layer below, grown by the XY distance of overhang outlines; the shared helper places the contact in Z and
 // merges the close contacts. The areas of every layer are computed in one scratch storage; the contacts keep copies in the run storage.
+// Borrows sliced layer views and matching run settings, appending owned contacts to support; geometry and allocation failures propagate.
 static void generate_contacts(const slic3r_api::Print &print, const slic3r_api::Object &object, const Common::SupportParams &params,
                               const TreeSettings &settings, Common::GeneratedSupport &support)
 {
     const slic3r_api::Config print_config = print.config();
-    std::vector<slic3r_api::Layer> layers;
-    for (uint32_t id = 0; id < object.layer_count(); ++id)
-        layers.push_back(object.layer(id));
+    const std::vector<slic3r_api::Layer> layers = Common::object_layers(object);
     with_scratch_storage([&](storage_handle *scratch) {
         for (uint32_t id = 1; id < layers.size(); ++id) {
             StoredExPolygonCollection islands_demand(scratch);
@@ -338,12 +336,13 @@ static void store_top_contact(Common::GeneratorLayer &slab, storage_handle *stor
 // not the collision with its XY distance) has no place for a tip: it is not a tip source, and it is appended to resting. Its stack fills the interval
 // down to the object, as the grid does (the floors are made by add_floors() in TreeSupportGenerator.cpp). The rest of the source routes as usual.
 // Without interface layers there is no stack to fill: a tip is the only support of a contact and nothing rests.
-static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, const TreeSettings &settings, const slic3r_api::Config &config,
+// Builds owned tip-source areas in run storage using borrowed contact layers and shared counts; settings.layer_print_z_mm has one entry per object layer with the same layer indices, and geometry/allocation failures propagate without publishing anything.
+static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, const TreeSettings &settings, const Common::SupportParams &params,
                                           const Common::GeneratedSupport &support, std::vector<RestingPart> &resting)
 {
     storage_handle *storage = support.storage;
     const coord_t step = settings.dense_slab_height;
-    const int32_t interfaces = std::max(0, config.get("support_material_interface_layers").get_int());
+    const int32_t interfaces = std::max(0, params.top_interface_layers);
     constexpr size_t no_source = std::numeric_limits<size_t>::max();
     std::vector<size_t> source_of_layer(object.layer_count(), no_source);
     std::vector<TipSource> sources;
@@ -375,7 +374,7 @@ static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, cons
             if (rests_on_model)
                 object_rings.emplace(to_polygons(scratch, object.layer(source.layer).slices()));
             for (uint32_t idx = 0; idx < united.size(); ++idx) {
-                StoredPolygonCollection part = expolygon_rings(storage, united.at(idx));
+                StoredPolygonCollection part = Common::expolygon_rings(storage, united.at(idx));
                 if (rests_on_model) {
                     const StoredPolygonCollection over_object = polygons_intersection(scratch, part, *object_rings);
                     if (! over_object.empty()) {
@@ -385,7 +384,7 @@ static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, cons
                         const StoredPolygonCollection elsewhere = polygons_diff(scratch, part, *object_rings);
                         const StoredExPolygonCollection components = expolygons_union(scratch, elsewhere);
                         for (uint32_t component = 0; component < components.size(); ++component)
-                            parts.push_back(TipSource{ expolygon_rings(storage, components.at(component)), source.layer, source.object_above });
+                            parts.push_back(TipSource{ Common::expolygon_rings(storage, components.at(component)), source.layer, source.object_above });
                         continue;
                     }
                 }
@@ -394,15 +393,6 @@ static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, cons
         }
     });
     return parts;
-}
-
-static StoredPolygonCollection expolygon_rings(storage_handle *storage, const slic3r_api::ExPolygon &expolygon)
-{
-    StoredPolygonCollection rings(storage);
-    rings.push_back(expolygon.contour());
-    for (const slic3r_api::Polygon hole : expolygon.holes())
-        rings.push_back(hole);
-    return rings;
 }
 
 // A part of a top contact that no placed tip reaches is cut from the contact, since its roof would have no branch under it. The resting parts are
@@ -482,23 +472,19 @@ static void generate_initial_areas(const TreeVolumes &volumes, const TreeSetting
     // Extra outset that compensates for the tip radius.
     const coord_t extra_outset = std::max(coord_t(0), config.min_radius - config.support_line_width / 2);
     // The recipe of the lines: the flow and spacing of the base, the density that makes the lines one branch distance apart, and its angle.
-    Common::PatternService::Fill fill;
-    fill.flow = params.base_flow;
-    fill.spacing = params.base_flow_mm.spacing;
-    fill.density = float(scale_d(fill.spacing) / (scale_d(fill.spacing) + float(config.branch_distance)));
-    fill.angle = params.base_angle;
+    const double spacing = params.base_flow_mm.spacing;
+    const float density = float(scale_d(spacing) / (scale_d(spacing) + float(config.branch_distance)));
     const infill_pattern_runtime_id pattern_id = patterns.resolve(params.base_pattern_id);
     std::vector<raw_infill_pattern_params> recipes;
     for (const TipSource &source : sources) {
-        fill.layer_id = uint32_t(source.layer);
-        recipes.push_back(Common::PatternService::recipe(pattern_id, fill));
+        recipes.push_back(Common::fill_recipe(pattern_id, RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL, params.base_flow,
+                                              spacing, density, params.base_angle, 0., uint32_t(source.layer)));
     }
     const TipPlacement placement{ volumes, config, patterns, sources, connect_length,
         circle_length_to_half_linewidth_change, extra_outset, std::move(recipes), context, move_bounds, run_storage, {},
         std::vector<std::unordered_set<c_point, PointHash, PointEqual>>(move_bounds.size()),
         make_circle(scale_d(0.01), SUPPORT_TREE_CIRCLE_RESOLUTION) };
-    // FIXME(perf): one job per source, as the legacy loop did (every job does a pattern call and several Clipper operations, so the job is
-    // not small); a source that is cheap against the cost of its scratch storage would call for chunks of sources. To measure.
+    // Each source job samples a pattern and performs Clipper operations using its own scratch storage.
     slic3r_api::parallel_for_storage_with_progress(0, uint32_t(sources.size()), context, nullptr, &place_source_tips, &placement);
 }
 
@@ -509,7 +495,7 @@ static void place_source_tips(uint32_t source_idx, storage_handle *scratch, cons
     const StoredPolygonCollection overhang_regular = supported_overhang(scratch, *placement, source);
     const StoredExPolygonCollection parts = expolygons_union(scratch, overhang_regular);
     for (uint32_t part_idx = 0; part_idx < parts.size(); ++part_idx) {
-        const StoredPolygonCollection part_area = expolygon_rings(scratch, parts.at(part_idx));
+        const StoredPolygonCollection part_area = Common::expolygon_rings(scratch, parts.at(part_idx));
         const Lines lines = tip_lines(scratch, *placement, source_idx, part_area);
         // A pattern error or a cancellation stops the step: no further part; the jobs still to run stop at their next check.
         slic3r_api::throw_if_cancelled(placement->context);
@@ -650,7 +636,7 @@ void TipPlacement::add_point(const std::pair<c_point, LineStatus> &point, LayerI
         if (len < 2 * distance && min_points <= 1)
         {
             // Insert the opposite point of the first one.
-            //FIXME pretty expensive
+            // Find the opposite point by clipping a copy of the polyline.
             slic3r_api::StoredPolyline half(scratch);
             for (const c_point &point : part)
                 half.push_back(point);
@@ -1060,9 +1046,7 @@ static void create_layer_pathing(const TreeVolumes &volumes, const TreeSettings 
     // layer_storage holds the merging data of the layer being treated.
     with_scratch_storage([&](storage_handle *layer_storage) {
         // The influence areas are merged on every layer: merging after skipped layers would move the branches farther than the branch angle
-        // allows in one layer. The native tree support does the same: its cadence limit (Cura's constants in micrometres, compared with
-        // coordinates scaled 1e6 per mm) evaluates to zero. Spacing the merges gave no measurable time gain; the hidden benchmark
-        // [tree-routing-benchmark] (test_support_tree_family.cpp) measures a cadence.
+        // allows in one layer. The native tree support also merges on every layer.
         // Calculate the influence areas for each layer below (Top down)
         // This is done by first increasing the influence area by the allowed movement distance, and merging them with other influence areas if possible
         for (int layer_idx = int(move_bounds.size()) - 1; layer_idx > 0; -- layer_idx)
@@ -1169,9 +1153,7 @@ static void merge_influence_areas(
     size_t num_buckets_initial;
     {
         // How many buckets per first merge iteration?
-        // FIXME(perf): the bucket count follows the concurrency of the arena, so the merge order (hence the result) depends on the
-        // number of threads, as in the legacy code; the API gives no equivalent of the arena size and the grouping is kept as it was.
-        // To revisit with real performance tests.
+        // The bucket count follows arena concurrency, so the merge order and result depend on the number of threads.
         const size_t num_threads     = tbb::this_task_arena::max_concurrency();
         // 4 buckets per thread if possible,
         const size_t num_buckets_min = (input_size + 2) / 4;
@@ -1406,7 +1388,7 @@ static bool merge_influence_areas_two_elements(
     if (polygons_area(intersect) <= tiny_area_threshold)
         return false;
 
-    // While 0.025 was guessed as enough, i did not have reason to change it.
+    // Require the overlap to retain area after a 0.025 mm inset, rejecting narrow connections.
     // The area is shrunk: it is the output of an intersection, a clean region (see polygons_offset()).
     {
         const StoredPolygonCollection shrunk = polygons_offset(scratch, intersect, scale_d(-0.025), CLIPPER_JOIN_MITER, 1.2);
@@ -1503,10 +1485,7 @@ static void increase_areas_one_layer(
     SupportElements                    &layer_elements,
     const plugin_run_context           *context)
 {
-    // FIXME(perf): one task per element (grain 1, simple_partitioner) as the legacy loop: the cost of an element varies a lot (a
-    // few offsets or dozens), so no grouping is wanted, and slic3r_parallel_for_storage() gives no control of it. Each task takes a
-    // scratch storage of its own (with_scratch_storage(), a nested job of one index run inline). To revisit with real performance
-    // tests, with slic3r_parallel_for_storage() and the scratch storage of its jobs.
+    // Offset work varies by element; grain-one ranges use scratch storage local to each element.
     tbb::parallel_for(tbb::blocked_range<size_t>(0, merging_areas.size(), 1),
         [&](const tbb::blocked_range<size_t> &range) {
         for (size_t merging_area_idx = range.begin(); merging_area_idx < range.end(); ++ merging_area_idx)
@@ -2134,7 +2113,8 @@ static void remove_deleted_elements(std::vector<SupportElements> &move_bounds)
 
 // Turns the placed elements into routed trees. Elements linked through their parents belong to the same tree; the trees are
 // built from the top layer down, so each node finds its carried nodes already in place.
-static std::vector<RoutedTree> build_trees(const slic3r_api::Object &object, const TreeSettings &config, const std::vector<SupportElements> &move_bounds)
+// Groups borrowed placed elements into owned trees in layer order and copies each node's Z from the shared settings table; move_bounds and config.layer_print_z_mm each have one entry per object layer with the same indices, parents index the layer above, and allocation failures propagate.
+static std::vector<RoutedTree> build_trees(const TreeSettings &config, const std::vector<SupportElements> &move_bounds)
 {
     constexpr size_t none = std::numeric_limits<size_t>::max();
     // Elements of all layers get one flat index: the layer offset plus the index in the layer.
@@ -2174,7 +2154,7 @@ static std::vector<RoutedTree> build_trees(const slic3r_api::Object &object, con
             RoutedTree &tree = trees[tree_of_root[root]];
             TreeNode node;
             node.layer = layer_idx;
-            node.print_z = unscaled(object.layer(uint32_t(layer_idx)).print_z());
+            node.print_z = config.layer_print_z_mm[layer_idx];
             node.position = elem.state.result_on_layer;
             node.radius = support_element_radius(config, elem);
             node.to_buildplate = elem.state.to_buildplate;

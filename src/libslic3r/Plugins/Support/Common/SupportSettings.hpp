@@ -2,7 +2,7 @@
 /* Support settings shared by the support plugins: the enum options they test
    and the configuration keys they declare.
 
-   Enums are read by their serialized value (decision Q4): the plugin side has
+   Enums are read by their serialized value: the plugin side has
    no access to the host C++ enum types, and the serialized names are the
    stable form saved in project files. Each parse_* function turns one
    serialized value into a small plugin-side enum; an unknown value gives
@@ -18,8 +18,7 @@
    calculations read, so the host re-runs it when one of them changes. The
    grid family and the legacy toolpath algorithms declare the lists below with
    append_used_config_keys() instead of copying them; the lists cover the keys
-   SupportParams reads, which those plugins will use once they are migrated to
-   it (G1b, G2b). */
+   SupportParams reads for their geometry and toolpaths. */
 #ifndef plugins_support_common_settings_hpp_
 #define plugins_support_common_settings_hpp_
 

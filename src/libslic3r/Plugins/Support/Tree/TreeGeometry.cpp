@@ -104,14 +104,6 @@ std::vector<LineSegment> to_lines(const slic3r_api::PolygonCollection &polygons)
     return lines;
 }
 
-// The host fills a new collection of the storage with the contour then the holes of each expolygon.
-slic3r_api::StoredPolygonCollection to_polygons(storage_handle *storage, const slic3r_api::ExPolygonCollection &expolygons)
-{
-    slic3r_api::StoredPolygonCollection polygons(storage);
-    ::expolygons_to_polygons(expolygons.handle(), polygons.mutable_handle());
-    return polygons;
-}
-
 // Counts the rings that contain the point; the first ring that has the point on its border decides the answer.
 bool point_in_polygons(const slic3r_api::PolygonCollection &polygons, c_point point, bool border_result)
 {

@@ -24,9 +24,9 @@ void clear(Print &print);
 // Nothing to prepare (see the .cpp).
 void prepare(Print &print);
 // Accept the input tree without imposing algorithm-specific requirements.
-bool validate_pre(const Print &print, std::string &error);
+bool validate_pre(const Print &print, std::string *error = nullptr);
 // Accept the output tree without imposing algorithm-specific requirements.
-bool validate_post(const Print &print, std::string &error);
+bool validate_post(const Print &print, std::string *error = nullptr);
 // Run the selected support toolpath algorithms sequentially on the objects that selected them.
 void run_step(Orchestrator &orchestrator, Print &print);
 

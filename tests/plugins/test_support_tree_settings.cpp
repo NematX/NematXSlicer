@@ -292,6 +292,12 @@ TEST_CASE("Tree settings measure the height to the model and the root depth in r
     REQUIRE(object.layer(transition).scaled_height() == scale_to_layer_coord(0.3));
     REQUIRE(object.layer(transition + 8).scaled_height() == scale_to_layer_coord(0.3));
     REQUIRE(settings.layer_print_z.size() == object.layer_count());
+    REQUIRE(settings.layer_print_z_mm.size() == object.layer_count());
+    for (size_t id = 0; id < object.layer_count(); ++id) {
+        CHECK(settings.layer_print_z[id] == object.layer(id).scaled_print_z());
+        CHECK(settings.layer_print_z_mm[id] == unscaled(settings.layer_print_z[id]));
+        CHECK(settings.layer_print_z_mm[id] == object.layer(id).unscaled_print_z());
+    }
     const TF::LayerIndex t = TF::LayerIndex(transition);
     CHECK(settings.min_height_to_model == scale_i(1.));
 

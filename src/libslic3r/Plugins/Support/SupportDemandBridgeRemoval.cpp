@@ -17,6 +17,7 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_post_perimeter.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 
 /*
 Support-demand bridge removal
@@ -95,14 +96,6 @@ BridgeRemovalConfig read_object_config(const Object &object)
     BridgeRemovalConfig out;
     out.dont_support_bridges = object_config.get("dont_support_bridges").get_bool();
     return out;
-}
-
-uint32_t island_work_count(const Object &object)
-{
-    uint32_t count = 0;
-    for (uint32_t layer_idx = 1; layer_idx < object.layer_count(); ++layer_idx)
-        count += object.layer(layer_idx).island_count();
-    return count;
 }
 
 BridgeLineFlow bridge_line_flow(const LayerIsland &island)
@@ -416,6 +409,7 @@ void SupportDemandBridgeRemoval::inilialize_impl(storage_handle *) const
         .add_to(m_orchestrator);
 }
 
+// Borrows a post-perimeter payload and reserves progress above layer zero when bridge removal is enabled; missing payload does nothing and cancellation propagates.
 void SupportDemandBridgeRemoval::setup_run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
@@ -426,7 +420,7 @@ void SupportDemandBridgeRemoval::setup_run_impl(const plugin_run_context *run_ct
     const Object object(ctx->object);
     const BridgeRemovalConfig config = read_object_config(object);
     if (config.dont_support_bridges)
-        progress().add_max(island_work_count(object));
+        progress().add_max(Common::island_work_count(object, 1));
 }
 
 void SupportDemandBridgeRemoval::run_impl(const plugin_run_context *run_ctx) const
