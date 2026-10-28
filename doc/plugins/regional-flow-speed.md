@@ -19,3 +19,7 @@ After ordering validation, every region of a printing extrusion's source island
 must belong to the same layer and object. Editors may therefore resolve the
 source layer through any region. Region-less service work stays outside this
 first-layer flow pass.
+
+First-layer speed percentages use the original role or per-flow autospeed base,
+before the first-layer minimum and physical print/filament caps. A zero
+`first_layer_infill_speed` (absolute or percent) falls back to `first_layer_speed`.

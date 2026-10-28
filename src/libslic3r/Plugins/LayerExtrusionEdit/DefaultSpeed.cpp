@@ -669,6 +669,9 @@ double role_speed(const ExtrusionSettingsContext &context,
                   bool full_overhang_speed,
                   double auto_base);
 
+// Resolve first-layer percentages before any minimum or physical speed cap.
+double first_layer_ceiling(const ExtrusionSettingsContext &context, raw_extrusion_role role, double base);
+
 // Apply first-layer rules and physical print/filament caps after role choice.
 double finalize_speed(const ExtrusionSettingsContext &context,
                       raw_extrusion_role role,
@@ -876,6 +879,19 @@ double role_speed(const ExtrusionSettingsContext &context,
     return 0.0;
 }
 
+double first_layer_ceiling(const ExtrusionSettingsContext &context, raw_extrusion_role role, double base)
+{
+    if (!context.first_layer)
+        return 0.;
+    const double general = context.object_config.effective_float_or_percent_or_default("first_layer_speed", base, 0.);
+    if (role == RAW_EXTRUSION_ROLE_INTERNAL_INFILL || role == RAW_EXTRUSION_ROLE_SOLID_INFILL) {
+        const double infill = context.object_config.effective_float_or_percent_or_default("first_layer_infill_speed", base, 0.);
+        if (infill > 0.)
+            return infill;
+    }
+    return general;
+}
+
 double finalize_speed(const ExtrusionSettingsContext &context,
                       raw_extrusion_role role,
                       double mm3_per_mm,
@@ -885,16 +901,8 @@ double finalize_speed(const ExtrusionSettingsContext &context,
     // Apply first-layer limits after role selection. Infill may use a distinct
     // cap, while all remaining roles share first_layer_speed.
     if (context.first_layer) {
-        const double first_layer_speed = effective_value(context.object_config, "first_layer_speed", speed);
-        if (role == RAW_EXTRUSION_ROLE_INTERNAL_INFILL || role == RAW_EXTRUSION_ROLE_SOLID_INFILL) {
-            const double infill_speed = effective_value(
-                context.object_config, "first_layer_infill_speed", speed);
-            const double limit = infill_speed > 0.0 ? infill_speed : first_layer_speed;
-            if (limit > 0.0)
-                speed = std::min(speed, limit);
-        } else if (first_layer_speed > 0.0) {
-            speed = std::min(speed, first_layer_speed);
-        }
+        const double limit = first_layer_ceiling(context, role, speed);
+        if (limit > 0.) speed = std::min(speed, limit);
 
         // The minimum follows the cap. First-layer flow ratios are already in
         // mm3_per_mm: the first-layer flow plugin runs before this one.

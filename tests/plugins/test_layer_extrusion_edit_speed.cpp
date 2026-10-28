@@ -54,6 +54,7 @@
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepLayerExtrusionEdition.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepPostSlicing.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
 
@@ -1970,6 +1971,33 @@ TEST_CASE("Layer extrusion editor preserves overrides and applies first-layer ca
     CHECK(found_fully_resolved);
 }
 
+TEST_CASE("First-layer infill speed zero falls back to the general first-layer limit",
+          "[plugins][layer-extrusion-edit][speed][limits][first-layer-fallback]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const char *infill_limit : {"0", "0%", "30", "25%"}) {
+        CAPTURE(infill_limit);
+        PreparedSpeedPrint prepared;
+        const DynamicPrintConfig config = speed_config({
+            {"infill_speed", "200"}, {"solid_infill_speed", "200"},
+            {"first_layer_speed", "20"}, {"first_layer_infill_speed", infill_limit},
+            {"first_layer_min_speed", "0"}, {"max_print_speed", "300"},
+            {"max_volumetric_speed", "0"}, {"filament_max_speed", "0"},
+            {"filament_max_volumetric_speed", "0"}
+        });
+        prepare_ordered_plan(prepared, config, {{
+            {ExtrusionRole::InternalInfill, 0.2}, {ExtrusionRole::SolidInfill, 0.2}
+        }});
+        run_default_editors(prepared);
+        const auto leaves = observed_plan_leaves(prepared.print);
+        REQUIRE(leaves.size() == 2);
+        const float expected = std::string(infill_limit) == "30" ? 30.f :
+                               std::string(infill_limit) == "25%" ? 50.f : 20.f;
+        for (const auto &leaf : leaves)
+            CHECK(leaf.speed == expected);
+    }
+}
+
 TEST_CASE("Layer extrusion editor caps explicit role speed with max print speed",
           "[plugins][layer-extrusion-edit][speed][limits]")
 {
@@ -2937,6 +2965,72 @@ TEST_CASE("First-layer flow selects one regional value for a deposit without dup
     CHECK(deposit.first_point() == point);
     REQUIRE(deposit.get_property<ExtrusionPropertySpecialCommand>() != nullptr);
     CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
+}
+
+TEST_CASE("Default speed declared settings pass a linear STL export matrix",
+          "[plugins][plugin-e2e][layer-extrusion-edit][speed-e2e]")
+{
+    namespace E2E = Test::PluginE2E;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedActivePlugins active({DEFAULT_SPEED_PLUGIN, "ordering.extrusion_tree.advanced"}, true);
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
+    REQUIRE_FALSE(ordering_key.empty());
+    baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");
+    std::vector<E2E::Domain> domains;
+    for (const char *key : {"bridge_speed", "brim_speed", "external_perimeter_speed", "first_layer_infill_speed",
+             "first_layer_speed", "gap_fill_speed", "infill_speed", "internal_bridge_speed", "ironing_speed",
+             "overhangs_speed", "perimeter_speed", "solid_infill_speed", "support_material_interface_speed",
+             "support_material_speed", "thin_walls_speed", "top_solid_infill_speed"}) {
+        E2E::Domain domain{{key}, {}};
+        for (const char *value : {"0", "25", "50%"})
+            domain.cases.push_back({std::string(key) + "=" + value, {{key, value}}});
+        domains.push_back(std::move(domain));
+    }
+    const auto add = [&domains](const std::string &key, const std::vector<std::string> &values) {
+        E2E::Domain domain{{key}, {}};
+        for (const std::string &value : values)
+            domain.cases.push_back({key + "=" + value, {{key, value}}});
+        domains.push_back(std::move(domain));
+    };
+    add("autospeed_min_thin_flow", {"0", "!0", "50%"});
+    add("filament_max_speed", {"0", "25"});
+    add("filament_max_volumetric_speed", {"0", "2"});
+    add("first_layer_min_speed", {"0", "30"});
+    add("max_print_speed", {"20", "100"});
+    add("max_volumetric_speed", {"0", "2"});
+    add("milling_speed", {"10", "30"});
+    add("overhangs", {"0", "1"});
+    add("travel_speed", {"50", "150"});
+    const TriangleMesh mesh = E2E::stl_fixture(true);
+    for (const E2E::Case &test : E2E::linear_cases(host, {DEFAULT_SPEED_PLUGIN}, baseline, domains)) {
+        INFO(test.name);
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, E2E::apply_case(baseline, test));
+        print.process();
+        const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+        std::string code;
+        try {
+            const std::string exported = host.export_gcode_cli(print, path.string());
+            code = Test::GCode::read_text_file(exported);
+            Test::GCode::remove_output_pair(path);
+        } catch (...) {
+            Test::GCode::remove_output_pair(path);
+            throw;
+        }
+        CHECK(code.find("G1 ") != std::string::npos);
+        CHECK(code.find(" E") != std::string::npos);
+        const std::vector<ObservedLeaf> leaves = observed_plan_leaves(print);
+        REQUIRE_FALSE(leaves.empty());
+        for (const ObservedLeaf &leaf : leaves) {
+            CHECK(std::isfinite(leaf.speed));
+            CHECK(leaf.speed > 0.);
+        }
+    }
 }
 
 TEST_CASE("First-layer flow declared settings pass a linear STL export matrix",
