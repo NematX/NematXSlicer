@@ -1565,7 +1565,6 @@ GCodeGenerator::~GCodeGenerator() = default;
 
 void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorResult* result, ThumbnailsGeneratorCallback thumbnail_cb)
 {
-
     // mutable print status, to make print unmutable.
     Print::StatusMonitor monitor{ *print };
 
@@ -8949,8 +8948,14 @@ double_t GCodeGenerator::_compute_speed_mm_per_sec(const ExtrusionPath& path, co
         if(comment) *comment += ", reduced by filament_max_speed";
     }
 
-    if (!m_speed_override.empty() && m_speed_override.back().second->fan_speed_percent > 0) {
-        fan_speed = (double)m_speed_override.back().second->fan_speed_percent;
+    for (auto it = m_current_entity.rbegin(); it != m_current_entity.rend(); ++it) {
+        const ExtrusionPropertyFan *fan = (*it)->get_property<ExtrusionPropertyFan>();
+        if (!fan)
+            continue;
+        if (!fan->is_set())
+            continue;
+        fan_speed = double(fan->percent);
+        break;
     }
 
     return speed;

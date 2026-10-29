@@ -1060,6 +1060,12 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
         CHECK(events[fan_index].value == 128);  // 50 % of 255
         CHECK(events[fan_index].phase == 1);
         CHECK(events[fan_index].pulls == expected_fan_pulls);
+        // The fan is requested after the heater command (blocking in normal
+        // mode, nonblocking in fast skinnydip), never during the normal wait.
+        REQUIRE(fan_index > 0);
+        CHECK_FALSE(events[fan_index - 1].fan);
+        CHECK(events[fan_index - 1].value == toolchange_temp);
+        CHECK(events[fan_index - 1].wait == (mode == 1));
     }
     // The first layer of the plan uses first_layer_temperature, every later layer temperature.
     for (const Event &event : events)

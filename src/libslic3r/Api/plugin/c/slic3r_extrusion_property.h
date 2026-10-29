@@ -5,8 +5,8 @@
 #ifndef slic3r_extrusion_property_h_
 #define slic3r_extrusion_property_h_
 
-/* Major 3 removes the speed temperature (heater events replace it); it keeps the DEPOSIT special command of 2.2. */
-#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MAJOR 3u
+/* Major 4 separates fan requests from speed, keeping heater events and the DEPOSIT command. */
+#define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MAJOR 4u
 #define SLIC3R_PLUGIN_API_EXTRUSION_PROPERTY_MINOR 0u
 
 #include <stdint.h>
@@ -60,6 +60,7 @@ typedef slic3r_property_type extrusion_property_type;
 #define EXTRUSION_PROPERTY_TYPE_INFILL          ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_INFILL)
 #define EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS  ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_AXIS)
 #define EXTRUSION_PROPERTY_TYPE_HEATER           ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_HEATER)
+#define EXTRUSION_PROPERTY_TYPE_FAN              ((extrusion_property_type)SLIC3R_PROPERTY_TYPE_EXTRUSION_FAN)
 
 typedef uint32_t extrusion_data_id;
 
@@ -260,8 +261,34 @@ typedef struct c_extrusion_property_speed {
     float speed_mm_per_s;
     float accel_mm_per_s2;
     float pressure_adv;
-    float fan_speed_percent;
 } c_extrusion_property_speed;
+
+/* Exclusive fan-request modes, not combinable flags. Plugins extend this typed
+   registry with orchestrator_register_runtime_id(). The host reserves the
+   standard names below; custom numeric ids must never be serialized. */
+typedef orchestrator_runtime_id fan_request_mode;
+#define FAN_REQUEST_MODE_ID_TYPE "slic3r.fan.request_mode"
+#define FAN_REQUEST_MODE_UNSPECIFIED ((fan_request_mode)0u)
+#define FAN_REQUEST_MODE_AUTOMATIC   ((fan_request_mode)1u)
+#define FAN_REQUEST_MODE_OVERRIDE    ((fan_request_mode)2u)
+#define FAN_REQUEST_MODE_NAME_UNSPECIFIED "slic3r.unspecified"
+#define FAN_REQUEST_MODE_NAME_AUTOMATIC   "slic3r.automatic"
+#define FAN_REQUEST_MODE_NAME_OVERRIDE    "slic3r.override"
+
+/* Property type: EXTRUSION_PROPERTY_TYPE_FAN.
+   The pair is inherited atomically. Unspecified inherits, even when a local
+   payload is present; zero-initialized bytes are therefore neutral. Every
+   other registered mode is a set request, including a percentage of zero.
+   Active percentages must be finite and in [0,100]. Modes arbitrate policies:
+   Automatic is modifiable by any policy, Override by none, and a plugin mode
+   only by its owning policy. Registration provides identity, not behavior.
+   STEP_GCODE validates registration in the export's orchestrator before the
+   finalized tree reaches firmware. Firmware checks active percentages and
+   encodes without mode conversion; direct SDK callers supply validated modes. */
+typedef struct c_extrusion_property_fan {
+    float percent;
+    orchestrator_runtime_id mode;
+} c_extrusion_property_fan;
 
 /* Property type: EXTRUSION_PROPERTY_TYPE_MODIFIER. */
 typedef struct c_extrusion_property_modifier {

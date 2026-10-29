@@ -557,6 +557,110 @@ void append_special_extrusion_event(PrintingScopeEvents &events,
 
 } // namespace
 
+TEST_CASE("Direct empty fan events encode once and preserve physical state",
+          "[plugins][gcode][firmware][fan-request]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"extruder_fan_offset", "10%"}, {"fan_printer_min_speed", "30"}});
+    CustomFanFirmwareSession firmware;
+    firmware.setup(slic3r_api::Config(ApiHost::to_config_handle(&config)));
+    const auto write = [&](const ExtrusionEntity &entity) {
+        return firmware.write_event(slic3r_api::ExtrusionEntity(
+            reinterpret_cast<const extrusion_entity_handle *>(&entity)));
+    };
+    const auto select = special_command_entity(ExtrusionPropertySpecialCommand::Code::TOOLCHANGE, 0.);
+    write(*select);
+
+    ExtrusionNop neutral;
+    neutral.get_or_add_property<ExtrusionPropertyFan>();
+    CHECK(write(neutral).empty());
+    ExtrusionEntityCollection inherited(false, false);
+    inherited.add_property(ExtrusionPropertyFan(70.f, FAN_REQUEST_MODE_OVERRIDE));
+    inherited.append(ExtrusionNop(ExtrusionPropertyHeater(
+        C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 200, true)));
+    const auto inherited_output = write(inherited);
+    CHECK(inherited_output.find("M109") != std::string::npos);
+    CHECK(inherited_output.find("CUSTOM_FAN") == std::string::npos);
+
+    ExtrusionNop stop;
+    stop.add_property(ExtrusionPropertyFan(0.f, FAN_REQUEST_MODE_OVERRIDE));
+    CHECK(write(stop) == "CUSTOM_FAN T0 S0\n");
+    CHECK(write(stop).empty());
+    // Neither exiting a parent nor the next request-less movement restores its
+    // old lexical request. A fan-only event emits no motion/PA/heater commands.
+    ExtrusionEntityCollection parent(false, false);
+    parent.add_property(ExtrusionPropertyFan(80.f, FAN_REQUEST_MODE_AUTOMATIC));
+    parent.append(ExtrusionNop(ExtrusionPropertyFan(20.f, FAN_REQUEST_MODE_OVERRIDE)));
+    CHECK(write(parent) == "CUSTOM_FAN T0 S40\n"); // the minimum also applies to Override
+    const auto travel = make_firmware_travel(
+        ArcPolyline(Points{Point::new_scale(0., 0.), Point::new_scale(1., 0.)}), 20.f, 500.f);
+    CHECK(write(*travel).find("CUSTOM_FAN") == std::string::npos);
+    CHECK(write(stop) == "CUSTOM_FAN T0 S0\n");
+
+    ExtrusionNop raw;
+    auto &request = raw.get_or_add_property<ExtrusionPropertyFan>();
+    request.percent = std::numeric_limits<float>::quiet_NaN();
+    CHECK(write(raw).empty()); // Unspecified ignores even noncanonical bytes.
+    request.mode = FAN_REQUEST_MODE_OVERRIDE;
+    CHECK_THROWS_AS(write(raw), std::invalid_argument);
+    request.percent = 101.f;
+    CHECK_THROWS_AS(write(raw), std::invalid_argument);
+    request.percent = 25.f;
+    request.mode = orchestrator_register_runtime_id(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+        FAN_REQUEST_MODE_ID_TYPE, "tests.firmware.plugin_mode");
+    const fan_request_mode custom = request.mode;
+    CHECK(write(raw) == "CUSTOM_FAN T0 S40\n"); // custom mode reaches firmware, calibration once
+    CHECK(request.mode == custom); // no conversion to Automatic
+    // Registry errors are rejected by STEP_GCODE, not by this standalone
+    // encoder, which needs no orchestrator or reader service for fan events.
+}
+
+TEST_CASE("STEP_GCODE validates raw fan pairs without closing the runtime mode domain",
+          "[plugins][gcode][validation][fan-request]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    configure_standard_firmware(print);
+    auto &tool = append_speed_validation_tool_group(print, scale_i(0.2), 0);
+    auto root = std::make_unique<ExtrusionNop>();
+    auto &fan = root->get_or_add_property<ExtrusionPropertyFan>();
+    // This fan-only event belongs to no model instance in the compact plan.
+    append_speed_validation_extrusion(tool, std::move(root), nullptr, UINT32_MAX);
+    std::string error;
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    fan.set(0.f, FAN_REQUEST_MODE_OVERRIDE);
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    const auto custom = orchestrator_register_runtime_id(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+        FAN_REQUEST_MODE_ID_TYPE, "tests.validation.custom");
+    fan.set(35.f, custom);
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    // Standard firmware encodes plugin-owned percentages without rewriting
+    // their mode; policy identity has no effect on firmware command syntax.
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    CHECK(output.find("M106 S89\n") != std::string::npos);
+    CHECK(fan.mode == custom);
+    // Forged or unregistered modes and malformed active C writes cannot export.
+    fan.mode = 42;
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    CHECK(error.find("EPropertyFan") != std::string::npos);
+    CHECK_THROWS_AS(export_with_firmware(print, "gcode.firmware.marlin2"), RuntimeError);
+    fan.mode = ORCHESTRATOR_RUNTIME_ID_INVALID;
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    fan.mode = FAN_REQUEST_MODE_AUTOMATIC;
+    for (float invalid : {-1.f, 101.f, std::numeric_limits<float>::infinity(),
+                          std::numeric_limits<float>::quiet_NaN()}) {
+        fan.percent = invalid;
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    }
+    fan.mode = FAN_REQUEST_MODE_UNSPECIFIED;
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+    fan.clear();
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
+}
+
 TEST_CASE("STEP_GCODE pre-validation resolves inherited geometric speeds",
           "[plugins][gcode][validation][speed]")
 {
@@ -568,7 +672,7 @@ TEST_CASE("STEP_GCODE pre-validation resolves inherited geometric speeds",
         append_speed_validation_extrusion(tool_group, speed_validation_path(22.f));
 
         std::string error = "stale";
-        CHECK(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.empty());
     }
 
@@ -582,7 +686,7 @@ TEST_CASE("STEP_GCODE pre-validation resolves inherited geometric speeds",
         root->add_property(ExtrusionPropertySpeed(24.f));
         append_speed_validation_extrusion(tool_group, std::move(root));
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("a non-positive child declaration keeps the inherited parent speed") {
@@ -596,7 +700,7 @@ TEST_CASE("STEP_GCODE pre-validation resolves inherited geometric speeds",
         root->add_property(ExtrusionPropertySpeed(26.f));
         append_speed_validation_extrusion(tool_group, std::move(root));
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("an event leaf without geometry does not require speed") {
@@ -605,7 +709,7 @@ TEST_CASE("STEP_GCODE pre-validation resolves inherited geometric speeds",
         append_speed_validation_extrusion(
             tool_group, std::unique_ptr<ExtrusionEntity>(new ExtrusionNop()));
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 }
 
@@ -617,7 +721,7 @@ TEST_CASE("STEP_GCODE pre-validation reports missing and malformed speeds",
     SECTION("a PrintingPlan is required") {
         Print print;
         std::string error = "stale";
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("Print has no plan") != std::string::npos);
     }
 
@@ -633,7 +737,7 @@ TEST_CASE("STEP_GCODE pre-validation reports missing and malformed speeds",
             new ExtrusionEntity(std::move(root_children), false, false, true)));
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("1 geometric extrusion leaf has no valid effective speed") != std::string::npos);
         CHECK(error.find(
             "groups[0].layers[0].tool_groups[0].extrusions[0].root.children[0].children[0]") !=
@@ -664,7 +768,7 @@ TEST_CASE("STEP_GCODE pre-validation reports missing and malformed speeds",
         append_speed_validation_extrusion(tool_group, std::move(root));
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find(".root: speed_mm_per_s=-1 (inherit)") != std::string::npos);
         CHECK(error.find(".root.children[0]: speed_mm_per_s=0 (inherit)") != std::string::npos);
         CHECK(error.find("every speed declaration on this path requests inheritance") != std::string::npos);
@@ -688,7 +792,7 @@ TEST_CASE("STEP_GCODE pre-validation reports missing and malformed speeds",
             append_speed_validation_extrusion(tool_group, std::move(root));
 
             std::string error;
-            CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+            CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
             CHECK(error.find(std::string("speed_mm_per_s=") + invalid.second) != std::string::npos);
             CHECK(error.find("Every explicit speed must be finite") != std::string::npos);
         }
@@ -700,7 +804,7 @@ TEST_CASE("STEP_GCODE pre-validation reports missing and malformed speeds",
         append_speed_validation_extrusion(tool_group, nullptr);
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("extrusions[0].root") != std::string::npos);
         CHECK(error.find("print_z=0.42 mm") != std::string::npos);
         CHECK(error.find("extruder_id=3") != std::string::npos);
@@ -727,7 +831,7 @@ TEST_CASE("STEP_GCODE pre-validation rejects unsupported printable marker roles"
     append_speed_validation_extrusion(tool_group, std::move(path));
 
     std::string error;
-    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     CHECK(error.find("unsupported effective extrusion role raw=3") !=
           std::string::npos);
     CHECK(error.find(
@@ -756,7 +860,7 @@ TEST_CASE("STEP_GCODE pre-validation covers every before and after event scope",
     append_speed_validation_event(tool_group.events, false, std::nullopt);
 
     std::string error;
-    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     CHECK(error.find("8 movement-producing before/after event entities are invalid") != std::string::npos);
     CHECK(error.find("plan.events.before.children[0]") != std::string::npos);
     CHECK(error.find("plan.events.after.children[0]") != std::string::npos);
@@ -786,7 +890,7 @@ TEST_CASE("STEP_GCODE pre-validation recognizes event movement kinds",
         append_speed_validation_event(tool_group.events, true, 18.f);
         append_special_extrusion_event(tool_group.events, false, 12.f);
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("event geometry inherits speed inside its own event root") {
@@ -798,7 +902,7 @@ TEST_CASE("STEP_GCODE pre-validation recognizes event movement kinds",
         event.add_property(ExtrusionPropertySpeed(19.f));
         tool_group.events.append_before(event);
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("an E-only special extrusion without speed is diagnosed") {
@@ -807,7 +911,7 @@ TEST_CASE("STEP_GCODE pre-validation recognizes event movement kinds",
         append_special_extrusion_event(tool_group.events, false, std::nullopt);
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("1 movement-producing before/after event entity is invalid") !=
               std::string::npos);
         CHECK(error.find("movement=E-only special extrusion") != std::string::npos);
@@ -820,7 +924,7 @@ TEST_CASE("STEP_GCODE pre-validation recognizes event movement kinds",
         PrintingToolGroup &tool_group = append_speed_validation_tool_group(print);
         tool_group.events.append_before(ExtrusionNop());
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("an E-only command in a PrintingExtrusion is also rejected early") {
@@ -832,7 +936,7 @@ TEST_CASE("STEP_GCODE pre-validation recognizes event movement kinds",
         append_speed_validation_extrusion(tool_group, std::move(event));
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("1 E-only special extrusion event is invalid") != std::string::npos);
         CHECK(error.find("extrusions[0].root") != std::string::npos);
     }
@@ -865,7 +969,7 @@ TEST_CASE("STEP_GCODE pre-validation visits E-only commands in every event scope
     append_special_extrusion_event(group.events, false, 12.f);
     append_special_extrusion_event(plan.events, false, 12.f);
 
-    CHECK(Steps::StepGenerateGcode::validate_pre(print));
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
 }
 
 TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
@@ -879,7 +983,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
             print, scale_i(0.42), 0);
         append_special_extrusion_event(tool_group.events, true, std::nullopt, 0.0);
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("an E-only child inherits speed from its event parent") {
@@ -895,7 +999,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
         event.add_property(ExtrusionPropertySpeed(17.f));
         tool_group.events.append_before(event);
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("a non-finite speed remains invalid for a zero E delta") {
@@ -906,7 +1010,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
             tool_group.events, true, std::numeric_limits<float>::quiet_NaN(), 0.0);
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("a speed declaration on this path is NaN or infinite") !=
               std::string::npos);
     }
@@ -925,7 +1029,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
             append_special_extrusion_event(tool_group.events, true, 15.f, invalid_value);
 
             std::string error;
-            CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+            CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
             CHECK(error.find("requested E delta is NaN or infinite") != std::string::npos);
         }
     }
@@ -936,7 +1040,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
         append_special_extrusion_event(plan.events, true, 15.f);
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("plan.events.before.children[0]") != std::string::npos);
         CHECK(error.find("Active tool: unavailable") != std::string::npos);
         CHECK(error.find("no tool has been selected yet") != std::string::npos);
@@ -948,7 +1052,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
             print, scale_i(0.42), 0);
         append_special_extrusion_event(tool_group.events, true, 15.f);
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("an out-of-range tool is diagnosed with its source") {
@@ -958,7 +1062,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
         append_special_extrusion_event(tool_group.events, true, 15.f);
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("Active tool: 3") != std::string::npos);
         CHECK(error.find("tool_groups[0].extruder_id") != std::string::npos);
         CHECK(error.find("outside the configured range") != std::string::npos);
@@ -982,7 +1086,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
         commands.push_back(std::move(extrusion));
         plan.events.append_before(ExtrusionEntity(std::move(commands), false, false, true));
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 
     SECTION("a fractional semantic tool change is rejected instead of rounded") {
@@ -1004,7 +1108,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
         plan.events.append_before(ExtrusionEntity(std::move(commands), false, false, true));
 
         std::string error;
-        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+        CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
         CHECK(error.find("invalid TOOLCHANGE value") != std::string::npos);
     }
 
@@ -1013,7 +1117,7 @@ TEST_CASE("STEP_GCODE pre-validation checks explicit E-only extrusion inputs",
         append_speed_validation_tool_group(print, scale_i(0.42), 0);
         append_special_extrusion_event(print.mutable_printing_plan().events, false, 15.f);
 
-        CHECK(Steps::StepGenerateGcode::validate_pre(print));
+        CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
     }
 }
 
@@ -1038,7 +1142,7 @@ TEST_CASE("STEP_GCODE speed validation leaves retraction policy to the firmware"
         ExtrusionRole(ExtrusionRole::Travel | ExtrusionRoleModifier::ERM_Retract)));
     tool_group.events.append_after(semantic_retract);
 
-    CHECK(Steps::StepGenerateGcode::validate_pre(print));
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print));
 }
 
 TEST_CASE("STEP_GCODE speed diagnostics retain source object context",
@@ -1064,7 +1168,7 @@ TEST_CASE("STEP_GCODE speed diagnostics retain source object context",
         tool_group, speed_validation_path(std::nullopt), &source_island, 0);
 
     std::string error;
-    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(prepared.print, &error));
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), prepared.print, &error));
     CHECK(error.find("region_count=1") != std::string::npos);
     CHECK(error.find("layer_id=0") != std::string::npos);
     CHECK(error.find("print_object_index=0") != std::string::npos);
@@ -1084,7 +1188,7 @@ TEST_CASE("STEP_GCODE speed diagnostics are bounded without hiding the total",
             tool_group, speed_validation_path(std::nullopt, double(extrusion_idx), double(extrusion_idx + 1)));
 
     std::string error;
-    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(print, &error));
+    CHECK_FALSE(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error));
     CHECK(error.find("12 geometric extrusion leaves") != std::string::npos);
     CHECK(error.find("[10/12]") != std::string::npos);
     CHECK(error.find("[11/12]") == std::string::npos);
@@ -2997,7 +3101,7 @@ TEST_CASE("STEP_GCODE pre-validation checks stationary deposit requirements",
     else
         append_speed_validation_extrusion(tool, std::move(leaf));
     std::string error;
-    CHECK(Steps::StepGenerateGcode::validate_pre(print, &error) == valid);
+    CHECK(Steps::StepGenerateGcode::validate_pre(Orchestrator::instance(), print, &error) == valid);
     if (!valid)
         CHECK(error.find("DEPOSIT needs") != std::string::npos);
     if (event_scope) {
@@ -3849,7 +3953,8 @@ TEST_CASE("Default firmware restores inherited requests between sibling nodes",
         -1.f));
     std::unique_ptr<ExtrusionEntity> root(
         new ExtrusionEntity(std::move(children), false, true, true));
-    root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f, 50.f));
+    root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f));
+    root->add_property(ExtrusionPropertyFan(50.f, FAN_REQUEST_MODE_OVERRIDE));
     root->add_property(ExtrusionPropertyHeater(
         C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 210, false));
     append_path_extrusion(tool_group, std::move(root));
@@ -4306,7 +4411,8 @@ TEST_CASE("Default firmware handles ordered special commands and custom G-code",
 
     std::unique_ptr<ExtrusionEntity> root(
         new ExtrusionEntity(std::move(children), false, true, true));
-    root->add_property(ExtrusionPropertySpeed(12.f, 300.f, 0.02f, 30.f));
+    root->add_property(ExtrusionPropertySpeed(12.f, 300.f, 0.02f));
+    root->add_property(ExtrusionPropertyFan(30.f, FAN_REQUEST_MODE_OVERRIDE));
     root->add_property(ExtrusionPropertyHeater(
         C_EXTRUSION_HEATER_TOOL, 1, 205, false));
     append_path_extrusion(tool_group, std::move(root));

@@ -17,9 +17,10 @@
 #include "PrusaGCodeFirmware.hpp"
 #include "RepRapGCodeFirmware.hpp"
 #include "SprinterGCodeFirmware.hpp"
-#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/FanConfig.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeScriptProcessorViews.hpp"
 #include "libslic3r/Plugins/GCode/Reader/BambuGCodeReaderItems.hpp"
 
@@ -134,6 +135,7 @@ const raw_used_config_key k_common_used_config_keys[] = {
     {"extruder_offset", RAW_CO_VECTOR_POINT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"extruder_temperature_offset", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"extrusion_multiplier", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"fan_printer_min_speed", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"filament_diameter", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"gcode_precision_e", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"gcode_precision_xyz", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -399,7 +401,7 @@ private:
     // Return this firmware's preference number. Nothing is changed or transferred, and the call cannot fail.
     int32_t exclusive_group_priority_impl() const noexcept override { return m_definition.exclusive_group_priority; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
-    // Enumerate the settings owned by this definition.
+    // Enumerate dialect settings plus the calibration shared by every alternative.
     int32_t defined_config_keys(const char **keys) const noexcept override;
     // Create dialect settings before optionally publishing the shared selector.
     void inilialize_impl(storage_handle *storage) const override;
@@ -429,8 +431,9 @@ int32_t BuiltinGCodeFirmwarePlugin::defined_config_keys(const char **keys) const
     if (keys != nullptr) {
         for (size_t idx = 0; idx < m_definition.defined_key_count; ++idx)
             keys[idx] = m_definition.settings[idx].key;
+        keys[m_definition.defined_key_count] = "fan_printer_min_speed";
     }
-    return int32_t(m_definition.defined_key_count);
+    return int32_t(m_definition.defined_key_count + 1);
 }
 
 // Initialize owned settings through the definition before the shared UI guard.
@@ -439,6 +442,10 @@ void BuiltinGCodeFirmwarePlugin::inilialize_impl(storage_handle *) const
 {
     if (m_definition.create_settings != nullptr)
         m_definition.create_settings(m_orchestrator);
+    const raw_config_option_def def = fan_minimum_option_definition();
+    if (orchestrator_create_option_def(m_orchestrator, &def) != OPTION_DEF_ERROR_OK)
+        throw std::runtime_error("Cannot define the firmware minimum fan speed.");
+
     if (!m_definition.registers_ui)
         return;
 

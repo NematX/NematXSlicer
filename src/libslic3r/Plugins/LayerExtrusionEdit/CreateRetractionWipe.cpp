@@ -658,8 +658,7 @@ void add_inside_start(
     unretract.get_or_add(EPropertySpeed::key)
         .speed(float(wipe_speed(print_config, extruder_id)))
         .acceleration(-1.f)
-        .pressure_advance(-1.f)
-        .fan_speed(-1.f);
+        .pressure_advance(-1.f);
 }
 
 void set_wipe_attributes(MutableExtrusionEntity entity,
@@ -852,8 +851,7 @@ void add_outgoing_wipe(
     wipe.get_or_add(EPropertySpeed::key)
         .speed(float(speed))
         .acceleration(-1.f)
-        .pressure_advance(-1.f)
-        .fan_speed(-1.f);
+        .pressure_advance(-1.f);
 
     // Structural insertion may have moved the original event into a child.
     // Reacquire it before changing the initial E-only target.

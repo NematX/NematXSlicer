@@ -55,10 +55,7 @@ unrelated.
 The lower half is reserved for host-defined static ids. Plugins receive ids
 from the upper half and cannot choose their numeric value.
 */
-typedef uint32_t orchestrator_runtime_id;
-
-#define ORCHESTRATOR_RUNTIME_ID_INVALID ((orchestrator_runtime_id)UINT32_MAX)
-#define ORCHESTRATOR_RUNTIME_ID_DYNAMIC_BEGIN ((orchestrator_runtime_id)0x80000000u)
+/* orchestrator_runtime_id and its range constants are declared in slic3r_def.h. */
 
 /* ========================= REGISTRATION ========================= */
 

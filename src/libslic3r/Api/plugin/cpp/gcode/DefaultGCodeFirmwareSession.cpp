@@ -263,7 +263,7 @@ struct DefaultGCodeFirmwareSession::RequestedState
     std::optional<float> speed_mm_per_s;
     std::optional<float> acceleration_mm_per_s2;
     std::optional<float> pressure_advance;
-    std::optional<float> fan_speed_percent;
+    EPropertyFan fan = {};
     std::optional<EPropertyAttributes> attributes;
     std::optional<EPropertyExtrusionAxis> extrusion_axis;
     coord_t z_offset = 0;
@@ -307,8 +307,13 @@ protected:
                 m_state.acceleration_mm_per_s2 = speed->accel_mm_per_s2;
             if (speed->pressure_adv >= 0.f)
                 m_state.pressure_advance = speed->pressure_adv;
-            if (speed->fan_speed_percent >= 0.f)
-                m_state.fan_speed_percent = speed->fan_speed_percent;
+        }
+        const EPropertyFan *direct_fan = entity.get(EPropertyFan::key);
+        if (direct_fan) {
+            // Registration was checked by STEP_GCODE before this finalized
+            // tree reached the firmware. Encoding needs only its percentage.
+            direct_fan->validate_percentage();
+            m_state.fan = direct_fan->resolved_with(m_state.fan);
         }
         if (const EPropertyAttributes *attributes = entity.get(EPropertyAttributes::key))
             m_state.attributes = *attributes;
@@ -324,6 +329,8 @@ protected:
         m_output += m_session.enter_extrusion_node(entity);
         if (const EPropertyHeater *heater = entity.get(EPropertyHeater::key))
             m_output += m_session.write_heater_event(*heater);
+        if (direct_fan && direct_fan->is_set() && entity.child_count() == 0 && entity.segment_count() == 0)
+            m_output += m_session.write_requested_fan();
         if (const EPropertyCustomGcode *custom_gcode = entity.get(EPropertyCustomGcode::key))
             m_output += m_session.write_custom_gcode(entity, *custom_gcode);
         if (const EPropertySpecialCommand *command = entity.get(EPropertySpecialCommand::key)) {
@@ -1067,6 +1074,18 @@ std::string DefaultGCodeFirmwareSession::move_to_group_start(const ConstPrinting
     return {};
 }
 
+std::string DefaultGCodeFirmwareSession::write_requested_fan()
+{
+    if (!m_current_extruder_idx)
+        throw std::invalid_argument("A fan request has no active tool.");
+    DefaultExtruder &tool = current_extruder();
+    if (!tool.fan().needs_encoding())
+        return {};
+    const std::string output = encode_fan(tool.id(), tool.fan().effective_speed_percent());
+    tool.fan().mark_encoded();
+    return output;
+}
+
 std::string DefaultGCodeFirmwareSession::transition_wipe_marker(const bool wipe)
 {
     if (wipe == m_wipe_tag_open)
@@ -1090,8 +1109,8 @@ void DefaultGCodeFirmwareSession::apply_requested_state(const RequestedState &st
     // selected physical tool; heater targets are changed only by entry events
     // or external G-code and therefore are not part of lexical state.
     DefaultExtruder &tool = current_extruder();
-    tool.fan().request_speed_percent(state.fan_speed_percent ?
-        std::optional<double>(*state.fan_speed_percent) : std::optional<double>());
+    tool.fan().request_speed_percent(state.fan.is_set() ?
+        std::optional<double>(state.fan.percent) : std::optional<double>());
     tool.pressure_advance().request(state.pressure_advance ?
         std::optional<double>(*state.pressure_advance) : std::optional<double>());
 }
@@ -2077,10 +2096,7 @@ std::string DefaultGCodeFirmwareSession::write_lines(const PreparedMove &prepare
     }
     if (m_current_extruder_idx) {
         DefaultExtruder &tool = current_extruder();
-        if (tool.fan().needs_encoding()) {
-            output += encode_fan(tool.id(), tool.fan().effective_speed_percent());
-            tool.fan().mark_encoded();
-        }
+        output += write_requested_fan();
         if (tool.pressure_advance().needs_encoding()) {
             output += encode_pressure_advance(
                 tool.id(), *tool.pressure_advance().requested());

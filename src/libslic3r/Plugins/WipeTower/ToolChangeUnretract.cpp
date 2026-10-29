@@ -508,8 +508,7 @@ void edit_scope(const ScopeEntity &scope, const PrintingLayerGroup &layer,
     wipe.get_or_add(EPropertySpeed::key)
         .speed(float(speed))
         .acceleration(-1.f)
-        .pressure_advance(-1.f)
-        .fan_speed(-1.f);
+        .pressure_advance(-1.f);
     wipe.get_or_add(EPropertyExtrusionAxis::key).unretract(restart_extra, true);
 }
 

@@ -78,6 +78,7 @@ static const std::vector<PropertyInfo> &builtin_property_infos()
     static const std::vector<PropertyInfo> infos = {
         { EXTRUSION_PROPERTY_TYPE_ATTRIBUTES,      "slic3r.extrusion.attributes",      sizeof(c_extrusion_property_attributes),      alignof(c_extrusion_property_attributes) },
         { EXTRUSION_PROPERTY_TYPE_SPEED,           "slic3r.extrusion.speed",           sizeof(c_extrusion_property_speed),           alignof(c_extrusion_property_speed) },
+        { EXTRUSION_PROPERTY_TYPE_FAN,             "slic3r.extrusion.fan",             sizeof(c_extrusion_property_fan),             alignof(c_extrusion_property_fan) },
         { EXTRUSION_PROPERTY_TYPE_MODIFIER,        "slic3r.extrusion.modifier",        sizeof(c_extrusion_property_modifier),        alignof(c_extrusion_property_modifier) },
         { EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE,    "slic3r.extrusion.custom_gcode",    sizeof(c_extrusion_property_custom_gcode),    alignof(c_extrusion_property_custom_gcode) },
         { EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND, "slic3r.extrusion.special_command", sizeof(c_extrusion_property_special_command), alignof(c_extrusion_property_special_command) },

@@ -178,6 +178,44 @@ TEST_CASE("Reusable heater and fan states preserve destination configuration",
     CHECK(destination_fan.needs_encoding());
 }
 
+TEST_CASE("Fan calibration preserves stop and separates physical observations",
+          "[plugins][gcode][firmware][state][fan-request]")
+{
+    FanState fan;
+    fan.setup(10., 30.);
+    CHECK_FALSE(fan.needs_encoding());
+    fan.request_speed_percent(0.);
+    CHECK(fan.effective_speed_percent() == 0.);
+    fan.mark_encoded();
+    CHECK_FALSE(fan.needs_encoding());
+    fan.request_speed_percent(5.);
+    CHECK(fan.effective_speed_percent() == 40.); // minimum, then offset
+    fan.mark_encoded();
+    fan.request_speed_percent(10.);
+    CHECK_FALSE(fan.needs_encoding()); // deduplicate physically, not logically
+    fan.request_speed_percent(95.);
+    CHECK(fan.effective_speed_percent() == 100.);
+
+    FanState second;
+    second.setup(-20., 30.);
+    second.request_speed_percent(20.);
+    CHECK(second.effective_speed_percent() == 10.);
+    second.synchronize_runtime_from(fan);
+    CHECK(second.effective_speed_percent() == 75.); // own calibration survives
+    second.synchronize_after_external_gcode(17.);
+    CHECK_FALSE(second.requested_speed_percent());
+    CHECK(second.encoded_speed_percent() == 17.);
+    CHECK_FALSE(second.needs_encoding());
+    second.request_speed_percent(20.);
+    CHECK(second.effective_speed_percent() == 10.);
+    CHECK(second.needs_encoding());
+    second.synchronize_encoded_after_external_gcode(15.);
+    CHECK(second.requested_speed_percent() == 20.);
+    CHECK(second.encoded_speed_percent() == 15.);
+    second.request_speed_percent(std::nullopt);
+    CHECK_FALSE(second.needs_encoding());
+}
+
 TEST_CASE("Generic firmware state distinguishes normal and wait temperature encodings",
           "[plugins][gcode][firmware][state]")
 {

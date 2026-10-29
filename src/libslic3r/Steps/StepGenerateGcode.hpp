@@ -25,7 +25,7 @@ void register_selector_traits(Orchestrator &orchestrator);
 
 void clear(Print &print);
 void prepare(Print &print);
-bool validate_pre(const Print &print, std::string *error = nullptr);
+bool validate_pre(const Orchestrator &orchestrator, const Print &print, std::string *error = nullptr);
 bool validate_post(const Print &print, std::string *error = nullptr);
 std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path);
 

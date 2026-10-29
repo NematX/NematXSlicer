@@ -504,7 +504,8 @@ All follow the window of the node carrying them. Field lists group values having
 | C payload | Members |
 |---|---|
 | `c_extrusion_property_attributes` | `mm3_per_mm`, `width`, `height`, `role`, `no_seam` |
-| `c_extrusion_property_speed` | `speed_mm_per_s`, `accel_mm_per_s2`, `pressure_adv`, `fan_speed_percent` |
+| `c_extrusion_property_speed` | `speed_mm_per_s`, `accel_mm_per_s2`, `pressure_adv` |
+| `c_extrusion_property_fan` | atomic `percent`, exclusive runtime-ID `mode`; zero-filled = inherit |
 | `c_extrusion_property_modifier` | `enforce_travel`, `enforce_retraction`, `enforce_unlift`, `disable_retraction`, `disable_lift`, `toolchange_retraction` |
 | `c_extrusion_property_custom_gcode` | `kind`, `script_type`, `processing_extruder_id`; `text_id`, `config_id` reference buffers local to the entity, not live Config handles |
 | `c_extrusion_property_special_command` | `code`, `extra_data` |

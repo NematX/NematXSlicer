@@ -1,13 +1,13 @@
 # Using Plugin Properties
 
-> API snapshot commit: `2273b753a20b520d8ca2b275299e4003e0f680ab`
+> Base snapshot commit: `78538901a5f3a30b36d4c0540de04f6120200b2c`, with the fan SDK migration below.
 >
-> Plugin ABI version: `50`
+> Per-header ABI: `slic3r_extrusion_property.h` 4.0, `slic3r_def.h` 1.5.
 
 The commit above identifies the source-tree state against which this guide and
 its examples were checked. It is not the commit that adds this document: a
 commit cannot contain its own final hash. Update both the snapshot hash and the
-ABI value whenever this guide is revised for a later plugin API.
+per-header ABI requirements whenever this guide is revised for a later plugin API.
 
 Plugin properties are small typed metadata records attached to objects already
 owned by the slicer. They let one plugin annotate an object and a later plugin
@@ -108,6 +108,89 @@ editable_speed.speed(35.f).acceleration(800.f);
 `get()` and `get_mutable()` return `nullptr` when the direct property is absent.
 `get_or_add()` returns the existing payload or creates a zero-initialized one.
 `remove()` returns whether a property was actually removed.
+
+## Fan Requests: Absence Is A Mode, Not A Percentage
+
+`EPropertySpeed` contains only speed, acceleration and pressure advance. Fan
+requests have their own built-in key, `EPropertyFan::key`, and C payload:
+
+```cpp
+struct c_extrusion_property_fan {
+    float percent;
+    orchestrator_runtime_id mode;
+};
+```
+
+The standard exclusive modes are `FAN_REQUEST_MODE_UNSPECIFIED` (0),
+`FAN_REQUEST_MODE_AUTOMATIC` (1), and `FAN_REQUEST_MODE_OVERRIDE` (2).
+There are no flags or combinable bits. A zero-filled payload is neutral.
+`clear()` restores `{0, Unspecified}`; `set(percent, mode)` updates the pair.
+Active percentages must be finite and in [0,100], including explicit stop at 0.
+
+Inheritance applies to the **whole pair**. A local Unspecified request inherits
+the parent even if a local payload exists. `resolved_with(parent)` resolves a
+pair. A generic tree visitor can skip neutral payloads with a predicate:
+
+```cpp
+const EPropertyFan *fan = current_property(EPropertyFan::key,
+    [](const EPropertyFan &request) { return request.is_set(); });
+```
+
+This returns null if no active request exists. Raw `current_property(key)`
+still returns the nearest payload, not its field-specific semantic resolution.
+
+Only add a default when the **effective** request is absent/Unspecified.
+Automatic0, Override0 and every registered custom mode are already set.
+For transforming policies, `request.can_modify(my_mode)` implements the shared
+conflict rule: Unspecified and Automatic may be modified by any policy; Override
+is protected against every policy (even one passing Override as `my_mode`); a
+plugin's own mode may only be modified by that plugin. Validate the effective
+request and the policy's registered mode before arbitration. `set()` remains a
+direct producer operation, not a policy-arbitration operation.
+
+Plugins can register extra exclusive modes with the existing typed registry:
+
+```cpp
+slic3r_api::RuntimeIdDomain modes(FAN_REQUEST_MODE_ID_TYPE);
+const fan_request_mode special = modes.register_name(orch, "com.example.cooling.special");
+mutable_entity.get_or_add(EPropertyFan::key).set(40.f, special);
+```
+
+Register before parallel processing and retain the ID per orchestrator/plugin
+instance, never in presets or serialized models. The host reserves the three
+standard names published by `FAN_REQUEST_MODE_NAME_*`. The generic domain helper
+provides `register_name(orch, name)`, `name(orch, id)`, `is_valid(orch, id)` and
+`validate(orch, id)` for any typed runtime-ID namespace. It borrows a constant
+domain name, which must outlive the helper, and retains no orchestrator.
+`EPropertyFan::is_valid(orch)` directly checks active values and registration,
+including raw C writes; `validate(orch)` throws if that check fails. Unspecified
+ignores its percentage, even when raw writes do not use the canonical zero.
+Python exposes `RuntimeIdDomain` from `slic3r_runtime_id`, passing `api` instead
+of `orch` to each operation. Fan helpers use `is_valid(api)` and `validate(api)`;
+successful validation returns `None`.
+
+Registration defines **identity, not behavior**. Modes arbitrate between policies,
+not firmware encodings. The host validates registration in the export's
+orchestrator once at the host's `STEP_GCODE` prevalidation boundary. Firmware
+then encodes the percentage of **every active request**, without conversion to
+Automatic or knowledge of the originating policy. Unregistered modes remain
+host validation errors. Firmware checks only active percentages and needs no
+orchestrator for fan encoding. Direct SDK callers must supply prevalidated modes.
+
+Firmware applies minimum and per-tool offset once: absent emits nothing; zero
+stays zero; positive values encode as `clamp(max(percent, minimum)+offset,0,100)`, as in the legacy slicer.
+Each firmware alternative defines `fan_printer_min_speed` in the shared
+`gcode_firmware_plugin` exclusive group. SDK helper
+`GCodeGeneration::fan_minimum_option_definition()` in `gcode/FanConfig.hpp`
+provides identical metadata, including the `Slic3r` translation domain, for
+built-in and external providers. Do not depend on Marlin2 being active or
+redefine this physical setting in a layer policy.
+An empty leaf with a direct active fan request emits once without motion.
+Inherited requests do not turn empty heater/script leaves into fan events.
+Leaving the event does not emit a lexical ancestor or undo the physical output.
+
+This is an incompatible Speed layout change. Rebuild packages against API 4.0;
+old packages must be rejected by their sidecar and exported version table.
 
 ## Defining A Dynamic Property
 

@@ -213,7 +213,7 @@ double ramming_volume(const std::vector<RammingStep> &steps);
 // Return true when the band prints at the Z of the first layer of the plan.
 bool is_first_plan_layer(const ConstPrintingPlan &plan, double print_z);
 // Add a toolchange heater entry event, and its part fan when enabled, to a collection.
-void request_toolchange_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
+void request_toolchange_temperature(storage_handle *storage, StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
                                     size_t idx, bool wait);
 // Add an incoming-filament heater entry event without waiting to a collection.
 void request_incoming_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
@@ -852,14 +852,20 @@ void append_x_move(storage_handle *storage, extrusion_entity_handle *root, c_vec
 }
 
 // Add one heater entry event with the requested target and optional wait, then add the configured part-fan request; idx must select configured filament data, configuration is borrowed, and no entity ownership is transferred.
-void request_toolchange_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
+void request_toolchange_temperature(storage_handle *storage, StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
                                     const size_t idx, const bool wait)
 {
     entity.get_or_add(EPropertyHeater::key).set_tool(
         int16_t(config.filament_toolchange_temp.get_at(idx)), EXTRUDER_ID_UNKNOWN, wait);
-    if (config.filament_enable_toolchange_part_fan.get_at(idx))
-        entity.get_or_add(EPropertySpeed::key).fan_speed(
-            float(std::clamp(config.filament_toolchange_part_fan_speed.get_at(idx), 0, 100)));
+    if (config.filament_enable_toolchange_part_fan.get_at(idx)) {
+        // Collection heater (and its wait) precedes this direct empty child.
+        StoredExtrusionEntity fan_event(storage);
+        fan_event.get_or_add(EPropertyFan::key).set(
+            float(std::clamp(config.filament_toolchange_part_fan_speed.get_at(idx), 0, 100)),
+            FAN_REQUEST_MODE_OVERRIDE);
+        if (entity.append_child_move(fan_event.mutable_view()) == UINT32_MAX)
+            throw std::runtime_error("Cannot append the toolchange fan event.");
+    }
 }
 
 // Add an incoming-filament heater entry event without waiting; tool must select configured filament data, the first plan layer uses first_layer_temperature and later layers use temperature, and no entity ownership is transferred.
@@ -916,7 +922,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
     pulls.disable_sort().disable_reverse();
     extrusion_entity_handle *pulls_handle = pulls.mutable_handle();
     if (toolchange_temp && !fast_skinnydip) {
-        request_toolchange_temperature(pulls, config, idx, true);
+        request_toolchange_temperature(storage, pulls, config, idx, true);
     }
     if (tube_retraction != 0. || tube_length != 0.) {
         const double total = tube_retraction + tube_length / 2. - 15.;
@@ -935,7 +941,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
     swap.disable_sort().disable_reverse();
     extrusion_entity_handle *swap_handle = swap.mutable_handle();
     if (toolchange_temp && fast_skinnydip)
-        request_toolchange_temperature(swap, config, idx, false);
+        request_toolchange_temperature(storage, swap, config, idx, false);
     else if (incoming_known)
         request_incoming_temperature(swap, config, incoming, first_layer);
     const int moves = config.filament_cooling_moves.get_at(idx);

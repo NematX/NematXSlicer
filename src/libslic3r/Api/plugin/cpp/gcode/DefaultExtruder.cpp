@@ -24,7 +24,8 @@ void DefaultExtruder::setup(const Config &config)
 
     // Convert configuration units at the owner boundary so the reusable
     // component classes remain independent of setting names and Config views.
-    m_fan.setup(config.vector_percent_or_default("extruder_fan_offset", m_id, 0.0) * 100.0);
+    m_fan.setup(config.vector_percent_or_default("extruder_fan_offset", m_id, 0.0) * 100.0,
+                config.int_or_default("fan_printer_min_speed", 0));
     m_heater.setup(int16_t(config.vector_float_or_default(
         "extruder_temperature_offset", m_id, 0.0)));
 

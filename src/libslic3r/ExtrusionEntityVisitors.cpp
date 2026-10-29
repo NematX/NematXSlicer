@@ -118,6 +118,7 @@ bool ExtrusionPrinter::print_properties(const ExtrusionEntity &entity, const cha
     const bool has_known_property =
         entity.get_property<ExtrusionAttributes>() != nullptr ||
         entity.get_property<ExtrusionPropertySpeed>() != nullptr ||
+        entity.get_property<ExtrusionPropertyFan>() != nullptr ||
         entity.get_property<ExtrusionPropertyModifier>() != nullptr ||
         entity.get_property<ExtrusionPropertyCustomGcode>() != nullptr ||
         entity.get_property<ExtrusionPropertySpecialCommand>() != nullptr ||
@@ -161,8 +162,16 @@ bool ExtrusionPrinter::print_properties(const ExtrusionEntity &entity, const cha
         ss << property->accel_mm_per_s2;
         this->begin_property_field(first_field, "pressure_adv");
         ss << property->pressure_adv;
-        this->begin_property_field(first_field, "fan_speed_percent");
-        ss << property->fan_speed_percent;
+        ss << "}";
+    }
+
+    if (const ExtrusionPropertyFan *property = entity.get_property<ExtrusionPropertyFan>()) {
+        bool first_field = true;
+        this->begin_property(first_property, "fan");
+        this->begin_property_field(first_field, "percent");
+        ss << property->percent;
+        this->begin_property_field(first_field, "mode");
+        ss << property->mode;
         ss << "}";
     }
 

@@ -355,6 +355,99 @@ class PythonPrintingPlanViewTests(unittest.TestCase):
         host = PrintingPlanHost(self.generated)
         return types.SimpleNamespace(host=host), host
 
+    def test_fan_property_preserves_exclusive_modes_and_zero_requests(self):
+        extrusion = importlib.import_module("slic3r_extrusion_views")
+        fan = extrusion.EPropertyFan()
+        known_modes = {extrusion.FAN_REQUEST_MODE_UNSPECIFIED, extrusion.FAN_REQUEST_MODE_AUTOMATIC,
+                       extrusion.FAN_REQUEST_MODE_OVERRIDE, 0x80000000}
+        api = types.SimpleNamespace(orchestrator=ctypes.c_void_p(1), host=types.SimpleNamespace(
+            orchestrator_runtime_id_name=lambda orch, domain, mode:
+                b"tests.mode" if domain == b"slic3r.fan.request_mode" and mode in known_modes else None))
+        self.assertIsNone(fan.validate(api))
+        self.assertEqual(ctypes.sizeof(fan), 8)
+        self.assertFalse(fan.is_set())
+        self.assertEqual(fan.percent, 0)
+        self.assertEqual(fan.key.type(), self.generated.EXTRUSION_PROPERTY_TYPE_FAN)
+        parent = extrusion.EPropertyFan().set(70, extrusion.FAN_REQUEST_MODE_OVERRIDE)
+        self.assertEqual(fan.resolved_with(parent).percent, 70)
+        self.assertEqual(fan.resolved_with(parent).mode, extrusion.FAN_REQUEST_MODE_OVERRIDE)
+        for mode in (extrusion.FAN_REQUEST_MODE_AUTOMATIC,
+                     extrusion.FAN_REQUEST_MODE_OVERRIDE, 0x80000000):
+            fan.set(0, mode)
+            self.assertTrue(fan.is_set())
+            fan.validate(api)
+            self.assertEqual(fan.resolved_with(parent).percent, 0)
+            self.assertEqual(fan.resolved_with(parent).mode, mode)
+        fan.clear()
+        self.assertFalse(fan.is_set())
+        self.assertEqual(fan.percent, 0)
+        for value in (-1, 101, float("nan"), float("inf")):
+            with self.assertRaises(ValueError):
+                fan.set(value, extrusion.FAN_REQUEST_MODE_AUTOMATIC)
+        for mode in (-1, 0xFFFFFFFF, 0x100000000):
+            with self.assertRaises(ValueError):
+                fan.set(40, mode)
+        with self.assertRaises(ValueError):
+            fan.set(40, extrusion.FAN_REQUEST_MODE_UNSPECIFIED)
+        fan.percent, fan.mode = float("nan"), extrusion.FAN_REQUEST_MODE_UNSPECIFIED
+        self.assertIsNone(fan.validate(api))
+        fan.mode = extrusion.FAN_REQUEST_MODE_AUTOMATIC
+        with self.assertRaises(ValueError):
+            fan.validate(api)
+        fan.percent, fan.mode = 30, 42
+        with self.assertRaises(ValueError):
+            fan.validate(api)
+
+    def test_runtime_id_domain_and_fan_conflict_rule(self):
+        extrusion = importlib.import_module("slic3r_extrusion_views")
+        RuntimeIdDomain = importlib.import_module("slic3r_runtime_id").RuntimeIdDomain
+        registry = {}
+
+        def register(orch, domain, name):
+            names = registry.setdefault((address(orch), domain), {})
+            if name not in names:
+                names[name] = 0x80000000 + len(names)
+            return names[name]
+
+        def lookup(orch, domain, identifier):
+            return next((name for name, value in registry.get((address(orch), domain), {}).items()
+                         if identifier == value), None)
+
+        api = types.SimpleNamespace(orchestrator=ctypes.c_void_p(11), host=types.SimpleNamespace(
+            orchestrator_register_runtime_id=register, orchestrator_runtime_id_name=lookup))
+        modes = RuntimeIdDomain(extrusion.FAN_REQUEST_MODE_ID_TYPE)
+        registry[(11, extrusion.FAN_REQUEST_MODE_ID_TYPE.encode())] = {
+            b"slic3r.unspecified": 0, b"slic3r.automatic": 1, b"slic3r.override": 2}
+        mine = modes.register_name(api, "tests.fan.mine")
+        other = modes.register_name(api, "tests.fan.other")
+        self.assertEqual(modes.register_name(api, "tests.fan.mine"), mine)
+        self.assertEqual(modes.name(api, mine), "tests.fan.mine")
+        self.assertTrue(modes.is_valid(api, mine))
+        for invalid in (-1, 42, 0xFFFFFFFF, 0x100000000):
+            self.assertFalse(modes.is_valid(api, invalid))
+            with self.assertRaises(ValueError):
+                modes.validate(api, invalid)
+        annotations = RuntimeIdDomain("tests.annotation")
+        annotation = annotations.register_name(api, "tests.value")
+        self.assertEqual(annotations.name(api, annotation), "tests.value")
+        other_api = types.SimpleNamespace(host=api.host, orchestrator=ctypes.c_void_p(12))
+        self.assertFalse(modes.is_valid(other_api, mine))
+
+        request = extrusion.EPropertyFan()
+        for percent in (0, 40):
+            for inherited in (0, 1, 2, mine, other):
+                request.set(0 if inherited == 0 else percent, inherited)
+                self.assertIsNone(request.validate(api))
+                self.assertTrue(request.is_valid(api))
+                for policy in (1, 2, mine, other):
+                    self.assertEqual(request.can_modify(policy),
+                                     inherited != 2 and (inherited in (0, 1) or inherited == policy))
+                self.assertFalse(request.can_modify(0xFFFFFFFF))
+        request.clear().percent = 27
+        self.assertIsNone(request.validate(api))
+        request.mode = 42
+        self.assertFalse(request.is_valid(api))
+
     def test_read_only_views_cover_the_complete_hierarchy(self):
         api, _host = self.make_api()
         plan = self.views.PrintingPlan(api, 10)

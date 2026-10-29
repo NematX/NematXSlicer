@@ -46,10 +46,11 @@ enum class EPropertySpeedField
     // Linear movement speed stored in EPropertySpeed::speed_mm_per_s.
     Speed,
     // Movement acceleration stored in EPropertySpeed::accel_mm_per_s2.
-    Acceleration,
-    // Requested fan percentage stored in EPropertySpeed::fan_speed_percent.
-    FanSpeed
+    Acceleration
 };
+
+// Eligibility of leaves is independent of how a property editor stores values.
+enum class LeafPolicy { SpeedAndAcceleration, Fan };
 
 struct EffectiveTreeState
 {
@@ -57,7 +58,7 @@ struct EffectiveTreeState
     bool has_attributes = false;
     float speed = -1.f;
     float acceleration = -1.f;
-    float fan_speed = -1.f;
+    EPropertyFan fan = {};
     EPropertyOverhang overhang = {};
     bool has_overhang = false;
     bool full_overhang_speed = false;
@@ -86,7 +87,7 @@ LeafDisposition leaf_disposition(const MutableExtrusionEntity &entity,
 // support and skirt/brim; only the fan field excludes milling.
 LeafDisposition leaf_disposition(const MutableExtrusionEntity &entity,
                                  const EffectiveTreeState &state,
-                                 EPropertySpeedField field);
+                                 LeafPolicy policy);
 
 // Overlay a node's direct attributes and process fields on inherited state.
 EffectiveTreeState effective_state(const MutableExtrusionEntity &entity,
@@ -121,8 +122,8 @@ Edit one field of EPropertySpeed without making the caller manage the shared
 property payload or the extrusion tree's inheritance rules.
 
 EPropertySpeed stores several independent process parameters. A speed plugin,
-for example, must be able to set speed without resetting acceleration, fan,
-pressure advance, or temperature values written by another plugin. This editor
+for example, must be able to set speed without resetting acceleration or
+pressure advance written by another plugin. This editor
 therefore reuses an existing property when possible and fully initializes a new
 property with the unset value (-1) before writing only the field selected by
 the constructor.
@@ -131,14 +132,13 @@ After assigning leaf values, call hoist() once on the root. It moves an exactly
 uniform effective value to the nearest common parent and removes only redundant
 direct values for the selected field. Hoisting stops at excluded leaves,
 unresolved values, or conflicting values, so it never gives a process value to
-a subtree for which that value was not proven valid. Fan values receive an
-additional ownership check: a pre-existing direct fan override is not removed
-merely because it equals a value hoisted by this pass.
+a subtree for which that value was not proven valid. Fan requests use their own
+pair editor below and are not speed fields.
 
 The editor is intended for one field and one mutation pass. It keeps borrowed
 entity handles so it can remove payloads that it created when they become empty,
-report the remaining generated annotations, and protect pre-existing fan
-overrides. It must not outlive structural mutations that invalidate handles.
+report the remaining generated annotations. It must not outlive structural
+mutations that invalidate handles.
 
 Typical use:
 
@@ -158,8 +158,8 @@ public:
 
     /*
     Set the selected field directly on entity while preserving every other
-    EPropertySpeed field. Speed and acceleration require a positive value; fan
-    speed also accepts zero. An unset or invalid value is ignored.
+    EPropertySpeed field. Speed and acceleration require a positive value.
+    An unset value is ignored.
 
     The entity is recorded as modified so hoist() can remove this direct value
     later if the same value is proven to be inherited from a parent.
@@ -174,8 +174,7 @@ public:
 
     Other EPropertySpeed fields and their containing payload are preserved. A
     redundant direct speed or acceleration may be cleared even if it predates
-    this editor; a pre-existing fan override is retained. This operation does
-    not reorder or otherwise reshape the tree.
+    this editor. This operation does not reorder or otherwise reshape the tree.
     */
     void hoist(MutableExtrusionEntity root);
 
@@ -201,7 +200,7 @@ private:
 
     // Read the selected field from the effective state inherited by a node.
     float state_value(const EffectiveTreeState &state) const;
-    // Apply the selected field's validity rule, including valid zero fan speed.
+    // Speed and acceleration are set only when positive.
     bool value_is_set(float value) const;
     // Read the selected direct field, or return the unset sentinel when absent.
     float direct_value(const EPropertySpeed *process) const;
@@ -223,6 +222,20 @@ private:
     std::set<extrusion_entity_handle *> m_created_properties;
     // Entities that currently retain a direct value written by this editor.
     std::set<extrusion_entity_handle *> m_modified_entities;
+};
+
+// Fan requests are pairs, not speed fields. Only generated requests may be
+// cleared while compacting; an upstream request, even at 0%, stays authoritative.
+class EPropertyFanEditor
+{
+public:
+    void set_value(MutableExtrusionEntity entity, float percent);
+    void hoist(MutableExtrusionEntity root);
+    const std::set<extrusion_entity_handle *> &modified_entities() const { return m_modified; }
+private:
+    struct Summary { EPropertyFan fan = {}; bool blocked = false; };
+    Summary hoist_tree(MutableExtrusionEntity entity, const EffectiveTreeState &parent);
+    std::set<extrusion_entity_handle *> m_modified;
 };
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::ProcessParameterHelpers

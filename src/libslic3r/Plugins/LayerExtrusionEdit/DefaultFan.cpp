@@ -13,7 +13,7 @@ builds the legacy role fan table independently for every extruder. Missing fan
 fields are written on leaves and compacted towards collection roots.
 
 No G-code is produced here. The firmware sees the resulting inherited
-fan_speed_percent and decides whether a physical fan command is necessary.
+EPropertyFan and decides whether a physical fan command is necessary.
 */
 
 #include "DefaultFan.hpp"
@@ -55,7 +55,6 @@ const raw_used_config_key k_used_config_keys[] = {
     {"disable_fan_first_layers", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"external_perimeter_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"fan_below_layer_time", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
-    {"fan_printer_min_speed", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"full_fan_speed_layer", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"gap_fill_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"infill_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -78,7 +77,6 @@ const char *const k_defined_config_keys[] = {
     "disable_fan_first_layers",
     "external_perimeter_fan_speed",
     "fan_below_layer_time",
-    "fan_printer_min_speed",
     "full_fan_speed_layer",
     "gap_fill_fan_speed",
     "infill_fan_speed",
@@ -190,28 +188,6 @@ void initialize_default_fan_settings(orchestrator_handle *orchestrator)
     def.precision = 6;
     def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_PRUSA;
     def.default_serialized_value = "60";
-    orchestrator_create_option_def(orchestrator, &def);
-
-    // ---- fan_printer_min_speed | preset=RAW_PRESET_TYPE_FFF_PRINTER ----
-    def = raw_config_option_def_init();
-    def.opt_key = "fan_printer_min_speed";
-    def.type = RAW_CO_INT;
-    def.container_type = RAW_CONTAINER_TYPE_PLATER;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_GCODE;
-    def.category = RAW_OPTION_CATEGORY_GENERAL;
-    def.label = "Minimum fan speed";
-    def.full_label = "Minimum fan speed";
-    def.tooltip = "This setting represents the minimum fan speed (like minimum PWM) your fan needs to work.";
-    def.sidetext = "%";
-    def.has_min = 1;
-    def.min_value = 0;
-    def.has_max = 1;
-    def.max_value = 100;
-    def.precision = 6;
-    def.mode = RAW_CONFIG_OPTION_MODE_ADVANCED | RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
-    def.default_serialized_value = "0";
     orchestrator_create_option_def(orchestrator, &def);
 
     // ---- full_fan_speed_layer | preset=RAW_PRESET_TYPE_FFF_FILAMENT ----
@@ -547,7 +523,6 @@ struct GeneratedFanMarker
 struct LayerFanPolicy
 {
     std::array<int, size_t(FanRole::Count)> speed = {};
-    int minimum_speed = 0;
     int dynamic_min = 0;
     int dynamic_max = 100;
 };
@@ -580,7 +555,7 @@ void assign_fan_tree(MutableExtrusionEntity entity,
                      const Config &config,
                      extruder_index_t extruder_id,
                      const LayerFanPolicy &policy,
-                     EPropertySpeedFieldEditor &editor,
+                     EPropertyFanEditor &editor,
                      const plugin_run_context *run_ctx);
 void edit_extrusion(PrintingExtrusion extrusion,
                     const Config &config,
@@ -692,11 +667,7 @@ LayerFanPolicy layer_fan_policy(const Config &config,
     LayerFanPolicy policy;
     policy.speed.fill(-1);
 
-    const int minimum = std::max(0, config.int_or_default("fan_printer_min_speed", 0));
-    policy.minimum_speed = minimum;
     int default_speed = legacy_fan_value(config, "default_fan_speed", extruder_id);
-    if (default_speed > 0)
-        default_speed = std::max(default_speed, minimum);
     policy.speed[role_index(FanRole::Default)] = default_speed;
     policy.speed[role_index(FanRole::Skirt)] = default_speed;
 
@@ -782,7 +753,7 @@ LayerFanPolicy layer_fan_policy(const Config &config,
         policy.dynamic_min = policy.dynamic_max;
 
     // Apply late family fallbacks after time rules, matching the legacy role
-    // state machine, then enforce the physical minimum for active values.
+    // state machine. Physical calibration belongs exclusively to firmware.
     if (policy.speed[role_index(FanRole::BridgeInfill)] < 0)
         policy.speed[role_index(FanRole::BridgeInfill)] = policy.speed[role_index(FanRole::Default)];
     if (policy.speed[role_index(FanRole::InternalBridgeInfill)] < 0)
@@ -794,9 +765,6 @@ LayerFanPolicy layer_fan_policy(const Config &config,
     policy.speed[role_index(FanRole::Ironing)] = policy.speed[role_index(FanRole::TopSolidInfill)];
     policy.speed[role_index(FanRole::ThinWall)] = policy.speed[role_index(FanRole::ExternalPerimeter)];
 
-    for (int &speed : policy.speed)
-        if (speed > 0)
-            speed = std::clamp(std::max(speed, minimum), 0, 100);
     return policy;
 }
 
@@ -827,8 +795,6 @@ float dynamic_overhang_fan(const Config &config,
     const int dynamic = std::clamp(int(std::min(start, end) + 0.5),
                                    policy.dynamic_min, policy.dynamic_max);
     result = std::max(result, dynamic);
-    if (result > 0)
-        result = std::max(result, policy.minimum_speed);
     return float(std::clamp(result, 0, 100));
 }
 
@@ -841,15 +807,7 @@ void remove_generated_fields(MutableExtrusionEntity entity,
     // plugin. Other process fields and unmarked fan overrides are untouched.
     if (marker.has(entity)) {
         throw_if_cancelled(run_ctx);
-        if (EPropertySpeed *process = entity.get_mutable(EPropertySpeed::key)) {
-            process->fan_speed_percent = -1.f;
-            const bool empty = process->speed_mm_per_s < 0.f && process->accel_mm_per_s2 < 0.f &&
-                process->pressure_adv < 0.f && process->fan_speed_percent < 0.f;
-            if (empty) {
-                throw_if_cancelled(run_ctx);
-                entity.remove(EPropertySpeed::key);
-            }
-        }
+        entity.remove(EPropertyFan::key);
         throw_if_cancelled(run_ctx);
         marker.remove(entity);
     }
@@ -880,7 +838,7 @@ void assign_fan_tree(MutableExtrusionEntity entity,
                      const Config &config,
                      extruder_index_t extruder_id,
                      const LayerFanPolicy &policy,
-                     EPropertySpeedFieldEditor &editor,
+                     EPropertyFanEditor &editor,
                      const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
@@ -895,8 +853,10 @@ void assign_fan_tree(MutableExtrusionEntity entity,
         return;
     }
 
-    if (leaf_disposition(entity, state, EPropertySpeedField::FanSpeed) != LeafDisposition::Editable ||
-        state.fan_speed >= 0.f)
+    // This provider only fills absence; unlike transforming policies it does
+    // not rewrite even Automatic requests from upstream producers.
+    if (leaf_disposition(entity, state, LeafPolicy::Fan) != LeafDisposition::Editable ||
+        state.fan.is_set())
         return;
 
     const raw_extrusion_role role = state.attributes.extrusion_role();
@@ -923,7 +883,7 @@ void edit_extrusion(PrintingExtrusion extrusion,
 
     // Recompute from the upstream tree after removing only our previous pass,
     // then compact equal leaf values without changing geometry or ordering.
-    EPropertySpeedFieldEditor editor(EPropertySpeedField::FanSpeed);
+    EPropertyFanEditor editor;
     assign_fan_tree(
         root, EffectiveTreeState{}, config, extruder_id, policy, editor, run_ctx);
     throw_if_cancelled(run_ctx);

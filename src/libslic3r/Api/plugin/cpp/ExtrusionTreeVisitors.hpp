@@ -138,10 +138,20 @@ protected:
     template<class PropertyType>
     const PropertyType *current_property(const PluginPropertyKey<PropertyType> &key) const
     {
+        return current_property(key, [](const PropertyType &) { return true; });
+    }
+
+    // Field-specific inheritance stays with callers: skip direct payloads
+    // which the predicate considers neutral, without teaching this visitor
+    // about any particular built-in or plugin property.
+    template<class PropertyType, class Predicate>
+    const PropertyType *current_property(const PluginPropertyKey<PropertyType> &key, Predicate accepts) const
+    {
         for (typename std::vector<Frame>::const_reverse_iterator it = m_stack.rbegin();
              it != m_stack.rend(); ++it) {
             if (const PropertyType *property = it->entity.get(key))
-                return property;
+                if (accepts(*property))
+                    return property;
         }
         return nullptr;
     }

@@ -124,6 +124,7 @@ struct ObservedLeaf
     float fan_speed = -1.f;
     const ExtrusionPropertySpeed *direct_process = nullptr;
     size_t direct_property_count = 0;
+    const ExtrusionPropertyFan *direct_fan = nullptr;
 };
 
 struct PreparedSpeedPrint
@@ -217,12 +218,13 @@ std::unique_ptr<ExtrusionPath> make_path(const ExtrusionSpec &spec, const size_t
     path->polyline().append(Point(scale_i(11.), y));
     path->polyline().append(Point(scale_i(29.), y));
     if (spec.existing_speed > 0.f || spec.existing_acceleration > 0.f ||
-        spec.pressure_advance > 0.f || spec.fan_speed > 0.f) {
+        spec.pressure_advance > 0.f) {
         path->add_property(ExtrusionPropertySpeed(spec.existing_speed,
                                                   spec.existing_acceleration,
-                                                  spec.pressure_advance,
-                                                  spec.fan_speed));
+                                                   spec.pressure_advance));
     }
+    if (spec.fan_speed >= 0.f)
+        path->add_property(ExtrusionPropertyFan(spec.fan_speed, FAN_REQUEST_MODE_OVERRIDE));
     return path;
 }
 
@@ -452,9 +454,10 @@ void collect_observed_leaves(const ExtrusionEntity &entity,
             state.speed = process->speed_mm_per_s;
         if (process->accel_mm_per_s2 > 0.f)
             state.acceleration = process->accel_mm_per_s2;
-        if (process->fan_speed_percent >= 0.f)
-            state.fan_speed = process->fan_speed_percent;
     }
+    const auto *fan = entity.get_property<ExtrusionPropertyFan>();
+    if (fan && fan->is_set())
+        state.fan_speed = fan->percent;
 
     if (entity.child_count() > 0) {
         for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
@@ -468,7 +471,7 @@ void collect_observed_leaves(const ExtrusionEntity &entity,
             attributes->extrusion_role(), state.speed, state.acceleration, state.fan_speed,
             process,
             slic3r_api::ExtrusionEntity(
-                reinterpret_cast<const extrusion_entity_handle *>(&entity)).property_count()});
+                reinterpret_cast<const extrusion_entity_handle *>(&entity)).property_count(), fan});
 }
 
 // Collect every plan leaf. This helper intentionally preserves duplicate roles
@@ -643,10 +646,10 @@ void recording_run(void *ctx, const plugin_run_context *run_ctx)
         for (PrintingExtrusion &extrusion : tool.extrusions) {
             if (extrusion.root == nullptr)
                 continue;
-            ExtrusionPropertySpeed &process = extrusion.root->get_or_add_property<ExtrusionPropertySpeed>();
+            ExtrusionPropertyFan &process = extrusion.root->get_or_add_property<ExtrusionPropertyFan>();
             if (state.writes_marker)
-                process.fan_speed_percent = 23.f;
-            else if (process.fan_speed_percent == 23.f)
+                process.set(23.f, FAN_REQUEST_MODE_OVERRIDE);
+            else if (process.is_set() && process.percent == 23.f)
                 ++state.saw_previous_marker;
         }
     ++state.run_count;
@@ -966,7 +969,9 @@ TEST_CASE("Layer speed follows final values across region boundaries",
             REQUIRE(leaf.direct_process != nullptr);
             CHECK(leaf.acceleration == 321.f);
             CHECK(leaf.direct_process->pressure_adv == 0.05f);
-            CHECK(leaf.direct_process->fan_speed_percent == 42.f);
+            REQUIRE(leaf.direct_fan != nullptr);
+            CHECK(leaf.direct_fan->percent == 42.f);
+            CHECK(leaf.direct_fan->mode == FAN_REQUEST_MODE_OVERRIDE);
         }
 
         ExtrusionEntity &root = single_plan_root(prepared.print);
@@ -1387,7 +1392,8 @@ TEST_CASE("Layer acceleration follows final values across region boundaries",
             REQUIRE(leaf.direct_process != nullptr);
             CHECK(leaf.speed == 37.f);
             CHECK(leaf.direct_process->pressure_adv == 0.05f);
-            CHECK(leaf.direct_process->fan_speed_percent == 42.f);
+            REQUIRE(leaf.direct_fan != nullptr);
+            CHECK(leaf.direct_fan->percent == 42.f);
         }
 
         ExtrusionEntity &root = single_plan_root(prepared.print);
@@ -1534,7 +1540,7 @@ TEST_CASE("Layer extrusion editor mutates plan clones and hoists uniform fields"
     CHECK(root_process->speed_mm_per_s == 40.f);
     CHECK(root_process->accel_mm_per_s2 == 1000.f);
     CHECK(root_process->pressure_adv == -1.f);
-    CHECK(root_process->fan_speed_percent == -1.f);
+    CHECK(root.get_property<ExtrusionPropertyFan>() == nullptr);
     REQUIRE(root.child_count() == 2);
     CHECK(root.child(0).get_property<ExtrusionPropertySpeed>() == nullptr);
     CHECK(root.child(1).get_property<ExtrusionPropertySpeed>() == nullptr);
@@ -2140,7 +2146,8 @@ TEST_CASE("Layer extrusion editor preserves overrides and applies first-layer ca
             found_existing_speed = true;
             CHECK(leaf.speed == 18.f);
             CHECK(leaf.acceleration == 500.f);
-            CHECK(leaf.direct_process->fan_speed_percent == 35.f);
+            REQUIRE(leaf.direct_fan != nullptr);
+            CHECK(leaf.direct_fan->percent == 35.f);
         } else if (leaf.acceleration == 321.f) {
             found_existing_acceleration = true;
             CHECK(leaf.speed == 25.f);
@@ -2462,13 +2469,13 @@ TEST_CASE("Layer fan plugin exposes its independent contract",
     CHECK(fan_plugin->get_priority() == 20);
     CHECK(fan_plugin->get_exclusive_group() == "layer_extrusion_edit.fan");
 
-    // Keys the fan step reads; the plugin publishes exactly this set.
+    // Layer policies own logical settings, while firmware owns calibration.
     std::vector<std::string> defined_keys;
     for (const Plugin::DefinedConfigKey &key : fan_plugin->get_defined_config_keys())
         defined_keys.push_back(key.key);
-    CHECK(defined_keys.size() == 18);
+    CHECK(defined_keys.size() == 17);
     for (const char *expected : { "bridge_fan_speed", "default_fan_speed", "disable_fan_first_layers",
-                                  "fan_below_layer_time", "fan_printer_min_speed", "max_fan_speed",
+                                   "fan_below_layer_time", "max_fan_speed",
                                   "top_fan_speed" })
         CHECK(std::find(defined_keys.begin(), defined_keys.end(), expected) != defined_keys.end());
 
@@ -2491,6 +2498,19 @@ TEST_CASE("Layer fan plugin exposes its independent contract",
     REQUIRE(fan_def != nullptr);
     CHECK(fan_def->type == coInt);
     CHECK(fan_def->default_value->serialize() == "0");
+    CHECK(fan_def->invalidates_step == STEP_GCODE);
+    CHECK(std::find(defined_keys.begin(), defined_keys.end(), "fan_printer_min_speed") == defined_keys.end());
+    CHECK(fan_def->translation_domain == "Slic3r");
+    for (const char *id : {"gcode.firmware.marlin2", "gcode.firmware.marlin1",
+                           "gcode.firmware.klipper", "gcode.firmware.prusa",
+                           "gcode.firmware.reprap", "gcode.firmware.sprinter"}) {
+        INFO(id);
+        Plugin *firmware_plugin = Orchestrator::instance().get_plugin(id);
+        REQUIRE(firmware_plugin != nullptr);
+        const std::vector<Plugin::DefinedConfigKey> &firmware_keys = firmware_plugin->get_defined_config_keys();
+        REQUIRE(firmware_keys.size() == 1);
+        CHECK(firmware_keys.front().key == "fan_printer_min_speed");
+    }
 
     std::vector<std::string> keys;
     for (const Plugin::UsedConfigKey &key : fan_plugin->get_used_config_keys())
@@ -2499,6 +2519,7 @@ TEST_CASE("Layer fan plugin exposes its independent contract",
     CHECK(std::find(keys.begin(), keys.end(), "overhangs_dynamic_fan_speed") != keys.end());
     CHECK(std::find(keys.begin(), keys.end(), "travel_speed") != keys.end());
     CHECK(std::find(keys.begin(), keys.end(), "perimeter_speed") == keys.end());
+    CHECK(std::find(keys.begin(), keys.end(), "fan_printer_min_speed") == keys.end());
 
     orchestrator_handle *orchestrator =
         reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance());
@@ -2562,7 +2583,8 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
     const std::vector<float> expected_fan_speeds{35.f, 35.f, 63.f, 70.f};
     CHECK(fan_speeds == expected_fan_speeds);
     CHECK(std::count_if(leaves.begin(), leaves.end(), [](const ObservedLeaf &leaf) {
-        return leaf.direct_process != nullptr && leaf.direct_process->fan_speed_percent == 35.f &&
+        return leaf.direct_fan != nullptr && leaf.direct_fan->percent == 35.f &&
+               leaf.direct_fan->mode == FAN_REQUEST_MODE_OVERRIDE &&
                leaf.direct_property_count == 2;
     }) == 1);
 
@@ -2577,7 +2599,8 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
     std::sort(fan_speeds.begin(), fan_speeds.end());
     CHECK(fan_speeds == expected_fan_speeds);
     CHECK(std::count_if(leaves.begin(), leaves.end(), [](const ObservedLeaf &leaf) {
-        return leaf.direct_process != nullptr && leaf.direct_process->fan_speed_percent == 35.f &&
+        return leaf.direct_fan != nullptr && leaf.direct_fan->percent == 35.f &&
+               leaf.direct_fan->mode == FAN_REQUEST_MODE_OVERRIDE &&
                leaf.direct_property_count == 2;
     }) == 1);
 
@@ -2591,6 +2614,68 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
     REQUIRE(time != nullptr);
     CHECK(time->duration_seconds > 0.0);
     CHECK_FALSE(time->is_final());
+}
+
+TEST_CASE("Layer fan defaults preserve effective modes including zero and plugin requests",
+          "[plugins][layer-extrusion-edit][fan][fan-request]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const auto config = speed_config({
+        {"default_fan_speed", "35"}, {"disable_fan_first_layers", "0"},
+        {"full_fan_speed_layer", "0"}, {"fan_below_layer_time", "0"},
+        {"slowdown_below_layer_time", "0"}});
+    const ExtrusionSpec spec{ExtrusionRole::Perimeter, 0.2, 20.f};
+    prepare_ordered_plan(prepared, config, {{spec, spec, spec}});
+    auto &root = single_plan_root(prepared.print);
+    REQUIRE(root.child_count() == 3);
+    root.add_property(ExtrusionPropertyFan(70.f, FAN_REQUEST_MODE_OVERRIDE));
+    root.child(0).get_or_add_property<ExtrusionPropertyFan>().clear();
+    root.child(1).add_property(ExtrusionPropertyFan(0.f, FAN_REQUEST_MODE_AUTOMATIC));
+    const auto mode = orchestrator_register_runtime_id(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+        FAN_REQUEST_MODE_ID_TYPE, "tests.default_fan.custom");
+    root.child(2).add_property(ExtrusionPropertyFan(0.f, mode));
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    const auto leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == 3);
+    CHECK(leaves[0].fan_speed == 70.f);
+    CHECK(leaves[1].fan_speed == 0.f);
+    CHECK(leaves[2].fan_speed == 0.f);
+    REQUIRE(leaves[0].direct_fan != nullptr);
+    REQUIRE(leaves[1].direct_fan != nullptr);
+    REQUIRE(leaves[2].direct_fan != nullptr);
+    CHECK(leaves[0].direct_fan->mode == FAN_REQUEST_MODE_UNSPECIFIED);
+    CHECK(leaves[1].direct_fan->mode == FAN_REQUEST_MODE_AUTOMATIC);
+    CHECK(leaves[2].direct_fan->mode == mode);
+}
+
+TEST_CASE("Layer fan hoisting does not create requests on empty service leaves",
+          "[plugins][layer-extrusion-edit][fan][fan-request]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const auto config = speed_config({
+        {"default_fan_speed", "35"}, {"disable_fan_first_layers", "0"},
+        {"full_fan_speed_layer", "0"}, {"fan_below_layer_time", "0"},
+        {"slowdown_below_layer_time", "0"}});
+    const ExtrusionSpec spec{ExtrusionRole::Perimeter, 0.2, 20.f};
+    prepare_ordered_plan(prepared, config, {{spec, spec}});
+    auto &root = single_plan_root(prepared.print);
+    auto event = std::make_unique<ExtrusionNop>(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::EXTRUSION, 0.5));
+    root.append_child(std::move(event));
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    CHECK(root.get_property<ExtrusionPropertyFan>() == nullptr);
+    REQUIRE(root.child_count() == 3);
+    CHECK(root.child(2).get_property<ExtrusionPropertyFan>() == nullptr);
+    const auto leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == 2);
+    for (const auto &leaf : leaves) {
+        CHECK(leaf.fan_speed == 35.f);
+        REQUIRE(leaf.direct_fan != nullptr);
+        CHECK(leaf.direct_fan->mode == FAN_REQUEST_MODE_AUTOMATIC);
+    }
 }
 
 TEST_CASE("Layer fan rerun preserves unrelated process fields",
@@ -2632,7 +2717,9 @@ TEST_CASE("Layer fan rerun preserves unrelated process fields",
     CHECK(perimeter.direct_process->speed_mm_per_s == Approx(27.f));
     CHECK(perimeter.direct_process->accel_mm_per_s2 == Approx(321.f));
     CHECK(perimeter.direct_process->pressure_adv == Approx(0.047f));
-    CHECK(perimeter.direct_process->fan_speed_percent == Approx(35.f));
+    REQUIRE(perimeter.direct_fan != nullptr);
+    CHECK(perimeter.direct_fan->percent == Approx(35.f));
+    CHECK(perimeter.direct_fan->mode == FAN_REQUEST_MODE_AUTOMATIC);
 }
 
 TEST_CASE("PrintingPlan time estimator counts geometry and connecting travel",

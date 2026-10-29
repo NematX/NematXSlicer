@@ -391,6 +391,7 @@ private:
     // Return per-tool filament lengths, including the currently open interval, without changing session counters.
     std::vector<double> filament_used_mm() const;
     void apply_requested_state(const RequestedState &state);
+    std::string write_requested_fan();
     c_vec3d machine_position(c_point point, coord_t z_offset) const;
     double segment_length_mm(const c_extrusion_segment &segment) const;
     DefaultExtruder &extruder(extruder_index_t tool_id);

@@ -1034,6 +1034,23 @@ TEST_CASE("Firmware rejects invalid script Config snapshots and clears its scrat
         "M117 [first_only]", GCODE_SCRIPT_TYPE_EXTRUSION_CUSTOM, second_config, uint16_t(0));
     CHECK_THROWS(firmware.write_event(second_event.readonly()));
 }
+TEST_CASE("ExtrusionPrinter describes fan-only events including explicit stops",
+          "[plugins][gcode][fan-request][diagnostic]")
+{
+    const bool json = GENERATE(false, true);
+    const float percent = GENERATE(0.f, 35.f);
+    ExtrusionNop entity(ExtrusionPropertyFan(percent, FAN_REQUEST_MODE_OVERRIDE));
+    REQUIRE(entity.get_property<ExtrusionPropertySpeed>() == nullptr);
+    ExtrusionPrinter printer(/*mult=*/1.0, /*trunc=*/0, json);
+    printer.traverse(entity);
+    const std::string output = printer.str();
+    CHECK(output.find(json ? "\"fan\":{" : "fan={") != std::string::npos);
+    CHECK(output.find((json ? "\"percent\":" : "percent=") +
+                     std::string(percent == 0.f ? "0" : "35")) != std::string::npos);
+    CHECK(output.find(json ? "\"mode\":2" : "mode=2") != std::string::npos);
+    CHECK(output.find(json ? "\"speed\":" : "speed=") == std::string::npos);
+}
+
 TEST_CASE("ExtrusionPrinter names every custom G-code kind",
           "[plugins][gcode][custom-gcode][diagnostic]")
 {

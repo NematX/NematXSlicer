@@ -22,7 +22,7 @@ namespace slic3r_api { namespace GCodeGeneration {
 class FanState
 {
 public:
-    void setup(double speed_offset_percent);
+    void setup(double speed_offset_percent, double minimum_speed_percent = 0.0);
     void reset_runtime_state();
     void synchronize_runtime_from(const FanState &source);
     // Import a physical percentage already emitted by external G-code.
@@ -46,6 +46,7 @@ private:
     // --- Configuration cache populated by setup() ---
     // Per-device correction added before a requested percentage is encoded.
     double m_speed_offset_percent = 0.0;
+    double m_minimum_speed_percent = 0.0;
 };
 
 }} // namespace slic3r_api::GCodeGeneration

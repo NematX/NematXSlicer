@@ -72,6 +72,7 @@ from slic3r_api_generated import (
     CExtrusionPropertyPerimeter,
     CExtrusionPropertySpecialCommand,
     CExtrusionPropertySpeed,
+    CExtrusionPropertyFan,
     CExtrusionPropertyZOffset,
     CExtrusionSegment,
     CPoint,
@@ -93,6 +94,11 @@ from slic3r_api_generated import (
     EXTRUSION_PROPERTY_TYPE_PERIMETER,
     EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND,
     EXTRUSION_PROPERTY_TYPE_SPEED,
+    EXTRUSION_PROPERTY_TYPE_FAN,
+    FAN_REQUEST_MODE_UNSPECIFIED,
+    FAN_REQUEST_MODE_AUTOMATIC,
+    FAN_REQUEST_MODE_OVERRIDE,
+    FAN_REQUEST_MODE_ID_TYPE,
     EXTRUSION_PROPERTY_TYPE_Z_OFFSET,
     EXTRUSION_SPLIT_FRAGMENT,
     MEDIAL_AXIS_EXTRUSION_CAN_REVERSE,
@@ -133,6 +139,7 @@ if TYPE_CHECKING:
 
 CExtrusionPropertyAttributes.property_type = EXTRUSION_PROPERTY_TYPE_ATTRIBUTES
 CExtrusionPropertySpeed.property_type = EXTRUSION_PROPERTY_TYPE_SPEED
+CExtrusionPropertyFan.property_type = EXTRUSION_PROPERTY_TYPE_FAN
 CExtrusionPropertyModifier.property_type = EXTRUSION_PROPERTY_TYPE_MODIFIER
 CExtrusionPropertyCustomGcode.property_type = EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE
 CExtrusionPropertySpecialCommand.property_type = EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND
@@ -145,6 +152,7 @@ CExtrusionPropertyHeater.property_type = EXTRUSION_PROPERTY_TYPE_HEATER
 
 EPropertyAttributes = CExtrusionPropertyAttributes
 EPropertySpeed = CExtrusionPropertySpeed
+EPropertyFan = CExtrusionPropertyFan
 EPropertyModifier = CExtrusionPropertyModifier
 EPropertyCustomGcode = CExtrusionPropertyCustomGcode
 EPropertySpecialCommand = CExtrusionPropertySpecialCommand
@@ -158,6 +166,7 @@ EPropertyInfill = CExtrusionPropertyInfill
 for _property_payload in (
     EPropertyAttributes,
     EPropertySpeed,
+    EPropertyFan,
     EPropertyModifier,
     EPropertyCustomGcode,
     EPropertySpecialCommand,
@@ -169,6 +178,63 @@ for _property_payload in (
     EPropertyInfill,
 ):
     _property_payload.key = PluginPropertyKey.built_in(_property_payload)
+
+
+_FAN_REQUEST_MODE_ID_TYPE_BYTES = FAN_REQUEST_MODE_ID_TYPE.encode("utf-8")
+
+
+def _fan_set(self, percent, mode):
+    import math
+    percent, mode = float(percent), int(mode)
+    if (not math.isfinite(percent) or not 0 <= percent <= 100 or
+            not 0 <= mode < 0xFFFFFFFF or
+            (mode == FAN_REQUEST_MODE_UNSPECIFIED and percent != 0)):
+        raise ValueError("Invalid fan request pair")
+    self.percent, self.mode = percent, mode
+    return self
+
+
+def _fan_clear(self):
+    self.percent, self.mode = 0, FAN_REQUEST_MODE_UNSPECIFIED
+    return self
+
+
+def _fan_resolved_with(self, parent):
+    source = self if self.is_set() else parent
+    result = EPropertyFan()
+    result.percent, result.mode = source.percent, source.mode
+    return result
+
+
+@abi_requires_headers("slic3r_orchestrator.h", "slic3r_extrusion_property.h")
+def _fan_validate(self, api):
+    if not self.is_valid(api):
+        raise ValueError("Invalid fan request: unregistered mode or invalid active percentage")
+
+
+def _fan_can_modify(self, my_mode):
+    import operator
+    my_mode = operator.index(my_mode)
+    return (0 <= my_mode < 0xFFFFFFFF and self.mode != FAN_REQUEST_MODE_OVERRIDE and
+            (self.mode in (FAN_REQUEST_MODE_UNSPECIFIED, FAN_REQUEST_MODE_AUTOMATIC) or
+             self.mode == my_mode))
+
+
+def _fan_is_valid(self, api):
+    import math
+    return (self.mode != 0xFFFFFFFF and
+            (not self.is_set() or (math.isfinite(self.percent) and 0 <= self.percent <= 100)) and
+            api.host.orchestrator_runtime_id_name(
+                api.orchestrator, _FAN_REQUEST_MODE_ID_TYPE_BYTES, self.mode) is not None)
+
+
+EPropertyFan.set = _fan_set
+EPropertyFan.clear = _fan_clear
+EPropertyFan.is_set = lambda self: self.mode != FAN_REQUEST_MODE_UNSPECIFIED
+EPropertyFan.resolved_with = _fan_resolved_with
+EPropertyFan.validate = _fan_validate
+EPropertyFan.can_modify = _fan_can_modify
+EPropertyFan.is_valid = _fan_is_valid
 
 
 def _address(handle) -> int:
@@ -1294,6 +1360,7 @@ __all__ = [
     "CExtrusionPropertyPerimeter",
     "CExtrusionPropertySpecialCommand",
     "CExtrusionPropertySpeed",
+    "CExtrusionPropertyFan",
     "CExtrusionPropertyZOffset",
     "CExtrusionSegment",
     "CFlow",
@@ -1308,6 +1375,11 @@ __all__ = [
     "EPropertyPerimeter",
     "EPropertySpecialCommand",
     "EPropertySpeed",
+    "EPropertyFan",
+    "FAN_REQUEST_MODE_UNSPECIFIED",
+    "FAN_REQUEST_MODE_AUTOMATIC",
+    "FAN_REQUEST_MODE_OVERRIDE",
+    "FAN_REQUEST_MODE_ID_TYPE",
     "EPropertyZOffset",
     "EXTRUSION_DATA_ID_INVALID",
     "EXTRUSION_INDEX_INVALID",
@@ -1322,6 +1394,7 @@ __all__ = [
     "EXTRUSION_PROPERTY_TYPE_PERIMETER",
     "EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND",
     "EXTRUSION_PROPERTY_TYPE_SPEED",
+    "EXTRUSION_PROPERTY_TYPE_FAN",
     "EXTRUSION_PROPERTY_TYPE_Z_OFFSET",
     "ExtrusionAreaFragment",
     "ExtrusionEntity",

@@ -594,8 +594,7 @@ ExtrusionEntityCollection WipeTower2::prime(
         ExtrusionPropertySpeed speed_property;
         speed_property.speed(this->get_loading_speed(tool_id))
             .acceleration(this->get_first_layer_acceleration(tool_id))
-            .presure_advance(this->get_first_layer_pa(tool_id))
-            .fan_speed(this->get_first_layer_fan_speed(tool_id));
+            .presure_advance(this->get_first_layer_pa(tool_id));
 
         assert(path_around_bed.length() > dist_load);
         // create loading path
@@ -605,7 +604,10 @@ ExtrusionEntityCollection WipeTower2::prime(
                                       false);
         multipaths.paths().back().add_property(
             ExtrusionPropertySpeed(this->get_loading_speed(tool_id), this->get_first_layer_acceleration(tool_id),
-                                   this->get_first_layer_pa(tool_id), this->get_first_layer_fan_speed(tool_id)));
+                                   this->get_first_layer_pa(tool_id)));
+        if (this->get_first_layer_fan_speed(tool_id) >= 0)
+            multipaths.paths().back().add_property(ExtrusionPropertyFan(
+                this->get_first_layer_fan_speed(tool_id), FAN_REQUEST_MODE_AUTOMATIC));
 
         // create priming path
         Polyline unloading_start;
@@ -616,7 +618,10 @@ ExtrusionEntityCollection WipeTower2::prime(
                                           nullptr, false);
             multipaths.paths().back().add_property(
                 ExtrusionPropertySpeed(this->get_prime_speed(tool_id), this->get_first_layer_acceleration(tool_id),
-                                       this->get_first_layer_pa(tool_id), this->get_first_layer_fan_speed(tool_id)));
+                                       this->get_first_layer_pa(tool_id)));
+            if (this->get_first_layer_fan_speed(tool_id) >= 0)
+                multipaths.paths().back().add_property(ExtrusionPropertyFan(
+                    this->get_first_layer_fan_speed(tool_id), FAN_REQUEST_MODE_AUTOMATIC));
         } else {
             unloading_start = std::move(priming_start);
         }
@@ -630,7 +635,10 @@ ExtrusionEntityCollection WipeTower2::prime(
                                       false);
         multipaths.paths().back().add_property(
             ExtrusionPropertySpeed(this->get_unloading_speed(tool_id), this->get_first_layer_acceleration(tool_id),
-                                   this->get_first_layer_pa(tool_id), this->get_first_layer_fan_speed(tool_id)));
+                                   this->get_first_layer_pa(tool_id)));
+        if (this->get_first_layer_fan_speed(tool_id) >= 0)
+            multipaths.paths().back().add_property(ExtrusionPropertyFan(
+                this->get_first_layer_fan_speed(tool_id), FAN_REQUEST_MODE_AUTOMATIC));
         tool_extrusions.append(std::move(multipaths));
     }
     tool_extrusions.append(
@@ -991,9 +999,7 @@ void wait_for_temp_with_fan(ExtrusionEntityCollection &coll, bool enable_fan, in
     if (enable_fan) {
         ExtrusionEntityCollection wait_for_temp(false, false);
         // enable special fan for the temp wait.
-        ExtrusionPropertySpeed &prop_fan = (ExtrusionPropertySpeed &) wait_for_temp.add_property(
-            ExtrusionPropertySpeed());
-        prop_fan.fan_speed(fan_speed);
+        wait_for_temp.add_property(ExtrusionPropertyFan(float(fan_speed), FAN_REQUEST_MODE_OVERRIDE));
         wait_for_temp.append(
             ExtrusionNop(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP)));
         coll.append(std::move(wait_for_temp));

@@ -41,15 +41,15 @@ double effective_value(const Config &config, const char *key, double ratio)
 LeafDisposition leaf_disposition(const MutableExtrusionEntity &entity,
                                  const EffectiveTreeState &state)
 {
-    return leaf_disposition(entity, state, EPropertySpeedField::Speed);
+    return leaf_disposition(entity, state, LeafPolicy::SpeedAndAcceleration);
 }
 
 LeafDisposition leaf_disposition(const MutableExtrusionEntity &entity,
                                  const EffectiveTreeState &state,
-                                 EPropertySpeedField field)
+                                 LeafPolicy policy)
 {
-    // Empty leaves do not emit G-code, while printable leaves need inherited
-    // attributes before their role and flow can be interpreted safely.
+    // Empty leaves are not deposition paths (they may carry service events).
+    // Printable leaves need inherited attributes to interpret their role/flow.
     if (entity.point_count() == 0)
         return LeafDisposition::Empty;
     if (!state.has_attributes)
@@ -63,11 +63,22 @@ LeafDisposition leaf_disposition(const MutableExtrusionEntity &entity,
         (role == RAW_EXTRUSION_ROLE_MIXED && role != RAW_EXTRUSION_ROLE_GAP_FILL))
         return LeafDisposition::Excluded;
 
-    // Speed, acceleration and cooling own printable object paths, support,
-    // and skirt/brim. Milling has a speed and an acceleration but is excluded
-    // from cooling because it is not controlled by filament fan settings.
+    // Cooling owns printable object paths, support, and skirt/brim. Milling
+    // remains excluded because it is not controlled by filament fan settings.
+    if (policy == LeafPolicy::Fan) {
+        const bool fan_role = role == RAW_EXTRUSION_ROLE_GAP_FILL ||
+                              role == RAW_EXTRUSION_ROLE_THIN_WALL ||
+                              RAW_EXTRUSION_ROLE_IS_PERIMETER(role) ||
+                              RAW_EXTRUSION_ROLE_IS_INFILL(role) ||
+                              RAW_EXTRUSION_ROLE_IS_SKIRT(role) ||
+                              RAW_EXTRUSION_ROLE_IS_SUPPORT(role);
+        return fan_role && !RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_MILL) ?
+            LeafDisposition::Editable : LeafDisposition::Excluded;
+    }
+
+    // Milling has process speed/acceleration, but no filament cooling request.
     if (RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_MILL))
-        return field == EPropertySpeedField::FanSpeed ? LeafDisposition::Excluded : LeafDisposition::Editable;
+        return LeafDisposition::Editable;
 
     // Unknown future roles also remain untouched and prevent a property on an
     // ancestor from leaking into a subtree that the plugins do not understand.
@@ -95,9 +106,9 @@ EffectiveTreeState effective_state(const MutableExtrusionEntity &entity,
             state.speed = process->speed_mm_per_s;
         if (process->accel_mm_per_s2 > 0.f)
             state.acceleration = process->accel_mm_per_s2;
-        if (process->fan_speed_percent >= 0.f)
-            state.fan_speed = process->fan_speed_percent;
     }
+    if (const EPropertyFan *fan = entity.get(EPropertyFan::key))
+        state.fan = fan->resolved_with(state.fan);
     if (const EPropertyOverhang *overhang = entity.get(EPropertyOverhang::key)) {
         state.overhang = *overhang;
         state.has_overhang = true;
@@ -196,14 +207,13 @@ float EPropertySpeedFieldEditor::state_value(const EffectiveTreeState &state) co
     switch (m_field) {
     case EPropertySpeedField::Speed: return state.speed;
     case EPropertySpeedField::Acceleration: return state.acceleration;
-    case EPropertySpeedField::FanSpeed: return state.fan_speed;
     }
     return -1.f;
 }
 
 bool EPropertySpeedFieldEditor::value_is_set(float value) const
 {
-    return m_field == EPropertySpeedField::FanSpeed ? value >= 0.f : value > 0.f;
+    return value > 0.f;
 }
 
 float EPropertySpeedFieldEditor::direct_value(const EPropertySpeed *process) const
@@ -213,7 +223,6 @@ float EPropertySpeedFieldEditor::direct_value(const EPropertySpeed *process) con
     switch (m_field) {
     case EPropertySpeedField::Speed: return process->speed_mm_per_s;
     case EPropertySpeedField::Acceleration: return process->accel_mm_per_s2;
-    case EPropertySpeedField::FanSpeed: return process->fan_speed_percent;
     }
     return -1.f;
 }
@@ -223,15 +232,14 @@ float &EPropertySpeedFieldEditor::field(EPropertySpeed &process) const
     switch (m_field) {
     case EPropertySpeedField::Speed: return process.speed_mm_per_s;
     case EPropertySpeedField::Acceleration: return process.accel_mm_per_s2;
-    case EPropertySpeedField::FanSpeed: return process.fan_speed_percent;
     }
     return process.speed_mm_per_s;
 }
 
-// Return the entity's mutable speed payload or create one with all four fields unset; the entity remains the owner, no output is produced, and allocation failures propagate.
+// Return the entity's mutable speed payload or create one with all three fields unset; the entity remains the owner, no output is produced, and allocation failures propagate.
 EPropertySpeed &EPropertySpeedFieldEditor::ensure_property(MutableExtrusionEntity entity)
 {
-    // Reuse pre-existing metadata so pressure, fan, and the other
+    // Reuse pre-existing metadata so pressure and the other
     // process field survive when this editor writes its selected field.
     if (EPropertySpeed *existing = entity.get_mutable(EPropertySpeed::key))
         return *existing;
@@ -242,7 +250,6 @@ EPropertySpeed &EPropertySpeedFieldEditor::ensure_property(MutableExtrusionEntit
     created.speed_mm_per_s = -1.f;
     created.accel_mm_per_s2 = -1.f;
     created.pressure_adv = -1.f;
-    created.fan_speed_percent = -1.f;
     m_created_properties.insert(entity.mutable_handle());
     return created;
 }
@@ -284,12 +291,6 @@ void EPropertySpeedFieldEditor::clear_redundant_field(MutableExtrusionEntity ent
     EPropertySpeed *process = entity.get_mutable(EPropertySpeed::key);
     if (process == nullptr)
         return;
-    // A coincidentally equal upstream fan override must remain physically
-    // present. Otherwise a later rerun could remove the generated parent and
-    // silently lose the producer's original intent.
-    if (m_field == EPropertySpeedField::FanSpeed &&
-        m_modified_entities.count(entity.mutable_handle()) == 0)
-        return;
     float &direct_field = field(*process);
     if (!value_is_set(direct_field) || direct_field != inherited_value)
         return;
@@ -299,7 +300,7 @@ void EPropertySpeedFieldEditor::clear_redundant_field(MutableExtrusionEntity ent
     // Delete an empty payload only when this editor created it. Pre-existing
     // payloads remain owned by the plugin or producer that supplied them.
     const bool empty = process->speed_mm_per_s < 0.f && process->accel_mm_per_s2 < 0.f &&
-        process->pressure_adv < 0.f && process->fan_speed_percent < 0.f;
+        process->pressure_adv < 0.f;
     if (empty && m_created_properties.erase(entity.mutable_handle()) > 0)
         entity.remove(EPropertySpeed::key);
 }
@@ -312,7 +313,7 @@ EPropertySpeedFieldEditor::FieldSummary EPropertySpeedFieldEditor::hoist_tree(
     // block hoisting so a parent value cannot change their behavior.
     EffectiveTreeState state = effective_state(entity, parent_state);
     if (entity.child_count() == 0) {
-        const LeafDisposition disposition = leaf_disposition(entity, state, m_field);
+        const LeafDisposition disposition = leaf_disposition(entity, state);
         if (disposition == LeafDisposition::Empty)
             return {};
         if (disposition == LeafDisposition::Excluded)
@@ -341,8 +342,6 @@ EPropertySpeedFieldEditor::FieldSummary EPropertySpeedFieldEditor::hoist_tree(
                 state.speed = summary.value;
             else if (m_field == EPropertySpeedField::Acceleration)
                 state.acceleration = summary.value;
-            else
-                state.fan_speed = summary.value;
         }
         const float inherited = value_is_set(direct) ? direct :
             (value_is_set(state_value(state)) ? state_value(state) : summary.value);
@@ -355,6 +354,63 @@ EPropertySpeedFieldEditor::FieldSummary EPropertySpeedFieldEditor::hoist_tree(
 }
 
 void EPropertySpeedFieldEditor::hoist(MutableExtrusionEntity root)
+{
+    (void)hoist_tree(root, EffectiveTreeState{});
+}
+
+void EPropertyFanEditor::set_value(MutableExtrusionEntity entity, float percent)
+{
+    if (percent < 0.f)
+        return;
+    entity.get_or_add(EPropertyFan::key).set(percent, FAN_REQUEST_MODE_AUTOMATIC);
+    m_modified.insert(entity.mutable_handle());
+}
+
+EPropertyFanEditor::Summary EPropertyFanEditor::hoist_tree(
+    MutableExtrusionEntity entity, const EffectiveTreeState &parent)
+{
+    const EffectiveTreeState state = effective_state(entity, parent);
+    if (entity.child_count() == 0) {
+        const LeafDisposition disposition = leaf_disposition(entity, state, LeafPolicy::Fan);
+        // Empty leaves can contain E-only moves or scripts. Never hoist a
+        // deposition request onto them, or move a direct fan event across them.
+        if (disposition == LeafDisposition::Empty)
+            return Summary{{}, true};
+        return Summary{state.fan, disposition != LeafDisposition::Editable || !state.fan.is_set()};
+    }
+    auto equal = [](const EPropertyFan &a, const EPropertyFan &b) {
+        return a.mode == b.mode && (!a.is_set() || a.percent == b.percent);
+    };
+    Summary result;
+    for (uint32_t i = 0; i < entity.child_count(); ++i) {
+        const Summary child = hoist_tree(entity.child_mutable(i), state);
+        result.blocked = result.blocked || child.blocked;
+        if (!child.fan.is_set())
+            continue;
+        if (!result.fan.is_set())
+            result.fan = child.fan;
+        else if (!equal(result.fan, child.fan))
+            result.blocked = true;
+    }
+    if (!result.fan.is_set() || result.blocked)
+        return result;
+    const EPropertyFan *direct = entity.get(EPropertyFan::key);
+    if (direct && direct->is_set() && !equal(*direct, result.fan))
+        return result;
+    if (!state.fan.is_set() || !equal(state.fan, result.fan)) {
+        entity.get_or_add(EPropertyFan::key) = result.fan;
+        m_modified.insert(entity.mutable_handle());
+    }
+    for (uint32_t i = 0; i < entity.child_count(); ++i) {
+        auto child = entity.child_mutable(i);
+        const EPropertyFan *request = child.get(EPropertyFan::key);
+        if (request && equal(*request, result.fan) && m_modified.erase(child.mutable_handle()) > 0)
+            child.remove(EPropertyFan::key);
+    }
+    return result;
+}
+
+void EPropertyFanEditor::hoist(MutableExtrusionEntity root)
 {
     (void)hoist_tree(root, EffectiveTreeState{});
 }
