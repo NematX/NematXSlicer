@@ -9,12 +9,54 @@
 ///|/
 #include "ExtrusionEntityCollection.hpp"
 
+/* Const pointer-view access serializes cache validation and rebuilding with a scope-owned flag guard. Owned children remain
+   immutable during concurrent reads; mutators retain the caller's exclusive-access requirement. */
+
 #include <algorithm>
+#include <thread>
 
 #include "ExtrusionEntityVisitors.hpp"
 #include "ShortestPath.hpp"
 
 namespace Slic3r {
+namespace {
+// Borrows the collection's cache flag and releases it on every scope exit, including allocation failures.
+class EntitiesCacheLock {
+public:
+    // Acquires exclusive access to the borrowed cache flag.
+    explicit EntitiesCacheLock(std::atomic_flag &flag);
+    // Releases the borrowed cache flag.
+    ~EntitiesCacheLock();
+    // Keeps this scope's lock ownership unique.
+    EntitiesCacheLock(const EntitiesCacheLock &) = delete;
+    // Prevents transferring another scope's lock ownership by assignment.
+    EntitiesCacheLock &operator=(const EntitiesCacheLock &) = delete;
+private:
+    std::atomic_flag &m_flag;
+};
+
+// Spins with yielding until the borrowed flag is acquired; the flag outlives this guard, no allocation occurs and no exception is thrown.
+EntitiesCacheLock::EntitiesCacheLock(std::atomic_flag &flag) : m_flag(flag)
+{
+    while (m_flag.test_and_set(std::memory_order_acquire))
+        std::this_thread::yield();
+}
+
+// Releases this scope's borrowed flag with release ordering; owns no geometry and does not throw.
+EntitiesCacheLock::~EntitiesCacheLock()
+{
+    m_flag.clear(std::memory_order_release);
+}
+} // namespace
+
+// Serializes cache validation and rebuilding against immutable owned children, returning borrowed pointers valid until mutation;
+// mutation requires exclusive access. Allocation failures propagate and release the flag so subsequent readers can retry.
+const ExtrusionEntitiesPtr &ExtrusionEntityCollection::entities() const
+{
+    const EntitiesCacheLock lock(m_entities_cache_lock);
+    this->rebuild_entities_cache();
+    return m_entities_cache;
+}
 
 #if 0
 void filter_by_extrusion_role_in_place(ExtrusionEntitiesPtr &extrusion_entities, ExtrusionRole role)
@@ -36,6 +78,8 @@ ExtrusionEntityCollection::ExtrusionEntityCollection(const ExtrusionPaths &paths
     this->append(paths);
 }
 
+// Validates pointer count/order against owned non-leaf children while the caller holds the cache flag; replaces stale borrowed
+// pointers without changing children. Allocation failures propagate with a retryable cache and the caller releases the flag.
 void ExtrusionEntityCollection::rebuild_entities_cache() const
 {
     assert(!this->is_leaf());
@@ -293,6 +337,8 @@ ExtrusionEntityCollection ExtrusionEntityCollection::flatten(bool preserve_order
 
 }
 
+// Reads the source through FlatenEntities, appending an ordered wrapper or transferring flattened children into out and clearing
+// its cache. out owns the added children and requires exclusive access throughout the call; allocation/traversal failures propagate.
 void ExtrusionEntityCollection::flatten(bool preserve_ordering, ExtrusionEntityCollection& out) const
 {
     if (!this->can_sort() && preserve_ordering && this->entities().size() > 1) {

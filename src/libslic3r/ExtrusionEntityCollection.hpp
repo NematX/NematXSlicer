@@ -8,6 +8,12 @@
 #ifndef slic3r_ExtrusionEntityCollection_hpp_
 #define slic3r_ExtrusionEntityCollection_hpp_
 
+/* Collections own their children through the extrusion tree. The compatibility pointer view borrows those children and is
+   validated under a cache spin lock on every access; direct child queries need no pointer cache. Readers may run concurrently,
+   while all mutations require exclusive access and invalidate borrowed views. */
+
+#include <atomic>
+
 #include "Exception.hpp"
 #include "ExtrusionEntity.hpp"
 #include "libslic3r.h"
@@ -31,11 +37,15 @@ inline ExtrusionEntitiesPtr filter_by_extrusion_role(const ExtrusionEntitiesPtr 
 }
 #endif
 
+// Owns an extrusion-child tree and exposes a compatibility pointer view. Concurrent const reads are safe;
+// mutations, including changes through the base class or returned child pointers, require exclusive access.
 class ExtrusionEntityCollection : public ExtrusionEntity
 {
 private:
     mutable ExtrusionEntitiesPtr m_entities_cache;
+    mutable std::atomic_flag m_entities_cache_lock = ATOMIC_FLAG_INIT;
 
+    // Validates and rebuilds the borrowed-pointer cache while the caller holds m_entities_cache_lock.
     void rebuild_entities_cache() const;
 
 public:
@@ -47,7 +57,8 @@ public:
     /// Owned ExtrusionEntities and descendent ExtrusionEntityCollections.
     /// Iterating over this needs to check each child to see if it, too is a collection.
     /// FIXME Warning: not a true const, the entities inside can be modified, and if the entities are deleted -> crash
-    const ExtrusionEntitiesPtr& entities() const { this->rebuild_entities_cache(); return m_entities_cache; }
+    // Returns the synchronized pointer view, valid until the next mutation; concurrent const readers do not invalidate it.
+    const ExtrusionEntitiesPtr& entities() const;
     ExtrusionEntityCollection() : ExtrusionEntity(ExtrusionEntity::Children(), true, true, false) {}
     ExtrusionEntityCollection(bool can_sort, bool can_reverse) : ExtrusionEntity(ExtrusionEntity::Children(), can_sort, can_reverse, false) {}
     ExtrusionEntityCollection(const ExtrusionEntityCollection &other) : ExtrusionEntity(other) {}
@@ -126,9 +137,18 @@ public:
     void remove(size_t i);
     ExtrusionEntityReferences chained_path_from(const Point &start_near);
     void reverse() override;
-    const Point& first_point() const override { return this->entities().front()->first_point(); }
-    const Point& last_point() const override { return this->entities().back()->last_point(); }
-    const Point& middle_point() const override { return this->entities()[this->entities().size() / 2]->middle_point(); }
+    // Returns the first child's first point; requires a nonempty collection and a child able to provide that point,
+    // recursively for nested collections. Empty children are not skipped.
+    const Point& first_point() const override { return ExtrusionEntity::children().front()->first_point(); }
+    // Returns the last child's last point; requires a nonempty collection and a child able to provide that point,
+    // recursively for nested collections. Empty children are not skipped.
+    const Point& last_point() const override { return ExtrusionEntity::children().back()->last_point(); }
+    // Returns the middle point of child children().size()/2; requires a nonempty collection and that child able to provide
+    // its middle point, recursively for nested collections. Empty children are not skipped.
+    const Point& middle_point() const override {
+        const Children &children = ExtrusionEntity::children();
+        return children[children.size() / 2]->middle_point();
+    }
     // Produce a list of 2D polygons covered by the extruded paths, offsetted by the extrusion width.
     // Increase the offset by scaled_epsilon to achieve an overlap, so a union will produce no gaps.
     void polygons_covered_by_width(Polygons &out, const float scaled_epsilon) const override;
@@ -142,7 +162,7 @@ public:
         { Polygons out; this->polygons_covered_by_spacing(out, spacing_ratio, scaled_epsilon); return out; }
 
     /// count of entities inside this container.
-    size_t size() const { return entities().size(); }
+    size_t size() const { return ExtrusionEntity::children().size(); }
     // Recursively count paths and loops contained in this collection. 
     // this->items_count() >= this->size()
     size_t items_count() const;
@@ -152,6 +172,7 @@ public:
     /// the original tree and choose candidates without destroying hierarchy.
     [[deprecated("flatten() rebuilds extrusion hierarchy and may lose inherited node properties; use a tree visitor for ordering instead.")]]
     ExtrusionEntityCollection flatten(bool preserve_ordering) const;
+    // Reads the source and flattens into out, mutating its children and cache; out requires exclusive access throughout the call.
     [[deprecated("flatten() rebuilds extrusion hierarchy and may lose inherited node properties; use a tree visitor for ordering instead.")]]
     void flatten(bool preserve_ordering, ExtrusionEntityCollection& out) const;
     double total_volume() const override { double volume=0.; for (const auto& ent : entities()) volume+=ent->total_volume(); return volume; }
@@ -176,8 +197,9 @@ public:
         throw Slic3r::RuntimeError("Calling length() on a ExtrusionEntityCollection");
         return 0.;        
     }
+    // Returns true when every owned child is empty, including when there are no children.
     bool empty() const override {
-        for (const ExtrusionEntity *extrusion_entity : this->entities())
+        for (const ExtrusionEntityUPtr &extrusion_entity : ExtrusionEntity::children())
             if (!extrusion_entity->empty())
                 return false;
         return true;

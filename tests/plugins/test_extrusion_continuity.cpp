@@ -1,9 +1,46 @@
+/* Extrusion-tree tests check ordered continuity, wrapper simplification and collection access.
+   Concurrent collection readers share immutable owned children and compare const accessors against those children.
+   Freshly appended collections exercise first-read pointer-cache construction; assertions run only after workers join. */
 #include <catch2/catch.hpp>
+
+#include <atomic>
+#include <exception>
+#include <memory>
+#include <thread>
+#include <vector>
 
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 
 namespace {
+
+// Checks const collection views against its owned children without changing the collection.
+bool collection_reads_match(const Slic3r::ExtrusionEntityCollection &collection);
+
+// Borrows a nonempty collection of nonempty paths and compares all const views with its immutable owned children;
+// returns false for a size, pointer, iteration or endpoint mismatch, owns nothing and propagates accessor failures.
+bool collection_reads_match(const Slic3r::ExtrusionEntityCollection &collection)
+{
+    const Slic3r::ExtrusionEntity::Children &children = collection.children();
+    const Slic3r::ExtrusionEntitiesPtr &entities = collection.entities();
+    if (entities.size() != children.size()) return false;
+    for (size_t idx = 0; idx < children.size(); ++idx)
+        if (entities[idx] != children[idx].get()) return false;
+    if (collection.size() != children.size() || collection.empty()) return false;
+    Slic3r::ExtrusionEntitiesPtr::const_iterator it = collection.begin();
+    const Slic3r::ExtrusionEntitiesPtr::const_iterator end = collection.end();
+    for (size_t idx = 0; idx < children.size(); ++idx, ++it) {
+        if (it == end || *it != children[idx].get()) return false;
+    }
+    if (it != end) return false;
+    Slic3r::ExtrusionEntitiesPtr::const_iterator cit = collection.cbegin();
+    const Slic3r::ExtrusionEntitiesPtr::const_iterator cend = collection.cend();
+    for (size_t idx = 0; idx < children.size(); ++idx, ++cit) {
+        if (cit == cend || *cit != children[idx].get()) return false;
+    }
+    return cit == cend && collection.first_point() == children.front()->first_point() &&
+        collection.last_point() == children.back()->last_point();
+}
 
 Slic3r::ExtrusionPath path_between(const Slic3r::Point &from, const Slic3r::Point &to)
 {
@@ -19,6 +56,64 @@ Slic3r::ExtrusionPath path_between(const Slic3r::Point &from, const Slic3r::Poin
 }
 
 } // namespace
+
+// Creates owned collections before starting readers, gates each cold read on all eight workers being ready, and checks worker-local
+// results after joining. Children outlive every reader; accessor exceptions are retained for the test thread, and startup failures join workers.
+TEST_CASE("Concurrent const collection access matches owned children", "[plugins][extrusion][extrusion-collection-threads]")
+{
+    constexpr size_t collection_count = 200, child_count = 256, worker_count = 8;
+    std::vector<std::unique_ptr<Slic3r::ExtrusionEntityCollection>> collections;
+    collections.reserve(collection_count);
+    for (size_t round = 0; round < collection_count; ++round) {
+        std::unique_ptr<Slic3r::ExtrusionEntityCollection> collection = std::make_unique<Slic3r::ExtrusionEntityCollection>();
+        for (size_t idx = 0; idx < child_count; ++idx)
+            collection->append(path_between(Slic3r::Point(int(idx), 0), Slic3r::Point(int(idx + 1), 0)));
+        // Appending leaves the pointer cache empty; no const collection accessor runs before the synchronized readers.
+        collections.push_back(std::move(collection));
+    }
+    std::atomic<size_t> ready{0}, phase{0};
+    std::atomic<bool> stop{false};
+    std::vector<size_t> mismatches(worker_count, 0);
+    std::vector<std::exception_ptr> errors(worker_count);
+    std::vector<std::thread> workers;
+    workers.reserve(worker_count);
+    try {
+        for (size_t worker = 0; worker < worker_count; ++worker) {
+            // Reads each collection only after the release gate, records failures in this worker's slots and owns no geometry;
+            // each round reaches the next barrier even after an accessor exception so the coordinator can finish and join.
+            workers.emplace_back([&, worker] {
+                for (size_t round = 0; round < collection_count; ++round) {
+                    ready.fetch_add(1, std::memory_order_release);
+                    while (phase.load(std::memory_order_acquire) < round + 1 && !stop.load(std::memory_order_acquire))
+                        std::this_thread::yield();
+                    if (stop.load(std::memory_order_acquire)) return;
+                    try {
+                        const Slic3r::ExtrusionEntityCollection &collection = *collections[round];
+                        for (size_t pass = 0; pass < 3; ++pass)
+                            if (!collection_reads_match(collection)) ++mismatches[worker];
+                    } catch (...) {
+                        if (!errors[worker]) errors[worker] = std::current_exception();
+                    }
+                }
+            });
+        }
+    } catch (...) {
+        stop.store(true, std::memory_order_release);
+        for (std::thread &worker : workers) worker.join();
+        throw;
+    }
+    for (size_t round = 0; round < collection_count; ++round) {
+        while (ready.load(std::memory_order_acquire) < (round + 1) * worker_count)
+            std::this_thread::yield();
+        phase.store(round + 1, std::memory_order_release);
+    }
+    for (std::thread &worker : workers) worker.join();
+    for (size_t worker = 0; worker < worker_count; ++worker) {
+        INFO("reader " << worker);
+        if (errors[worker]) std::rethrow_exception(errors[worker]);
+        CHECK(mismatches[worker] == 0);
+    }
+}
 
 TEST_CASE("Extrusion continuity is computed from tree order", "[plugins][extrusion][continuity]")
 {
