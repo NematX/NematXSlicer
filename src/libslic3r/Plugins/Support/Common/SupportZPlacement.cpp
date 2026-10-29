@@ -30,10 +30,24 @@ namespace slic3r_api::Support::Common {
 namespace {
 constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
 
+// Synchronizes coplanar contact thicknesses when requested and returns contacts sorted by extreme Z.
+GeneratorLayers prepare_contact_extremes(bool sync, GeneratedSupport &out);
 // Place one interval of the handed-over layout between start and end. The previous top contact keeps its span as one slab first;
 // the current top contact, when it has no thickness yet, becomes the top dense slab. Returns the Z where the current extreme ends.
 coord_t place_handed_over_interval(const SlabSpacing &spacing, const MiddleSplitter &split_middle, GeneratedSupport &out,
                                    const GeneratorLayer *previous, GeneratorLayer *current, coord_t start, coord_t end);
+// Places object-Z slabs and assigns an unknown top contact's thickness, returning the remaining interval top.
+coord_t place_synchronized_interval(const SlabSpacing &spacing, const std::vector<Layer> &layers, GeneratedSupport &out,
+                                    GeneratorLayer *current, coord_t start, coord_t end);
+// Distributes dense and sparse grid slabs within an interval, returning its top after contact placement.
+coord_t place_grid_interval(const SlabSpacing &spacing, GeneratedSupport &out, const GeneratorLayer *previous,
+                            GeneratorLayer *current, coord_t start, coord_t end);
+// Assigns an unknown contact's grid thickness and appends dense/sparse slabs in order, returning the remaining interval top.
+coord_t append_grid_slabs(const SlabSpacing &spacing, GeneratedSupport &out, GeneratorLayer *current, coord_t start, coord_t end,
+                          size_t top, size_t bottom, size_t middle, size_t total, double step, double dense_step);
+// Splits a short handed-over interval into whole-grid dense slabs and returns the top below an unknown contact.
+coord_t place_even_dense_interval(GeneratedSupport &out, GeneratorLayer *current, coord_t start, coord_t end,
+                                  coord_t distance, coord_t zgrid, coord_t dense, coord_t min_height, bool unknown_top);
 // Check perimeter loops and the INFILLS bucket independently; bridge fills never require a perimeter bucket to exist.
 bool has_bridges(storage_handle *storage, const Layer &layer);
 // Read generic tree children and inherited flow attributes, returning true for a bridge polyline without assuming a concrete path subclass.
@@ -42,6 +56,17 @@ bool bridging_fills(const ExtrusionEntity &entity, const EPropertyAttributes *at
 size_t ceil_steps(coord_t distance, coord_t step);
 // Round a length up to a whole number of grid steps.
 coord_t round_up_to_grid(coord_t value, coord_t grid);
+// Initializes cheap borrowed bridge-layer metadata in an empty cache slot and returns it.
+BridgeFootprintLayer &bridge_layer_metadata(std::optional<BridgeFootprintLayer> &slot, const Layer &layer);
+// Gets a lazy cached region thread start, or computes an uncached start for a region absent from the layer list.
+coord_t bridge_region_start(BridgeFootprintLayer &pieces, const Layer &layer, const LayerRegion &region,
+                            const Config &print_config, bool filament);
+// Lazily builds and appends one region's grown bridge fills in work-island order.
+void append_region_bridge_fills(storage_handle *storage, const ClipperContext &clipper, BridgeFootprintLayer &pieces,
+                                size_t region_idx, raw_surface_type bridge_fill, coord_t gap_xy, StoredExPolygonCollection &footprint);
+// Checks work-region starts in order and appends eligible lazily built perimeter footprints.
+void append_bridge_perimeters(storage_handle *storage, BridgeFootprintLayer &pieces, const Layer &layer, const Config &print_config,
+                              bool filament, coord_t upper, coord_t gap_xy, StoredExPolygonCollection &footprint);
 } // namespace
 
 // Resolve the borrowed setting in mm (percent of nozzle_mm), clamp nonzero values to [0, max_height_mm], then scale to the layer grid.
@@ -186,23 +211,8 @@ void place_intermediate_slabs(const SlabSpacing &spacing, const std::vector<Laye
 {
     const bool sync = spacing.synchronize;
     assert(!(sync && split_middle));
-    const coord_t first = spacing.first_z, min_height = spacing.min_height, base_step = spacing.base_step;
-    const coord_t interface_step = spacing.interface_step, machine_step = spacing.machine_step;
-    if (sync) {
-        // Contacts at one print Z need a common printable bottom, otherwise a thinner top slab would shorten the published bottom contact's gap.
-        for (GeneratorLayer *top : out.top)
-            for (const GeneratorLayer *bottom : out.bottom)
-                if (top->height == 0 && top->print_z == bottom->print_z) {
-                    top->bottom_z = bottom->bottom_z;
-                    top->height = bottom->height;
-                }
-    }
-    GeneratorLayers extremes = out.top;
-    extremes.insert(extremes.end(), out.bottom.begin(), out.bottom.end());
-    std::sort(extremes.begin(), extremes.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
-        return a->extreme_z() < b->extreme_z() || (a->extreme_z() == b->extreme_z() &&
-            a->type == LayerType::TopContact && b->type == LayerType::BottomContact);
-    });
+    const coord_t first = spacing.first_z, min_height = spacing.min_height;
+    const GeneratorLayers extremes = prepare_contact_extremes(sync, out);
     coord_t previous_extreme = 0;
     GeneratorLayer *previous = nullptr;
     for (GeneratorLayer *current : extremes) {
@@ -234,123 +244,11 @@ void place_intermediate_slabs(const SlabSpacing &spacing, const std::vector<Laye
                 previous_extreme = end;
                 continue;
             }
-            // Soluble contacts already have a bottom on an object Z. Non-soluble contacts retain their top Z and acquire a printable thickness here.
-            const bool unknown_top = current->type == LayerType::TopContact && current->height == 0;
-            coord_t last = start;
-            for (const Layer &layer : layers) {
-                const coord_t z = layer.print_z();
-                if (z <= start) continue;
-                if (z > end || (unknown_top && z == end)) break;
-                if (z - last < min_height) continue;
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
-                last = z;
-            }
-            if (unknown_top) {
-                if (end - last < min_height && !out.base.empty() && out.base.back()->print_z == last) {
-                    last = out.base.back()->bottom_z;
-                    out.base.pop_back();
-                }
-                // Round cumulative boundaries, not one repeated thickness, so residual machine steps reach the unchanged contact Z.
-                const coord_t limit = machine_step > SCALED_EPSILON ? interface_step - interface_step % machine_step : interface_step;
-                const size_t count = ceil_steps(end - last, limit);
-                const coord_t start_z = last;
-                for (size_t i = 1; i < count; ++i) {
-                    const coord_t next = check_z_step(scale_to_layer_coord(unscaled(start_z) + unscaled(end - start_z) * i / count), machine_step);
-                    assert(next - last >= min_height && next - last <= interface_step);
-                    out.base.push_back(&add_layer(out, LayerType::Intermediate, next, last, next - last));
-                    last = next;
-                }
-                current->bottom_z = last;
-                current->height = end - last;
-                assert(current->height >= min_height && current->height <= interface_step);
-                end = last;
-            } else if (last < end) {
-                // A bottom contact keeps its gap above the object; close the interval at its top before returning to object Z positions.
-                if (end - last < min_height && !out.base.empty() && out.base.back()->print_z == last) {
-                    last = out.base.back()->bottom_z;
-                    out.base.pop_back();
-                }
-                const coord_t limit = machine_step > SCALED_EPSILON ? base_step - base_step % machine_step : base_step;
-                const size_t count = ceil_steps(end - last, limit);
-                const coord_t start_z = last;
-                for (size_t i = 1; i <= count; ++i) {
-                    const coord_t z = i == count ? end : check_z_step(scale_to_layer_coord(unscaled(start_z) + unscaled(end - start_z) * i / count), machine_step);
-                    assert(z - last >= min_height && z - last <= base_step);
-                    out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
-                    last = z;
-                }
-            }
+            end = place_synchronized_interval(spacing, layers, out, current, start, end);
         } else if (split_middle) {
             end = place_handed_over_interval(spacing, split_middle, out, previous, current, start, end);
         } else {
-            // Distribute the interval across the requested top, bottom and sparse thicknesses, as in native support generation.
-            size_t top = size_t(std::max(0, spacing.interface_layers));
-            const int bottom_count = spacing.bottom_interface_layers;
-            size_t bottom = bottom_count > 0 ? size_t(bottom_count - 1) : 0;
-            size_t middle = 0;
-            double step = 0, dense_step = interface_step;
-            const coord_t dense_height = interface_step * coord_t(top + bottom);
-            if (distance <= dense_height - EPSILON) {
-                top = ceil_steps(distance, interface_step);
-                dense_step = double(distance) / top;
-                bottom = std::min(bottom, top / 2);
-                top -= bottom;
-            } else {
-                middle = ceil_steps(distance - dense_height, base_step);
-                step = double(distance) / (top + bottom + middle);
-                if (step <= base_step && step <= interface_step) dense_step = step;
-                else if (interface_step <= base_step) step = (distance - dense_step * (top + bottom)) / middle;
-                else { step = base_step; dense_step = (distance - step * middle) / (top + bottom); }
-            }
-            size_t total = top + bottom + middle;
-            // A bed contact is already covered by the first-layer slab; preserve a contact span only above start.
-            if (previous && previous->type == LayerType::TopContact && previous->print_z > start &&
-                previous->print_z + min_height > previous->bottom_z + scale_to_layer_coord(unscaled(step))) {
-                start = previous->print_z;
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, start, previous->bottom_z, previous->height));
-                distance = end - start;
-                if (distance == 0) { previous = current; previous_extreme = end; continue; }
-                --total;
-                if (bottom > 0) --bottom;
-                else if (middle > 0) --middle;
-                else --top;
-                const coord_t remaining_dense = interface_step * coord_t(top + bottom);
-                if (distance <= remaining_dense) {
-                    top = ceil_steps(distance, interface_step);
-                    dense_step = double(distance) / top;
-                    middle = 0;
-                    bottom = std::min(bottom, top - 1);
-                    top -= bottom;
-                } else {
-                    middle = ceil_steps(distance - remaining_dense, base_step);
-                    step = double(distance) / (top + bottom + middle);
-                    if (step <= base_step && step <= interface_step) dense_step = step;
-                    else if (interface_step <= base_step) { dense_step = interface_step; step = double(distance - remaining_dense) / middle; }
-                    else { step = base_step; dense_step = double(remaining_dense) / (top + bottom); }
-                }
-                total = top + bottom + middle;
-            }
-            if (!spacing.soluble && current->type == LayerType::TopContact && current->height == 0) {
-                if (top > 0) { --top; current->height = scale_to_layer_coord(unscaled(dense_step)); }
-                else if (middle > 0) { --middle; current->height = scale_to_layer_coord(unscaled(step)); }
-                else { --bottom; current->height = scale_to_layer_coord(unscaled(dense_step)); }
-                end = current->bottom_z = current->print_z - current->height;
-                --total;
-            }
-            coord_t last = start;
-            double wanted = unscaled(start);
-            for (size_t i = 0; i < total; ++i) {
-                coord_t z = end;
-                if (i + 1 < total) {
-                    const bool dense = i < bottom || i >= total - top;
-                    wanted += unscaled(dense ? dense_step : step);
-                    z = last + std::min(check_z_step(scale_to_layer_coord(wanted) - last,
-                        machine_step), dense ? interface_step : base_step);
-                }
-                assert(z > last);
-                out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
-                last = z;
-            }
+            end = place_grid_interval(spacing, out, previous, current, start, end);
         }
         previous = current;
         previous_extreme = end;
@@ -359,8 +257,178 @@ void place_intermediate_slabs(const SlabSpacing &spacing, const std::vector<Laye
 }
 
 namespace {
+// Updates out-owned unknown top contacts from coplanar bottom contacts in nested list order when sync is true, then returns
+// owned sorted pointers borrowing those contacts; allocation failures propagate after any contact updates.
+GeneratorLayers prepare_contact_extremes(bool sync, GeneratedSupport &out)
+{
+    if (sync) {
+        // Contacts at one print Z need a common printable bottom, otherwise a thinner top slab would shorten the published bottom contact's gap.
+        for (GeneratorLayer *top : out.top)
+            for (const GeneratorLayer *bottom : out.bottom)
+                if (top->height == 0 && top->print_z == bottom->print_z) {
+                    top->bottom_z = bottom->bottom_z;
+                    top->height = bottom->height;
+                }
+    }
+    GeneratorLayers extremes = out.top;
+    extremes.insert(extremes.end(), out.bottom.begin(), out.bottom.end());
+    std::sort(extremes.begin(), extremes.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+        return a->extreme_z() < b->extreme_z() || (a->extreme_z() == b->extreme_z() &&
+            a->type == LayerType::TopContact && b->type == LayerType::BottomContact);
+    });
+    return extremes;
+}
+
+// Walks borrowed object layers in order, appending out-owned intermediate slabs and setting the borrowed contact's thickness;
+// start/end bound a positive interval, spacing supplies grid limits, and allocation failures propagate after any appended slabs.
+coord_t place_synchronized_interval(const SlabSpacing &spacing, const std::vector<Layer> &layers, GeneratedSupport &out,
+                                    GeneratorLayer *current, coord_t start, coord_t end)
+{
+    const coord_t min_height = spacing.min_height, machine_step = spacing.machine_step;
+    const coord_t interface_step = spacing.interface_step, base_step = spacing.base_step;
+    // Soluble contacts already have a bottom on an object Z. Non-soluble contacts retain their top Z and acquire a printable thickness here.
+    const bool unknown_top = current->type == LayerType::TopContact && current->height == 0;
+    coord_t last = start;
+    for (const Layer &layer : layers) {
+        const coord_t z = layer.print_z();
+        if (z <= start) continue;
+        if (z > end || (unknown_top && z == end)) break;
+        if (z - last < min_height) continue;
+        out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
+        last = z;
+    }
+    if (unknown_top) {
+        if (end - last < min_height && !out.base.empty() && out.base.back()->print_z == last) {
+            last = out.base.back()->bottom_z;
+            out.base.pop_back();
+        }
+        // Round cumulative boundaries, not one repeated thickness, so residual machine steps reach the unchanged contact Z.
+        const coord_t limit = machine_step > SCALED_EPSILON ? interface_step - interface_step % machine_step : interface_step;
+        const size_t count = ceil_steps(end - last, limit);
+        const coord_t start_z = last;
+        for (size_t i = 1; i < count; ++i) {
+            const coord_t next = check_z_step(scale_to_layer_coord(unscaled(start_z) + unscaled(end - start_z) * i / count), machine_step);
+            assert(next - last >= min_height && next - last <= interface_step);
+            out.base.push_back(&add_layer(out, LayerType::Intermediate, next, last, next - last));
+            last = next;
+        }
+        current->bottom_z = last;
+        current->height = end - last;
+        assert(current->height >= min_height && current->height <= interface_step);
+        end = last;
+    } else if (last < end) {
+        // A bottom contact keeps its gap above the object; close the interval at its top before returning to object Z positions.
+        if (end - last < min_height && !out.base.empty() && out.base.back()->print_z == last) {
+            last = out.base.back()->bottom_z;
+            out.base.pop_back();
+        }
+        const coord_t limit = machine_step > SCALED_EPSILON ? base_step - base_step % machine_step : base_step;
+        const size_t count = ceil_steps(end - last, limit);
+        const coord_t start_z = last;
+        for (size_t i = 1; i <= count; ++i) {
+            const coord_t z = i == count ? end : check_z_step(scale_to_layer_coord(unscaled(start_z) + unscaled(end - start_z) * i / count), machine_step);
+            assert(z - last >= min_height && z - last <= base_step);
+            out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
+            last = z;
+        }
+    }
+    return end;
+}
+
+// Computes dense/sparse thicknesses in evaluation order, appends out-owned grid slabs and assigns an unknown contact's span;
+// borrowed contacts and an initially positive interval are required. Projecting a previous contact can consume the remainder:
+// distance == 0 then returns end after the contact-span append, without adding any further slab. Otherwise the returned top
+// excludes an assigned upper contact; allocation failures propagate.
+coord_t place_grid_interval(const SlabSpacing &spacing, GeneratedSupport &out, const GeneratorLayer *previous,
+                            GeneratorLayer *current, coord_t start, coord_t end)
+{
+    const coord_t min_height = spacing.min_height, interface_step = spacing.interface_step;
+    const coord_t base_step = spacing.base_step;
+    coord_t distance = end - start;
+    // Distribute the interval across the requested top, bottom and sparse thicknesses, as in native support generation.
+    size_t top = size_t(std::max(0, spacing.interface_layers));
+    const int bottom_count = spacing.bottom_interface_layers;
+    size_t bottom = bottom_count > 0 ? size_t(bottom_count - 1) : 0;
+    size_t middle = 0;
+    double step = 0, dense_step = interface_step;
+    const coord_t dense_height = interface_step * coord_t(top + bottom);
+    if (distance <= dense_height - EPSILON) {
+        top = ceil_steps(distance, interface_step);
+        dense_step = double(distance) / top;
+        bottom = std::min(bottom, top / 2);
+        top -= bottom;
+    } else {
+        middle = ceil_steps(distance - dense_height, base_step);
+        step = double(distance) / (top + bottom + middle);
+        if (step <= base_step && step <= interface_step) dense_step = step;
+        else if (interface_step <= base_step) step = (distance - dense_step * (top + bottom)) / middle;
+        else { step = base_step; dense_step = (distance - step * middle) / (top + bottom); }
+    }
+    size_t total = top + bottom + middle;
+    // A bed contact is already covered by the first-layer slab; preserve a contact span only above start.
+    if (previous && previous->type == LayerType::TopContact && previous->print_z > start &&
+        previous->print_z + min_height > previous->bottom_z + scale_to_layer_coord(unscaled(step))) {
+        start = previous->print_z;
+        out.base.push_back(&add_layer(out, LayerType::Intermediate, start, previous->bottom_z, previous->height));
+        distance = end - start;
+        if (distance == 0) return end;
+        --total;
+        if (bottom > 0) --bottom;
+        else if (middle > 0) --middle;
+        else --top;
+        const coord_t remaining_dense = interface_step * coord_t(top + bottom);
+        if (distance <= remaining_dense) {
+            top = ceil_steps(distance, interface_step);
+            dense_step = double(distance) / top;
+            middle = 0;
+            bottom = std::min(bottom, top - 1);
+            top -= bottom;
+        } else {
+            middle = ceil_steps(distance - remaining_dense, base_step);
+            step = double(distance) / (top + bottom + middle);
+            if (step <= base_step && step <= interface_step) dense_step = step;
+            else if (interface_step <= base_step) { dense_step = interface_step; step = double(distance - remaining_dense) / middle; }
+            else { step = base_step; dense_step = double(remaining_dense) / (top + bottom); }
+        }
+        total = top + bottom + middle;
+    }
+    return append_grid_slabs(spacing, out, current, start, end, top, bottom, middle, total, step, dense_step);
+}
+
+// Assigns the borrowed unknown top contact one dense/sparse step and appends the remaining out-owned slabs using cumulative
+// rounded boundaries; counts/thicknesses describe the positive interval, the returned top excludes the contact, and allocation failures propagate.
+coord_t append_grid_slabs(const SlabSpacing &spacing, GeneratedSupport &out, GeneratorLayer *current, coord_t start, coord_t end,
+                          size_t top, size_t bottom, size_t middle, size_t total, double step, double dense_step)
+{
+    const coord_t machine_step = spacing.machine_step, interface_step = spacing.interface_step, base_step = spacing.base_step;
+    if (!spacing.soluble && current->type == LayerType::TopContact && current->height == 0) {
+        if (top > 0) { --top; current->height = scale_to_layer_coord(unscaled(dense_step)); }
+        else if (middle > 0) { --middle; current->height = scale_to_layer_coord(unscaled(step)); }
+        else { --bottom; current->height = scale_to_layer_coord(unscaled(dense_step)); }
+        end = current->bottom_z = current->print_z - current->height;
+        --total;
+    }
+    coord_t last = start;
+    double wanted = unscaled(start);
+    for (size_t i = 0; i < total; ++i) {
+        coord_t z = end;
+        if (i + 1 < total) {
+            const bool dense = i < bottom || i >= total - top;
+            wanted += unscaled(dense ? dense_step : step);
+            z = last + std::min(check_z_step(scale_to_layer_coord(wanted) - last,
+                machine_step), dense ? interface_step : base_step);
+        }
+        assert(z > last);
+        out.base.push_back(&add_layer(out, LayerType::Intermediate, z, last, z - last));
+        last = z;
+    }
+    return end;
+}
+
 // The stacks are placed at the interface step rounded down to the Z grid. They are kept when the middle they leave is zero or at least
 // min_height; otherwise the interval is split evenly into dense slabs, within the interface step when feasible (see the header), and an unknown top contact is the last of them.
+// Borrows spacing, contacts and splitter, appends out-owned slabs and returns the top below any assigned contact; interval/grid
+// limits must be valid, splitter output is asserted, and splitter/allocation failures propagate with prior appends intact.
 coord_t place_handed_over_interval(const SlabSpacing &spacing, const MiddleSplitter &split_middle, GeneratedSupport &out,
                                    const GeneratorLayer *previous, GeneratorLayer *current, coord_t start, coord_t end)
 {
@@ -412,6 +480,14 @@ coord_t place_handed_over_interval(const SlabSpacing &spacing, const MiddleSplit
         assert(last == end);
         return end;
     }
+    return place_even_dense_interval(out, current, start, end, distance, zgrid, dense, min_height, unknown_top);
+}
+
+// Appends evenly spaced out-owned slabs in whole grid steps for a positive short interval; an unknown contact receives the final
+// part and the returned top lies below it. Valid grid/dense limits are required; allocation failures propagate after prior appends.
+coord_t place_even_dense_interval(GeneratedSupport &out, GeneratorLayer *current, coord_t start, coord_t end,
+                                  coord_t distance, coord_t zgrid, coord_t dense, coord_t min_height, bool unknown_top)
+{
     // Even split in whole grid steps: every slab takes the floor or the ceiling of the average, so it stays within the dense step.
     // The count is the fewest that keeps the dense step, and it is capped so that the floor still reaches the minimum height;
     // when no count does both, the slabs are at least the minimum height and may exceed the dense step, and an interval shorter
@@ -545,81 +621,108 @@ StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::v
     size_t id = size_t(first - layers.begin());
     for (; id < layers.size(); ++id) {
         const Layer &layer = layers[id];
-        if (!cache->layers[id]) {
-            BridgeFootprintLayer pieces;
-            for (uint32_t region_idx = 0; region_idx < layer.region_count(); ++region_idx)
-                pieces.regions.push_back(layer.region(region_idx));
-            for (uint32_t island = 0; island < layer.island_count(); ++island) {
-                const LayerIsland layer_island = layer.island(island);
-                for (uint32_t work_idx = 0; work_idx < layer_island.region_island_count(); ++work_idx)
-                    pieces.works.push_back(layer_island.region_island(work_idx));
-            }
-            pieces.region_starts.resize(pieces.regions.size());
-            pieces.region_fills.resize(pieces.regions.size());
-            pieces.perimeters.resize(pieces.works.size());
-            cache->layers[id].emplace(std::move(pieces));
-        }
-        BridgeFootprintLayer &pieces = *cache->layers[id];
-        // Layer regions normally contain every work member. A member absent from that list uses an uncached height,
-        // so membership in the metadata list is not required for the perimeter pass to compute its thread start.
-        // Returns a start for a borrowed region, publishing a cached scalar only after height computation succeeds;
-        // unknown bridge types propagate, and no geometry is owned or changed by this lookup.
-        const auto thread_start = [&](const LayerRegion &region) -> coord_t {
-            const std::vector<LayerRegion>::const_iterator found = std::find_if(pieces.regions.cbegin(), pieces.regions.cend(),
-                [&region](const LayerRegion &candidate) { return candidate.handle() == region.handle(); });
-            if (found != pieces.regions.cend()) {
-                std::optional<coord_t> &start = pieces.region_starts[size_t(found - pieces.regions.cbegin())];
-                if (!start) {
-                    const coord_t height = filament ? scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, region)) : layer.height();
-                    start = layer.print_z() - height;
-                }
-                return *start;
-            }
-            const coord_t height = filament ? scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, region)) : layer.height();
-            return layer.print_z() - height;
-        };
+        BridgeFootprintLayer &pieces = bridge_layer_metadata(cache->layers[id], layer);
         bool overlaps = false;
         for (size_t region_idx = 0; region_idx < pieces.regions.size(); ++region_idx) {
             const LayerRegion &region = pieces.regions[region_idx];
-            if (thread_start(region) >= upper) break;
+            if (bridge_region_start(pieces, layer, region, print_config, filament) >= upper) break;
             overlaps = true;
-            if (!pieces.region_fills[region_idx]) {
-                StoredExPolygonCollection fills(storage);
-                for (const LayerRegionIsland &work : pieces.works) {
-                    bool member = false;
-                    for (uint32_t idx = 0; idx < work.region_count(); ++idx)
-                        member = member || work.region(idx).handle() == region.handle();
-                    if (!member) continue;
-                    StoredExPolygonCollection bridges(storage);
-                    for (const Surface &surface : work.fill_surfaces())
-                        if (surface.type() == bridge_fill) bridges.push_back(surface.expolygon());
-                    fills.append_move_from(clipper_offset(clipper(bridges), double(p.gap_xy), join_type, 0.).to_expolygon_collection());
-                }
-                pieces.region_fills[region_idx].emplace(std::move(fills));
-            }
-            footprint.append_copy_from(*pieces.region_fills[region_idx]);
+            append_region_bridge_fills(storage, clipper, pieces, region_idx, bridge_fill, p.gap_xy, footprint);
         }
-        for (size_t work_idx = 0; work_idx < pieces.works.size(); ++work_idx) {
-            const LayerRegionIsland &work = pieces.works[work_idx];
-            if (!work.has_extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))) continue;
-            bool too_high = false;
-            for (uint32_t idx = 0; idx < work.region_count(); ++idx)
-                if (thread_start(work.region(idx)) >= upper) { too_high = true; break; }
-            if (too_high) continue;
-            if (!pieces.perimeters[work_idx]) {
-                StoredExPolygonCollection perimeter(storage);
-                // bridge_areas only appends raw footprints; it never reads the destination's existing geometry.
-                bridge_areas(storage, ExtrusionEntity(work.extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))), p.gap_xy, perimeter);
-                pieces.perimeters[work_idx].emplace(std::move(perimeter));
-            }
-            footprint.append_copy_from(*pieces.perimeters[work_idx]);
-        }
+        append_bridge_perimeters(storage, pieces, layer, print_config, filament, upper, p.gap_xy, footprint);
         if (!overlaps) break;
     }
     return footprint;
 }
 
 namespace {
+// Builds borrowed region/work views and empty piece slots only when slot is empty; layer views outlive the cache, publication
+// occurs after successful construction, and allocation/view-access failures leave the slot empty and propagate.
+BridgeFootprintLayer &bridge_layer_metadata(std::optional<BridgeFootprintLayer> &slot, const Layer &layer)
+{
+    if (!slot) {
+        BridgeFootprintLayer pieces;
+        for (uint32_t region_idx = 0; region_idx < layer.region_count(); ++region_idx)
+            pieces.regions.push_back(layer.region(region_idx));
+        for (uint32_t island = 0; island < layer.island_count(); ++island) {
+            const LayerIsland layer_island = layer.island(island);
+            for (uint32_t work_idx = 0; work_idx < layer_island.region_island_count(); ++work_idx)
+                pieces.works.push_back(layer_island.region_island(work_idx));
+        }
+        pieces.region_starts.resize(pieces.regions.size());
+        pieces.region_fills.resize(pieces.regions.size());
+        pieces.perimeters.resize(pieces.works.size());
+        slot.emplace(std::move(pieces));
+    }
+    return *slot;
+}
+
+// Visits borrowed work islands and their member regions in order, stopping each height check at the first start >= upper;
+// eligible raw perimeters use storage and are copied into caller-owned footprint. Failed construction leaves its slot empty;
+// geometry/allocation/unknown-bridge failures propagate, retaining earlier completed pieces and appends.
+void append_bridge_perimeters(storage_handle *storage, BridgeFootprintLayer &pieces, const Layer &layer, const Config &print_config,
+                              bool filament, coord_t upper, coord_t gap_xy, StoredExPolygonCollection &footprint)
+{
+    for (size_t work_idx = 0; work_idx < pieces.works.size(); ++work_idx) {
+        const LayerRegionIsland &work = pieces.works[work_idx];
+        if (!work.has_extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))) continue;
+        bool too_high = false;
+        for (uint32_t idx = 0; idx < work.region_count(); ++idx)
+            if (bridge_region_start(pieces, layer, work.region(idx), print_config, filament) >= upper) { too_high = true; break; }
+        if (too_high) continue;
+        if (!pieces.perimeters[work_idx]) {
+            StoredExPolygonCollection perimeter(storage);
+            // bridge_areas only appends raw footprints; it never reads the destination's existing geometry.
+            bridge_areas(storage, ExtrusionEntity(work.extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))), gap_xy, perimeter);
+            pieces.perimeters[work_idx].emplace(std::move(perimeter));
+        }
+        footprint.append_copy_from(*pieces.perimeters[work_idx]);
+    }
+}
+
+// Looks up a borrowed region by handle and publishes its scalar start only after a successful height computation; a work member
+// absent from layer metadata is computed uncached. No geometry ownership changes; unknown bridge types and view failures propagate.
+coord_t bridge_region_start(BridgeFootprintLayer &pieces, const Layer &layer, const LayerRegion &region,
+                            const Config &print_config, bool filament)
+{
+    // Layer regions normally contain every work member; absent members use an uncached height.
+    const std::vector<LayerRegion>::const_iterator found = std::find_if(pieces.regions.cbegin(), pieces.regions.cend(),
+        [&region](const LayerRegion &candidate) { return candidate.handle() == region.handle(); });
+    if (found != pieces.regions.cend()) {
+        std::optional<coord_t> &start = pieces.region_starts[size_t(found - pieces.regions.cbegin())];
+        if (!start) {
+            const coord_t height = filament ? scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, region)) : layer.height();
+            start = layer.print_z() - height;
+        }
+        return *start;
+    }
+    const coord_t height = filament ? scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, region)) : layer.height();
+    return layer.print_z() - height;
+}
+
+// Builds a valid region slot's fills in member-work order and appends copies to caller-owned footprint; storage owns raw grown rings,
+// geometry/allocation failures leave an unfinished slot empty, and successful pieces remain cached if the final append fails.
+void append_region_bridge_fills(storage_handle *storage, const ClipperContext &clipper, BridgeFootprintLayer &pieces,
+                                size_t region_idx, raw_surface_type bridge_fill, coord_t gap_xy, StoredExPolygonCollection &footprint)
+{
+    const LayerRegion &region = pieces.regions[region_idx];
+    if (!pieces.region_fills[region_idx]) {
+        StoredExPolygonCollection fills(storage);
+        for (const LayerRegionIsland &work : pieces.works) {
+            bool member = false;
+            for (uint32_t idx = 0; idx < work.region_count(); ++idx)
+                member = member || work.region(idx).handle() == region.handle();
+            if (!member) continue;
+            StoredExPolygonCollection bridges(storage);
+            for (const Surface &surface : work.fill_surfaces())
+                if (surface.type() == bridge_fill) bridges.push_back(surface.expolygon());
+            fills.append_move_from(clipper_offset(clipper(bridges), double(gap_xy), join_type, 0.).to_expolygon_collection());
+        }
+        pieces.region_fills[region_idx].emplace(std::move(fills));
+    }
+    footprint.append_copy_from(*pieces.region_fills[region_idx]);
+}
+
 // Detect bridge extrusion paths so thicker object bridges get a separate contact Z.
 bool has_bridges(storage_handle *storage, const Layer &layer)
 {

@@ -91,6 +91,14 @@ using BoxVector = Eigen::AlignedBox<coord_t, 2>::VectorType;
 struct SupportElementInfluenceAreas;
 struct SupportElementMerging;
 
+// Non-owning half-open ranges into the layer's merging elements.
+using MergingBuckets = std::vector<std::pair<SupportElementMerging*, SupportElementMerging*>>;
+
+// Movement allowances for one downward propagation, in scaled coordinates.
+struct MergingMovement {
+    coord_t extra_speed, extra_slow_speed, safe_movement_distance, fast_speed, slow_speed;
+};
+
 // The points of lines, one vector per line.
 using Lines = std::vector<std::vector<c_point>>;
 
@@ -154,6 +162,8 @@ static Lines tip_lines(storage_handle *scratch, const TipPlacement &placement, u
 static Lines generate_support_infill_lines(storage_handle *scratch, const TipPlacement &placement, const raw_infill_pattern_params &recipe, const PolygonCollection &polygon);
 // Places evenly spaced points along polylines, at most the given distance apart.
 [[nodiscard]] static Lines ensure_maximum_distance_polyline(storage_handle *scratch, const Lines &input, double distance, size_t min_points);
+// Rotates a closed line to its first farthest pair and returns the other endpoint's rotated index.
+static size_t rotate_closed_tip_line(std::vector<c_point> &part, size_t optimal_end_index);
 // The length of a polyline, in scaled units.
 static double polyline_length(const std::vector<c_point> &polyline);
 // Finds the point at the given distance from a start point, along a polyline.
@@ -181,6 +191,8 @@ static void merge_influence_areas(
     const LayerIndex                    layer_idx,
     std::vector<SupportElementMerging> &influence_areas,
     const plugin_run_context           *context);
+// Initializes adjacent leaf buckets and returns the first-round count; requires at least two elements and empty buckets.
+static size_t initialize_merging_buckets(std::vector<SupportElementMerging> &influence_areas, MergingBuckets &buckets);
 // Merges two buckets of influence areas into one bucket.
 static SupportElementMerging* merge_influence_areas_two_sets(
     const TreeVolumes &volumes, const TreeSettings &config, const LayerIndex layer_idx, storage_handle *scratch,
@@ -194,6 +206,19 @@ static SupportElementMerging* merge_influence_areas_leaves(
 static bool merge_influence_areas_two_elements(
     const TreeVolumes &volumes, const TreeSettings &config, const LayerIndex layer_idx, storage_handle *scratch,
     SupportElementMerging &dst, SupportElementMerging &src);
+// Tests overlap after expanding the smaller branch box for the rounded growth distance.
+static bool merging_boxes_overlap(const SupportElementMerging &smaller_rad, const SupportElementMerging &bigger_rad, coord_t real_radius_delta);
+// Checks model-resting constraints and outputs any accumulated model-radius increase.
+static bool model_merge_allowed(const TreeSettings &config, const SupportElementMerging &dst,
+    const SupportElementMerging &src, bool merging_to_bp, coord_t &increased_to_model_radius);
+// Publishes accepted merged geometry/state/parents into dst and clears src.
+static void store_influence_merge(const TreeSettings &config, SupportElementMerging &dst, SupportElementMerging &src,
+    const SupportElementState &new_state, bool merging_to_bp, StoredPolygonCollection &influence_areas,
+    StoredPolygonCollection &intersect, StoredPolygonCollection &to_model_areas);
+// Grows smaller rings against collision and intersects them with the bigger rings.
+static StoredPolygonCollection intersect_merging_areas(storage_handle *scratch, const TreeSettings &config,
+    coord_t real_radius_delta, coord_t smaller_collision_radius, const StoredPolygonCollection &collision,
+    const PolygonCollection &small, const PolygonCollection &bigger);
 // Computes the influence areas of the layer below from the elements of the layer above.
 static void increase_areas_one_layer(
     const TreeVolumes                  &volumes,
@@ -206,6 +231,23 @@ static void increase_areas_one_layer(
 static void increase_merging_area(
     storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config, SupportElementMerging &merging_area,
     const LayerIndex layer_idx, SupportElements &layer_elements, const plugin_run_context *context);
+// Computes radius-growth allowances and slow/fast movement distances for one parent.
+static MergingMovement merging_movement(const TreeVolumes &volumes, const TreeSettings &config,
+    const SupportElement &parent, LayerIndex layer_idx);
+// Lists distinct movement settings in the order they are attempted.
+static std::vector<AreaIncreaseSettings> merging_settings(storage_handle *scratch, const TreeVolumes &volumes,
+    const TreeSettings &config, const SupportElement &parent, const SupportElementState &elem, LayerIndex layer_idx,
+    coord_t radius, coord_t fast_speed, coord_t slow_speed);
+// Prepares lazy movement offsets and tries one setting, retaining candidate areas in scratch storage.
+static std::optional<SupportElementState> try_merging_setting(storage_handle *scratch, const TreeVolumes &volumes,
+    const TreeSettings &config, const SupportElement &parent, const SupportElementState &elem, LayerIndex layer_idx,
+    coord_t radius, const MergingMovement &movement, const StoredPolygonCollection &wall_restriction,
+    bool offset_independant_faster, const AreaIncreaseSettings &settings, LazyPolygons &offset_slow, LazyPolygons &offset_fast,
+    LazyPolygons &to_bp_data, LazyPolygons &to_model_data, StoredPolygonCollection &inc_wo_collision);
+// Publishes the accepted influence union and any mergeable reachability areas into the layer-owned merging element.
+static void store_merging_increase(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    SupportElementMerging &merging_area, const SupportElementState &elem, LayerIndex layer_idx, coord_t radius,
+    bool bypass_merge, LazyPolygons &to_bp_data, LazyPolygons &to_model_data, const StoredPolygonCollection &inc_wo_collision);
 // Computes the influence area of one element on the layer below, within the maximum move.
 [[nodiscard]] static std::optional<SupportElementState> increase_single_area(
     storage_handle                 *scratch,
@@ -219,6 +261,20 @@ static void increase_merging_area(
     LazyPolygons                   &to_model_data,
     StoredPolygonCollection        &increased,
     const coord_t                   overspeed);
+// Fills buildplate/model reachability and corrects the propagated state's reachability flags.
+static void classify_increased_area(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    const AreaIncreaseSettings &settings, LayerIndex layer_idx, coord_t radius, const StoredPolygonCollection &increased,
+    SupportElementState &current_elem, LazyPolygons &to_bp_data, LazyPolygons &to_model_data);
+// Catches up branch/foot growth within valid cached radii and refreshes affected candidate areas.
+static void grow_increased_radius(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    const AreaIncreaseSettings &settings, LayerIndex layer_idx, const SupportElement &parent, const StoredPolygonCollection &increased,
+    SupportElementState &current_elem, coord_t &radius, LazyPolygons &to_bp_data, LazyPolygons &to_model_data,
+    const StoredPolygonCollection &check_layer_data);
+// Recomputes reachability for a changed ceiled radius and reports any area lost by catch-up.
+static void refresh_increased_radius(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    const AreaIncreaseSettings &settings, LayerIndex layer_idx, const StoredPolygonCollection &increased,
+    const SupportElementState &current_elem, coord_t radius, coord_t ceil_radius_before, LazyPolygons &to_bp_data,
+    LazyPolygons &to_model_data, const StoredPolygonCollection &check_layer_data);
 // Chooses the point that each influence area is drawn through, from the bottom layer up.
 static void create_nodes_from_area(
     const TreeVolumes       &volumes,
@@ -628,6 +684,8 @@ void TipPlacement::add_point(const std::pair<c_point, LineStatus> &point, LayerI
  * \param min_points[in] The amount of points that have to be placed. If not enough can be placed the distance will be reduced to place this many points.
  * \return The lines containing the evenly spaced points. Does not represent an area, more a collection of points on lines.
  */
+// Samples borrowed lines in their original order into owned point lists, using scratch for short-line clipping;
+// spacing bottoms out at 0.1 mm, input geometry is unchanged, and allocation/geometry failures propagate.
 [[nodiscard]] static Lines ensure_maximum_distance_polyline(storage_handle *scratch, const Lines &input, double distance, size_t min_points)
 {
     Lines result;
@@ -653,23 +711,7 @@ void TipPlacement::add_point(const std::pair<c_point, LineStatus> &point, LayerI
             size_t optimal_end_index = part.size() - 1;
 
             if (part.front() == part.back()) {
-                size_t optimal_start_index = 0;
-                // If the polyline was a polygon, there is a high chance it was an overhang. Overhangs that are <60° tend to be very thin areas, so lets get the beginning and end of them and ensure that they are supported.
-                // The first point of the line will always be supported, so rotate the order of points in this polyline that one of the two corresponding points that are furthest from each other is in the beginning.
-                // The other will be manually added (optimal_end_index)
-                coord_t max_dist2_between_vertecies = 0;
-                for (size_t idx = 0; idx < part.size() - 1; ++ idx) {
-                    for (size_t inner_idx = 0; inner_idx < part.size() - 1; inner_idx++) {
-                        if (to_vec2d(part[idx] - part[inner_idx]).squaredNorm() > max_dist2_between_vertecies) {
-                            optimal_start_index = idx;
-                            optimal_end_index = inner_idx;
-                            max_dist2_between_vertecies = to_vec2d(part[idx] - part[inner_idx]).squaredNorm();
-                        }
-                    }
-                }
-                std::rotate(part.begin(), part.begin() + optimal_start_index, part.end() - 1);
-                part[part.size() - 1] = part[0]; // restore that property that this polyline ends where it started.
-                optimal_end_index = (part.size() + optimal_end_index - optimal_start_index - 1) % (part.size() - 1);
+                optimal_end_index = rotate_closed_tip_line(part, optimal_end_index);
             }
 
             while (line.size() < min_points && current_distance >= scale_d(0.1))
@@ -720,6 +762,27 @@ void TipPlacement::add_point(const std::pair<c_point, LineStatus> &point, LayerI
         result.emplace_back(std::move(line));
     }
     return result;
+}
+
+// Searches vertex pairs in index order, rotates the borrowed closed line of at least two points and restores its closing vertex;
+// returns the second endpoint index remapped modulo part.size() - 1 after rotation, even when no positive distance is found;
+// owns no rings or allocations.
+static size_t rotate_closed_tip_line(std::vector<c_point> &part, size_t optimal_end_index)
+{
+    size_t optimal_start_index = 0;
+    coord_t max_dist2_between_vertecies = 0;
+    for (size_t idx = 0; idx < part.size() - 1; ++ idx) {
+        for (size_t inner_idx = 0; inner_idx < part.size() - 1; inner_idx++) {
+            if (to_vec2d(part[idx] - part[inner_idx]).squaredNorm() > max_dist2_between_vertecies) {
+                optimal_start_index = idx;
+                optimal_end_index = inner_idx;
+                max_dist2_between_vertecies = to_vec2d(part[idx] - part[inner_idx]).squaredNorm();
+            }
+        }
+    }
+    std::rotate(part.begin(), part.begin() + optimal_start_index, part.end() - 1);
+    part[part.size() - 1] = part[0];
+    return (part.size() + optimal_end_index - optimal_start_index - 1) % (part.size() - 1);
 }
 
 static double polyline_length(const std::vector<c_point> &polyline)
@@ -1128,6 +1191,8 @@ static void create_layer_pathing(const TreeVolumes &volumes, const TreeSettings 
  * \param layer_idx[in] The layer of the elements whose areas are merged (the areas are the ones of the layer below).
  * \param influence_areas[in,out] The elements of the layer, each with its three candidate areas.
  */
+// Orders and merges borrowed layer elements in arena-sized buckets with per-job scratch storage; layer_idx is above zero,
+// storage stays caller-owned, and cancellation/geometry/allocation failures propagate with prior merges intact.
 static void merge_influence_areas(
     const TreeVolumes                  &volumes,
     const TreeSettings                 &config,
@@ -1153,8 +1218,38 @@ static void merge_influence_areas(
     // Prepare the initial buckets as ranges of influence areas. The initial buckets contain power of 2 influence areas to follow
     // the branching of the AABB tree.
     // Vectors of ranges of influence areas, following the branching of the AABB tree:
-    std::vector<std::pair<SupportElementMerging*, SupportElementMerging*>> buckets;
+    MergingBuckets buckets;
     // Initial number of buckets for 1st round of merging.
+    const size_t num_buckets_initial = initialize_merging_buckets(influence_areas, buckets);
+
+    // Each bucket job owns scratch storage; cancellation is checked before each job.
+    slic3r_api::parallel_for_storage_with_progress(0, uint32_t(num_buckets_initial), context, nullptr,
+        [&](uint32_t idx, storage_handle *scratch) {
+            buckets[idx].second = merge_influence_areas_leaves(volumes, config, layer_idx, scratch, buckets[idx].first, buckets[idx].second);
+        });
+
+    // Merge adjacent subtrees, retaining the surviving ranges in their original order.
+    while (buckets.size() > 1) {
+        slic3r_api::parallel_for_storage_with_progress(0, uint32_t(buckets.size() / 2), context, nullptr,
+            [&](uint32_t idx, storage_handle *scratch) {
+                const size_t bucket_pair_idx = size_t(idx) * 2;
+                buckets[bucket_pair_idx].second = merge_influence_areas_two_sets(volumes, config, layer_idx, scratch,
+                    buckets[bucket_pair_idx].first, buckets[bucket_pair_idx].second,
+                    buckets[bucket_pair_idx + 1].first, buckets[bucket_pair_idx + 1].second);
+            });
+        size_t new_size = (buckets.size() + 1) / 2;
+        for (size_t i = 1; i < new_size; ++ i)
+            buckets[i] = std::move(buckets[i * 2]);
+        buckets.erase(buckets.begin() + new_size, buckets.end());
+    }
+}
+
+// Appends non-owning ranges into borrowed layer storage using the current arena's concurrency; requires at least two elements
+// and an initially empty buckets vector. The caller owns both vectors and must keep element storage stable;
+// returns the first-round count, and allocation failures propagate.
+static size_t initialize_merging_buckets(std::vector<SupportElementMerging> &influence_areas, MergingBuckets &buckets)
+{
+    const size_t input_size = influence_areas.size();
     size_t num_buckets_initial;
     {
         // How many buckets per first merge iteration?
@@ -1183,31 +1278,7 @@ static void merge_influence_areas(
         }
     }
 
-    // 1st merge iteration, merge one with each other. A bucket is one job with a scratch storage of its own, shared by all the merges
-    // of the bucket (the temporaries of a merge are freed when it ends); the cancellation is checked before each job.
-    slic3r_api::parallel_for_storage_with_progress(0, uint32_t(num_buckets_initial), context, nullptr,
-        [&](uint32_t idx, storage_handle *scratch) {
-            // Merge bucket_count adjacent to each other, merging uneven bucket numbers into even buckets
-            buckets[idx].second = merge_influence_areas_leaves(volumes, config, layer_idx, scratch, buckets[idx].first, buckets[idx].second);
-        });
-
-    // Further merge iterations, merging one AABB subtree with another one, hopefully minimizing intersections between the elements
-    // of each of the subtree.
-    while (buckets.size() > 1) {
-        slic3r_api::parallel_for_storage_with_progress(0, uint32_t(buckets.size() / 2), context, nullptr,
-            [&](uint32_t idx, storage_handle *scratch) {
-                const size_t bucket_pair_idx = size_t(idx) * 2;
-                // Merge bucket_count adjacent to each other, merging uneven bucket numbers into even buckets
-                buckets[bucket_pair_idx].second = merge_influence_areas_two_sets(volumes, config, layer_idx, scratch,
-                    buckets[bucket_pair_idx].first, buckets[bucket_pair_idx].second,
-                    buckets[bucket_pair_idx + 1].first, buckets[bucket_pair_idx + 1].second);
-            });
-        // Remove odd buckets, which were merged into even buckets.
-        size_t new_size = (buckets.size() + 1) / 2;
-        for (size_t i = 1; i < new_size; ++ i)
-            buckets[i] = std::move(buckets[i * 2]);
-        buckets.erase(buckets.begin() + new_size, buckets.end());
-    }
+    return num_buckets_initial;
 }
 
 /*!
@@ -1317,22 +1388,72 @@ static bool merge_influence_areas_two_elements(
     const SupportElementMerging &smaller_rad = dst_radius_bigger ? src : dst;
     const SupportElementMerging &bigger_rad  = dst_radius_bigger ? dst : src;
     const coord_t real_radius_delta = std::abs(support_element_radius(config, bigger_rad.state) - support_element_radius(config, smaller_rad.state));
-    {
-        // Testing intersection of bounding boxes.
-        // Expand the smaller radius branch bounding box to match the lambda intersect_small_with_bigger() below.
-        // Because the lambda intersect_small_with_bigger() applies a rounded offset, a snug offset of the bounding box
-        // is sufficient. On the other side, if a mitered offset was used by the lambda,
-        // the bounding box expansion would have to account for the mitered extension of the sharp corners.
-        Eigen::AlignedBox<coord_t, 2> smaller_bbox = smaller_rad.bbox();
-        smaller_bbox.min() -= BoxVector{ real_radius_delta, real_radius_delta };
-        smaller_bbox.max() += BoxVector{ real_radius_delta, real_radius_delta };
-        if (! smaller_bbox.intersects(bigger_rad.bbox()))
-            return false;
-    }
+    if (!merging_boxes_overlap(smaller_rad, bigger_rad, real_radius_delta))
+        return false;
 
     // Accumulator of a radius increase of a "to model" branch by merging in a "to build plate" branch.
     coord_t increased_to_model_radius = 0;
     const bool merging_to_bp                     = dst.state.to_buildplate && src.state.to_buildplate;
+    if (!model_merge_allowed(config, dst, src, merging_to_bp, increased_to_model_radius))
+        return false;
+
+    // Area of the bigger radius is used to ensure correct placement regarding the relevant avoidance,
+    // so if that would change an invalid area may be created.
+    if (! bigger_rad.state.can_use_safe_radius && smaller_rad.state.can_use_safe_radius)
+        return false;
+
+    const coord_t smaller_collision_radius = support_element_collision_radius(config, smaller_rad.state);
+    const StoredPolygonCollection &collision = volumes.getCollision(smaller_collision_radius, layer_idx - 1);
+    StoredPolygonCollection intersect = intersect_merging_areas(scratch, config, real_radius_delta, smaller_collision_radius, collision,
+        merging_to_bp ? smaller_rad.areas.to_bp_areas : smaller_rad.areas.to_model_areas,
+        merging_to_bp ? bigger_rad.areas.to_bp_areas : bigger_rad.areas.to_model_areas);
+    if (polygons_area(intersect) <= tiny_area_threshold)
+        return false;
+    // Require the overlap to retain area after a 0.025 mm inset, rejecting narrow connections.
+    {
+        const StoredPolygonCollection shrunk = polygons_offset(scratch, intersect, scale_d(-0.025), CLIPPER_JOIN_MITER, 1.2);
+        if (polygons_area(shrunk) <= tiny_area_threshold)
+            return false;
+    }
+    const c_point new_pos = move_inside_if_outside(intersect, dst.state.next_position);
+    SupportElementState new_state = merge_support_element_states(dst.state, src.state, new_pos, layer_idx - 1, config);
+    if (merge_crosses_cache_step(volumes.ceilRadius(support_element_collision_radius(config, new_state)),
+                                 volumes.ceilRadius(support_element_collision_radius(config, dst.state)),
+                                 volumes.ceilRadius(support_element_collision_radius(config, src.state))))
+        return false;
+    new_state.increased_to_model_radius = increased_to_model_radius == 0 ?
+        std::max(dst.state.increased_to_model_radius, src.state.increased_to_model_radius) : increased_to_model_radius;
+    const StoredPolygonCollection small_in_bigger = intersect_merging_areas(scratch, config, real_radius_delta, smaller_collision_radius,
+        collision, smaller_rad.areas.influence_areas, bigger_rad.areas.influence_areas);
+    StoredPolygonCollection influence_areas = safe_union(scratch, small_in_bigger, intersect);
+    StoredPolygonCollection to_model_areas(scratch);
+    if (merging_to_bp && config.support_rests_on_model) {
+        if (new_state.to_model_gracious) {
+            const StoredPolygonCollection model_small_in_bigger = intersect_merging_areas(scratch, config, real_radius_delta, smaller_collision_radius,
+                collision, smaller_rad.areas.to_model_areas, bigger_rad.areas.to_model_areas);
+            to_model_areas = safe_union(scratch, model_small_in_bigger, intersect);
+        } else
+            to_model_areas.copy_from(influence_areas);
+    }
+    store_influence_merge(config, dst, src, new_state, merging_to_bp, influence_areas, intersect, to_model_areas);
+    return true;
+}
+
+// Expands a local copy of the borrowed smaller box to match rounded area growth and compares it with the bigger box;
+// returns false for disjoint boxes, changes no element, owns no geometry and performs no allocation.
+static bool merging_boxes_overlap(const SupportElementMerging &smaller_rad, const SupportElementMerging &bigger_rad, coord_t real_radius_delta)
+{
+    Eigen::AlignedBox<coord_t, 2> smaller_bbox = smaller_rad.bbox();
+    smaller_bbox.min() -= BoxVector{ real_radius_delta, real_radius_delta };
+    smaller_bbox.max() += BoxVector{ real_radius_delta, real_radius_delta };
+    return smaller_bbox.intersects(bigger_rad.bbox());
+}
+
+// Checks borrowed model/buildplate states in radius-then-height order, updating only the caller's radius accumulator;
+// returns false when a model merge is disallowed, owns no rings and performs no geometry allocation.
+static bool model_merge_allowed(const TreeSettings &config, const SupportElementMerging &dst,
+    const SupportElementMerging &src, bool merging_to_bp, coord_t &increased_to_model_radius)
+{
     if (! merging_to_bp) {
         // Get the real radius increase as the user does not care for the collision model.
         if (dst.state.to_buildplate != src.state.to_buildplate) {
@@ -1361,80 +1482,15 @@ static bool merge_influence_areas_two_elements(
             return false;
     }
 
-    // Area of the bigger radius is used to ensure correct placement regarding the relevant avoidance,
-    // so if that would change an invalid area may be created.
-    if (! bigger_rad.state.can_use_safe_radius && smaller_rad.state.can_use_safe_radius)
-        return false;
+    return true;
+}
 
-
-    // The idea is that the influence area with the smaller collision radius is increased by the radius difference.
-    // If this area has any intersections with the influence area of the larger collision radius, a branch (of the larger collision radius) placed in this intersection, has already engulfed the branch of the smaller collision radius.
-    // Because of this a merge may happen even if the influence areas (that represent possible center points of branches) do not intersect yet.
-    // Remember that collision radius <= real radius as otherwise this assumption would be false.
-    const coord_t   smaller_collision_radius    = support_element_collision_radius(config, smaller_rad.state);
-    const StoredPolygonCollection &collision    = volumes.getCollision(smaller_collision_radius, layer_idx - 1);
-    // The small area grown by the radius difference (up to the collision), common part with the bigger area. The temporaries of the
-    // computation live in the scratch storage of the merge job; the result too, the caller moves it where it stays.
-    auto            intersect_small_with_bigger = [real_radius_delta, smaller_collision_radius, &collision, &config, scratch](
-                        const PolygonCollection &small, const PolygonCollection &bigger) {
-        const StoredPolygonCollection grown = safe_offset_inc(
-            scratch, small, real_radius_delta, collision,
-            // -3 avoids possible rounding errors
-            2 * (config.xy_distance + smaller_collision_radius - 3), 0, 0);
-        return polygons_intersection(scratch, grown, bigger);
-    };
-    StoredPolygonCollection intersect =
-        intersect_small_with_bigger(
-        merging_to_bp ? smaller_rad.areas.to_bp_areas : smaller_rad.areas.to_model_areas,
-        merging_to_bp ? bigger_rad.areas.to_bp_areas : bigger_rad.areas.to_model_areas);
-
-    // dont use empty as a line is not empty, but for this use-case it very well may be (and would be one layer down as union does not keep lines)
-    // check if the overlap is large enough (Small ares tend to attract rounding errors in clipper).
-    if (polygons_area(intersect) <= tiny_area_threshold)
-        return false;
-
-    // Require the overlap to retain area after a 0.025 mm inset, rejecting narrow connections.
-    // The area is shrunk: it is the output of an intersection, a clean region (see polygons_offset()).
-    {
-        const StoredPolygonCollection shrunk = polygons_offset(scratch, intersect, scale_d(-0.025), CLIPPER_JOIN_MITER, 1.2);
-        if (polygons_area(shrunk) <= tiny_area_threshold)
-            return false;
-    }
-
-
-    // Do the actual merge now that the branches are confirmed to be able to intersect.
-    // calculate which point is closest to the point of the last merge (or tip center if no merge above it has happened)
-    // used at the end to estimate where to best place the branch on the bottom most layer
-    // could be replaced with a random point inside the new area
-    const c_point new_pos = move_inside_if_outside(intersect, dst.state.next_position);
-
-    SupportElementState new_state = merge_support_element_states(dst.state, src.state, new_pos, layer_idx - 1, config);
-    // The areas of both parents were validated with their own collision radii. If the merged state needs a larger ceiled radius
-    // than both (its foot carries the drawn radius of the larger parent), those areas do not hold for it: refuse the merge, before
-    // dst or src are modified.
-    if (merge_crosses_cache_step(volumes.ceilRadius(support_element_collision_radius(config, new_state)),
-                                 volumes.ceilRadius(support_element_collision_radius(config, dst.state)),
-                                 volumes.ceilRadius(support_element_collision_radius(config, src.state))))
-        return false;
-    new_state.increased_to_model_radius = increased_to_model_radius == 0 ?
-        // increased_to_model_radius was not set yet. Propagate maximum.
-        std::max(dst.state.increased_to_model_radius, src.state.increased_to_model_radius) :
-        increased_to_model_radius;
-
-    // Rather unioning with "intersect" due to some rounding errors.
-    const StoredPolygonCollection small_in_bigger = intersect_small_with_bigger(smaller_rad.areas.influence_areas, bigger_rad.areas.influence_areas);
-    StoredPolygonCollection influence_areas = safe_union(scratch, small_in_bigger, intersect);
-
-    StoredPolygonCollection to_model_areas(scratch);
-    if (merging_to_bp && config.support_rests_on_model) {
-        if (new_state.to_model_gracious) {
-            // Rather unioning with "intersect" due to some rounding errors.
-            const StoredPolygonCollection model_small_in_bigger = intersect_small_with_bigger(smaller_rad.areas.to_model_areas, bigger_rad.areas.to_model_areas);
-            to_model_areas = safe_union(scratch, model_small_in_bigger, intersect);
-        } else
-            to_model_areas.copy_from(influence_areas);
-    }
-
+// Appends borrowed parent indices and moves accepted scratch rings into dst's layer-owned collections, then updates its box
+// and clears src. Inputs are validated before this call; geometry/allocation failures propagate with prior writes intact.
+static void store_influence_merge(const TreeSettings &config, SupportElementMerging &dst, SupportElementMerging &src,
+    const SupportElementState &new_state, bool merging_to_bp, StoredPolygonCollection &influence_areas,
+    StoredPolygonCollection &intersect, StoredPolygonCollection &to_model_areas)
+{
     // The results move into the collections of dst, which belong to the storage of the layer.
     dst.parents.insert(dst.parents.end(), src.parents.begin(), src.parents.end());
     dst.state = new_state;
@@ -1455,7 +1511,18 @@ static bool merge_influence_areas_two_elements(
     // Clear the source data.
     src.areas.clear();
     src.parents.clear();
-    return true;
+}
+
+// Grows borrowed small rings with rounded collision-checked steps, then intersects with bigger rings; scratch owns the result
+// and temporaries, radius delta is nonnegative, and geometry/allocation failures propagate without modifying inputs.
+static StoredPolygonCollection intersect_merging_areas(storage_handle *scratch, const TreeSettings &config,
+    coord_t real_radius_delta, coord_t smaller_collision_radius, const StoredPolygonCollection &collision,
+    const PolygonCollection &small, const PolygonCollection &bigger)
+{
+    const StoredPolygonCollection grown = safe_offset_inc(scratch, small, real_radius_delta, collision,
+        // -3 avoids possible rounding errors.
+        2 * (config.xy_distance + smaller_collision_radius - 3), 0, 0);
+    return polygons_intersection(scratch, grown, bigger);
 }
 
 /*!
@@ -1509,8 +1576,6 @@ static void increase_merging_area(
     storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config, SupportElementMerging &merging_area,
     const LayerIndex layer_idx, SupportElements &layer_elements, const plugin_run_context *context)
 {
-    using AvoidanceType = TreeVolumes::AvoidanceType;
-
     assert(merging_area.parents.size() == 1);
     SupportElement          &parent         = layer_elements[merging_area.parents.front()];
     SupportElementState      elem           = SupportElementState::propagate_down(parent.state);
@@ -1522,6 +1587,55 @@ static void increase_merging_area(
     LazyPolygons to_bp_data(scratch), to_model_data(scratch);
     coord_t radius = support_element_collision_radius(config, elem);
 
+    const MergingMovement movement = merging_movement(volumes, config, parent, layer_idx);
+    const coord_t extra_speed = movement.extra_speed, extra_slow_speed = movement.extra_slow_speed;
+    const coord_t safe_movement_distance = movement.safe_movement_distance;
+    const coord_t fast_speed = movement.fast_speed, slow_speed = movement.slow_speed;
+
+    LazyPolygons offset_slow(scratch), offset_fast(scratch);
+
+    bool add = false;
+    bool bypass_merge = false;
+    const std::vector<AreaIncreaseSettings> order = merging_settings(scratch, volumes, config, parent, elem, layer_idx, radius, fast_speed, slow_speed);
+    StoredPolygonCollection inc_wo_collision(scratch);
+    bool offset_independant_faster = radius / safe_movement_distance - int(config.maximum_move_distance(layer_idx) + extra_speed < radius + safe_movement_distance) >
+                                     round_up_divide((extra_speed + extra_slow_speed + config.maximum_move_distance_slow(layer_idx)), safe_movement_distance);
+    for (const AreaIncreaseSettings &settings : order) {
+        const std::optional<SupportElementState> result = try_merging_setting(scratch, volumes, config, parent, elem, layer_idx,
+            radius, movement, wall_restriction, offset_independant_faster, settings, offset_slow, offset_fast,
+            to_bp_data, to_model_data, inc_wo_collision);
+        if (result) {
+            elem = *result;
+            radius = support_element_collision_radius(config, elem);
+            elem.last_area_increase = settings;
+            add = true;
+            bypass_merge = !settings.move;
+            if (! settings.move)
+                elem.result_on_layer = parent.state.result_on_layer;
+            elem.can_use_safe_radius = settings.type != TreeVolumes::AvoidanceType::Fast;
+            if (!settings.no_error)
+                BOOST_LOG_TRIVIAL(info) << "Trying to keep area by moving faster than intended: Success";
+            break;
+        } else if (!settings.no_error)
+            BOOST_LOG_TRIVIAL(error) << "Trying to keep area by moving faster than intended: FAILURE! WRONG BRANCHES LIKLY!";
+    }
+    if (add) {
+        store_merging_increase(scratch, volumes, config, merging_area, elem, layer_idx, radius, bypass_merge,
+            to_bp_data, to_model_data, inc_wo_collision);
+    } else {
+        // Unplaced model branches keep no result point, so later placement can cull branches too short to rest on the model.
+        parent.state.result_on_layer_reset();
+        parent.state.to_model_gracious = false;
+        parent.state.verylost = true;
+    }
+    slic3r_api::throw_if_cancelled(context);
+}
+
+// Computes scaled movement allowances from borrowed parent/settings and cached radius steps; owns no geometry, changes no state,
+// and propagates volume-cache failures. layer_idx is above the bed.
+static MergingMovement merging_movement(const TreeVolumes &volumes, const TreeSettings &config,
+    const SupportElement &parent, LayerIndex layer_idx)
+{
     // When the radius increases, the outer "support wall" of the branch will have been moved farther away from the center (as this is the definition of radius).
     // As it is not specified that the support_tree_angle has to be one of the center of the branch, it is here seen as the smaller angle of the outer wall of the branch, to the outer wall of the same branch one layer above.
     // As the branch may have become larger the distance between these 2 walls is smaller than the distance of the center points.
@@ -1561,10 +1675,16 @@ static void increase_merging_area(
     const coord_t fast_speed = config.maximum_move_distance(layer_idx) + extra_speed;
     const coord_t slow_speed = config.maximum_move_distance_slow(layer_idx) + extra_speed + extra_slow_speed;
 
-    LazyPolygons offset_slow(scratch), offset_fast(scratch);
+    return MergingMovement{extra_speed, extra_slow_speed, safe_movement_distance, fast_speed, slow_speed};
+}
 
-    bool add = false;
-    bool bypass_merge = false;
+// Builds owned distinct settings in trial order from borrowed state and layer geometry; scratch owns intersection temporaries,
+// no parent state is changed, and geometry/allocation/volume-cache failures propagate.
+static std::vector<AreaIncreaseSettings> merging_settings(storage_handle *scratch, const TreeVolumes &volumes,
+    const TreeSettings &config, const SupportElement &parent, const SupportElementState &elem, LayerIndex layer_idx,
+    coord_t radius, coord_t fast_speed, coord_t slow_speed)
+{
+    using AvoidanceType = TreeVolumes::AvoidanceType;
     constexpr bool increase_radius = true, no_error = true, move = true; // aliases for better readability
 
     // Determine in which order configurations are checked if they result in a valid influence area. Check will stop if a valid area is found
@@ -1605,100 +1725,83 @@ static void increase_merging_area(
         insertSetting({ AvoidanceType::Fast, fast_speed, !increase_radius, !no_error, move });
     }
 
-    StoredPolygonCollection inc_wo_collision(scratch);
-    // Check whether it is faster to calculate the area increased with the fast speed independently from the slow area, or time could be saved by reusing the slow area to calculate the fast one.
-    // Calculated by comparing the steps saved when calcualting idependently with the saved steps when not.
-    bool offset_independant_faster = radius / safe_movement_distance - int(config.maximum_move_distance(layer_idx) + extra_speed < radius + safe_movement_distance) >
-                                     round_up_divide((extra_speed + extra_slow_speed + config.maximum_move_distance_slow(layer_idx)), safe_movement_distance);
-    for (const AreaIncreaseSettings &settings : order) {
-        if (settings.move) {
-            if (offset_slow.empty() && (settings.increase_speed == slow_speed || ! offset_independant_faster)) {
-                // offsetting in 2 steps makes our offsetted area rounder preventing (rounding) errors created by to pointy areas.
-                offset_slow.get() = safe_offset_inc(scratch, parent.influence_area, extra_speed + extra_slow_speed + config.maximum_move_distance_slow(layer_idx),
-                    wall_restriction, safe_movement_distance, offset_independant_faster ? safe_movement_distance + radius : 0, 2);
-            }
-            if (offset_fast.empty() && settings.increase_speed != slow_speed) {
-                if (offset_independant_faster)
-                    offset_fast.get() = safe_offset_inc(scratch, parent.influence_area, extra_speed + config.maximum_move_distance(layer_idx),
-                        wall_restriction, safe_movement_distance, offset_independant_faster ? safe_movement_distance + radius : 0, 1);
-                else {
-                    const coord_t delta_slow_fast = config.maximum_move_distance(layer_idx) - (config.maximum_move_distance_slow(layer_idx) + extra_slow_speed);
-                    offset_fast.get() = safe_offset_inc(scratch, offset_slow.get(), delta_slow_fast, wall_restriction, safe_movement_distance, safe_movement_distance + radius, offset_independant_faster ? 2 : 1);
-                }
+    return order;
+}
+
+// Prepares offsets only when needed and tries one borrowed setting, replacing inc_wo_collision and filling lazy candidate areas;
+// scratch owns temporary rings, parent/elem remain unchanged, and geometry/allocation/cancellation failures propagate.
+static std::optional<SupportElementState> try_merging_setting(storage_handle *scratch, const TreeVolumes &volumes,
+    const TreeSettings &config, const SupportElement &parent, const SupportElementState &elem, LayerIndex layer_idx,
+    coord_t radius, const MergingMovement &movement, const StoredPolygonCollection &wall_restriction,
+    bool offset_independant_faster, const AreaIncreaseSettings &settings, LazyPolygons &offset_slow, LazyPolygons &offset_fast,
+    LazyPolygons &to_bp_data, LazyPolygons &to_model_data, StoredPolygonCollection &inc_wo_collision)
+{
+    const coord_t extra_speed = movement.extra_speed, extra_slow_speed = movement.extra_slow_speed;
+    const coord_t safe_movement_distance = movement.safe_movement_distance, slow_speed = movement.slow_speed;
+    if (settings.move) {
+        if (offset_slow.empty() && (settings.increase_speed == slow_speed || ! offset_independant_faster)) {
+            // offsetting in 2 steps makes our offsetted area rounder preventing (rounding) errors created by to pointy areas.
+            offset_slow.get() = safe_offset_inc(scratch, parent.influence_area, extra_speed + extra_slow_speed + config.maximum_move_distance_slow(layer_idx),
+                wall_restriction, safe_movement_distance, offset_independant_faster ? safe_movement_distance + radius : 0, 2);
+        }
+        if (offset_fast.empty() && settings.increase_speed != slow_speed) {
+            if (offset_independant_faster)
+                offset_fast.get() = safe_offset_inc(scratch, parent.influence_area, extra_speed + config.maximum_move_distance(layer_idx),
+                    wall_restriction, safe_movement_distance, offset_independant_faster ? safe_movement_distance + radius : 0, 1);
+            else {
+                const coord_t delta_slow_fast = config.maximum_move_distance(layer_idx) - (config.maximum_move_distance_slow(layer_idx) + extra_slow_speed);
+                offset_fast.get() = safe_offset_inc(scratch, offset_slow.get(), delta_slow_fast, wall_restriction, safe_movement_distance, safe_movement_distance + radius, offset_independant_faster ? 2 : 1);
             }
         }
-        std::optional<SupportElementState> result;
-        inc_wo_collision.clear();
-        if (!settings.no_error) {
-            // ERROR CASE
-            // if the area becomes for whatever reason something that clipper sees as a line, offset would stop working, so ensure that even if if wrongly would be a line, it still actually has an area that can be increased
-            const StoredPolylineCollection area_lines = to_polylines(scratch, parent.influence_area);
-            const slic3r_api::ClipperContext clipper(scratch);
-            const StoredPolygonCollection base_error_area = slic3r_api::clipper_union2(clipper(parent.influence_area),
-                slic3r_api::clipper_offset_polylines(scratch, area_lines, scale_d(0.005), CLIPPER_JOIN_MITER, 1.2)).to_polygon_collection();
-            result = increase_single_area(scratch, volumes, config, settings, layer_idx, parent,
-                base_error_area, to_bp_data, to_model_data, inc_wo_collision, (config.maximum_move_distance(layer_idx) + extra_speed) * 1.5);
-            BOOST_LOG_TRIVIAL(error)
-                  << "Influence area could not be increased! Data about the Influence area: "
-                     "Radius: " << radius << " at layer: " << layer_idx - 1 << " NextTarget: " << elem.layer_idx << " Distance to top: " << elem.distance_to_top <<
-                     " Foot gain " << elem.foot_gain << " to buildplate " << elem.to_buildplate <<
-                     " gracious " << elem.to_model_gracious << " safe " << elem.can_use_safe_radius << " \n "
-                     "Parent: Radius: " << support_element_collision_radius(config, parent.state) << " at layer: " << layer_idx << " NextTarget: " << parent.state.layer_idx <<
-                     " Distance to top: " << parent.state.distance_to_top << " Foot gain " << parent.state.foot_gain <<
-                     " to buildplate " << parent.state.to_buildplate << " gracious " << parent.state.to_model_gracious << " safe " << parent.state.can_use_safe_radius << ". Potentially lost branch!";
-        } else
-            result = increase_single_area(scratch, volumes, config, settings, layer_idx, parent,
-                (settings.increase_speed == slow_speed ? offset_slow : offset_fast).get(), to_bp_data, to_model_data, inc_wo_collision, 0);
-
-        if (result) {
-            elem = *result;
-            radius = support_element_collision_radius(config, elem);
-            elem.last_area_increase = settings;
-            add = true;
-            // do not merge if the branch should not move.
-            bypass_merge = !settings.move;
-            if (! settings.move)
-                elem.result_on_layer = parent.state.result_on_layer;
-
-            elem.can_use_safe_radius = settings.type != AvoidanceType::Fast;
-
-
-            if (!settings.no_error)
-                BOOST_LOG_TRIVIAL(info)
-                    << "Trying to keep area by moving faster than intended: Success";
-            break;
-        } else if (!settings.no_error)
-            BOOST_LOG_TRIVIAL(error) << "Trying to keep area by moving faster than intended: FAILURE! WRONG BRANCHES LIKLY!";
     }
+    std::optional<SupportElementState> result;
+    inc_wo_collision.clear();
+    if (!settings.no_error) {
+        // ERROR CASE
+        // if the area becomes for whatever reason something that clipper sees as a line, offset would stop working, so ensure that even if if wrongly would be a line, it still actually has an area that can be increased
+        const StoredPolylineCollection area_lines = to_polylines(scratch, parent.influence_area);
+        const slic3r_api::ClipperContext clipper(scratch);
+        const StoredPolygonCollection base_error_area = slic3r_api::clipper_union2(clipper(parent.influence_area),
+            slic3r_api::clipper_offset_polylines(scratch, area_lines, scale_d(0.005), CLIPPER_JOIN_MITER, 1.2)).to_polygon_collection();
+        result = increase_single_area(scratch, volumes, config, settings, layer_idx, parent,
+            base_error_area, to_bp_data, to_model_data, inc_wo_collision, (config.maximum_move_distance(layer_idx) + extra_speed) * 1.5);
+        BOOST_LOG_TRIVIAL(error)
+              << "Influence area could not be increased! Data about the Influence area: "
+                 "Radius: " << radius << " at layer: " << layer_idx - 1 << " NextTarget: " << elem.layer_idx << " Distance to top: " << elem.distance_to_top <<
+                 " Foot gain " << elem.foot_gain << " to buildplate " << elem.to_buildplate <<
+                 " gracious " << elem.to_model_gracious << " safe " << elem.can_use_safe_radius << " \n "
+                 "Parent: Radius: " << support_element_collision_radius(config, parent.state) << " at layer: " << layer_idx << " NextTarget: " << parent.state.layer_idx <<
+                 " Distance to top: " << parent.state.distance_to_top << " Foot gain " << parent.state.foot_gain <<
+                 " to buildplate " << parent.state.to_buildplate << " gracious " << parent.state.to_model_gracious << " safe " << parent.state.can_use_safe_radius << ". Potentially lost branch!";
+    } else
+        result = increase_single_area(scratch, volumes, config, settings, layer_idx, parent,
+            (settings.increase_speed == slow_speed ? offset_slow : offset_fast).get(), to_bp_data, to_model_data, inc_wo_collision, 0);
 
-    if (add) {
-        // Union seems useless, but some rounding errors somewhere can cause to_bp_data to be slightly bigger than it should be.
-        assert(! inc_wo_collision.empty() || ! to_bp_data.empty() || ! to_model_data.empty());
-        const StoredPolygonCollection free_increase = diff_clipped(scratch, inc_wo_collision, volumes.getCollision(radius, layer_idx - 1));
-        const StoredPolygonCollection free_union = safe_union(scratch, to_bp_data.get(), to_model_data.get());
-        StoredPolygonCollection max_influence_area = safe_union(scratch, free_increase, free_union);
-        merging_area.state = elem;
-        assert(!max_influence_area.empty());
-        merging_area.set_bbox(polygons_bounding_box(max_influence_area));
-        // The candidate areas stay in the collections of the layer: the rings move into them.
-        merging_area.areas.influence_areas.move_from(max_influence_area);
-        if (! bypass_merge) {
-            if (elem.to_buildplate)
-                merging_area.areas.to_bp_areas.move_from(to_bp_data.get());
-            if (config.support_rests_on_model)
-                merging_area.areas.to_model_areas.move_from(to_model_data.get());
-        }
-    } else {
-        // If the bottom most point of a branch is set, later functions will assume that the position is valid, and ignore it.
-        // But as branches connecting with the model that are to small have to be culled, the bottom most point has to be not set.
-        // A point can be set on the top most tip layer (a step without move puts the parent's point for one step).
-        parent.state.result_on_layer_reset();
-        parent.state.to_model_gracious = false;
-        parent.state.verylost = true;
+    return result;
+}
+
+// Unites accepted scratch-owned candidate areas in operand order, sets the borrowed merging state/box, and moves kept rings into
+// layer storage; layer_idx is above zero, parents stay owned by the caller, and geometry/allocation/cache failures propagate.
+static void store_merging_increase(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    SupportElementMerging &merging_area, const SupportElementState &elem, LayerIndex layer_idx, coord_t radius,
+    bool bypass_merge, LazyPolygons &to_bp_data, LazyPolygons &to_model_data, const StoredPolygonCollection &inc_wo_collision)
+{
+    // Union seems useless, but some rounding errors somewhere can cause to_bp_data to be slightly bigger than it should be.
+    assert(! inc_wo_collision.empty() || ! to_bp_data.empty() || ! to_model_data.empty());
+    const StoredPolygonCollection free_increase = diff_clipped(scratch, inc_wo_collision, volumes.getCollision(radius, layer_idx - 1));
+    const StoredPolygonCollection free_union = safe_union(scratch, to_bp_data.get(), to_model_data.get());
+    StoredPolygonCollection max_influence_area = safe_union(scratch, free_increase, free_union);
+    merging_area.state = elem;
+    assert(!max_influence_area.empty());
+    merging_area.set_bbox(polygons_bounding_box(max_influence_area));
+    // The candidate areas stay in the collections of the layer: the rings move into them.
+    merging_area.areas.influence_areas.move_from(max_influence_area);
+    if (! bypass_merge) {
+        if (elem.to_buildplate)
+            merging_area.areas.to_bp_areas.move_from(to_bp_data.get());
+        if (config.support_rests_on_model)
+            merging_area.areas.to_model_areas.move_from(to_model_data.get());
     }
-
-    // The task ends with a cancellation check; the lazy computations of the volumes check the same context.
-    slic3r_api::throw_if_cancelled(context);
 }
 
 /*!
@@ -1759,6 +1862,21 @@ static void increase_merging_area(
         // if no movement is done the areas keep parent area as no move == offset(0)
         increased.copy_from(parent.influence_area);
 
+    classify_increased_area(scratch, volumes, config, settings, layer_idx, radius, increased, current_elem, to_bp_data, to_model_data);
+    // Lazy collections retain their handles when refilled, so this reference observes radius-refresh replacements too.
+    const StoredPolygonCollection &check_layer_data = current_elem.to_buildplate ? to_bp_data.get() : to_model_data.get();
+    if (settings.increase_radius && polygons_area(check_layer_data) > tiny_area_threshold)
+        grow_increased_radius(scratch, volumes, config, settings, layer_idx, parent, increased, current_elem, radius,
+            to_bp_data, to_model_data, check_layer_data);
+    return polygons_area(check_layer_data) > tiny_area_threshold ? std::optional<SupportElementState>(current_elem) : std::optional<SupportElementState>();
+}
+
+// Computes buildplate then model candidate rings using borrowed settings/volumes, moving results into scratch-owned lazy outputs
+// and correcting the borrowed state's flags; layer_idx is above zero, geometry/allocation/cache failures propagate in call order.
+static void classify_increased_area(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    const AreaIncreaseSettings &settings, LayerIndex layer_idx, coord_t radius, const StoredPolygonCollection &increased,
+    SupportElementState &current_elem, LazyPolygons &to_bp_data, LazyPolygons &to_model_data)
+{
     StoredPolygonCollection to_bp_area = safe_free_area(scratch, increased, volumes.getAvoidance(radius, layer_idx - 1, settings.type, false));
     to_bp_data.get().move_from(to_bp_area);
     if (! current_elem.to_buildplate && to_bp_data.area() > tiny_area_threshold) {
@@ -1784,75 +1902,83 @@ static void increase_merging_area(
         }
     }
 
-    // The area that decides whether the element can be increased: the one to the build plate or the one to the model (the status of the
-    // element does not change below). The collections keep their handles when they are refilled, so the reference stays valid.
-    const StoredPolygonCollection &check_layer_data = current_elem.to_buildplate ? to_bp_data.get() : to_model_data.get();
+}
 
-    if (settings.increase_radius && polygons_area(check_layer_data) > tiny_area_threshold) {
-        auto validWithRadius = [&](coord_t next_radius) {
-            if (volumes.ceilRadius(next_radius) <= volumes.ceilRadius(radius))
-                return true;
+// Advances borrowed branch/foot state only through radii whose avoidance retains usable area; scratch owns validation rings,
+// check_layer_data aliases a lazy output with a stable handle, and geometry/allocation/cache failures propagate.
+static void grow_increased_radius(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    const AreaIncreaseSettings &settings, LayerIndex layer_idx, const SupportElement &parent, const StoredPolygonCollection &increased,
+    SupportElementState &current_elem, coord_t &radius, LazyPolygons &to_bp_data, LazyPolygons &to_model_data,
+    const StoredPolygonCollection &check_layer_data)
+{
+    auto validWithRadius = [&](coord_t next_radius) {
+        if (volumes.ceilRadius(next_radius) <= volumes.ceilRadius(radius))
+            return true;
 
-            StoredPolygonCollection check_layer_data_2(scratch);
-            if (current_elem.to_buildplate)
-                // regular union as output will not be used later => this area should always be a subset of the safe_union one (i think)
-                check_layer_data_2 = diff_clipped(scratch, increased, volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, false));
-            else if (config.support_rests_on_model)
-                check_layer_data_2 = diff_clipped(scratch, increased,
-                    current_elem.to_model_gracious ?
-                        volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, true) :
-                        volumes.getCollision(next_radius, layer_idx - 1));
-            return polygons_area(check_layer_data_2) > tiny_area_threshold;
-        };
-        coord_t ceil_radius_before = volumes.ceilRadius(radius);
+        StoredPolygonCollection check_layer_data_2(scratch);
+        if (current_elem.to_buildplate)
+            // Validation needs only the clipped area's size; no rings are published from this temporary.
+            check_layer_data_2 = diff_clipped(scratch, increased, volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, false));
+        else if (config.support_rests_on_model)
+            check_layer_data_2 = diff_clipped(scratch, increased,
+                current_elem.to_model_gracious ?
+                    volumes.getAvoidance(next_radius, layer_idx - 1, settings.type, true) :
+                    volumes.getCollision(next_radius, layer_idx - 1));
+        return polygons_area(check_layer_data_2) > tiny_area_threshold;
+    };
+    coord_t ceil_radius_before = volumes.ceilRadius(radius);
 
-        if (support_element_collision_radius(config, current_elem) < config.branch_radius && support_element_collision_radius(config, current_elem) < support_element_radius(config, current_elem)) {
-            coord_t target_radius = std::min(support_element_radius(config, current_elem), config.branch_radius);
-            coord_t current_ceil_radius = volumes.ceilRadius(radius);
+    if (support_element_collision_radius(config, current_elem) < config.branch_radius && support_element_collision_radius(config, current_elem) < support_element_radius(config, current_elem)) {
+        coord_t target_radius = std::min(support_element_radius(config, current_elem), config.branch_radius);
+        coord_t current_ceil_radius = volumes.ceilRadius(radius);
 
-            while (current_ceil_radius < target_radius && validWithRadius(volumes.ceilRadius(current_ceil_radius + 1)))
-                current_ceil_radius = volumes.ceilRadius(current_ceil_radius + 1);
-            // Catch up the gain to the largest one that stays within the ceiled radius found above and within the drawn radius, and
-            // at most one step short of the path without pause (one step less than the distance to the tip). The foot acquired so far
-            // is part of both radii.
-            current_elem.radius_gain = catch_up_gain(current_elem.radius_gain, current_ceil_radius, support_element_radius(config, current_elem),
-                config.min_radius, current_elem.foot_gain, config.path_gain(layer_idx, current_elem.distance_to_top - 1));
-        }
+        while (current_ceil_radius < target_radius && validWithRadius(volumes.ceilRadius(current_ceil_radius + 1)))
+            current_ceil_radius = volumes.ceilRadius(current_ceil_radius + 1);
+        // Catch up within the valid cache radius, drawn radius, and one step short of uninterrupted path growth.
+        current_elem.radius_gain = catch_up_gain(current_elem.radius_gain, current_ceil_radius, support_element_radius(config, current_elem),
+            config.min_radius, current_elem.foot_gain, config.path_gain(layer_idx, current_elem.distance_to_top - 1));
+    }
+    radius = support_element_collision_radius(config, current_elem);
+
+    // Spend the remaining growth budget on the foot, limited by validated collision-radius cache steps.
+    const double planned_foot_increase = foot_step_gain(config, parent.state, current_elem, layer_idx);
+    if (planned_foot_increase > 0.) {
+        const double foot_increase = partial_foot_gain(
+            double(config.min_radius) + current_elem.radius_gain + current_elem.foot_gain, planned_foot_increase,
+            [&](double increase) { return radius_from_gain(config, current_elem.radius_gain, current_elem.foot_gain + increase); },
+            [&](coord_t r) { return volumes.ceilRadius(r); }, validWithRadius);
+        current_elem.foot_gain += foot_increase;
         radius = support_element_collision_radius(config, current_elem);
-
-        // The foot of the step: what the step budget bp_gain leaves after the normal growth, up to foot_target. The new collision
-        // radius must be valid like the one of any radius increase; when it is not, the foot widens only as far as the cache
-        // steps (fine in the foot band, see TreeVolumes::ceilRadius()) allow.
-        const double planned_foot_increase = foot_step_gain(config, parent.state, current_elem, layer_idx);
-        if (planned_foot_increase > 0.) {
-            const double foot_increase = partial_foot_gain(
-                double(config.min_radius) + current_elem.radius_gain + current_elem.foot_gain, planned_foot_increase,
-                [&](double increase) { return radius_from_gain(config, current_elem.radius_gain, current_elem.foot_gain + increase); },
-                [&](coord_t r) { return volumes.ceilRadius(r); }, validWithRadius);
-            current_elem.foot_gain += foot_increase;
-            radius = support_element_collision_radius(config, current_elem);
-        }
-
-        if (ceil_radius_before != volumes.ceilRadius(radius)) {
-            if (current_elem.to_buildplate) {
-                StoredPolygonCollection to_bp_area = safe_free_area(scratch, increased, volumes.getAvoidance(radius, layer_idx - 1, settings.type, false));
-                to_bp_data.get().move_from(to_bp_area);
-            }
-            if (config.support_rests_on_model) {
-                StoredPolygonCollection to_model_area = safe_free_area(scratch, increased,
-                    current_elem.to_model_gracious ?
-                        volumes.getAvoidance(radius, layer_idx - 1, settings.type, true) :
-                        volumes.getCollision(radius, layer_idx - 1));
-                to_model_data.get().move_from(to_model_area);
-            }
-            if (polygons_area(check_layer_data) < tiny_area_threshold) {
-                BOOST_LOG_TRIVIAL(error) << "Lost area by doing catch up from " << ceil_radius_before << " to radius " <<
-                    volumes.ceilRadius(support_element_collision_radius(config, current_elem)) << ". May not cause visible malformation.";
-            }
-        }
     }
 
-    return polygons_area(check_layer_data) > tiny_area_threshold ? std::optional<SupportElementState>(current_elem) : std::optional<SupportElementState>();
+    if (ceil_radius_before != volumes.ceilRadius(radius)) {
+        refresh_increased_radius(scratch, volumes, config, settings, layer_idx, increased, current_elem, radius,
+            ceil_radius_before, to_bp_data, to_model_data, check_layer_data);
+    }
+}
+
+// Replaces candidate rings in buildplate/model order for a changed collision radius, preserving the caller's stable check-area
+// reference; outputs own scratch-storage rings, state is borrowed read-only, and geometry/allocation/cache failures propagate.
+static void refresh_increased_radius(storage_handle *scratch, const TreeVolumes &volumes, const TreeSettings &config,
+    const AreaIncreaseSettings &settings, LayerIndex layer_idx, const StoredPolygonCollection &increased,
+    const SupportElementState &current_elem, coord_t radius, coord_t ceil_radius_before, LazyPolygons &to_bp_data,
+    LazyPolygons &to_model_data, const StoredPolygonCollection &check_layer_data)
+{
+    if (current_elem.to_buildplate) {
+        StoredPolygonCollection to_bp_area = safe_free_area(scratch, increased, volumes.getAvoidance(radius, layer_idx - 1, settings.type, false));
+        to_bp_data.get().move_from(to_bp_area);
+    }
+    if (config.support_rests_on_model) {
+        StoredPolygonCollection to_model_area = safe_free_area(scratch, increased,
+            current_elem.to_model_gracious ?
+                volumes.getAvoidance(radius, layer_idx - 1, settings.type, true) :
+                volumes.getCollision(radius, layer_idx - 1));
+        to_model_data.get().move_from(to_model_area);
+    }
+    if (polygons_area(check_layer_data) < tiny_area_threshold) {
+        BOOST_LOG_TRIVIAL(error) << "Lost area by doing catch up from " << ceil_radius_before << " to radius " <<
+            volumes.ceilRadius(support_element_collision_radius(config, current_elem)) << ". May not cause visible malformation.";
+    }
 }
 
 /*!

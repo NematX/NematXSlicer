@@ -34,177 +34,42 @@
    slab generator, publishes the slabs and finishes progress for valid payloads. */
 
 namespace slic3r_api::Support::Common {
-// Group non-empty slabs by integer Z and thickness and publish their union before locking islands; equal-Z insertion precedes existing layers with unique creation ids, and rejected API writes throw.
-// Inputs and context are borrowed; the object owns published layers. Rejected writes exit through silent
-// PluginCancelled when stopping (the cause has its message, the step names it, or the runner rethrows the print
-// cancellation), otherwise std::runtime_error.
-void publish(const plugin_run_context *context, const Object &object, const SupportParams &params, GeneratedSupport &support, orchestrator_handle *orchestrator)
-{
-    Counters::add(Counters::totals.publication_calls);
-    storage_handle *storage = support.storage;
-    const ClipperContext clipper(storage);
-    GeneratorLayers sorted = support.top;
-    sorted.insert(sorted.end(), support.bottom.begin(), support.bottom.end());
-    sorted.insert(sorted.end(), support.base.begin(), support.base.end());
-    sorted.insert(sorted.end(), support.interfaces.begin(), support.interfaces.end());
-    std::sort(sorted.begin(), sorted.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) { return *a < *b; });
-    const int32_t base_tool = params.base_tool;
-    const int32_t interface_tool = params.interface_tool;
-    const bool top_enabled = params.top_published_interfaces_enabled;
-    const bool bottom_enabled = params.bottom_published_interfaces_enabled;
-    const extruder_index_t base_extruder = base_tool > 0 ? base_tool - 1 : EXTRUDER_ID_UNKNOWN;
-    const extruder_index_t interface_extruder = interface_tool > 0 ? interface_tool - 1 : EXTRUDER_ID_UNKNOWN;
-    // The native generator only moves a contact into the base when both support roles share one
-    // extruder, so publication types the area the same way.
-    const bool merge_regions = base_tool == interface_tool;
-    const object_handle *object_ptr = object.handle();
-    uint32_t interface_id = 0;
-    std::map<coord_t, uint32_t> installed_ids;
-    for (size_t i = 0; i < sorted.size();) {
-        // One print Z carries several (Z, thickness) groups. The native generator counts the
-        // interfaces and advances its interface id once per print Z, over all groups of that Z.
-        const coord_t z = sorted[i]->print_z;
-        std::vector<std::pair<size_t, size_t>> groups;
-        size_t interface_count = 0, top_count = 0, z_end = i;
-        coord_t contact_bottom = 0;
-        bool z_has_base = false;
-        coord_t z_min_height = 0;
-        for (size_t end = i; end < sorted.size() && sorted[end]->print_z == z;) {
-            const coord_t height = sorted[end]->height;
-            size_t group_end = end + 1;
-            while (group_end < sorted.size() && sorted[group_end]->print_z == z && sorted[group_end]->height == height) ++group_end;
-            for (size_t j = end; j < group_end; ++j) {
-                const GeneratorLayer &slab = *sorted[j];
-                if (slab.polygons.empty()) continue;
-                if (slab.type == LayerType::Base || slab.type == LayerType::Intermediate || slab.type == LayerType::Branch) z_has_base = true;
-                else ++interface_count;
-                z_min_height = z_min_height == 0 ? slab.height : std::min(z_min_height, slab.height);
-                if (slab.type == LayerType::TopContact) { ++top_count; contact_bottom = slab.bottom_z; }
-            }
-            groups.emplace_back(end, group_end);
-            z_end = group_end;
-            end = group_end;
-        }
-        const bool contacts_only = top_count > 0 && top_count == interface_count;
-        const uint32_t this_id = contacts_only && installed_ids.count(contact_bottom) ? installed_ids.at(contact_bottom) + 1 : interface_id;
-        if (interface_count && !contacts_only) ++interface_id;
-        // The host inserts an equal-Z layer before the existing ones, so publishing the thinnest
-        // group first leaves the native order at this print Z: the thickest layer first.
-        for (std::vector<std::pair<size_t, size_t>>::const_reverse_iterator group = groups.rbegin(); group != groups.rend(); ++group) {
-            const size_t begin = group->first, end = group->second;
-            StoredPolygonCollection all(storage);
-            for (size_t j = begin; j < end; ++j) all.append_copy_from(sorted[j]->polygons);
-            if (all.empty()) continue;
-            const coord_t height = sorted[begin]->height;
-            layer_handle *layer = object_add_auxiliary_layer(object_ptr, height, z, z - height / 2);
-            if (!layer) {
-                throw_if_cancelled(context);
-                throw std::runtime_error("Cannot create support layer");
-            }
-            LayerSupportProperty *property = static_cast<LayerSupportProperty *>(plugin_property_get_or_add_data_mutable(
-                orchestrator, layer_get_properties_mutable(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT));
-            if (!property) {
-                throw_if_cancelled(context);
-                throw std::runtime_error("Cannot mark support layer");
-            }
-            property->interface_id = this_id;
-            property->reserved = 0;
-            installed_ids[z] = this_id;
-            const StoredExPolygonCollection slices = native_expolygons(clipper_union(clipper(all)));
-            expolygons_copy(layer_region_borrow_mutable_slices(layer_get_region_mutable(layer, 0)), slices.handle());
-            layer_recompute_slices_and_islands_from_layer_regions(layer);
-            layer_add_regions_to_islands(layer);
-            if (Counters::enabled) {
-                Counters::add(Counters::totals.groups);
-                Counters::add(Counters::totals.slabs, end - begin);
-                Counters::add(Counters::totals.islands, layer_count_island(layer));
-                Counters::maximum(Counters::totals.max_islands_slabs, uint64_t(layer_count_island(layer)) * (end - begin));
-            }
-            for (uint32_t island_idx = 0; island_idx < layer_count_island(layer); ++island_idx) {
-                layer_island_handle *island = layer_get_island_mutable(layer, island_idx);
-                const ExPolygon island_slice(layer_island_get_slice(island));
-                // Clip every slab of this layer to the island and collect the role surfaces: upper
-                // (top), lower (bottom, bridged or not), sparse base and branch bodies.
-                StoredPolygonCollection top_surfaces(storage), bridge_surfaces(storage), bottom_surfaces(storage),
-                    sparse_surfaces(storage), branch_surfaces(storage);
-                for (size_t j = begin; j < end; ++j) {
-                    const GeneratorLayer &slab = *sorted[j];
-                    const bool base = slab.type == LayerType::Base || slab.type == LayerType::Intermediate;
-                    const bool branch = slab.type == LayerType::Branch;
-                    const bool top = slab.type == LayerType::TopContact || slab.type == LayerType::TopInterface;
-                    const bool bridge = slab.type == LayerType::BottomContact && slab.bridging;
-                    /* A contact is typed as base when no interface layer is configured on its side
-                       and the native generator would have moved that contact area into the base
-                       layer: the user asked for no interface there, so the dense strip that would
-                       have joined the base is just base, and the sparse algorithm fills base and
-                       strip in one pass. The conditions are the native merge ones: the two support
-                       roles share one extruder, the contact does not bridge (the base never
-                       bridges), and the merged base layer of this print Z either has the contact's
-                       thickness, the smallest of that Z, or does not exist. Otherwise the contact
-                       keeps its own type and its own algorithm prints
-                       it with the base settings. This is decided here because each algorithm prints
-                       only the surfaces of its own type. */
-                    const bool mergeable_contact = (slab.type == LayerType::TopContact && !top_enabled) ||
-                        (slab.type == LayerType::BottomContact && !bottom_enabled);
-                    // The merged base layer of a print Z carries the smallest thickness of its slabs,
-                    // so it takes this contact only when the contact has exactly that thickness.
-                    const bool base_takes_contact = z_has_base && slab.height == z_min_height;
-                    const bool typed_as_base = mergeable_contact &&
-                        Internal::merged_into_base(merge_regions, base_takes_contact, z_has_base, slab.bridging);
-                    Counters::add(Counters::totals.intersections);
-                    StoredPolygonCollection clipped = clipper_intersection(clipper(slab.polygons), clipper(island_slice)).to_polygon_collection();
-                    if (branch) branch_surfaces.append_move_from(clipped);
-                    else if (base || typed_as_base) sparse_surfaces.append_move_from(clipped);
-                    else if (top) top_surfaces.append_move_from(clipped);
-                    else if (bridge) bridge_surfaces.append_move_from(clipped);
-                    else bottom_surfaces.append_move_from(clipped);
-                }
-                // One owner per area: the upper surfaces keep every area they share with a lower
-                // one, the branch keeps the areas no interface covers, and the base keeps only the
-                // areas that neither an interface nor a branch covers.
-                Counters::add(Counters::totals.unions);
-                const StoredPolygonCollection top_union = clipper_union(clipper(top_surfaces)).to_polygon_collection();
-                bridge_surfaces = Internal::resolve_overlap(bridge_surfaces, top_union);
-                bottom_surfaces = Internal::resolve_overlap(bottom_surfaces, top_union);
-                Counters::add(Counters::totals.unions);
-                const StoredPolygonCollection lower_union =
-                    clipper_union2(clipper(bridge_surfaces), clipper(bottom_surfaces)).to_polygon_collection();
-                Counters::add(Counters::totals.unions);
-                const StoredPolygonCollection covered = clipper_union2(clipper(top_union), clipper(lower_union)).to_polygon_collection();
-                branch_surfaces = Internal::resolve_overlap(branch_surfaces, covered);
-                sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, covered);
-                sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, branch_surfaces);
-                // Surfaces of one extruder, in the native order of their types.
-                std::map<extruder_index_t, std::vector<std::pair<StoredExPolygonCollection, raw_surface_type>>> surfaces;
-                // Borrows role rings, counts a nonempty union and stores its converted result by extruder/type; storage owns geometry and allocation/Clipper failures propagate.
-                const auto add = [&](extruder_index_t extruder, const StoredPolygonCollection &area, raw_surface_type type) {
-                    if (!area.empty()) {
-                        // The explicit union and native_expolygons' normalization each call Clipper.
-                        Counters::add(Counters::totals.unions, 2);
-                        surfaces[extruder].emplace_back(native_expolygons(clipper_union(clipper(area))), type);
-                    }
-                };
-                add(interface_extruder, top_surfaces, srf_type().top().solid().support().raw());
-                add(interface_extruder, bridge_surfaces, srf_type().bottom().solid().bridge().support().raw());
-                add(interface_extruder, bottom_surfaces, srf_type().bottom().solid().support().raw());
-                add(base_extruder, sparse_surfaces, srf_type().internal().sparse().support().raw());
-                add(base_extruder, branch_surfaces, srf_type().internal().sparse().support().branch().raw());
-                for (const auto &[extruder, collection] : surfaces) {
-                    StoredSurfaceCollection stored(storage);
-                    for (const auto &[expolygons, type] : collection)
-                        for (const ExPolygon expolygon : expolygons) stored.append(expolygon, type);
-                    if (stored.empty()) continue;
-                    layer_region_island_handle *region = layer_island_get_or_create_region_island(island, nullptr, 0, extruder);
-                    if (!region || !layer_region_island_set_fill_surfaces(region, stored.mutable_handle())) {
-                        throw_if_cancelled(context);
-                        throw std::runtime_error("Cannot publish support surfaces");
-                    }
-                }
-            }
-        }
-        i = z_end;
-    }
-}
+namespace {
+// Role rings owned by publication storage, kept in separate collections until overlap resolution.
+struct IslandSurfaces {
+    StoredPolygonCollection top_surfaces, bridge_surfaces, bottom_surfaces, sparse_surfaces, branch_surfaces;
+};
+
+// Group ranges and contact/base metadata for one exact print Z in the sorted borrowed slab list.
+struct PublicationZ {
+    std::vector<std::pair<size_t, size_t>> groups;
+    size_t interface_count = 0, top_count = 0, end = 0;
+    coord_t contact_bottom = 0, min_height = 0;
+    bool has_base = false;
+};
+// Extruder assignments and contact-typing flags shared by all published groups.
+struct PublicationTools {
+    extruder_index_t base_extruder, interface_extruder;
+    bool top_enabled, bottom_enabled, merge_regions;
+};
+// Collects equal-height ranges and interface/base metadata at one print Z.
+PublicationZ collect_publication_z(const GeneratorLayers &sorted, size_t begin, coord_t z);
+// Publishes one nonempty height group, its islands and their role surfaces.
+void publish_group(const plugin_run_context *context, const object_handle *object, orchestrator_handle *orchestrator,
+    storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted, size_t begin, size_t end,
+    coord_t z, uint32_t interface_id, std::map<coord_t, uint32_t> &installed_ids, const PublicationZ &metadata,
+    const PublicationTools &tools);
+// Collects clipped slab rings for one island in slab order.
+IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted,
+    size_t begin, size_t end, const ExPolygon &island_slice, bool top_enabled, bool bottom_enabled,
+    bool merge_regions, bool z_has_base, coord_t z_min_height);
+// Removes role overlaps in top/lower/branch/base precedence.
+void resolve_island_surfaces(const ClipperContext &clipper, IslandSurfaces &areas);
+// Installs typed surfaces by extruder on the borrowed island.
+void install_island_surfaces(const plugin_run_context *context, storage_handle *storage, const ClipperContext &clipper,
+    layer_island_handle *island, const IslandSurfaces &areas, extruder_index_t base_extruder, extruder_index_t interface_extruder);
+
+} // namespace
 
 // Borrows a valid support payload, filters its style and demand, and publishes generated owned slabs before finishing progress; invalid payloads return unfinished, while cancellation and generation/publication failures propagate.
 void run_support_family(const plugin_run_context *context, orchestrator_handle *orchestrator, PluginProgress &progress,
@@ -225,6 +90,222 @@ void run_support_family(const plugin_run_context *context, orchestrator_handle *
     }
     progress.finish_run();
 }
+
+// Groups borrowed slabs by exact print Z and thickness, publishes object-owned auxiliary layers thinnest first per Z and advances
+// interface ids once per Z. Storage owns temporary rings; rejected writes check cancellation then throw runtime_error, and
+// geometry/allocation failures propagate with any completed publication intact.
+void publish(const plugin_run_context *context, const Object &object, const SupportParams &params, GeneratedSupport &support, orchestrator_handle *orchestrator)
+{
+    Counters::add(Counters::totals.publication_calls);
+    storage_handle *storage = support.storage;
+    const ClipperContext clipper(storage);
+    GeneratorLayers sorted = support.top;
+    sorted.insert(sorted.end(), support.bottom.begin(), support.bottom.end());
+    sorted.insert(sorted.end(), support.base.begin(), support.base.end());
+    sorted.insert(sorted.end(), support.interfaces.begin(), support.interfaces.end());
+    std::sort(sorted.begin(), sorted.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) { return *a < *b; });
+    const int32_t base_tool = params.base_tool;
+    const int32_t interface_tool = params.interface_tool;
+    const bool top_enabled = params.top_published_interfaces_enabled;
+    const bool bottom_enabled = params.bottom_published_interfaces_enabled;
+    const extruder_index_t base_extruder = base_tool > 0 ? base_tool - 1 : EXTRUDER_ID_UNKNOWN;
+    const extruder_index_t interface_extruder = interface_tool > 0 ? interface_tool - 1 : EXTRUDER_ID_UNKNOWN;
+    // Contacts can join the base only when both roles share one extruder.
+    const bool merge_regions = base_tool == interface_tool;
+    const object_handle *object_ptr = object.handle();
+    uint32_t interface_id = 0;
+    std::map<coord_t, uint32_t> installed_ids;
+    const PublicationTools tools{base_extruder, interface_extruder, top_enabled, bottom_enabled, merge_regions};
+    for (size_t i = 0; i < sorted.size();) {
+        const coord_t z = sorted[i]->print_z;
+        const PublicationZ metadata = collect_publication_z(sorted, i, z);
+        const bool contacts_only = metadata.top_count > 0 && metadata.top_count == metadata.interface_count;
+        const uint32_t this_id = contacts_only && installed_ids.count(metadata.contact_bottom) ? installed_ids.at(metadata.contact_bottom) + 1 : interface_id;
+        if (metadata.interface_count && !contacts_only) ++interface_id;
+        // Equal-Z insertion precedes existing layers, so thinnest-first publication leaves the thickest layer first.
+        for (std::vector<std::pair<size_t, size_t>>::const_reverse_iterator group = metadata.groups.rbegin(); group != metadata.groups.rend(); ++group)
+            publish_group(context, object_ptr, orchestrator, storage, clipper, sorted, group->first, group->second,
+                z, this_id, installed_ids, metadata, tools);
+        i = metadata.end;
+    }
+}
+
+namespace {
+// Walks borrowed sorted slabs from a valid begin index through the equal-Z run, collecting height ranges and metadata in order;
+// returns owned index ranges without changing slabs, ignores empty rings for counts, and allocation failures propagate.
+PublicationZ collect_publication_z(const GeneratorLayers &sorted, size_t begin, coord_t z)
+{
+    PublicationZ result;
+    result.end = begin;
+    for (size_t end = begin; end < sorted.size() && sorted[end]->print_z == z;) {
+        const coord_t height = sorted[end]->height;
+        size_t group_end = end + 1;
+        while (group_end < sorted.size() && sorted[group_end]->print_z == z && sorted[group_end]->height == height) ++group_end;
+        for (size_t j = end; j < group_end; ++j) {
+            const GeneratorLayer &slab = *sorted[j];
+            if (slab.polygons.empty()) continue;
+            if (slab.type == LayerType::Base || slab.type == LayerType::Intermediate || slab.type == LayerType::Branch) result.has_base = true;
+            else ++result.interface_count;
+            result.min_height = result.min_height == 0 ? slab.height : std::min(result.min_height, slab.height);
+            if (slab.type == LayerType::TopContact) { ++result.top_count; result.contact_bottom = slab.bottom_z; }
+        }
+        result.groups.emplace_back(end, group_end);
+        result.end = group_end;
+        end = group_end;
+    }
+    return result;
+}
+
+// Copies borrowed slab rings [begin,end) in order, creates an object-owned auxiliary layer and installs its slices/island surfaces;
+// an empty group does nothing. Storage owns temporaries; rejected writes check cancellation then throw runtime_error, while
+// geometry/allocation failures propagate with prior object writes intact. installed_ids records successful layer marking.
+void publish_group(const plugin_run_context *context, const object_handle *object, orchestrator_handle *orchestrator,
+    storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted, size_t begin, size_t end,
+    coord_t z, uint32_t interface_id, std::map<coord_t, uint32_t> &installed_ids, const PublicationZ &metadata,
+    const PublicationTools &tools)
+{
+    StoredPolygonCollection all(storage);
+    for (size_t j = begin; j < end; ++j) all.append_copy_from(sorted[j]->polygons);
+    if (all.empty()) return;
+    const coord_t height = sorted[begin]->height;
+    layer_handle *layer = object_add_auxiliary_layer(object, height, z, z - height / 2);
+    if (!layer) {
+        throw_if_cancelled(context);
+        throw std::runtime_error("Cannot create support layer");
+    }
+    LayerSupportProperty *property = static_cast<LayerSupportProperty *>(plugin_property_get_or_add_data_mutable(
+        orchestrator, layer_get_properties_mutable(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT));
+    if (!property) {
+        throw_if_cancelled(context);
+        throw std::runtime_error("Cannot mark support layer");
+    }
+    property->interface_id = interface_id;
+    property->reserved = 0;
+    installed_ids[z] = interface_id;
+    const StoredExPolygonCollection slices = native_expolygons(clipper_union(clipper(all)));
+    expolygons_copy(layer_region_borrow_mutable_slices(layer_get_region_mutable(layer, 0)), slices.handle());
+    layer_recompute_slices_and_islands_from_layer_regions(layer);
+    layer_add_regions_to_islands(layer);
+    if (Counters::enabled) {
+        Counters::add(Counters::totals.groups);
+        Counters::add(Counters::totals.slabs, end - begin);
+        Counters::add(Counters::totals.islands, layer_count_island(layer));
+        Counters::maximum(Counters::totals.max_islands_slabs, uint64_t(layer_count_island(layer)) * (end - begin));
+    }
+    for (uint32_t island_idx = 0; island_idx < layer_count_island(layer); ++island_idx) {
+        layer_island_handle *island = layer_get_island_mutable(layer, island_idx);
+        const ExPolygon island_slice(layer_island_get_slice(island));
+        IslandSurfaces areas = collect_island_surfaces(storage, clipper, sorted, begin, end, island_slice,
+            tools.top_enabled, tools.bottom_enabled, tools.merge_regions, metadata.has_base, metadata.min_height);
+        resolve_island_surfaces(clipper, areas);
+        install_island_surfaces(context, storage, clipper, island, areas, tools.base_extruder, tools.interface_extruder);
+    }
+}
+
+// Intersects borrowed slabs [begin,end) with an island, preserving slab order and contact typing; returned role rings use storage,
+// which outlives them. Sorted slabs and the Z-wide base metadata are required; geometry/allocation failures propagate.
+IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted,
+    size_t begin, size_t end, const ExPolygon &island_slice, bool top_enabled, bool bottom_enabled,
+    bool merge_regions, bool z_has_base, coord_t z_min_height)
+{
+    // Clip every slab of this layer to the island and collect the role surfaces: upper
+    // (top), lower (bottom, bridged or not), sparse base and branch bodies.
+    StoredPolygonCollection top_surfaces(storage), bridge_surfaces(storage), bottom_surfaces(storage),
+        sparse_surfaces(storage), branch_surfaces(storage);
+    for (size_t j = begin; j < end; ++j) {
+        const GeneratorLayer &slab = *sorted[j];
+        const bool base = slab.type == LayerType::Base || slab.type == LayerType::Intermediate;
+        const bool branch = slab.type == LayerType::Branch;
+        const bool top = slab.type == LayerType::TopContact || slab.type == LayerType::TopInterface;
+        const bool bridge = slab.type == LayerType::BottomContact && slab.bridging;
+        /* A contact is typed as base when no interface layer is configured on its side
+           and the native generator would have moved that contact area into the base
+           layer: the user asked for no interface there, so the dense strip that would
+           have joined the base is just base, and the sparse algorithm fills base and
+           strip in one pass. The conditions are the native merge ones: the two support
+           roles share one extruder, the contact does not bridge (the base never
+           bridges), and the merged base layer of this print Z either has the contact's
+           thickness, the smallest of that Z, or does not exist. Otherwise the contact
+           keeps its own type and its own algorithm prints
+           it with the base settings. This is decided here because each algorithm prints
+           only the surfaces of its own type. */
+        const bool mergeable_contact = (slab.type == LayerType::TopContact && !top_enabled) ||
+            (slab.type == LayerType::BottomContact && !bottom_enabled);
+        // The merged base layer of a print Z carries the smallest thickness of its slabs,
+        // so it takes this contact only when the contact has exactly that thickness.
+        const bool base_takes_contact = z_has_base && slab.height == z_min_height;
+        const bool typed_as_base = mergeable_contact &&
+            Internal::merged_into_base(merge_regions, base_takes_contact, z_has_base, slab.bridging);
+        Counters::add(Counters::totals.intersections);
+        StoredPolygonCollection clipped = clipper_intersection(clipper(slab.polygons), clipper(island_slice)).to_polygon_collection();
+        if (branch) branch_surfaces.append_move_from(clipped);
+        else if (base || typed_as_base) sparse_surfaces.append_move_from(clipped);
+        else if (top) top_surfaces.append_move_from(clipped);
+        else if (bridge) bridge_surfaces.append_move_from(clipped);
+        else bottom_surfaces.append_move_from(clipped);
+    }
+    return IslandSurfaces{std::move(top_surfaces), std::move(bridge_surfaces), std::move(bottom_surfaces),
+        std::move(sparse_surfaces), std::move(branch_surfaces)};
+}
+
+// Resolves caller-owned role rings in top/lower/branch/base order using the borrowed Clipper context; collections stay in their
+// storage, counters record each operation, and geometry/allocation failures propagate after any completed replacements.
+void resolve_island_surfaces(const ClipperContext &clipper, IslandSurfaces &areas)
+{
+    StoredPolygonCollection &top_surfaces = areas.top_surfaces, &bridge_surfaces = areas.bridge_surfaces,
+        &bottom_surfaces = areas.bottom_surfaces, &sparse_surfaces = areas.sparse_surfaces, &branch_surfaces = areas.branch_surfaces;
+    // One owner per area: the upper surfaces keep every area they share with a lower
+    // one, the branch keeps the areas no interface covers, and the base keeps only the
+    // areas that neither an interface nor a branch covers.
+    Counters::add(Counters::totals.unions);
+    const StoredPolygonCollection top_union = clipper_union(clipper(top_surfaces)).to_polygon_collection();
+    bridge_surfaces = Internal::resolve_overlap(bridge_surfaces, top_union);
+    bottom_surfaces = Internal::resolve_overlap(bottom_surfaces, top_union);
+    Counters::add(Counters::totals.unions);
+    const StoredPolygonCollection lower_union =
+        clipper_union2(clipper(bridge_surfaces), clipper(bottom_surfaces)).to_polygon_collection();
+    Counters::add(Counters::totals.unions);
+    const StoredPolygonCollection covered = clipper_union2(clipper(top_union), clipper(lower_union)).to_polygon_collection();
+    branch_surfaces = Internal::resolve_overlap(branch_surfaces, covered);
+    sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, covered);
+    sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, branch_surfaces);
+}
+
+// Normalizes borrowed role rings in type order, then installs surfaces on island-owned work regions in extruder order;
+// storage owns temporary geometry, failed writes check cancellation before throwing runtime_error, and geometry/allocation failures propagate.
+void install_island_surfaces(const plugin_run_context *context, storage_handle *storage, const ClipperContext &clipper,
+    layer_island_handle *island, const IslandSurfaces &areas, extruder_index_t base_extruder, extruder_index_t interface_extruder)
+{
+    const StoredPolygonCollection &top_surfaces = areas.top_surfaces, &bridge_surfaces = areas.bridge_surfaces,
+        &bottom_surfaces = areas.bottom_surfaces, &sparse_surfaces = areas.sparse_surfaces, &branch_surfaces = areas.branch_surfaces;
+    // Surfaces of one extruder, in the native order of their types.
+    std::map<extruder_index_t, std::vector<std::pair<StoredExPolygonCollection, raw_surface_type>>> surfaces;
+    // Borrows role rings, counts a nonempty union and stores its converted result by extruder/type; storage owns geometry and allocation/Clipper failures propagate.
+    const auto add = [&](extruder_index_t extruder, const StoredPolygonCollection &area, raw_surface_type type) {
+        if (!area.empty()) {
+            // The explicit union and native_expolygons' normalization each call Clipper.
+            Counters::add(Counters::totals.unions, 2);
+            surfaces[extruder].emplace_back(native_expolygons(clipper_union(clipper(area))), type);
+        }
+    };
+    add(interface_extruder, top_surfaces, srf_type().top().solid().support().raw());
+    add(interface_extruder, bridge_surfaces, srf_type().bottom().solid().bridge().support().raw());
+    add(interface_extruder, bottom_surfaces, srf_type().bottom().solid().support().raw());
+    add(base_extruder, sparse_surfaces, srf_type().internal().sparse().support().raw());
+    add(base_extruder, branch_surfaces, srf_type().internal().sparse().support().branch().raw());
+    for (const auto &[extruder, collection] : surfaces) {
+        StoredSurfaceCollection stored(storage);
+        for (const auto &[expolygons, type] : collection)
+            for (const ExPolygon expolygon : expolygons) stored.append(expolygon, type);
+        if (stored.empty()) continue;
+        layer_region_island_handle *region = layer_island_get_or_create_region_island(island, nullptr, 0, extruder);
+        if (!region || !layer_region_island_set_fill_surfaces(region, stored.mutable_handle())) {
+            throw_if_cancelled(context);
+            throw std::runtime_error("Cannot publish support surfaces");
+        }
+    }
+}
+} // namespace
 
 // Decide whether the native generator would have moved a contact area into the base layer: the
 // support regions must share one extruder, the contact must not bridge (the base never bridges, and

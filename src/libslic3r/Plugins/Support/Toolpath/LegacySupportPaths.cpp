@@ -104,6 +104,9 @@ c_point rounded(double x, double y);
 double squared_distance(c_point a, c_point b);
 // Cut removable loops out of a contact part and append their interface paths to out.
 void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &contact, const Polys &overhang, const c_flow &flow, coord_t resolution);
+// Clips broken contact contours, rejoins split endpoints, publishes loops and removes their footprint from contact.
+void publish_contact_loops(storage_handle *storage, const ClipperContext &clipper, MutableExtrusionEntity out, Polys &contact, const Polys &overhang,
+                           const c_flow &flow, coord_t resolution, coordf_t radius, const PointLists &contours, const PointLists &circles);
 // Split each polyline by the area, returning the pieces inside and the pieces outside.
 std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area);
 // Clip one path from the highest overlap down, scale its flow by the remaining height and rechain the fragments from its start.
@@ -119,6 +122,15 @@ uint32_t first_layer_at(const Object &object, coord_t z, bool bottom);
 // Generate one role across a support layer and assign its paths to the islands they cross.
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
                    const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer);
+// Collects contact demand, fills each pass in order, then assigns generated paths to this layer's islands.
+void fill_layer_passes(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
+                      const Object &object, const Common::SupportParams &geometry, const SupportLayerIndex &support_layers,
+                      SurfaceRole role, layer_handle *layer, coord_t z, coord_t height, coord_t bottom,
+                      float base_angle, float angle, const std::string &contact_pattern, std::vector<Pass> &passes,
+                      bool top_as_base, bool bottom_as_base);
+// Moves generated children to the first intersecting island, using the role's bucket and tool.
+void publish_layer_paths(const plugin_run_context *context, storage_handle *storage, layer_handle *layer,
+                         StoredExtrusionEntity &out, const Common::SupportParams &geometry, bool as_base);
 
 Polys as_polygons(ClipperOperand &&result)
 {
@@ -362,6 +374,14 @@ void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &c
             }
         }
     }
+    publish_contact_loops(storage, clipper, out, contact, overhang, flow, resolution, radius, contours, circles);
+}
+
+// Subtracts borrowed circle rings from contour rings, clips and rejoins their lines, then moves generated paths into out;
+// storage owns geometry, contact loses the loop footprint, resolution is scaled, and geometry/allocation failures propagate.
+void publish_contact_loops(storage_handle *storage, const ClipperContext &clipper, MutableExtrusionEntity out, Polys &contact, const Polys &overhang,
+                           const c_flow &flow, coord_t resolution, coordf_t radius, const PointLists &contours, const PointLists &circles)
+{
     const Polys contour_polygons = polygon_collection(storage, contours);
     const Polys circle_polygons = polygon_collection(storage, circles);
     const Polys loop_polygons = as_polygons(clipper_diff(clipper(contour_polygons), clipper(circle_polygons)));
@@ -573,6 +593,18 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
         if (!parts.bottom_interface.empty()) passes.emplace_back(std::move(parts.bottom_interface), false, bottom_as_base, false);
     }
     if (passes.empty()) return;
+    fill_layer_passes(context, payload, storage, object, geometry, support_layers, role, layer, z, height, bottom,
+        base_angle, angle, contact_pattern, passes, top_as_base, bottom_as_base);
+}
+
+// Fills borrowed ordered passes using this object's layer dimensions and angles, modulates against lower slabs, then publishes;
+// pass polygons may lose contact-loop footprints, storage owns temporary paths, and cancellation/geometry/pattern failures propagate.
+void fill_layer_passes(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
+                      const Object &object, const Common::SupportParams &geometry, const SupportLayerIndex &support_layers,
+                      SurfaceRole role, layer_handle *layer, coord_t z, coord_t height, coord_t bottom,
+                      float base_angle, float angle, const std::string &contact_pattern, std::vector<Pass> &passes,
+                      bool top_as_base, bool bottom_as_base)
+{
     // Object demand directly above the layer: the removable loops of a top contact follow its outline.
     Polys overhang(storage);
     if (role == SurfaceRole::Top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops)
@@ -636,6 +668,15 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     // A part printed as base joins the support bucket and the support extruder, on this role's own
     // surface; otherwise the role keeps its interface bucket and extruder.
     const bool as_base = role == SurfaceRole::Sparse || (role == SurfaceRole::Top ? top_as_base : bottom_as_base);
+    publish_layer_paths(context, storage, layer, out, geometry, as_base);
+}
+
+// Moves borrowed generated children into layer-owned extrusion destinations in child order, choosing the first crossing island;
+// as_base selects the bucket/tool, storage owns slice temporaries, and failed assignment/destination access checks cancellation
+// before throwing runtime_error; failed insertion throws runtime_error, and geometry/allocation failures propagate.
+void publish_layer_paths(const plugin_run_context *context, storage_handle *storage, layer_handle *layer,
+                         StoredExtrusionEntity &out, const Common::SupportParams &geometry, bool as_base)
+{
     const raw_extrusion_role bucket = as_base ? RAW_EXTRUSION_ROLE_SUPPORT : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
     const int32_t tool = as_base ? geometry.base_tool : geometry.interface_tool;
     for (uint32_t index = 0; index < out.readonly().child_count(); ++index) {
