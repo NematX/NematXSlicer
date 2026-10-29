@@ -39,8 +39,8 @@ void test(storage_handle *storage) {
     command.set(C_EXTRUSION_SPECIAL_COMMAND_TOOLCHANGE,0.);
     check(!is_raw_filament_command(&command) && !is_raw_filament_command(nullptr),"ordinary extrusion is not a raw filament command");
     api::EPropertySpeed fields={};
-    fields.speed_mm_per_s=-1.f; fields.fan_speed_percent=65.f;
-    check(inherited_speed(30.,&fields)==30.,"fan-only payload retains inherited speed");
+    fields.speed_mm_per_s=-1.f;
+    check(inherited_speed(30.,&fields)==30.,"unset speed retains inherited speed");
     fields.speed_mm_per_s=45.f;
     check(inherited_speed(30.,&fields)==45.,"direct speed overrides ancestor");
     check(inherited_speed(30.,nullptr)==30.,"absent speed retains ancestor");
@@ -51,8 +51,11 @@ void test(storage_handle *storage) {
     original.get_or_add(api::EPropertyAttributes::key).extrusion_role(RAW_EXTRUSION_ROLE_INTERNAL_INFILL)
         .mm3_per_mm(0.04).width(0.225f).height(0.2f);
     original.get_or_add(api::EPropertyZOffset::key).set(scale_i(0.05));
+    original.get_or_add(api::EPropertyFan::key).set(65.f,FAN_REQUEST_MODE_OVERRIDE);
     api::MutableExtrusionEntity clone(extrusion_clone(storage,original.handle()));
     check(clone.get(api::EPropertyZOffset::key)->get()==scale_i(0.05),"clone preserves direct Z property");
+    check(clone.get(api::EPropertyFan::key)->percent==65.f &&
+          clone.get(api::EPropertyFan::key)->mode==FAN_REQUEST_MODE_OVERRIDE,"clone preserves fan request pair");
     api::StoredExPolygonCollection left(storage),right(storage);
     for (int side=0;side<2;++side) {
         api::StoredExPolygon region(storage);
@@ -65,6 +68,8 @@ void test(storage_handle *storage) {
     for (const auto &piece:pieces) {
         check(piece.entity.get(api::EPropertyZOffset::key)->get()==scale_i(0.05),"regional split preserves Z property");
         check(piece.entity.get(api::EPropertyAttributes::key)->mm3_per_mm()==0.04,"regional split preserves flow property");
+        const auto *fan=piece.entity.get(api::EPropertyFan::key);
+        check(fan && fan->percent==65.f && fan->mode==FAN_REQUEST_MODE_OVERRIDE,"regional split preserves fan request pair");
     }
     for (int shape:{0,1,2,3}) for (double density:{0.18,0.5,1.}) for (double angle:{0.,0.7853981633974483}) {
         const bool hole=shape==1;

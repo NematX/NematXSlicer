@@ -106,7 +106,8 @@ inline c_point point(Point p) { return {coord_t(std::llround(p.x)),coord_t(std::
 // so an event or unknown scope change cannot be crossed silently.
 struct State {
     std::optional<EPropertyAttributes> attr;
-    c_extrusion_property_speed process{-1,-1,-1,-1};
+    c_extrusion_property_speed process{-1,-1,-1};
+    EPropertyFan fan = {};
     uint16_t perimeter=0;
     coord_t z=0;
     // Unknown and event properties remain on their original nodes. Their identity
@@ -125,11 +126,11 @@ State effective(MutableExtrusionEntity node, State s) {
         if(p->speed_mm_per_s>0) s.process.speed_mm_per_s=p->speed_mm_per_s;
         if(p->accel_mm_per_s2>=0) s.process.accel_mm_per_s2=p->accel_mm_per_s2;
         if(p->pressure_adv>=0) s.process.pressure_adv=p->pressure_adv;
-        if(p->fan_speed_percent>=0) s.process.fan_speed_percent=p->fan_speed_percent;
     }
+    if(const auto *p=node.get(EPropertyFan::key)) s.fan=p->resolved_with(s.fan);
     for(uint32_t i=0;i<node.property_count();++i) {
         auto t=node.property_type_at(i);
-        if(t!=EXTRUSION_PROPERTY_TYPE_ATTRIBUTES && t!=EXTRUSION_PROPERTY_TYPE_SPEED &&
+        if(t!=EXTRUSION_PROPERTY_TYPE_ATTRIBUTES && t!=EXTRUSION_PROPERTY_TYPE_SPEED && t!=EXTRUSION_PROPERTY_TYPE_FAN &&
            t!=EXTRUSION_PROPERTY_TYPE_PERIMETER && t!=EXTRUSION_PROPERTY_TYPE_Z_OFFSET)
             s.other[t]=node.property_data(t);
     }
@@ -146,7 +147,8 @@ bool equivalent(const State&a,const State&b) {
     return x.mm3_per_mm==y.mm3_per_mm && x.width==y.width && x.height==y.height && x.role==y.role &&
         x.no_seam==y.no_seam && a.z==b.z && a.perimeter==b.perimeter && a.other==b.other &&
         a.process.speed_mm_per_s==b.process.speed_mm_per_s && a.process.accel_mm_per_s2==b.process.accel_mm_per_s2 &&
-        a.process.pressure_adv==b.process.pressure_adv && a.process.fan_speed_percent==b.process.fan_speed_percent;
+        a.process.pressure_adv==b.process.pressure_adv && a.fan.mode==b.fan.mode &&
+        (!a.fan.is_set() || a.fan.percent==b.fan.percent);
 }
 
 // A borrowed source leaf, its resolved inherited state, and its original

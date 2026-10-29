@@ -92,7 +92,7 @@ private:
         if (!entity.get(EPropertySpeed::key)) {
             auto &p=entity.get_or_add(EPropertySpeed::key);
             p.speed_mm_per_s=-1.f; p.accel_mm_per_s2=-1.f;
-            p.pressure_adv=-1.f; p.fan_speed_percent=-1.f;
+            p.pressure_adv=-1.f;
         }
         entity.get_or_add(EPropertySpeed::key).speed_mm_per_s=float(speed);
         entity.get_or_add(keys.applied).version=1;

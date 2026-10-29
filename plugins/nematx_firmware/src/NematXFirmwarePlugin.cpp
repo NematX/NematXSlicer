@@ -24,6 +24,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_plugin.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/FanConfig.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFirmwareViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeScriptProcessorViews.hpp"
 
@@ -38,7 +39,8 @@ using namespace slic3r_api::GCodeGeneration;
 
 const char *const k_no_dependencies[] = { nullptr };
 const char *const k_defined_config_keys[] = {
-    k_extruder_axis_key, k_disable_unused_fan_key, k_line_number_key, k_no_comment_key
+    k_extruder_axis_key, k_disable_unused_fan_key, k_line_number_key, k_no_comment_key,
+    "fan_printer_min_speed"
 };
 
 // Settings read by the session: the ones of every built-in firmware, plus the
@@ -46,6 +48,7 @@ const char *const k_defined_config_keys[] = {
 const raw_used_config_key k_used_config_keys[] = {
     {"deretract_speed", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"extruder_fan_offset", RAW_CO_VECTOR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"fan_printer_min_speed", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"extruder_offset", RAW_CO_VECTOR_POINT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"extruder_temperature_offset", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"extrusion_multiplier", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -138,6 +141,12 @@ private:
 
     void inilialize_impl(storage_handle *) const override
     {
+        // Publish the shared definition unchanged, including its host domain
+        // and printer scope, so this firmware also works without built-ins.
+        const raw_config_option_def minimum_fan = fan_minimum_option_definition();
+        if (orchestrator_create_option_def(m_orchestrator, &minimum_fan) != OPTION_DEF_ERROR_OK)
+            throw std::runtime_error("Cannot define the firmware minimum fan speed.");
+
         raw_config_option_def axis = raw_config_option_def_init();
         axis.opt_key = k_extruder_axis_key;
         axis.type = RAW_CO_VECTOR_STRING;

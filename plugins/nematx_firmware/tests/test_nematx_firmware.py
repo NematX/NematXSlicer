@@ -7,12 +7,15 @@ gcode_firmware_plugin = gcode.firmware.nematx, then checks the G-code text.
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -212,7 +215,7 @@ def profile_text(options: tuple[str, ...]) -> str:
 
 
 def run_export(name: str, options: tuple[str, ...] = (), model: Path = CUBE,
-               arguments: tuple[str, ...] = ()) -> tuple[Path, str, int]:
+               arguments: tuple[str, ...] = (), *, datadir: Path | None = None) -> tuple[Path, str, int]:
     case_dir = OUTPUT_ROOT / name
     case_dir.mkdir(parents=True, exist_ok=True)
     profile = case_dir / "profile.ini"
@@ -222,7 +225,7 @@ def run_export(name: str, options: tuple[str, ...] = (), model: Path = CUBE,
     environment = dict(os.environ)
     environment["PATH"] = os.pathsep.join(RUNTIME_PATH + [environment.get("PATH", "")])
     # The datadir must be a native absolute path: the Debug host checks it.
-    command = [str(HOST_EXECUTABLE), "--datadir", str(PLUGIN_DATADIR), "--export-gcode",
+    command = [str(HOST_EXECUTABLE), "--datadir", str(datadir or PLUGIN_DATADIR), "--export-gcode",
                "--load", str(profile), "--output", str(output), *arguments, str(model)]
     result = subprocess.run(command, cwd=HOST_BUILD, capture_output=True, timeout=1800, env=environment)
     log = (result.stdout + result.stderr).decode("utf-8", errors="replace")
@@ -242,6 +245,76 @@ def code_lines(path: Path) -> list[str]:
 
 def command(line: str) -> str:
     return re.split(r"[ =]", line, maxsplit=1)[0]
+
+
+class FirmwareCalibrationOwnership(unittest.TestCase):
+    """Fresh processes must define calibration even with no built-in provider."""
+
+    def test_cold_start_firmware_calibration(self) -> None:
+        roles = (
+            "default_fan_speed", "perimeter_fan_speed", "external_perimeter_fan_speed",
+            "infill_fan_speed", "solid_infill_fan_speed", "top_fan_speed", "gap_fill_fan_speed",
+            "bridge_fan_speed", "internal_bridge_fan_speed", "overhangs_fan_speed",
+            "support_material_fan_speed", "support_material_interface_fan_speed",
+        )
+        builtins = tuple("gcode.firmware." + name for name in
+                         ("marlin1", "marlin2", "prusa", "reprap", "sprinter", "klipper"))
+        nematx = "gcode.firmware.nematx"
+        OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+        # Each run gets a new datadir: an earlier successful process must not
+        # leave a saved activation/configuration that conceals missing ownership.
+        root = Path(tempfile.mkdtemp(prefix="cold-calibration-", dir=OUTPUT_ROOT))
+        for firmware, mixed in ((builtins[0], False), (builtins[-1], False),
+                                (nematx, False), (nematx, True)):
+            with self.subTest(firmware=firmware, mixed=mixed):
+                case = root / (firmware + ("-mixed" if mixed else "-only"))
+                plugins = case / "datadir" / "plugins"
+                plugins.mkdir(parents=True)
+                shutil.copytree(PLUGIN_DATADIR / "plugins" / "nematx-firmware", plugins / "nematx-firmware")
+                activation = configparser.RawConfigParser()
+                activation.optionxform = str
+                activation.read(PLUGIN_DATADIR / "plugins" / "activated.ini", encoding="utf-8-sig")
+                for provider in builtins + (nematx,):
+                    activation.set("activated", provider, "1" if mixed or provider == firmware else "0")
+                with (plugins / "activated.ini").open("w", encoding="utf-8") as stream:
+                    activation.write(stream)
+
+                for request in (20, 0):
+                    options = (
+                        f"gcode_firmware_plugin = {firmware}", "fan_printer_min_speed = 35",
+                        "extruder_fan_offset = 0%", "disable_fan_first_layers = 0",
+                        "full_fan_speed_layer = 0", "fan_below_layer_time = 0",
+                        "slowdown_below_layer_time = 0", "fan_speedup_time = 0", "fan_kickstart = 0",
+                        "seam_position = aligned",
+                    ) + tuple(f"{role} = {request}" for role in roles)
+                    name = str((case / f"request-{request}").relative_to(OUTPUT_ROOT))
+                    output, log, code = run_export(name, options, datadir=case / "datadir")
+                    self.assertEqual(code, 0, f"{name}: see host.log")
+                    self.assertTrue(output.is_file(), name)
+                    self.assertNotIn("no active plugin", log.lower(), name)
+                    self.assertNotIn("Disabled plugin 'gcode.firmware.", log, name)
+                    fans = [line for line in code_lines(output) if re.match(r"M(?:106|107|126)\b", line)]
+                    expected = ("M106=89.25" if request else "M106=0") if firmware == nematx else (
+                        "M106 S89" if request else "M107")
+                    self.assertEqual(fans, [expected], name)
+                    if firmware == nematx:
+                        self.assertIn("G71", code_lines(output), "NematX, not a fallback dialect")
+
+                    # A second fresh process verifies profile retention and the
+                    # actual selected provider, not merely the requested input.
+                    saved = output.parent / "saved.ini"
+                    environment = dict(os.environ)
+                    environment["PATH"] = os.pathsep.join(RUNTIME_PATH + [environment.get("PATH", "")])
+                    result = subprocess.run(
+                        [str(HOST_EXECUTABLE), "--datadir", str(case / "datadir"),
+                         "--load", str(output.parent / "profile.ini"), "--save", str(saved)],
+                        cwd=HOST_BUILD, capture_output=True, timeout=600, env=environment)
+                    (output.parent / "save.log").write_bytes(result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, 0, name)
+                    values = dict(line.split(" = ", 1) for line in
+                                  saved.read_text(encoding="utf-8").splitlines() if " = " in line)
+                    self.assertEqual(values["fan_printer_min_speed"], "35")
+                    self.assertEqual(values["gcode_firmware_plugin"], firmware)
 
 
 class NematXFirmwareIntegration(unittest.TestCase):

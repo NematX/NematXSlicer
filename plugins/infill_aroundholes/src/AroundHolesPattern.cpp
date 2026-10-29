@@ -353,7 +353,6 @@ private:
             speed.speed_mm_per_s = float(bypass_speed);
             speed.accel_mm_per_s2 = -1.f;
             speed.pressure_adv = -1.f;
-            speed.fan_speed_percent = -1.f;
             if (flow_ratio == 0.)
                 leaf.get_or_add(EPropertySpecialCommand::key).set(C_EXTRUSION_SPECIAL_COMMAND_EXTRUSION, 0.);
             return leaf;
