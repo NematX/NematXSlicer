@@ -23,7 +23,8 @@
    (place_handed_over_interval) places the dense stacks at the interface step, gives the middle to the splitter, and
    splits the whole interval evenly when the stacks leave no usable middle. The synchronized layout is grid-only:
    contacts that share a print Z take the bottom contact's span first, and each interval is then cut on the Z of the
-   object layers. */
+   object layers. Bridge footprints use caller-owned lazy per-layer pieces: thread starts select raw fill and perimeter
+   rings for each slab, and copies compose them in region order followed by work-island perimeter order. */
 
 namespace slic3r_api::Support::Common {
 namespace {
@@ -126,6 +127,9 @@ void merge_contacts(const SupportParams &p, GeneratedSupport &out)
 // layer; otherwise the height of the bottom contact flow (bottom_flow_mm). Non-soluble contacts whose Z lands within the minimum
 // height of a top contact take that contact's Z, as the native generator does, so the list is searched from the first contact that
 // can match. The returned reference belongs to out, which owns the layer.
+// In ascending object-layer order, bottom-contact print_z is non-decreasing: out.top is sorted, snapping chooses an upper
+// contact in [z - min_height, z + min_height], and min_height <= every object-layer height. A family generating contacts
+// in descending object-layer order reverses out.bottom before consumers use its non-decreasing print-Z order.
 GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const SupportParams &p, size_t id,
                                    const StoredPolygonCollection &touching, const StoredPolygonCollection &top_surfaces,
                                    GeneratedSupport &out)
@@ -145,6 +149,9 @@ GeneratorLayer &add_bottom_contact(const std::vector<Layer> &layers, const Suppo
         contact.polygons = clipper_intersection(clipper(top_surfaces), clipper_offset(clipper(touching),
             scale_d(c_float_or_percent_get_effective_value(&p.bottom_expansion, p.bottom_flow_mm.width)), join_type, 0.)).to_polygon_collection();
     if (!p.soluble) {
+        assert(std::is_sorted(out.top.begin(), out.top.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
         const auto first_at_or_above = std::lower_bound(out.top.begin(), out.top.end(), layer.print_z(),
             [](const GeneratorLayer *top, coord_t print_z) { return top->print_z < print_z; });
         const size_t first = size_t(first_at_or_above - out.top.begin());
@@ -517,31 +524,68 @@ double bridging_height_avg_mm(const Config &print_config, const Layer &layer, co
 //  - Perimeter pass: for each work region island with perimeters, unless one of its regions has a thread starting at or above
 //    the limit, the overhang perimeter footprints are added through bridge_areas (grown by gap_xy).
 // The layer walk ends after the first layer whose region pass left overlaps false. A soluble support gets nothing.
-// The result is a new collection owned by the caller.
+// The result is a new collection owned by the caller. A supplied cache belongs to this object/settings/storage combination
+// and is accessed sequentially by grid/tree trimming; without one, pieces live only for this call. Layer metadata and each piece
+// publish only a complete value, so geometry/allocation failures propagate and leave the failed slot retryable. Temporary pieces
+// and returned geometry use storage, which must outlive the cache. Soluble support initializes no cache.
 StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::vector<Layer> &layers, const Config &print_config,
-                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab)
+                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab, BridgeFootprintCache *cache)
 {
     StoredExPolygonCollection footprint(storage);
     if (p.soluble) return footprint;
+    BridgeFootprintCache local_cache;
+    if (!cache) cache = &local_cache;
+    if (cache->layers.empty()) cache->layers.resize(layers.size());
     const ClipperContext clipper(storage);
     const bool filament = p.distance_type == ContactDistanceType::Filament;
     const raw_surface_type bridge_fill = srf_type().bottom().solid().bridge().raw();
     const coord_t upper = slab.print_z + scale_to_layer_coord(p.gap_above);
-    size_t id = 0;
-    while (id < layers.size() && layers[id].bottom_z() < from_z) ++id;
+    const std::vector<Layer>::const_iterator first = std::lower_bound(layers.begin(), layers.end(), from_z,
+        [](const Layer &layer, coord_t z) { return layer.bottom_z() < z; });
+    size_t id = size_t(first - layers.begin());
     for (; id < layers.size(); ++id) {
         const Layer &layer = layers[id];
-        bool overlaps = false;
-        for (uint32_t region_idx = 0; region_idx < layer.region_count(); ++region_idx) {
-            const LayerRegion region = layer.region(region_idx);
-            const coord_t bridge_height = filament ?
-                scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, region)) : layer.height();
-            if (layer.print_z() - bridge_height >= upper) break;
-            overlaps = true;
+        if (!cache->layers[id]) {
+            BridgeFootprintLayer pieces;
+            for (uint32_t region_idx = 0; region_idx < layer.region_count(); ++region_idx)
+                pieces.regions.push_back(layer.region(region_idx));
             for (uint32_t island = 0; island < layer.island_count(); ++island) {
                 const LayerIsland layer_island = layer.island(island);
-                for (uint32_t work_idx = 0; work_idx < layer_island.region_island_count(); ++work_idx) {
-                    const LayerRegionIsland work = layer_island.region_island(work_idx);
+                for (uint32_t work_idx = 0; work_idx < layer_island.region_island_count(); ++work_idx)
+                    pieces.works.push_back(layer_island.region_island(work_idx));
+            }
+            pieces.region_starts.resize(pieces.regions.size());
+            pieces.region_fills.resize(pieces.regions.size());
+            pieces.perimeters.resize(pieces.works.size());
+            cache->layers[id].emplace(std::move(pieces));
+        }
+        BridgeFootprintLayer &pieces = *cache->layers[id];
+        // Layer regions normally contain every work member. A member absent from that list uses an uncached height,
+        // so membership in the metadata list is not required for the perimeter pass to compute its thread start.
+        // Returns a start for a borrowed region, publishing a cached scalar only after height computation succeeds;
+        // unknown bridge types propagate, and no geometry is owned or changed by this lookup.
+        const auto thread_start = [&](const LayerRegion &region) -> coord_t {
+            const std::vector<LayerRegion>::const_iterator found = std::find_if(pieces.regions.cbegin(), pieces.regions.cend(),
+                [&region](const LayerRegion &candidate) { return candidate.handle() == region.handle(); });
+            if (found != pieces.regions.cend()) {
+                std::optional<coord_t> &start = pieces.region_starts[size_t(found - pieces.regions.cbegin())];
+                if (!start) {
+                    const coord_t height = filament ? scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, region)) : layer.height();
+                    start = layer.print_z() - height;
+                }
+                return *start;
+            }
+            const coord_t height = filament ? scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, region)) : layer.height();
+            return layer.print_z() - height;
+        };
+        bool overlaps = false;
+        for (size_t region_idx = 0; region_idx < pieces.regions.size(); ++region_idx) {
+            const LayerRegion &region = pieces.regions[region_idx];
+            if (thread_start(region) >= upper) break;
+            overlaps = true;
+            if (!pieces.region_fills[region_idx]) {
+                StoredExPolygonCollection fills(storage);
+                for (const LayerRegionIsland &work : pieces.works) {
                     bool member = false;
                     for (uint32_t idx = 0; idx < work.region_count(); ++idx)
                         member = member || work.region(idx).handle() == region.handle();
@@ -549,24 +593,26 @@ StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::v
                     StoredExPolygonCollection bridges(storage);
                     for (const Surface &surface : work.fill_surfaces())
                         if (surface.type() == bridge_fill) bridges.push_back(surface.expolygon());
-                    footprint.append_move_from(clipper_offset(clipper(bridges), double(p.gap_xy), join_type, 0.).to_expolygon_collection());
+                    fills.append_move_from(clipper_offset(clipper(bridges), double(p.gap_xy), join_type, 0.).to_expolygon_collection());
                 }
+                pieces.region_fills[region_idx].emplace(std::move(fills));
             }
+            footprint.append_copy_from(*pieces.region_fills[region_idx]);
         }
-        for (uint32_t island = 0; island < layer.island_count(); ++island) {
-            const LayerIsland layer_island = layer.island(island);
-            for (uint32_t work_idx = 0; work_idx < layer_island.region_island_count(); ++work_idx) {
-                const LayerRegionIsland work = layer_island.region_island(work_idx);
-                if (!work.has_extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))) continue;
-                bool too_high = false;
-                for (uint32_t idx = 0; idx < work.region_count(); ++idx) {
-                    const coord_t bridge_height = filament ?
-                        scale_to_layer_coord(bridging_height_avg_mm(print_config, layer, work.region(idx))) : layer.height();
-                    if (layer.print_z() - bridge_height >= upper) { too_high = true; break; }
-                }
-                if (!too_high)
-                    bridge_areas(storage, ExtrusionEntity(work.extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))), p.gap_xy, footprint);
+        for (size_t work_idx = 0; work_idx < pieces.works.size(); ++work_idx) {
+            const LayerRegionIsland &work = pieces.works[work_idx];
+            if (!work.has_extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))) continue;
+            bool too_high = false;
+            for (uint32_t idx = 0; idx < work.region_count(); ++idx)
+                if (thread_start(work.region(idx)) >= upper) { too_high = true; break; }
+            if (too_high) continue;
+            if (!pieces.perimeters[work_idx]) {
+                StoredExPolygonCollection perimeter(storage);
+                // bridge_areas only appends raw footprints; it never reads the destination's existing geometry.
+                bridge_areas(storage, ExtrusionEntity(work.extrusion(raw_extrusion_role(RAW_EXTRUSION_ROLE_PERIMETER))), p.gap_xy, perimeter);
+                pieces.perimeters[work_idx].emplace(std::move(perimeter));
             }
+            footprint.append_copy_from(*pieces.perimeters[work_idx]);
         }
         if (!overlaps) break;
     }

@@ -22,7 +22,8 @@
    the bisector of the two stretches meeting at its node (path_ring_normals), and the two ends get a half sphere each. The mesh
    is held as plain arrays of the plugin API (BranchMesh) and handed to the host as a StoredTriangleMesh, which refuses a
    repeated vertex index. The mesh is positive, so its Positive slicing mode gives the solid section of the branch at each Z.
-   slice_branch_meshes() slices every mesh at the Z values of the slabs it crosses, in one call per path.
+   slice_branch_meshes() sorts float slice heights with their output indices before parallel jobs start. Each mesh selects
+   its inclusive height range from that read-only index and is sliced in one call per path.
 
    Every tree is one parallel job with its own scratch storage: the meshes and the raw slices live in it, and the non-empty
    sections move into the output storage (out_storage, owned by the caller) before the job ends. The sections of the trees are joined in tree order afterwards. */
@@ -40,7 +41,7 @@ struct BranchMesh {
 
 // A section of one tree: the polygons (in out_storage) that its meshes give at the slice Z number z_index.
 struct TreeSection {
-    size_t z_index;
+    uint32_t z_index;
     slic3r_api::StoredPolygonCollection polygons;
 };
 
@@ -48,7 +49,8 @@ struct TreeSection {
 struct TreeSlicing {
     storage_handle *out_storage;
     const std::vector<RoutedTree> &trees;
-    const std::vector<coord_t> &slice_z;
+    // Float Z and output slot, sorted once before parallel readers; equal float heights use output-slot order.
+    std::vector<std::pair<float, uint32_t>> cuts;
     const plugin_run_context *context;
     std::vector<std::vector<TreeSection>> sections;
 };
@@ -86,11 +88,18 @@ void add_triangle(BranchMesh &mesh, int a, int b, int c);
 int next_in_ring(int i, int ibegin, int iend);
 } // namespace
 
-// Slices every path of every tree at the Z values it crosses; a path is sliced in one call for all of them.
+// Indexes borrowed slice heights as sorted float/output-slot pairs before parallel tree jobs, then slices inclusive mesh spans;
+// slice counts must fit uint32_t; trees and context outlive synchronous jobs, out_storage owns returned sections,
+// and slicing/cancellation/allocation failures propagate.
 std::vector<slic3r_api::StoredPolygonCollection> slice_branch_meshes(storage_handle *out_storage, const std::vector<RoutedTree> &trees,
                                                                      const std::vector<coord_t> &slice_z, const plugin_run_context *context)
 {
-    TreeSlicing slicing{ out_storage, trees, slice_z, context, std::vector<std::vector<TreeSection>>(trees.size()) };
+    assert(slice_z.size() <= std::numeric_limits<uint32_t>::max());
+    TreeSlicing slicing{ out_storage, trees, {}, context, std::vector<std::vector<TreeSection>>(trees.size()) };
+    slicing.cuts.reserve(slice_z.size());
+    for (size_t idx = 0; idx < slice_z.size(); ++idx)
+        slicing.cuts.emplace_back(float(unscaled(slice_z[idx])), uint32_t(idx));
+    std::sort(slicing.cuts.begin(), slicing.cuts.end());
     // Each tree is a separate job that draws its branch paths.
     slic3r_api::parallel_for_storage_with_progress(0, uint32_t(trees.size()), context, nullptr, &slice_tree, &slicing);
 
@@ -123,18 +132,16 @@ void slice_path(storage_handle *scratch, const TreeSlicing &slicing, const Route
     const std::pair<float, float> span = extrude_branch(tree, path, path_ring_normals(tree, path), mesh);
     slic3r_api::Support::Common::Counters::add(slic3r_api::Support::Common::Counters::totals.meshes);
     // The slice Z values inside the Z span of the mesh, with the index of the slice Z they come from.
-    std::vector<std::pair<float, size_t>> cuts;
-    for (size_t idx = 0; idx < slicing.slice_z.size(); ++idx) {
-        const float z = float(unscaled(slicing.slice_z[idx]));
-        if (z >= span.first && z <= span.second)
-            cuts.emplace_back(z, idx);
-    }
+    const std::vector<std::pair<float, uint32_t>>::const_iterator first = std::lower_bound(slicing.cuts.cbegin(), slicing.cuts.cend(), span.first,
+        [](const std::pair<float, uint32_t> &cut, float z) { return cut.first < z; });
+    std::vector<std::pair<float, uint32_t>> cuts;
+    for (std::vector<std::pair<float, uint32_t>>::const_iterator it = first; it != slicing.cuts.cend() && it->first <= span.second; ++it)
+        cuts.push_back(*it);
     if (cuts.empty())
         return;
-    std::sort(cuts.begin(), cuts.end());
     std::vector<float> zs;
     zs.reserve(cuts.size());
-    for (const std::pair<float, size_t> &cut : cuts)
+    for (const std::pair<float, uint32_t> &cut : cuts)
         zs.push_back(cut.first);
 
     // The host refuses a mesh with a repeated vertex index (std::invalid_argument): the error stops the step, no branch is skipped.

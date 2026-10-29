@@ -27,8 +27,13 @@
        volumes.precalculate(max_layer);
        const StoredPolygonCollection &free = volumes.getAvoidance(radius, layer, TreeVolumes::AvoidanceType::Fast, false);
 
+   Per-layer outline and radius-zero surface unions are immutable expolygon collections built lazily in run storage.
+   A call_once per layer publishes each complete union to concurrent readers; failed initialization is retryable.
+   Union temporaries are released when initialization returns or throws. Per-radius computations instead use scratch
+   storage and publish their results into the caches below.
+
    Storage: the areas are StoredPolygonCollection values owned by the run storage given to the constructor, which must outlive the
-   TreeVolumes (declare it first). A computation runs on a scratch storage of its own (slic3r_parallel_for_storage); its result is
+   TreeVolumes (declare it first). A per-radius computation runs on scratch storage of its own; its result is
    moved into the run storage when it is published, so that no handle of a scratch storage survives the computation.
 
    Concurrency: once the constructor and precalculate() have returned, the getters are called from many threads at once, and any
@@ -77,8 +82,8 @@ static constexpr const coord_t SUPPORT_TREE_COLLISION_RESOLUTION = scale_i(0.5);
 class TreeVolumes
 {
 public:
-    // Reads the object once, in run_storage: it slices the support blockers and simplifies the outline of every layer. No area is
-    // computed until precalculate(). The areas are owned by run_storage, which must outlive this object. The context, which must
+    // Reads the object once, in run_storage: it slices blockers and simplifies outlines; ordered unions are initialized lazily per layer.
+    // Radius-dependent areas are computed on demand. The areas are owned by run_storage, which must outlive this object. The context, which must
     // outlive it too, is checked before and after the slicing of each blocker volume and between its cleaned layers
     // (the slicing of one mesh checks it too, at the coarse granularity of the native slicer)
     // and by every later computation.
@@ -142,6 +147,8 @@ public:
     // the last step of the table the steps keep growing by SUPPORT_TREE_EXPONENTIAL_FACTOR.
     coord_t ceilRadius(const coord_t radius) const;
 private:
+    // Returns a layer's immutable ordered outline union, publishing it once before concurrent readers proceed.
+    const slic3r_api::StoredExPolygonCollection &outline_regions(LayerIndex layer_idx);
     // Areas of a range of layers computed on a scratch storage, indexed by layer. A collection stays in the storage that allocated it, so
     // the cache that receives them moves their content into new collections of the run storage when it publishes them; the range must
     // be destroyed before its scratch storage.
@@ -309,6 +316,8 @@ private:
 
     // The context of the step, checked by every computation; not owned, nullptr never cancels.
     const plugin_run_context *m_context = nullptr;
+    // Borrowed storage for immutable outline and radius-zero surface unions; outlives these volumes.
+    storage_handle *m_run_storage;
     // Per layer maximum move of the branch centres (scaled), fast and slow, with a small margin against rounding.
     std::vector<coord_t> m_max_move;
     std::vector<coord_t> m_max_move_slow;
@@ -321,8 +330,16 @@ private:
     // that branch_radius rounds up to and bp_radius. In that band, where the branches widen into their foot on the build plate, a
     // wider branch is checked at the resolution of foot_cache_step (half the largest support nozzle).
     std::vector<coord_t> m_radius_steps;
-    // Object outline of each layer.
+    // Simplified object rings for consumers that use the flat form without an expolygon union.
     std::vector<slic3r_api::StoredPolygonCollection> m_layer_outlines;
+    // Empty collections filled lazily with ordered outline unions at the first offset that needs each layer.
+    std::vector<slic3r_api::StoredExPolygonCollection> m_layer_outline_regions;
+    // Publishes each complete outline union before concurrent readers use that layer.
+    std::deque<std::once_flag> m_layer_outline_regions_once;
+    // Empty collections filled lazily with radius-zero surface unions in calculatePlaceables.
+    std::vector<slic3r_api::StoredExPolygonCollection> m_placeable_regions;
+    // Publishes each immutable radius-zero union before concurrent readers use that layer.
+    std::deque<std::once_flag> m_placeable_regions_once;
     // Support blockers of each layer, avoided like the object; empty when the object has no blocker.
     std::vector<slic3r_api::StoredExPolygonCollection> m_anti_overhang;
     // The settings that give the radii of the tips and the branch sizes.

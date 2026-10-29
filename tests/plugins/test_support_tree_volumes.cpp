@@ -705,6 +705,64 @@ struct CancelHost {
     }
 };
 
+// Concurrent cold requests share per-layer outline and placeable unions across radii; each worker owns its result slot,
+// joined results match serial areas, and captured worker exceptions fail assertions on the test thread.
+TEST_CASE("Lazy per-layer unions agree under concurrent radius requests", "[plugins][support-tree-volumes][support-layer-unions]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene;
+    std::vector<Request> requests;
+    for (TF::LayerIndex layer : {1, 3, 5})
+        for (coord_t radius : {scene.settings.min_radius, scene.settings.branch_radius}) {
+            requests.push_back(Request{Kind::Collision, radius, layer});
+            requests.push_back(Request{Kind::Placeable, radius, layer});
+        }
+    Volumes serial = scene.volumes();
+    std::vector<Rings> expected;
+    for (const Request &request : requests)
+        expected.push_back(rings(fetch(serial, request)));
+    Volumes concurrent = scene.volumes();
+    std::vector<int> mismatches(4, 0);
+    std::vector<std::exception_ptr> errors(4);
+    // Each worker requests every key in a rotated order; areas and their storage outlive the joined loop.
+    tbb::parallel_for(0, 4, [&](int worker) {
+        try {
+            for (size_t offset = 0; offset < requests.size(); ++offset) {
+                const size_t idx = (offset + size_t(worker)) % requests.size();
+                if (rings(fetch(concurrent, requests[idx])) != expected[idx])
+                    ++mismatches[worker];
+            }
+        } catch (...) { errors[worker] = std::current_exception(); }
+    });
+    for (size_t worker = 0; worker < errors.size(); ++worker) {
+        REQUIRE_FALSE(bool(errors[worker]));
+        CHECK(mismatches[worker] == 0);
+    }
+}
+
+// Host cancellation checks bracket outline union initialization and follow the radius-zero surface union inside call_once.
+// The boolean operation itself exposes no cancellation hook; failures at these reachable boundaries must leave retries equal to serial areas.
+TEST_CASE("Interrupted per-layer union initialization remains retryable", "[plugins][support-tree-volumes][support-layer-unions]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Scene scene;
+    for (Kind kind : {Kind::Collision, Kind::Placeable}) {
+        const Request request{kind, scene.settings.branch_radius, 1};
+        Volumes serial = scene.volumes();
+        const Rings expected = rings(fetch(serial, request));
+        CancelHost host;
+        const plugin_run_context context = host.context();
+        Volumes volumes = scene.volumes(&context);
+        if (kind == Kind::Placeable)
+            volumes.getPlaceableAreas(0, 1);
+        host.calls = 0;
+        host.cancel_from = kind == Kind::Collision ? 2 : 1;
+        REQUIRE_THROWS_AS(fetch(volumes, request), slic3r_api::PluginCancelled);
+        host.cancel_from = 0;
+        CHECK(rings(fetch(volumes, request)) == expected);
+    }
+}
+
 // Requests for every kind of area on a layer that precalculate() does not compute. The Slow and FastSafe avoidances, which need the
 // holefree collisions, are asked for the radius of a tip, as only the radii below the branch radius have holefree collisions.
 std::vector<Request> lazy_requests(const TF::TreeSettings &settings)

@@ -67,6 +67,7 @@ constexpr clipper_join_type_t join_type = CLIPPER_JOIN_SQUARE;
 
 // The views, parameters and object settings every phase reads, gathered once per run.
 struct Run {
+    // Gathers borrowed settings and views and reserves lazy square-join outline slots in caller-owned storage.
     Run(const plugin_run_context *context, const Print &print, const Object &object, const Common::SupportParams &params,
         storage_handle *storage);
     const plugin_run_context *context;
@@ -77,6 +78,10 @@ struct Run {
     ClipperContext clipper;
     // The object layers, bottom first.
     std::vector<Layer> layers;
+    // Filled at first trimming use per layer, then read-only; this run's trimming passes execute sequentially.
+    mutable std::vector<std::optional<ExPolys>> grown_outlines;
+    // Bridge pieces share run storage; trimming visits slabs sequentially, so initialization needs no lock.
+    mutable Common::BridgeFootprintCache bridge_cache;
     int32_t threshold, enforce_layers;
     bool synchronize;
     // Build-plate-only support: support may stand only on the bed, so contacts and columns are cut by the area the object covers below.
@@ -127,7 +132,8 @@ std::vector<unsigned char> rasterize(int size_x, int size_y, double pixel, c_poi
 Polys contours(const Grid &grid, coord_t offset, bool fill_holes);
 } // namespace
 
-// Run geometric phases on a sliced object with demand; the result owns every slab and the object receives no layers or extrusions here.
+// Runs geometric phases with borrowed sliced inputs and print-Z-ordered contacts; out owns slabs, the object receives no layers
+// or extrusions here, and cancellation, geometry and allocation failures propagate.
 void generate_support(const plugin_run_context *context, const Print &print, const Object &object,
                       const Common::SupportParams &params, Common::GeneratedSupport &out)
 {
@@ -139,17 +145,26 @@ void generate_support(const plugin_run_context *context, const Print &print, con
     intermediate_layers(run, out);
     trim_by_object(run, out.top);
     base_layers(run, areas, out);
-    for (Common::GeneratorLayer *top : out.top)
-        for (const Common::GeneratorLayer *bottom : out.bottom)
+    for (Common::GeneratorLayer *top : out.top) {
+        // Bottom contacts have print_z >= top->print_z, including equality, and bottom_print_z() <= top->bottom_z.
+        assert(std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
+        const Common::GeneratorLayers::const_iterator first = std::lower_bound(out.bottom.cbegin(), out.bottom.cend(), top->print_z,
+            [](const Common::GeneratorLayer *slab, coord_t z) { return slab->print_z < z; });
+        for (Common::GeneratorLayers::const_iterator it = first; it != out.bottom.cend(); ++it) {
+            const Common::GeneratorLayer *bottom = *it;
             if (bottom->bottom_print_z() <= top->bottom_z && top->print_z <= bottom->print_z)
                 top->polygons = polygons(clipper_diff(run.clipper(top->polygons), run.clipper(bottom->polygons)));
+        }
+    }
     Common::carve_interfaces(params, params.style == Common::SupportStyle::Snug, out);
     // The foot of the support is widened, as in every family. The support ignores the brim and the skirt.
     Common::expand_first_layer_foot(run.object, run.layers, params, out);
 }
 
 namespace {
-// Borrows the run inputs and stores ordered layer views and grid-only settings; the object and storage must outlive the run, and allocation failures propagate.
+// Borrows run inputs, stores ordered layer views/settings and reserves lazy clearance-offset slots without computing geometry; object/storage outlive the run, and allocation failures propagate.
 Run::Run(const plugin_run_context *context, const Print &print, const Object &object, const Common::SupportParams &params,
          storage_handle *storage)
     : context(context), print_config(print.config()), object(object), p(params), storage(storage), clipper(storage)
@@ -164,6 +179,7 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
     interface_layer_height = config.get("support_material_interface_layer_height").get_float_or_percent();
     closing_radius = config.get("support_material_closing_radius").get_float();
     spacing = config.get("support_material_spacing").get_float();
+    grown_outlines.resize(layers.size());
 }
 
 Polys polygons(ClipperOperand &&result)
@@ -356,7 +372,7 @@ void intermediate_layers(const Run &run, Common::GeneratedSupport &out)
     Common::place_intermediate_slabs(spacing, run.layers, out);
 }
 
-// Remove object silhouettes within the slab's gap-expanded Z range, including thick bridge fills and perimeter footprints above it; slab geometry is replaced in place.
+// Finds the first layer strictly above the slab's lower gap bound, lazily caches ordered square-join offsets per used layer and copies them with bridge footprints into trimming; borrowed slabs are replaced in place, run storage owns geometry, and cancellation/geometry/allocation failures propagate.
 void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
 {
     const Common::SupportParams &p = run.p;
@@ -364,16 +380,24 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
     for (Common::GeneratorLayer *support : layers) {
         if (support->polygons.empty()) continue;
         ExPolys trimming(run.storage);
-        size_t id = 0;
         const coord_t lower = support->print_z - support->height_block - scale_to_layer_coord(p.gap_below);
-        while (id < run.layers.size() && run.layers[id].print_z() <= lower) ++id;
+        // Layer views remain in print-Z order; upper_bound matches the strict print_z > lower window start.
+        const std::vector<Layer>::const_iterator first = std::upper_bound(run.layers.begin(), run.layers.end(), lower,
+            [](coord_t z, const Layer &layer) { return z < layer.print_z(); });
+        size_t id = size_t(first - run.layers.begin());
         const coord_t upper = support->print_z + scale_to_layer_coord(p.gap_above);
         for (; id < run.layers.size(); ++id) {
             const Layer &layer = run.layers[id];
             if (layer.bottom_z() >= upper) break;
-            trimming.append_move_from(clipper_offset(clipper(layer.slices()), double(p.gap_xy), join_type, 0.).to_expolygon_collection());
+            if (!run.grown_outlines[id]) {
+                throw_if_cancelled(run.context);
+                run.grown_outlines[id].emplace(clipper_offset(clipper(layer.slices()), double(p.gap_xy), join_type, 0.).to_expolygon_collection());
+            }
+            // Copy the reusable offset, then retain the move insertion's native ring handling and order.
+            ExPolys grown = run.grown_outlines[id]->readonly().clone(run.storage);
+            trimming.append_move_from(grown);
         }
-        trimming.append_move_from(Common::bridge_footprint(run.storage, run.layers, run.print_config, p, upper, *support));
+        trimming.append_move_from(Common::bridge_footprint(run.storage, run.layers, run.print_config, p, upper, *support, &run.bridge_cache));
         trimming.ensure_valid(p.resolution);
         const ExPolys united = Common::native_expolygons(clipper_union(clipper(trimming)));
         support->polygons = polygons(clipper_diff(clipper(support->polygons), clipper(united)));
@@ -381,25 +405,48 @@ void trim_by_object(const Run &run, Common::GeneratorLayers &layers)
     }
 }
 
-// Select the cached projection at each slab's top, subtract enclosing contacts, and trim against the object; base slabs stay owned by out.
+// Searches print-Z-ordered layers/contacts, selects cached projections, subtracts enclosing contacts and trims against the object;
+// areas shares object-layer indices, out owns modified base slabs, and cancellation/geometry/allocation failures propagate.
 void base_layers(const Run &run, const std::vector<Polys> &areas, Common::GeneratedSupport &out)
 {
     const ClipperContext &clipper = run.clipper;
     for (Common::GeneratorLayer *base : out.base) {
-        int below = -1;
-        for (size_t id = 0; id < run.layers.size() && run.layers[id].print_z() <= base->print_z; ++id) below = int(id);
+        const std::vector<Layer>::const_iterator above = std::upper_bound(run.layers.begin(), run.layers.end(), base->print_z,
+            [](coord_t z, const Layer &layer) { return z < layer.print_z(); });
+        const int below = int(above - run.layers.begin()) - 1;
         Polys polys = (below < 0 ? areas.front() : areas[below]).readonly().clone(run.storage);
+        assert(std::is_sorted(out.top.begin(), out.top.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
         if (below < 0)
-            for (const Common::GeneratorLayer *top : out.top)
+            for (Common::GeneratorLayers::const_iterator it = out.top.cbegin(), end = std::upper_bound(out.top.cbegin(), out.top.cend(), run.layers[0].print_z(),
+                     [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != end; ++it) {
+                const Common::GeneratorLayer *top = *it;
                 if (top->bottom_z >= base->print_z && top->print_z <= run.layers[0].print_z()) polys.append_copy_from(top->polygons);
+            }
         Polys trimming(run.storage);
-        for (const Common::GeneratorLayer *top : out.top) {
-            assert(!(base->print_z > top->bottom_z + SCALED_EPSILON && base->bottom_z < top->bottom_z - SCALED_EPSILON));
+        // Debug overlap checks cover every contact, including those outside the print-Z search range.
+        assert(std::all_of(out.top.begin(), out.top.end(), [base](const Common::GeneratorLayer *top) {
+            return !(base->print_z > top->bottom_z + SCALED_EPSILON && base->bottom_z < top->bottom_z - SCALED_EPSILON);
+        }));
+        assert(std::all_of(out.bottom.begin(), out.bottom.end(), [base](const Common::GeneratorLayer *bottom) {
+            return !(base->print_z > bottom->print_z + SCALED_EPSILON && base->bottom_z < bottom->print_z - SCALED_EPSILON);
+        }));
+        assert(std::is_sorted(out.top.begin(), out.top.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
+        for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.top.cbegin(), out.top.cend(), base->bottom_z,
+                 [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.top.cend(); ++it) {
+            const Common::GeneratorLayer *top = *it;
             if (top->bottom_z < base->print_z && top->print_z > base->bottom_z &&
                 base->print_z <= top->print_z && base->bottom_z >= top->bottom_z) trimming.append_copy_from(top->polygons);
         }
-        for (const Common::GeneratorLayer *bottom : out.bottom) {
-            assert(!(base->print_z > bottom->print_z + SCALED_EPSILON && base->bottom_z < bottom->print_z - SCALED_EPSILON));
+        assert(std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const Common::GeneratorLayer *a, const Common::GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
+        for (Common::GeneratorLayers::const_iterator it = std::upper_bound(out.bottom.cbegin(), out.bottom.cend(), base->bottom_print_z(),
+                 [](coord_t z, const Common::GeneratorLayer *slab) { return z < slab->print_z; }); it != out.bottom.cend(); ++it) {
+            const Common::GeneratorLayer *bottom = *it;
             if (bottom->bottom_print_z() < base->print_z && bottom->print_z > base->bottom_print_z() &&
                 base->print_z <= bottom->print_z && base->bottom_z >= bottom->bottom_print_z()) trimming.append_copy_from(bottom->polygons);
         }

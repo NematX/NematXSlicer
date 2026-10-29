@@ -44,9 +44,11 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    filled by one computation instead of one per layer. See the Concurrency note in TreeVolumes.hpp.
 
    All the geometry is written on the plugin API: the areas are StoredPolygonCollection, the boolean operations and offsets are the
-   wrappers of TreeGeometry.hpp, and the simplification is slic3r_api::polygons_simplify. Each computation allocates its temporary
+   wrappers of TreeGeometry.hpp, and the simplification is slic3r_api::polygons_simplify. Each per-radius computation allocates its temporary
    collections in a scratch storage (with_scratch_storage), which is destroyed when the computation returns; the areas to keep are
-   moved into the run storage by the caches when they are published.
+   moved into the run storage by the caches when they are published. Per-layer immutable outline and radius-zero surface
+   unions are built lazily in run storage instead: call_once publishes each complete union to readers, and local
+   temporary collections are released on return or exception so failed initialization can be retried.
 */
 
 namespace Slic3r::TreeFamily {
@@ -141,11 +143,12 @@ std::vector<coord_t> build_radius_steps(const coord_t min_radius, const coord_t 
 }
 } // namespace
 
-// Copies settings and caches simplified real-layer outlines in run_storage; views are borrowed during construction. Cancellation
+// Copies settings and caches simplified real-layer rings in run_storage, reserving empty per-layer union collections for lazy initialization; views are borrowed during construction. Cancellation
 // and allocation failures propagate; the supplied storage and the context, when non-null, must outlive the resulting volumes.
 TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Print &print, const TreeSettings &settings, storage_handle *run_storage,
                          const plugin_run_context *context) :
     m_context(context),
+    m_run_storage(run_storage),
     m_min_resolution(settings.resolution),
     m_support_rests_on_model(settings.support_rests_on_model),
     m_radius_steps(build_radius_steps(settings.min_radius, settings.branch_radius, settings.bp_radius,
@@ -163,16 +166,24 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
     m_wall_restrictions_cache(run_storage)
 {
     // The constructor does the two once-only readings of the object, in the run storage: it slices the support blockers and it
-    // simplifies the outline of every layer. Nothing else is computed until precalculate().
+    // simplifies the outline of every layer. Unions for offsets are computed at first use of each layer.
 
     // The support blockers of every layer: the union of all the blocker volumes, which are sliced at the slice Z of the layers.
     // The slices use the print resolution to clean the outlines, where the native PrintObject::slice_support_blockers() uses the
     // default one: a contour lies within `resolution` of the native contour.
     const std::vector<float> slice_zs = Common::layer_slice_zs(object);
     const c_mesh_slicing_params slicing_params = Common::support_modifier_slicing_params(print, object);
-    // One scratch storage holds the temporaries of the unions and of the simplifications; the results are moved to the run storage.
+    // One scratch storage holds blocker-union and outline-simplification temporaries; their results move to run storage.
     const uint32_t layer_count = object.layer_count();
     m_layer_outlines.reserve(layer_count);
+    m_layer_outline_regions.reserve(layer_count);
+    m_layer_outline_regions_once.resize(layer_count);
+    m_placeable_regions.reserve(layer_count);
+    m_placeable_regions_once.resize(layer_count);
+    for (uint32_t layer_idx = 0; layer_idx < layer_count; ++layer_idx) {
+        m_layer_outline_regions.emplace_back(run_storage);
+        m_placeable_regions.emplace_back(run_storage);
+    }
     with_scratch_storage([&](storage_handle *scratch_storage) {
         for (uint32_t volume_idx = 0; volume_idx < object.volume_count(); ++ volume_idx) {
             const slic3r_api::Volume volume = object.volume(volume_idx);
@@ -208,6 +219,7 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
             const StoredPolygonCollection rings = to_polygons(scratch_storage, object.layer(layer_idx).slices());
             StoredPolygonCollection simplified = slic3r_api::polygons_simplify(scratch_storage, rings, double(settings.resolution));
             m_layer_outlines.emplace_back(moved_to_storage(run_storage, simplified));
+            slic3r_api::throw_if_cancelled(m_context);
         }
     });
     // The helper that slices the blockers may drop a cancellation at the boundary of its job: no half-built object leaves the constructor.
@@ -217,6 +229,19 @@ TreeVolumes::TreeVolumes(const slic3r_api::Object &object, const slic3r_api::Pri
         m_max_move.push_back(std::max<coord_t>(move - 2, 0));
     for (coord_t move : settings.max_move_slow)
         m_max_move_slow.push_back(std::max<coord_t>(move - 2, 0));
+}
+
+// Unites a valid layer's borrowed simplified rings once in run storage and returns the immutable result; no cache mutex is held,
+// local temporaries are released on exit, and cancellation/allocation failures leave call_once retryable without publishing a partial union.
+const StoredExPolygonCollection &TreeVolumes::outline_regions(LayerIndex layer_idx)
+{
+    std::call_once(m_layer_outline_regions_once[layer_idx], [this, layer_idx] {
+        throw_if_interrupted();
+        StoredExPolygonCollection united = expolygons_union(m_run_storage, m_layer_outlines[layer_idx]);
+        throw_if_interrupted();
+        m_layer_outline_regions[layer_idx] = std::move(united);
+    });
+    return m_layer_outline_regions[layer_idx];
 }
 
 // Computes the caches for the keys (ceiled radius, layer) that a tree whose top layer is max_layer can request: each radius is
@@ -353,7 +378,7 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
                         if (offset_value == 0)
                             collision_areas_offsetted[layer_idx].move_from(polygons_union(storage, outlines[layer_idx]));
                         else {
-                            const StoredExPolygonCollection regions = expolygons_union(storage, outlines[layer_idx]);
+                            const StoredExPolygonCollection &regions = outline_regions(layer_idx);
                             collision_areas_offsetted[layer_idx].move_from(polygons_offset(storage, regions, offset_value, CLIPPER_JOIN_MITER, 1.2));
                         }
                         slic3r_api::throw_if_cancelled(m_context);
@@ -384,7 +409,7 @@ void TreeVolumes::calculateCollision(const coord_t radius, const LayerIndex max_
                                 // an overhang below 90 degrees is then left unsupported rather than fused to the object.
                                 const coord_t required_range_x =
                                     (xy_distance - ((i - (z_distance_top_layers == 1 ? 0.5 : 0)) * xy_distance / z_distance_top_layers));
-                                const StoredExPolygonCollection regions = expolygons_union(storage, outlines[j]);
+                                const StoredExPolygonCollection &regions = outline_regions(j);
                                 StoredPolygonCollection grown = polygons_offset(storage, regions, radius + required_range_x, CLIPPER_JOIN_MITER, 1.2);
                                 collisions.append_move_from(grown);
                             }
@@ -609,15 +634,20 @@ void TreeVolumes::calculatePlaceables(const coord_t radius, const LayerIndex max
         for (LayerIndex layer_idx = 0; layer_idx <= max_required_layer; ++ layer_idx)
             data.emplace_back(result_storage);
 
-        // When the placeable areas of radius 0 are not cached, one computation of their whole range fills them (they come with the
-        // collision of radius 0), instead of one per layer in the loop below.
+        // Request only the radius-zero range needed by this calculation, preserving on-demand cache boundaries.
         getPlaceableAreas(0, max_required_layer);
-
         tbb::parallel_for(tbb::blocked_range<LayerIndex>(1, max_required_layer + 1),
             [this, &data, radius](const tbb::blocked_range<LayerIndex>& range) {
                 with_scratch_storage([&](storage_handle *storage) {
                     for (LayerIndex layer_idx = range.begin(); layer_idx < range.end(); ++ layer_idx) {
-                        const StoredExPolygonCollection regions = expolygons_union(storage, getPlaceableAreas(0, layer_idx));
+                        // Publishes this layer's union once in run storage before readers proceed; getters hold no cache lock
+                        // during computation, and call_once retries after cancellation or allocation failures.
+                        std::call_once(m_placeable_regions_once[layer_idx], [this, layer_idx] {
+                            StoredExPolygonCollection united = expolygons_union(m_run_storage, getPlaceableAreas(0, layer_idx));
+                            throw_if_interrupted();
+                            m_placeable_regions[layer_idx] = std::move(united);
+                        });
+                        const StoredExPolygonCollection &regions = m_placeable_regions[layer_idx];
                         data[layer_idx].move_from(polygons_offset(storage, regions,
                             // As a placeable area is calculated by (collision of the layer below) - (collision of the current layer) and the collision is offset by xy_distance,
                             // it can happen that a small line is considered a flat area to place something onto, even though it is mostly

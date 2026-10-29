@@ -108,11 +108,17 @@ void contact_loops(storage_handle *storage, MutableExtrusionEntity out, Polys &c
 std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area);
 // Clip one path from the highest overlap down, scale its flow by the remaining height and rechain the fragments from its start.
 void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coord_t z, const std::vector<Internal::Overlap> &overlapping, coord_t resolution);
+// Borrowed marked layers keyed by print Z, with their auxiliary-list position retained for operand order.
+using SupportLayerIndex = std::map<coord_t, std::vector<std::pair<uint32_t, const layer_handle *>>>;
 // Gather the lower support footprints whose top lies between the bottom and the current slab, sorted by Z.
-std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_handle *object, coord_t z, coord_t bottom, bool bottom_contact);
+std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLayerIndex &support_layers, coord_t z, coord_t bottom, bool bottom_contact);
+
+// Returns the first layer reaching z: bottom=true selects bottom_z, false selects print_z; both sequences must be sorted.
+// Callers apply an inclusive tolerance window starting at this index.
+uint32_t first_layer_at(const Object &object, coord_t z, bool bottom);
 // Generate one role across a support layer and assign its paths to the islands they cross.
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
-                   const std::vector<coord_t> &support_z, SurfaceRole role, layer_handle *layer);
+                   const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer);
 
 Polys as_polygons(ClipperOperand &&result)
 {
@@ -166,8 +172,9 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
         parts.bottom_interface = layer_polygons(storage, layer, SurfaceRole::Bottom, 0);
     } else {
         Polys adjacent(storage);
-        for (uint32_t index = 0; index < object.layer_count(); ++index) {
+        for (uint32_t index = first_layer_at(object, layer_bottom - CONTACT_MATCH_TOLERANCE, false); index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
+            if (object_layer.print_z() > layer_bottom + CONTACT_MATCH_TOLERANCE) break;
             if (std::abs(object_layer.print_z() - layer_bottom) <= CONTACT_MATCH_TOLERANCE) Common::append_polygons(adjacent, object_layer.slices());
         }
         parts.bottom_contact = as_polygons(clipper_intersection(clipper(bottom), clipper(adjacent)));
@@ -178,14 +185,30 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
         parts.top_contact.copy_from(top);
     } else {
         Polys adjacent(storage);
-        for (uint32_t index = 0; index < object.layer_count(); ++index) {
+        for (uint32_t index = first_layer_at(object, z + scale_to_layer_coord(geometry.gap_above) - CONTACT_MATCH_TOLERANCE, true); index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
+            if (object_layer.bottom_z() > z + scale_to_layer_coord(geometry.gap_above) + CONTACT_MATCH_TOLERANCE) break;
             if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) <= CONTACT_MATCH_TOLERANCE) Common::append_polygons(adjacent, object_layer.slices());
         }
         parts.top_contact = as_polygons(clipper_intersection(clipper(top), clipper(adjacent)));
         parts.top_interface = as_polygons(clipper_diff(clipper(top), clipper(parts.top_contact)));
     }
     return parts;
+}
+
+// Binary-searches borrowed object layers: bottom=true selects bottom_z, false selects print_z, both assumed non-decreasing.
+// Returns the first index whose key is >= z, or layer_count if absent; callers apply the inclusive tolerance window.
+// Owns no geometry, changes no layers and propagates view-access failures.
+uint32_t first_layer_at(const Object &object, coord_t z, bool bottom)
+{
+    uint32_t first = 0, last = object.layer_count();
+    while (first < last) {
+        const uint32_t middle = first + (last - first) / 2;
+        const Layer layer = object.layer(middle);
+        if ((bottom ? layer.bottom_z() : layer.print_z()) < z) first = middle + 1;
+        else last = middle;
+    }
+    return first;
 }
 
 void fuse_parts(LayerParts &parts)
@@ -468,13 +491,20 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
     extrusion_move_from(entity.mutable_handle(), result.mutable_handle());
 }
 
-// Collects marked layer footprints strictly between bottom and z into an owned sorted list backed by borrowed storage; bottom contacts include sparse/bottom roles, each collected pair is counted, and geometry/allocation failures propagate.
-std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_handle *object, coord_t z, coord_t bottom, bool bottom_contact)
+// Searches the borrowed marked-layer Z index strictly between bottom and z, restores auxiliary order and collects footprints into
+// an owned sorted list in caller storage; bottom contacts include sparse/bottom roles, pairs are counted, and geometry/allocation failures propagate.
+std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLayerIndex &support_layers, coord_t z, coord_t bottom, bool bottom_contact)
 {
     const ClipperContext clipper(storage);
     std::vector<Internal::Overlap> result;
-    for (uint32_t index = 0; index < object_count_auxiliary_layer(object); ++index) {
-        const layer_handle *layer = object_get_auxiliary_layer(object, index);
+    // Select the open Z interval, then restore auxiliary-list order before the final overlap sort, including ties.
+    std::vector<std::pair<uint32_t, const layer_handle *>> selected;
+    for (SupportLayerIndex::const_iterator it = support_layers.upper_bound(bottom); it != support_layers.end() && it->first < z; ++it)
+        selected.insert(selected.end(), it->second.begin(), it->second.end());
+    std::sort(selected.begin(), selected.end(), [](const std::pair<uint32_t, const layer_handle *> &a,
+                                                 const std::pair<uint32_t, const layer_handle *> &b) { return a.first < b.first; });
+    for (const std::pair<uint32_t, const layer_handle *> &entry : selected) {
+        const layer_handle *layer = entry.second;
         const coord_t other_z = layer_get_print_z(layer);
         if (other_z <= bottom || other_z >= z || !plugin_property_has(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT)) continue;
         Polys polygons(storage);
@@ -503,8 +533,10 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const object_ha
 // the step names it, or the runner rethrows the print cancellation); ordinary assignment, destination and pattern
 // refusals throw std::runtime_error.
 // support_z contains the same object's sorted unique marked auxiliary-layer tops; its rank selects the alternating support pattern.
+// support_layers borrows the marked support layers, keyed by print_z with their auxiliary-list positions. generate_paths builds
+// the index once per object; it and its borrowed handles live throughout the synchronous for_support_layers call.
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
-                   const std::vector<coord_t> &support_z, SurfaceRole role, layer_handle *layer)
+                   const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer)
 {
     Common::Counters::add(Common::Counters::totals.modulation_layers);
     const Common::SupportParams &geometry = params.geometry;
@@ -544,8 +576,9 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     // Object demand directly above the layer: the removable loops of a top contact follow its outline.
     Polys overhang(storage);
     if (role == SurfaceRole::Top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops)
-        for (uint32_t index = 0; index < object.layer_count(); ++index) {
+        for (uint32_t index = first_layer_at(object, z + scale_to_layer_coord(geometry.gap_above) - CONTACT_MATCH_TOLERANCE, true); index < object.layer_count(); ++index) {
             const Layer object_layer = object.layer(index);
+            if (object_layer.bottom_z() > z + scale_to_layer_coord(geometry.gap_above) + CONTACT_MATCH_TOLERANCE) break;
             if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) > CONTACT_MATCH_TOLERANCE) continue;
             for (uint32_t island = 0; island < object_layer.island_count(); ++island)
                 Common::append_polygons(overhang, object_layer.island(island).support_demand());
@@ -597,7 +630,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
             Common::fill_base_areas(context, payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
         // A bottom contact also overlaps sparse and interface slabs, so it collects them for modulation.
         const bool bottom_contact_pass = role == SurfaceRole::Bottom && &pass == &passes.front();
-        Internal::modulate(storage, paths.mutable_view(), z, overlaps(storage, payload.object, z, bottom, bottom_contact_pass), geometry.resolution);
+        Internal::modulate(storage, paths.mutable_view(), z, overlaps(storage, support_layers, z, bottom, bottom_contact_pass), geometry.resolution);
         Common::move_children(out.mutable_view(), paths.mutable_view());
     }
     // A part printed as base joins the support bucket and the support extruder, on this role's own
@@ -660,19 +693,24 @@ std::string Internal::surface_pattern(bool as_base, bool contact, bool bridge, b
 void generate_paths(const plugin_run_context *context, SurfaceRole role)
 {
     std::vector<coord_t> support_z;
+    SupportLayerIndex support_layers;
     Common::for_support_layers(context, false,
-        // Collects owned layer ranks once on the first marked layer (so the table is nonempty), then publishes borrowed run inputs synchronously; allocation/generation failures propagate.
-        [context, role, &support_z](const run_ctx_support_toolpath &payload, const Object &object, const Common::ToolpathParams &params, layer_handle *layer) {
+        // Builds unique support-Z ranks and a print-Z-ordered index of borrowed marked layers with auxiliary-list positions once
+        // per object on its first marked layer. The index and handles live through this synchronous for_support_layers call;
+        // process_layer publishes paths into layer-owned islands, and allocation/generation failures propagate.
+        [context, role, &support_z, &support_layers](const run_ctx_support_toolpath &payload, const Object &object, const Common::ToolpathParams &params, layer_handle *layer) {
             if (support_z.empty()) {
                 for (uint32_t index = 0; index < object_count_auxiliary_layer(payload.object); ++index) {
                     const layer_handle *support_layer = object_get_auxiliary_layer(payload.object, index);
-                    if (plugin_property_has(layer_get_properties(support_layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT))
+                    if (plugin_property_has(layer_get_properties(support_layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT)) {
                         support_z.push_back(layer_get_print_z(support_layer));
+                        support_layers[layer_get_print_z(support_layer)].emplace_back(index, support_layer);
+                    }
                 }
                 std::sort(support_z.begin(), support_z.end());
                 support_z.erase(std::unique(support_z.begin(), support_z.end()), support_z.end());
             }
-            process_layer(context, payload, context->plugin_storage, object, params, support_z, role, layer);
+            process_layer(context, payload, context->plugin_storage, object, params, support_z, support_layers, role, layer);
         });
 }
 } // namespace slic3r_api::Support::Toolpath

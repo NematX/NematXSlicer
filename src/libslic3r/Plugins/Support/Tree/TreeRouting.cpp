@@ -360,9 +360,14 @@ static std::vector<TipSource> tip_sources(const slic3r_api::Object &object, cons
             }
             source = sources.size();
             const coord_t stack_bottom = contact->extreme_z() - coord_t(interfaces) * step;
-            LayerIndex layer = 0;
-            for (LayerIndex idx = 0; idx < LayerIndex(object.layer_count()) && object.layer(idx).print_z() <= stack_bottom; ++ idx)
-                layer = idx;
+            // Search layer indices so integer print Z, including equal tops, determines the source layer.
+            uint32_t first = 0, last = object.layer_count();
+            while (first < last) {
+                const uint32_t middle = first + (last - first) / 2;
+                if (object.layer(middle).print_z() <= stack_bottom) first = middle + 1;
+                else last = middle;
+            }
+            const LayerIndex layer = first == 0 ? 0 : LayerIndex(first - 1);
             sources.push_back(TipSource{ area.readonly().clone(storage), layer, contact->object_above });
         }
         // Each connected part of a contact area is a source of its own, so that a part without a placed tip is removed alone. A part keeps, as a tip source, only the area

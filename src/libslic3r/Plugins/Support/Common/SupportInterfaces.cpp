@@ -2,6 +2,7 @@
 #include "SupportInterfaces.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <utility>
 
@@ -127,20 +128,38 @@ void expand_first_layer_foot(const Object &object, const std::vector<Layer> &lay
 }
 
 namespace {
+// Appends borrowed contacts in non-decreasing print Z: top contacts have print_z >= base.print_z and bottom_z <= the top
+// window's print_z; bottom contacts have print_z in [the bottom window's bottom_z, base.bottom_z]. Equal print Z is included.
+// i indexes out.base, result vectors borrow contacts, and allocation failures propagate.
 void interface_contacts(const SupportParams &p, const GeneratedSupport &out, size_t i, GeneratorLayers &top, GeneratorLayers &bottom)
 {
     const GeneratorLayer &base = *out.base[i];
     if (p.top_interfaces > 0) {
         const coord_t z = out.base[std::min(out.base.size() - 1, i + p.top_interfaces - 1)]->print_z;
-        for (GeneratorLayer *contact : out.top)
+        assert(std::is_sorted(out.top.begin(), out.top.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
+        for (GeneratorLayers::const_iterator it = std::lower_bound(out.top.begin(), out.top.end(), base.print_z,
+                 [](const GeneratorLayer *contact, coord_t value) { return contact->print_z < value; }); it != out.top.end(); ++it) {
+            GeneratorLayer *contact = *it;
             if (contact->print_z >= base.print_z && contact->bottom_z <= z)
                 top.push_back(contact);
+        }
     }
     if (p.bottom_interfaces > 0) {
         const coord_t z = out.base[i + 1 > p.bottom_interfaces ? i + 1 - p.bottom_interfaces : 0]->bottom_z;
-        for (GeneratorLayer *contact : out.bottom)
+        assert(std::is_sorted(out.bottom.begin(), out.bottom.end(), [](const GeneratorLayer *a, const GeneratorLayer *b) {
+            return a->print_z < b->print_z;
+        }));
+        const GeneratorLayers::const_iterator first = std::lower_bound(out.bottom.begin(), out.bottom.end(), z,
+            [](const GeneratorLayer *contact, coord_t value) { return contact->print_z < value; });
+        const GeneratorLayers::const_iterator end = std::upper_bound(first, out.bottom.end(), base.bottom_z,
+            [](coord_t value, const GeneratorLayer *contact) { return value < contact->print_z; });
+        for (GeneratorLayers::const_iterator it = first; it != end; ++it) {
+            GeneratorLayer *contact = *it;
             if (contact->print_z >= z && contact->print_z <= base.bottom_z)
                 bottom.push_back(contact);
+        }
     }
 }
 } // namespace

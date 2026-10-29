@@ -28,7 +28,9 @@
    above it, a contact below the first layer is dropped, a contact less than the minimum height above the first
    layer snaps onto it, a filament bridge contact sits at the bridge height, and contacts closer than the minimum
    height merge into the lower one. bridge_footprint() gives the area under the bridge threads of the object layers
-   above a slab, which a family removes from the slab.
+   above a slab, which a family removes from the slab. A caller-owned BridgeFootprintCache retains each used layer's raw
+   bridge pieces in caller-provided storage (grid: Run's run storage; tree: generate_tree_slabs scratch storage).
+   The cache must be destroyed before that storage. Sequential slab visits evaluate pieces only as their upper Z bound needs them.
 
        for each object layer with demand:
            TopContactSlabs slabs = add_top_contacts(layers, print_config, params, id, out);
@@ -40,6 +42,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <vector>
 
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
@@ -112,15 +115,35 @@ void bridge_areas(storage_handle *storage, const ExtrusionEntity &entity, coord_
                   const EPropertyAttributes *attributes = nullptr);
 // Height of the bridges of a layer region, the native LayerRegion::bridging_height_avg_mm().
 double bridging_height_avg_mm(const Config &print_config, const Layer &layer, const LayerRegion &region);
+// Borrowed layer/work views and independently lazy raw pieces in caller-provided storage; views and storage outlive the cache.
+struct BridgeFootprintLayer {
+    // Regions retain layer order; work islands retain island/work-island order.
+    std::vector<LayerRegion> regions;
+    std::vector<LayerRegionIsland> works;
+    // Empty until reached by composition; a region's fills include every member work island in work order.
+    std::vector<std::optional<coord_t>> region_starts;
+    std::vector<std::optional<StoredExPolygonCollection>> region_fills;
+    // Empty until a work island with perimeters passes its member-region height checks.
+    std::vector<std::optional<StoredExPolygonCollection>> perimeters;
+};
+
+// Lazy per-layer pieces for one object/settings/storage combination. Grid and tree trimming use this cache sequentially;
+// no parallel slab task accesses it. Destroy the cache before its storage; failed layer/piece construction leaves an empty slot.
+struct BridgeFootprintCache {
+    std::vector<std::optional<BridgeFootprintLayer>> layers;
+};
+
 // Footprints, grown by gap_xy, of the object bridges (thick bridge fills and overhang perimeters) whose thread starts below
 // the top of the slab plus the gap above, found in the object layers from the first one that begins at or above from_z. The layers
 // that begin below from_z are not examined: the caller removes their outlines itself, so from_z is the slab top plus the gap above
 // for a caller whose outline trimming reaches that far, and the slab top for one that trims only the layers its Z span crosses.
 // A slab must not stand where those threads hang. The bridge height follows p.distance_type. The areas are raw offsets, neither
 // united nor normalized: the caller unites and normalizes them as it needs. Empty for a soluble support. The caller owns the
-// returned collection. An exception from bridging_height_avg_mm (unknown bridge type) propagates.
+// returned collection. cache, when supplied, retains pieces in storage for this object/settings combination and must be
+// accessed sequentially; nullptr uses a cache local to this call. An exception from bridging_height_avg_mm (unknown bridge type) propagates.
 StoredExPolygonCollection bridge_footprint(storage_handle *storage, const std::vector<Layer> &layers, const Config &print_config,
-                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab);
+                                           const SupportParams &p, coord_t from_z, const GeneratorLayer &slab,
+                                           BridgeFootprintCache *cache = nullptr);
 
 } // namespace slic3r_api::Support::Common
 #endif
