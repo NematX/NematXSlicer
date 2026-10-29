@@ -255,6 +255,8 @@ set(SLIC3R_SOURCES
 	Plugins/GCode/Exporter/DefaultGCodeExporter.cpp
 	Plugins/GCode/Exporter/DefaultGCodeExporter.hpp
 	Plugins/GCode/Exporter/GCodeExporterShared.hpp
+	Plugins/GCode/Firmware/BambuGCodeFirmware.cpp
+	Plugins/GCode/Firmware/BambuGCodeFirmware.hpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.cpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp
 	Plugins/GCode/Firmware/KlipperGCodeFirmware.cpp

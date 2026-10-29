@@ -981,6 +981,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "gcode.firmware.reprap");
         activate_plugin_or_fail(orchestrator, "gcode.firmware.sprinter");
         activate_plugin_or_fail(orchestrator, "gcode.firmware.klipper");
+        activate_plugin_or_fail(orchestrator, "gcode.firmware.bambu");
         activate_plugin_or_fail(orchestrator, "PNG");
         activate_plugin_or_fail(orchestrator, "JPG");
         activate_plugin_or_fail(orchestrator, "QOI");

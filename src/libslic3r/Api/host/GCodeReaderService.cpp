@@ -21,6 +21,7 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_reader.h"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Plugins/GCode/Reader/BambuGCodeReaderItems.hpp"
 #include "libslic3r/Plugins/GCode/Reader/RepRapGCodeReaderState.hpp"
 
 /*
@@ -34,11 +35,31 @@ invocation path which forwards each validated event to the viewer builder.
 
     final state only --> plugin helper --> exact Reader plugin
     unknown dialect --> host probes ----> selected Reader id
-    viewer result ---> host invocation -> event builder
 
 Viewer reads additionally wrap that same execution with a
 GCodeReaderResultBuilder. The wrapper indexes source lines before lending each
 chunk and observes validated events after they have updated the tracker.
+
+Operation notes:
+- viewer result --:  host invocation :  event builder
+
+Representative direct calls (branches are not a timeline):
+
+    detect_gcode_reader()
+        |-- orchestrator.get_active_plugins_for_step()
+        |-- orchestrator.execute_plugin()
+        |-- invocation.confidence()
+        |-- plugin->get_priority()
+        `-- winner->get_priority()
+
+    GCodeReaderService::read()
+        `-- m_reader.read()
+
+    GCodeReaderService::read_for_viewer()
+        |-- validated_reader_id()
+        |-- initial_state()
+        |-- m_orchestrator.execute_plugin()
+        `-- invocation.take_result()
 */
 
 namespace Slic3r {
@@ -442,18 +463,23 @@ slic3r_api::GCodeStateTracker GCodeReaderService::initial_state(
 {
     const std::string id = validated_reader_id(reader_plugin_id);
     uint32_t reader_state_id = GCODE_READER_STATE_ID_PORTABLE;
-    if (id == "gcode.reader.reprap") {
+    const char *state_name = nullptr;
+    if (id == "gcode.reader.reprap")
+        state_name = slic3r_api::GCodeGeneration::Reader::REPRAP_READER_STATE_NAME;
+    else if (id == "gcode.reader.bambu")
+        state_name = slic3r_api::GCodeGeneration::Reader::BAMBU_READER_STATE_NAME;
+    if (state_name != nullptr) {
         reader_state_id = m_orchestrator.register_runtime_id(
-            GCODE_READER_STATE_ID_TYPE,
-            slic3r_api::GCodeGeneration::Reader::REPRAP_READER_STATE_NAME);
+            GCODE_READER_STATE_ID_TYPE, state_name);
         if (reader_state_id == ORCHESTRATOR_RUNTIME_ID_INVALID)
             throw std::runtime_error(
-                "The RepRap G-code Reader state identity could not be registered.");
+                std::string("The G-code Reader state identity could not be registered: ") + state_name);
     }
     // TODO: a future Reader registration descriptor must expose a private
     // state schema name. This phase cannot initialize an external Reader with
     // private keys without changing the plugin API, so only the built-in RRF
-    // schema is known here; every portable Reader uses the permanent id zero.
+    // and Bambu schemas are known here; every portable Reader uses the
+    // permanent id zero.
 
     const PrintConfig *config = m_print != nullptr ? &m_print->config() : nullptr;
     const size_t tool_count = config != nullptr ?

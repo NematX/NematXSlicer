@@ -34,6 +34,7 @@ gcode.firmware.prusa = 1
 gcode.firmware.reprap = 1
 gcode.firmware.sprinter = 1
 gcode.firmware.klipper = 1
+gcode.firmware.bambu = 1
 PNG = 1
 JPG = 1
 QOI = 1

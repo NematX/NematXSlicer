@@ -269,13 +269,23 @@ private:
             apply_heater(line, m_session.extruder(*tool_id).heater(), waited);
     }
 
+    // Update the part-cooling fan of the tool a script M106/M107 addresses. The
+    // session decides how P maps to a tool (script_fan_tool()), so a dialect whose
+    // P is a fan number is not read as a tool; a tool the print does not have is
+    // ignored.
     void apply_fan(const GCodeLineParser::GCodeLine &line, bool stopped)
     {
-        const std::optional<extruder_index_t> tool_id = addressed_tool(line, 'P');
-        if (!tool_id)
+        std::optional<int32_t> fan_index;
+        int32_t parsed_index = 0;
+        if (line.parameter_value('P', parsed_index))
+            fan_index = parsed_index;
+        const std::optional<int32_t> tool_id = m_session.script_fan_tool(
+            fan_index, m_session.m_current_extruder_idx ?
+                m_session.m_current_extruder_idx : m_session.m_script_processing_tool);
+        if (!tool_id || *tool_id < 0 || *tool_id >= int32_t(m_session.m_extruders.size()))
             return;
         const float pwm = stopped ? 0.f : line.parameter_value('S').value_or(255.f);
-        m_session.extruder(*tool_id).fan().synchronize_after_external_gcode(
+        m_session.extruder(static_cast<extruder_index_t>(*tool_id)).fan().synchronize_after_external_gcode(
             std::clamp(double(pwm) * 100.0 / 255.0, 0.0, 100.0));
     }
 

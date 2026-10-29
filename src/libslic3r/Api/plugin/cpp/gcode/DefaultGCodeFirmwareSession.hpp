@@ -192,6 +192,19 @@ protected:
     virtual void append_reader_private_state(
         std::vector<raw_gcode_reader_event_item> &items) const;
     virtual void synchronize_reader_private_state(const GCodeStateTracker &state);
+    // Name the tool whose part-cooling fan a script line `M106` / `M107` addresses.
+    // `fan_index` is the value of the P parameter when the line has one;
+    // `selected_tool` is the tool selected where the script runs (the current tool,
+    // else the tool the script was processed for), empty when none is known. The
+    // answer is not range checked: the caller ignores a tool the print does not
+    // have. An empty answer means the command is not a tool fan. The neutral
+    // session reads P as the tool index, and a line without P addresses the
+    // selected tool; a dialect whose P is a fan number overrides it.
+    virtual std::optional<int32_t> script_fan_tool(std::optional<int32_t> fan_index,
+                                                   std::optional<extruder_index_t> selected_tool) const;
+    // True while a firmware-labelled object block is open: the printer skips the
+    // text written now when that object is cancelled.
+    bool object_block_open() const { return m_object_block_open; }
     // Update the protocol-level G10/G11 flag reconstructed by a dialect
     // Reader. This does not invent an E position or retraction distance.
     void synchronize_native_retraction(extruder_index_t tool_id, bool retracted);
@@ -254,6 +267,59 @@ protected:
     virtual std::string encode_object_definitions(const std::vector<ObjectLabel> &objects) const;
     virtual std::string encode_object_start(const ObjectLabel &object) const;
     virtual std::string encode_object_end(const ObjectLabel &object) const;
+    // Ask whether the firmware end marker written by encode_object_end() must
+    // be followed by an absolute-E zero. When true and E is absolute, the session
+    // appends the dialect's axis reset and zeroes its logical E before preparing
+    // any later extrusion, so a firmware that skips a cancelled object's moves
+    // cannot see the skipped E distance. Retraction state is preserved. Relative
+    // E never needs it. The neutral session answers false.
+    virtual bool resets_extrusion_axis_after_object_end(const ObjectLabel &object) const;
+    // Retraction depth, in mm, that the labelled block of `object` must open with
+    // for the tool `tool_id`; 0 (the neutral answer) leaves the block alone. When it
+    // is positive and encode_object_start() writes a label, the session:
+    //   - retracts the complement up to this depth just BEFORE the start label, only
+    //     if the tool is less retracted (a retraction already at least this deep is
+    //     kept), by explicit E or by the native retract command;
+    //   - then, inside the block, after the approach and before the first deposited
+    //     geometry, repays any remaining retraction with an explicit unretraction
+    //     (E move or native unretract), so the first extrusion is not shortened.
+    //   - before the end label (inside the block, before the axis reset), retracts the
+    //     complement up to the depth the block was entered with (its debt after the
+    //     entry retraction, so at least this depth); a tool change closes the block
+    //     first (see select_extruder()), so the tool is still the block's tool.
+    // Native retraction already active is kept as is: no logical complement.
+    // Invariant for a dialect that answers a depth: every labelled block ends with the
+    // debt it started with, so the printer can skip it without changing the filament
+    // state. A block that ends deeper than its entry depth (the plan's tool-change
+    // retraction inside the block before a tool change) is not normalized.
+    virtual double object_block_retract_length(const ObjectLabel &object,
+                                               extruder_index_t tool_id) const;
+    // Ask whether a firmware-labelled block must be closed (exit work, end label, axis
+    // reset) before the session selects another tool, whatever its retraction depth,
+    // so that a skipped object never skips the tool change. The neutral session
+    // answers false and leaves tool changes where the plan puts them.
+    virtual bool closes_object_block_before_tool_change() const;
+
+    // Emit dialect text outside a cancellable block, immediately before its opening.
+    virtual std::string write_before_object_start();
+    // Close/open labels, treating synthetic IDs and UINT32_MAX as outside objects.
+    std::string transition_object(uint32_t printing_catalog_id);
+    // Wrap dialect text in a retraction/unretraction pair of the current tool, so that a
+    // pause of the print (a scan, a probe...) happens with the filament pulled back.
+    //   - tool not retracted: retract `retract_length` mm (explicit E, or G10 with
+    //     firmware retraction), then `gcode`, then repay that temporary retraction only
+    //     (E move or G11); restart extras scheduled before stay scheduled;
+    //   - tool already retracted, even partially: only the complement up to
+    //     `retract_length` (nothing if it is at least that deep), then `gcode`; the
+    //     existing debt is left for the normal flow of the following extrusion;
+    //   - firmware retraction already active: nothing is added (the firmware's depth is
+    //     kept, as for labelled blocks), then `gcode`;
+    //   - `retract_length` of 0 (or less): `gcode` alone.
+    // Contract: `retract_length` is finite and >= 0; `gcode` must not change the tool, the
+    // E position or the E mode (it is only appended, never interpreted); the caller closes
+    // any open object block first (transition_object()) when the text must not be skipped
+    // with an object. Requires a selected tool.
+    std::string write_with_retraction(const std::string &gcode, double retract_length);
 
 private:
     std::unique_ptr<GCodeReaderService> m_gcode_reader_service;
@@ -266,7 +332,9 @@ private:
     // Select a tool, transfer SEMM runtime, settle filament usage and reset absolute E after emitted selections.
     std::string select_extruder(extruder_index_t tool_id, bool emit_command = true);
     std::string move_to_group_start(const ConstPrintingGroup &group);
-    std::string write_extrusion_tree(const ExtrusionEntity &root);
+    // Visit an extrusion tree while tracking its object for opt-in tool-change reopening.
+    std::string write_extrusion_tree(const ExtrusionEntity &root,
+                                     uint32_t object_id = uint32_t(-1));
     // Emit changed role/dimension tags, permitting zero dimensions for fixed-E paths.
     std::string write_printable_markers(const EPropertyAttributes &attributes, bool fixed_e = false);
     std::string write_seam_marker(const ExtrusionEntity &loop) const;
@@ -279,6 +347,16 @@ private:
     std::string approach_leaf_point(c_point point, coord_t z_offset);
     // Emit a stationary volume, forcing swallowed support steps or dwelling for sub-step deposits.
     std::string write_deposit(const ExtrusionEntity &leaf, const RequestedState &state);
+    // Retract the active tool of a labelled block down to `depth` mm. Does nothing
+    // when native retraction is already active: the firmware keeps its own depth and
+    // no logical complement is recorded.
+    std::string write_block_retraction(double depth);
+    // Retract the active tool down to `target` mm by explicit E, or by the native
+    // command in firmware retraction; writes nothing when it is already that deep.
+    std::string write_retraction(double target);
+    // Repay the whole retraction of the active tool (explicit E or native unretract);
+    // writes nothing when it is not retracted.
+    std::string write_full_unretraction();
     // Emit static retraction or full/limited unretraction for the active tool.
     std::string write_extrusion_axis_event(const EPropertyExtrusionAxis &axis,
                                            const RequestedState &state);
@@ -297,8 +375,7 @@ private:
     // data; this session never takes ownership of it.
     std::string write_custom_gcode(const ExtrusionEntity &entity,
                                    const EPropertyCustomGcode &custom_gcode);
-    // Close/open object labels, treating synthetic catalog IDs as outside every object.
-    std::string transition_object(uint32_t printing_catalog_id);
+    // Look up session-owned object metadata, rejecting unknown catalog IDs.
     const ObjectLabel &object_label(uint32_t printing_catalog_id) const;
 
     // Reconcile custom G-code after it was interpreted. Replace each cached
@@ -365,6 +442,21 @@ private:
     // physical object instance. The generated marker uses this same ID and
     // writes -1 for the outside sentinel.
     uint32_t m_current_printing_catalog_id = uint32_t(-1);
+    // Object of the tree being visited, independent of temporarily closed labels.
+    uint32_t m_extrusion_tree_object_id = uint32_t(-1);
+    // Only an opt-in tool-change closure requests reopening before the next geometry.
+    bool m_object_block_reopen_pending = false;
+    // Set when the open block was started with a retraction depth (see
+    // object_block_retract_length): its first deposited geometry must be preceded
+    // by an unretraction if a debt remains. Cleared when that geometry is reached
+    // or the block closes.
+    bool m_object_block_unretract_pending = false;
+    // Entry depth (mm of debt right after the entry retraction) of the open block
+    // when it was started with a retraction depth; the exit retraction goes back to
+    // it. Unset when no block with a depth is open.
+    std::optional<double> m_object_block_depth;
+    // True while a block that got a firmware start label is open.
+    bool m_object_block_open = false;
     bool m_is_setup = false;
     orchestrator_runtime_id m_reader_state_id = GCODE_READER_STATE_ID_PORTABLE;
     GCodeScriptProcessorView m_scripts;
