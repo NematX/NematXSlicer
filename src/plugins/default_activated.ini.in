@@ -21,6 +21,7 @@ gcode.settings_scripts = 1
 gcode.feature_gcode = 1
 gcode.custom_gcode_per_print_z = 1
 gcode.reader.default = 1
+gcode.reader.bambu = 1
 gcode.reader.klipper = 1
 gcode.reader.marlin1 = 1
 gcode.reader.marlin2 = 1

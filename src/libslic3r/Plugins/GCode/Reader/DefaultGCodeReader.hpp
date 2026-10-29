@@ -17,7 +17,7 @@ common parser and deliberately adds none: an extension it cannot model must
 invalidate portable state instead of being guessed harmless.
 
     PluginLoader -> register_builtin_gcode_reader_plugins()
-                 -> Orchestrator stores all seven providers
+                 -> Orchestrator stores all eight providers
                  -> firmware requests its dialect Reader
                  -> read_gcode() validates and executes that exact provider
 
@@ -39,7 +39,7 @@ private:
     uint32_t probe_impl(std::string_view prefix) const override;
 };
 
-// Register the default, four Marlin-family, RepRapFirmware and Klipper
+// Register the default, four Marlin-family, RepRapFirmware, Klipper and Bambu
 // providers. The Orchestrator borrows the process-lived static plugin
 // instances; this function transfers no ownership. Readers do not join an
 // exclusive group because the host probes all active dialects and executes

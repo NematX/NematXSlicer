@@ -269,6 +269,9 @@ set(SLIC3R_SOURCES
 	Plugins/GCode/Firmware/RepRapGCodeFirmware.hpp
 	Plugins/GCode/Firmware/SprinterGCodeFirmware.cpp
 	Plugins/GCode/Firmware/SprinterGCodeFirmware.hpp
+	Plugins/GCode/Reader/BambuGCodeReader.cpp
+	Plugins/GCode/Reader/BambuGCodeReader.hpp
+	Plugins/GCode/Reader/BambuGCodeReaderItems.hpp
 	Plugins/GCode/Reader/BuiltinGCodeReaderBase.cpp
 	Plugins/GCode/Reader/BuiltinGCodeReaderBase.hpp
 	Plugins/GCode/Reader/DefaultGCodeReader.cpp

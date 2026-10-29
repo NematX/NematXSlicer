@@ -959,6 +959,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "gcode.settings_scripts");
         activate_plugin_or_fail(orchestrator, "gcode.feature_gcode");
         activate_plugin_or_fail(orchestrator, "gcode.reader.default");
+        activate_plugin_or_fail(orchestrator, "gcode.reader.bambu");
         activate_plugin_or_fail(orchestrator, "gcode.reader.klipper");
         activate_plugin_or_fail(orchestrator, "gcode.reader.marlin1");
         activate_plugin_or_fail(orchestrator, "gcode.reader.marlin2");
