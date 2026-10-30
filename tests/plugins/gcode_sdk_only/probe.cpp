@@ -59,9 +59,10 @@ extern "C" PROBE_EXPORT int gcode_sdk_probe()
         return 3;
     slic3r_api::FanPolicy::Settings settings;
     settings.configured[RAW_FAN_ROLE_DEFAULT] = 20;
-    const slic3r_api::FanPolicy::Context base = slic3r_api::FanPolicy::make_base(settings, 0);
+    settings.validate();
+    const slic3r_api::FanPolicy::Context base = slic3r_api::FanPolicy::make_base(settings);
     const slic3r_api::FanPolicy::Context timed = slic3r_api::FanPolicy::apply_layer_time(base, settings, 10.);
-    const slic3r_api::FanPolicy::Context closed = slic3r_api::FanPolicy::close_first_layers(timed);
+    const slic3r_api::FanPolicy::Context closed = slic3r_api::FanPolicy::close_first_layers(timed, settings, 0);
     closed.validate(RAW_FAN_POLICY_PHASE_CLOSED);
     if (closed.roles[RAW_FAN_ROLE_DEFAULT].percent != 20)
         return 5;

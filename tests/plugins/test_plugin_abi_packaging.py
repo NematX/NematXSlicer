@@ -184,9 +184,9 @@ class AbiPackagingTests(unittest.TestCase):
             )
             self.assertIn("slic3r_gcode_firmware.h", catalog["headers"])
             self.assertIn("steps/slic3r_step_gcode_firmware.h", catalog["headers"])
-            for header, symbol in (("slic3r_fan_policy.h", "CFanPolicyContext"),
-                                   ("slic3r_printing_layer_time.h", "CPrintingLayerTimeProperty")):
-                self.assertEqual(catalog["headers"][header]["version"], [1, 0])
+            for header, symbol, version in (("slic3r_fan_policy.h", "CFanPolicyContext", [2, 0]),
+                                            ("slic3r_printing_layer_time.h", "CPrintingLayerTimeProperty", [1, 0])):
+                self.assertEqual(catalog["headers"][header]["version"], version)
                 self.assertEqual(catalog["headers"][header]["dependencies"], [])
                 self.assertEqual(catalog["python_symbols"][symbol], [header])
             self.assertNotIn(

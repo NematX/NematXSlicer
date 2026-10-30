@@ -813,7 +813,6 @@ void DefaultFan::run_impl(const plugin_run_context *run_ctx) const
     const Config config = print.config();
     PrintingLayerGroup layer(ctx->layer_group);
     const PrintingLayerTimeProperty &time = m_layer_times.at(ctx->group_idx).at(ctx->layer_group_idx);
-    time.validate();
     m_layer_time_property.get_or_add(layer.properties()) = time;
 
     for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
@@ -822,9 +821,9 @@ void DefaultFan::run_impl(const plugin_run_context *run_ctx) const
         if (tool.extruder_id() == EXTRUDER_ID_UNKNOWN)
             throw std::runtime_error("Printing layer fan calculation needs a concrete extruder id.");
         const FanPolicy::Settings settings = FanPolicy::read_settings(config, tool.extruder_id());
-        const LayerFanPolicy base = FanPolicy::make_base(settings, ctx->layer_group_idx);
+        const LayerFanPolicy base = FanPolicy::make_base(settings);
         const LayerFanPolicy timed = FanPolicy::apply_layer_time(base, settings, time.duration_seconds);
-        const LayerFanPolicy policy = FanPolicy::close_first_layers(timed);
+        const LayerFanPolicy policy = FanPolicy::close_first_layers(timed, settings, ctx->layer_group_idx);
         // The combined provider publishes only a complete context, after all
         // stages have run in this callback.
         m_fan_context_property.get_or_add(tool.properties()) = policy;

@@ -3053,7 +3053,7 @@ TEST_CASE("Fan setup is read only and every tool consumes total layer duration",
     CHECK(published->duration_seconds == Approx(total));
     const slic3r_api::FanPolicy::Settings settings = slic3r_api::FanPolicy::read_settings(config_view, 0);
     const slic3r_api::FanPolicy::Context expected = slic3r_api::FanPolicy::close_first_layers(
-        slic3r_api::FanPolicy::apply_layer_time(slic3r_api::FanPolicy::make_base(settings, 0), settings, total));
+        slic3r_api::FanPolicy::apply_layer_time(slic3r_api::FanPolicy::make_base(settings), settings, total), settings, 0);
     REQUIRE(published_layer.tool_groups.size() == 2);
     for (PrintingToolGroup &tool : published_layer.tool_groups) {
         const slic3r_api::PrintingToolGroup view(reinterpret_cast<printing_tool_group_handle *>(&tool));

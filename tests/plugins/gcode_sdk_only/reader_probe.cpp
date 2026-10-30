@@ -1,3 +1,5 @@
+#include "libslic3r/Api/plugin/c/slic3r_fan_policy.h"
+#include "libslic3r/Api/plugin/c/slic3r_printing_layer_time.h"
 #include "libslic3r/Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 
@@ -36,6 +38,7 @@ private:
 
 // A real provider entry point also forces the link of the complete reader
 // vtable. Registration receives the real orchestrator, never a fabricated handle.
+// The version-export include set also covers public records used by probe.cpp.
 extern "C" SLIC3R_PLUGIN_API void register_plugin(orchestrator_handle *orchestrator);
 
 extern "C" SLIC3R_PLUGIN_API void register_plugin(orchestrator_handle *orchestrator)

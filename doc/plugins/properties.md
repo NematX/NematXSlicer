@@ -3,7 +3,7 @@
 > Base snapshot commit: `7a9b6ed96b`, with the public fan-policy/timing contracts below.
 >
 > Per-header ABI: `slic3r_extrusion_property.h` 4.0, `slic3r_def.h` 1.5.
-> Public policy records: `slic3r_fan_policy.h` 1.0,
+> Public policy records: `slic3r_fan_policy.h` 2.0,
 > `slic3r_printing_layer_time.h` 1.0; append-only API IDs in `slic3r_plugin_types.h` 4.2.
 
 The commit above identifies the source-tree state against which this guide and
@@ -137,19 +137,18 @@ implemented by these contracts.
 
 Fan references are distinct from extrusion requests. `configured_percent` keeps
 normalized filament input (`-1` disabled, historical `1` mapped to `0`), while
-`percent` is the current reference (`-1` absent, `0` a real stop). `fallback_role`
-identifies a late fallback, with `RAW_FAN_ROLE_COUNT` meaning none. Early family
-fallbacks are already applied in BASE. Filament normalization must never be
+`percent` is the current reference (`-1` absent, `0` a real stop). Fallback rules
+are constants in the policy implementation, not published per-tool data. Early
+family fallbacks are already applied in BASE. Filament normalization must never be
 applied to a regional or user request of 1%.
 
 The value-only SDK stages consume copies and enforce this order:
 
 ```cpp
 const FanPolicy::Settings settings = FanPolicy::read_settings(config, extruder_id);
-const FanPolicy::Context base = FanPolicy::make_base(settings, layer_index);
+const FanPolicy::Context base = FanPolicy::make_base(settings);
 const FanPolicy::Context timed = FanPolicy::apply_layer_time(base, settings, duration_seconds);
-const FanPolicy::Context closed = FanPolicy::close_first_layers(timed);
-closed.validate(RAW_FAN_POLICY_PHASE_CLOSED);
+const FanPolicy::Context closed = FanPolicy::close_first_layers(timed, settings, layer_index);
 ```
 
 `BASE -> TIME -> CLOSED` preserves role exceptions, time-threshold rounding,
@@ -160,6 +159,16 @@ only to modifiable requests, never to Override or another plugin's mode.
 `FanPolicy::transform_request()` preserves protected pairs, updates a modifiable
 pair without changing its active mode, and assigns the caller's mode when absent.
 Its inputs follow `can_modify()`'s prevalidated-mode contract below.
+
+`slic3r_fan_policy.h` 2.0 publishes results only: references, phase and dynamic
+bounds. It is incompatible with the former 1.0 layout. Settings and layer ordinal
+remain explicit inputs; the timing header remains 1.0. `read_settings()` validates
+configuration once; callers assembling `Settings` directly must call `validate()`.
+Validate a context read from a published property with `context.validate(phase)`
+before processing it. Numerical stages only check size/phase and the separate
+duration argument; they do not rescan references they just computed. Property
+timing and estimator output are validated when entering the DefaultFan cache,
+not again when publishing that unchanged cache.
 
 For now `DefaultFan` performs all three stages within its layer callback and
 publishes CLOSED. Separate plugin callbacks and the advanced E/D/G program are

@@ -421,8 +421,11 @@ class PythonPrintingPlanViewTests(unittest.TestCase):
         time_key = policy.printing_layer_time_property_key(api)
         self.assertNotEqual(context_key.type(), time_key.type())
         self.assertEqual(time_key.payload_cls, policy.PrintingLayerTimeProperty)
-        self.assertEqual(ctypes.sizeof(policy.FanPolicyContext), 212)
-        self.assertEqual(ctypes.sizeof(self.generated.CFanRoleReference), 12)
+        self.assertEqual(ctypes.sizeof(policy.FanPolicyContext), 136)
+        self.assertEqual(ctypes.sizeof(self.generated.CFanRoleReference), 8)
+        for removed in ("layer_index", "disabled_layers", "full_speed_layer", "dynamic_enabled"):
+            self.assertFalse(hasattr(policy.FanPolicyContext, removed))
+        self.assertFalse(hasattr(self.generated.CFanRoleReference, "fallback_role"))
         self.assertEqual(policy.FanPolicyContext.roles.offset, 8)
         self.assertEqual(policy.PrintingLayerTimeProperty.origin.offset, 8)
 

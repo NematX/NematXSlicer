@@ -8,12 +8,14 @@
 // on each tool group after the three stages have run in order:
 //
 //     const auto settings = FanPolicy::read_settings(config, tool);
-//     const auto base = FanPolicy::make_base(settings, layer_index);
+//     const auto base = FanPolicy::make_base(settings);
 //     const auto timed = FanPolicy::apply_layer_time(base, settings, seconds);
-//     const auto closed = FanPolicy::close_first_layers(timed);
+//     const auto closed = FanPolicy::close_first_layers(timed, settings, layer_index);
 //
-// Payloads own values only. Keys belong to the registering host; malformed input
-// throws invalid_argument rather than publishing an invalid phase or reference.
+// Payloads own values only. Keys belong to the registering host. Validate settings
+// assembled manually and contexts read from properties before passing them to
+// kernels. Input validators throw invalid_argument; kernels check size and phase
+// without rescanning validated references.
 #include <array>
 #include <cstdint>
 
@@ -40,10 +42,13 @@ struct Settings {
     bool dynamic_enabled = false;
     // Start with absent references and disabled time/first-layer transforms.
     Settings() { configured.fill(-1); }
+    // Validate once after reading configuration or assembling settings manually.
+    void validate() const;
 };
 
 struct Context : c_fan_policy_context {
-    // Refuse zero storage, malformed references or an unexpected stage.
+    // Validate a published property before passing it to a numerical kernel.
+    // Kernels only recheck size/phase; they trust the validated references.
     void validate(raw_fan_policy_phase expected) const;
 };
 
@@ -54,14 +59,16 @@ bool can_increase(Role role);
 bool can_ramp(Role role);
 // Normalize historical filament spelling 1 -> stop; regional requests bypass it.
 int normalize_fan_value(int value);
-// Read only existing filament options for one concrete extruder.
+// Read and validate existing filament options for one concrete extruder.
 Settings read_settings(const Config &config, extruder_index_t extruder_id);
-// Apply initial family/default fallbacks while retaining configured references.
-Context make_base(const Settings &settings, uint32_t layer_index);
+// All stages require validated Settings. Apply initial family/default fallbacks
+// while retaining configured references; no plan/configuration metadata is kept.
+Context make_base(const Settings &settings);
 // Apply legacy time thresholds/rounding to a BASE table, producing TIME.
 Context apply_layer_time(const Context &base, const Settings &settings, double duration_seconds);
 // Apply D/F compatibility and late fallbacks once, producing CLOSED.
-Context close_first_layers(const Context &time);
+// layer_index is the ordinal within the current PrintingGroup.
+Context close_first_layers(const Context &time, const Settings &settings, uint32_t layer_index);
 
 // Transform a logical request only when the policy owns it; never rewrite a
 // protected pair or normalize its percentage using filament-option rules.

@@ -25,7 +25,6 @@ from slic3r_api_generated import (
     CPrintingLayerTimeProperty,
     FAN_POLICY_CONTEXT_PROPERTY_NAME,
     PRINTING_LAYER_TIME_PROPERTY_NAME,
-    RAW_FAN_ROLE_COUNT,
     RAW_FAN_POLICY_PHASE_BASE,
     RAW_FAN_POLICY_PHASE_TIME,
     RAW_FAN_POLICY_PHASE_CLOSED,
@@ -54,11 +53,10 @@ def validate_fan_policy_context(context, expected_phase: int) -> None:
     """Reject unpublished storage or a phase/reference contract violation."""
     if (expected_phase not in (RAW_FAN_POLICY_PHASE_BASE, RAW_FAN_POLICY_PHASE_TIME, RAW_FAN_POLICY_PHASE_CLOSED)
             or context.struct_size != ctypes.sizeof(FanPolicyContext) or context.phase != expected_phase
-            or context.dynamic_enabled > 1 or not 0 <= context.dynamic_min <= context.dynamic_max <= 100):
+             or not 0 <= context.dynamic_min <= context.dynamic_max <= 100):
         raise ValueError("Invalid fan context size, phase or dynamic bounds")
     for role in context.roles:
-        if (not -1 <= role.configured_percent <= 100 or not -1 <= role.percent <= 100
-                or role.fallback_role > RAW_FAN_ROLE_COUNT):
+        if not -1 <= role.configured_percent <= 100 or not -1 <= role.percent <= 100:
             raise ValueError("Invalid fan role reference")
 
 

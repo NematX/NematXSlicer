@@ -3,7 +3,7 @@
 #ifndef slic3r_fan_policy_h_
 #define slic3r_fan_policy_h_
 
-#define SLIC3R_PLUGIN_API_FAN_POLICY_MAJOR 1u
+#define SLIC3R_PLUGIN_API_FAN_POLICY_MAJOR 2u
 #define SLIC3R_PLUGIN_API_FAN_POLICY_MINOR 0u
 
 #include <stdint.h>
@@ -40,27 +40,22 @@ typedef enum raw_fan_policy_phase {
 
 /* Negative percentages mean a disabled/absent reference, not an explicit stop.
    configured_percent preserves normalized filament input through all phases.
-   fallback_role describes a late fallback, or ROLE_COUNT for none. Early
-   family/default fallbacks have already been applied to percent in BASE. */
+   Early family/default fallbacks have already been applied to percent in BASE.
+   Late fallback rules belong to the policy implementation, not this record. */
 typedef struct c_fan_role_reference {
     int32_t configured_percent;
     int32_t percent;
-    uint32_t fallback_role;
 } c_fan_role_reference;
 
 /* struct_size must equal sizeof(c_fan_policy_context); zero-filled storage is
    not a published context. Phase transitions are BASE -> TIME -> CLOSED.
    References are computed even if every extrusion has a protected request.
    Bounds apply to automatic dynamic requests, never to Override/plugin modes.
-   Layer indices reset in each PrintingGroup; D/F describe compatibility mode. */
+   Configuration and the layer ordinal are inputs to kernels, not results. */
 typedef struct c_fan_policy_context {
     uint32_t struct_size;
     uint32_t phase;
     c_fan_role_reference roles[15]; /* RAW_FAN_ROLE_COUNT, fixed ABI extent */
-    uint32_t layer_index;
-    int32_t disabled_layers;
-    int32_t full_speed_layer;
-    uint32_t dynamic_enabled;
     int32_t dynamic_min;
     int32_t dynamic_max;
 } c_fan_policy_context;

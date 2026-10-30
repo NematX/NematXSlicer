@@ -185,11 +185,13 @@ TEST_CASE("Fan policy and timing declare independent public ABI requirements", "
         const std::string prefix = std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n[abi]\nslic3r_plugin_types.h=") +
             std::to_string(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR) + "." +
             std::to_string(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR) + "\n" + header + "=";
-        REQUIRE(parse_plugin_package_metadata(prefix + "1.0\n", metadata, error));
+        const std::string major = std::string(header) == "slic3r_fan_policy.h" ? "2" : "1";
+        REQUIRE(parse_plugin_package_metadata(prefix + major + ".0\n", metadata, error));
         CHECK(metadata.compatibility.compatible());
-        REQUIRE(parse_plugin_package_metadata(prefix + "1.1\n", metadata, error));
+        REQUIRE(parse_plugin_package_metadata(prefix + major + ".1\n", metadata, error));
         CHECK_FALSE(metadata.compatibility.compatible());
-        REQUIRE(parse_plugin_package_metadata(prefix + "2.0\n", metadata, error));
+        const std::string incompatible_major = major == "2" ? "1" : "2";
+        REQUIRE(parse_plugin_package_metadata(prefix + incompatible_major + ".0\n", metadata, error));
         CHECK_FALSE(metadata.compatibility.compatible());
     }
 }

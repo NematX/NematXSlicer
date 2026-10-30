@@ -29,6 +29,9 @@ TEST_CASE("Public fan and timing records have matching C and C++ layouts",
     CHECK(fan_policy_c_layout(3) == sizeof(PrintingLayerTimeProperty));
     CHECK(fan_policy_c_layout(4) == offsetof(c_printing_layer_time_property, origin));
     CHECK(fan_policy_c_layout(5) == RAW_FAN_ROLE_COUNT);
+    CHECK(sizeof(Cooling::Context) == 136);
+    CHECK(sizeof(c_fan_role_reference) == 8);
+    CHECK(SLIC3R_PLUGIN_API_FAN_POLICY_MAJOR == 2);
     CHECK(RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED == 1);
     CHECK(Cooling::normalize_fan_value(1) == 0);
     CHECK(Cooling::normalize_fan_value(0) == 0);
@@ -59,12 +62,14 @@ TEST_CASE("Fan stages preserve configured references and enforce phase order",
     settings.configured[RAW_FAN_ROLE_PERIMETER] = 40;
     settings.slowdown_seconds = 5;
     settings.fan_seconds = 10;
-    const Cooling::Context base = Cooling::make_base(settings, 6);
+    settings.validate();
+    const Cooling::Context base = Cooling::make_base(settings);
+    CHECK_NOTHROW(base.validate(RAW_FAN_POLICY_PHASE_BASE));
     CHECK(base.roles[RAW_FAN_ROLE_PERIMETER].percent == 40);
     CHECK(base.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].configured_percent == -1);
     CHECK(base.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].percent == 20);
-    CHECK(base.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].fallback_role == RAW_FAN_ROLE_SOLID_INFILL);
     const Cooling::Context timed = Cooling::apply_layer_time(base, settings, 7.5);
+    CHECK_NOTHROW(timed.validate(RAW_FAN_POLICY_PHASE_TIME));
     CHECK(timed.phase == RAW_FAN_POLICY_PHASE_TIME);
     CHECK(timed.roles[RAW_FAN_ROLE_DEFAULT].percent == 60);
     CHECK(timed.roles[RAW_FAN_ROLE_PERIMETER].percent == 70);
@@ -72,19 +77,26 @@ TEST_CASE("Fan stages preserve configured references and enforce phase order",
     CHECK(timed.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].percent == 20);
     CHECK(timed.roles[RAW_FAN_ROLE_SUPPORT_MATERIAL].percent == 20);
     CHECK(timed.dynamic_min == 60);
-    const Cooling::Context closed = Cooling::close_first_layers(timed);
+    const Cooling::Context closed = Cooling::close_first_layers(timed, settings, 6);
+    CHECK_NOTHROW(closed.validate(RAW_FAN_POLICY_PHASE_CLOSED));
     CHECK(closed.phase == RAW_FAN_POLICY_PHASE_CLOSED);
     CHECK(closed.roles[RAW_FAN_ROLE_DEFAULT].percent == 60);
     CHECK(base.roles[RAW_FAN_ROLE_DEFAULT].percent == 20); // inputs are immutable
-    CHECK_THROWS_AS(Cooling::close_first_layers(base), std::invalid_argument);
+    CHECK_THROWS_AS(Cooling::close_first_layers(base, settings, 6), std::invalid_argument);
     CHECK_THROWS_AS(Cooling::apply_layer_time(timed, settings, 7.5), std::invalid_argument);
-    CHECK_THROWS_AS(Cooling::close_first_layers(closed), std::invalid_argument);
+    CHECK_THROWS_AS(Cooling::close_first_layers(closed, settings, 6), std::invalid_argument);
 
     Cooling::Context malformed = base;
     malformed.struct_size = 0;
     CHECK_THROWS_AS(Cooling::apply_layer_time(malformed, settings, 7.5), std::invalid_argument);
     malformed = base;
-    malformed.roles[RAW_FAN_ROLE_DEFAULT].fallback_role = RAW_FAN_ROLE_COUNT + 1;
+    malformed.roles[RAW_FAN_ROLE_DEFAULT].percent = 101;
+    CHECK_THROWS_AS(malformed.validate(RAW_FAN_POLICY_PHASE_BASE), std::invalid_argument);
+    malformed = base;
+    malformed.roles[RAW_FAN_ROLE_DEFAULT].configured_percent = -2;
+    CHECK_THROWS_AS(malformed.validate(RAW_FAN_POLICY_PHASE_BASE), std::invalid_argument);
+    malformed = base;
+    malformed.dynamic_min = malformed.dynamic_max + 1;
     CHECK_THROWS_AS(malformed.validate(RAW_FAN_POLICY_PHASE_BASE), std::invalid_argument);
     malformed = base;
     malformed.phase = 42;
@@ -101,7 +113,8 @@ TEST_CASE("Fan time thresholds disabled references and D F closure retain legacy
     settings.configured[RAW_FAN_ROLE_DEFAULT] = 20;
     settings.slowdown_seconds = 5;
     settings.fan_seconds = 10;
-    const Cooling::Context base = Cooling::make_base(settings, 0);
+    settings.validate();
+    const Cooling::Context base = Cooling::make_base(settings);
     CHECK(Cooling::apply_layer_time(base, settings, 5).roles[RAW_FAN_ROLE_DEFAULT].percent == 100);
     CHECK(Cooling::apply_layer_time(base, settings, 10).roles[RAW_FAN_ROLE_DEFAULT].percent == 20);
     settings.fan_seconds = settings.slowdown_seconds;
@@ -113,7 +126,7 @@ TEST_CASE("Fan time thresholds disabled references and D F closure retain legacy
     settings.configured.fill(-1);
     settings.configured[RAW_FAN_ROLE_PERIMETER] = 0;
     settings.fan_seconds = 10;
-    const Cooling::Context absent = Cooling::make_base(settings, 2);
+    const Cooling::Context absent = Cooling::make_base(settings);
     CHECK(absent.roles[RAW_FAN_ROLE_DEFAULT].percent == -1);
     CHECK(absent.roles[RAW_FAN_ROLE_PERIMETER].percent == 0);
     CHECK(Cooling::apply_layer_time(absent, settings, 7.5).roles[RAW_FAN_ROLE_DEFAULT].percent == -1);
@@ -124,19 +137,27 @@ TEST_CASE("Fan time thresholds disabled references and D F closure retain legacy
     settings.disabled_layers = 1;
     settings.full_speed_layer = 4;
     const Cooling::Context off = Cooling::close_first_layers(
-        Cooling::apply_layer_time(Cooling::make_base(settings, 0), settings, 0));
+        Cooling::apply_layer_time(Cooling::make_base(settings), settings, 0), settings, 0);
     for (const c_fan_role_reference &role : off.roles)
         CHECK(role.percent == 0);
     CHECK(off.dynamic_min == 0);
     CHECK(off.dynamic_max == 0);
     const Cooling::Context ramp = Cooling::close_first_layers(
-        Cooling::apply_layer_time(Cooling::make_base(settings, 1), settings, 20));
+        Cooling::apply_layer_time(Cooling::make_base(settings), settings, 20), settings, 1);
     CHECK(ramp.roles[RAW_FAN_ROLE_DEFAULT].percent == 26);
     CHECK(ramp.roles[RAW_FAN_ROLE_BRIDGE_INFILL].percent == 80);
     CHECK(ramp.roles[RAW_FAN_ROLE_SUPPORT_MATERIAL_INTERFACE].percent == 80);
     CHECK(ramp.dynamic_max == 26);
     CHECK(ramp.roles[RAW_FAN_ROLE_IRONING].percent == ramp.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].percent);
     CHECK(ramp.roles[RAW_FAN_ROLE_THIN_WALL].percent == ramp.roles[RAW_FAN_ROLE_EXTERNAL_PERIMETER].percent);
+
+    // Reuse one numerical result with explicit closure inputs: neither the
+    // layer ordinal nor D/F settings are hidden snapshots inside the context.
+    const Cooling::Context timed = Cooling::apply_layer_time(Cooling::make_base(settings), settings, 20);
+    CHECK(Cooling::close_first_layers(timed, settings, 0).roles[RAW_FAN_ROLE_DEFAULT].percent == 0);
+    CHECK(Cooling::close_first_layers(timed, settings, 4).roles[RAW_FAN_ROLE_DEFAULT].percent == 80);
+    settings.disabled_layers = 0;
+    CHECK(Cooling::close_first_layers(timed, settings, 1).roles[RAW_FAN_ROLE_DEFAULT].percent == 40);
 }
 
 TEST_CASE("Common fan request transformations preserve protected mode pairs",
@@ -175,8 +196,9 @@ TEST_CASE("Fan reference tables keep role exceptions and close family fallbacks 
     settings.full_speed_layer = 4;
     // At half-time the increasable roles become 90. On layer 1 (index0),
     // rampable roles then become one quarter, with truncation after +0.01.
-    const Cooling::Context time = Cooling::apply_layer_time(Cooling::make_base(settings, 0), settings, 7.5);
-    const Cooling::Context closed = Cooling::close_first_layers(time);
+    settings.validate();
+    const Cooling::Context time = Cooling::apply_layer_time(Cooling::make_base(settings), settings, 7.5);
+    const Cooling::Context closed = Cooling::close_first_layers(time, settings, 0);
     const int expected_time[RAW_FAN_ROLE_COUNT] = {90,90,90,90,90,90,90,80,80,90,90,90,80,80,80};
     const int expected_closed[RAW_FAN_ROLE_COUNT] = {22,22,22,90,22,90,22,20,20,90,22,22,80,20,80};
     for (size_t role = 0; role < RAW_FAN_ROLE_COUNT; ++role) {
@@ -194,18 +216,45 @@ TEST_CASE("Fan reference tables keep role exceptions and close family fallbacks 
     settings.configured[RAW_FAN_ROLE_BRIDGE_INFILL] = 80;
     settings.configured[RAW_FAN_ROLE_SUPPORT_MATERIAL] = 30;
     settings.full_speed_layer = 0;
-    const Cooling::Context base = Cooling::make_base(settings, 0);
+    const Cooling::Context base = Cooling::make_base(settings);
     CHECK(base.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].percent == 60); // early fallback
     CHECK(base.roles[RAW_FAN_ROLE_INTERNAL_BRIDGE_INFILL].percent == 80);
     CHECK(base.roles[RAW_FAN_ROLE_SUPPORT_MATERIAL_INTERFACE].percent == 30);
     CHECK(base.roles[RAW_FAN_ROLE_EXTERNAL_PERIMETER].percent == -1); // late fallback
-    const Cooling::Context resolved = Cooling::close_first_layers(Cooling::apply_layer_time(base, settings, 20));
+    const Cooling::Context resolved = Cooling::close_first_layers(Cooling::apply_layer_time(base, settings, 20), settings, 0);
     CHECK(resolved.roles[RAW_FAN_ROLE_EXTERNAL_PERIMETER].percent == 40);
     CHECK(resolved.roles[RAW_FAN_ROLE_THIN_WALL].percent == 40);
     CHECK(resolved.roles[RAW_FAN_ROLE_IRONING].percent == 60);
     settings.configured[RAW_FAN_ROLE_OVERHANG_PERIMETER] = 75;
     settings.dynamic_enabled = true;
-    const Cooling::Context dynamic = Cooling::make_base(settings, 0);
+    const Cooling::Context dynamic = Cooling::make_base(settings);
     CHECK(dynamic.roles[RAW_FAN_ROLE_OVERHANG_PERIMETER].configured_percent == 75);
     CHECK(dynamic.roles[RAW_FAN_ROLE_OVERHANG_PERIMETER].percent == -1);
+}
+
+TEST_CASE("Fan settings are validated once at the configuration boundary",
+          "[plugins][fan-policy][properties]")
+{
+    Cooling::Settings settings;
+    CHECK_NOTHROW(settings.validate());
+    for (int32_t invalid : {-2, 101}) {
+        settings.configured[RAW_FAN_ROLE_DEFAULT] = invalid;
+        CHECK_THROWS_AS(settings.validate(), std::invalid_argument);
+    }
+    settings.configured[RAW_FAN_ROLE_DEFAULT] = -1;
+    for (int32_t invalid : {-1, 101}) {
+        settings.maximum = invalid;
+        CHECK_THROWS_AS(settings.validate(), std::invalid_argument);
+    }
+    settings.maximum = 100;
+    for (double invalid : {-1., std::numeric_limits<double>::infinity(),
+                           std::numeric_limits<double>::quiet_NaN()}) {
+        settings.slowdown_seconds = invalid;
+        CHECK_THROWS_AS(settings.validate(), std::invalid_argument);
+        settings.slowdown_seconds = 0;
+        settings.fan_seconds = invalid;
+        CHECK_THROWS_AS(settings.validate(), std::invalid_argument);
+        settings.fan_seconds = 0;
+    }
+    CHECK_NOTHROW(settings.validate());
 }
