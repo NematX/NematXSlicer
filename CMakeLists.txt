@@ -123,3 +123,12 @@ add_subdirectory(plugins/nematx_firmware)
 add_executable(corner_stretch_tests tests/corner_stretch/geometry_tests.cpp)
 target_include_directories(corner_stretch_tests PRIVATE src)
 add_test(NAME corner_stretch_geometry COMMAND corner_stretch_tests)
+
+# Compile and link the public fan kernels as an external SDK consumer. The
+# generic launcher supplies only the existing host C ABI library's runtime path.
+add_executable(fan_policy_sdk_tests tests/fan_policy/sdk_tests.cpp)
+target_link_libraries(fan_policy_sdk_tests PRIVATE slic3r::plugin_sdk_cpp nematx_host_sdk)
+get_filename_component(_fan_policy_host_lib_dir "${SUPERSLICER_HOST_LIBRARY}" DIRECTORY)
+add_test(NAME fan_policy_sdk
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/plugins/infill_gridvarspeed/tests/run_sdk_tests.py"
+            --library-dir "${_fan_policy_host_lib_dir}" --exe "$<TARGET_FILE:fan_policy_sdk_tests>")
