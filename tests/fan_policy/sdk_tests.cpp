@@ -24,9 +24,10 @@ int main()
         settings.configured[RAW_FAN_ROLE_PERIMETER] = 40;
         settings.slowdown_seconds = 5;
         settings.fan_seconds = 10;
-        const FanPolicy::Context base = FanPolicy::make_base(settings, 0);
+        settings.validate();
+        const FanPolicy::Context base = FanPolicy::make_base(settings);
         const FanPolicy::Context time = FanPolicy::apply_layer_time(base, settings, 7.5);
-        const FanPolicy::Context closed = FanPolicy::close_first_layers(time);
+        const FanPolicy::Context closed = FanPolicy::close_first_layers(time, settings, 0);
         closed.validate(RAW_FAN_POLICY_PHASE_CLOSED);
         require(closed.roles[RAW_FAN_ROLE_DEFAULT].percent == 60, "default time interpolation");
         require(closed.roles[RAW_FAN_ROLE_PERIMETER].percent == 70, "role time interpolation");
