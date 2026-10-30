@@ -36,6 +36,7 @@
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
+#include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanTimeEstimator.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
@@ -50,7 +51,7 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintRegion.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
-#include "libslic3r/Plugins/PrintingPlan/PrintingLayerTimeProperty.h"
+#include "libslic3r/Api/plugin/cpp/PrintingLayerTimeProperty.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
 #include "libslic3r/Steps/StepLayerExtrusionEdition.hpp"
@@ -2613,7 +2614,7 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
     const PrintingLayerTimeProperty *time = layer_time_key.get(layer_view.properties());
     REQUIRE(time != nullptr);
     CHECK(time->duration_seconds > 0.0);
-    CHECK_FALSE(time->is_final());
+    CHECK_FALSE(time->is_resolved());
 }
 
 TEST_CASE("Layer fan defaults preserve effective modes including zero and plugin requests",
@@ -2914,7 +2915,7 @@ TEST_CASE("Layer fan plugin consumes final timing without estimating geometry",
                 reinterpret_cast<printing_layer_group_handle *>(&layer));
             PrintingLayerTimeProperty &time = layer_time_key.get_or_add(layer_view.properties());
             time.duration_seconds = 123.0;
-            time.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_FINAL;
+            time.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED;
         }
     }
 
@@ -2932,7 +2933,222 @@ TEST_CASE("Layer fan plugin consumes final timing without estimating geometry",
     const PrintingLayerTimeProperty *time = layer_time_key.get(layer_view.properties());
     REQUIRE(time != nullptr);
     CHECK(time->duration_seconds == Approx(123.0));
-    CHECK(time->is_final());
+    CHECK(time->is_resolved());
+}
+
+TEST_CASE("Public fan context publishes references despite protected leaves and copies with tools",
+          "[plugins][layer-extrusion-edit][fan-policy][fan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "20"}, {"perimeter_fan_speed", "40"},
+        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
+        {"fan_below_layer_time", "10"}, {"slowdown_below_layer_time", "5"}
+    });
+    ExtrusionSpec protected_leaf{ExtrusionRole::Perimeter, 0.2};
+    protected_leaf.fan_speed = 0.f;
+    prepare_ordered_plan(prepared, config, {{protected_leaf}});
+    orchestrator_handle *orch = reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance());
+    const PluginPropertyKey<slic3r_api::FanPolicy::Context> context_key = slic3r_api::FanPolicy::context_property_key(orch);
+    CHECK(slic3r_api::FanPolicy::context_property_key(orch).type() == context_key.type());
+    CHECK(orchestrator_register_property(orch, FAN_POLICY_CONTEXT_PROPERTY_NAME,
+        uint32_t(sizeof(c_fan_policy_context) + 1), uint32_t(alignof(c_fan_policy_context))) == SLIC3R_PROPERTY_TYPE_INVALID);
+    const PluginPropertyKey<PrintingLayerTimeProperty> time_key = registered_layer_time_property_key();
+    for (PrintingGroup &group : prepared.print.mutable_printing_plan().groups)
+        for (PrintingLayerGroup &layer : group.layers) {
+            slic3r_api::PrintingLayerGroup view(reinterpret_cast<printing_layer_group_handle *>(&layer));
+            PrintingLayerTimeProperty &time = time_key.get_or_add(view.properties());
+            time.duration_seconds = 7.5;
+            time.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED;
+        }
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == 1);
+    CHECK(leaves.front().fan_speed == 0.f);
+    size_t contexts = 0;
+    for (PrintingGroup &group : prepared.print.mutable_printing_plan().groups)
+        for (PrintingLayerGroup &layer : group.layers)
+            for (PrintingToolGroup &tool : layer.tool_groups) {
+                const slic3r_api::PrintingToolGroup view(reinterpret_cast<printing_tool_group_handle *>(&tool));
+                const slic3r_api::FanPolicy::Context *context = context_key.get(view.properties());
+                REQUIRE(context != nullptr);
+                CHECK_NOTHROW(context->validate(RAW_FAN_POLICY_PHASE_CLOSED));
+                CHECK(context->roles[RAW_FAN_ROLE_DEFAULT].percent == 60);
+                CHECK(context->roles[RAW_FAN_ROLE_PERIMETER].configured_percent == 40);
+                CHECK(context->roles[RAW_FAN_ROLE_PERIMETER].percent == 70);
+                // A property-container copy must retain the complete ABI record,
+                // not borrow storage from the original tool group.
+                PrintingToolGroup copy;
+                copy.properties = tool.properties;
+                const slic3r_api::PrintingToolGroup copy_view(reinterpret_cast<printing_tool_group_handle *>(&copy));
+                const slic3r_api::FanPolicy::Context *copied = context_key.get(copy_view.properties());
+                REQUIRE(copied != nullptr);
+                CHECK(copied != context);
+                CHECK(copied->roles[RAW_FAN_ROLE_PERIMETER].percent == 70);
+                ++contexts;
+            }
+    CHECK(contexts > 0);
+    for (const ExtrusionEntity *root : prepared.source_roots)
+        CHECK(root->get_property<ExtrusionPropertyFan>() == nullptr);
+}
+
+TEST_CASE("Fan setup is read only and every tool consumes total layer duration",
+          "[plugins][layer-extrusion-edit][fan-policy][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "20"}, {"perimeter_fan_speed", "40"},
+        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
+        {"fan_below_layer_time", "10"}, {"slowdown_below_layer_time", "5"}
+    });
+    ExtrusionSpec spec{ExtrusionRole::Perimeter, 0.2};
+    spec.existing_speed = 20.f;
+    prepare_ordered_plan(prepared, config, {{spec}});
+    PrintingPlan &plan = prepared.print.mutable_printing_plan();
+    PrintingLayerGroup &layer = plan.groups.front().layers.front();
+    REQUIRE(layer.tool_groups.size() == 1);
+    // Separate visits to the same physical tool still share the layer total.
+    // Moving a second root into another visit also exercises inter-leaf travel.
+    layer.tool_groups.emplace_back();
+    layer.tool_groups.back().extruder_id = 0;
+    PrintingExtrusion second;
+    second.root.reset(layer.tool_groups.front().extrusions.front().root->clone());
+    layer.tool_groups.back().extrusions.emplace_back(std::move(second));
+    const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
+    const slic3r_api::Config config_view(Slic3r::ApiHost::to_config_handle(&prepared.print.config()));
+    const std::vector<slic3r_api::PrintingLayerTimeEstimate> estimates =
+        slic3r_api::PrintingPlanTimeEstimator(config_view).estimate(plan_view);
+    REQUIRE_FALSE(estimates.empty());
+    const double total = estimates.front().duration_seconds;
+    const PluginPropertyKey<PrintingLayerTimeProperty> time_key = registered_layer_time_property_key();
+    const PluginPropertyKey<slic3r_api::FanPolicy::Context> context_key = slic3r_api::FanPolicy::context_property_key(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    Plugin *plugin = Orchestrator::instance().get_plugin(DEFAULT_FAN_PLUGIN);
+    REQUIRE(plugin != nullptr);
+    run_ctx_layer_extrusion_edition payload = {};
+    payload.print = reinterpret_cast<const print_handle *>(&prepared.print);
+    payload.plan = reinterpret_cast<printing_plan_handle *>(&plan);
+    payload.group = reinterpret_cast<printing_group_handle *>(&plan.groups.front());
+    payload.layer_group = reinterpret_cast<printing_layer_group_handle *>(&layer);
+    plugin_run_context run = {};
+    run.step = STEP_LAYER_EXTRUSION_EDIT;
+    run.data = &payload;
+    plugin->setup(run, uint32_t(estimates.size()));
+    const slic3r_api::PrintingLayerGroup layer_view(payload.layer_group);
+    CHECK(time_key.get(layer_view.properties()) == nullptr);
+    for (PrintingToolGroup &tool : layer.tool_groups) {
+        const slic3r_api::PrintingToolGroup tool_view(reinterpret_cast<printing_tool_group_handle *>(&tool));
+        CHECK(context_key.get(tool_view.properties()) == nullptr);
+        CHECK(tool.extrusions.front().root->get_property<ExtrusionPropertyFan>() == nullptr);
+    }
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    // Read the finished pass through newly acquired views of its owning scopes.
+    PrintingLayerGroup &published_layer = prepared.print.mutable_printing_plan().groups.front().layers.front();
+    const slic3r_api::PrintingLayerGroup published_view(reinterpret_cast<printing_layer_group_handle *>(&published_layer));
+    const PrintingLayerTimeProperty *published = time_key.get(published_view.properties());
+    REQUIRE(published != nullptr);
+    CHECK(published->origin == RAW_PRINTING_LAYER_TIME_ORIGIN_ESTIMATED);
+    CHECK(published->duration_seconds == Approx(total));
+    const slic3r_api::FanPolicy::Settings settings = slic3r_api::FanPolicy::read_settings(config_view, 0);
+    const slic3r_api::FanPolicy::Context expected = slic3r_api::FanPolicy::close_first_layers(
+        slic3r_api::FanPolicy::apply_layer_time(slic3r_api::FanPolicy::make_base(settings, 0), settings, total));
+    REQUIRE(published_layer.tool_groups.size() == 2);
+    for (PrintingToolGroup &tool : published_layer.tool_groups) {
+        const slic3r_api::PrintingToolGroup view(reinterpret_cast<printing_tool_group_handle *>(&tool));
+        const slic3r_api::FanPolicy::Context *context = context_key.get(view.properties());
+        REQUIRE(context != nullptr);
+        CHECK(context->roles[RAW_FAN_ROLE_PERIMETER].percent == expected.roles[RAW_FAN_ROLE_PERIMETER].percent);
+    }
+}
+
+TEST_CASE("Fan references and estimated timing replay from the checkpoint on the same Print",
+          "[plugins][layer-extrusion-edit][fan-policy][fan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    DynamicPrintConfig config = speed_config({
+        {"perimeter_speed", "20"}, {"first_layer_speed", "100%"}, {"max_volumetric_speed", "0"},
+        {"filament_max_speed", "0"}, {"filament_max_volumetric_speed", "0"},
+        {"default_fan_speed", "20"}, {"perimeter_fan_speed", "40"},
+        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
+        {"fan_below_layer_time", "10"}, {"slowdown_below_layer_time", "5"}
+    });
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::Perimeter, 0.2}}});
+    for (slicing_step_t step : Steps::execution_order()) {
+        prepared.print.mark_step_executed(step);
+        if (step == STEP_ORDERING)
+            break;
+    }
+    REQUIRE(prepared.print.save_ordering_checkpoint());
+    const PluginPropertyKey<PrintingLayerTimeProperty> time_key = registered_layer_time_property_key();
+    const PluginPropertyKey<slic3r_api::FanPolicy::Context> context_key = slic3r_api::FanPolicy::context_property_key(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    double first_duration = 0;
+    size_t iteration = 0;
+    for (int speed : {20, 40, 20}) {
+        if (iteration > 0) {
+            config.set_deserialize_strict("perimeter_speed", std::to_string(speed));
+            REQUIRE(prepared.print.apply(prepared.model, config) == Print::APPLY_STATUS_INVALIDATED);
+            prepared.print.prepare_checkpoint_resume();
+        }
+        run_editors(prepared, {DEFAULT_SPEED_PLUGIN, DEFAULT_FAN_PLUGIN});
+        prepared.print.mark_step_executed(STEP_LAYER_EXTRUSION_EDIT);
+        PrintingLayerGroup &layer = prepared.print.mutable_printing_plan().groups.front().layers.front();
+        const slic3r_api::PrintingLayerGroup layer_view(reinterpret_cast<printing_layer_group_handle *>(&layer));
+        const PrintingLayerTimeProperty *time = time_key.get(layer_view.properties());
+        REQUIRE(time != nullptr);
+        if (iteration == 0)
+            first_duration = time->duration_seconds;
+        CHECK(time->duration_seconds == Approx(first_duration * 20 / speed));
+        const slic3r_api::PrintingToolGroup tool_view(reinterpret_cast<printing_tool_group_handle *>(&layer.tool_groups.front()));
+        const slic3r_api::FanPolicy::Context *context = context_key.get(tool_view.properties());
+        REQUIRE(context != nullptr);
+        CHECK(context->phase == RAW_FAN_POLICY_PHASE_CLOSED);
+        CHECK(context->roles[RAW_FAN_ROLE_PERIMETER].configured_percent == 40);
+        ++iteration;
+    }
+}
+
+TEST_CASE("Invalid public timing fails in setup without publishing cached fan data",
+          "[plugins][layer-extrusion-edit][fan-policy][fan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "20"}, {"disable_fan_first_layers", "0"},
+        {"full_fan_speed_layer", "0"}, {"fan_below_layer_time", "0"}, {"slowdown_below_layer_time", "0"}
+    });
+    ExtrusionSpec spec{ExtrusionRole::Perimeter, 0.2};
+    spec.existing_speed = 20.f;
+    // Warm the shared plugin's setup cache using a different Print first.
+    PreparedSpeedPrint previous;
+    prepare_ordered_plan(previous, config, {{spec}});
+    run_editors(previous, {DEFAULT_FAN_PLUGIN});
+
+    PreparedSpeedPrint invalid;
+    prepare_ordered_plan(invalid, config, {{spec}});
+    const PluginPropertyKey<PrintingLayerTimeProperty> time_key = registered_layer_time_property_key();
+    PrintingLayerGroup &layer = invalid.print.mutable_printing_plan().groups.front().layers.front();
+    slic3r_api::PrintingLayerGroup view(reinterpret_cast<printing_layer_group_handle *>(&layer));
+    PrintingLayerTimeProperty &time = time_key.get_or_add(view.properties());
+    time.duration_seconds = -1;
+    time.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED;
+    {
+        ScopedActivePlugins active({DEFAULT_FAN_PLUGIN});
+        orchestrator.reset_plugin_cancel();
+        CHECK_THROWS(Steps::StepLayerExtrusionEdition::run_step(orchestrator, invalid.print));
+        CHECK(orchestrator.is_plugin_cancelled());
+        orchestrator.reset_plugin_cancel();
+    }
+    const PluginPropertyKey<slic3r_api::FanPolicy::Context> context_key = slic3r_api::FanPolicy::context_property_key(
+        reinterpret_cast<orchestrator_handle *>(&orchestrator));
+    for (PrintingToolGroup &tool : layer.tool_groups) {
+        const slic3r_api::PrintingToolGroup tool_view(reinterpret_cast<printing_tool_group_handle *>(&tool));
+        CHECK(context_key.get(tool_view.properties()) == nullptr);
+        CHECK(tool.extrusions.front().root->get_property<ExtrusionPropertyFan>() == nullptr);
+    }
 }
 
 TEST_CASE("Acceleration plugin owns its settings and activation rules",

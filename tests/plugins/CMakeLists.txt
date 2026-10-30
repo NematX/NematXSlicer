@@ -41,6 +41,8 @@ add_executable(${_TEST_NAME}_tests
     test_geometry_primitives.cpp
     test_extrusion_split_by_areas.cpp
     test_extrusion_views.cpp
+    fan_policy_c_fixture.c
+    test_fan_policy.cpp
     test_fff_print_gui_rules.cpp
     test_plugin_activation_config.cpp
     test_plugin_api_compatibility.cpp

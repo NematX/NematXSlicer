@@ -1,8 +1,10 @@
 # Using Plugin Properties
 
-> Base snapshot commit: `78538901a5f3a30b36d4c0540de04f6120200b2c`, with the fan SDK migration below.
+> Base snapshot commit: `7a9b6ed96b`, with the public fan-policy/timing contracts below.
 >
 > Per-header ABI: `slic3r_extrusion_property.h` 4.0, `slic3r_def.h` 1.5.
+> Public policy records: `slic3r_fan_policy.h` 1.0,
+> `slic3r_printing_layer_time.h` 1.0; append-only API IDs in `slic3r_plugin_types.h` 4.2.
 
 The commit above identifies the source-tree state against which this guide and
 its examples were checked. It is not the commit that adds this document: a
@@ -108,6 +110,68 @@ editable_speed.speed(35.f).acceleration(800.f);
 `get()` and `get_mutable()` return `nullptr` when the direct property is absent.
 `get_or_add()` returns the existing payload or creates a zero-initialized one.
 `remove()` returns whether a property was actually removed.
+
+## Public Layer Timing And Fan References
+
+Two dynamic properties carry pipeline metadata without borrowing host objects:
+
+| SDK helper | Owner | Stable property name |
+| --- | --- | --- |
+| `PrintingLayerTimeProperty.hpp` | `PrintingLayerGroup::properties()` | `slic3r.printing_layer.time` |
+| `FanPolicy.hpp` (`FanPolicy::Context`) | `PrintingToolGroup::properties()` | `slic3r.printing_tool.fan_context` |
+
+Their minimal C headers define the layouts independently of Config, orchestrator
+and tree APIs. Register C++ keys with `printing_layer_time_property_key(orch)`
+and `FanPolicy::context_property_key(orch)` before parallel processing. C callers
+use `orchestrator_register_property()` with the published name, `sizeof` and
+alignment. Numeric IDs are local to that orchestrator, not preset data.
+
+Timing is the **whole layer's duration**, shared by every tool visit, not a
+per-tool duration. `ESTIMATED` is a replaceable geometric fallback. `RESOLVED`
+means a producer ran its timing model after speed/slowdown changes; it does not
+mean measured machine time or provide intra-movement timing. Both origins
+require finite, nonnegative seconds. A producer must republish after modifying
+speeds. The combined `DefaultFan` keeps valid RESOLVED records and recomputes
+other durations in one ordered estimation pass. No post-slowdown producer is
+implemented by these contracts.
+
+Fan references are distinct from extrusion requests. `configured_percent` keeps
+normalized filament input (`-1` disabled, historical `1` mapped to `0`), while
+`percent` is the current reference (`-1` absent, `0` a real stop). `fallback_role`
+identifies a late fallback, with `RAW_FAN_ROLE_COUNT` meaning none. Early family
+fallbacks are already applied in BASE. Filament normalization must never be
+applied to a regional or user request of 1%.
+
+The value-only SDK stages consume copies and enforce this order:
+
+```cpp
+const FanPolicy::Settings settings = FanPolicy::read_settings(config, extruder_id);
+const FanPolicy::Context base = FanPolicy::make_base(settings, layer_index);
+const FanPolicy::Context timed = FanPolicy::apply_layer_time(base, settings, duration_seconds);
+const FanPolicy::Context closed = FanPolicy::close_first_layers(timed);
+closed.validate(RAW_FAN_POLICY_PHASE_CLOSED);
+```
+
+`BASE -> TIME -> CLOSED` preserves role exceptions, time-threshold rounding,
+the D/F first-layer program and late fallback closure. `struct_size` must match
+the C layout: zero-initialized storage is not a published context. Contexts are
+computed even when all extrusion requests are protected. Dynamic bounds apply
+only to modifiable requests, never to Override or another plugin's mode.
+`FanPolicy::transform_request()` preserves protected pairs, updates a modifiable
+pair without changing its active mode, and assigns the caller's mode when absent.
+Its inputs follow `can_modify()`'s prevalidated-mode contract below.
+
+For now `DefaultFan` performs all three stages within its layer callback and
+publishes CLOSED. Separate plugin callbacks and the advanced E/D/G program are
+not part of this interface's initial implementation. Setup only caches durations;
+publication happens in the owning layer's run. Reprocessing restores the saved
+preprocessing tree and rebuilds references, not inverse transformations.
+
+Python exposes the same ctypes records through `slic3r_fan_policy`:
+`FanPolicyContext`, `PrintingLayerTimeProperty`, `fan_policy_context_key(api)`,
+`printing_layer_time_property_key(api)`, `validate_fan_policy_context(record, phase)`
+and `validate_printing_layer_time(record)`. Registration requires the owning API;
+successful validation returns `None`. Numerical kernels are in the C++ SDK archive.
 
 ## Fan Requests: Absence Is A Mode, Not A Percentage
 

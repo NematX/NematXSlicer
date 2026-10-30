@@ -398,6 +398,67 @@ class PythonPrintingPlanViewTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             fan.validate(api)
 
+    def test_public_fan_context_and_timing_keys_use_owning_registry(self):
+        policy = importlib.import_module("slic3r_fan_policy")
+        registry = {}
+
+        def register(orch, name, size, alignment):
+            identity = address(orch), name
+            previous = registry.get(identity)
+            if previous is not None:
+                return previous[0] if previous[1:] == (size, alignment) else self.generated.SLIC3R_PROPERTY_TYPE_INVALID
+            registry[identity] = (0x10000 + len(registry), size, alignment)
+            return registry[identity][0]
+
+        host = types.SimpleNamespace(orchestrator_register_property=register)
+        api = types.SimpleNamespace(orchestrator=ctypes.c_void_p(11), host=host)
+        other_api = types.SimpleNamespace(orchestrator=ctypes.c_void_p(12), host=host)
+        context_key = policy.fan_policy_context_key(api)
+        self.assertEqual(context_key.type(), policy.fan_policy_context_key(api).type())
+        self.assertNotEqual(context_key.type(), policy.fan_policy_context_key(other_api).type())
+        self.assertEqual(context_key.payload_cls, policy.FanPolicyContext)
+        self.assertEqual(address(context_key.orchestrator), 11)
+        time_key = policy.printing_layer_time_property_key(api)
+        self.assertNotEqual(context_key.type(), time_key.type())
+        self.assertEqual(time_key.payload_cls, policy.PrintingLayerTimeProperty)
+        self.assertEqual(ctypes.sizeof(policy.FanPolicyContext), 212)
+        self.assertEqual(ctypes.sizeof(self.generated.CFanRoleReference), 12)
+        self.assertEqual(policy.FanPolicyContext.roles.offset, 8)
+        self.assertEqual(policy.PrintingLayerTimeProperty.origin.offset, 8)
+
+    def test_public_fan_context_and_timing_reject_unpublished_or_invalid_records(self):
+        policy = importlib.import_module("slic3r_fan_policy")
+        context = policy.FanPolicyContext()
+        g = self.generated
+        with self.assertRaises(ValueError):
+            policy.validate_fan_policy_context(context, g.RAW_FAN_POLICY_PHASE_BASE)
+        context.struct_size = ctypes.sizeof(context)
+        context.phase = g.RAW_FAN_POLICY_PHASE_BASE
+        context.dynamic_max = 100
+        self.assertIsNone(policy.validate_fan_policy_context(context, g.RAW_FAN_POLICY_PHASE_BASE))
+        for phase in (g.RAW_FAN_POLICY_PHASE_TIME, g.RAW_FAN_POLICY_PHASE_CLOSED, 42):
+            with self.assertRaises(ValueError):
+                policy.validate_fan_policy_context(context, phase)
+        context.roles[0].percent = -2
+        with self.assertRaises(ValueError):
+            policy.validate_fan_policy_context(context, g.RAW_FAN_POLICY_PHASE_BASE)
+        context.roles[0].percent = -1
+        context.roles[0].configured_percent = -1
+        self.assertIsNone(policy.validate_fan_policy_context(context, g.RAW_FAN_POLICY_PHASE_BASE))
+        time = policy.PrintingLayerTimeProperty()
+        for origin in (g.RAW_PRINTING_LAYER_TIME_ORIGIN_ESTIMATED, g.RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED):
+            time.origin = origin
+            time.duration_seconds = 12.5
+            self.assertIsNone(policy.validate_printing_layer_time(time))
+            for value in (-1, float("nan"), float("inf")):
+                time.duration_seconds = value
+                with self.assertRaises(ValueError):
+                    policy.validate_printing_layer_time(time)
+        time.duration_seconds = 0
+        time.origin = 42
+        with self.assertRaises(ValueError):
+            policy.validate_printing_layer_time(time)
+
     def test_runtime_id_domain_and_fan_conflict_rule(self):
         extrusion = importlib.import_module("slic3r_extrusion_views")
         RuntimeIdDomain = importlib.import_module("slic3r_runtime_id").RuntimeIdDomain

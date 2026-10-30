@@ -7,6 +7,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 
 set(_sdk_sources
+    cpp/FanPolicy.cpp
     cpp/HoleCompensation.cpp
     cpp/PrintHelpers.cpp
     cpp/gcode/BuiltinGCodeReaderBase.cpp

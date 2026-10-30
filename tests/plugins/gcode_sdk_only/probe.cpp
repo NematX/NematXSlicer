@@ -1,6 +1,8 @@
 #include <cmath>
 
 #include "libslic3r/Api/plugin/cpp/HoleCompensation.hpp"
+#include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintingLayerTimeProperty.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 
@@ -14,6 +16,7 @@ checks arc geometry without including any internal host header.
     gcode_sdk_probe()
     |-- ExternalFirmware::probe(): dispatch to the fixture's E reset encoder
     |-- compensate_convex_holes: require resolution from the SDK archive
+    |-- FanPolicy stages: link the shared kernels and validate the public context
     `-- arc_center(): check the public signed-radius calculation
 */
 
@@ -54,6 +57,16 @@ extern "C" PROBE_EXPORT int gcode_sdk_probe()
         const slic3r_api::ConvexHoleDelta &, bool &) = &slic3r_api::compensate_convex_holes;
     if (compensate == nullptr)
         return 3;
+    slic3r_api::FanPolicy::Settings settings;
+    settings.configured[RAW_FAN_ROLE_DEFAULT] = 20;
+    const slic3r_api::FanPolicy::Context base = slic3r_api::FanPolicy::make_base(settings, 0);
+    const slic3r_api::FanPolicy::Context timed = slic3r_api::FanPolicy::apply_layer_time(base, settings, 10.);
+    const slic3r_api::FanPolicy::Context closed = slic3r_api::FanPolicy::close_first_layers(timed);
+    closed.validate(RAW_FAN_POLICY_PHASE_CLOSED);
+    if (closed.roles[RAW_FAN_ROLE_DEFAULT].percent != 20)
+        return 5;
+    const slic3r_api::PrintingLayerTimeProperty duration{{10., RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED}};
+    duration.validate();
     // The arc helper is header-only: an external firmware uses it directly.
     const c_vec2d center = arc_center(c_vec2d{ 5.0, 0.0 }, c_vec2d{ 0.0, 5.0 }, 5.0, true);
     return std::abs(center.x) < 1e-9 && std::abs(center.y) < 1e-9 ? 0 : 2;

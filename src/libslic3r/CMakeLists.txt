@@ -451,7 +451,6 @@ set(SLIC3R_SOURCES
 	Plugins/PrintingPlan/EntryPointProperty.h
 	Plugins/PrintingPlan/PrintingLayerEntryStateProperties.h
 	Plugins/PrintingPlan/PrintingExtrusionScopeProperty.h
-	Plugins/PrintingPlan/PrintingLayerTimeProperty.h
 	Plugins/SeamPlacer/AlignedSeamPlacer.cpp
 	Plugins/SeamPlacer/AlignedSeamPlacer.hpp
 	Plugins/SeamPlacer/ContiguousSeamPlacer.cpp

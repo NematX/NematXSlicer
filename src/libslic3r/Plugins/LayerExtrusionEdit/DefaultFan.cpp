@@ -35,8 +35,9 @@ EPropertyFan and decides whether a physical fan command is necessary.
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintingLayerTimeProperty.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanTimeEstimator.hpp"
-#include "libslic3r/Plugins/PrintingPlan/PrintingLayerTimeProperty.h"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultFanPlugin {
 // Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
@@ -495,48 +496,13 @@ void initialize_default_fan_settings(orchestrator_handle *orchestrator)
 }
 
 
-enum class FanRole : uint8_t
-{
-    Default,
-    Perimeter,
-    ExternalPerimeter,
-    OverhangPerimeter,
-    InternalInfill,
-    InternalBridgeInfill,
-    SolidInfill,
-    TopSolidInfill,
-    Ironing,
-    BridgeInfill,
-    ThinWall,
-    GapFill,
-    Skirt,
-    SupportMaterial,
-    SupportMaterialInterface,
-    Count
-};
+using LayerFanPolicy = FanPolicy::Context;
 
 struct GeneratedFanMarker
 {
     uint8_t generated = 1;
 };
 
-struct LayerFanPolicy
-{
-    std::array<int, size_t(FanRole::Count)> speed = {};
-    int dynamic_min = 0;
-    int dynamic_max = 100;
-};
-
-int role_index(FanRole role);
-int legacy_fan_value(const Config &config, const char *key, extruder_index_t extruder_id);
-int normalize_fan_value(int value);
-FanRole fan_role(raw_extrusion_role role);
-bool can_increase(FanRole role);
-bool can_ramp(FanRole role);
-LayerFanPolicy layer_fan_policy(const Config &config,
-                                extruder_index_t extruder_id,
-                                uint32_t layer_idx,
-                                double duration_seconds);
 float dynamic_overhang_fan(const Config &config,
                            extruder_index_t extruder_id,
                            raw_extrusion_role role,
@@ -587,186 +553,11 @@ private:
     void run_impl(const plugin_run_context *run_ctx) const override;
 
     PluginPropertyKey<PrintingLayerTimeProperty> m_layer_time_property;
+    PluginPropertyKey<FanPolicy::Context> m_fan_context_property;
     PluginPropertyKey<GeneratedFanMarker> m_generated_marker;
     mutable bool m_setup_valid = false;
-    mutable std::vector<std::vector<double>> m_layer_durations;
+    mutable std::vector<std::vector<PrintingLayerTimeProperty>> m_layer_times;
 };
-
-int role_index(FanRole role)
-{
-    return int(uint8_t(role));
-}
-
-int legacy_fan_value(const Config &config, const char *key, extruder_index_t extruder_id)
-{
-    return normalize_fan_value(config.vector_int_or_default(key, extruder_id, -1));
-}
-
-int normalize_fan_value(int value)
-{
-    // Older profiles used 1 as their serialized spelling for a stopped fan.
-    // Preserve that compatibility before any minimum-speed clamp is applied.
-    return value == 1 ? 0 : value;
-}
-
-FanRole fan_role(raw_extrusion_role role)
-{
-    // Test the compound roles before their broader bit families. This is the
-    // same specificity order used by the legacy G-code role conversion.
-    if (role == RAW_EXTRUSION_ROLE_GAP_FILL)
-        return FanRole::GapFill;
-    if (RAW_EXTRUSION_ROLE_IS_SUPPORT(role))
-        return RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_EXTERNAL) ?
-            FanRole::SupportMaterialInterface : FanRole::SupportMaterial;
-    if (RAW_EXTRUSION_ROLE_IS_SKIRT(role))
-        return FanRole::Skirt;
-    if (RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_IRONING))
-        return FanRole::Ironing;
-    if (RAW_EXTRUSION_ROLE_IS_INFILL(role) && RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_BRIDGE))
-        return RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_EXTERNAL) ?
-            FanRole::BridgeInfill : FanRole::InternalBridgeInfill;
-    if (RAW_EXTRUSION_ROLE_IS_INFILL(role) && RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_SOLID))
-        return RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_EXTERNAL) ?
-            FanRole::TopSolidInfill : FanRole::SolidInfill;
-    if (RAW_EXTRUSION_ROLE_IS_INFILL(role))
-        return FanRole::InternalInfill;
-    if (role == RAW_EXTRUSION_ROLE_THIN_WALL)
-        return FanRole::ThinWall;
-    if (RAW_EXTRUSION_ROLE_IS_PERIMETER(role) && RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_BRIDGE))
-        return FanRole::OverhangPerimeter;
-    if (RAW_EXTRUSION_ROLE_IS_PERIMETER(role) && RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_EXTERNAL))
-        return FanRole::ExternalPerimeter;
-    if (RAW_EXTRUSION_ROLE_IS_PERIMETER(role))
-        return FanRole::Perimeter;
-    return FanRole::Count;
-}
-
-bool can_increase(FanRole role)
-{
-    return role == FanRole::Default || role == FanRole::BridgeInfill ||
-           role == FanRole::InternalBridgeInfill || role == FanRole::ExternalPerimeter ||
-           role == FanRole::ThinWall || role == FanRole::Perimeter ||
-           role == FanRole::SolidInfill || role == FanRole::InternalInfill ||
-           role == FanRole::OverhangPerimeter || role == FanRole::GapFill;
-}
-
-bool can_ramp(FanRole role)
-{
-    return role == FanRole::Default || role == FanRole::TopSolidInfill ||
-           role == FanRole::Ironing || role == FanRole::SupportMaterial ||
-           role == FanRole::ExternalPerimeter || role == FanRole::ThinWall ||
-           role == FanRole::Perimeter || role == FanRole::SolidInfill ||
-           role == FanRole::InternalInfill || role == FanRole::GapFill;
-}
-
-LayerFanPolicy layer_fan_policy(const Config &config,
-                                extruder_index_t extruder_id,
-                                uint32_t layer_idx,
-                                double duration_seconds)
-{
-    LayerFanPolicy policy;
-    policy.speed.fill(-1);
-
-    int default_speed = legacy_fan_value(config, "default_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::Default)] = default_speed;
-    policy.speed[role_index(FanRole::Skirt)] = default_speed;
-
-    // Build the role table before applying time-based changes. A disabled role
-    // keeps -1 so the late family fallback at the end of the pass can redirect
-    // it to its reference role.
-    policy.speed[role_index(FanRole::BridgeInfill)] = legacy_fan_value(config, "bridge_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::InternalBridgeInfill)] = legacy_fan_value(config, "internal_bridge_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::TopSolidInfill)] = legacy_fan_value(config, "top_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::Ironing)] = policy.speed[role_index(FanRole::TopSolidInfill)];
-    policy.speed[role_index(FanRole::SupportMaterialInterface)] = legacy_fan_value(config, "support_material_interface_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::SupportMaterial)] = legacy_fan_value(config, "support_material_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::ExternalPerimeter)] = legacy_fan_value(config, "external_perimeter_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::ThinWall)] = policy.speed[role_index(FanRole::ExternalPerimeter)];
-    policy.speed[role_index(FanRole::Perimeter)] = legacy_fan_value(config, "perimeter_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::SolidInfill)] = legacy_fan_value(config, "solid_infill_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::InternalInfill)] = legacy_fan_value(config, "infill_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::OverhangPerimeter)] = legacy_fan_value(config, "overhangs_fan_speed", extruder_id);
-    policy.speed[role_index(FanRole::GapFill)] = legacy_fan_value(config, "gap_fill_fan_speed", extruder_id);
-
-    if (policy.speed[role_index(FanRole::TopSolidInfill)] < 0)
-        policy.speed[role_index(FanRole::TopSolidInfill)] = policy.speed[role_index(FanRole::SolidInfill)];
-    if (policy.speed[role_index(FanRole::SupportMaterialInterface)] < 0)
-        policy.speed[role_index(FanRole::SupportMaterialInterface)] = policy.speed[role_index(FanRole::SupportMaterial)];
-    if (policy.speed[role_index(FanRole::InternalBridgeInfill)] < 0)
-        policy.speed[role_index(FanRole::InternalBridgeInfill)] = policy.speed[role_index(FanRole::BridgeInfill)];
-
-    const ConfigOption dynamic_option = config.get("overhangs_dynamic_fan_speed");
-    const bool dynamic_overhang = dynamic_option.valid() && size_t(extruder_id) < dynamic_option.size() &&
-                                  dynamic_option.is_enabled(extruder_id);
-    if (dynamic_overhang)
-        policy.speed[role_index(FanRole::OverhangPerimeter)] = -1;
-
-    if (default_speed >= 0) {
-        for (size_t idx = 0; idx < policy.speed.size(); ++idx)
-            if (policy.speed[idx] < 0 && idx != size_t(FanRole::OverhangPerimeter))
-                policy.speed[idx] = default_speed;
-    }
-
-    const int disabled_layers = config.vector_int_or_default("disable_fan_first_layers", extruder_id, 0);
-    if (int(layer_idx) < disabled_layers) {
-        // The plan stores effective per-leaf state, so every controlled role
-        // receives zero during the disabled prefix instead of relying on an
-        // ambient default fan command.
-        policy.speed.fill(0);
-        policy.dynamic_min = 0;
-        policy.dynamic_max = 0;
-        return policy;
-    }
-
-    const int maximum = std::clamp(config.vector_int_or_default("max_fan_speed", extruder_id, 100), 0, 100);
-    const double slowdown_time = config.vector_float_or_default("slowdown_below_layer_time", extruder_id, 0.0);
-    const double fan_time = config.vector_float_or_default("fan_below_layer_time", extruder_id, 0.0);
-
-    // Very short layers use maximum cooling. Between the two thresholds the
-    // same rounded linear interpolation as CoolingBuffer is retained.
-    if (duration_seconds < slowdown_time && fan_time > 0.0) {
-        for (size_t idx = 0; idx < policy.speed.size(); ++idx)
-            if (can_increase(FanRole(idx)))
-                policy.speed[idx] = std::max(maximum, policy.speed[idx]);
-        policy.dynamic_min = std::max(0, policy.speed[role_index(FanRole::Default)]);
-    } else if (duration_seconds < fan_time && fan_time > slowdown_time) {
-        const double ratio = (duration_seconds - slowdown_time) / (fan_time - slowdown_time);
-        for (size_t idx = 0; idx < policy.speed.size(); ++idx) {
-            if (can_increase(FanRole(idx)) && policy.speed[idx] >= 0 && policy.speed[idx] < maximum)
-                policy.speed[idx] = std::clamp(
-                    int(ratio * policy.speed[idx] + (1.0 - ratio) * maximum + 0.5), 0, 100);
-        }
-        policy.dynamic_min = std::max(0, policy.speed[role_index(FanRole::Default)]);
-    }
-
-    const int full_layer = config.vector_int_or_default("full_fan_speed_layer", extruder_id, 0);
-    if (int(layer_idx) + 1 < full_layer && full_layer > disabled_layers) {
-        const float factor = float(int(layer_idx) + 1 - disabled_layers) /
-                             float(full_layer - disabled_layers);
-        for (size_t idx = 0; idx < policy.speed.size(); ++idx) {
-            if (can_ramp(FanRole(idx)) && policy.speed[idx] > 0)
-                policy.speed[idx] = std::clamp(int(float(policy.speed[idx]) * factor + 0.01f), 0, 100);
-        }
-        policy.dynamic_max = std::max(0, policy.speed[role_index(FanRole::Default)]);
-    }
-    if (policy.dynamic_min > policy.dynamic_max)
-        policy.dynamic_min = policy.dynamic_max;
-
-    // Apply late family fallbacks after time rules, matching the legacy role
-    // state machine. Physical calibration belongs exclusively to firmware.
-    if (policy.speed[role_index(FanRole::BridgeInfill)] < 0)
-        policy.speed[role_index(FanRole::BridgeInfill)] = policy.speed[role_index(FanRole::Default)];
-    if (policy.speed[role_index(FanRole::InternalBridgeInfill)] < 0)
-        policy.speed[role_index(FanRole::InternalBridgeInfill)] = policy.speed[role_index(FanRole::BridgeInfill)];
-    if (policy.speed[role_index(FanRole::ExternalPerimeter)] < 0)
-        policy.speed[role_index(FanRole::ExternalPerimeter)] = policy.speed[role_index(FanRole::Perimeter)];
-    if (policy.speed[role_index(FanRole::TopSolidInfill)] < 0)
-        policy.speed[role_index(FanRole::TopSolidInfill)] = policy.speed[role_index(FanRole::SolidInfill)];
-    policy.speed[role_index(FanRole::Ironing)] = policy.speed[role_index(FanRole::TopSolidInfill)];
-    policy.speed[role_index(FanRole::ThinWall)] = policy.speed[role_index(FanRole::ExternalPerimeter)];
-
-    return policy;
-}
 
 float dynamic_overhang_fan(const Config &config,
                            extruder_index_t extruder_id,
@@ -774,9 +565,9 @@ float dynamic_overhang_fan(const Config &config,
                            const EffectiveTreeState &state,
                            const LayerFanPolicy &policy)
 {
-    const FanRole fallback_role = RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_EXTERNAL) ?
-        FanRole::ExternalPerimeter : FanRole::Perimeter;
-    int result = policy.speed[role_index(fallback_role)];
+    const FanPolicy::Role fallback_role = RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_EXTERNAL) ?
+        RAW_FAN_ROLE_EXTERNAL_PERIMETER : RAW_FAN_ROLE_PERIMETER;
+    int result = policy.roles[fallback_role].percent;
 
     const ConfigOption option = config.get("overhangs_dynamic_fan_speed");
     if (!state.has_overhang || !option.valid() || size_t(extruder_id) >= option.size() ||
@@ -860,10 +651,10 @@ void assign_fan_tree(MutableExtrusionEntity entity,
         return;
 
     const raw_extrusion_role role = state.attributes.extrusion_role();
-    const FanRole resolved_role = fan_role(role);
-    if (resolved_role == FanRole::Count)
+    const FanPolicy::Role resolved_role = FanPolicy::fan_role(role);
+    if (resolved_role == RAW_FAN_ROLE_COUNT)
         return;
-    float value = float(policy.speed[role_index(resolved_role)]);
+    float value = float(policy.roles[resolved_role].percent);
     if (RAW_EXTRUSION_ROLE_IS_PERIMETER(role) && RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_BRIDGE))
         value = dynamic_overhang_fan(config, extruder_id, role, state, policy);
     throw_if_cancelled(run_ctx);
@@ -901,6 +692,7 @@ DefaultFan &DefaultFan::instance(orchestrator_handle *orch)
 DefaultFan::DefaultFan(orchestrator_handle *orch) :
     PluginBase(orch),
     m_layer_time_property(printing_layer_time_property_key(orch)),
+    m_fan_context_property(FanPolicy::context_property_key(orch)),
     m_generated_marker(PluginPropertyKey<GeneratedFanMarker>::register_dynamic(
         orch, "slic3r.layer_extrusion_edit.fan.default.generated"))
 {
@@ -946,30 +738,27 @@ void DefaultFan::setup_impl(const plugin_run_context *run_ctx, uint32_t) const
 {
     throw_if_cancelled(run_ctx);
     m_setup_valid = false;
-    m_layer_durations.clear();
+    m_layer_times.clear();
     const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run_ctx);
     if (ctx == nullptr || ctx->print == nullptr || ctx->plan == nullptr)
         return;
 
     const Print print(ctx->print);
     PrintingPlan plan(ctx->plan);
-    m_layer_durations.resize(plan.group_count());
+    m_layer_times.resize(plan.group_count());
     bool needs_estimate = false;
     for (uint32_t group_idx = 0; group_idx < plan.group_count(); ++group_idx) {
         throw_if_cancelled(run_ctx);
-        m_layer_durations[group_idx].resize(plan.group(group_idx).layer_group_count(), 0.0);
+        m_layer_times[group_idx].resize(plan.group(group_idx).layer_group_count());
         const PrintingGroup group = plan.group(group_idx);
         for (uint32_t layer_idx = 0; layer_idx < group.layer_group_count(); ++layer_idx) {
             throw_if_cancelled(run_ctx);
             const PrintingLayerTimeProperty *time =
                 m_layer_time_property.get(group.layer_group(layer_idx).properties());
-            if (time != nullptr && time->origin != RAW_PRINTING_LAYER_TIME_ORIGIN_ESTIMATED &&
-                time->origin != RAW_PRINTING_LAYER_TIME_ORIGIN_FINAL)
-                throw std::runtime_error("A PrintingLayerGroup duration has an unknown origin.");
-            if (time != nullptr && time->is_final()) {
-                if (!std::isfinite(time->duration_seconds) || time->duration_seconds < 0.0)
-                    throw std::runtime_error("A final PrintingLayerGroup duration is invalid.");
-                m_layer_durations[group_idx][layer_idx] = time->duration_seconds;
+            if (time != nullptr)
+                time->validate();
+            if (time != nullptr && time->is_resolved()) {
+                m_layer_times[group_idx][layer_idx] = *time;
             } else {
                 needs_estimate = true;
             }
@@ -987,9 +776,12 @@ void DefaultFan::setup_impl(const plugin_run_context *run_ctx, uint32_t) const
             throw_if_cancelled(run_ctx);
             const PrintingLayerTimeProperty *time = m_layer_time_property.get(
                 plan.group(estimate.group_idx).layer_group(estimate.layer_group_idx).properties());
-            if (time == nullptr || !time->is_final())
-                m_layer_durations.at(estimate.group_idx).at(estimate.layer_group_idx) =
-                    estimate.duration_seconds;
+            if (time == nullptr || !time->is_resolved()) {
+                PrintingLayerTimeProperty &cached = m_layer_times.at(estimate.group_idx).at(estimate.layer_group_idx);
+                cached.duration_seconds = estimate.duration_seconds;
+                cached.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_ESTIMATED;
+                cached.validate();
+            }
         }
     }
     m_setup_valid = true;
@@ -999,20 +791,12 @@ void DefaultFan::setup_run_impl(const plugin_run_context *run_ctx) const
 {
     const run_ctx_layer_extrusion_edition *ctx = plugin_ctx_as_layer_extrusion_edition(run_ctx);
     if (!m_setup_valid || ctx == nullptr || ctx->layer_group == nullptr ||
-        ctx->group_idx >= m_layer_durations.size() ||
-        ctx->layer_group_idx >= m_layer_durations[ctx->group_idx].size())
+        ctx->group_idx >= m_layer_times.size() ||
+        ctx->layer_group_idx >= m_layer_times[ctx->group_idx].size())
         return;
 
     throw_if_cancelled(run_ctx);
     PrintingLayerGroup layer(ctx->layer_group);
-    PluginProperties properties = layer.properties();
-    PrintingLayerTimeProperty *time = m_layer_time_property.get_mutable(properties);
-    if (time == nullptr || !time->is_final()) {
-        throw_if_cancelled(run_ctx);
-        PrintingLayerTimeProperty &published = m_layer_time_property.get_or_add(properties);
-        published.duration_seconds = m_layer_durations[ctx->group_idx][ctx->layer_group_idx];
-        published.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_ESTIMATED;
-    }
     progress().add_max(extrusion_tree_count(layer));
 }
 
@@ -1028,17 +812,22 @@ void DefaultFan::run_impl(const plugin_run_context *run_ctx) const
     const Print print(ctx->print);
     const Config config = print.config();
     PrintingLayerGroup layer(ctx->layer_group);
-    const PrintingLayerTimeProperty *time = m_layer_time_property.get(layer.properties());
-    if (time == nullptr || !std::isfinite(time->duration_seconds) || time->duration_seconds < 0.0)
-        throw std::runtime_error("Printing layer fan calculation needs a valid layer duration.");
+    const PrintingLayerTimeProperty &time = m_layer_times.at(ctx->group_idx).at(ctx->layer_group_idx);
+    time.validate();
+    m_layer_time_property.get_or_add(layer.properties()) = time;
 
     for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
         throw_if_cancelled(run_ctx);
         PrintingToolGroup tool = layer.tool_group(tool_idx);
         if (tool.extruder_id() == EXTRUDER_ID_UNKNOWN)
             throw std::runtime_error("Printing layer fan calculation needs a concrete extruder id.");
-        const LayerFanPolicy policy = layer_fan_policy(
-            config, tool.extruder_id(), ctx->layer_group_idx, time->duration_seconds);
+        const FanPolicy::Settings settings = FanPolicy::read_settings(config, tool.extruder_id());
+        const LayerFanPolicy base = FanPolicy::make_base(settings, ctx->layer_group_idx);
+        const LayerFanPolicy timed = FanPolicy::apply_layer_time(base, settings, time.duration_seconds);
+        const LayerFanPolicy policy = FanPolicy::close_first_layers(timed);
+        // The combined provider publishes only a complete context, after all
+        // stages have run in this callback.
+        m_fan_context_property.get_or_add(tool.properties()) = policy;
         for (uint32_t extrusion_idx = 0; extrusion_idx < tool.extrusion_count(); ++extrusion_idx) {
             throw_if_cancelled(run_ctx);
             edit_extrusion(tool.extrusion(extrusion_idx), config, tool.extruder_id(), policy,
