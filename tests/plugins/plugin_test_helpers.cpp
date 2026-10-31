@@ -978,6 +978,14 @@ void ensure_plugin_test_runtime_initialized()
         if (without_png) orchestrator.set_plugin_active("PNG", false);
         orchestrator.initialize_plugins();
         if (without_png) orchestrator.set_plugin_active("PNG", true);
+        // Test-only defaults must precede option finalization and typed-config caches. The registered definition owns its
+        // replacement bool; a missing/incompatible visibility option fails startup rather than silently enabling raytracing.
+        t_optiondef_map &definitions = PrintConfigDef::instance_mutable().options;
+        t_optiondef_map::iterator visibility = definitions.find("seam_visibility");
+        if (visibility == definitions.end() || visibility->second.type != coBool ||
+            dynamic_cast<const ConfigOptionBool *>(visibility->second.default_value.get()) == nullptr)
+            throw std::runtime_error("Test runtime requires a registered bool seam_visibility before config caches");
+        visibility->second.set_default_value(new ConfigOptionBool(false));
         orchestrator.finalize_plugin_option_defs();
         orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);
         {

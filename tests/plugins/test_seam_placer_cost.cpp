@@ -42,6 +42,8 @@
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/TriangleSelector.hpp"
 
+// Cost seam tests construct real placement sessions and model geometry to check candidate scoring, visibility and config defaults.
+
 /*
 Cost, Aligned and Contiguous seam provider tests
 ================================================
@@ -757,6 +759,29 @@ TEST_CASE("Cost seam metadata is the default regional provider",
     CHECK(contents.str().find("seam_placer.contiguous = 1") != std::string::npos);
 }
 
+// Builds defaults and an owned prepared print without a visibility override, checking cached and applied regional
+// values before any seam session; missing/wrong-type options fail Catch and preparation/allocation failures propagate.
+TEST_CASE("Plugin test defaults disable seam visibility in full and applied configs",
+          "[plugins][seam-placer][cost][visibility-default]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // Reads a borrowed config's bool option without mutation; type/presence/value mismatches fail the test.
+    const auto check_disabled = [](const auto &config) {
+        const ConfigOptionBool *option = dynamic_cast<const ConfigOptionBool *>(config.option("seam_visibility"));
+        REQUIRE(option != nullptr);
+        CHECK_FALSE(option->value);
+    };
+    const DynamicPrintConfig full = DynamicPrintConfig::full_print_config();
+    check_disabled(full);
+    const PrintRegionConfig region;
+    check_disabled(region);
+    PreparedPerimeterPrint prepared;
+    prepare_cube_print(prepared, full);
+    check_disabled(prepared.print.default_region_config());
+    REQUIRE(prepared.print.object(0).layer_count() > 0);
+    check_disabled(prepared.print.object(0).layer(0).region(0).region().config());
+}
+
 TEST_CASE("Cost seam projects candidates and supports parallel placement",
           "[plugins][seam-placer][cost]")
 {
@@ -1383,7 +1408,7 @@ TEST_CASE("Cost seam visibility switch changes the selected model-facing point",
         Point::new_scale(-10, 10), Point::new_scale(-10, -10),
         Point::new_scale(10, -10)}));
     CostFixture disabled({{"seam_visibility", "0"}, {"seam_angle_cost", "0"},
-                          {"seam_travel_cost", "0"}});
+                         {"seam_travel_cost", "0"}});
     disabled.box(9, -11, 2, 2, ModelVolumeType::MODEL_PART);
     const slic3r_api::PrintingExtrusion disabled_loop = disabled.add(
         loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
@@ -1395,7 +1420,9 @@ TEST_CASE("Cost seam visibility switch changes the selected model-facing point",
     CHECK(without_visibility.y == scale_i(-10));
 
     CostFixture enabled({{"seam_visibility", "1"}, {"seam_angle_cost", "0"},
-                         {"seam_travel_cost", "0"}});
+                          {"seam_travel_cost", "0"}});
+    REQUIRE(enabled.region->region().config().option("seam_visibility") != nullptr);
+    CHECK(enabled.region->region().config().option("seam_visibility")->serialize() == "1");
     enabled.box(9, -11, 2, 2, ModelVolumeType::MODEL_PART);
     const slic3r_api::PrintingExtrusion enabled_loop = enabled.add(
         loop, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
