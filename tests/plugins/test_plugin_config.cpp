@@ -1889,6 +1889,40 @@ TEST_CASE("The skirt option audit keeps unproven and native-prefix consumers con
     }
 }
 
+// The fan timing options reshape the extrusion tree at the layer edit step. fan_speedup_time and
+// fan_kickstart require a fan timing plugin, so a non-default value without one is refused;
+// fan_speedup_overhangs only restricts the anticipation and requires none.
+TEST_CASE("Fan timing options invalidate the layer edit and require a fan timing plugin",
+          "[plugins][config][setting-support][fan-policy]")
+{
+    using namespace Slic3r;
+    const PrintConfigDef &definitions = PrintConfigDef::instance();
+    for (const char *key : {"fan_speedup_time", "fan_speedup_overhangs", "fan_kickstart"}) {
+        CAPTURE(key);
+        const ConfigOptionDef *definition = definitions.get(key);
+        REQUIRE(definition != nullptr);
+        CHECK(definition->invalidates_step == STEP_LAYER_EXTRUSION_EDIT);
+    }
+    CHECK(definitions.get("fan_speedup_time")->required_plugin_group == "fan_temporal_plugin");
+    CHECK(definitions.get("fan_kickstart")->required_plugin_group == "fan_temporal_plugin");
+    CHECK(definitions.get("fan_speedup_overhangs")->required_plugin_group.empty());
+
+    const std::function<const Plugin *(const std::string &)> no_provider =
+        [](const std::string &group_id) -> const Plugin * {
+            CHECK(group_id == "fan_temporal_plugin");
+            return nullptr;
+        };
+    DynamicConfig config;
+    config.set_key_value("fan_kickstart", new ConfigOptionFloat(2.));
+    const std::optional<std::string> error = Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, no_provider);
+    REQUIRE(error);
+    CHECK(error->find("fan_kickstart") != std::string::npos);
+    CHECK(error->find("fan_temporal_plugin") != std::string::npos);
+
+    config.set_key_value("fan_kickstart", new ConfigOptionFloat(0.));
+    CHECK_FALSE(Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, no_provider));
+}
+
 // Check a minimal definition/config against borrowed provider metadata without
 // changing registration. Resolver counts prove absent/default values skip selection.
 TEST_CASE("Active settings require support from the selected exclusive-group plugin",

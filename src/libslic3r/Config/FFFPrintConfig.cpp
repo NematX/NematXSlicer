@@ -4167,11 +4167,13 @@ void init_fff_params(PrintConfigDef &definition)
     def = definition.add("fan_speedup_time", coFloat, ptFFF);
     def->label = L("Fan startup delay");
     def->category = OptionCategory::firmware;
-    def->invalidates_step = STEP_GCODE;
-    def->tooltip = L("Move the fan start in the past by at least this delay (in seconds, you can use decimals)."
-        " It assumes infinite acceleration for this time estimation, and will only take into account G1 and G0 moves."
-        "\nIt won't move fan commands from custom gcodes (they act as a sort of 'barrier')."
-        "\nIt won't move fan commands into the start gcode if the 'only custom start gcode' is activated."
+    def->invalidates_step = STEP_LAYER_EXTRUSION_EDIT;
+    def->required_plugin_group = "fan_temporal_plugin";
+    def->tooltip = L("Move the fan start in the past by up to this delay (in seconds, you can use decimals)."
+        " It is shorter at the start of a group or after a barrier."
+        " It is applied to the layer extrusions by the selected fan timing plugin; a non-zero value requires one."
+        " It assumes infinite acceleration for this time estimation, and will only take into account extrusion and travel moves."
+        "\nIt won't move fan commands past custom gcodes (they act as a sort of 'barrier'); scripts inserted later (layer, height) are not analyzed."
         "\nUse 0 to deactivate.");
     def->sidetext = L("s");
     def->mode = comAdvancedE | comSuSi;
@@ -4180,7 +4182,7 @@ void init_fff_params(PrintConfigDef &definition)
     def = definition.add("fan_speedup_overhangs", coBool, ptFFF);
     def->label = L("Fan delay only for overhangs");
     def->category = OptionCategory::firmware;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_LAYER_EXTRUSION_EDIT;
     def->tooltip = L("Will only take into account the delay for the cooling of overhangs.");
     def->mode = comAdvancedE | comSuSi;
     def->set_default_value(new ConfigOptionBool(true));
@@ -4195,8 +4197,10 @@ void init_fff_params(PrintConfigDef &definition)
     def = definition.add("fan_kickstart", coFloat, ptFFF);
     def->label = L("Fan KickStart time");
     def->category = OptionCategory::firmware;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_LAYER_EXTRUSION_EDIT;
+    def->required_plugin_group = "fan_temporal_plugin";
     def->tooltip = L("Add a M106 S255 (max speed for fan) for this amount of seconds before going down to the desired speed to kick-start the cooling fan."
+                    "\nIt is applied to the layer extrusions by the selected fan timing plugin; a non-zero value requires one."
                     "\nThis value is used for a 0->100% speedup, it will go down if the delta is lower."
                     "\nSet to 0 to deactivate.");
     def->sidetext = L("s");
