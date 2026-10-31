@@ -17,7 +17,9 @@
 
 /* Publication turns the slabs of a GeneratedSupport into auxiliary layers, for any support family.
    Slabs sharing the same exact print Z and printable thickness become one auxiliary layer, whose
-   raw slice is their union in object region zero, without modifier splitting. Rebuilding slices
+   raw slice is their union in object region zero, without modifier splitting; pieces that the closing
+   by +SCALED_EPSILON then -SCALED_EPSILON of the legacy toolpath fill would join form one joined island, the others
+   keep the exact geometry of the union (published_islands()). Rebuilding slices
    creates islands before region membership is locked. Each island then gets one work region per
    extruder that prints on it, holding dense top or bottom surfaces, or sparse internal support
    surfaces (base slabs, and branch slabs typed as branch surfaces), each typed by its role.
@@ -61,6 +63,9 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
     storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted, size_t begin, size_t end,
     coord_t z, uint32_t interface_id, std::map<coord_t, uint32_t> &installed_ids, const PublicationZ &metadata,
     const PublicationTools &tools);
+// The islands of a layer from the union of its slabs: the plain pieces of the union (native_expolygons()), except that pieces which the closing
+// by +SCALED_EPSILON then -SCALED_EPSILON joins are replaced by the closed island that contains them.
+StoredExPolygonCollection published_islands(storage_handle *storage, const ClipperContext &clipper, const ClipperOperand &united);
 // Records each slab ring's bounding box in slab/ring order for repeated island clipping.
 std::vector<std::vector<c_bounding_box>> publication_slab_bounds(const GeneratorLayers &sorted, size_t begin, size_t end);
 // Collects clipped slab rings for one island in slab order.
@@ -189,7 +194,15 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
     property->interface_id = interface_id;
     property->reserved = 0;
     installed_ids[z] = interface_id;
-    const StoredExPolygonCollection slices = native_expolygons(clipper_union(clipper(all)));
+    /* The islands are what the legacy toolpaths unite: they fill the surfaces of one role from all the islands of the layer together, closing the
+       sparse ones by +SCALED_EPSILON then -SCALED_EPSILON (LegacySupportPaths.cpp), so two pieces closer than 2 x SCALED_EPSILON, or touching at a vertex, form one fill
+       area and a path may cross both. published_islands() therefore joins such pieces into one island and leaves every other piece exactly as the plain
+       union made it, so that the geometry only changes where pieces are joined. The ring boxes are those of the published islands, and the joined island
+       contains its pieces within the one-unit rounding of the closing, so every slab ring still lies in an island up to that rounding; the role surfaces are clipped by the island, hence stay inside the slabs. The slices
+       keep the outside-to-inside order that the host asserts. The host copies them as the raw slice of region 0: with one region it takes them as they are,
+       with several it adds a safety offset of 10 units to their union, which does not undo the joining; in both cases its ensure_valid() then simplifies
+       the contours (resolution), so the identity with the plain union holds for the result of published_islands(), not for the published island slices. */
+    const StoredExPolygonCollection slices = published_islands(storage, clipper, clipper_union(clipper(all)));
     expolygons_copy(layer_region_borrow_mutable_slices(layer_get_region_mutable(layer, 0)), slices.handle());
     layer_recompute_slices_and_islands_from_layer_regions(layer);
     layer_add_regions_to_islands(layer);
@@ -208,6 +221,77 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
         resolve_island_surfaces(clipper, areas);
         install_island_surfaces(context, storage, clipper, island, areas, tools.base_extruder, tools.interface_extruder);
     }
+}
+
+/* The closed islands (same offsets and join type as the sparse fill closing) give the order and the joins. Each plain piece is assigned to the closed
+   island that covers most of its area (the closing moves outlines by about a unit, so a vertex test would be unreliable, and the closed island contains
+   the piece up to that rounding). A closed island with exactly one piece is replaced by that piece, whose geometry is then bit-identical to the plain
+   union; one with several pieces is kept, since it is the joined island. A closed island with no piece would need a ring that native_expolygons() keeps in
+   the closed union but dropped from the plain one (rings narrower than ~128 units are dropped by both, from the same operand), so it is not expected; it
+   is skipped, as there is no piece to publish. A piece that no closed island overlaps (not expected either) is kept after the others, so that no geometry
+   is lost. When no closed island has several pieces and no piece is left over, the plain islands are returned as they are, in their own order. The closed
+   islands are in the outside-to-inside order that the host asserts, and a replaced island and its piece are the same shape within a unit, so the order is
+   preserved; a piece inside a hole of another stays in its own closed island unless the closing joins them, in which case that island is the joined one.
+   Reads the borrowed union operand, returns an owned collection in storage, and geometry/allocation failures propagate. */
+StoredExPolygonCollection published_islands(storage_handle *storage, const ClipperContext &clipper, const ClipperOperand &united)
+{
+    StoredExPolygonCollection plain = native_expolygons(united);
+    const StoredExPolygonCollection closed = native_expolygons(clipper_offset2(united, double(SCALED_EPSILON), -double(SCALED_EPSILON)));
+    // The boxes of the contours, computed once for the pre-filter of the overlaps.
+    const auto contour_boxes = [](const StoredExPolygonCollection &areas) {
+        std::vector<c_bounding_box> boxes;
+        boxes.reserve(areas.size());
+        for (const ExPolygon area : areas)
+            boxes.push_back(area.contour().bounding_box());
+        return boxes;
+    };
+    const std::vector<c_bounding_box> plain_boxes = contour_boxes(plain), closed_boxes = contour_boxes(closed);
+    std::vector<std::vector<uint32_t>> members(closed.size());
+    std::vector<bool> claimed(plain.size(), false);
+    for (uint32_t plain_idx = 0; plain_idx < plain.size(); ++plain_idx) {
+        const ExPolygon piece = plain.at(plain_idx);
+        const c_bounding_box &piece_box = plain_boxes[plain_idx];
+        double best_area = 0.;
+        uint32_t best = 0;
+        for (uint32_t closed_idx = 0; closed_idx < closed.size(); ++closed_idx) {
+            const c_bounding_box &box = closed_boxes[closed_idx];
+            if (piece_box.max.x < box.min.x || box.max.x < piece_box.min.x || piece_box.max.y < box.min.y || box.max.y < piece_box.min.y)
+                continue;
+            const StoredExPolygonCollection common = clipper_intersection(clipper(piece), clipper(closed.at(closed_idx))).to_expolygon_collection();
+            double common_area = 0.;
+            for (const ExPolygon part : common)
+                common_area += part.area();
+            if (common_area > best_area) {
+                best_area = common_area;
+                best = closed_idx;
+            }
+        }
+        if (best_area > 0.) {
+            members[best].push_back(plain_idx);
+            claimed[plain_idx] = true;
+        }
+    }
+    const bool joined = std::any_of(members.begin(), members.end(), [](const std::vector<uint32_t> &pieces) { return pieces.size() > 1; });
+    const bool leftover = std::find(claimed.begin(), claimed.end(), false) != claimed.end();
+    if (!joined && !leftover)
+        return plain;
+    // The sources in publication order, borrowed from plain and closed.
+    std::vector<ExPolygon> sources;
+    for (uint32_t closed_idx = 0; closed_idx < closed.size(); ++closed_idx)
+        if (members[closed_idx].size() == 1)
+            sources.push_back(plain.at(members[closed_idx].front()));
+        else if (members[closed_idx].size() > 1)
+            sources.push_back(closed.at(closed_idx));
+    for (uint32_t plain_idx = 0; plain_idx < plain.size(); ++plain_idx)
+        if (!claimed[plain_idx])
+            sources.push_back(plain.at(plain_idx));
+    /* The collection is sized first and each slot is assigned by a plain copy of the source area. Inserting an area (expolygons_insert_copy) copies it
+       then moves it into the vector, and moving a Polygon pops a near-closing last vertex, so a piece would not be bit-identical to the plain union. */
+    StoredExPolygonCollection islands(storage);
+    expolygons_resize(islands.mutable_handle(), uint32_t(sources.size()));
+    for (uint32_t idx = 0; idx < sources.size(); ++idx)
+        expolygon_copy(expolygons_at(islands.mutable_handle(), idx), sources[idx].handle());
+    return islands;
 }
 
 // Reads borrowed slabs in [begin,end) without changing geometry, returning owned boxes in exactly their polygon order;

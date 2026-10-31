@@ -4633,6 +4633,280 @@ TEST_CASE("Close Z contact stays a contact with a Z step", "[plugins][support-tr
 }
 
 namespace {
+// Whether the segment ab meets the island, by the host polyline/polygon intersection that the legacy toolpaths use to assign a path to the islands it
+// crosses (an end inside, a pass through the contour or through vertices): the part of the segment inside the island is not empty.
+bool segment_meets_island(Point a, Point b, const ExPolygon &island)
+{
+    return !intersection_pl(Polyline(a, b), island).empty();
+}
+// Counts the polyline leaves of an extrusion tree and those that meet an island other than their own (a segment that has a part inside it).
+void count_island_crossings(const ExtrusionEntity &entity, const std::vector<const LayerSliceIsland *> &islands, size_t own, size_t &leaves, size_t &crossing)
+{
+    if (entity.has_polyline()) {
+        ++leaves;
+        const ArcPolyline &line = entity.polyline_ref();
+        bool crosses = false;
+        for (size_t idx = 0; idx < line.size() && !crosses; ++idx)
+            for (size_t other = 0; other < islands.size() && !crosses; ++other)
+                if (other != own)
+                    crosses = segment_meets_island(line.get_point(idx), line.get_point(idx > 0 ? idx - 1 : idx), islands[other]->get_slice());
+        crossing += crosses ? 1 : 0;
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        count_island_crossings(*child, islands, own, leaves, crossing);
+}
+
+// The result of publishing slabs of one height group and running the legacy toolpaths: the layers and islands, the area of each island in
+// publication order, the number of support paths, those that have a point in an island other than their own, and those that have points in two
+// of the given zones.
+struct Published {
+    size_t layers = 0, islands = 0, leaves = 0, crossing = 0, spanning = 0;
+    std::vector<double> areas;
+};
+// Whether a leaf has points in two different zones.
+void count_zone_spans(const ExtrusionEntity &entity, const ExPolygons &zones, size_t &spanning)
+{
+    if (entity.has_polyline()) {
+        const ArcPolyline &line = entity.polyline_ref();
+        std::vector<bool> reached(zones.size(), false);
+        for (size_t idx = 0; idx < line.size(); ++idx)
+            for (size_t zone = 0; zone < zones.size(); ++zone)
+                if (zones[zone].contains(line.get_point(idx)))
+                    reached[zone] = true;
+        spanning += std::count(reached.begin(), reached.end(), true) > 1 ? 1 : 0;
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        count_zone_spans(*child, zones, spanning);
+}
+// Publishes one base slab per entry of slab_rings (same print Z and height), runs the toolpaths and measures the result.
+Published publish_pieces(const std::vector<Polygons> &slab_rings, const ExPolygons &zones)
+{
+    DynamicPrintConfig config = SG::config("tree", false, 0);
+    Print print;
+    Model model;
+    Test::init_print({ SG::slab() }, print, model, config);
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    PluginStorage storage;
+    Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
+    const coord_t top = scale_to_layer_coord(1.0), height = scale_to_layer_coord(0.2);
+    for (const Polygons &rings : slab_rings) {
+        Common::GeneratorLayer &slab = Common::add_layer(support, Common::LayerType::Intermediate, top, top - height, height);
+        support.base.push_back(&slab);
+        assign_native(slab.polygons, rings);
+    }
+    Common::publish(nullptr, SG::object_view(object), SG::params(print, object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    SG::toolpaths(print);
+    Published result;
+    result.layers = object.auxiliary_layers().size();
+    for (const Layer &layer : object.auxiliary_layers()) {
+        std::vector<const LayerSliceIsland *> islands;
+        for (const LayerSliceIsland &island : layer.islands()) {
+            islands.push_back(&island);
+            result.areas.push_back(island.get_slice().area());
+        }
+        result.islands += islands.size();
+        for (size_t own = 0; own < islands.size(); ++own)
+            for (const LayerRegionIsland &work : islands[own]->regions_islands())
+                for (const ExtrusionRole bucket : { LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE })
+                    if (work.has_extrusion(bucket)) {
+                        count_island_crossings(work.extrusion(bucket), islands, own, result.leaves, result.crossing);
+                        count_zone_spans(work.extrusion(bucket), zones, result.spanning);
+                    }
+    }
+    return result;
+}
+// Two 2 mm squares, `gap` scaled units apart in x, as two slabs; the zones are the squares.
+Published publish_two_squares(coord_t gap)
+{
+    const coord_t side = scale_i(2.);
+    const auto square = [side](coord_t x) {
+        return Polygon(Points{ Point(x, coord_t(0)), Point(x + side, coord_t(0)), Point(x + side, side), Point(x, side) });
+    };
+    return publish_pieces({ Polygons{ square(coord_t(0)) }, Polygons{ square(side + gap) } }, ExPolygons{ ExPolygon(square(coord_t(0))), ExPolygon(square(side + gap)) });
+}
+// A 10 mm square with a 4 mm square hole (a ring slab), and a square slab in the hole, `gap` scaled units from the edge of the hole on every side.
+Published publish_nested(coord_t gap)
+{
+    const auto square = [](double from, double to, bool clockwise) {
+        Points points{ Point(scale_i(from), scale_i(from)), Point(scale_i(to), scale_i(from)), Point(scale_i(to), scale_i(to)), Point(scale_i(from), scale_i(to)) };
+        if (clockwise)
+            std::reverse(points.begin(), points.end());
+        return Polygon(points);
+    };
+    const coord_t margin = gap;
+    Polygon inner(Points{ Point(scale_i(3.) + margin, scale_i(3.) + margin), Point(scale_i(7.) - margin, scale_i(3.) + margin),
+                          Point(scale_i(7.) - margin, scale_i(7.) - margin), Point(scale_i(3.) + margin, scale_i(7.) - margin) });
+    return publish_pieces({ Polygons{ square(0., 10., false), square(3., 7., true) }, Polygons{ inner } }, ExPolygons{});
+}
+} // namespace
+
+// Positive control of the crossing detection: a segment with both ends outside an island but passing through it is found, as is a segment that ends
+// inside it, and a segment that stays outside is not.
+TEST_CASE("Island crossing detection finds a segment that passes through an island", "[plugins][support-tree-family][support-island]")
+{
+    const coord_t side = scale_i(2.), mm = scale_i(1.);
+    const ExPolygon island(Polygon(Points{ Point(coord_t(0), coord_t(0)), Point(side, coord_t(0)), Point(side, side), Point(coord_t(0), side) }));
+    CHECK(segment_meets_island(Point(-mm, mm), Point(3 * mm, mm), island));
+    CHECK(!island.contains(Point(-mm, mm)));
+    CHECK(!island.contains(Point(3 * mm, mm)));
+    CHECK(segment_meets_island(Point(-mm, mm), Point(mm, mm), island));
+    // Through two opposite vertices of the square: no proper crossing of its edges, yet the segment passes through the island.
+    CHECK(segment_meets_island(Point(-mm, -mm), Point(3 * mm, 3 * mm), island));
+    CHECK(!segment_meets_island(Point(-mm, 3 * mm), Point(3 * mm, 3 * mm), island));
+    CHECK(!segment_meets_island(Point(-2 * mm, -mm), Point(-mm, 3 * mm), island));
+}
+
+// Two joined pieces and a distant one in one layer: the distant piece is published point by point as the plain union makes it (in the raw slice
+// of region 0, before the host simplifies the islands) although the island list is rebuilt. A union output never keeps a vertex within
+// SCALED_EPSILON of another (Clipper merges them), so the near-closing vertex that a Polygon move would drop cannot reach the rebuild: the
+// distant piece is a notched ring, so a rebuilt, rotated or simplified contour would show.
+TEST_CASE("Joined support pieces leave a distant piece identical to the plain union", "[plugins][support-tree-family][support-island]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({ SG::slab() }, print, model, SG::config("tree", false, 0));
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    Common::GeneratedSupport support{ handle };
+    const coord_t top = scale_to_layer_coord(1.0), height = scale_to_layer_coord(0.2), side = scale_i(2.);
+    const auto square = [side](coord_t x) {
+        return Polygon(Points{ Point(x, coord_t(0)), Point(x + side, coord_t(0)), Point(x + side, side), Point(x, side) });
+    };
+    // The distant ring is a notched square with an off-axis start.
+    const coord_t far_x = scale_i(20.);
+    Polygon far_ring;
+    far_ring.points = Points{ Point(far_x, coord_t(0)), Point(far_x + side, coord_t(0)), Point(far_x + side, side / 2), Point(far_x + side / 2, side / 2),
+                              Point(far_x + side / 2, side), Point(far_x, side) };
+    const std::vector<Polygons> rings{ Polygons{ square(coord_t(0)) }, Polygons{ square(side + 50) } };
+    slic3r_api::StoredPolygonCollection all(handle);
+    for (const Polygons &ring : rings) {
+        Common::GeneratorLayer &slab = Common::add_layer(support, Common::LayerType::Intermediate, top, top - height, height);
+        support.base.push_back(&slab);
+        assign_native(slab.polygons, ring);
+        all.append_copy_from(slab.polygons);
+    }
+    // The distant ring is injected by the exact multipoint copy that the island ring filter uses (assign_native copies, then moves into the
+    // collection).
+    Common::GeneratorLayer &far_slab = Common::add_layer(support, Common::LayerType::Intermediate, top, top - height, height);
+    support.base.push_back(&far_slab);
+    polygons_resize(far_slab.polygons.mutable_handle(), 1);
+    multipoint_copy(polygon_as_multipoint(polygons_at(far_slab.polygons.mutable_handle(), 0)),
+                    polygon_as_multipoint_const(reinterpret_cast<const polygon_handle *>(&far_ring)));
+    all.append_copy_from(far_slab.polygons);
+    // The ring reached the slab with all its points.
+    REQUIRE(support.base.back()->polygons.at(0).points().size() == far_ring.points.size());
+    const slic3r_api::ClipperContext clipper(handle);
+    const slic3r_api::StoredExPolygonCollection plain = Common::native_expolygons(slic3r_api::clipper_union(clipper(all)));
+    const std::vector<c_point> *expected = nullptr;
+    std::vector<c_point> expected_points;
+    for (const slic3r_api::ExPolygon piece : plain)
+        if (piece.contour().points().front().x > scale_i(10.)) {
+            expected_points = piece.contour().points();
+            expected = &expected_points;
+        }
+    REQUIRE(expected != nullptr);
+    // The union keeps the notch: six vertices.
+    REQUIRE(expected->size() == far_ring.points.size());
+    Common::publish(nullptr, SG::object_view(object), SG::params(print, object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    REQUIRE(object.auxiliary_layers().size() == 1);
+    const Layer &layer = object.auxiliary_layers().front();
+    REQUIRE(layer.islands().size() == 2);
+    // The raw slice of region 0 is what publication copied, before the host's ensure_valid simplifies the contours of the islands.
+    const ExPolygons &raw = layer.regions().front().get_raw_slices();
+    const Points *published = nullptr;
+    for (const ExPolygon &slice : raw)
+        if (slice.contour.points.front().x() > scale_i(10.))
+            published = &slice.contour.points;
+    REQUIRE(published != nullptr);
+    REQUIRE(published->size() == expected->size());
+    for (size_t idx = 0; idx < expected->size(); ++idx) {
+        CHECK((*published)[idx].x() == (*expected)[idx].x);
+        CHECK((*published)[idx].y() == (*expected)[idx].y);
+    }
+}
+// The islands of a support layer are what the legacy toolpaths unite (the sparse surfaces are closed by +SCALED_EPSILON then -SCALED_EPSILON): two
+// slabs of one height group 50 units apart publish one island, and the support paths cross no other island. The united fill makes paths that
+// run over both squares: they would have crossed two islands.
+TEST_CASE("Support slabs closer than the closing publish one island", "[plugins][support-tree-family][support-island]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Published close = publish_two_squares(50);
+    CHECK(close.layers == 1);
+    CHECK(close.islands == 1);
+    CHECK(close.leaves > 0);
+    REQUIRE(close.spanning > 0);
+    CHECK(close.crossing == 0);
+}
+
+// A ring with a hole and a square 50 units from the edge of the hole: the closing fills the gap, one island. A square 1 mm from it stays its own
+// island, listed after the ring (outside to inside, which the host asserts in Debug), and no path crosses the other island.
+TEST_CASE("Support slab nested in the hole of another publishes joined or separate islands", "[plugins][support-tree-family][support-island]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Published joined = publish_nested(50);
+    CHECK(joined.layers == 1);
+    CHECK(joined.islands == 1);
+    CHECK(joined.leaves > 0);
+    CHECK(joined.crossing == 0);
+    const Published apart = publish_nested(scale_i(1.));
+    CHECK(apart.layers == 1);
+    REQUIRE(apart.islands == 2);
+    CHECK(apart.areas[0] > apart.areas[1]);
+    CHECK(apart.leaves > 0);
+    CHECK(apart.crossing == 0);
+}
+// A slab with no other piece near it publishes exactly the plain union of its rings (same points in the same order), so the joining of pieces
+// changes the geometry only where pieces are joined.
+TEST_CASE("An isolated support slab publishes the plain union geometry", "[plugins][support-tree-family][support-island]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    Test::init_print({ SG::slab() }, print, model, SG::config("tree", false, 0));
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    Common::GeneratedSupport support{ handle };
+    const coord_t top = scale_to_layer_coord(1.0), height = scale_to_layer_coord(0.2);
+    Common::GeneratorLayer &slab = Common::add_layer(support, Common::LayerType::Intermediate, top, top - height, height);
+    support.base = { &slab };
+    // A square with an off-axis start and a notch, so that a ring that is rebuilt or rotated would show.
+    const Points ring{ Point(scale_i(1.), scale_i(1.)), Point(scale_i(3.), scale_i(1.)), Point(scale_i(3.), scale_i(2.)), Point(scale_i(2.5), scale_i(2.)),
+                       Point(scale_i(2.5), scale_i(3.)), Point(scale_i(1.), scale_i(3.)) };
+    assign_native(slab.polygons, Polygons{ Polygon(ring) });
+    const slic3r_api::ClipperContext clipper(handle);
+    const slic3r_api::StoredExPolygonCollection plain = Common::native_expolygons(slic3r_api::clipper_union(clipper(slab.polygons)));
+    REQUIRE(plain.size() == 1);
+    Common::publish(nullptr, SG::object_view(object), SG::params(print, object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    REQUIRE(object.auxiliary_layers().size() == 1);
+    const Layer &layer = object.auxiliary_layers().front();
+    REQUIRE(layer.islands().size() == 1);
+    const Points &published = layer.islands().front().get_slice().contour.points;
+    const std::vector<c_point> expected = plain.at(0).contour().points();
+    REQUIRE(published.size() == expected.size());
+    for (size_t idx = 0; idx < expected.size(); ++idx) {
+        CHECK(published[idx].x() == expected[idx].x);
+        CHECK(published[idx].y() == expected[idx].y);
+    }
+}
+
+// Pieces farther apart than the closing stay two islands, each with its own paths.
+TEST_CASE("Support slabs 1 mm apart publish two islands", "[plugins][support-tree-family][support-island]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Published far = publish_two_squares(scale_i(1.));
+    CHECK(far.layers == 1);
+    CHECK(far.islands == 2);
+    CHECK(far.leaves > 0);
+    CHECK(far.crossing == 0);
+}
+
+namespace {
 const SurfaceType roof_rest_top_type = stModSupport | stPosTop | stDensSolid;
 const SurfaceType roof_rest_floor_type = stModSupport | stPosBottom | stDensSolid | stModBridge;
 

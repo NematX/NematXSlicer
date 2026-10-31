@@ -2,6 +2,7 @@
 #include "BranchSheathPaths.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstdlib>
 #include <limits>
@@ -173,8 +174,33 @@ void append_region_paths(const plugin_run_context *context, const run_ctx_suppor
     StoredExPolygonCollection closed = clipper_offset2(clipper(surfaces), double(SCALED_EPSILON),
                                                        -(double(SCALED_EPSILON) + 0.5 * double(flow.width))).to_expolygon_collection();
     closed.ensure_valid(params.geometry.resolution);
-    // The fused islands are the surfaces closed by the epsilon only, as the flange fuses them: each gets one method.
-    StoredExPolygonCollection fused = clipper_offset2(clipper(surfaces), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection();
+    // The fused islands are the surfaces closed by the epsilon only, as the flange fuses them, with the necks narrower than the closing cut: each gets one method.
+    StoredExPolygonCollection closing = clipper_offset2(clipper(surfaces), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection();
+    closing.ensure_valid(params.geometry.resolution);
+    /* The islands of a layer are published joined where their pieces are closer than the closing (Common::publish), so a region island can hold two branch
+       pieces that this closing joins by a neck narrower than 2 epsilon (a fraction of a micron). The medial axis of such an outline made the Voronoi
+       diagram non-finite in the reproduced case (the shelf over a lower lobe), and a neck that thin carries no path of its own. The necks are cut: each
+       component of the closing is opened, that is shrunk by one epsilon, which removes its parts narrower than 2 epsilon and splits the pieces they joined,
+       then each resulting area is grown back by one epsilon on its own, so that the pieces are not merged again. A component that the opening leaves
+       empty (everything in it is narrower than 2 epsilon) is kept as the closing made it, so that it keeps its deposit or centreline. So the fused islands
+       differ from the closing only in the components that the opening splits or trims: the necks and the parts narrower than 2 epsilon of the components that
+       survive it are gone, and the regrown outline matches the old one up to the rounding of the offsets; everything else is as it was.
+       The closed pieces are expected to lie in one of the fused islands: a closed piece is D eroded by epsilon + w / 2 (D being the dilation of the surfaces
+       by one epsilon), the closing is D eroded by epsilon, its erosion by epsilon is D eroded by 2 epsilon, which should contain the closed piece because
+       w / 2 is far larger than epsilon (the offsets are composed, simplified by ensure_valid and use miter joins of limited length, so this is an
+       assumption with that margin, checked in append_island_paths), and the regrowth of an area contains that area. */
+    StoredExPolygonCollection fused(storage);
+    for (const ExPolygon area : closing) {
+        const StoredExPolygonCollection shrunk = clipper_offset(clipper(area), -double(SCALED_EPSILON)).to_expolygon_collection();
+        if (shrunk.empty()) {
+            fused.push_back(area);
+            continue;
+        }
+        for (const ExPolygon part : shrunk) {
+            StoredExPolygonCollection regrown = clipper_offset(clipper(part), double(SCALED_EPSILON)).to_expolygon_collection();
+            fused.append_move_from(regrown);
+        }
+    }
     fused.ensure_valid(params.geometry.resolution);
     append_island_paths(storage, fused, closed, params, flow, out);
 }
@@ -203,7 +229,7 @@ void append_flange(const plugin_run_context *context, const run_ctx_support_tool
     Common::append_base_flange(context, payload, storage, out, fused, layer, params.geometry);
 }
 
-// Classify valid disjoint fused islands using flow width, then move owned entities into out in closed-piece order. A piece
+// Classify valid fused islands (expected to overlap at most within an epsilon of a cut neck) using flow width, then move owned entities into out in closed-piece order. A piece
 // outside every island throws; thin islands print once at their first piece, or after the loop in fused-island order.
 void append_island_paths(storage_handle *storage, const StoredExPolygonCollection &fused, const StoredExPolygonCollection &closed,
                          const BranchParams &params, const c_flow &flow, MutableExtrusionEntity out)
@@ -211,9 +237,10 @@ void append_island_paths(storage_handle *storage, const StoredExPolygonCollectio
     std::vector<BranchIslandClass> kinds;
     for (const ExPolygon island : fused)
         kinds.push_back(classify_island(storage, island, flow.width).kind);
-    // A closed piece belongs to the fused island that holds the first point of its contour. The piece lies at least half a
-    // width inside that island and the fused islands are disjoint, so exactly one island holds the point: finding none is a
-    // broken invariant.
+    // A closed piece belongs to the fused island that holds the first point of its contour, the first one in fused order. The piece is expected
+    // to lie at least about half a width inside its island, and the fused islands to overlap at most within an epsilon of a cut neck, so exactly
+    // one island holds the point; this is an assumption (simplifications and miter joins of limited length), which a Debug build checks by
+    // counting every island that holds the point. Finding none is a broken invariant.
     std::vector<size_t> owners;
     for (uint32_t piece = 0; piece < closed.size(); ++piece) {
         const c_point first = closed.at(piece).contour().front();
@@ -222,6 +249,12 @@ void append_island_paths(storage_handle *storage, const StoredExPolygonCollectio
             ++owner;
         if (owner == fused.size())
             throw std::logic_error("A closed branch piece lies in no fused island");
+#ifndef NDEBUG
+        size_t holders = 0;
+        for (uint32_t island = 0; island < fused.size(); ++island)
+            holders += fused.at(island).contains(first) ? 1 : 0;
+        assert(holders == 1);
+#endif
         owners.push_back(owner);
     }
 
