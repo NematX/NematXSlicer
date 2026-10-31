@@ -30,6 +30,8 @@
    plugin storage but are released individually; a run never clears that shared storage. Groups of
    one print Z share the native interface id of that Z, and they are published thinnest first so the
    host's ordered insertion keeps the thickest layer first at that Z.
+   Slab ring bounding boxes are cached per height group. Each island intersection keeps only rings whose boxes
+   can touch its contour box, in original order; enclosing rings and boundary touches remain in the operand.
    run_support_family() shares the style and demand filters, constructs one parameter object, calls the family's
    slab generator, publishes the slabs and finishes progress for valid payloads. */
 
@@ -59,10 +61,15 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
     storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted, size_t begin, size_t end,
     coord_t z, uint32_t interface_id, std::map<coord_t, uint32_t> &installed_ids, const PublicationZ &metadata,
     const PublicationTools &tools);
+// Records each slab ring's bounding box in slab/ring order for repeated island clipping.
+std::vector<std::vector<c_bounding_box>> publication_slab_bounds(const GeneratorLayers &sorted, size_t begin, size_t end);
 // Collects clipped slab rings for one island in slab order.
 IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted,
-    size_t begin, size_t end, const ExPolygon &island_slice, bool top_enabled, bool bottom_enabled,
+    size_t begin, size_t end, const std::vector<std::vector<c_bounding_box>> &slab_bounds, const ExPolygon &island_slice, bool top_enabled, bool bottom_enabled,
     bool merge_regions, bool z_has_base, coord_t z_min_height);
+// Copies only rings whose bounding boxes can touch the island, preserving their original order.
+PolygonCollection island_slab_polygons(StoredPolygonCollection &filtered, const PolygonCollection &polygons,
+    const std::vector<c_bounding_box> &bounds, const c_bounding_box &island_bounds);
 // Removes role overlaps in top/lower/branch/base precedence.
 void resolve_island_surfaces(const ClipperContext &clipper, IslandSurfaces &areas);
 // Installs typed surfaces by extruder on the borrowed island.
@@ -192,26 +199,45 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
         Counters::add(Counters::totals.islands, layer_count_island(layer));
         Counters::maximum(Counters::totals.max_islands_slabs, uint64_t(layer_count_island(layer)) * (end - begin));
     }
+    const std::vector<std::vector<c_bounding_box>> slab_bounds = publication_slab_bounds(sorted, begin, end);
     for (uint32_t island_idx = 0; island_idx < layer_count_island(layer); ++island_idx) {
         layer_island_handle *island = layer_get_island_mutable(layer, island_idx);
         const ExPolygon island_slice(layer_island_get_slice(island));
-        IslandSurfaces areas = collect_island_surfaces(storage, clipper, sorted, begin, end, island_slice,
+        IslandSurfaces areas = collect_island_surfaces(storage, clipper, sorted, begin, end, slab_bounds, island_slice,
             tools.top_enabled, tools.bottom_enabled, tools.merge_regions, metadata.has_base, metadata.min_height);
         resolve_island_surfaces(clipper, areas);
         install_island_surfaces(context, storage, clipper, island, areas, tools.base_extruder, tools.interface_extruder);
     }
 }
 
+// Reads borrowed slabs in [begin,end) without changing geometry, returning owned boxes in exactly their polygon order;
+// slabs must remain unchanged while boxes are used, and view-access/allocation failures propagate.
+std::vector<std::vector<c_bounding_box>> publication_slab_bounds(const GeneratorLayers &sorted, size_t begin, size_t end)
+{
+    std::vector<std::vector<c_bounding_box>> result;
+    result.reserve(end - begin);
+    for (size_t j = begin; j < end; ++j) {
+        std::vector<c_bounding_box> bounds;
+        bounds.reserve(sorted[j]->polygons.size());
+        for (const Polygon polygon : sorted[j]->polygons)
+            bounds.push_back(polygon.bounding_box());
+        result.push_back(std::move(bounds));
+    }
+    return result;
+}
+
 // Intersects borrowed slabs [begin,end) with an island, preserving slab order and contact typing; returned role rings use storage,
-// which outlives them. Sorted slabs and the Z-wide base metadata are required; geometry/allocation failures propagate.
+// which outlives them. Bounds match the unchanged slabs/rings in [begin,end); strict-disjoint rings are omitted without offsets.
+// Sorted slabs and the Z-wide base metadata are required; geometry/allocation failures propagate.
 IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperContext &clipper, const GeneratorLayers &sorted,
-    size_t begin, size_t end, const ExPolygon &island_slice, bool top_enabled, bool bottom_enabled,
+    size_t begin, size_t end, const std::vector<std::vector<c_bounding_box>> &slab_bounds, const ExPolygon &island_slice, bool top_enabled, bool bottom_enabled,
     bool merge_regions, bool z_has_base, coord_t z_min_height)
 {
     // Clip every slab of this layer to the island and collect the role surfaces: upper
     // (top), lower (bottom, bridged or not), sparse base and branch bodies.
     StoredPolygonCollection top_surfaces(storage), bridge_surfaces(storage), bottom_surfaces(storage),
         sparse_surfaces(storage), branch_surfaces(storage);
+    const c_bounding_box island_bounds = island_slice.contour().bounding_box();
     for (size_t j = begin; j < end; ++j) {
         const GeneratorLayer &slab = *sorted[j];
         const bool base = slab.type == LayerType::Base || slab.type == LayerType::Intermediate;
@@ -236,8 +262,10 @@ IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperCon
         const bool base_takes_contact = z_has_base && slab.height == z_min_height;
         const bool typed_as_base = mergeable_contact &&
             Internal::merged_into_base(merge_regions, base_takes_contact, z_has_base, slab.bridging);
+        StoredPolygonCollection filtered(storage);
+        const PolygonCollection nearby = island_slab_polygons(filtered, slab.polygons, slab_bounds[j - begin], island_bounds);
         Counters::add(Counters::totals.intersections);
-        StoredPolygonCollection clipped = clipper_intersection(clipper(slab.polygons), clipper(island_slice)).to_polygon_collection();
+        StoredPolygonCollection clipped = clipper_intersection(clipper(nearby), clipper(island_slice)).to_polygon_collection();
         if (branch) branch_surfaces.append_move_from(clipped);
         else if (base || typed_as_base) sparse_surfaces.append_move_from(clipped);
         else if (top) top_surfaces.append_move_from(clipped);
@@ -246,6 +274,30 @@ IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperCon
     }
     return IslandSurfaces{std::move(top_surfaces), std::move(bridge_surfaces), std::move(bottom_surfaces),
         std::move(sparse_surfaces), std::move(branch_surfaces)};
+}
+
+// Copies borrowed rings into storage only when their cached boxes are not strictly disjoint from the island contour box;
+// touching and enclosing boxes are kept, with no offset or ring reordering. Bounds must match polygons in count/order;
+// empty/degenerate rings have no Clipper area, so omitting disjoint ones has no effect. Returns the borrowed source when all
+// rings remain, otherwise a view of filtered, whose storage must outlive use; view-access/allocation failures propagate.
+PolygonCollection island_slab_polygons(StoredPolygonCollection &filtered, const PolygonCollection &polygons,
+    const std::vector<c_bounding_box> &bounds, const c_bounding_box &island_bounds)
+{
+    std::vector<uint32_t> retained;
+    for (uint32_t index = 0; index < polygons.size(); ++index) {
+        const c_bounding_box &box = bounds[index];
+        if (box.max.x < island_bounds.min.x || island_bounds.max.x < box.min.x ||
+            box.max.y < island_bounds.min.y || island_bounds.max.y < box.min.y)
+            continue;
+        retained.push_back(index);
+    }
+    if (retained.size() == polygons.size()) return polygons;
+    // Size once before filling: later vector growth could move a populated native Polygon and remove its near-closing vertex.
+    polygons_resize(filtered.mutable_handle(), uint32_t(retained.size()));
+    for (uint32_t index = 0; index < retained.size(); ++index)
+        multipoint_copy(polygon_as_multipoint(polygons_at(filtered.mutable_handle(), index)),
+            polygon_as_multipoint_const(polygons.at(retained[index]).handle()));
+    return filtered.readonly();
 }
 
 // Resolves caller-owned role rings in top/lower/branch/base order using the borrowed Clipper context; collections stay in their

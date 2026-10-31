@@ -3,6 +3,7 @@
 #include "support_grid_test_helpers.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
+#include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 
 /* Publication of hand-typed slabs, without a support family. Each test fills a GeneratedSupport with slabs of chosen
    types, publishes it through Common::publish and reads the auxiliary layers back. A branch slab is published as a
@@ -157,6 +158,68 @@ TEST_CASE("Publication counts role normalization unions", "[plugins][support-pub
     CHECK(Counters::totals.differences.load(std::memory_order_relaxed) == 0);
     // Each island makes three role-combination unions and two calls for its one nonempty role: union plus normalization.
     CHECK(Counters::totals.unions.load(std::memory_order_relaxed) == 2 * (3 + 2));
+}
+
+// Publishes an exact near-closing slab ring with and without a remote ring, exercising filtered and borrowed operands through
+// the public publisher. Compares full-operand intersections and their published normalization point-for-point; storage owns
+// temporary geometry, the sliced print owns surfaces, and geometry/allocation/publication failures fail the test.
+TEST_CASE("Publication filtering preserves near-closing ring vertices", "[plugins][support-publication][support-publication-filter]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool remote : {false, true}) {
+        CAPTURE(remote);
+        Print print;
+        slice_cube(print);
+        PluginStorage storage;
+        storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+        GeneratedSupport support{handle};
+        Polygon near;
+        near.points = {Point(0, 0), Point(1000000, 0), Point(1000000, 1000000), Point(0, 10)};
+        add_slab(support, support.interfaces, LayerType::TopInterface, near);
+        Polygons rings{near};
+        if (remote) rings.push_back(rect_polygon(12., 2., 16., 6.));
+        polygons_copy(support.slabs.back().polygons.mutable_handle(), reinterpret_cast<const polygon_collection_handle *>(&rings));
+        REQUIRE(support.slabs.back().polygons.at(0).size() == 4);
+        publish_support(print, support);
+        const PrintObject &object = print.object(0);
+        REQUIRE(object.auxiliary_layers().size() == 1);
+        const ExPolygons actual = surfaces_of(object, top_type, interface_extruder);
+        REQUIRE(actual.size() == (remote ? 2 : 1));
+        const slic3r_api::ClipperContext clipper(handle);
+        const slic3r_api::PolygonCollection full(reinterpret_cast<const polygon_collection_handle *>(&rings));
+        const Polygons local_rings{near};
+        const slic3r_api::PolygonCollection local(reinterpret_cast<const polygon_collection_handle *>(&local_rings));
+        ExPolygons expected;
+        size_t near_islands = 0;
+        for (const LayerSliceIsland &island : object.auxiliary_layers().front().islands()) {
+            const slic3r_api::ExPolygon slice(reinterpret_cast<const expolygon_handle *>(&island.get_slice()));
+            const slic3r_api::StoredPolygonCollection clipped = slic3r_api::clipper_intersection(clipper(full), clipper(slice)).to_polygon_collection();
+            // The island near the origin cannot touch the remote rectangle: removing it must preserve every output point.
+            if (slice.contour().bounding_box().max.x < scale_i(2.)) {
+                ++near_islands;
+                REQUIRE_FALSE(clipped.empty());
+                const slic3r_api::StoredPolygonCollection local_clip = slic3r_api::clipper_intersection(clipper(local), clipper(slice)).to_polygon_collection();
+                CHECK(SG::native(clipped) == SG::native(local_clip));
+                slic3r_api::StoredPolygonCollection moved_copy(handle);
+                moved_copy.push_back(local.at(0));
+                REQUIRE(moved_copy.at(0).size() == 3);
+                const slic3r_api::StoredPolygonCollection changed_clip = slic3r_api::clipper_intersection(clipper(moved_copy), clipper(slice)).to_polygon_collection();
+                CHECK(SG::native(clipped) != SG::native(changed_clip));
+            }
+            const slic3r_api::StoredExPolygonCollection normalized = Common::native_expolygons(slic3r_api::clipper_union(clipper(clipped)));
+            for (const slic3r_api::ExPolygon polygon : normalized)
+                expected.push_back(*reinterpret_cast<const ExPolygon *>(polygon.handle()));
+        }
+        REQUIRE(near_islands == 1);
+        REQUIRE(actual.size() == expected.size());
+        for (size_t index = 0; index < expected.size(); ++index) {
+            CHECK(actual[index].contour.points == expected[index].contour.points);
+            REQUIRE(actual[index].holes.size() == expected[index].holes.size());
+            for (size_t hole = 0; hole < expected[index].holes.size(); ++hole)
+                CHECK(actual[index].holes[hole].points == expected[index].holes[hole].points);
+        }
+    }
 }
 
 // A slab without polygons publishes nothing: no auxiliary layer, island or extrusion is created for it.
