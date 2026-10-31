@@ -230,6 +230,11 @@ TEST_CASE("Fan reference tables keep role exceptions and close family fallbacks 
     const Cooling::Context dynamic = Cooling::make_base(settings);
     CHECK(dynamic.roles[RAW_FAN_ROLE_OVERHANG_PERIMETER].configured_percent == 75);
     CHECK(dynamic.roles[RAW_FAN_ROLE_OVERHANG_PERIMETER].percent == -1);
+    settings.full_speed_layer = 4;
+    const Cooling::Context disabled_default = Cooling::close_first_layers(
+        Cooling::apply_layer_time(dynamic, settings, 20), settings, 0);
+    CHECK(disabled_default.roles[RAW_FAN_ROLE_DEFAULT].percent == -1);
+    CHECK(disabled_default.dynamic_max == 25);
 }
 
 TEST_CASE("Fan settings are validated once at the configuration boundary",

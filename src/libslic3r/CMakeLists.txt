@@ -417,10 +417,18 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/DefaultTravel.hpp
 	Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.cpp
 	Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp
+	Plugins/LayerExtrusionEdit/DynamicFan.cpp
+	Plugins/LayerExtrusionEdit/DynamicFan.hpp
 	Plugins/LayerExtrusionEdit/FirstLayerFlow.cpp
 	Plugins/LayerExtrusionEdit/FirstLayerFlow.hpp
 	Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.cpp
 	Plugins/LayerExtrusionEdit/ExtrusionScopeHelpers.hpp
+	Plugins/LayerExtrusionEdit/FanCooling.cpp
+	Plugins/LayerExtrusionEdit/FanCooling.hpp
+	Plugins/LayerExtrusionEdit/FanTreeHelpers.cpp
+	Plugins/LayerExtrusionEdit/FanTreeHelpers.hpp
+	Plugins/LayerExtrusionEdit/FirstLayerFan.cpp
+	Plugins/LayerExtrusionEdit/FirstLayerFan.hpp
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.cpp
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.hpp
 	Plugins/LayerExtrusionEdit/RegionalProcessParameterHelpers.cpp

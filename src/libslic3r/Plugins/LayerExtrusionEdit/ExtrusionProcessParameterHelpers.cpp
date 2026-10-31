@@ -65,7 +65,12 @@ LeafDisposition leaf_disposition(const MutableExtrusionEntity &entity,
 
     // Cooling owns printable object paths, support, and skirt/brim. Milling
     // remains excluded because it is not controlled by filament fan settings.
+    // A raw EXTRUSION command replaces the leaf's E (for example a zero-flow
+    // infill connector): it keeps the physical fan state of its neighbours.
     if (policy == LeafPolicy::Fan) {
+        const EPropertySpecialCommand *command = entity.get(EPropertySpecialCommand::key);
+        if (command != nullptr && command->code == C_EXTRUSION_SPECIAL_COMMAND_EXTRUSION)
+            return LeafDisposition::Excluded;
         const bool fan_role = role == RAW_EXTRUSION_ROLE_GAP_FILL ||
                               role == RAW_EXTRUSION_ROLE_THIN_WALL ||
                               RAW_EXTRUSION_ROLE_IS_PERIMETER(role) ||
@@ -354,63 +359,6 @@ EPropertySpeedFieldEditor::FieldSummary EPropertySpeedFieldEditor::hoist_tree(
 }
 
 void EPropertySpeedFieldEditor::hoist(MutableExtrusionEntity root)
-{
-    (void)hoist_tree(root, EffectiveTreeState{});
-}
-
-void EPropertyFanEditor::set_value(MutableExtrusionEntity entity, float percent)
-{
-    if (percent < 0.f)
-        return;
-    entity.get_or_add(EPropertyFan::key).set(percent, FAN_REQUEST_MODE_AUTOMATIC);
-    m_modified.insert(entity.mutable_handle());
-}
-
-EPropertyFanEditor::Summary EPropertyFanEditor::hoist_tree(
-    MutableExtrusionEntity entity, const EffectiveTreeState &parent)
-{
-    const EffectiveTreeState state = effective_state(entity, parent);
-    if (entity.child_count() == 0) {
-        const LeafDisposition disposition = leaf_disposition(entity, state, LeafPolicy::Fan);
-        // Empty leaves can contain E-only moves or scripts. Never hoist a
-        // deposition request onto them, or move a direct fan event across them.
-        if (disposition == LeafDisposition::Empty)
-            return Summary{{}, true};
-        return Summary{state.fan, disposition != LeafDisposition::Editable || !state.fan.is_set()};
-    }
-    auto equal = [](const EPropertyFan &a, const EPropertyFan &b) {
-        return a.mode == b.mode && (!a.is_set() || a.percent == b.percent);
-    };
-    Summary result;
-    for (uint32_t i = 0; i < entity.child_count(); ++i) {
-        const Summary child = hoist_tree(entity.child_mutable(i), state);
-        result.blocked = result.blocked || child.blocked;
-        if (!child.fan.is_set())
-            continue;
-        if (!result.fan.is_set())
-            result.fan = child.fan;
-        else if (!equal(result.fan, child.fan))
-            result.blocked = true;
-    }
-    if (!result.fan.is_set() || result.blocked)
-        return result;
-    const EPropertyFan *direct = entity.get(EPropertyFan::key);
-    if (direct && direct->is_set() && !equal(*direct, result.fan))
-        return result;
-    if (!state.fan.is_set() || !equal(state.fan, result.fan)) {
-        entity.get_or_add(EPropertyFan::key) = result.fan;
-        m_modified.insert(entity.mutable_handle());
-    }
-    for (uint32_t i = 0; i < entity.child_count(); ++i) {
-        auto child = entity.child_mutable(i);
-        const EPropertyFan *request = child.get(EPropertyFan::key);
-        if (request && equal(*request, result.fan) && m_modified.erase(child.mutable_handle()) > 0)
-            child.remove(EPropertyFan::key);
-    }
-    return result;
-}
-
-void EPropertyFanEditor::hoist(MutableExtrusionEntity root)
 {
     (void)hoist_tree(root, EffectiveTreeState{});
 }

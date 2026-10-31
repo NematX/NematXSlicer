@@ -173,6 +173,26 @@ TEST_CASE("Plugin activation desired package section is mandatory but may be emp
     boost::filesystem::remove_all(root);
 }
 
+TEST_CASE("Fan extraction preserves the standard identity and explicit successor choices",
+          "[plugins][activation][fan-policy]")
+{
+    const std::string standard = "layer_extrusion_edit.fan.default";
+    const std::string cooling = "layer_extrusion_edit.fan.cooling";
+    const std::string first = "layer_extrusion_edit.fan.first_layers";
+    const std::string dynamic = "layer_extrusion_edit.fan.dynamic";
+    for (bool enabled : {false, true}) {
+        Slic3r::PluginActivationConfig config;
+        config.activated[standard] = enabled;
+        config.activated[dynamic] = !enabled; // explicit newer choice wins
+        REQUIRE(Slic3r::migrate_plugin_activation_id(config, standard, {standard, cooling, first, dynamic}));
+        CHECK(config.activated.at(standard) == enabled);
+        CHECK(config.activated.at(cooling) == enabled);
+        CHECK(config.activated.at(first) == enabled);
+        CHECK(config.activated.at(dynamic) == !enabled);
+        CHECK_FALSE(Slic3r::migrate_plugin_activation_id(config, standard, {standard, cooling, first, dynamic}));
+    }
+}
+
 TEST_CASE("Plugin activation configuration preserves package providers",
           "[plugins][repository][activation]")
 {

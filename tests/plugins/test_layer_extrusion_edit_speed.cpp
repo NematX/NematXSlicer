@@ -101,6 +101,9 @@ int32_t recording_initialize(void *, storage_handle *);
 constexpr const char *DEFAULT_SPEED_PLUGIN = "layer_extrusion_edit.speed.default";
 constexpr const char *DEFAULT_ACCELERATION_PLUGIN = "layer_extrusion_edit.acceleration.default";
 constexpr const char *DEFAULT_FAN_PLUGIN = "layer_extrusion_edit.fan.default";
+constexpr const char *FAN_COOLING_PLUGIN = "layer_extrusion_edit.fan.cooling";
+constexpr const char *FIRST_LAYER_FAN_PLUGIN = "layer_extrusion_edit.fan.first_layers";
+constexpr const char *DYNAMIC_FAN_PLUGIN = "layer_extrusion_edit.fan.dynamic";
 constexpr const char *DEFAULT_ENTRY_STATE_PLUGIN = "layer_extrusion_edit.entry_state.default";
 constexpr const char *DEFAULT_TRANSITION_SCOPE_PLUGIN =
     "layer_extrusion_edit.transition_scope.default";
@@ -436,6 +439,16 @@ void run_editors(PreparedSpeedPrint &prepared,
     orchestrator.reset_plugin_cancel();
     Steps::StepLayerExtrusionEdition::run_step(orchestrator, prepared.print);
     REQUIRE_FALSE(orchestrator.is_plugin_cancelled());
+}
+
+// Activate the complete fan chain explicitly. Passing the reverse activation
+// order checks the host's priority sort rather than relying on insertion order.
+void run_fan_editors(PreparedSpeedPrint &prepared, bool include_speed = false)
+{
+    if (include_speed)
+        run_editors(prepared, {DYNAMIC_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN, FAN_COOLING_PLUGIN, DEFAULT_FAN_PLUGIN, DEFAULT_SPEED_PLUGIN});
+    else
+        run_editors(prepared, {DYNAMIC_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN, FAN_COOLING_PLUGIN, DEFAULT_FAN_PLUGIN});
 }
 
 // Reproduce the default pipeline with speed first and acceleration second.
@@ -2474,10 +2487,8 @@ TEST_CASE("Layer fan plugin exposes its independent contract",
     std::vector<std::string> defined_keys;
     for (const Plugin::DefinedConfigKey &key : fan_plugin->get_defined_config_keys())
         defined_keys.push_back(key.key);
-    CHECK(defined_keys.size() == 17);
-    for (const char *expected : { "bridge_fan_speed", "default_fan_speed", "disable_fan_first_layers",
-                                   "fan_below_layer_time", "max_fan_speed",
-                                  "top_fan_speed" })
+    CHECK(defined_keys.size() == 12);
+    for (const char *expected : { "bridge_fan_speed", "default_fan_speed", "top_fan_speed" })
         CHECK(std::find(defined_keys.begin(), defined_keys.end(), expected) != defined_keys.end());
 
     const ConfigOptionDef *fan_def = PrintConfigDef::instance().get("bridge_fan_speed");
@@ -2518,7 +2529,8 @@ TEST_CASE("Layer fan plugin exposes its independent contract",
         keys.push_back(key.key);
     CHECK(std::find(keys.begin(), keys.end(), "default_fan_speed") != keys.end());
     CHECK(std::find(keys.begin(), keys.end(), "overhangs_dynamic_fan_speed") != keys.end());
-    CHECK(std::find(keys.begin(), keys.end(), "travel_speed") != keys.end());
+    CHECK(std::find(keys.begin(), keys.end(), "travel_speed") == keys.end());
+    CHECK(std::find(keys.begin(), keys.end(), "fan_below_layer_time") == keys.end());
     CHECK(std::find(keys.begin(), keys.end(), "perimeter_speed") == keys.end());
     CHECK(std::find(keys.begin(), keys.end(), "fan_printer_min_speed") == keys.end());
 
@@ -2574,7 +2586,7 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
         equal_override
     }});
 
-    run_editors(prepared, {DEFAULT_SPEED_PLUGIN, DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared, true);
     std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
     REQUIRE(leaves.size() == 4);
     std::vector<float> fan_speeds;
@@ -2591,7 +2603,7 @@ TEST_CASE("Layer fan plugin assigns roles and preserves upstream overrides",
 
     // A second execution removes only values marked by the first fan pass,
     // recomputes them, and leaves the upstream 63% override authoritative.
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared);
     leaves = observed_plan_leaves(prepared.print);
     REQUIRE(leaves.size() == 4);
     fan_speeds.clear();
@@ -2637,7 +2649,7 @@ TEST_CASE("Layer fan defaults preserve effective modes including zero and plugin
         reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
         FAN_REQUEST_MODE_ID_TYPE, "tests.default_fan.custom");
     root.child(2).add_property(ExtrusionPropertyFan(0.f, mode));
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared);
     const auto leaves = observed_plan_leaves(prepared.print);
     REQUIRE(leaves.size() == 3);
     CHECK(leaves[0].fan_speed == 70.f);
@@ -2646,12 +2658,13 @@ TEST_CASE("Layer fan defaults preserve effective modes including zero and plugin
     REQUIRE(leaves[0].direct_fan != nullptr);
     REQUIRE(leaves[1].direct_fan != nullptr);
     REQUIRE(leaves[2].direct_fan != nullptr);
-    CHECK(leaves[0].direct_fan->mode == FAN_REQUEST_MODE_UNSPECIFIED);
+    CHECK(leaves[0].direct_fan->mode == FAN_REQUEST_MODE_OVERRIDE);
+    CHECK(root.get_property<ExtrusionPropertyFan>() == nullptr);
     CHECK(leaves[1].direct_fan->mode == FAN_REQUEST_MODE_AUTOMATIC);
     CHECK(leaves[2].direct_fan->mode == mode);
 }
 
-TEST_CASE("Layer fan hoisting does not create requests on empty service leaves",
+TEST_CASE("Layer fan normalization does not create requests on service leaves or raw extrusion connectors",
           "[plugins][layer-extrusion-edit][fan][fan-request]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -2661,21 +2674,26 @@ TEST_CASE("Layer fan hoisting does not create requests on empty service leaves",
         {"full_fan_speed_layer", "0"}, {"fan_below_layer_time", "0"},
         {"slowdown_below_layer_time", "0"}});
     const ExtrusionSpec spec{ExtrusionRole::Perimeter, 0.2, 20.f};
-    prepare_ordered_plan(prepared, config, {{spec, spec}});
+    prepare_ordered_plan(prepared, config, {{spec, spec, spec}});
     auto &root = single_plan_root(prepared.print);
+    // A zero-flow connector between two deposits keeps their physical fan state.
+    root.child(1).add_property(ExtrusionPropertySpecialCommand(
+        ExtrusionPropertySpecialCommand::Code::EXTRUSION, 0.));
     auto event = std::make_unique<ExtrusionNop>(ExtrusionPropertySpecialCommand(
         ExtrusionPropertySpecialCommand::Code::EXTRUSION, 0.5));
     root.append_child(std::move(event));
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared);
     CHECK(root.get_property<ExtrusionPropertyFan>() == nullptr);
-    REQUIRE(root.child_count() == 3);
-    CHECK(root.child(2).get_property<ExtrusionPropertyFan>() == nullptr);
+    REQUIRE(root.child_count() == 4);
+    CHECK(root.child(3).get_property<ExtrusionPropertyFan>() == nullptr);
     const auto leaves = observed_plan_leaves(prepared.print);
-    REQUIRE(leaves.size() == 2);
-    for (const auto &leaf : leaves) {
-        CHECK(leaf.fan_speed == 35.f);
-        REQUIRE(leaf.direct_fan != nullptr);
-        CHECK(leaf.direct_fan->mode == FAN_REQUEST_MODE_AUTOMATIC);
+    REQUIRE(leaves.size() == 3);
+    CHECK(leaves[1].direct_fan == nullptr);
+    CHECK(leaves[1].fan_speed == -1.f);
+    for (const size_t idx : {size_t(0), size_t(2)}) {
+        CHECK(leaves[idx].fan_speed == 35.f);
+        REQUIRE(leaves[idx].direct_fan != nullptr);
+        CHECK(leaves[idx].direct_fan->mode == FAN_REQUEST_MODE_AUTOMATIC);
     }
 }
 
@@ -2706,8 +2724,8 @@ TEST_CASE("Layer fan rerun preserves unrelated process fields",
         external
     }});
 
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared);
+    run_fan_editors(prepared);
 
     const std::map<uint16_t, ObservedLeaf> leaves =
         observed_by_role(observed_plan_leaves(prepared.print));
@@ -2919,7 +2937,7 @@ TEST_CASE("Layer fan plugin consumes final timing without estimating geometry",
         }
     }
 
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared);
     const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
     REQUIRE(leaves.size() == 3);
     const std::map<uint16_t, ObservedLeaf> by_role = observed_by_role(leaves);
@@ -2962,7 +2980,7 @@ TEST_CASE("Public fan context publishes references despite protected leaves and 
             time.duration_seconds = 7.5;
             time.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED;
         }
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared);
     const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
     REQUIRE(leaves.size() == 1);
     CHECK(leaves.front().fan_speed == 0.f);
@@ -3025,7 +3043,7 @@ TEST_CASE("Fan setup is read only and every tool consumes total layer duration",
     const PluginPropertyKey<PrintingLayerTimeProperty> time_key = registered_layer_time_property_key();
     const PluginPropertyKey<slic3r_api::FanPolicy::Context> context_key = slic3r_api::FanPolicy::context_property_key(
         reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
-    Plugin *plugin = Orchestrator::instance().get_plugin(DEFAULT_FAN_PLUGIN);
+    Plugin *plugin = Orchestrator::instance().get_plugin(FAN_COOLING_PLUGIN);
     REQUIRE(plugin != nullptr);
     run_ctx_layer_extrusion_edition payload = {};
     payload.print = reinterpret_cast<const print_handle *>(&prepared.print);
@@ -3043,7 +3061,7 @@ TEST_CASE("Fan setup is read only and every tool consumes total layer duration",
         CHECK(context_key.get(tool_view.properties()) == nullptr);
         CHECK(tool.extrusions.front().root->get_property<ExtrusionPropertyFan>() == nullptr);
     }
-    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(prepared);
     // Read the finished pass through newly acquired views of its owning scopes.
     PrintingLayerGroup &published_layer = prepared.print.mutable_printing_plan().groups.front().layers.front();
     const slic3r_api::PrintingLayerGroup published_view(reinterpret_cast<printing_layer_group_handle *>(&published_layer));
@@ -3072,8 +3090,8 @@ TEST_CASE("Fan references and estimated timing replay from the checkpoint on the
         {"perimeter_speed", "20"}, {"first_layer_speed", "100%"}, {"max_volumetric_speed", "0"},
         {"filament_max_speed", "0"}, {"filament_max_volumetric_speed", "0"},
         {"default_fan_speed", "20"}, {"perimeter_fan_speed", "40"},
-        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
-        {"fan_below_layer_time", "10"}, {"slowdown_below_layer_time", "5"}
+        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "4"},
+        {"fan_below_layer_time", "1.5"}, {"slowdown_below_layer_time", "0.5"}
     });
     prepare_ordered_plan(prepared, config, {{{ExtrusionRole::Perimeter, 0.2}}});
     for (slicing_step_t step : Steps::execution_order()) {
@@ -3093,7 +3111,7 @@ TEST_CASE("Fan references and estimated timing replay from the checkpoint on the
             REQUIRE(prepared.print.apply(prepared.model, config) == Print::APPLY_STATUS_INVALIDATED);
             prepared.print.prepare_checkpoint_resume();
         }
-        run_editors(prepared, {DEFAULT_SPEED_PLUGIN, DEFAULT_FAN_PLUGIN});
+        run_fan_editors(prepared, true);
         prepared.print.mark_step_executed(STEP_LAYER_EXTRUSION_EDIT);
         PrintingLayerGroup &layer = prepared.print.mutable_printing_plan().groups.front().layers.front();
         const slic3r_api::PrintingLayerGroup layer_view(reinterpret_cast<printing_layer_group_handle *>(&layer));
@@ -3107,6 +3125,12 @@ TEST_CASE("Fan references and estimated timing replay from the checkpoint on the
         REQUIRE(context != nullptr);
         CHECK(context->phase == RAW_FAN_POLICY_PHASE_CLOSED);
         CHECK(context->roles[RAW_FAN_ROLE_PERIMETER].configured_percent == 40);
+        const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+        REQUIRE(leaves.size() == 1);
+        // The ramp is not idempotent. Matching a freshly computed reference
+        // proves this pass did not transform the preceding pass's leaf request.
+        CHECK(leaves.front().fan_speed == context->roles[RAW_FAN_ROLE_PERIMETER].percent);
+        CHECK(leaves.front().speed == speed);
         ++iteration;
     }
 }
@@ -3125,7 +3149,7 @@ TEST_CASE("Invalid public timing fails in setup without publishing cached fan da
     // Warm the shared plugin's setup cache using a different Print first.
     PreparedSpeedPrint previous;
     prepare_ordered_plan(previous, config, {{spec}});
-    run_editors(previous, {DEFAULT_FAN_PLUGIN});
+    run_fan_editors(previous);
 
     PreparedSpeedPrint invalid;
     prepare_ordered_plan(invalid, config, {{spec}});
@@ -3136,7 +3160,7 @@ TEST_CASE("Invalid public timing fails in setup without publishing cached fan da
     time.duration_seconds = -1;
     time.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED;
     {
-        ScopedActivePlugins active({DEFAULT_FAN_PLUGIN});
+        ScopedActivePlugins active({DEFAULT_FAN_PLUGIN, FAN_COOLING_PLUGIN, FIRST_LAYER_FAN_PLUGIN, DYNAMIC_FAN_PLUGIN});
         orchestrator.reset_plugin_cancel();
         CHECK_THROWS(Steps::StepLayerExtrusionEdition::run_step(orchestrator, invalid.print));
         CHECK(orchestrator.is_plugin_cancelled());
@@ -3146,9 +3170,246 @@ TEST_CASE("Invalid public timing fails in setup without publishing cached fan da
         reinterpret_cast<orchestrator_handle *>(&orchestrator));
     for (PrintingToolGroup &tool : layer.tool_groups) {
         const slic3r_api::PrintingToolGroup tool_view(reinterpret_cast<printing_tool_group_handle *>(&tool));
-        CHECK(context_key.get(tool_view.properties()) == nullptr);
-        CHECK(tool.extrusions.front().root->get_property<ExtrusionPropertyFan>() == nullptr);
+        const slic3r_api::FanPolicy::Context *context = context_key.get(tool_view.properties());
+        REQUIRE(context != nullptr);
+        CHECK(context->phase == RAW_FAN_POLICY_PHASE_BASE);
+        // The completed BASE pass remains, but failed cooling publishes no TIME.
+        CHECK(observed_plan_leaves(invalid.print).front().fan_speed == 20.f);
     }
+}
+
+// Read the first tool's public record by value, never retaining a property view
+// across another plugin run or a PrintingPlan replacement.
+slic3r_api::FanPolicy::Context first_fan_context(PreparedSpeedPrint &prepared)
+{
+    const PluginPropertyKey<slic3r_api::FanPolicy::Context> key = slic3r_api::FanPolicy::context_property_key(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    const PrintingToolGroup &tool = prepared.print.printing_plan()->groups.front().layers.front().tool_groups.front();
+    const slic3r_api::ConstPrintingToolGroup view(reinterpret_cast<const printing_tool_group_handle *>(&tool));
+    const slic3r_api::FanPolicy::Context *context = key.get(view.properties());
+    REQUIRE(context != nullptr);
+    return *context;
+}
+
+// Inject one authoritative whole-layer total so policy tests do not depend on
+// incidental path lengths, travel placement or the geometric timing fallback.
+void publish_fan_test_duration(PreparedSpeedPrint &prepared, double seconds)
+{
+    const PluginPropertyKey<PrintingLayerTimeProperty> key = registered_layer_time_property_key();
+    for (PrintingGroup &group : prepared.print.mutable_printing_plan().groups)
+        for (PrintingLayerGroup &layer : group.layers) {
+            slic3r_api::PrintingLayerGroup view(reinterpret_cast<printing_layer_group_handle *>(&layer));
+            PrintingLayerTimeProperty &time = key.get_or_add(view.properties());
+            time.duration_seconds = seconds;
+            time.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED;
+        }
+}
+
+TEST_CASE("Independent fan stages expose phases and transform only modifiable pairs",
+          "[plugins][layer-extrusion-edit][fan-policy][fan-request]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "20"}, {"perimeter_fan_speed", "40"},
+        {"fan_below_layer_time", "10"}, {"slowdown_below_layer_time", "5"},
+        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "4"}});
+    const ExtrusionSpec spec{ExtrusionRole::Perimeter, 0.2, 20.f};
+    prepare_ordered_plan(prepared, config, {{spec, spec, spec, spec, spec, spec}});
+    ExtrusionEntity &root = single_plan_root(prepared.print);
+    REQUIRE(root.child_count() == 6);
+    std::vector<double> lengths;
+    for (size_t idx = 0; idx < root.child_count(); ++idx)
+        lengths.push_back(root.child(idx).length());
+    const fan_request_mode custom = orchestrator_register_runtime_id(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()), FAN_REQUEST_MODE_ID_TYPE, "tests.fan.stage.other");
+    const fan_request_mode modes[] = {FAN_REQUEST_MODE_AUTOMATIC, FAN_REQUEST_MODE_AUTOMATIC,
+        FAN_REQUEST_MODE_OVERRIDE, FAN_REQUEST_MODE_OVERRIDE, custom};
+    const float initial[] = {40, 0, 40, 0, 40};
+    for (size_t idx = 0; idx < 5; ++idx)
+        root.child(idx).add_property(ExtrusionPropertyFan(initial[idx], modes[idx]));
+    publish_fan_test_duration(prepared, 7.5);
+
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    CHECK(first_fan_context(prepared).phase == RAW_FAN_POLICY_PHASE_BASE);
+    const std::vector<ObservedLeaf> base = observed_plan_leaves(prepared.print);
+    CHECK(base[0].fan_speed == 40);
+    CHECK(base[1].fan_speed == 0);
+    CHECK(base[5].fan_speed == 40);
+    run_editors(prepared, {FAN_COOLING_PLUGIN});
+    const slic3r_api::FanPolicy::Context timed = first_fan_context(prepared);
+    CHECK(timed.phase == RAW_FAN_POLICY_PHASE_TIME);
+    CHECK(timed.roles[RAW_FAN_ROLE_DEFAULT].percent == 60);
+    const std::vector<ObservedLeaf> time = observed_plan_leaves(prepared.print);
+    const float expected_time[] = {70, 50, 40, 0, 40, 70};
+    for (size_t idx = 0; idx < 6; ++idx) CHECK(time[idx].fan_speed == expected_time[idx]);
+    run_editors(prepared, {FIRST_LAYER_FAN_PLUGIN});
+    const slic3r_api::FanPolicy::Context closed = first_fan_context(prepared);
+    CHECK(closed.phase == RAW_FAN_POLICY_PHASE_CLOSED);
+    CHECK(closed.roles[RAW_FAN_ROLE_DEFAULT].percent == 15);
+    CHECK(closed.roles[RAW_FAN_ROLE_PERIMETER].percent == 17);
+    run_editors(prepared, {DYNAMIC_FAN_PLUGIN}); // disabled graph is an identity
+    const std::vector<ObservedLeaf> final = observed_plan_leaves(prepared.print);
+    const float expected_final[] = {17, 12, 40, 0, 40, 17};
+    for (size_t idx = 0; idx < 6; ++idx) {
+        CHECK(final[idx].fan_speed == expected_final[idx]);
+        REQUIRE(final[idx].direct_fan != nullptr);
+        CHECK(final[idx].direct_fan->mode == (idx < 5 ? modes[idx] : FAN_REQUEST_MODE_AUTOMATIC));
+        CHECK(final[idx].speed == 20.f);
+        CHECK(root.child(idx).length() == Approx(lengths[idx]));
+    }
+    CHECK(root.get_property<ExtrusionPropertyFan>() == nullptr);
+}
+
+TEST_CASE("Fan closure works without optional time cooling and retains late family fallbacks",
+          "[plugins][layer-extrusion-edit][fan-policy]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "!100"}, {"perimeter_fan_speed", "40"},
+        {"solid_infill_fan_speed", "60"}, {"top_fan_speed", "!100"},
+        {"fan_below_layer_time", "10"}, {"slowdown_below_layer_time", "5"},
+        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"}});
+    // No speeds: absence of cooling must not invoke the timing estimator.
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::ExternalPerimeter, 0.2},
+        {ExtrusionRole::ThinWall, 0.2}, {ExtrusionRole::Ironing, 0.2}}});
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN});
+    CHECK(first_fan_context(prepared).phase == RAW_FAN_POLICY_PHASE_CLOSED);
+    const std::map<uint16_t, ObservedLeaf> leaves = observed_by_role(observed_plan_leaves(prepared.print));
+    CHECK(leaves.at(uint16_t(ExtrusionRole::ExternalPerimeter)).fan_speed == 40);
+    CHECK(leaves.at(uint16_t(ExtrusionRole::ThinWall)).fan_speed == 40);
+    CHECK(leaves.at(uint16_t(ExtrusionRole::Ironing)).fan_speed == 60);
+    const PrintingLayerGroup &layer = prepared.print.printing_plan()->groups.front().layers.front();
+    const slic3r_api::ConstPrintingLayerGroup view(reinterpret_cast<const printing_layer_group_handle *>(&layer));
+    CHECK(registered_layer_time_property_key().get(view.properties()) == nullptr);
+}
+
+TEST_CASE("Standard fan honors the configured overhang role when the dynamic graph is disabled",
+          "[plugins][layer-extrusion-edit][fan-policy]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "20"}, {"perimeter_fan_speed", "40"}, {"overhangs_fan_speed", "75"},
+        {"fan_below_layer_time", "0"}, {"slowdown_below_layer_time", "0"},
+        {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"}});
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::OverhangPerimeter, 0.2, 20.f}}});
+    run_fan_editors(prepared);
+    REQUIRE(observed_plan_leaves(prepared.print).size() == 1);
+    CHECK(observed_plan_leaves(prepared.print).front().fan_speed == 75);
+}
+
+TEST_CASE("Dynamic fan only increases modifiable overhangs within closed first-layer bounds",
+          "[plugins][layer-extrusion-edit][fan-policy][fan-request]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const fan_request_mode other = orchestrator_register_runtime_id(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()), FAN_REQUEST_MODE_ID_TYPE, "tests.dynamic.fan.other");
+    for (int program : {0, 1, 2}) {
+        INFO(program);
+        PreparedSpeedPrint prepared;
+        DynamicPrintConfig config = speed_config({
+            {"default_fan_speed", "20"}, {"perimeter_fan_speed", "40"},
+            {"overhangs_fan_speed", "75"}, {"fan_below_layer_time", "0"}, {"slowdown_below_layer_time", "0"},
+            {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"}});
+        if (program == 1) config.set_deserialize_strict("disable_fan_first_layers", "1");
+        if (program == 2) config.set_deserialize_strict("full_fan_speed_layer", "4");
+        config.set_key_value("overhangs_dynamic_fan_speed", new ConfigOptionGraphs({
+            GraphData(0, 2, GraphData::GraphType::LINEAR, {{0., 80.}, {100., 80.}})}));
+        const ExtrusionSpec spec{ExtrusionRole::OverhangPerimeter, 0.2, 20.f};
+        prepare_ordered_plan(prepared, config, {{spec, spec, spec, spec, spec, spec, spec}});
+        ExtrusionEntity &root = single_plan_root(prepared.print);
+        REQUIRE(root.child_count() == 7);
+        const float initial[] = {90, 40, 40, 0, 40};
+        const fan_request_mode modes[] = {FAN_REQUEST_MODE_AUTOMATIC, FAN_REQUEST_MODE_AUTOMATIC,
+            FAN_REQUEST_MODE_OVERRIDE, FAN_REQUEST_MODE_OVERRIDE, other};
+        for (size_t idx = 0; idx < 7; ++idx) {
+            if (idx < 5) root.child(idx).add_property(ExtrusionPropertyFan(initial[idx], modes[idx]));
+            if (idx < 6) {
+                slic3r_api::MutableExtrusionEntity leaf(reinterpret_cast<extrusion_entity_handle *>(&root.child(idx)));
+                slic3r_api::EPropertyOverhang &overhang = leaf.get_or_add(slic3r_api::EPropertyOverhang::key);
+                overhang.start_distance_from_prev_layer = 0.5f;
+                overhang.end_distance_from_prev_layer = 0.5f;
+            }
+        }
+        publish_fan_test_duration(prepared, 7.5);
+        run_fan_editors(prepared);
+        // Overhang requests share the bridge ramp exception. Dynamic cooling
+        // never lowers an existing Automatic above its own closed ceiling.
+        const float expected[3][7] = {{90, 80, 40, 0, 40, 80, 40}, {0, 0, 40, 0, 40, 0, 0}, {90, 40, 40, 0, 40, 10, 10}};
+        const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+        REQUIRE(leaves.size() == 7);
+        for (size_t idx = 0; idx < 7; ++idx) {
+            CHECK(leaves[idx].fan_speed == expected[program][idx]);
+            REQUIRE(leaves[idx].direct_fan != nullptr);
+            CHECK(leaves[idx].direct_fan->mode == (idx < 5 ? modes[idx] : FAN_REQUEST_MODE_AUTOMATIC));
+        }
+    }
+}
+
+TEST_CASE("Fan consumers reject missing malformed and out of order published contexts",
+          "[plugins][layer-extrusion-edit][fan-policy]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "20"}, {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"}});
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::Perimeter, 0.2, 20.f}}});
+    publish_fan_test_duration(prepared, 7.5);
+    Orchestrator &orch = Orchestrator::instance();
+    const PluginPropertyKey<slic3r_api::FanPolicy::Context> key = slic3r_api::FanPolicy::context_property_key(
+        reinterpret_cast<orchestrator_handle *>(&orch));
+    PrintingToolGroup &tool = prepared.print.mutable_printing_plan().groups.front().layers.front().tool_groups.front();
+    slic3r_api::PrintingToolGroup view(reinterpret_cast<printing_tool_group_handle *>(&tool));
+    for (const char *consumer : {FAN_COOLING_PLUGIN, FIRST_LAYER_FAN_PLUGIN, DYNAMIC_FAN_PLUGIN}) {
+        INFO(consumer);
+        ScopedActivePlugins active({consumer});
+        orch.reset_plugin_cancel();
+        CHECK_THROWS(Steps::StepLayerExtrusionEdition::run_step(orch, prepared.print));
+        CHECK(orch.is_plugin_cancelled());
+        orch.reset_plugin_cancel();
+    }
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN});
+    key.get_or_add(view.properties()).struct_size = 0;
+    {
+        ScopedActivePlugins active({FAN_COOLING_PLUGIN});
+        CHECK_THROWS(Steps::StepLayerExtrusionEdition::run_step(orch, prepared.print));
+        orch.reset_plugin_cancel();
+    }
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN});
+    {
+        ScopedActivePlugins active({FAN_COOLING_PLUGIN});
+        CHECK_THROWS(Steps::StepLayerExtrusionEdition::run_step(orch, prepared.print));
+        orch.reset_plugin_cancel();
+    }
+    CHECK(first_fan_context(prepared).phase == RAW_FAN_POLICY_PHASE_CLOSED);
+    orch.consume_plugin_messages();
+}
+
+TEST_CASE("Fan host policies keep separate priorities configuration owners and read sets",
+          "[plugins][layer-extrusion-edit][fan-policy][api]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *ids[] = {DEFAULT_FAN_PLUGIN, FAN_COOLING_PLUGIN, FIRST_LAYER_FAN_PLUGIN, DYNAMIC_FAN_PLUGIN};
+    const int priorities[] = {20, 22, 24, 26};
+    const size_t defined_counts[] = {12, 3, 2, 0};
+    std::set<std::string> owners;
+    for (size_t idx = 0; idx < 4; ++idx) {
+        Plugin *plugin = Orchestrator::instance().get_plugin(ids[idx]);
+        REQUIRE(plugin != nullptr);
+        CHECK(plugin->get_priority() == priorities[idx]);
+        CHECK(plugin->get_step() == STEP_LAYER_EXTRUSION_EDIT);
+        CHECK(plugin->get_defined_config_keys().size() == defined_counts[idx]);
+        if (idx > 0) CHECK(plugin->get_exclusive_group().empty());
+        for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys()) {
+            CHECK(owners.insert(key.key).second);
+            const ConfigOptionDef *definition = PrintConfigDef::instance().get(key.key);
+            REQUIRE(definition != nullptr);
+            CHECK(definition->invalidates_step == STEP_LAYER_EXTRUSION_EDIT);
+        }
+    }
+    CHECK(owners.size() == 17);
 }
 
 TEST_CASE("Acceleration plugin owns its settings and activation rules",
@@ -3452,6 +3713,73 @@ TEST_CASE("First-layer flow selects one regional value for a deposit without dup
     CHECK(deposit.first_point() == point);
     REQUIRE(deposit.get_property<ExtrusionPropertySpecialCommand>() != nullptr);
     CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
+}
+
+TEST_CASE("Composable fan stages pass their declared linear STL export catalogue",
+          "[plugins][plugin-e2e][fan-policy][fan-e2e]")
+{
+    namespace E2E = Test::PluginE2E;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedActivePlugins active({DEFAULT_FAN_PLUGIN, FAN_COOLING_PLUGIN, FIRST_LAYER_FAN_PLUGIN,
+        DYNAMIC_FAN_PLUGIN, DEFAULT_SPEED_PLUGIN, "ordering.extrusion_tree.advanced"}, true);
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"default_fan_speed", "20"}, {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
+        {"fan_below_layer_time", "0"}, {"slowdown_below_layer_time", "0"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
+    REQUIRE_FALSE(ordering_key.empty());
+    baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");
+    std::vector<E2E::Domain> domains;
+    const auto add = [&domains](const std::string &key, const std::vector<std::string> &values) {
+        E2E::Domain domain{{key}, {}};
+        for (const std::string &value : values)
+            domain.cases.push_back({key + "=" + value, {{key, value}}});
+        domains.push_back(std::move(domain));
+    };
+    for (const char *key : {"default_fan_speed", "bridge_fan_speed", "external_perimeter_fan_speed",
+            "gap_fill_fan_speed", "infill_fan_speed", "internal_bridge_fan_speed", "overhangs_fan_speed",
+            "perimeter_fan_speed", "solid_infill_fan_speed", "support_material_fan_speed",
+            "support_material_interface_fan_speed", "top_fan_speed"})
+        add(key, {"!0", "0", "1", "100"});
+    add("disable_fan_first_layers", {"0", "2"});
+    add("full_fan_speed_layer", {"0", "4"});
+    add("fan_below_layer_time", {"0", "60"});
+    add("slowdown_below_layer_time", {"0", "5"});
+    add("max_fan_speed", {"0", "100"});
+    add("travel_speed", {"50", "150"});
+    const ConfigOptionGraphs low({GraphData(0, 2, GraphData::GraphType::LINEAR, {{0., 0.}, {100., 0.}})});
+    const ConfigOptionGraphs high({GraphData(0, 2, GraphData::GraphType::LINEAR, {{0., 100.}, {100., 100.}})});
+    add("overhangs_dynamic_fan_speed", {baseline.optptr("overhangs_dynamic_fan_speed")->serialize(),
+        low.serialize(), high.serialize()});
+    const TriangleMesh mesh = E2E::stl_fixture(true);
+    for (const E2E::Case &test : E2E::linear_cases(host,
+            {DEFAULT_FAN_PLUGIN, FAN_COOLING_PLUGIN, FIRST_LAYER_FAN_PLUGIN, DYNAMIC_FAN_PLUGIN}, baseline, domains)) {
+        INFO(test.name);
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, E2E::apply_case(baseline, test));
+        print.process();
+        const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+        std::string code;
+        try {
+            code = Test::GCode::read_text_file(host.export_gcode_cli(print, path.string()));
+            Test::GCode::remove_output_pair(path);
+        } catch (...) {
+            Test::GCode::remove_output_pair(path);
+            throw;
+        }
+        CHECK(code.find("G1 ") != std::string::npos);
+        CHECK(code.find(" E") != std::string::npos);
+        const std::vector<ObservedLeaf> leaves = observed_plan_leaves(print);
+        REQUIRE_FALSE(leaves.empty());
+        for (const ObservedLeaf &leaf : leaves) {
+            CHECK(std::isfinite(leaf.fan_speed));
+            CHECK(leaf.fan_speed >= -1.f);
+            CHECK(leaf.fan_speed <= 100.f);
+        }
+    }
 }
 
 TEST_CASE("Default speed declared settings pass a linear STL export matrix",

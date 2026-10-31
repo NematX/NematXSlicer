@@ -101,6 +101,9 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultLayerEntryState.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultSpeed.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/DynamicFan.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/FanCooling.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFan.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFlow.hpp"
@@ -891,6 +894,9 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultFanPlugin::register_default_fan_plugin(
             orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::FanCoolingPlugin::register_fan_cooling_plugin(orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::FirstLayerFanPlugin::register_first_layer_fan_plugin(orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::DynamicFanPlugin::register_dynamic_fan_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultTemperaturePlugin::register_default_temperature_plugins(
             orchestrator_handle_value);
         slic3r_api::SkirtBrim::DefaultBrimGeneratorPlugin::register_default_brim_generator_plugin(
@@ -1066,6 +1072,9 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.acceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel_deceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.default");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.cooling");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.first_layers");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.dynamic");
         activate_plugin_or_fail(orchestrator, "extrusion_edit.startup_temperature.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.temperature.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.toolchange.default");

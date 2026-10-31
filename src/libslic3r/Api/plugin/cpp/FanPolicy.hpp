@@ -61,6 +61,17 @@ bool can_ramp(Role role);
 int normalize_fan_value(int value);
 // Read and validate existing filament options for one concrete extruder.
 Settings read_settings(const Config &config, extruder_index_t extruder_id);
+// Stage-specific readers avoid consuming another policy's configuration.
+Settings read_base_settings(const Config &config, extruder_index_t extruder_id);
+// Read and validate only timing thresholds and the maximum fan reference.
+Settings read_layer_time_settings(const Config &config, extruder_index_t extruder_id);
+// Read and validate only the first-layer program's configuration.
+Settings read_first_layer_settings(const Config &config, extruder_index_t extruder_id);
+// Shared scalar rules for references and modifiable leaf requests. Settings and
+// duration are prevalidated by the owning policy before its leaf traversal.
+float layer_time_percent(float percent, Role role, const Settings &settings, double duration_seconds);
+// Apply the disable/ramp program once to a validated modifiable request.
+float first_layer_percent(float percent, Role role, const Settings &settings, uint32_t layer_index);
 // All stages require validated Settings. Apply initial family/default fallbacks
 // while retaining configured references; no plan/configuration metadata is kept.
 Context make_base(const Settings &settings);

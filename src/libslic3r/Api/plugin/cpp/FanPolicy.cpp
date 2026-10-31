@@ -30,6 +30,11 @@ namespace slic3r_api { namespace FanPolicy {
 namespace {
 // Enforce the public stage contract without rescanning validated references.
 void require_phase(const Context &context, raw_fan_policy_phase expected);
+// Populate one input family without validation; public readers validate their
+// assembled Settings exactly once before returning them to a caller.
+void read_base_inputs(Settings &settings, const Config &config, extruder_index_t extruder_id);
+void read_layer_time_inputs(Settings &settings, const Config &config, extruder_index_t extruder_id);
+void read_first_layer_inputs(Settings &settings, const Config &config, extruder_index_t extruder_id);
 
 void require_phase(const Context &context, raw_fan_policy_phase expected)
 {
@@ -117,6 +122,40 @@ int normalize_fan_value(int value)
 Settings read_settings(const Config &config, extruder_index_t extruder_id)
 {
     Settings settings;
+    read_base_inputs(settings, config, extruder_id);
+    read_layer_time_inputs(settings, config, extruder_id);
+    read_first_layer_inputs(settings, config, extruder_id);
+    settings.validate();
+    return settings;
+}
+
+Settings read_base_settings(const Config &config, extruder_index_t extruder_id)
+{
+    Settings settings;
+    read_base_inputs(settings, config, extruder_id);
+    settings.validate();
+    return settings;
+}
+
+Settings read_layer_time_settings(const Config &config, extruder_index_t extruder_id)
+{
+    Settings settings;
+    read_layer_time_inputs(settings, config, extruder_id);
+    settings.validate();
+    return settings;
+}
+
+Settings read_first_layer_settings(const Config &config, extruder_index_t extruder_id)
+{
+    Settings settings;
+    read_first_layer_inputs(settings, config, extruder_id);
+    settings.validate();
+    return settings;
+}
+
+namespace {
+void read_base_inputs(Settings &settings, const Config &config, extruder_index_t extruder_id)
+{
     const char *const keys[RAW_FAN_ROLE_COUNT] = {
         "default_fan_speed", "perimeter_fan_speed", "external_perimeter_fan_speed",
         "overhangs_fan_speed", "infill_fan_speed", "internal_bridge_fan_speed",
@@ -126,15 +165,49 @@ Settings read_settings(const Config &config, extruder_index_t extruder_id)
     };
     for (size_t idx = 0; idx < settings.configured.size(); ++idx)
         settings.configured[idx] = normalize_fan_value(config.vector_int_or_default(keys[idx], extruder_id, -1));
+    const ConfigOption dynamic = config.get("overhangs_dynamic_fan_speed");
+    settings.dynamic_enabled = dynamic.valid() && size_t(extruder_id) < dynamic.size() && dynamic.is_enabled(extruder_id);
+}
+
+void read_layer_time_inputs(Settings &settings, const Config &config, extruder_index_t extruder_id)
+{
     settings.maximum = std::clamp(config.vector_int_or_default("max_fan_speed", extruder_id, 100), 0, 100);
     settings.slowdown_seconds = config.vector_float_or_default("slowdown_below_layer_time", extruder_id, 0.0);
     settings.fan_seconds = config.vector_float_or_default("fan_below_layer_time", extruder_id, 0.0);
+}
+
+void read_first_layer_inputs(Settings &settings, const Config &config, extruder_index_t extruder_id)
+{
     settings.disabled_layers = config.vector_int_or_default("disable_fan_first_layers", extruder_id, 0);
     settings.full_speed_layer = config.vector_int_or_default("full_fan_speed_layer", extruder_id, 0);
-    const ConfigOption dynamic = config.get("overhangs_dynamic_fan_speed");
-    settings.dynamic_enabled = dynamic.valid() && size_t(extruder_id) < dynamic.size() && dynamic.is_enabled(extruder_id);
-    settings.validate();
-    return settings;
+}
+} // namespace
+
+float layer_time_percent(float percent, Role role, const Settings &settings, double duration_seconds)
+{
+    if (!can_increase(role))
+        return percent;
+    if (duration_seconds < settings.slowdown_seconds && settings.fan_seconds > 0.0)
+        return std::max(float(settings.maximum), percent);
+    if (duration_seconds < settings.fan_seconds && settings.fan_seconds > settings.slowdown_seconds &&
+        percent >= 0.f && percent < settings.maximum) {
+        const double ratio = (duration_seconds - settings.slowdown_seconds) / (settings.fan_seconds - settings.slowdown_seconds);
+        return float(std::clamp(int(ratio * percent + (1.0 - ratio) * settings.maximum + 0.5), 0, 100));
+    }
+    return percent;
+}
+
+float first_layer_percent(float percent, Role role, const Settings &settings, uint32_t layer_index)
+{
+    if (int64_t(layer_index) < settings.disabled_layers)
+        return 0.f;
+    if (int64_t(layer_index) + 1 < settings.full_speed_layer && settings.full_speed_layer > settings.disabled_layers &&
+        can_ramp(role) && percent > 0.f) {
+        const float factor = float(int64_t(layer_index) + 1 - settings.disabled_layers) /
+                             float(settings.full_speed_layer - settings.disabled_layers);
+        return float(std::clamp(int(percent * factor + 0.01f), 0, 100));
+    }
+    return percent;
 }
 
 Context make_base(const Settings &settings)
@@ -164,6 +237,10 @@ Context make_base(const Settings &settings)
             if (result.roles[idx].percent < 0 && idx != RAW_FAN_ROLE_OVERHANG_PERIMETER)
                 result.roles[idx].percent = default_speed;
 
+    // Aliases start from their family reference so leaf and table transforms
+    // agree even when that family reference came from an early fallback.
+    result.roles[RAW_FAN_ROLE_IRONING].percent = result.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].percent;
+    result.roles[RAW_FAN_ROLE_THIN_WALL].percent = result.roles[RAW_FAN_ROLE_EXTERNAL_PERIMETER].percent;
     return result;
 }
 
@@ -177,16 +254,9 @@ Context apply_layer_time(const Context &base, const Settings &settings, double d
     const bool very_short = duration_seconds < settings.slowdown_seconds && settings.fan_seconds > 0.0;
     const bool interpolate = duration_seconds < settings.fan_seconds && settings.fan_seconds > settings.slowdown_seconds;
     if (very_short || interpolate) {
-        const double ratio = very_short ? 0.0 :
-            (duration_seconds - settings.slowdown_seconds) / (settings.fan_seconds - settings.slowdown_seconds);
         for (uint32_t idx = 0; idx < RAW_FAN_ROLE_COUNT; ++idx) {
             int32_t &percent = result.roles[idx].percent;
-            if (!can_increase(Role(idx)))
-                continue;
-            if (very_short)
-                percent = std::max(settings.maximum, percent);
-            else if (percent >= 0 && percent < settings.maximum)
-                percent = std::clamp(int(ratio * percent + (1.0 - ratio) * settings.maximum + 0.5), 0, 100);
+            percent = int32_t(layer_time_percent(float(percent), Role(idx), settings, duration_seconds));
         }
         result.dynamic_min = std::max(0, result.roles[RAW_FAN_ROLE_DEFAULT].percent);
     }
@@ -206,12 +276,13 @@ Context close_first_layers(const Context &time, const Settings &settings, uint32
         return result;
     }
     if (int64_t(layer_index) + 1 < settings.full_speed_layer && settings.full_speed_layer > settings.disabled_layers) {
-        const float factor = float(int64_t(layer_index) + 1 - settings.disabled_layers) /
-                             float(settings.full_speed_layer - settings.disabled_layers);
         for (uint32_t idx = 0; idx < RAW_FAN_ROLE_COUNT; ++idx)
-            if (can_ramp(Role(idx)) && result.roles[idx].percent > 0)
-                result.roles[idx].percent = std::clamp(int(float(result.roles[idx].percent) * factor + 0.01f), 0, 100);
-        result.dynamic_max = std::max(0, result.roles[RAW_FAN_ROLE_DEFAULT].percent);
+            result.roles[idx].percent = int32_t(first_layer_percent(float(result.roles[idx].percent), Role(idx), settings, layer_index));
+        // A disabled default is absence, not a stop. Keep a useful geometric
+        // ceiling by ramping 100 when no default reference exists.
+        result.dynamic_max = result.roles[RAW_FAN_ROLE_DEFAULT].percent >= 0 ?
+            result.roles[RAW_FAN_ROLE_DEFAULT].percent :
+            int32_t(first_layer_percent(100.f, RAW_FAN_ROLE_DEFAULT, settings, layer_index));
     }
     result.dynamic_min = std::min(result.dynamic_min, result.dynamic_max);
     // Close absent references in dependency order. Ironing/thin-wall are aliases,

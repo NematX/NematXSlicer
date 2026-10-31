@@ -132,8 +132,8 @@ After assigning leaf values, call hoist() once on the root. It moves an exactly
 uniform effective value to the nearest common parent and removes only redundant
 direct values for the selected field. Hoisting stops at excluded leaves,
 unresolved values, or conflicting values, so it never gives a process value to
-a subtree for which that value was not proven valid. Fan requests use their own
-pair editor below and are not speed fields.
+a subtree for which that value was not proven valid. Fan requests are pairs
+edited per leaf by the fan policies, not speed fields.
 
 The editor is intended for one field and one mutation pass. It keeps borrowed
 entity handles so it can remove payloads that it created when they become empty,
@@ -222,20 +222,6 @@ private:
     std::set<extrusion_entity_handle *> m_created_properties;
     // Entities that currently retain a direct value written by this editor.
     std::set<extrusion_entity_handle *> m_modified_entities;
-};
-
-// Fan requests are pairs, not speed fields. Only generated requests may be
-// cleared while compacting; an upstream request, even at 0%, stays authoritative.
-class EPropertyFanEditor
-{
-public:
-    void set_value(MutableExtrusionEntity entity, float percent);
-    void hoist(MutableExtrusionEntity root);
-    const std::set<extrusion_entity_handle *> &modified_entities() const { return m_modified; }
-private:
-    struct Summary { EPropertyFan fan = {}; bool blocked = false; };
-    Summary hoist_tree(MutableExtrusionEntity entity, const EffectiveTreeState &parent);
-    std::set<extrusion_entity_handle *> m_modified;
 };
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::ProcessParameterHelpers

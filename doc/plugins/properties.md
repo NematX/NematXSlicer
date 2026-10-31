@@ -1,6 +1,6 @@
 # Using Plugin Properties
 
-> Base snapshot commit: `7a9b6ed96b`, with the public fan-policy/timing contracts below.
+> Base snapshot commit: `b1692c6920`, with the host-policy extraction described below.
 >
 > Per-header ABI: `slic3r_extrusion_property.h` 4.0, `slic3r_def.h` 1.5.
 > Public policy records: `slic3r_fan_policy.h` 2.0,
@@ -131,7 +131,7 @@ per-tool duration. `ESTIMATED` is a replaceable geometric fallback. `RESOLVED`
 means a producer ran its timing model after speed/slowdown changes; it does not
 mean measured machine time or provide intra-movement timing. Both origins
 require finite, nonnegative seconds. A producer must republish after modifying
-speeds. The combined `DefaultFan` keeps valid RESOLVED records and recomputes
+speeds. `FanCooling` keeps valid RESOLVED records and recomputes
 other durations in one ordered estimation pass. No post-slowdown producer is
 implemented by these contracts.
 
@@ -167,14 +167,47 @@ configuration once; callers assembling `Settings` directly must call `validate()
 Validate a context read from a published property with `context.validate(phase)`
 before processing it. Numerical stages only check size/phase and the separate
 duration argument; they do not rescan references they just computed. Property
-timing and estimator output are validated when entering the DefaultFan cache,
+timing and estimator output are validated when entering the FanCooling cache,
 not again when publishing that unchanged cache.
 
-For now `DefaultFan` performs all three stages within its layer callback and
-publishes CLOSED. Separate plugin callbacks and the advanced E/D/G program are
-not part of this interface's initial implementation. Setup only caches durations;
-publication happens in the owning layer's run. Reprocessing restores the saved
-preprocessing tree and rebuilds references, not inverse transformations.
+The host runs independent plugins at the published layer-edit priorities:
+
+| Plugin ID suffix (`layer_extrusion_edit.fan.`) | Priority | Result |
+| --- | --- | --- |
+| `default` | 20 | Fill only effective absences and publish BASE |
+| `cooling` | 22 | Transform eligible requests using total duration; publish TIME |
+| `first_layers` | 24 | Apply D/F, close late fallbacks; publish CLOSED |
+| `dynamic` | 26 | Increase geometric overhang requests within CLOSED bounds |
+
+The standard retains the `default_fan_plugin` exclusive group. Other stages have
+no provider-identity dependency. Each consumes and fully validates the preceding
+property before processing a tool. Without optional cooling, the first-layer
+applicator accepts BASE as an identity TIME stage, without estimating duration.
+Dynamic processing requires CLOSED even when its graph is disabled. Setup only
+caches durations; publication happens in the owning layer's run.
+
+Every later policy preserves Override (including zero) and other plugins' modes;
+Automatic zero is a real request but may be transformed. No intermediate fan
+compaction is performed. The standard materializes inherited collection requests
+on eligible deposition leaves, leaving direct service requests unchanged and
+not copying a collection request onto travel, empty or service leaves. A printable
+leaf whose E is replaced by a raw `EXTRUSION` command (such as a zero-flow infill
+connector) is not a deposition leaf: it keeps the fan state of its neighbours. Reprocessing
+restores the saved preprocessing tree, rather than undoing prior transformations.
+
+With a disabled dynamic graph, a configured `overhangs_fan_speed` is honored
+(unlike the earlier combined provider's unconditional perimeter fallback).
+Missing overhang requests wait for the closed perimeter-family reference;
+upstream Automatic overhangs retain bridge-role ramp exceptions. Dynamic cooling
+never lowers an existing request above its own ceiling. A disabled default fan
+uses ramp(100) as the dynamic ceiling, not a manufactured stop. The advanced E/D/G
+program, slowdown solver and temporal processing remain separate future work.
+
+Each extracted plugin owns its existing option definitions and invalidates
+`STEP_LAYER_EXTRUSION_EDIT`. Shipped defaults enable all four; migration copies
+the old standard's activation to missing successors, retaining explicit choices.
+Public priority constants are additive in `slic3r_step_layer_extrusion_edit.h` 1.1;
+fan2.0 and timing1.0 record layouts are unchanged.
 
 Python exposes the same ctypes records through `slic3r_fan_policy`:
 `FanPolicyContext`, `PrintingLayerTimeProperty`, `fan_policy_context_key(api)`,
