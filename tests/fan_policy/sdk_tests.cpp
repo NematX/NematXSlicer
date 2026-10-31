@@ -5,6 +5,7 @@
 
 #include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingLayerTimeProperty.hpp"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_layer_extrusion_edit.h"
 
 namespace {
 // Keep assertions active regardless of build flags and identify a bad contract.
@@ -41,6 +42,21 @@ int main()
         timing.origin = RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED;
         timing.validate();
         require(timing.is_resolved(), "resolved timing provenance");
+        // Independent host policies use the same scalar kernels as references;
+        // these symbols must also be linkable by an external SDK consumer.
+        require(FanPolicy::layer_time_percent(40, RAW_FAN_ROLE_PERIMETER, settings, 7.5) == 70,
+                "leaf time interpolation");
+        require(FanPolicy::layer_time_percent(0, RAW_FAN_ROLE_PERIMETER, settings, 7.5) == 50,
+                "automatic zero can be increased");
+        settings.full_speed_layer = 4;
+        require(FanPolicy::first_layer_percent(70, RAW_FAN_ROLE_PERIMETER, settings, 0) == 17,
+                "leaf first-layer rounding");
+        require(FanPolicy::first_layer_percent(70, RAW_FAN_ROLE_BRIDGE_INFILL, settings, 0) == 70,
+                "bridge ramp exception");
+        require(LAYER_EXTRUSION_EDIT_PRIORITY_FAN_STANDARD < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_COOLING &&
+                LAYER_EXTRUSION_EDIT_PRIORITY_FAN_COOLING < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_FIRST_LAYERS &&
+                LAYER_EXTRUSION_EDIT_PRIORITY_FAN_FIRST_LAYERS < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_DYNAMIC,
+                "public fan stage ordering");
     } catch (const std::exception &error) {
         std::cerr << error.what() << '\n';
         return 1;
