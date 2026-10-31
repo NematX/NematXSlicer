@@ -10,6 +10,7 @@ A collection of plugins for NematXSlicer.
 - [nematx_infill_gridvarspeed](plugins/infill_gridvarspeed/README.md)
 - [nematx-firmware](plugins/nematx_firmware/README.md): NematX G-code firmware and reader
 - [nematx_hole_size_curve](plugins/hole_size_curve/README.md): hole compensation by diameter
+- [nematx_regional_fan](plugins/regional_fan/README.md): fan speed overrides per region and role
 
 ## Build targets
 
