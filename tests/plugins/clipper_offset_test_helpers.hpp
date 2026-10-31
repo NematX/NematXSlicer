@@ -48,6 +48,7 @@ CanonicalRing canonical_ring(const Slic3r::Polygon &polygon);
 bool operator==(const CanonicalExPolygon &first, const CanonicalExPolygon &second);
 bool operator<(const CanonicalExPolygon &first, const CanonicalExPolygon &second);
 
+// Check nonempty contour and hole orientation, attaching the supplied context to failures.
 void check_orientation(const std::string &info, const Slic3r::ExPolygons &expolygons);
 void compare(const std::string &info,
              const Slic3r::ExPolygons &api,

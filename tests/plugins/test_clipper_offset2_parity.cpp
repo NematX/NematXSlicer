@@ -120,6 +120,9 @@ std::vector<Offset2Case> offset2_cases();
 // Compare all input variants for one case and one input ordering.
 void run_case2(const Offset2Case &test_case);
 
+// Check orientation and canonical equality of two API results.
+void compare_api_results(const std::string &info, const Slic3r::ExPolygons &actual, const Slic3r::ExPolygons &expected);
+
 // Verify the public two-stage operation against two public one-stage calls.
 void run_api_invariants(const Offset2Case &test_case);
 
@@ -341,16 +344,23 @@ bool same_topology(const Offset2Topology &first, const Offset2Topology &second)
     return first.islands == second.islands && first.holes == second.holes;
 }
 
+// Compare borrowed results by canonical geometry; report orientation/equality failures, formatting full geometry only for mismatches.
 void compare_api_results(const std::string &info,
                          const Slic3r::ExPolygons &actual,
                          const Slic3r::ExPolygons &expected)
 {
     check_orientation(info + " actual", actual);
     check_orientation(info + " expected", expected);
+    const CanonicalShape actual_shape = canonical(actual);
+    const CanonicalShape expected_shape = canonical(expected);
+    if (actual_shape == expected_shape) {
+        CHECK(actual_shape == expected_shape);
+        return;
+    }
     INFO(info);
     INFO("actual " << describe(actual));
     INFO("expected " << describe(expected));
-    CHECK(canonical(actual) == canonical(expected));
+    CHECK(actual_shape == expected_shape);
 }
 
 std::vector<Offset2Case> offset2_cases()
@@ -478,6 +488,7 @@ void compare_polygons_guard(const std::string &info,
     }
 }
 
+// Copy and rotate the borrowed case inputs, reuse order-specific flat rings, and report parity failures for every parameter/variant combination.
 void run_case2(const Offset2Case &test_case)
 {
     const std::vector<Offset2Params> matrix = offset2_matrix(test_case.extra_pairs);
@@ -492,6 +503,8 @@ void run_case2(const Offset2Case &test_case)
             std::rotate(ordered_inputs.begin(), ordered_inputs.begin() + 1, ordered_inputs.end());
             std::rotate(ordered_indices.begin(), ordered_indices.begin() + 1, ordered_indices.end());
         }
+        const Slic3r::Polygons polygons = needs_manual_polygon_conversion(ordered_inputs) ?
+            flatten_polygons(ordered_inputs) : Slic3r::to_polygons(ordered_inputs);
         for (const Offset2Params &params : matrix) {
             Slic3r::PluginStorage plugin_storage;
             storage_handle *storage = reinterpret_cast<storage_handle *>(&plugin_storage);
@@ -508,16 +521,12 @@ void run_case2(const Offset2Case &test_case)
             if (ordered_inputs.size() == 1) {
                 const Slic3r::ExPolygons single_api = api_offset2_expolygon(
                     storage, ordered_inputs.front(), params);
-                const Slic3r::ExPolygons single_legacy = Slic3r::offset2_ex(
-                    Slic3r::ExPolygons{ordered_inputs.front()}, scale_d(params.delta1_mm),
-                    scale_d(params.delta2_mm), legacy_join(params.join), params.limit);
+                const Slic3r::ExPolygons &single_legacy = collection_legacy;
                 compare_api_results(prefix + " single API collection", single_api, collection_api);
                 compare(prefix + " single API legacy", single_api, single_legacy, documentary);
             }
 
             if (params.delta1_mm != 0.) {
-                const Slic3r::Polygons polygons = needs_manual_polygon_conversion(ordered_inputs) ?
-                    flatten_polygons(ordered_inputs) : Slic3r::to_polygons(ordered_inputs);
                 const Slic3r::ExPolygons polygons_api = api_offset2_polygons(storage, polygons, params);
                 const Slic3r::ExPolygons polygons_legacy = legacy_offset2_polygons(polygons, params);
                 const bool polygon_documentary = test_case.documentary || is_documented2(
