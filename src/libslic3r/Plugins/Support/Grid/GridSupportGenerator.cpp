@@ -178,7 +178,7 @@ Run::Run(const plugin_run_context *context, const Print &print, const Object &ob
     layer_height = config.get("support_material_layer_height").get_float_or_percent();
     interface_layer_height = config.get("support_material_interface_layer_height").get_float_or_percent();
     closing_radius = config.get("support_material_closing_radius").get_float();
-    spacing = config.get("support_material_spacing").get_float();
+    spacing = p.base_spacing_gap;
     grown_outlines.resize(layers.size());
 }
 

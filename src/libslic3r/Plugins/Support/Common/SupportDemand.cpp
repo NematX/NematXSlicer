@@ -67,13 +67,15 @@ ClipperOperand accumulate_lower_slices(const ClipperContext &clipper, const Clip
     return clipper_union2(covered, clipper_offset(clipper(lower.slices()), scale_d(0.01)));
 }
 
-// Computes a scaled horizontal allowance using the original height/tan rounding; positive thresholds use threshold+1 degrees unless the requested guard rejects it, otherwise half the scaled width is returned without host calls or mutation; unguarded negative allowances assert in scale_to_layer_coord().
+// Truncates the horizontal height/tan allowance to XY coordinates; positive thresholds use threshold+1 degrees unless the
+// angle guard rejects it, otherwise half the scaled width is returned. Unguarded angles above 90 degrees can return a negative
+// offset; inputs are scaled distances, no geometry is owned or changed, and no host calls or allocation occur.
 coord_t overhang_margin(int32_t threshold, coord_t lower_height, coord_t external_width, bool guard_angle)
 {
     if (threshold > 0) {
         const double angle = PI * double(threshold + 1) / 180.;
         if (angle > 0. && (!guard_angle || angle < PI / 2.))
-            return scale_to_layer_coord(unscaled(lower_height) / std::tan(angle));
+            return scale_i(unscaled(lower_height) / std::tan(angle));
     }
     return external_width / 2;
 }

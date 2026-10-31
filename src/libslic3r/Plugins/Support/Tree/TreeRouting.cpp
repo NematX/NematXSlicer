@@ -577,7 +577,7 @@ static StoredPolygonCollection supported_overhang(storage_handle *scratch, const
         placement.volumes.getAvoidance(config.min_radius, layer_idx, AvoidanceType::Fast, false);
     const StoredExPolygonCollection forbidden_regions = expolygons_union(scratch, relevant_forbidden_raw);
     const StoredPolygonCollection relevant_forbidden = polygons_offset(scratch, forbidden_regions, scale_d(0.005), CLIPPER_JOIN_MITER, 1.2);
-    StoredPolygonCollection overhang_regular = safe_offset_inc(scratch, source.area, 0, relevant_forbidden, config.min_radius * 1.75 + config.xy_distance, 0, 1);
+    StoredPolygonCollection overhang_regular = safe_offset_inc(scratch, source.area, 0, relevant_forbidden, config.min_radius * 1.75 + config.safe_step_distance, 0, 1);
     const StoredExPolygonCollection supported_regions = expolygons_union(scratch, overhang_regular);
     const StoredPolygonCollection supported_grown = polygons_offset(scratch, supported_regions, config.support_line_width * 0.5, CLIPPER_JOIN_MITER, 1.2);
     const StoredPolygonCollection not_supported = polygons_diff(scratch, source.area, supported_grown);
@@ -591,7 +591,7 @@ static StoredPolygonCollection supported_overhang(storage_handle *scratch, const
             placement.extra_outset - extra_total_offset_acc);
         extra_total_offset_acc += offset_current_step;
         const StoredPolygonCollection &raw_collision = placement.volumes.getCollision(0, layer_idx);
-        const coord_t offset_step = config.xy_distance + config.support_line_width;
+        const coord_t offset_step = config.safe_step_distance + config.support_line_width;
         // Reduce the remaining overhang by the areas already supported, then extend the supported area by what is left.
         remaining_overhang = polygons_diff(scratch, remaining_overhang, safe_offset_inc(scratch, overhang_regular, coord_t(1.5 * extra_total_offset_acc), raw_collision, offset_step, 0, 1));
         overhang_regular = polygons_union(scratch, overhang_regular, polygons_diff(scratch, safe_offset_inc(scratch, remaining_overhang, extra_total_offset_acc, raw_collision, offset_step, 0, 1), relevant_forbidden));
@@ -1521,7 +1521,7 @@ static StoredPolygonCollection intersect_merging_areas(storage_handle *scratch, 
 {
     const StoredPolygonCollection grown = safe_offset_inc(scratch, small, real_radius_delta, collision,
         // -3 avoids possible rounding errors.
-        2 * (config.xy_distance + smaller_collision_radius - 3), 0, 0);
+        2 * (config.safe_step_distance + smaller_collision_radius - 3), 0, 0);
     return polygons_intersection(scratch, grown, bigger);
 }
 
@@ -1659,7 +1659,7 @@ static MergingMovement merging_movement(const TreeVolumes &volumes, const TreeSe
      *  For more detailed visualisation see calculateWallRestrictions
      */
     const coord_t safe_movement_distance =
-        config.xy_distance +
+        config.safe_step_distance +
         (config.z_distance_both_sides ? config.min_feature_size : 0);
     if (ceiled_parent_radius == volumes.ceilRadius(projected_radius_increased) ||
         projected_radius_increased < config.branch_radius)
@@ -1849,7 +1849,7 @@ static void store_merging_increase(storage_handle *scratch, const TreeVolumes &v
         increased.copy_from(relevant_offset);
         if (overspeed > 0) {
             const coord_t safe_movement_distance =
-                config.xy_distance +
+                config.safe_step_distance +
                 (config.z_distance_both_sides ? config.min_feature_size : 0);
             // The difference to ensure that the result not only conforms to wall_restriction, but collision/avoidance is done later.
             // The higher last_safe_step_movement_distance comes exactly from the fact that the collision will be subtracted later.

@@ -2802,6 +2802,49 @@ TEST_CASE("Final tree and organic slabs keep the normal XY distance from the obj
     REQUIRE(checked_pairs > 0);
 }
 
+// Generates and publishes soluble supports below a roof beside its post; final trimmed/smoothed surfaces must occupy positive
+// area in the outer 0.08 mm band of a vertically overlapping object layer. Print/model own inputs and published output;
+// generation/allocation failures reach Catch, and the band check excludes contacts against an object layer only above/below it.
+TEST_CASE("Final soluble tree and organic supports approach the object at zero XY clearance", "[plugins][support-tree-family][support-tree-xy-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic");
+    CAPTURE(style);
+    TriangleMesh mesh = make_cube(4., 8., 6.);
+    TriangleMesh roof = make_cube(12., 8., 1.);
+    roof.translate(-4., 0., 6.);
+    mesh.merge(roof);
+    DynamicPrintConfig config = SG::config(style, true, 3);
+    config.set_deserialize_strict({{"support_material_xy_spacing", "0"}, {"support_material_synchronize_layers", "0"}});
+    Print print;
+    Model model;
+    Test::init_print({mesh}, print, model, config);
+    SG::prefix(print);
+    SG::family(print);
+    const PrintObject &object = print.object(0);
+    REQUIRE_FALSE(object.auxiliary_layers().empty());
+    double close_area = 0.;
+    size_t overlapping_pairs = 0;
+    for (const Layer &support : object.auxiliary_layers()) {
+        ExPolygons printed;
+        for (const LayerSliceIsland &island : support.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces())
+                    printed.push_back(surface.expolygon);
+        if (printed.empty()) continue;
+        for (size_t id = 0; id < object.layer_count(); ++id) {
+            const Layer &layer = object.layer(id);
+            if (layer.scaled_bottom_z() >= support.scaled_print_z() || layer.scaled_print_z() <= support.scaled_bottom_z())
+                continue;
+            ++overlapping_pairs;
+            const ExPolygons band = diff_ex(offset_ex(layer.lslices(), scale_i(0.08)), layer.lslices());
+            close_area += area(intersection_ex(printed, band));
+        }
+    }
+    REQUIRE(overlapping_pairs > 0);
+    CHECK(close_area > scale_d(0.001) * scale_d(0.001));
+}
+
 // A tree or organic support under an object with thin and thick layer bands is generated and exported on the real layer heights.
 TEST_CASE("Tree and organic supports are generated and exported on a variable layer height", "[plugins][support-tree-family][variable-layer-height][gcode]")
 {

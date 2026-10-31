@@ -415,6 +415,8 @@ TEST_CASE("Soluble tree routing with zero XY spacing propagates the tips", "[plu
     Test::init_print({SG::slab()}, print, model, config);
     SG::prefix(print);
     const Routed routed(print);
+    CHECK(routed.settings.xy_distance == 0);
+    CHECK(routed.settings.safe_step_distance == scale_i(0.1));
     REQUIRE_FALSE(routed.trees.empty());
     size_t propagated = 0;
     for (const TF::RoutedTree &tree : routed.trees) {

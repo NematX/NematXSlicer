@@ -585,13 +585,55 @@ TEST_CASE("References from the volume caches survive the growth of the cache", "
     }
 }
 
-// A branch without radius and without XY distance has no step to propagate its avoidance with, so its avoidance is its collision.
+// Builds soluble tree/organic collision masks at zero printed clearance and trims a probe strip 0.02--0.08 mm outside a cube;
+// the strip stays printable while a 0.1 mm mask would remove it. Local print/storage own inputs and outputs; slicing, geometry
+// and allocation failures reach Catch. The shared grid parameters retain the same zero clearance and configured line gap.
+TEST_CASE("Soluble tree and organic masks allow support within 0.1 mm at zero XY clearance", "[plugins][support-tree-routing][tree-volumes][support-tree-xy-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *style = GENERATE("tree", "organic", "grid");
+    CAPTURE(style);
+    DynamicPrintConfig config = SG::config(style, true, 3);
+    config.set_deserialize_strict({{"support_material_xy_spacing", "0"}, {"support_material_spacing", "2.5"}});
+    Print print;
+    Model model;
+    Test::init_print({make_cube(2., 2., 2.)}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    const slic3r_api::Support::Common::SupportParams params = SG::params(print, object);
+    REQUIRE(params.soluble);
+    CHECK(params.gap_xy == 0);
+    CHECK(params.base_spacing_gap == 2.5);
+    if (std::string(style) == "grid") return;
+    const TF::TreeSettings settings = ST::tree_settings(print, object, params);
+    REQUIRE(settings.xy_distance == params.gap_xy);
+    REQUIRE(settings.safe_step_distance == scale_i(0.1));
+    const TF::LayerIndex layer = TF::LayerIndex(object.layer_count() / 2);
+    const BoundingBox bounds = get_extents(object.layer(size_t(layer)).lslices());
+    const coord_t y = (bounds.min.y() + bounds.max.y()) / 2;
+    const Polygons probe{Polygon{Point(bounds.max.x() + scale_i(0.02), y - scale_i(0.1)),
+        Point(bounds.max.x() + scale_i(0.08), y - scale_i(0.1)),
+        Point(bounds.max.x() + scale_i(0.08), y + scale_i(0.1)),
+        Point(bounds.max.x() + scale_i(0.02), y + scale_i(0.1))}};
+    PluginStorage storage;
+    Volumes volumes(SG::object_view(object), SG::print_view(print), settings, SG::handle(storage), nullptr);
+    const Polygons collision = SG::native(volumes.getCollision(0, layer));
+    CHECK(intersection(probe, collision).empty());
+    const Polygons printable = diff(probe, collision);
+    CHECK(diff(probe, printable).empty());
+    CHECK(diff(printable, probe).empty());
+    CHECK(diff(probe, offset(collision, scale_i(0.1))).empty());
+}
+
+// At radius zero and zero printed XY clearance, 1.9 * max(radius, xy_distance) is below the can_move threshold of 0.5;
+// avoidance cannot propagate and falls back to collision, independently of the safe-offset routing step.
 // The request has to return: nothing used to be published for such a key, and the getter computed it again for ever.
 TEST_CASE("The avoidance of a branch that cannot move is its collision", "[plugins][support-tree-routing][tree-volumes]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     Scene scene(false, "0");
     REQUIRE(scene.settings.xy_distance == 0);
+    REQUIRE(1.9f * float(std::max(coord_t(0), scene.settings.xy_distance)) < 0.5f);
     for (Volumes::AvoidanceType type : { Volumes::AvoidanceType::Slow, Volumes::AvoidanceType::FastSafe, Volumes::AvoidanceType::Fast })
         for (bool to_model : { false, true }) {
             Request request{ Kind::Avoidance, 0, lazy_layer, type, to_model };

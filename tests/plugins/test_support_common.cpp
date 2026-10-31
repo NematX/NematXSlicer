@@ -221,6 +221,8 @@ raw_infill_pattern_params inner_recipe(infill_pattern_runtime_id pattern_id, con
 // c_flow of a native flow, as the host converts it.
 c_flow to_api_flow(const Flow &flow);
 
+// Builds owned parameter combinations and explicit option overrides, including an XY gap between Z-grid steps;
+// no print is mutated here, and allocation failures propagate to Catch.
 std::vector<ParamsCase> params_cases()
 {
     std::vector<ParamsCase> cases;
@@ -232,6 +234,7 @@ std::vector<ParamsCase> params_cases()
     cases.push_back({"grid", false, 3, false, {{"first_layer_height", "75%"}}});
     cases.push_back({"grid", false, 3, false, {{"support_material_extruder", "0"}, {"support_material_interface_extruder", "0"}}});
     cases.push_back({"grid", false, 3, false, {{"support_material_xy_spacing", "60%"}, {"support_material_bottom_interface_expansion", "50%"}}});
+    cases.push_back({"grid", false, 3, false, {{"support_material_xy_spacing", "0.123456"}}});
     cases.push_back({"grid", false, 3, false, {{"support_material_pattern", "honeycomb"}, {"support_material_with_sheath", "1"}}});
     cases.push_back({"snug", false, 3, false, {{"support_material_pattern", "rectilinear-grid"}, {"support_material_spacing", "0"}}});
     cases.push_back({"grid", false, 2, false, {{"support_material_top_interface_pattern", "auto"}, {"support_material_bottom_interface_pattern", "auto"}}});
@@ -585,14 +588,15 @@ TEST_CASE("Support overhang margins retain guarded and unguarded angle rules", "
     for (const bool guard : {false, true}) {
         CHECK(Common::overhang_margin(0, height, width, guard) == width / 2);
         CHECK(Common::overhang_margin(45, height, width, guard) ==
-              scale_to_layer_coord(unscaled(height) / std::tan(PI * 46. / 180.)));
+              scale_i(unscaled(height) / std::tan(PI * 46. / 180.)));
     }
     CHECK(Common::overhang_margin(89, height, width, true) == width / 2);
     CHECK(Common::overhang_margin(89, height, width, false) ==
-          scale_to_layer_coord(unscaled(height) / std::tan(PI * 90. / 180.)));
+          scale_i(unscaled(height) / std::tan(PI * 90. / 180.)));
     CHECK(Common::overhang_margin(90, height, width, true) == width / 2);
-    // At 91 degrees the raw allowance is negative: calling the unguarded helper would assert in scale_to_layer_coord().
+    // At 91 degrees the unguarded XY allowance is negative rather than a layer-Z conversion failure.
     CHECK(unscaled(height) / std::tan(PI * 91. / 180.) < 0.);
+    CHECK(Common::overhang_margin(90, height, width, false) == scale_i(unscaled(height) / std::tan(PI * 91. / 180.)));
 }
 
 // Shared attributes and stored deposits must allow seam placement, with the physical flow values retained.
@@ -693,7 +697,14 @@ TEST_CASE("Support params equal the native grid support parameters", "[plugins][
         CHECK(params.bottom_expansion.value == native.bottom_expansion.value);
         CHECK((params.bottom_expansion.percent != 0) == native.bottom_expansion.percent);
         CHECK(params.min_height == native.min_height);
-        CHECK(params.gap_xy == native.gap_xy);
+        // Native snaps this XY quantity to a Z step; the plugin uses exact XY truncation instead.
+        const slic3r_api::Object object_view = SG::object_view(object);
+        double external_width = 0.;
+        for (uint32_t region = 0; region < object_view.print_region_count(); ++region)
+            external_width = std::max(external_width, object_view.region_flow_mm(region,
+                raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER), params.layer_height, 2).width);
+        CHECK(params.gap_xy == scale_i(object_view.config().get("support_material_xy_spacing").get_effective_value(external_width)));
+        CHECK(std::abs(params.gap_xy - native.gap_xy) <= SCALED_LAYER_Z_STEP);
         CHECK(params.resolution == native.resolution);
         // The millimeter flows are the native float values, so the densities are exact.
         check_flow_mm(params.first_flow_mm, native.first_flow);

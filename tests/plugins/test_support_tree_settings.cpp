@@ -87,13 +87,22 @@ void check_case(const SettingsCase &item)
     const slic3r_api::Support::Common::SupportParams params = SG::params(print, object);
     REQUIRE(params.max_support_height == Approx(max_layer_mm));
     const TF::TreeSettings settings = ST::tree_settings(print, object, params);
+    const double tree_height = slic3r_api::Support::Common::check_z_step_mm(object.config().layer_height.value, params.z_step);
+    double external_width = 0.;
+    const slic3r_api::Object object_view = SG::object_view(object);
+    for (uint32_t region = 0; region < object_view.print_region_count(); ++region)
+        external_width = std::max(external_width, object_view.region_flow_mm(region,
+            raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER), tree_height, 2).width);
+    CHECK(settings.min_feature_size == scale_i(external_width * 0.25));
+    CHECK(settings.resolution == scale_i(SG::print_view(print).config().get("resolution_internal").get_float()));
 
     if (item.native) {
         const FFFTreeSupport::TreeSupportMeshGroupSettings mesh_group(object);
         const FFFTreeSupport::TreeSupportSettings native(mesh_group, object.slicing_parameters());
         CHECK(settings.support_line_width == native.support_line_width);
-        CHECK(settings.resolution == native.resolution);
-        CHECK(settings.min_feature_size == native.min_feature_size);
+        CHECK(settings.resolution == params.resolution);
+        CHECK(std::abs(settings.resolution - native.resolution) <= SCALED_LAYER_Z_STEP);
+        CHECK(std::abs(settings.min_feature_size - native.min_feature_size) <= SCALED_LAYER_Z_STEP);
         CHECK(settings.branch_radius == native.branch_radius);
         CHECK(settings.min_radius == native.min_radius);
         CHECK(settings.bp_radius == native.bp_radius);
@@ -123,7 +132,10 @@ void check_case(const SettingsCase &item)
         }
         CHECK(settings.max_to_model_radius_increase == native.max_to_model_radius_increase);
         CHECK(settings.support_rests_on_model == native.support_rests_on_model);
+        // Shared and native XY clearances both truncate to XY coordinates for these non-soluble cases.
+        CHECK(settings.xy_distance == params.gap_xy);
         CHECK(settings.xy_distance == native.xy_distance);
+        CHECK(settings.safe_step_distance == settings.xy_distance);
         if (item.profile.empty()) {
             for (size_t layer = 0; layer < object.layer_count(); ++layer) {
                 CHECK(settings.z_distance_top_layers[layer] == native.z_distance_top_layers);

@@ -566,9 +566,10 @@ void TreeVolumes::calculateAvoidance(const std::vector<RadiusLayerPair> &keys, b
             const std::vector<coord_t> &max_moves = task.slow() ? m_max_move_slow : m_max_move;
             // Limiting the offset step so that unioning the shrunk latest_avoidance with the current layer collisions
             // will not create gaps in the resulting avoidance region letting a tree support branch tunneling through an object wall.
+            // For a wall of thickness w, this stays below w + 2 * (radius + printed XY clearance), the collision band.
             const float move_step = 1.9f * float(std::max(task.radius, m_settings.xy_distance));
             // Threshold must be >= 0.5 to prevent division by zero when move_step is cast to int in round_up_divide. A branch below
-            // it (no radius and no XY distance) has no step to propagate with: its avoidance is its collision. It is published
+            // it (zero radius and zero printed XY clearance) has no step to propagate with: its avoidance is its collision. It is published
             // like the others, as the getter that asked for it reads it back.
             const bool can_move = move_step >= 0.5f;
             // The scratch storage of the task holds the avoidance being propagated, the temporaries of every layer and the results;

@@ -49,8 +49,8 @@ static constexpr const double tiny_area_threshold = scale_d(0.001) * scale_d(0.0
 struct TreeSettings
 {
     TreeSettings() = default;
-    // Read the object and print settings through the plugin API views; params gives the minimum layer height, the Z gaps, the machine Z step
-    // and the support flows. The views must be those params was built from.
+    // Derive branch settings from the object view; params supplies layer limits, Z gaps/step, flows, printed gap_xy and XY resolution.
+    // Object and print must be those params was built from; the print view is not read here.
     TreeSettings(const slic3r_api::Object &object, const slic3r_api::Print &print, const slic3r_api::Support::Common::SupportParams &params);
 
     // Simplification tolerance and smallest feature size of the object outlines (scaled).
@@ -102,9 +102,11 @@ struct TreeSettings
     coord_t max_to_model_radius_increase = 0;
     // False when the object only allows branches on the build plate.
     bool support_rests_on_model = true;
-    // XY distance from the object (scaled): the user's support_material_xy_spacing, at least 0.1 mm for a soluble support. The tree uses it
-    // everywhere, from the routing to the final trim.
+    // Printed XY clearance from Common::SupportParams::gap_xy, without a floor: soluble XY 0 stays zero; see safe_step_distance for routing.
     coord_t xy_distance = 0;
+    // Collision-checked routing offset step allowance; soluble routing keeps a 0.1 mm minimum so zero clearance still advances.
+    // With zero printed clearance, safe offsets can cross walls thinner than this step (about 0.1 mm).
+    coord_t safe_step_distance = 0;
     // Collision windows from real Z, indexed by object layer; the top continues virtually at the last layer height.
     // Clearances in [gap - eps, gap), with eps = scale_to_layer_coord(EPSILON), are deliberately excluded: Z rounding must not
     // add a layer when an exact-gap boundary is rounded slightly closer, preserving integer gap/height counts.

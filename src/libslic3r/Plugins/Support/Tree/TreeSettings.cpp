@@ -18,8 +18,9 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
 
 /* Derives the tree branch settings of one object from its configuration and from the shared support parameters.
 
-   The constructor runs once per object. It reads the object and print configurations for the branch angles, radii and
-   distances, and the support parameters for the Z gaps, the minimum layer height and the support extrusion width.
+   The constructor runs once per object. It reads the object configuration for branch angles, radii and distances,
+   and the support parameters for Z gaps, minimum layer height, support flows, printed gap_xy and XY resolution;
+   it does not read the print view.
    Then it computes the maximum move from each real layer height and the collision windows from the real layer Z.
    A window includes object layers closer than the gap, allowing EPSILON for Z rounding; its top extends virtually
    at the last layer height so the collision's XY ramp has its full physical extent near the top of the object.
@@ -35,6 +36,9 @@ Tree supports by Thomas Rahm, losely based on Tree Supports by CuraEngine.
    (bp_radius - branch_radius) after the bp_gain of layers 1..L (the foot cone anchored at layer 0), never below branch_radius.
    foot_cache_step, half the diameter of the largest support nozzle, is the spacing of the cache radii in the band where the branches
    widen into their foot (see TreeVolumes).
+   Printed XY clearance is the shared gap_xy without a floor. Only safe_step_distance, used for collision-checked routing
+   increments, retains the soluble 0.1 mm minimum so a zero printed clearance does not stop offset propagation.
+   At zero printed clearance, safe offsets can cross walls thinner than that routing step (about 0.1 mm).
 */
 
 namespace Slic3r::TreeFamily {
@@ -55,33 +59,31 @@ coord_t maximum_move(const double angle, const coord_t layer_height)
 }
 }
 
-// Every option is read through the Config views of the object and of the print, as SupportParams does; the flows come from the
+// Object options use Config views; shared printed XY clearance and XY resolution come from SupportParams. Flows come from the
 // host (support_flow, region_flow_mm), which computes them like the legacy Flow functions. The views are borrowed; the constructor
-// stores derived values, real-Z collision windows, per-layer moves and the real layer tops (layer_print_z, read by
-// reaches_min_height_to_model and lowest_layer_within), and allocation failures propagate to the caller.
-TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::Print &print, const slic3r_api::Support::Common::SupportParams &params)
+// copies shared printed XY clearance and stores a separate routing step allowance, real-Z collision windows, per-layer moves
+// and the real layer tops (layer_print_z, read by reaches_min_height_to_model and lowest_layer_within).
+// Flow lookups return zero flows on failure; configuration/view and allocation failures propagate to the caller.
+TreeSettings::TreeSettings(const slic3r_api::Object &object, const slic3r_api::Print &, const slic3r_api::Support::Common::SupportParams &params)
 {
-    const slic3r_api::Config print_config = print.config();
     const slic3r_api::Config config = object.config();
     const double layer_height_mm = slic3r_api::Support::Common::check_z_step_mm(config.get("layer_height").get_float(), params.z_step);
-    // The XY spacing may be a percent of the widest external perimeter of the object regions.
+    // The routing feature size uses the widest external perimeter at the tree's nominal layer height.
     double external_perimeter_width = 0.;
     for (uint32_t region_id = 0; region_id < object.print_region_count(); ++ region_id)
         external_perimeter_width = std::max(external_perimeter_width,
             object.region_flow_mm(region_id, raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER), layer_height_mm, 2).width);
 
-    resolution = scale_to_layer_coord(print_config.get("resolution_internal").get_float());
-    min_feature_size = scale_to_layer_coord(external_perimeter_width * 0.25);
+    resolution = params.resolution;
+    min_feature_size = scale_i(external_perimeter_width * 0.25);
     const raw_extrusion_role support_role = raw_extrusion_role(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL);
     support_line_width = object.support_flow(support_role, layer_height_mm).width;
     support_rests_on_model = ! config.get("support_material_buildplate_only").get_bool();
     // The same option as tip_sources(): the interface layers under which the tips start.
     branches_carry_roof = params.top_interfaces_enabled;
-    xy_distance = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_perimeter_width));
-    if (params.soluble) {
-        // A soluble support touches the object, so its XY distance is its only separation: the safe offset steps by it and needs it above zero.
-        xy_distance = std::max(xy_distance, scale_i(0.1));
-    }
+    xy_distance = params.gap_xy;
+    // Only the internal offset step keeps the soluble minimum; it does not enlarge collision or printed keep-out areas.
+    safe_step_distance = params.soluble ? std::max(xy_distance, scale_i(0.1)) : xy_distance;
     const coord_t gap_above = scale_to_layer_coord(params.gap_above);
     const coord_t gap_below = scale_to_layer_coord(params.gap_below);
     const coord_t eps = scale_to_layer_coord(EPSILON);

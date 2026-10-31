@@ -29,7 +29,7 @@ void remove_from_demand(const plugin_run_context *context, const LayerIsland &is
                         ClipperOperand &&blockers);
 // Unions existing coverage with one lower layer's slices grown by 0.01 mm.
 ClipperOperand accumulate_lower_slices(const ClipperContext &clipper, const ClipperOperand &covered, const Layer &lower);
-// Returns the scaled threshold allowance or half the scaled external width; unguarded callers must supply a threshold whose derived angle PI * (threshold + 1) / 180 yields a nonnegative allowance for scale_to_layer_coord().
+// Returns the XY-scaled threshold allowance or half the scaled external width; unguarded angles above 90 degrees can yield a negative offset.
 coord_t overhang_margin(int32_t threshold, coord_t lower_height, coord_t external_width, bool guard_angle);
 
 } // namespace slic3r_api::Support::Common

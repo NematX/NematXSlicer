@@ -204,20 +204,20 @@ SupportParams::SupportParams(const Print &print, const Object &object)
     for (uint32_t region_idx = 0; region_idx < object.print_region_count(); ++region_idx)
         external_width = std::max(external_width, object.region_flow_mm(region_idx, raw_extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER),
                                                                         layer_height, 2).width);
-    gap_xy = scale_to_layer_coord(config.get("support_material_xy_spacing").get_effective_value(external_width));
+    gap_xy = scale_i(config.get("support_material_xy_spacing").get_effective_value(external_width));
     bottom_expansion = config.get("support_material_bottom_interface_expansion").get_float_or_percent();
 
     // Line densities from the configured gaps between lines.
     const double interface_spacing = interface_flow_mm.spacing;
     const double base_spacing = base_flow_mm.spacing;
-    const double base_gap = config.get("support_material_spacing").get_float();
+    base_spacing_gap = config.get("support_material_spacing").get_float();
     interface_density = std::min(1., interface_spacing / (config.get("support_material_interface_spacing").get_float() + interface_spacing));
     if (top == 0)
-        interface_density = std::min(1., base_spacing / (base_gap + base_spacing));
+        interface_density = std::min(1., base_spacing / (base_spacing_gap + base_spacing));
 
     // Path settings of the legacy toolpaths.
     base_pattern = Common::base_pattern(config);
-    base_density = std::min(1., base_spacing / (base_gap + base_spacing));
+    base_density = std::min(1., base_spacing / (base_spacing_gap + base_spacing));
     with_sheath = config.get("support_material_with_sheath").get_bool();
     interface_contact_loops = config.get("support_material_interface_contact_loops").get_bool();
     base_pattern_id = base_pattern_plugin_id(base_pattern, base_density, with_sheath);

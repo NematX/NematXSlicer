@@ -4,10 +4,10 @@
    SupportParams turns the object, print and region settings into the values
    the support family and the support toolpaths share: layer heights rounded to
    the machine Z step, contact gaps, interface counts, the support flows, the
-   XY gap and the patterns, densities and angles of the toolpaths. It gives the
-   same values as the native derivation from the object settings (Slicing.cpp,
-   support flow functions) and the native path settings of SupportParameters.cpp;
-   tests/plugins/test_support_common.cpp compares both.
+    XY gap and the patterns, densities and angles of the toolpaths. Values follow the
+    native derivation (Slicing.cpp, support flow functions and SupportParameters.cpp),
+    except gap_xy truncates to XY coordinates instead of snapping to layer Z: it may
+    differ from native by less than SCALED_LAYER_Z_STEP. tests/plugins/test_support_common.cpp compares both.
 
    Units follow the native classes: heights, gaps and extrusion lengths in
    millimeters as double, XY distances (gap_xy, resolution, min_height) scaled,
@@ -81,6 +81,8 @@ struct SupportParams
     coord_t min_height = 0, gap_xy = 0, resolution = SCALED_EPSILON;
     // Interface line density in (0, 1]; the base density when there is no interface layer.
     double interface_density = 0;
+    // Configured clear gap between sparse support lines (mm), shared by density calculation and the grid raster spacing.
+    double base_spacing_gap = 0;
 
     // ---- Paths (native PathParams of the legacy toolpaths) ----
     SupportStyle style = SupportStyle::Unknown;
