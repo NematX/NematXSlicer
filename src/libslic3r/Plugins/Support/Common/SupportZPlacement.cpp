@@ -79,7 +79,12 @@ coord_t slab_step(const c_float_or_percent &setting, double nozzle_mm, double ma
 
 // Create the contact of object layer id under that layer, in the Z of the native rules: a soluble contact fills the object layer
 // just below, a non-soluble one lies the gap above the object, is dropped below the first layer and snaps onto it within the
-// minimum height. With a filament distance, a layer with bridges also gets a bridge contact at the bridge height.
+// minimum height. With a filament distance, a layer whose bridge threads are thicker than the layer also gets a bridge contact
+// under the threads, at print_z minus the average region bridge height and the gap. With a plane distance this candidate
+// equals the normal contact and is never kept, so the bridge geometry is read only when the candidate is at least the
+// first-layer Z and strictly below the normal contact; a detected bridge then adds a slab owned by out. Inputs belong to the
+// same object, id is above zero, and configuration/view/geometry/allocation failures propagate with any already-added
+// contact intact.
 TopContactSlabs add_top_contacts(const std::vector<Layer> &layers, const Config &print_config, const SupportParams &p, size_t id,
                                  GeneratedSupport &out)
 {
@@ -98,7 +103,7 @@ TopContactSlabs add_top_contacts(const std::vector<Layer> &layers, const Config 
     slabs.contact = &add_layer(out, LayerType::TopContact, z, bottom, height);
     slabs.contact->object_above = id;
     out.top.push_back(slabs.contact);
-    if (!p.soluble && has_bridges(out.storage, layer)) {
+    if (!p.soluble) {
         coord_t bridge_height = layer.height();
         if (p.distance_type == ContactDistanceType::Filament) {
             double total = 0;
@@ -107,7 +112,7 @@ TopContactSlabs add_top_contacts(const std::vector<Layer> &layers, const Config 
             bridge_height = scale_to_layer_coord(total / layer.region_count());
         }
         coord_t bridge_z = layer.print_z() - bridge_height - scale_to_layer_coord(p.gap_above);
-        if (bridge_z >= first_z && bridge_z < z) {
+        if (bridge_z >= first_z && bridge_z < z && has_bridges(out.storage, layer)) {
             if (bridge_z < first_z + p.min_height) bridge_z = first_z;
             slabs.bridge = &add_layer(out, LayerType::TopContact, bridge_z, bridge_z == first_z ? 0 : bridge_z,
                                       bridge_z == first_z ? first_z : 0);
