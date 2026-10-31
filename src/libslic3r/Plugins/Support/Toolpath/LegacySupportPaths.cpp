@@ -109,7 +109,8 @@ void publish_contact_loops(storage_handle *storage, const ClipperContext &clippe
                            const c_flow &flow, coord_t resolution, coordf_t radius, const PointLists &contours, const PointLists &circles);
 // Split each polyline by the area, returning the pieces inside and the pieces outside.
 std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area);
-// Clip one path from the highest overlap down, scale its flow by the remaining height and rechain the fragments from its start.
+// Clip one path from the highest overlap down, scale its flow by the remaining height and rechain the fragments from its start; a path
+// that no footprint grown by half its width takes a non-empty piece of (before the length filter) is left untouched.
 void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coord_t z, const std::vector<Internal::Overlap> &overlapping, coord_t resolution);
 // Borrowed marked layers keyed by print Z, with their auxiliary-list position retained for operand order.
 using SupportLayerIndex = std::map<coord_t, std::vector<std::pair<uint32_t, const layer_handle *>>>;
@@ -439,7 +440,10 @@ std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const Poi
     return result;
 }
 
-// Recursively splits the borrowed entity against ascending lower-Z footprints, replaces its paths with storage-owned height-scaled fragments and counts changed nonempty fragments; missing flow attributes, geometry/allocation failures propagate.
+// Recursively splits the borrowed entity against ascending lower-Z footprints. A path is rebuilt, with storage-owned height-scaled
+// fragments, when some footprint grown by half its width takes a non-empty piece of what the higher footprints left of it, before the
+// length filter; changed nonempty fragments are counted. Otherwise the path is left untouched (same object, flags and place), so a path
+// that only touches or runs along the edge of a grown footprint stays intact. Missing flow attributes, geometry/allocation failures propagate.
 void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coord_t z, const std::vector<Internal::Overlap> &overlapping, coord_t resolution)
 {
     if (!entity.readonly().has_polyline()) {
@@ -454,11 +458,14 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
     std::vector<Fragment> fragments(overlapping.size() + 1, Fragment{attributes, {}});
     fragments.back().lines.push_back(entity.readonly().points());
     const c_point start = fragments.back().lines.front().front();
+    // Set when some footprint takes a piece of the path: only then the path is rebuilt.
+    bool cut = false;
     for (size_t index = overlapping.size(); index-- > 0;) {
         const StoredExPolygonCollection footprint = Common::native_expolygons(clipper_union(clipper(overlapping[index].polygons)));
         StoredExPolygonCollection trimming = clipper_offset(clipper(footprint), scale_d(0.5 * double(attributes.c_extrusion_property_attributes::width))).to_expolygon_collection();
         trimming.ensure_valid(resolution);
         std::pair<PointLists, PointLists> split = split_lines(storage, fragments.back().lines, trimming);
+        cut = cut || !split.first.empty();
         fragments[index].lines = Common::valid_polylines(storage, split.first, resolution);
         fragments.back().lines = std::move(split.second);
         const float height = float(unscaled(z - overlapping[index].z));
@@ -467,6 +474,9 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
         fragments[index].attributes.height(height);
         fragments[index].attributes.mm3_per_mm(fragments[index].attributes.mm3_per_mm() * (height / attributes.c_extrusion_property_attributes::height));
     }
+    // No grown footprint took a non-empty piece of the path (one that only touches or runs along its edge takes none): keep the path
+    // as it was. The counters only count non-empty fragments, so none was added.
+    if (!cut) return;
     StoredExtrusionEntity result(storage);
     c_point current = start;
     size_t remaining = 0;
@@ -707,8 +717,9 @@ void publish_layer_paths(const plugin_run_context *context, storage_handle *stor
 
 } // namespace
 
-// Split each leaf path of out against the lower footprints, in place: a path becomes its fragments in printing order. The
-// fragments and their group are neither reversible nor sortable, like the native multipath. Preconditions: z and each
+// Split each leaf path of out that a lower footprint cuts, in place: such a path becomes its fragments in printing order. The
+// fragments and their group are neither reversible nor sortable, like the native multipath. A path that no footprint cuts is
+// kept as it is, with its flags and order. Preconditions: z and each
 // Overlap::z are scaled layer Z values with z above them; overlapping is sorted by ascending z, because the walk trims from
 // the highest slab down; storage is borrowed and owns the temporaries. A leaf without EPropertyAttributes throws
 // std::runtime_error; an empty overlap list changes nothing.

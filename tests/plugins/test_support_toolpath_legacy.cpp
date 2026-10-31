@@ -5,6 +5,11 @@
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/LegacySupportPaths.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
+
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 
 /* Small roof-and-platform objects exercise the three built-in support roles.
    The slicing prefix leaves support editable, then the normal dispatcher fills
@@ -12,7 +17,8 @@
    native paths and generic API wrappers are tested in their published form.
    A failing pattern checks that a legacy algorithm preserves its sole error message.
    Two cases drive the internal helpers directly: synthetic slabs for height
-   modulation and plain arguments for the filler pattern choice. */
+    modulation and plain arguments for the filler pattern choice. A variable-height grid/tree case runs the full support
+    toolpath dispatcher, reports modulation counters and checks published heights and height-scaled flow. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -388,6 +394,205 @@ TEST_CASE("Native support path modulation splits and thins overlapping paths", "
     REQUIRE(leaf_attributes != nullptr);
     CHECK(leaf_attributes->c_extrusion_property_attributes::height == 0.2f);
     CHECK(leaf_attributes->mm3_per_mm() == Approx(0.1));
+}
+
+// Two paths in one pass, one footprint touching only the first: only that path is rebuilt (split, thinned, non-reversible);
+// the other keeps its object, flags, flow and place among its siblings.
+TEST_CASE("Native support path modulation keeps the paths no footprint touches", "[plugins][support-toolpath-legacy]")
+{
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const coord_t layer_z = scale_to_layer_coord(1.);
+    const std::vector<c_point> cut_line{c_point{0, 0}, c_point{scale_i(10.), 0}};
+    // At y = 5 mm, 3.8 mm outside the footprint (y in [-1, 1] mm) grown by half the 0.4 mm width.
+    const std::vector<c_point> far_line{c_point{0, scale_i(5.)}, c_point{scale_i(10.), scale_i(5.)}};
+    slic3r_api::EPropertyAttributes attributes;
+    attributes.extrusion_role(int32_t(RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL)).mm3_per_mm(0.1).width(0.4f).height(0.2f);
+    const std::vector<c_point> square{c_point{scale_i(4.), -scale_i(1.)}, c_point{scale_i(6.), -scale_i(1.)},
+                                      c_point{scale_i(6.), scale_i(1.)}, c_point{scale_i(4.), scale_i(1.)}};
+    slic3r_api::StoredPolygonCollection footprint(handle);
+    slic3r_api::StoredPolygon polygon(handle);
+    polygon.insert_array(0, square.data(), uint32_t(square.size()));
+    footprint.push_back(polygon);
+    std::vector<ToolpathInternal::Overlap> overlapping;
+    overlapping.push_back(ToolpathInternal::Overlap{scale_to_layer_coord(0.9), std::move(footprint)});
+    slic3r_api::StoredExtrusionEntity pass(handle);
+    for (const std::vector<c_point> &line : {cut_line, far_line}) {
+        slic3r_api::StoredExtrusionEntity path(handle, line);
+        path.set_flags(uint32_t(RAW_EXTRUSION_FLAG_REVERSIBLE));
+        path.get_or_add(slic3r_api::EPropertyAttributes::key) = attributes;
+        pass.append_child_move(path.mutable_view());
+    }
+    // What the second path is before the modulation: its object, flags and role must be the same afterwards.
+    REQUIRE(pass.readonly().child_count() == 2);
+    const extrusion_entity_handle *second_handle = pass.readonly().child(1).handle();
+    const uint32_t second_flags = pass.readonly().child(1).flags();
+    const slic3r_api::EPropertyAttributes *second_before = pass.readonly().child(1).get(slic3r_api::EPropertyAttributes::key);
+    REQUIRE(second_before != nullptr);
+    const auto second_role = second_before->c_extrusion_property_attributes::role;
+    ToolpathInternal::modulate(handle, pass.mutable_view(), layer_z, overlapping, SCALED_EPSILON);
+    REQUIRE(pass.readonly().child_count() == 2);
+    // The first path is split into three parts, the middle one thinned, and neither it nor its parts can be reversed.
+    const slic3r_api::ExtrusionEntity first = pass.readonly().child(0);
+    REQUIRE(!first.has_polyline());
+    REQUIRE(first.child_count() == 3);
+    CHECK(!first.reversible());
+    CHECK(!first.sortable());
+    std::vector<slic3r_api::ExtrusionEntity> leaves;
+    collect_api_leaves(first, leaves);
+    REQUIRE(leaves.size() == 3);
+    for (const slic3r_api::ExtrusionEntity &leaf : leaves)
+        CHECK(!leaf.reversible());
+    const slic3r_api::EPropertyAttributes *middle = leaves[1].get(slic3r_api::EPropertyAttributes::key);
+    REQUIRE(middle != nullptr);
+    CHECK(middle->c_extrusion_property_attributes::height == Approx(0.1));
+    CHECK(middle->mm3_per_mm() == Approx(0.1 * 0.1 / 0.2));
+    // The second path is the same leaf as before: one polyline, still reversible, same points, height and flow, still second.
+    const slic3r_api::ExtrusionEntity second = pass.readonly().child(1);
+    REQUIRE(second.has_polyline());
+    CHECK(second.handle() == second_handle);
+    CHECK(second.flags() == second_flags);
+    CHECK(second.reversible());
+    const std::vector<c_point> second_points = second.points();
+    REQUIRE(second_points.size() == far_line.size());
+    for (size_t index = 0; index < far_line.size(); ++index) {
+        CHECK(second_points[index].x == far_line[index].x);
+        CHECK(second_points[index].y == far_line[index].y);
+    }
+    const slic3r_api::EPropertyAttributes *second_attributes = second.get(slic3r_api::EPropertyAttributes::key);
+    REQUIRE(second_attributes != nullptr);
+    CHECK(second_attributes->c_extrusion_property_attributes::role == second_role);
+    CHECK(second_attributes->c_extrusion_property_attributes::height == 0.2f);
+    CHECK(second_attributes->mm3_per_mm() == Approx(0.1));
+}
+
+// Generates grid/tree supports on variable object heights and runs the registered toolpath providers. Print/model own
+// inputs and published paths; scoped counter enablement is restored on failure. Counts are diagnostic, while every leaf must
+// have positive geometry/flow, fit its slab height and scale nominal mm3_per_mm consistently with its height.
+// variant: "soluble" (no Z gap), "plane" (non-soluble, contact distance type plane) or "filament" (non-soluble, filament distance).
+// Non-soluble contacts keep a Z gap, so support layers of different heights can overlap in Z, which is what triggers the
+// legacy modulation; soluble ones never overlap.
+void check_variable_height_toolpaths(const char *style, const char *variant)
+{
+    namespace Counters = slic3r_api::Support::Common::Counters;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool soluble = strcmp(variant, "soluble") == 0;
+    CAPTURE(style, variant);
+    // Soluble contacts exclude bridging flow, leaving the ordinary role flow as the nominal reference for non-flange paths.
+    DynamicPrintConfig config = SG::config(style, soluble, 3);
+    config.set_deserialize_strict({{"support_material_synchronize_layers", "0"}});
+    if (strcmp(variant, "filament") == 0)
+        config.set_deserialize_strict({{"support_material_contact_distance_type", "filament"}});
+    TriangleMesh mesh = make_cube(4., 8., 6.);
+    TriangleMesh roof = make_cube(12., 8., 1.);
+    roof.translate(-4., 0., 6.);
+    mesh.merge(roof);
+    const std::vector<coordf_t> profile{0., 0.1, 2., 0.1, 2.01, 0.3, 4., 0.3, 4.01, 0.15, 7., 0.15};
+    Print print;
+    Model model;
+    SG::init_print_with_profile(print, model, std::move(mesh), profile, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    REQUIRE(object.layer_count() > 2);
+    bool variable = false;
+    for (size_t id = 1; id < object.layer_count(); ++id)
+        variable = variable || object.layer(id).scaled_height() != object.layer(0).scaled_height();
+    REQUIRE(variable);
+    SG::family(print);
+    REQUIRE_FALSE(object.auxiliary_layers().empty());
+    const slic3r_api::Support::Common::SupportParams params = SG::params(print, object);
+    REQUIRE(params.soluble == soluble);
+    const slic3r_api::Object object_view = SG::object_view(object);
+    struct RestoreCounters {
+        bool previous;
+        // Restores process-owned counter enablement after synchronous toolpath generation, including assertion/exception exits.
+        ~RestoreCounters() { Counters::set_enabled_for_tests(previous); }
+    } restore{Counters::set_enabled_for_tests(true)};
+    Counters::reset();
+    SG::toolpaths(print);
+    const unsigned long long modulation_layers = Counters::totals.modulation_layers.load(std::memory_order_relaxed);
+    const unsigned long long height_changes = Counters::totals.height_changes.load(std::memory_order_relaxed);
+    const unsigned long long overlap_pairs = Counters::totals.overlap_pairs.load(std::memory_order_relaxed);
+    INFO("style=" << style << " variant=" << variant << " modulation_layers=" << modulation_layers << " height_changes=" << height_changes << " overlap_pairs=" << overlap_pairs);
+    std::printf("support-toolpath-variable-height style=%s variant=%s modulation_layers=%llu height_changes=%llu overlap_pairs=%llu\n",
+        style, variant, modulation_layers, height_changes, overlap_pairs);
+    size_t leaves = 0, thinner = 0, layers_with_paths = 0;
+    // Resolves inherited attributes in borrowed trees, checks each leaf against its original role/slab flow and accumulates
+    // scalar counts without changing paths; nominal is a non-bridging flow and geometry/generation failures reach Catch.
+    const auto inspect = [&](const auto &self, const ExtrusionEntity &entity, const ExtrusionAttributes *inherited,
+                             const c_flow &nominal, double layer_height, bool bridging_flow) -> void {
+        const ExtrusionAttributes *attributes = entity.get_property<ExtrusionAttributes>();
+        if (!attributes) attributes = inherited;
+        if (entity.has_polyline()) {
+            REQUIRE(attributes != nullptr);
+            REQUIRE(std::isfinite(attributes->height));
+            REQUIRE(attributes->height > 0.);
+            CHECK(double(attributes->height) <= layer_height + 1e-6);
+            CHECK(std::isfinite(attributes->width));
+            CHECK(attributes->width > 0.);
+            REQUIRE(std::isfinite(attributes->mm3_per_mm));
+            REQUIRE(attributes->mm3_per_mm > 0.);
+            const float nominal_height = float(unscaled(nominal.height));
+            REQUIRE(nominal_height > 0.f);
+            // A non-soluble bottom contact prints with the bridging flow, whose width and height are not those of the
+            // ordinary interface role: the comparison to the role flow only holds without it.
+            if (!bridging_flow) {
+                CHECK(attributes->width == Approx(unscaled(nominal.width)).margin(1e-6));
+                CHECK(attributes->mm3_per_mm == Approx(nominal.mm3_per_mm * (attributes->height / nominal_height)).epsilon(1e-5));
+            }
+            const std::vector<ArcPolyline> lines = entity.as_polylines();
+            REQUIRE_FALSE(lines.empty());
+            for (const ArcPolyline &line : lines) {
+                CHECK(line.size() >= 2);
+                CHECK(line.length() > 0);
+            }
+            ++leaves;
+            thinner += double(attributes->height) < layer_height - 1e-6;
+        }
+        for (const ExtrusionEntityUPtr &child : entity.children())
+            self(self, *child, attributes, nominal, layer_height, bridging_flow);
+    };
+    for (const Layer &layer : object.auxiliary_layers()) {
+        const size_t before = leaves;
+        const double height = layer.unscaled_height();
+        // Only the interface bucket of a layer holding a bottom contact surface can carry the bridging flow (non-soluble only).
+        bool bottom_contact = false;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces())
+                    bottom_contact = bottom_contact || (surface.surface_type & stPosBottom) != 0;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE}) {
+                    if (!region.has_extrusion(bucket)) continue;
+                    const raw_extrusion_role role = bucket == LayerRegionIsland::SUPPORT ?
+                        RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
+                    const c_flow nominal = layer.scaled_bottom_z() <= 0 ? params.first_flow :
+                        object_view.support_flow(role, params.layer_height, height);
+                    inspect(inspect, region.extrusion(bucket), nullptr, nominal, height,
+                            !soluble && bucket == LayerRegionIsland::SUPPORT_INTERFACE && bottom_contact);
+                }
+        layers_with_paths += leaves > before;
+    }
+    REQUIRE(leaves > 0);
+    REQUIRE(layers_with_paths > 0);
+    INFO("thinner_leaves=" << thinner << " leaves=" << leaves << " layers_with_paths=" << layers_with_paths);
+    std::printf("support-toolpath-variable-height style=%s variant=%s thinner_leaves=%zu leaves=%zu layers_with_paths=%zu\n",
+        style, variant, thinner, leaves, layers_with_paths);
+}
+
+// Soluble contacts: no Z gap, so no support layer overlaps another (the legacy modulation does not fire).
+TEST_CASE("Variable layer height support toolpaths report legacy modulation", "[plugins][support-toolpath-legacy][support-toolpath-variable-height]")
+{
+    check_variable_height_toolpaths(GENERATE("grid", "tree"), "soluble");
+}
+
+// Non-soluble contacts with a Z gap (plane and filament distance types): support layers of different heights can overlap in Z.
+TEST_CASE("Variable layer height support toolpaths with a Z gap report legacy modulation", "[plugins][support-toolpath-legacy][support-toolpath-variable-height]")
+{
+    const char *style = GENERATE("grid", "tree");
+    const char *variant = GENERATE("plane", "filament");
+    check_variable_height_toolpaths(style, variant);
 }
 
 // With no interface layers and separate support extruders the contact cannot merge into the base, so
