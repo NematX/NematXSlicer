@@ -76,6 +76,12 @@ Def 1.5 allocates Fan at property ID 21. Existing LayerInstance 16 and the
 bridge/support payload IDs 17–20 remain unchanged. The fan runtime-ID typedef
 moves to the common header without changing its representation.
 
+Extrusion entity 1.2 adds `extrusion_split_leaf_at_lengths()` and appends the
+`ONE_SHOT_EVENT` split status. Existing enum values, entity layouts and functions
+are unchanged, so entity 1.0 and 1.1 packages remain loadable. Consumers using
+the new function declare 1.2. It preserves direct properties and native arc/Z
+intervals, but refuses events that would be duplicated by the resulting pieces.
+
 The G-code exporter step is at 4.2: QUERY requires a borrowed Print in its
 payload, while the generic execution-context Print remains null. Exporter 3.x
 packages are incompatible. QUERY reads settings from its configuration argument

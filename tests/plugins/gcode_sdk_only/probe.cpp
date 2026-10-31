@@ -1,6 +1,7 @@
 #include <cmath>
 
 #include "libslic3r/Api/plugin/cpp/HoleCompensation.hpp"
+#include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
 #include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingLayerTimeProperty.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanTimeEstimator.hpp"
@@ -14,6 +15,8 @@ Its exported probe constructs the complete session and calls an overridden
 encoder, forcing the implementation and virtual table to resolve in a real DLL.
 The same probe retains a reference to the shared hole-compensation core and
 checks arc geometry without including any internal host header.
+It also references the length-split entry point from the public extrusion view
+header, so linking and loading require the host's additive entity API 1.1 export.
 
     gcode_sdk_probe()
     |-- ExternalFirmware::probe(): dispatch to the fixture's E reset encoder
@@ -21,6 +24,7 @@ checks arc geometry without including any internal host header.
     |-- extrusion_can_rotate / extrusion_set_can_rotate: link additive rotation exports
     |-- FanPolicy stages: link the shared kernels and validate the public context
     |-- TemperatureTargets: require both shared resolvers from the SDK archive
+    |-- extrusion_split_leaf_at_lengths: require the host's additive split export
     `-- arc_center(): check the public signed-radius calculation
 */
 
@@ -82,6 +86,10 @@ extern "C" PROBE_EXPORT int gcode_sdk_probe()
         return 5;
     const slic3r_api::PrintingLayerTimeProperty duration{{10., RAW_PRINTING_LAYER_TIME_ORIGIN_RESOLVED}};
     duration.validate();
+    raw_extrusion_split_status (*volatile split_at_lengths)(extrusion_entity_handle *, const distf_t *,
+        uint32_t, extrusion_split_fragment_fn, void *) = &extrusion_split_leaf_at_lengths;
+    if (split_at_lengths == nullptr)
+        return 4;
     // The arc helper is header-only: an external firmware uses it directly.
     const c_vec2d center = arc_center(c_vec2d{ 5.0, 0.0 }, c_vec2d{ 0.0, 5.0 }, 5.0, true);
     return std::abs(center.x) < 1e-9 && std::abs(center.y) < 1e-9 ? 0 : 2;

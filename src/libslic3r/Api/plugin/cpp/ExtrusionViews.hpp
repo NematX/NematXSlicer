@@ -1037,6 +1037,17 @@ public:
         const std::vector<ExPolygonCollection> &areas,
         coord_t max_deviation = SCALED_EPSILON) const;
 
+    /*
+    Split this leaf at increasing distances from its start (scaled units); every
+    piece must be longer than SCALED_EPSILON. Pieces keep the leaf's properties,
+    arcs and Z, and are returned in path order as borrowed views into this leaf.
+    A leaf carrying a one-shot event or a raw E command is refused.
+    Reacquire pieces after a later structural mutation. Invalid inputs throw
+    invalid_argument; host failures throw runtime_error. Deferred callback
+    allocation failures rethrow after the C call has returned.
+    */
+    std::vector<MutableExtrusionEntity> split_leaf_at_lengths(const std::vector<distf_t> &lengths) const;
+
 private:
     extrusion_entity_handle *m_handle = nullptr;
 };
@@ -1477,6 +1488,50 @@ inline std::vector<ExtrusionAreaFragment> MutableExtrusionEntity::split_leaf_by_
     case RAW_EXTRUSION_SPLIT_STATUS_INTERNAL_ERROR:
     default:
         throw std::runtime_error("extrusion_split_leaf_by_areas: internal error");
+    }
+}
+
+inline std::vector<MutableExtrusionEntity> MutableExtrusionEntity::split_leaf_at_lengths(
+    const std::vector<distf_t> &lengths) const
+{
+    // Same deferred-exception callback as split_leaf_by_areas(); pieces arrive in path order.
+    struct CallbackContext
+    {
+        std::vector<MutableExtrusionEntity> pieces;
+        DeferredCallbackException exception;
+    };
+    CallbackContext context;
+    const extrusion_split_fragment_fn collect_piece =
+        [](extrusion_entity_handle *piece, uint32_t, void *user_data) noexcept {
+            CallbackContext &callback_context = *static_cast<CallbackContext *>(user_data);
+            if (callback_context.exception.captured())
+                return;
+            try {
+                callback_context.pieces.push_back(MutableExtrusionEntity(piece));
+            } catch (...) {
+                callback_context.exception.capture_current();
+            }
+        };
+
+    const raw_extrusion_split_status status = extrusion_split_leaf_at_lengths(
+        mutable_handle(), lengths.empty() ? nullptr : lengths.data(), static_cast<uint32_t>(lengths.size()),
+        collect_piece, &context);
+
+    context.exception.rethrow_if_captured();
+    switch (status) {
+    case RAW_EXTRUSION_SPLIT_STATUS_SUCCESS:
+        return context.pieces;
+    case RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT:
+        throw std::invalid_argument("extrusion_split_leaf_at_lengths: lengths must increase by more than SCALED_EPSILON");
+    case RAW_EXTRUSION_SPLIT_STATUS_NOT_A_LEAF:
+        throw std::invalid_argument("extrusion_split_leaf_at_lengths: entity is not a leaf");
+    case RAW_EXTRUSION_SPLIT_STATUS_INVALID_GEOMETRY:
+        throw std::invalid_argument("extrusion_split_leaf_at_lengths: invalid leaf geometry");
+    case RAW_EXTRUSION_SPLIT_STATUS_ONE_SHOT_EVENT:
+        throw std::invalid_argument("extrusion_split_leaf_at_lengths: the leaf carries an event or a raw E command "
+                                    "that every piece would repeat");
+    default:
+        throw std::runtime_error("extrusion_split_leaf_at_lengths: internal error");
     }
 }
 

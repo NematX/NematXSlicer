@@ -433,6 +433,13 @@ Read the needed value before mutation, then reacquire child views and property
 pointers afterwards. Do not keep fragment handles returned by
 `split_leaf_by_areas()` across a later structural mutation of their parent.
 
+`split_leaf_at_lengths()` cuts a leaf at increasing distances from its start, each
+piece longer than `SCALED_EPSILON`. Like the area splitter, the leaf becomes a
+non-sortable collection of copies holding the exact intervals, so arcs, Z and the
+volume per length are kept. A leaf carrying a custom G-code, special command
+(including a raw E command), heater or extrusion-axis event is refused, because
+every piece would repeat it.
+
 `copy_from()` and `move_from()` preserve the destination handle identity while
 replacing its content, properties, flags, children, and stored data. The move
 operation leaves the source valid but empty.

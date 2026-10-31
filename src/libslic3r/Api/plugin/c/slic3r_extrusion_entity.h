@@ -6,7 +6,7 @@
 #define slic3r_extrusion_entity_h_
 
 #define SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MAJOR 1u
-#define SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MINOR 1u
+#define SLIC3R_PLUGIN_API_EXTRUSION_ENTITY_MINOR 2u
 
 #include <stdint.h>
 
@@ -55,7 +55,9 @@ typedef enum raw_extrusion_split_status {
     RAW_EXTRUSION_SPLIT_STATUS_NOT_A_LEAF,
     RAW_EXTRUSION_SPLIT_STATUS_INVALID_GEOMETRY,
     RAW_EXTRUSION_SPLIT_STATUS_CLIPPING_FAILED,
-    RAW_EXTRUSION_SPLIT_STATUS_INTERNAL_ERROR
+    RAW_EXTRUSION_SPLIT_STATUS_INTERNAL_ERROR,
+    /* 1.2: the leaf carries an event that every fragment would repeat. */
+    RAW_EXTRUSION_SPLIT_STATUS_ONE_SHOT_EVENT
 } raw_extrusion_split_status;
 
 typedef void (*extrusion_split_fragment_fn)(
@@ -244,6 +246,36 @@ SLIC3R_HOST_API raw_extrusion_split_status extrusion_split_leaf_by_areas(
     const expolygon_collection_handle *const *areas,
     uint32_t area_count,
     coord_t max_deviation,
+    extrusion_split_fragment_fn on_fragment,
+    void *user_data);
+
+/*
+Split one extrusion leaf at increasing distances along its path (1.2).
+
+lengths are distances from the start of the leaf, in scaled units. Every piece,
+including the first and the last, must be longer than SCALED_EPSILON, otherwise
+nothing is changed and INVALID_ARGUMENT is returned. A leaf carrying a custom
+G-code, special command, heater or extrusion-axis event is rejected with
+ONE_SHOT_EVENT: a raw E quantity or an event would be repeated by every piece.
+
+On success the leaf handle keeps its identity and becomes a non-sortable
+collection of length_count + 1 children in path order. Each child receives the
+leaf's direct properties and flags; its path is the exact source interval, so
+arcs and interpolated Z offsets are kept and the extruded volume per length is
+unchanged. on_fragment follows the extrusion_split_leaf_by_areas() contract and
+receives the interval index.
+
+The caller owns the lengths array and must stop other access to the leaf while
+this function mutates it. Null arguments or zero length_count give INVALID_ARGUMENT;
+missing, empty or degenerate paths give INVALID_GEOMETRY. Rejections do not change
+the leaf. Geometry and allocation errors become INTERNAL_ERROR; no C++ exception
+escapes this function. Callbacks must not throw and run only after publication.
+Child handles are borrowed and remain valid until the next structural mutation.
+*/
+SLIC3R_HOST_API raw_extrusion_split_status extrusion_split_leaf_at_lengths(
+    extrusion_entity_handle *leaf,
+    const distf_t *lengths,
+    uint32_t length_count,
     extrusion_split_fragment_fn on_fragment,
     void *user_data);
 

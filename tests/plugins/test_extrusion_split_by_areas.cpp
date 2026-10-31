@@ -4,7 +4,7 @@
 ///|/
 
 /*
-Tests for the public extrusion area splitter.
+Tests for the public extrusion area and length splitters.
 
 The fixtures deliberately provide complete, non-overlapping partitions. The
 API contract leaves overlap and missing-coverage behavior undefined, so these
@@ -12,6 +12,16 @@ tests focus on stable handles, source order, preserved extrusion state and the
 exact ArcPolyline geometry reconstructed after temporary clipping.
 Direct distance-split regressions also cover short XY segments carrying a Z
 change, before this primitive is used by any regional or length-based splitter.
+
+Length requests also verify strictly increasing cuts, minimum fragment lengths
+and rejection of every one-shot event before publication. Native and C++ SDK
+entry points must preserve the same properties, source intervals and volume.
+
+    TEST_CASE
+    |-- straight_path(): own a small native extrusion with explicit process data
+    |-- extrusion_split_leaf_by_areas(): classify and then recover native spans
+    `-- extrusion_split_leaf_at_lengths(): publish caller-given native spans
+        `-- collect_fragment(): copy borrowed child handles and interval indices
 */
 
 #include <catch2/catch.hpp>
@@ -19,6 +29,7 @@ change, before this primitive is used by any regional or length-based splitter.
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <utility>
 #include <vector>
@@ -480,4 +491,174 @@ TEST_CASE("Invalid extrusion split inputs leave the leaf unchanged",
         std::invalid_argument);
     CHECK(leaf.has_polyline());
     CHECK(leaf.polyline_ref().to_polyline().points == original_points);
+}
+
+TEST_CASE("Extrusion leaves split at lengths keep order, properties and volume",
+          "[plugins][extrusion][split-at-lengths]")
+{
+    const coord_t unit = scale_i(1.);
+    ExtrusionPath leaf = straight_path({ Point(0, 0), Point(30 * unit, 0) });
+    leaf.add_property(ExtrusionPropertySpeed(42.f, 900.f));
+    leaf.add_property(ExtrusionPropertyFan(70.f, FAN_REQUEST_MODE_OVERRIDE));
+    const double source_volume = leaf.length() * leaf.mm3_per_mm();
+    const distf_t lengths[] = { distf_t(10 * unit), distf_t(25 * unit) };
+    CallbackCapture capture;
+    capture.handles.reserve(3);
+    capture.area_indices.reserve(3);
+
+    REQUIRE(extrusion_split_leaf_at_lengths(entity_handle(leaf), lengths, 2, collect_fragment, &capture) ==
+            RAW_EXTRUSION_SPLIT_STATUS_SUCCESS);
+    REQUIRE(leaf.child_count() == 3);
+    CHECK_FALSE(leaf.can_sort());
+    CHECK(leaf.is_continuous());
+    CHECK(capture.area_indices == std::vector<uint32_t>{ 0, 1, 2 });
+    const double expected_lengths[] = { 10. * unit, 15. * unit, 5. * unit };
+    double volume = 0.;
+    for (size_t child_idx = 0; child_idx < 3; ++child_idx) {
+        const ExtrusionEntity &child = leaf.child(child_idx);
+        CHECK(capture.handles[child_idx] == entity_handle(const_cast<ExtrusionEntity &>(child)));
+        CHECK(child.length() == Approx(expected_lengths[child_idx]));
+        CHECK(child.can_reverse());
+        REQUIRE(child.get_property<ExtrusionPropertySpeed>() != nullptr);
+        CHECK(child.get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 42.f);
+        REQUIRE(child.get_property<ExtrusionPropertyFan>() != nullptr);
+        CHECK(child.get_property<ExtrusionPropertyFan>()->percent == 70.f);
+        CHECK(child.get_property<ExtrusionPropertyFan>()->mode == FAN_REQUEST_MODE_OVERRIDE);
+        REQUIRE(child.get_property<ExtrusionAttributes>() != nullptr);
+        volume += child.length() * child.get_property<ExtrusionAttributes>()->mm3_per_mm;
+    }
+    CHECK(volume == Approx(source_volume));
+    CHECK(leaf.child(0).first_point() == Point(0, 0));
+    CHECK(leaf.child(0).last_point() == Point(10 * unit, 0));
+    CHECK(leaf.child(1).last_point() == Point(25 * unit, 0));
+    CHECK(leaf.child(2).last_point() == Point(30 * unit, 0));
+}
+
+TEST_CASE("Arc and Z geometry survive splitting at lengths",
+          "[plugins][extrusion][split-at-lengths]")
+{
+    const coord_t unit = scale_i(1.);
+    ArcPolyline source;
+    source.append(Point(unit, 0));
+    source.append(Geometry::ArcWelder::Segment(
+        Point(0, unit), float(unit), Geometry::ArcWelder::Orientation::CCW));
+    source.set_z_offset(0, 100);
+    source.set_z_offset(1, 900);
+    const ExtrusionAttributes attributes(ExtrusionRole::Perimeter, ExtrusionFlow(0.08, 0.4f, 0.2f));
+    ExtrusionPath leaf(std::move(source), attributes, nullptr, true);
+    const distf_t half = leaf.length() / 2.;
+
+    const std::vector<slic3r_api::MutableExtrusionEntity> pieces =
+        slic3r_api::MutableExtrusionEntity(entity_handle(leaf)).split_leaf_at_lengths({ half });
+
+    REQUIRE(pieces.size() == 2);
+    REQUIRE(leaf.child_count() == 2);
+    const ArcPolyline &first = leaf.child(0).polyline_ref();
+    const ArcPolyline &second = leaf.child(1).polyline_ref();
+    CHECK(first.has_arc());
+    CHECK(second.has_arc());
+    CHECK(first.length() == Approx(half));
+    CHECK(second.length() == Approx(half));
+    CHECK(first.back() == second.front());
+    // The cut lies on the arc, not on its chord.
+    CHECK((first.back() - Point(0, 0)).cast<double>().norm() == Approx(double(unit)).epsilon(1e-4));
+    CHECK(first.z_offset(first.size() - 1) == second.z_offset(0));
+    CHECK(first.z_offset(first.size() - 1) == Approx(500.).margin(2.));
+}
+
+TEST_CASE("Invalid splits at lengths leave the leaf unchanged",
+          "[plugins][extrusion][split-at-lengths]")
+{
+    const coord_t unit = scale_i(1.);
+    ExtrusionPath leaf = straight_path({ Point(0, 0), Point(10 * unit, 0) });
+    const Points original_points = leaf.polyline_ref().to_polyline().points;
+    const auto status = [&](std::vector<distf_t> lengths) {
+        return extrusion_split_leaf_at_lengths(entity_handle(leaf), lengths.empty() ? nullptr : lengths.data(),
+                                               uint32_t(lengths.size()), nullptr, nullptr);
+    };
+    CHECK(status({}) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ distf_t(6 * unit), distf_t(4 * unit) }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ distf_t(SCALED_EPSILON) }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ distf_t(10 * unit) }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ std::nan("") }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ std::numeric_limits<distf_t>::infinity() }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ distf_t(5 * unit), distf_t(5 * unit) }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ -distf_t(unit) }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(status({ distf_t(10 * unit - SCALED_EPSILON) }) == RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
+    CHECK(leaf.has_polyline());
+    CHECK(leaf.polyline_ref().to_polyline().points == original_points);
+
+    // A raw E command or an event would be repeated by every piece.
+    ExtrusionPath raw_e = straight_path({ Point(0, 0), Point(10 * unit, 0) });
+    raw_e.add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::EXTRUSION, 1.));
+    const distf_t middle = distf_t(5 * unit);
+    CHECK(extrusion_split_leaf_at_lengths(entity_handle(raw_e), &middle, 1, nullptr, nullptr) ==
+          RAW_EXTRUSION_SPLIT_STATUS_ONE_SHOT_EVENT);
+    CHECK(raw_e.has_polyline());
+    ExtrusionPath heated = straight_path({ Point(0, 0), Point(10 * unit, 0) });
+    heated.add_property(ExtrusionPropertyHeater(C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 200, false));
+    CHECK_THROWS_AS(slic3r_api::MutableExtrusionEntity(entity_handle(heated)).split_leaf_at_lengths({ middle }),
+                    std::invalid_argument);
+    CHECK(heated.has_polyline());
+
+    ExtrusionEntity parent(true);
+    parent.append_child(std::make_unique<ExtrusionPath>(straight_path({ Point(0, 0), Point(10 * unit, 0) })));
+    CHECK(extrusion_split_leaf_at_lengths(entity_handle(parent), &middle, 1, nullptr, nullptr) ==
+          RAW_EXTRUSION_SPLIT_STATUS_NOT_A_LEAF);
+    CHECK(parent.child_count() == 1);
+}
+
+TEST_CASE("Length splitting rejects every one-shot property before publishing children",
+          "[plugins][extrusion][split-at-lengths]")
+{
+    const extrusion_property_type type = GENERATE(EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE,
+        EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND, EXTRUSION_PROPERTY_TYPE_HEATER, EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS);
+    ExtrusionPath leaf = straight_path({Point(0, 0), Point(scale_i(10.), 0)});
+    switch (type) {
+    case EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE:
+        leaf.get_or_add_property<ExtrusionPropertyCustomGcode>();
+        break;
+    case EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND:
+        leaf.add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+        break;
+    case EXTRUSION_PROPERTY_TYPE_HEATER:
+        leaf.get_or_add_property<ExtrusionPropertyHeater>();
+        break;
+    case EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS:
+        leaf.get_or_add_property<ExtrusionPropertyExtrusionAxis>();
+        break;
+    default:
+        FAIL("Unlisted one-shot property");
+    }
+    const distf_t middle = scale_i(5.);
+    CallbackCapture capture;
+    CHECK(extrusion_split_leaf_at_lengths(entity_handle(leaf), &middle, 1, collect_fragment, &capture) ==
+          RAW_EXTRUSION_SPLIT_STATUS_ONE_SHOT_EVENT);
+    CHECK(leaf.child_count() == 0);
+    CHECK(leaf.has_polyline());
+    CHECK(leaf.first_point() == Point(0, 0));
+    CHECK(leaf.last_point() == Point(scale_i(10.), 0));
+    CHECK(extrusion_property_has(entity_handle(leaf), type) != 0);
+    CHECK(capture.handles.empty());
+}
+
+TEST_CASE("Length splitting diagnoses empty and degenerate geometry without mutation",
+          "[plugins][extrusion][split-at-lengths]")
+{
+    const distf_t middle = scale_i(5.);
+    ExtrusionPath leaf = straight_path({Point(0, 0), Point(scale_i(10.), 0)});
+    leaf.polyline() = ArcPolyline();
+    CHECK(extrusion_split_leaf_at_lengths(entity_handle(leaf), &middle, 1, nullptr, nullptr) ==
+          RAW_EXTRUSION_SPLIT_STATUS_INVALID_GEOMETRY);
+    CHECK(leaf.child_count() == 0);
+    leaf.polyline().append(Point(0, 0));
+    CHECK(extrusion_split_leaf_at_lengths(entity_handle(leaf), &middle, 1, nullptr, nullptr) ==
+          RAW_EXTRUSION_SPLIT_STATUS_INVALID_GEOMETRY);
+    CHECK(leaf.polyline().size() == 1);
+    leaf.polyline().append(Point(1, 0));
+    CHECK(extrusion_split_leaf_at_lengths(entity_handle(leaf), &middle, 1, nullptr, nullptr) ==
+          RAW_EXTRUSION_SPLIT_STATUS_INVALID_GEOMETRY);
+    CHECK(leaf.polyline().size() == 2);
+    CHECK(extrusion_split_leaf_at_lengths(nullptr, &middle, 1, nullptr, nullptr) ==
+          RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT);
 }

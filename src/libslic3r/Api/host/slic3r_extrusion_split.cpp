@@ -14,6 +14,9 @@ the original ArcPolyline by distance. The final children therefore retain arc
 segments and interpolated Z offsets instead of inheriting the temporary
 straight approximation.
 
+extrusion_split_leaf_at_lengths() publishes the same kind of children from
+caller-given distances, without linearization.
+
 The supplied areas are a caller-owned partition. This code validates each
 individual geometry, but intentionally does not test whether the collections
 overlap or whether their union covers the path. Keeping that responsibility at
@@ -453,6 +456,56 @@ extern "C" raw_extrusion_split_status extrusion_split_leaf_by_areas(
                 on_fragment(Slic3r::to_handle(&leaf.child(fragment_idx)),
                             spans[fragment_idx].area_index,
                             user_data);
+        return RAW_EXTRUSION_SPLIT_STATUS_SUCCESS;
+    } catch (...) {
+        return RAW_EXTRUSION_SPLIT_STATUS_INTERNAL_ERROR;
+    }
+}
+
+extern "C" raw_extrusion_split_status extrusion_split_leaf_at_lengths(
+    extrusion_entity_handle *leaf_handle,
+    const distf_t *lengths,
+    uint32_t length_count,
+    extrusion_split_fragment_fn on_fragment,
+    void *user_data)
+{
+    if (leaf_handle == nullptr || lengths == nullptr || length_count == 0)
+        return RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT;
+
+    try {
+        Slic3r::ExtrusionEntity &leaf = *Slic3r::to_extrusion(leaf_handle);
+        if (!leaf.is_leaf())
+            return RAW_EXTRUSION_SPLIT_STATUS_NOT_A_LEAF;
+        if (!leaf.has_polyline())
+            return RAW_EXTRUSION_SPLIT_STATUS_INVALID_GEOMETRY;
+        const Slic3r::ArcPolyline source = leaf.polyline_ref();
+        if (source.size() < 2 || source.length() <= distf_t(SCALED_EPSILON) || !source.is_valid())
+            return RAW_EXTRUSION_SPLIT_STATUS_INVALID_GEOMETRY;
+
+        // Pieces of at most SCALED_EPSILON would be snapped away by
+        // extract_source_span(): reject the request instead of losing a cut.
+        const distf_t source_length = source.length();
+        std::vector<Slic3r::ExtrusionAreaSpan> spans;
+        spans.reserve(size_t(length_count) + 1);
+        distf_t start = 0.;
+        for (uint32_t idx = 0; idx <= length_count; ++idx) {
+            const distf_t end = idx < length_count ? lengths[idx] : source_length;
+            if (!std::isfinite(end) || end - start <= distf_t(SCALED_EPSILON))
+                return RAW_EXTRUSION_SPLIT_STATUS_INVALID_ARGUMENT;
+            spans.push_back({start, end, idx});
+            start = end;
+        }
+
+        // Every piece copies direct properties, so an event would be repeated.
+        for (const extrusion_property_type type : {EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE, EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND,
+                                                   EXTRUSION_PROPERTY_TYPE_HEATER, EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS})
+            if (extrusion_property_has(leaf_handle, type) != 0)
+                return RAW_EXTRUSION_SPLIT_STATUS_ONE_SHOT_EVENT;
+
+        Slic3r::publish_split(leaf, source, spans);
+        if (on_fragment != nullptr)
+            for (size_t fragment_idx = 0; fragment_idx < spans.size(); ++fragment_idx)
+                on_fragment(Slic3r::to_handle(&leaf.child(fragment_idx)), uint32_t(fragment_idx), user_data);
         return RAW_EXTRUSION_SPLIT_STATUS_SUCCESS;
     } catch (...) {
         return RAW_EXTRUSION_SPLIT_STATUS_INTERNAL_ERROR;
