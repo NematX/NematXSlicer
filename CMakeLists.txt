@@ -116,6 +116,7 @@ nematx_package_plugin(
     OUTPUT_SUBDIR nematx-corner-stretch
 )
 enable_testing()
+add_subdirectory(plugins/fan_first_layer_program)
 add_subdirectory(plugins/hole_size_curve)
 add_subdirectory(plugins/infill_aroundholes)
 add_subdirectory(plugins/infill_gridvarspeed)

@@ -28,7 +28,7 @@ int main()
         settings.validate();
         const FanPolicy::Context base = FanPolicy::make_base(settings);
         const FanPolicy::Context time = FanPolicy::apply_layer_time(base, settings, 7.5);
-        const FanPolicy::Context closed = FanPolicy::close_first_layers(time, settings, 0);
+        const FanPolicy::Context closed = FanPolicy::close_first_layers(time, FanPolicy::first_layer_program(settings, 0));
         closed.validate(RAW_FAN_POLICY_PHASE_CLOSED);
         require(closed.roles[RAW_FAN_ROLE_DEFAULT].percent == 60, "default time interpolation");
         require(closed.roles[RAW_FAN_ROLE_PERIMETER].percent == 70, "role time interpolation");
@@ -49,12 +49,14 @@ int main()
         require(FanPolicy::layer_time_percent(0, RAW_FAN_ROLE_PERIMETER, settings, 7.5) == 50,
                 "automatic zero can be increased");
         settings.full_speed_layer = 4;
-        require(FanPolicy::first_layer_percent(70, RAW_FAN_ROLE_PERIMETER, settings, 0) == 17,
+        const FanPolicy::FirstLayerProgram ramp = FanPolicy::first_layer_program(settings, 0);
+        require(FanPolicy::first_layer_percent(70, RAW_FAN_ROLE_PERIMETER, ramp) == 17,
                 "leaf first-layer rounding");
-        require(FanPolicy::first_layer_percent(70, RAW_FAN_ROLE_BRIDGE_INFILL, settings, 0) == 70,
+        require(FanPolicy::first_layer_percent(70, RAW_FAN_ROLE_BRIDGE_INFILL, ramp) == 70,
                 "bridge ramp exception");
         require(LAYER_EXTRUSION_EDIT_PRIORITY_FAN_STANDARD < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_COOLING &&
-                LAYER_EXTRUSION_EDIT_PRIORITY_FAN_COOLING < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_FIRST_LAYERS &&
+                LAYER_EXTRUSION_EDIT_PRIORITY_FAN_COOLING < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_PROGRAM &&
+                LAYER_EXTRUSION_EDIT_PRIORITY_FAN_PROGRAM < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_FIRST_LAYERS &&
                 LAYER_EXTRUSION_EDIT_PRIORITY_FAN_FIRST_LAYERS < LAYER_EXTRUSION_EDIT_PRIORITY_FAN_DYNAMIC,
                 "public fan stage ordering");
     } catch (const std::exception &error) {
