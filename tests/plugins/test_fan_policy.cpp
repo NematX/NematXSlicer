@@ -77,14 +77,14 @@ TEST_CASE("Fan stages preserve configured references and enforce phase order",
     CHECK(timed.roles[RAW_FAN_ROLE_TOP_SOLID_INFILL].percent == 20);
     CHECK(timed.roles[RAW_FAN_ROLE_SUPPORT_MATERIAL].percent == 20);
     CHECK(timed.dynamic_min == 60);
-    const Cooling::Context closed = Cooling::close_first_layers(timed, settings, 6);
+    const Cooling::Context closed = Cooling::close_first_layers(timed, Cooling::first_layer_program(settings, 6));
     CHECK_NOTHROW(closed.validate(RAW_FAN_POLICY_PHASE_CLOSED));
     CHECK(closed.phase == RAW_FAN_POLICY_PHASE_CLOSED);
     CHECK(closed.roles[RAW_FAN_ROLE_DEFAULT].percent == 60);
     CHECK(base.roles[RAW_FAN_ROLE_DEFAULT].percent == 20); // inputs are immutable
-    CHECK_THROWS_AS(Cooling::close_first_layers(base, settings, 6), std::invalid_argument);
+    CHECK_THROWS_AS(Cooling::close_first_layers(base, Cooling::first_layer_program(settings, 6)), std::invalid_argument);
     CHECK_THROWS_AS(Cooling::apply_layer_time(timed, settings, 7.5), std::invalid_argument);
-    CHECK_THROWS_AS(Cooling::close_first_layers(closed, settings, 6), std::invalid_argument);
+    CHECK_THROWS_AS(Cooling::close_first_layers(closed, Cooling::first_layer_program(settings, 6)), std::invalid_argument);
 
     Cooling::Context malformed = base;
     malformed.struct_size = 0;
@@ -137,13 +137,13 @@ TEST_CASE("Fan time thresholds disabled references and D F closure retain legacy
     settings.disabled_layers = 1;
     settings.full_speed_layer = 4;
     const Cooling::Context off = Cooling::close_first_layers(
-        Cooling::apply_layer_time(Cooling::make_base(settings), settings, 0), settings, 0);
+        Cooling::apply_layer_time(Cooling::make_base(settings), settings, 0), Cooling::first_layer_program(settings, 0));
     for (const c_fan_role_reference &role : off.roles)
         CHECK(role.percent == 0);
     CHECK(off.dynamic_min == 0);
     CHECK(off.dynamic_max == 0);
     const Cooling::Context ramp = Cooling::close_first_layers(
-        Cooling::apply_layer_time(Cooling::make_base(settings), settings, 20), settings, 1);
+        Cooling::apply_layer_time(Cooling::make_base(settings), settings, 20), Cooling::first_layer_program(settings, 1));
     CHECK(ramp.roles[RAW_FAN_ROLE_DEFAULT].percent == 26);
     CHECK(ramp.roles[RAW_FAN_ROLE_BRIDGE_INFILL].percent == 80);
     CHECK(ramp.roles[RAW_FAN_ROLE_SUPPORT_MATERIAL_INTERFACE].percent == 80);
@@ -154,10 +154,50 @@ TEST_CASE("Fan time thresholds disabled references and D F closure retain legacy
     // Reuse one numerical result with explicit closure inputs: neither the
     // layer ordinal nor D/F settings are hidden snapshots inside the context.
     const Cooling::Context timed = Cooling::apply_layer_time(Cooling::make_base(settings), settings, 20);
-    CHECK(Cooling::close_first_layers(timed, settings, 0).roles[RAW_FAN_ROLE_DEFAULT].percent == 0);
-    CHECK(Cooling::close_first_layers(timed, settings, 4).roles[RAW_FAN_ROLE_DEFAULT].percent == 80);
+    CHECK(Cooling::close_first_layers(timed, Cooling::first_layer_program(settings, 0)).roles[RAW_FAN_ROLE_DEFAULT].percent == 0);
+    CHECK(Cooling::close_first_layers(timed, Cooling::first_layer_program(settings, 4)).roles[RAW_FAN_ROLE_DEFAULT].percent == 80);
     settings.disabled_layers = 0;
-    CHECK(Cooling::close_first_layers(timed, settings, 1).roles[RAW_FAN_ROLE_DEFAULT].percent == 40);
+    CHECK(Cooling::close_first_layers(timed, Cooling::first_layer_program(settings, 1)).roles[RAW_FAN_ROLE_DEFAULT].percent == 40);
+}
+
+TEST_CASE("First-layer programs separate a stop from a zero ramp and are validated",
+          "[plugins][fan-policy][properties]")
+{
+    Cooling::Settings settings;
+    settings.configured.fill(80);
+    settings.disabled_layers = 1;
+    settings.full_speed_layer = 4;
+    settings.validate();
+    CHECK(Cooling::first_layer_program(settings, 0).state == Cooling::FirstLayerProgram::Off);
+    CHECK(Cooling::first_layer_program(settings, 1).state == Cooling::FirstLayerProgram::Ramp);
+    CHECK(Cooling::first_layer_program(settings, 1).factor == 1.f / 3.f);
+    CHECK(Cooling::first_layer_program(settings, 3).state == Cooling::FirstLayerProgram::Normal);
+
+    const Cooling::Context time = Cooling::apply_layer_time(Cooling::make_base(settings), settings, 20);
+    Cooling::FirstLayerProgram program;
+    CHECK_NOTHROW(program.validate());
+    CHECK(Cooling::close_first_layers(time, program).roles[RAW_FAN_ROLE_DEFAULT].percent == 80);
+    // A ramp at zero only stops the rampable roles; bridges keep their value.
+    program.state = Cooling::FirstLayerProgram::Ramp;
+    program.factor = 0.f;
+    const Cooling::Context zero_ramp = Cooling::close_first_layers(time, program);
+    CHECK(zero_ramp.roles[RAW_FAN_ROLE_DEFAULT].percent == 0);
+    CHECK(zero_ramp.roles[RAW_FAN_ROLE_BRIDGE_INFILL].percent == 80);
+    CHECK(Cooling::first_layer_percent(80.f, RAW_FAN_ROLE_BRIDGE_INFILL, program) == 80.f);
+    program.state = Cooling::FirstLayerProgram::Off;
+    CHECK(Cooling::close_first_layers(time, program).roles[RAW_FAN_ROLE_BRIDGE_INFILL].percent == 0);
+    CHECK(Cooling::first_layer_percent(80.f, RAW_FAN_ROLE_BRIDGE_INFILL, program) == 0.f);
+
+    const auto make = [](uint32_t version, uint32_t state, float factor) {
+        Cooling::FirstLayerProgram result;
+        result.version = version;
+        result.state = state;
+        result.factor = factor;
+        return result;
+    };
+    for (const Cooling::FirstLayerProgram &invalid : {make(2, 1, 1.f), make(1, 0, 1.f), make(1, 4, 1.f),
+             make(1, 3, -0.1f), make(1, 3, 1.1f), make(1, 3, std::numeric_limits<float>::quiet_NaN())})
+        CHECK_THROWS_AS(invalid.validate(), std::invalid_argument);
 }
 
 TEST_CASE("Common fan request transformations preserve protected mode pairs",
@@ -198,7 +238,7 @@ TEST_CASE("Fan reference tables keep role exceptions and close family fallbacks 
     // rampable roles then become one quarter, with truncation after +0.01.
     settings.validate();
     const Cooling::Context time = Cooling::apply_layer_time(Cooling::make_base(settings), settings, 7.5);
-    const Cooling::Context closed = Cooling::close_first_layers(time, settings, 0);
+    const Cooling::Context closed = Cooling::close_first_layers(time, Cooling::first_layer_program(settings, 0));
     const int expected_time[RAW_FAN_ROLE_COUNT] = {90,90,90,90,90,90,90,80,80,90,90,90,80,80,80};
     const int expected_closed[RAW_FAN_ROLE_COUNT] = {22,22,22,90,22,90,22,20,20,90,22,22,80,20,80};
     for (size_t role = 0; role < RAW_FAN_ROLE_COUNT; ++role) {
@@ -221,7 +261,7 @@ TEST_CASE("Fan reference tables keep role exceptions and close family fallbacks 
     CHECK(base.roles[RAW_FAN_ROLE_INTERNAL_BRIDGE_INFILL].percent == 80);
     CHECK(base.roles[RAW_FAN_ROLE_SUPPORT_MATERIAL_INTERFACE].percent == 30);
     CHECK(base.roles[RAW_FAN_ROLE_EXTERNAL_PERIMETER].percent == -1); // late fallback
-    const Cooling::Context resolved = Cooling::close_first_layers(Cooling::apply_layer_time(base, settings, 20), settings, 0);
+    const Cooling::Context resolved = Cooling::close_first_layers(Cooling::apply_layer_time(base, settings, 20), Cooling::first_layer_program(settings, 0));
     CHECK(resolved.roles[RAW_FAN_ROLE_EXTERNAL_PERIMETER].percent == 40);
     CHECK(resolved.roles[RAW_FAN_ROLE_THIN_WALL].percent == 40);
     CHECK(resolved.roles[RAW_FAN_ROLE_IRONING].percent == 60);
@@ -232,7 +272,7 @@ TEST_CASE("Fan reference tables keep role exceptions and close family fallbacks 
     CHECK(dynamic.roles[RAW_FAN_ROLE_OVERHANG_PERIMETER].percent == -1);
     settings.full_speed_layer = 4;
     const Cooling::Context disabled_default = Cooling::close_first_layers(
-        Cooling::apply_layer_time(dynamic, settings, 20), settings, 0);
+        Cooling::apply_layer_time(dynamic, settings, 20), Cooling::first_layer_program(settings, 0));
     CHECK(disabled_default.roles[RAW_FAN_ROLE_DEFAULT].percent == -1);
     CHECK(disabled_default.dynamic_max == 25);
 }

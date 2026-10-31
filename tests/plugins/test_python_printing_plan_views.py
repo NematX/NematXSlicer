@@ -430,10 +430,10 @@ class PythonPrintingPlanViewTests(unittest.TestCase):
         self.assertEqual(policy.PrintingLayerTimeProperty.origin.offset, 8)
 
     def test_public_fan_priorities_are_generated_from_the_step_header(self):
-        priorities = ("STANDARD", "COOLING", "FIRST_LAYERS", "DYNAMIC")
+        priorities = ("STANDARD", "COOLING", "PROGRAM", "FIRST_LAYERS", "DYNAMIC")
         self.assertEqual(
             [getattr(self.generated, "LAYER_EXTRUSION_EDIT_PRIORITY_FAN_" + stage) for stage in priorities],
-            [20, 22, 24, 26])
+            [20, 22, 23, 24, 26])
 
     def test_public_fan_context_and_timing_reject_unpublished_or_invalid_records(self):
         policy = importlib.import_module("slic3r_fan_policy")

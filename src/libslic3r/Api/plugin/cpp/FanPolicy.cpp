@@ -66,6 +66,13 @@ void Context::validate(raw_fan_policy_phase expected) const
             throw std::invalid_argument("Invalid fan role reference.");
 }
 
+void FirstLayerProgram::validate() const
+{
+    if (version != 1 || (state != Normal && state != Off && state != Ramp) ||
+        !std::isfinite(factor) || factor < 0.f || factor > 1.f)
+        throw std::invalid_argument("Invalid first-layer fan program.");
+}
+
 Role fan_role(raw_extrusion_role role)
 {
     if (role == RAW_EXTRUSION_ROLE_GAP_FILL)
@@ -197,17 +204,26 @@ float layer_time_percent(float percent, Role role, const Settings &settings, dou
     return percent;
 }
 
-float first_layer_percent(float percent, Role role, const Settings &settings, uint32_t layer_index)
+float first_layer_percent(float percent, Role role, const FirstLayerProgram &program)
 {
-    if (int64_t(layer_index) < settings.disabled_layers)
+    if (program.state == FirstLayerProgram::Off)
         return 0.f;
-    if (int64_t(layer_index) + 1 < settings.full_speed_layer && settings.full_speed_layer > settings.disabled_layers &&
-        can_ramp(role) && percent > 0.f) {
-        const float factor = float(int64_t(layer_index) + 1 - settings.disabled_layers) /
-                             float(settings.full_speed_layer - settings.disabled_layers);
-        return float(std::clamp(int(percent * factor + 0.01f), 0, 100));
-    }
+    if (program.state == FirstLayerProgram::Ramp && can_ramp(role) && percent > 0.f)
+        return float(std::clamp(int(percent * program.factor + 0.01f), 0, 100));
     return percent;
+}
+
+FirstLayerProgram first_layer_program(const Settings &settings, uint32_t layer_index)
+{
+    FirstLayerProgram program;
+    if (int64_t(layer_index) < settings.disabled_layers) {
+        program.state = FirstLayerProgram::Off;
+    } else if (int64_t(layer_index) + 1 < settings.full_speed_layer && settings.full_speed_layer > settings.disabled_layers) {
+        program.state = FirstLayerProgram::Ramp;
+        program.factor = float(int64_t(layer_index) + 1 - settings.disabled_layers) /
+                         float(settings.full_speed_layer - settings.disabled_layers);
+    }
+    return program;
 }
 
 Context make_base(const Settings &settings)
@@ -264,25 +280,25 @@ Context apply_layer_time(const Context &base, const Settings &settings, double d
     return result;
 }
 
-Context close_first_layers(const Context &time, const Settings &settings, uint32_t layer_index)
+Context close_first_layers(const Context &time, const FirstLayerProgram &program)
 {
     require_phase(time, RAW_FAN_POLICY_PHASE_TIME);
     Context result = time;
     result.phase = RAW_FAN_POLICY_PHASE_CLOSED;
-    if (int64_t(layer_index) < settings.disabled_layers) {
+    if (program.state == FirstLayerProgram::Off) {
         for (c_fan_role_reference &role : result.roles)
             role.percent = 0;
         result.dynamic_min = result.dynamic_max = 0;
         return result;
     }
-    if (int64_t(layer_index) + 1 < settings.full_speed_layer && settings.full_speed_layer > settings.disabled_layers) {
+    if (program.state == FirstLayerProgram::Ramp) {
         for (uint32_t idx = 0; idx < RAW_FAN_ROLE_COUNT; ++idx)
-            result.roles[idx].percent = int32_t(first_layer_percent(float(result.roles[idx].percent), Role(idx), settings, layer_index));
+            result.roles[idx].percent = int32_t(first_layer_percent(float(result.roles[idx].percent), Role(idx), program));
         // A disabled default is absence, not a stop. Keep a useful geometric
         // ceiling by ramping 100 when no default reference exists.
         result.dynamic_max = result.roles[RAW_FAN_ROLE_DEFAULT].percent >= 0 ?
             result.roles[RAW_FAN_ROLE_DEFAULT].percent :
-            int32_t(first_layer_percent(100.f, RAW_FAN_ROLE_DEFAULT, settings, layer_index));
+            int32_t(first_layer_percent(100.f, RAW_FAN_ROLE_DEFAULT, program));
     }
     result.dynamic_min = std::min(result.dynamic_min, result.dynamic_max);
     // Close absent references in dependency order. Ironing/thin-wall are aliases,

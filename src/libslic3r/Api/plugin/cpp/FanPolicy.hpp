@@ -10,7 +10,8 @@
 //     const auto settings = FanPolicy::read_settings(config, tool);
 //     const auto base = FanPolicy::make_base(settings);
 //     const auto timed = FanPolicy::apply_layer_time(base, settings, seconds);
-//     const auto closed = FanPolicy::close_first_layers(timed, settings, layer_index);
+//     const auto program = FanPolicy::first_layer_program(settings, layer_index);
+//     const auto closed = FanPolicy::close_first_layers(timed, program);
 //
 // Payloads own values only. Keys belong to the registering host. Validate settings
 // assembled manually and contexts read from properties before passing them to
@@ -52,6 +53,22 @@ struct Context : c_fan_policy_context {
     void validate(raw_fan_policy_phase expected) const;
 };
 
+// First-layer program of one layer and tool. An optional provider publishes it
+// before the host first-layer stage; otherwise the host derives it from the
+// disable_fan_first_layers/full_fan_speed_layer settings.
+struct FirstLayerProgram {
+    enum State : uint32_t {
+        Normal = 1, // references and requests unchanged
+        Off = 2,    // every automatic reference and request stops
+        Ramp = 3    // positive rampable references and requests are scaled by factor
+    };
+    uint32_t version = 1;
+    uint32_t state = Normal;
+    float factor = 1.f; // in [0, 1], used by Ramp only
+    // Validate a published program before applying it.
+    void validate() const;
+};
+
 // Resolve compound extrusion roles in specificity order; COUNT means ineligible.
 Role fan_role(raw_extrusion_role role);
 // Role exceptions for reference-table and leaf transformations.
@@ -71,15 +88,16 @@ Settings read_first_layer_settings(const Config &config, extruder_index_t extrud
 // duration are prevalidated by the owning policy before its leaf traversal.
 float layer_time_percent(float percent, Role role, const Settings &settings, double duration_seconds);
 // Apply the disable/ramp program once to a validated modifiable request.
-float first_layer_percent(float percent, Role role, const Settings &settings, uint32_t layer_index);
+float first_layer_percent(float percent, Role role, const FirstLayerProgram &program);
+// D/F program for layer_index, the ordinal within the current PrintingGroup.
+FirstLayerProgram first_layer_program(const Settings &settings, uint32_t layer_index);
 // All stages require validated Settings. Apply initial family/default fallbacks
 // while retaining configured references; no plan/configuration metadata is kept.
 Context make_base(const Settings &settings);
 // Apply legacy time thresholds/rounding to a BASE table, producing TIME.
 Context apply_layer_time(const Context &base, const Settings &settings, double duration_seconds);
-// Apply D/F compatibility and late fallbacks once, producing CLOSED.
-// layer_index is the ordinal within the current PrintingGroup.
-Context close_first_layers(const Context &time, const Settings &settings, uint32_t layer_index);
+// Apply a validated first-layer program and late fallbacks once, producing CLOSED.
+Context close_first_layers(const Context &time, const FirstLayerProgram &program);
 
 // Transform a logical request only when the policy owns it; never rewrite a
 // protected pair or normalize its percentage using filament-option rules.
@@ -89,6 +107,12 @@ EPropertyFan transform_request(const EPropertyFan &request, float percent, fan_r
 inline PluginPropertyKey<Context> context_property_key(orchestrator_handle *orchestrator)
 {
     return PluginPropertyKey<Context>::register_dynamic(orchestrator, FAN_POLICY_CONTEXT_PROPERTY_NAME);
+}
+
+// Published on PrintingToolGroup::properties(), at most once per run.
+inline PluginPropertyKey<FirstLayerProgram> first_layer_program_key(orchestrator_handle *orchestrator)
+{
+    return PluginPropertyKey<FirstLayerProgram>::register_dynamic(orchestrator, "slic3r.printing_tool.fan_first_layer_program.v1");
 }
 
 static_assert(sizeof(Context) == sizeof(c_fan_policy_context), "Fan context ABI layout");

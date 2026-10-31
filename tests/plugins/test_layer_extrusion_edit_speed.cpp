@@ -3275,7 +3275,8 @@ TEST_CASE("Fan setup is read only and every tool consumes total layer duration",
     CHECK(published->duration_seconds == Approx(total));
     const slic3r_api::FanPolicy::Settings settings = slic3r_api::FanPolicy::read_settings(config_view, 0);
     const slic3r_api::FanPolicy::Context expected = slic3r_api::FanPolicy::close_first_layers(
-        slic3r_api::FanPolicy::apply_layer_time(slic3r_api::FanPolicy::make_base(settings), settings, total), settings, 0);
+        slic3r_api::FanPolicy::apply_layer_time(slic3r_api::FanPolicy::make_base(settings), settings, total),
+        slic3r_api::FanPolicy::first_layer_program(settings, 0));
     REQUIRE(published_layer.tool_groups.size() == 2);
     for (PrintingToolGroup &tool : published_layer.tool_groups) {
         const slic3r_api::PrintingToolGroup view(reinterpret_cast<printing_tool_group_handle *>(&tool));
@@ -3683,6 +3684,51 @@ TEST_CASE("Fan closure works without optional time cooling and retains late fami
     const PrintingLayerGroup &layer = prepared.print.printing_plan()->groups.front().layers.front();
     const slic3r_api::ConstPrintingLayerGroup view(reinterpret_cast<const printing_layer_group_handle *>(&layer));
     CHECK(registered_layer_time_property_key().get(view.properties()) == nullptr);
+}
+
+// Publish one first-layer program on every tool group, as an optional provider does.
+void publish_first_layer_program(PreparedSpeedPrint &prepared, const slic3r_api::FanPolicy::FirstLayerProgram &program)
+{
+    const PluginPropertyKey<slic3r_api::FanPolicy::FirstLayerProgram> key = slic3r_api::FanPolicy::first_layer_program_key(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    for (PrintingGroup &group : prepared.print.mutable_printing_plan().groups)
+        for (PrintingLayerGroup &layer : group.layers)
+            for (PrintingToolGroup &tool : layer.tool_groups) {
+                slic3r_api::PrintingToolGroup view(reinterpret_cast<printing_tool_group_handle *>(&tool));
+                key.get_or_add(view.properties()) = program;
+            }
+}
+
+TEST_CASE("First-layer fan stage applies a published program instead of its D F settings",
+          "[plugins][layer-extrusion-edit][fan-policy]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // Without a program, disable_fan_first_layers = 1 would stop both paths.
+    const DynamicPrintConfig config = speed_config({
+        {"default_fan_speed", "80"}, {"bridge_fan_speed", "60"}, {"fan_below_layer_time", "0"},
+        {"slowdown_below_layer_time", "0"}, {"disable_fan_first_layers", "1"}, {"full_fan_speed_layer", "0"}});
+    slic3r_api::FanPolicy::FirstLayerProgram program;
+    program.state = slic3r_api::FanPolicy::FirstLayerProgram::Ramp;
+    program.factor = 0.5f;
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::Perimeter, 0.2}, {ExtrusionRole::BridgeInfill, 0.2}}});
+    publish_first_layer_program(prepared, program);
+    run_editors(prepared, {DEFAULT_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN});
+    const std::map<uint16_t, ObservedLeaf> leaves = observed_by_role(observed_plan_leaves(prepared.print));
+    CHECK(leaves.at(uint16_t(ExtrusionRole::Perimeter)).fan_speed == 40);
+    CHECK(leaves.at(uint16_t(ExtrusionRole::BridgeInfill)).fan_speed == 60); // bridges do not ramp
+    CHECK(first_fan_context(prepared).dynamic_max == 40);
+
+    program.factor = 2.f;
+    PreparedSpeedPrint invalid;
+    prepare_ordered_plan(invalid, config, {{{ExtrusionRole::Perimeter, 0.2}}});
+    publish_first_layer_program(invalid, program);
+    ScopedActivePlugins active({DEFAULT_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN});
+    Orchestrator &orch = Orchestrator::instance();
+    orch.reset_plugin_cancel();
+    CHECK_THROWS(Steps::StepLayerExtrusionEdition::run_step(orch, invalid.print));
+    orch.reset_plugin_cancel();
+    orch.consume_plugin_messages();
 }
 
 TEST_CASE("Standard fan honors the configured overhang role when the dynamic graph is disabled",
@@ -4893,7 +4939,7 @@ TEST_CASE("Fan cooling follows the layer duration after the slowdown",
     const auto expected = [&](double seconds) {
         return slic3r_api::FanPolicy::close_first_layers(
             slic3r_api::FanPolicy::apply_layer_time(slic3r_api::FanPolicy::make_base(settings), settings, seconds),
-            settings, 0);
+            slic3r_api::FanPolicy::first_layer_program(settings, 0));
     };
     const int after_percent = expected(time->duration_seconds).roles[RAW_FAN_ROLE_PERIMETER].percent;
     const int estimated_percent = expected(before).roles[RAW_FAN_ROLE_PERIMETER].percent;

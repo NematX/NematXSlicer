@@ -169,7 +169,8 @@ The value-only SDK stages consume copies and enforce this order:
 const FanPolicy::Settings settings = FanPolicy::read_settings(config, extruder_id);
 const FanPolicy::Context base = FanPolicy::make_base(settings);
 const FanPolicy::Context timed = FanPolicy::apply_layer_time(base, settings, duration_seconds);
-const FanPolicy::Context closed = FanPolicy::close_first_layers(timed, settings, layer_index);
+const FanPolicy::FirstLayerProgram program = FanPolicy::first_layer_program(settings, layer_index);
+const FanPolicy::Context closed = FanPolicy::close_first_layers(timed, program);
 ```
 
 `BASE -> TIME -> CLOSED` preserves role exceptions, time-threshold rounding,
@@ -197,7 +198,7 @@ The host runs independent plugins at the published layer-edit priorities:
 | --- | --- | --- |
 | `default` | 20 | Fill only effective absences and publish BASE |
 | `cooling` | 22 | Transform eligible requests using total duration; publish TIME |
-| `first_layers` | 24 | Apply D/F, close late fallbacks; publish CLOSED |
+| `first_layers` | 24 | Apply the first-layer program, close late fallbacks; publish CLOSED |
 | `dynamic` | 26 | Increase geometric overhang requests within CLOSED bounds |
 
 The standard retains the `default_fan_plugin` exclusive group. Other stages have
@@ -206,6 +207,16 @@ property before processing a tool. Without optional cooling, the first-layer
 applicator accepts BASE as an identity TIME stage, without estimating duration.
 Dynamic processing requires CLOSED even when its graph is disabled. Setup only
 caches durations; publication happens in the owning layer's run.
+
+The first-layer stage applies a `FanPolicy::FirstLayerProgram` (Normal, Off, or
+Ramp with a factor in [0, 1]) for its layer and tool. An optional external
+provider may publish one before it, at `LAYER_EXTRUSION_EDIT_PRIORITY_FAN_PROGRAM`,
+with `first_layer_program_key()` on `PrintingToolGroup::properties()`; it only
+publishes and never edits requests. Otherwise the stage derives the program from
+`disable_fan_first_layers`/`full_fan_speed_layer` with `first_layer_program()`.
+Off stops every automatic reference and request; a Ramp, even at factor 0, only
+scales the positive rampable roles, so bridges and support interfaces keep their
+value. A published program is validated before use.
 
 Every later policy preserves Override (including zero) and other plugins' modes;
 Automatic zero is a real request but may be transformed. No intermediate fan

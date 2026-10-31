@@ -11,11 +11,13 @@
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 
 /*
-This layer editor applies the disabled-layer/full-speed-layer program to eligible
-fan requests and closes role fallbacks. It accepts TIME, or BASE as an identity
-time stage when optional cooling is absent. Protected pairs remain unchanged.
+This layer editor applies an optional published first-layer program, falling back
+to the disabled-layer/full-speed-layer settings, and closes role fallbacks. It
+accepts TIME, or BASE as an identity time stage when optional cooling is absent.
+Published programs are validated before use; protected pairs remain unchanged.
 
     run_impl(): validate the preceding public context
+    |-- read a published program, or derive one from the host's settings
     |-- close_first_layers(): compute CLOSED references and dynamic bounds
     `-- for_each_leaf(): apply the program once or fill a late absence
 
@@ -38,8 +40,9 @@ void initialize_settings(orchestrator_handle *orch);
 
 class FirstLayerFan : public PluginBase {
 public:
-    // Bind the public context key to the host that owns this provider.
-    explicit FirstLayerFan(orchestrator_handle *orch) : PluginBase(orch), m_context(FanPolicy::context_property_key(orch)) {}
+    // Bind context and optional-program keys to the host that owns this provider.
+    explicit FirstLayerFan(orchestrator_handle *orch) :
+        PluginBase(orch), m_context(FanPolicy::context_property_key(orch)), m_program(FanPolicy::first_layer_program_key(orch)) {}
 private:
     // Return the stable first-layer policy identity.
     const char *id_impl() const noexcept override { return "layer_extrusion_edit.fan.first_layers"; }
@@ -74,6 +77,7 @@ private:
     // Transform modifiable requests and publish a complete CLOSED context.
     void run_impl(const plugin_run_context *run) const override;
     PluginPropertyKey<FanPolicy::Context> m_context;
+    PluginPropertyKey<FanPolicy::FirstLayerProgram> m_program;
 };
 
 void initialize_settings(orchestrator_handle *orch)
@@ -142,15 +146,22 @@ void FirstLayerFan::run_impl(const plugin_run_context *run) const
         FanPolicy::Context time = FanTreeHelpers::read_context(tool, m_context, expected);
         // With no cooling plugin, BASE is the numerical identity for TIME.
         time.phase = RAW_FAN_POLICY_PHASE_TIME;
-        const FanPolicy::Settings settings = FanPolicy::read_first_layer_settings(config, tool.extruder_id());
-        const FanPolicy::Context closed = FanPolicy::close_first_layers(time, settings, ctx->layer_group_idx);
+        FanPolicy::FirstLayerProgram program;
+        if (const FanPolicy::FirstLayerProgram *published_program = m_program.get(tool.properties())) {
+            published_program->validate();
+            program = *published_program;
+        } else {
+            program = FanPolicy::first_layer_program(FanPolicy::read_first_layer_settings(config, tool.extruder_id()),
+                                                     ctx->layer_group_idx);
+        }
+        const FanPolicy::Context closed = FanPolicy::close_first_layers(time, program);
         for (uint32_t extrusion = 0; extrusion < tool.extrusion_count(); ++extrusion) {
             FanTreeHelpers::for_each_leaf(tool.extrusion(extrusion).mutable_root(),
                 [&](MutableExtrusionEntity leaf, const ProcessParameterHelpers::EffectiveTreeState &state) {
                     if (!state.fan.can_modify(FAN_REQUEST_MODE_AUTOMATIC)) return;
                     const raw_extrusion_role role = state.attributes.extrusion_role();
                     const float percent = state.fan.is_set() ?
-                        FanPolicy::first_layer_percent(state.fan.percent, FanPolicy::fan_role(role), settings, ctx->layer_group_idx) :
+                        FanPolicy::first_layer_percent(state.fan.percent, FanPolicy::fan_role(role), program) :
                         FanTreeHelpers::closed_reference(closed, role);
                     if (percent >= 0.f)
                         leaf.get_or_add(EPropertyFan::key) = FanPolicy::transform_request(state.fan, percent, FAN_REQUEST_MODE_AUTOMATIC);
