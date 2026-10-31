@@ -71,18 +71,29 @@ bool operator<(const CanonicalExPolygon &first, const CanonicalExPolygon &second
     return first.holes < second.holes;
 }
 
+// Check borrowed nonempty rings for CCW contours and CW holes; emit a check per ring and format context only on failure, without modifying inputs.
 void check_orientation(const std::string &info, const Slic3r::ExPolygons &expolygons)
 {
     for (size_t island = 0; island < expolygons.size(); ++island) {
         const Slic3r::ExPolygon &expolygon = expolygons[island];
         if (!expolygon.contour.points.empty()) {
-            INFO(info << " island=" << island << " contour");
-            CHECK(expolygon.contour.is_counter_clockwise());
+            const bool correct = expolygon.contour.is_counter_clockwise();
+            if (correct) {
+                CHECK(correct);
+            } else {
+                INFO(info << " island=" << island << " contour");
+                CHECK(correct);
+            }
         }
         for (size_t hole = 0; hole < expolygon.holes.size(); ++hole) {
             if (!expolygon.holes[hole].points.empty()) {
-                INFO(info << " island=" << island << " hole=" << hole);
-                CHECK(expolygon.holes[hole].is_clockwise());
+                const bool correct = expolygon.holes[hole].is_clockwise();
+                if (correct) {
+                    CHECK(correct);
+                } else {
+                    INFO(info << " island=" << island << " hole=" << hole);
+                    CHECK(correct);
+                }
             }
         }
     }

@@ -1,6 +1,7 @@
 /* Native support keeps its temporary slabs inside generate(), then destroys
-   them after path generation. These tests also run its geometry phases to
-   inspect the slab thicknesses before paths can be split by overlapping slabs.
+   them after path generation. These tests run its geometry phases themselves, once, then
+   finish with the same layer installation and toolpath generation, to inspect the slab
+   thicknesses before paths can be split by overlapping slabs.
    Explicit member-pointer instantiation gives this test access to seven private
    phases without changing native source or redefining its class. The deque
    owns the slabs and the vectors point into it for the duration of a comparison. */
@@ -61,31 +62,105 @@ template struct NativeStage<TrimContactStage, &PrintObjectSupportMaterial::trim_
 
 struct NativeSlabs {
     NativeStorage storage;
-    NativeLayers top, bottom, base, interfaces;
+    // The slabs. Layer installation and toolpath generation consume them (print Z grouping, merging of slabs of one
+    // support layer, cleared overhang polygons): read them only for what native_slabs() does not record in heights.
+    NativeLayers top, bottom, base, interfaces, raft;
+    // The (print Z, height) of the non-empty top, bottom, base and interface slabs, in this order, recorded after the
+    // geometry phases and before layer installation: the printable thicknesses of the original slabs.
+    std::vector<std::pair<coord_t, coord_t>> heights;
 };
 
-// Run native non-raft geometry phases and retain their original slab heights for comparison.
-inline void native_slabs(const PrintObject &object, const PrintObjectSupportMaterial &generator, NativeSlabs &result)
+// Run the native generate() once, phase by phase as PrintObjectSupportMaterial::generate() does (SupportMaterial.cpp),
+// recording the original slab heights for the comparison: install the support layers into the object (which must have none)
+// and generate their toolpaths from the same slabs. Like generate(), nothing is installed when there is no top contact; the
+// Debug checks of generate() are repeated here.
+inline void native_slabs(PrintObject &object, const PrintObjectSupportMaterial &generator, NativeSlabs &result)
 {
     const FFFSupport::SupportParameters params(object);
     const SlicingParameters &slicing = object.slicing_parameters();
+    // Same checks as the assert_check and assert_z of generate(), made when _DEBUG is defined.
+    const auto assert_check = [](const NativeLayers &layers) {
+#ifdef _DEBUG
+        for (const FFFSupport::SupportGeneratorLayer *layer : layers)
+            assert_valid(layer->polygons);
+#else
+        (void)layers;
+#endif
+    };
+    const auto assert_z = [](const NativeLayers &layers) {
+#ifdef _DEBUG
+        for (const FFFSupport::SupportGeneratorLayer *layer : layers) {
+            assert(layer->scaled_print_z() > layer->scaled_bottom_z());
+            assert(layer->scaled_print_z() >= layer->scaled_bottom_z() + layer->scaled_height());
+        }
+#else
+        (void)layers;
+#endif
+    };
     // The comparison models never request a raft. The build-plate coverage is computed as the native
     // generate() does; it is empty unless buildplate-only support is requested.
     REQUIRE(object.config().raft_layers.value == 0);
     std::vector<Polygons> covered = (generator.*native_stage(CoveredStage{}))(object), areas;
     result.top = (generator.*native_stage(TopStage{}))(object, covered, result.storage);
+    // generate() returns here: nothing is supported, no support layer is installed.
+    if (result.top.empty())
+        return;
+    assert_check(result.top);
     result.bottom = (generator.*native_stage(BottomStage{}))(object, result.top, covered, result.storage, areas);
+    assert_check(result.bottom);
+    assert_z(result.bottom);
     result.base = (generator.*native_stage(IntermediateStage{}))(object, result.bottom, result.top, result.storage);
+    assert_check(result.base);
+    assert_z(result.base);
     (generator.*native_stage(TrimStage{}))(object, result.top, scale_to_layer_coord(slicing.gap_support_object),
         scale_to_layer_coord(slicing.gap_object_support), params._gap_xy);
+    assert_check(result.top);
     (generator.*native_stage(BaseStage{}))(object, result.bottom, result.top, result.base, areas);
+    assert_check(result.bottom);
+    assert_check(result.top);
+    assert_check(result.base);
     (generator.*native_stage(TrimContactStage{}))(object, result.bottom, result.top);
+    assert_check(result.bottom);
+    assert_check(result.top);
+    assert_z(result.bottom);
+    assert_z(result.top);
     NativeLayers empty;
     std::pair<NativeLayers, NativeLayers> interfaces = FFFSupport::generate_interface_layers(object.config(), params,
         result.bottom, result.top, empty, empty, result.base, result.storage);
     result.interfaces = std::move(interfaces.first);
     REQUIRE(interfaces.second.empty());
-    FFFSupport::generate_raft_base(object, params, slicing, result.top, result.interfaces, empty, result.base, result.storage);
+    assert_check(result.bottom);
+    assert_check(result.top);
+    assert_check(result.base);
+    assert_check(result.interfaces);
+    assert_check(interfaces.second);
+    assert_z(result.bottom);
+    assert_z(result.top);
+    assert_z(result.base);
+    assert_z(result.interfaces);
+    assert_z(interfaces.second);
+    result.raft = FFFSupport::generate_raft_base(object, params, slicing, result.top, result.interfaces, interfaces.second, result.base, result.storage);
+    assert_check(result.raft);
+    assert_check(result.bottom);
+    assert_check(result.top);
+    assert_check(result.base);
+    assert_check(result.interfaces);
+    assert_check(interfaces.second);
+    // The thicknesses of the slabs as the geometry phases made them: generate_support_layers() and the toolpaths change them.
+    for (const NativeLayers *layers : {&result.top, &result.bottom, &result.base, &result.interfaces})
+        for (const FFFSupport::SupportGeneratorLayer *slab : *layers)
+            if (!slab->polygons.empty())
+                result.heights.emplace_back(slab->scaled_print_z(), slab->scaled_height());
+    FFFSupport::generate_support_layers(object, result.raft, result.bottom, result.top, result.base, result.interfaces, interfaces.second);
+    // generate() checks all six lists again before the toolpaths.
+    assert_check(result.raft);
+    assert_check(result.bottom);
+    assert_check(result.top);
+    assert_check(result.base);
+    assert_check(result.interfaces);
+    assert_check(interfaces.second);
+    FFFSupport::generate_support_toolpaths(object, object.mutable_auxiliary_layers(), object.config(), params, slicing,
+        result.raft, result.bottom, result.top, result.base, result.interfaces, interfaces.second);
 }
 }
 #endif

@@ -1,5 +1,7 @@
 // Entry point of plugins_tests: the Catch2 main comes from catch_main.hpp, and the listener at the end of the file
 // initializes the shared plugin test runtime before any test case runs.
+// SLIC3R_TEST_TIMINGS optionally selects an append-only TSV with flushed started/ended records per case. Fields are
+// event, escaped name, escaped source file, line, steady-clock milliseconds, status, passed/failed/allowed assertions, pid.
 //
 // This file also holds a test-only crash diagnostic, active only when the environment variable
 // SLIC3R_CRASH_TRACE is set (nothing is installed otherwise):
@@ -240,7 +242,102 @@ CATCH_REGISTER_LISTENER(HeapCheckListener)
 
 #include "plugin_test_helpers.hpp"
 
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <iomanip>
+#include <stdexcept>
+#include <string>
+#ifdef _WIN32
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace {
+
+// Optional per-process TSV timing output: escaped name/file fields preserve tabs, newlines and backslashes. Start/end rows
+// are flushed separately so interrupted cases remain identifiable; the listener owns its stream and monotone start time.
+class TestTimingListener final : public Catch::TestEventListenerBase {
+public:
+    using Catch::TestEventListenerBase::TestEventListenerBase;
+    // Opens the requested append-only timing stream before cases, with no output when unset; open failures abort visibly.
+    void testRunStarting(const Catch::TestRunInfo &) override;
+    // Writes a flushed start record for the borrowed case and starts its monotone timer; I/O failures propagate.
+    void testCaseStarting(const Catch::TestCaseInfo &info) override;
+    // Writes elapsed milliseconds, outcome and assertion counts for the borrowed completed case; I/O failures propagate.
+    void testCaseEnded(const Catch::TestCaseStats &stats) override;
+private:
+    // Escapes one borrowed TSV field into an owned string without changing UTF-8 bytes; allocation failures propagate.
+    static std::string field(const std::string &value);
+    // Appends and flushes one row with source location and process id; the stream owns output and failed writes throw.
+    void row(const char *event, const Catch::TestCaseInfo &info, double ms, const char *status,
+             std::size_t passed, std::size_t failed, std::size_t allowed);
+    std::ofstream m_stream;
+    bool m_enabled = false;
+    std::chrono::steady_clock::time_point m_started;
+};
+
+// Borrows the environment path only while opening the owned append stream; unset paths are silent and open failures throw.
+void TestTimingListener::testRunStarting(const Catch::TestRunInfo &)
+{
+    const char *path = std::getenv("SLIC3R_TEST_TIMINGS");
+    if (!path || !*path) return;
+    m_stream.open(path, std::ios::out | std::ios::app | std::ios::binary);
+    if (!m_stream) throw std::runtime_error("Cannot open SLIC3R_TEST_TIMINGS output");
+    m_enabled = true;
+}
+
+// Flushes borrowed case metadata before starting the monotone timer, preserving interrupted-case evidence; write failures throw.
+void TestTimingListener::testCaseStarting(const Catch::TestCaseInfo &info)
+{
+    if (!m_enabled) return;
+    row("started", info, 0., "started", 0, 0, 0);
+    m_started = std::chrono::steady_clock::now();
+}
+
+// Converts elapsed steady time to milliseconds and serializes borrowed Catch totals without retaining references; I/O errors throw.
+void TestTimingListener::testCaseEnded(const Catch::TestCaseStats &stats)
+{
+    if (!m_enabled) return;
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - m_started).count();
+    row("ended", stats.testInfo, ms, stats.totals.testCases.failed == 0 && !stats.aborting ? "passed" : "failed",
+        stats.totals.assertions.passed, stats.totals.assertions.failed, stats.totals.assertions.failedButOk);
+}
+
+// Serializes scalar totals and escaped borrowed metadata to the owned TSV stream, then flushes; failed output throws visibly.
+void TestTimingListener::row(const char *event, const Catch::TestCaseInfo &info, double ms, const char *status,
+                            std::size_t passed, std::size_t failed, std::size_t allowed)
+{
+#ifdef _WIN32
+    const int pid = _getpid();
+#else
+    const int pid = int(getpid());
+#endif
+    m_stream << event << '\t' << field(info.name) << '\t' << field(info.lineInfo.file) << '\t' << info.lineInfo.line
+             << '\t' << std::fixed << std::setprecision(6) << ms << '\t' << status << '\t' << passed << '\t' << failed
+             << '\t' << allowed << '\t' << pid << '\n';
+    m_stream.flush();
+    if (!m_stream) throw std::runtime_error("Cannot flush SLIC3R_TEST_TIMINGS output");
+}
+
+// Copies bytes into an owned field, escaping only TSV delimiters and backslashes; allocation failures propagate to Catch.
+std::string TestTimingListener::field(const std::string &value)
+{
+    std::string result;
+    for (const char c : value) {
+        switch (c) {
+        case '\\': result += "\\\\"; break;
+        case '\t': result += "\\t"; break;
+        case '\n': result += "\\n"; break;
+        case '\r': result += "\\r"; break;
+        default: result += c; break;
+        }
+    }
+    return result;
+}
+
+CATCH_REGISTER_LISTENER(TestTimingListener)
 
 // Parallel launcher buckets run in separate processes. The shared "Scenario: init_print
 // functionality" of tests/data/cpp/test_data.cpp cannot initialize plugin providers, so this

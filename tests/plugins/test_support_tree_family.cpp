@@ -36,7 +36,8 @@
 /* Tree-family tests: the slabs that the tree and organic styles publish. The branch slab planner is checked on synthetic
    overhang layers, the slabs of small objects on their geometry (interfaces, floors, heights, XY distance, branch overhang),
    then the published surfaces and the G-code of a whole print. The grid is unchanged by this family, which the grid
-   comparison tests cover. The Print::validate checks of the tree family settings (the [validate] case) are checked here too. */
+   comparison tests cover. Tip-material checks copy published paths and fused islands once per run, then lazily measure
+   islands without changing the geometry. The Print::validate checks of the tree family settings (the [validate] case) are checked here too. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -49,6 +50,16 @@ constexpr double tolerance_mm = 0.01;
 
 // Supplies the native layer-top table to isolated smoothing tests, without routing support.
 std::vector<double> layer_print_z_mm(const PrintObject &object);
+
+// Checks final slab XY clearance for one style/interface combination.
+void check_normal_xy_clearance(const char *style, int interfaces);
+// Checks downward-point object and published-support island ordering for one thickness variant and layer height.
+void check_downward_point_island_order(bool thin, const char *layer_height);
+struct GapScenario;
+// Checks one shelf/low-roof/lobe gap scenario using the selected support style.
+void check_shelf_clearance(const char *style, const GapScenario &scenario);
+// Checks each routed organic tip against published support toolpaths for one mesh/configuration.
+void check_isolated_tips(int fixture, bool thin, int interfaces, const char *layer_height);
 
 // The tree slabs of the first object of a sliced print, generated directly. The storage is declared first so that it
 // outlives the slabs that live in it.
@@ -538,52 +549,93 @@ TEST_CASE("Tips below a thin contact are published at its Z", "[plugins][support
 }
 
 namespace {
+// One geometric extrusion entity, including one-point deposits; line order and vertices are copied without flattening leaves together.
+struct TipOracleLeaf {
+    ArcPolylines lines;
+    bool deposit = false;
+};
+// Lazily computed, tip-independent properties of one fused island; the region owns its unchanged polygon separately.
+struct TipOracleIsland {
+    bool ready = false;
+    slic3r_api::Support::Toolpath::BranchIslandMeasure measure;
+    size_t leaves = 0, deposits = 0;
+};
+// Region-owned immutable geometry/path copies and lazy island measurements, in published region and fusion order.
+struct TipOracleRegion {
+    ExPolygons fused;
+    std::vector<TipOracleLeaf> paths;
+    std::vector<TipOracleIsland> islands;
+};
+// Layer bounds retain the original floating conversions; regions follow published island/region traversal order.
+struct TipOracleLayer {
+    double bottom_z = 0., print_z = 0.;
+    std::vector<TipOracleRegion> regions;
+};
+
+// Copies geometric entities into owned leaves, preserving recursive traversal and deposit identity.
+void copy_tip_paths(const ExtrusionEntity &entity, std::vector<TipOracleLeaf> &paths);
+// Measures the nearest cached segment or singleton point to a query point.
+double distance_to_paths_mm(const std::vector<TipOracleLeaf> &paths, const Point &point);
+// Counts cached vertices within the query radius, including singleton deposits.
+size_t path_points_within(const std::vector<TipOracleLeaf> &paths, const Point &point, double radius_mm);
+// Counts cached leaves and deposits with at least one vertex in the supplied area.
+void leaves_in_area(const std::vector<TipOracleLeaf> &paths, const ExPolygons &area, size_t &leaves, size_t &deposits);
+
+// Copies each borrowed geometric entity's polylines once into caller-owned storage; recursive order and deposit detection
+// match the entity tree, including geometric parents with children. No source mutation occurs; allocation failures propagate.
+void copy_tip_paths(const ExtrusionEntity &entity, std::vector<TipOracleLeaf> &paths)
+{
+    if (entity.has_polyline()) {
+        paths.emplace_back();
+        paths.back().lines = entity.as_polylines();
+        paths.back().deposit = slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&entity)).is_deposit();
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        copy_tip_paths(*child, paths);
+}
+
 // Smallest distance in millimeters from the point to the extrusion paths of an extrusion tree (a deposit is a point path), or
-// the largest double when the tree has none.
-double distance_to_paths_mm(const ExtrusionEntity &entity, const Point &point)
+// the largest double when the borrowed cached leaves have none; uses unchanged point/segment arithmetic without mutation.
+double distance_to_paths_mm(const std::vector<TipOracleLeaf> &paths, const Point &point)
 {
     double best = std::numeric_limits<double>::max();
-    if (entity.has_polyline())
-        for (const ArcPolyline &line : entity.as_polylines()) {
+    for (const TipOracleLeaf &leaf : paths)
+        for (const ArcPolyline &line : leaf.lines) {
             if (line.size() == 1)
                 best = std::min(best, unscaled(point.distance_to(line.get_point(0))));
             for (size_t idx = 0; idx + 1 < line.size(); ++idx)
                 best = std::min(best, unscaled(Line(line.get_point(idx), line.get_point(idx + 1)).distance_to(point)));
         }
-    for (const ExtrusionEntityUPtr &child : entity.children())
-        best = std::min(best, distance_to_paths_mm(*child, point));
     return best;
 }
 
-// Number of path points of the tree (the single point of a deposit included) that lie within the radius in millimeters of the point.
-size_t path_points_within(const ExtrusionEntity &entity, const Point &point, double radius_mm)
+// Counts vertices in borrowed cached leaves with the original inclusive millimeter-distance comparison; singleton deposits
+// count as one point, geometry is unchanged and no references escape.
+size_t path_points_within(const std::vector<TipOracleLeaf> &paths, const Point &point, double radius_mm)
 {
     size_t count = 0;
-    if (entity.has_polyline())
-        for (const ArcPolyline &line : entity.as_polylines())
+    for (const TipOracleLeaf &leaf : paths)
+        for (const ArcPolyline &line : leaf.lines)
             for (size_t idx = 0; idx < line.size(); ++idx)
                 count += unscaled(point.distance_to(line.get_point(idx))) <= radius_mm ? 1 : 0;
-    for (const ExtrusionEntityUPtr &child : entity.children())
-        count += path_points_within(*child, point, radius_mm);
     return count;
 }
 
-// Number of extrusion leaves of the tree that have a path point inside the area, and how many of them are deposits.
-void leaves_in_area(const ExtrusionEntity &entity, const ExPolygons &area, size_t &leaves, size_t &deposits)
+// Adds one count per borrowed cached leaf with any vertex inside the borrowed area, plus its stored deposit flag; containment
+// order and boundary semantics are unchanged, caller-owned scalar counts accumulate and geometry remains immutable.
+void leaves_in_area(const std::vector<TipOracleLeaf> &paths, const ExPolygons &area, size_t &leaves, size_t &deposits)
 {
-    if (entity.has_polyline()) {
+    for (const TipOracleLeaf &leaf : paths) {
         bool inside = false;
-        for (const ArcPolyline &line : entity.as_polylines())
+        for (const ArcPolyline &line : leaf.lines)
             for (size_t idx = 0; idx < line.size() && !inside; ++idx)
                 for (const ExPolygon &polygon : area)
                     inside = inside || polygon.contains(line.get_point(idx));
         if (inside) {
             ++leaves;
-            deposits += slic3r_api::ExtrusionEntity(reinterpret_cast<const extrusion_entity_handle *>(&entity)).is_deposit() ? 1 : 0;
+            deposits += leaf.deposit ? 1 : 0;
         }
     }
-    for (const ExtrusionEntityUPtr &child : entity.children())
-        leaves_in_area(*child, area, leaves, deposits);
 }
 
 // Number of extrusion leaves of the tree, and of them how many are deposits.
@@ -648,6 +700,8 @@ const char *isolated_tips_name(int fixture) { return fixture == 0 ? "arm" : fixt
 // of 0.42 mm; the control keeps the default tip and branch. The facts are printed as warnings; a failing CHECK below is a defect
 // of the tip material, not a fixture problem, and must not be loosened.
 namespace {
+// Generates owned support and extrusion trees for one mesh/configuration, then checks every routed tip against locally cached
+// immutable published geometry. Lazy island measurements do not alter polygons; generation/allocation failures reach Catch.
 void check_isolated_tips(int fixture, bool thin, int interfaces, const char *layer_height)
 {
     CAPTURE(isolated_tips_name(fixture), thin, interfaces, layer_height);
@@ -672,6 +726,33 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
     const coord_t width = SG::params(print, object).base_flow.width;
     const c_flow flow = SG::params(print, object).base_flow;
     const double tolerance = 1.5 * unscaled(width);
+    // Cache only after toolpaths finish: vector ownership preserves fused polygons without moving individual populated rings.
+    std::vector<TipOracleLayer> cached_layers(object.auxiliary_layers().size());
+    std::vector<size_t> top_order, bottom_order;
+    size_t layer_index = 0;
+    for (const Layer &layer : object.auxiliary_layers()) {
+        TipOracleLayer &cached = cached_layers[layer_index];
+        cached.bottom_z = unscaled(layer.scaled_bottom_z());
+        cached.print_z = layer.unscaled_print_z();
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands()) {
+                cached.regions.emplace_back();
+                TipOracleRegion &copy = cached.regions.back();
+                ExPolygons surfaces;
+                for (const Surface &surface : region.fill_surfaces())
+                    surfaces.push_back(surface.expolygon);
+                copy.fused = offset2_ex(surfaces, float(SCALED_EPSILON), -float(SCALED_EPSILON));
+                copy.islands.resize(copy.fused.size());
+                for (const ExtrusionRole role : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
+                    if (region.has_extrusion(role))
+                        copy_tip_paths(region.extrusion(role), copy.paths);
+            }
+        top_order.push_back(layer_index);
+        bottom_order.push_back(layer_index++);
+    }
+    // Sort indices, not geometry; equal bounds retain publication order and slab bottoms need not be monotone with tops.
+    std::stable_sort(top_order.begin(), top_order.end(), [&](size_t a, size_t b) { return cached_layers[a].print_z < cached_layers[b].print_z; });
+    std::stable_sort(bottom_order.begin(), bottom_order.end(), [&](size_t a, size_t b) { return cached_layers[a].bottom_z < cached_layers[b].bottom_z; });
     size_t tips = 0, loose_ok = 0, island_ok = 0, centreline_deposit_tips = 0;
     std::ostringstream report;
     report << isolated_tips_name(fixture) << " thin=" << thin << " interfaces=" << interfaces << " layer_height=" << layer_height
@@ -686,9 +767,24 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
             const double radius = unscaled(node.radius), reach = radius + tolerance;
             // The own slab: the lowest layer top at or above the tip node.
             double own_top = std::numeric_limits<double>::max();
-            for (const Layer &layer : object.auxiliary_layers())
-                if (layer.unscaled_print_z() >= node.print_z - 0.01)
-                    own_top = std::min(own_top, layer.unscaled_print_z());
+            const auto own = std::lower_bound(top_order.begin(), top_order.end(), node.print_z - 0.01,
+                [&](size_t id, double z) { return cached_layers[id].print_z < z; });
+            if (own != top_order.end())
+                own_top = cached_layers[*own].print_z;
+            const auto window_top = std::lower_bound(top_order.begin(), top_order.end(), node.print_z - 0.4,
+                [&](size_t id, double z) { return cached_layers[id].print_z < z; });
+            const auto window_bottom = std::upper_bound(bottom_order.begin(), bottom_order.end(), node.print_z + 1.0,
+                [&](double z, size_t id) { return z < cached_layers[id].bottom_z; });
+            std::vector<size_t> window;
+            // Filter the shorter bound-index range using the original inclusive window, then restore publication traversal.
+            if (top_order.end() - window_top <= window_bottom - bottom_order.begin()) {
+                for (auto it = window_top; it != top_order.end(); ++it)
+                    if (!(cached_layers[*it].bottom_z > node.print_z + 1.0)) window.push_back(*it);
+            } else {
+                for (auto it = bottom_order.begin(); it != window_bottom; ++it)
+                    if (!(cached_layers[*it].print_z < node.print_z - 0.4)) window.push_back(*it);
+            }
+            std::sort(window.begin(), window.end());
             std::vector<TipLayerFact> facts;
             double top_material = -1.;
             // The fused island of the own slab that holds the tip centre, else the nearest within the tip radius, and its paths.
@@ -696,7 +792,8 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
             double own_island_distance = std::numeric_limits<double>::max();
             size_t own_island_paths = 0, own_island_deposits = 0;
             bool own_island_centreline = false;
-            // The scan is light (no class, no text) until the tip fails a criterion or is the first of the case, then it describes.
+            // Borrows cached geometry, filling lazy island measurements once; only described tips collect text/point facts.
+            // Scalar results retain the original traversal and nearest-island tie order; failures propagate without mutation of paths.
             const auto scan = [&](bool describe) {
             facts.clear();
             top_material = -1.;
@@ -705,37 +802,43 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
             own_island_paths = 0;
             own_island_deposits = 0;
             own_island_centreline = false;
-            for (const Layer &layer : object.auxiliary_layers()) {
-                const double top_z = layer.unscaled_print_z(), bottom_z = unscaled(layer.scaled_bottom_z());
-                if (top_z < node.print_z - 0.4 || bottom_z > node.print_z + 1.0)
-                    continue;
-                TipLayerFact fact;
-                fact.bottom_z = bottom_z;
-                fact.print_z = top_z;
-                for (const LayerSliceIsland &island : layer.islands())
-                    for (const LayerRegionIsland &region : island.regions_islands()) {
-                        ExPolygons surfaces;
-                        for (const Surface &surface : region.fill_surfaces())
-                            surfaces.push_back(surface.expolygon);
-                        for (const ExPolygon &fused : offset2_ex(surfaces, float(SCALED_EPSILON), -float(SCALED_EPSILON))) {
-                            if (distance_to_region_mm(centre, to_polygons(fused)) > reach)
-                                continue;
-                            size_t leaves = 0, deposits = 0;
-                            if (describe || top_z == own_top) {
-                                // The island itself, boundary included, grown by a rounding tolerance only: a neighbour island's paths do not count.
-                                const ExPolygons area = offset_ex(fused, float(scale_d(0.005)));
-                                for (const ExtrusionRole role : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
-                                    if (region.has_extrusion(role))
-                                        leaves_in_area(region.extrusion(role), area, leaves, deposits);
-                            }
-                            bool centreline = false;
-                            if (describe || top_z == own_top) {
+            for (const size_t id : window) {
+                TipOracleLayer &layer = cached_layers[id];
+                const double top_z = layer.print_z, bottom_z = layer.bottom_z;
+                double nearest_path_mm = std::numeric_limits<double>::max();
+                TipLayerFact *fact = nullptr;
+                if (describe) {
+                    facts.emplace_back();
+                    fact = &facts.back();
+                    fact->bottom_z = bottom_z;
+                    fact->print_z = top_z;
+                }
+                for (TipOracleRegion &region : layer.regions) {
+                    for (size_t island_id = 0; island_id < region.fused.size(); ++island_id) {
+                        const ExPolygon &fused = region.fused[island_id];
+                        if (distance_to_region_mm(centre, to_polygons(fused)) > reach)
+                            continue;
+                        size_t leaves = 0, deposits = 0;
+                        TipOracleIsland &cached = region.islands[island_id];
+                        if (describe || top_z == own_top) {
+                            if (!cached.ready) {
+                                // Grow once by the same boundary tolerance; count leaves individually, including deposits.
+                                const ExPolygons grown = offset_ex(fused, float(scale_d(0.005)));
+                                leaves_in_area(region.paths, grown, cached.leaves, cached.deposits);
                                 PluginStorage class_storage;
-                                const auto measure = slic3r_api::Support::Toolpath::classify_island(
+                                cached.measure = slic3r_api::Support::Toolpath::classify_island(
                                     reinterpret_cast<storage_handle *>(&class_storage),
                                     slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&fused)), width);
-                                centreline = measure.kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline;
-                                if (describe) {
+                                cached.ready = true;
+                            }
+                            leaves = cached.leaves;
+                            deposits = cached.deposits;
+                        }
+                        bool centreline = false;
+                        if (describe || top_z == own_top) {
+                            const slic3r_api::Support::Toolpath::BranchIslandMeasure &measure = cached.measure;
+                            centreline = measure.kind == slic3r_api::Support::Toolpath::BranchIslandClass::Centreline;
+                            if (describe) {
                                 std::ostringstream text;
                                 text << " [island " << unscaled(unscaled(fused.area())) << " mm2 "
                                      << (centreline ? "Centreline" : measure.kind == slic3r_api::Support::Toolpath::BranchIslandClass::Blob ? "Blob" : "Sheath")
@@ -744,27 +847,26 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
                                     text << " width " << island_width_mm(fused);
                                 text << " paths in island " << leaves << " (deposits " << deposits << ")"
                                      << (centreline && leaves == 0 ? " CENTRELINE PRINTED NOTHING" : "") << "]";
-                                fact.islands += text.str();
-                                }
-                            }
-                            const double distance = fused.contains(centre) ? 0. : distance_to_region_mm(centre, to_polygons(fused));
-                            if (top_z == own_top && distance <= radius && distance < own_island_distance) {
-                                own_island = true;
-                                own_island_distance = distance;
-                                own_island_paths = leaves;
-                                own_island_deposits = deposits;
-                                own_island_centreline = centreline;
+                                fact->islands += text.str();
                             }
                         }
-                        for (const ExtrusionRole role : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
-                            if (region.has_extrusion(role)) {
-                                fact.nearest_path_mm = std::min(fact.nearest_path_mm, distance_to_paths_mm(region.extrusion(role), centre));
-                                fact.points_in_circle += path_points_within(region.extrusion(role), centre, radius);
-                            }
+                        const double distance = fused.contains(centre) ? 0. : distance_to_region_mm(centre, to_polygons(fused));
+                        if (top_z == own_top && distance <= radius && distance < own_island_distance) {
+                            own_island = true;
+                            own_island_distance = distance;
+                            own_island_paths = leaves;
+                            own_island_deposits = deposits;
+                            own_island_centreline = centreline;
+                        }
                     }
-                if (fact.nearest_path_mm <= reach)
+                    nearest_path_mm = std::min(nearest_path_mm, distance_to_paths_mm(region.paths, centre));
+                    if (describe)
+                        fact->points_in_circle += path_points_within(region.paths, centre, radius);
+                }
+                if (nearest_path_mm <= reach)
                     top_material = std::max(top_material, top_z);
-                facts.push_back(fact);
+                if (describe)
+                    fact->nearest_path_mm = nearest_path_mm;
             }
             };
             scan(false);
@@ -808,33 +910,100 @@ void check_isolated_tips(int fixture, bool thin, int interfaces, const char *lay
 }
 } // namespace
 
-// The three fixtures run as separate test cases so that the suite runner spreads them over its jobs. Each runs the whole matrix:
-// thin (0.42 / 0.42 / 0.42) and control, 0 and 3 interface layers, layer heights 0.2, 0.3 and 0.15.
-TEST_CASE("Organic tips of an isolated arm leave material", "[plugins][support-tree-organic][support-tree-thin-tips]")
+// Each thickness/interface combination is independently schedulable; every case retains all three layer heights.
+TEST_CASE("Organic tips of an isolated arm leave material (thin, 0 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool thin = GENERATE(true, false);
-    const int interfaces = GENERATE(0, 3);
     const char *layer_height = GENERATE("0.2", "0.3", "0.15");
-    check_isolated_tips(0, thin, interfaces, layer_height);
+    check_isolated_tips(0, true, 0, layer_height);
 }
 
-TEST_CASE("Organic tips of an isolated tab leave material", "[plugins][support-tree-organic][support-tree-thin-tips]")
+// Runs owned thin-arm support at all three heights with three interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated arm leave material (thin, 3 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool thin = GENERATE(true, false);
-    const int interfaces = GENERATE(0, 3);
     const char *layer_height = GENERATE("0.2", "0.3", "0.15");
-    check_isolated_tips(1, thin, interfaces, layer_height);
+    check_isolated_tips(0, true, 3, layer_height);
 }
 
-TEST_CASE("Organic tips of an isolated downward point leave material", "[plugins][support-tree-organic][support-tree-thin-tips]")
+// Runs owned control-arm support at all three heights without interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated arm leave material (control, 0 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool thin = GENERATE(true, false);
-    const int interfaces = GENERATE(0, 3);
     const char *layer_height = GENERATE("0.2", "0.3", "0.15");
-    check_isolated_tips(2, thin, interfaces, layer_height);
+    check_isolated_tips(0, false, 0, layer_height);
+}
+
+// Runs owned control-arm support at all three heights with three interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated arm leave material (control, 3 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(0, false, 3, layer_height);
+}
+
+// Runs owned thin-tab support at all three heights without interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated tab leave material (thin, 0 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(1, true, 0, layer_height);
+}
+
+// Runs owned thin-tab support at all three heights with three interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated tab leave material (thin, 3 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(1, true, 3, layer_height);
+}
+
+// Runs owned control-tab support at all three heights without interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated tab leave material (control, 0 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(1, false, 0, layer_height);
+}
+
+// Runs owned control-tab support at all three heights with three interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated tab leave material (control, 3 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(1, false, 3, layer_height);
+}
+
+// Runs owned thin-point support at all three heights without interfaces, including the helper's required deposit checks.
+TEST_CASE("Organic tips of an isolated downward point leave material (thin, 0 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(2, true, 0, layer_height);
+}
+
+// Runs owned thin-point support at all three heights with three interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated downward point leave material (thin, 3 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(2, true, 3, layer_height);
+}
+
+// Runs owned control-point support at all three heights without interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated downward point leave material (control, 0 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(2, false, 0, layer_height);
+}
+
+// Runs owned control-point support at all three heights with three interfaces; helper assertions and failures reach Catch.
+TEST_CASE("Organic tips of an isolated downward point leave material (control, 3 interfaces)", "[plugins][support-tree-organic][support-tree-thin-tips]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_isolated_tips(2, false, 3, layer_height);
 }
 
 // The base and dense slabs lie between the minimum and the largest thickness, and every slab edge sits on the layer Z grid,
@@ -2698,14 +2867,50 @@ void check_final_slab_clearance(TriangleMesh mesh, const char *style, int interf
     REQUIRE(violations == 0);
 }
 
-// The base, interface, contact and floor slabs of a shelf, a low roof and a lobe respect a small, a large, an asymmetric and a
-// variable-layer-height gap. The shelf roof at 8 mm lies in the thick band; the low roof at 2 mm lies in the thin band of the
-// variable profile, with the gap window of its contact; the lower lobe of the shelf provides a model surface for the floors. One
-// test case per style, so that they can run apart.
-void check_shelf_clearance(const char *style)
+} // namespace
+
+// Runs owned tree shelf geometry for all four gap scenarios; slab assertions and generation failures reach Catch.
+TEST_CASE("Final tree slabs respect small large asymmetric and variable physical Z gaps", "[plugins][support-tree-family][support-tree-slab-clearance]")
 {
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
     const GapScenario scenario = GENERATE(GapScenario{ "0.08", "0.08", false, false }, GapScenario{ "0.5", "0.5", false, true },
         GapScenario{ "0.5", "0.15", false, true }, GapScenario{ "0.15", "0.15", true, true });
+    check_shelf_clearance("tree", scenario);
+}
+
+// Checks owned organic shelf slabs with symmetric 0.08 mm gaps; helper assertions and generation failures reach Catch.
+TEST_CASE("Final organic slabs respect physical Z gaps (small)", "[plugins][support-tree-family][support-tree-slab-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_shelf_clearance("organic", GapScenario{ "0.08", "0.08", false, false });
+}
+
+// Checks owned organic shelf slabs with symmetric 0.5 mm gaps and floors; helper failures reach Catch.
+TEST_CASE("Final organic slabs respect physical Z gaps (large)", "[plugins][support-tree-family][support-tree-slab-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_shelf_clearance("organic", GapScenario{ "0.5", "0.5", false, true });
+}
+
+// Checks owned organic shelf slabs with 0.5/0.15 mm gaps and floors; helper failures reach Catch.
+TEST_CASE("Final organic slabs respect physical Z gaps (asymmetric)", "[plugins][support-tree-family][support-tree-slab-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_shelf_clearance("organic", GapScenario{ "0.5", "0.15", false, true });
+}
+
+// Checks owned organic shelf slabs with variable heights and symmetric 0.15 mm gaps; helper failures reach Catch.
+TEST_CASE("Final organic slabs respect physical Z gaps (variable layers)", "[plugins][support-tree-family][support-tree-slab-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_shelf_clearance("organic", GapScenario{ "0.15", "0.15", true, true });
+}
+
+namespace {
+// Builds owned shelf/low-roof/lobe geometry for the borrowed style and gap scenario, then checks every final slab with three
+// interfaces. The 8 mm roof and 2 mm roof exercise thick/thin profile bands; generation failures propagate to Catch.
+void check_shelf_clearance(const char *style, const GapScenario &scenario)
+{
     CAPTURE(style, scenario.above, scenario.below, scenario.variable_layers);
     TriangleMesh mesh = Slic3r::Test::SupportTree::comparison_mesh(2);
     TriangleMesh low_roof = make_cube(12., 8., 0.4);
@@ -2714,18 +2919,6 @@ void check_shelf_clearance(const char *style)
     check_final_slab_clearance(std::move(mesh), style, 3, scenario, true);
 }
 } // namespace
-
-TEST_CASE("Final tree slabs respect small large asymmetric and variable physical Z gaps", "[plugins][support-tree-family][support-tree-slab-clearance]")
-{
-    Test::Plugins::ensure_plugin_test_runtime_initialized();
-    check_shelf_clearance("tree");
-}
-
-TEST_CASE("Final organic slabs respect small large asymmetric and variable physical Z gaps", "[plugins][support-tree-family][support-tree-slab-clearance]")
-{
-    Test::Plugins::ensure_plugin_test_runtime_initialized();
-    check_shelf_clearance("organic");
-}
 
 // Without interface layers the top contacts are rebuilt from the branches drawn at their middle and the tip stretches that cross
 // them. Under a sloped overhang (a staircase whose roofs fall on consecutive layers) the tip stretch of a neighbouring roof then
@@ -2749,11 +2942,38 @@ TEST_CASE("Rebuilt tip contacts of a sloped overhang respect the physical Z gaps
 // The routing and the final trim both use the XY distance of the user (support_material_xy_spacing). With a spacing of 1 mm no
 // final slab may come closer than that to the layers of its Z span or of its gap windows, except to the layer a top contact supports
 // or a floor rests on, whose clearance is set by the contact placement.
-TEST_CASE("Final tree and organic slabs keep the normal XY distance from the object", "[plugins][support-tree-family][support-tree-xy-clearance]")
+TEST_CASE("Final tree slabs keep the normal XY distance from the object (3 interfaces)", "[plugins][support-tree-family][support-tree-xy-clearance]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const char *style = GENERATE("tree", "organic");
-    const int interfaces = GENERATE(3, 0);
+    check_normal_xy_clearance("tree", 3);
+}
+
+// Checks owned tree slabs without interfaces against normal XY clearance; helper failures reach Catch.
+TEST_CASE("Final tree slabs keep the normal XY distance from the object (0 interfaces)", "[plugins][support-tree-family][support-tree-xy-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_normal_xy_clearance("tree", 0);
+}
+
+// Checks owned organic slabs with three interfaces against normal XY clearance; helper failures reach Catch.
+TEST_CASE("Final organic slabs keep the normal XY distance from the object (3 interfaces)", "[plugins][support-tree-family][support-tree-xy-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_normal_xy_clearance("organic", 3);
+}
+
+// Checks owned organic slabs without interfaces against normal XY clearance; helper failures reach Catch.
+TEST_CASE("Final organic slabs keep the normal XY distance from the object (0 interfaces)", "[plugins][support-tree-family][support-tree-xy-clearance]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    check_normal_xy_clearance("organic", 0);
+}
+
+namespace {
+// Routes owned shelf/low-roof/lobe geometry for the borrowed style and interface count, then checks final slabs against
+// 1 mm expanded object outlines in their Z/gap windows. Print/model own geometry; generation failures and checks reach Catch.
+void check_normal_xy_clearance(const char *style, int interfaces)
+{
     CAPTURE(style, interfaces);
     DynamicPrintConfig config = SG::config(style, false, interfaces);
     config.set_deserialize_strict({{"support_material_synchronize_layers", "0"}, {"support_material_xy_spacing", "1"}});
@@ -2801,6 +3021,7 @@ TEST_CASE("Final tree and organic slabs keep the normal XY distance from the obj
     REQUIRE(non_empty > 0);
     REQUIRE(checked_pairs > 0);
 }
+} // namespace
 
 // Generates and publishes soluble supports below a roof beside its post; final trimmed/smoothed surfaces must occupy positive
 // area in the outer 0.08 mm band of a vertically overlapping object layer. Print/model own inputs and published output;
@@ -3538,11 +3759,26 @@ TEST_CASE("The API union lists nested islands from outside to inside", "[plugins
 // 3 interface layers must be ordered outside to inside, which the Debug build asserts when a layer is published (Layer.cpp,
 // recompute_slices_from_layer_regions). The support layers are rebuilt here as publish() builds them. The interface slabs of the point are rings around the cone section, with
 // branch discs in their holes.
-TEST_CASE("The islands of the layers of the downward point are ordered from outside to inside", "[plugins][support-island-order]")
+TEST_CASE("The islands of the layers of the downward point are ordered from outside to inside (thin)", "[plugins][support-island-order]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
-    const bool thin = GENERATE(true, false);
     const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_downward_point_island_order(true, layer_height);
+}
+
+// Checks owned control-point islands at all three heights through the ordering helper; failures reach Catch.
+TEST_CASE("The islands of the layers of the downward point are ordered from outside to inside (control)", "[plugins][support-island-order]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *layer_height = GENERATE("0.2", "0.3", "0.15");
+    check_downward_point_island_order(false, layer_height);
+}
+
+namespace {
+// Slices owned downward-point geometry with the selected thickness and borrowed height string, then checks object islands
+// and support islands unioned by publication Z/thickness. Geometry stays locally owned; generation failures reach Catch.
+void check_downward_point_island_order(bool thin, const char *layer_height)
+{
     CAPTURE(thin, layer_height);
     DynamicPrintConfig config = SG::config("organic", false, 3, true);
     config.set_deserialize_strict({{"layer_height", layer_height}, {"first_layer_height", layer_height}});
@@ -3588,6 +3824,7 @@ TEST_CASE("The islands of the layers of the downward point are ordered from outs
     CAPTURE(groups, violations, report.str());
     CHECK(violations == 0);
 }
+} // namespace
 
 // Close print Z: the print z of the supports are kept more than 4 * SCALED_EPSILON (512 units, 0.5 um) apart from the other z of the print by a host pass
 // at the end of STEP_SUPPORT (Steps::StepGenerateSupport). The reproductions list the Z involved (on stderr, and in CLOSEZ_DUMP_DIR when that

@@ -7,10 +7,12 @@
    and check the documented behavior: orientation (contours CCW, holes CW), empty input, rings that collapse, and touching
    rings that merge (the accepted difference). Results are compared as NonZero regions and by ring count, never ring by
    ring: the order of the rings and their first point differ from the native result.
+   Canonical ring lists keep orientation and ignore start points and collection order; identical lists have zero symmetric difference.
    A symmetric difference below 1e-3 mm2 per collection is required. */
 #include <catch2/catch.hpp>
 
 #include "plugin_test_helpers.hpp"
+#include "clipper_offset_test_helpers.hpp"
 #include "polygon_metrics_test_helpers.hpp"
 #include "test_data.hpp"
 
@@ -92,6 +94,7 @@ size_t wrong_orientation_count(const Polygons &polygons)
     return wrong;
 }
 
+// Slice one test-owned model centered at (100, 100) with default active plugins; return copied layers, with exceptions propagated; validation diagnostics are not checked.
 std::vector<Polygons> sliced_layers(Test::TestMesh mesh)
 {
     // The Print needs the plugin runtime.
@@ -100,7 +103,17 @@ std::vector<Polygons> sliced_layers(Test::TestMesh mesh)
     Print print;
     Model model;
     config.set_deserialize_strict({{"support_material", "0"}, {"layer_height", "0.3"}, {"first_layer_height", "0.3"}});
-    Test::init_print({mesh}, print, model, config);
+    ModelObject *object = model.add_object();
+    object->name = "object.stl";
+    object->add_volume(Test::mesh(mesh));
+    object->add_instance();
+    // Default arrangement allows no rotation; centering this sole instance fixes the same XY position without packing.
+    model.center_instances_around_point({100, 100});
+    object->ensure_on_bed();
+    print.auto_assign_extruders(object);
+    print.apply(model, config);
+    print.validate();
+    print.set_status_silent();
     Orchestrator &host = Orchestrator::instance();
     Steps::StepLayerHeightGeneration::prepare(print);
     Steps::StepLayerHeightGeneration::run_step(host, print);
@@ -113,11 +126,20 @@ std::vector<Polygons> sliced_layers(Test::TestMesh mesh)
     return layers;
 }
 
+// Simplify borrowed rings at a millimeter tolerance; return area difference and report failed geometry checks, retaining both owned results locally.
 double compare_with_native(const Polygons &input, double tolerance_mm, bool expect_same_ring_count)
 {
     const Polygons api = simplify_api(input, tolerance_mm);
     const Polygons native = simplify_native(input, tolerance_mm);
-    const double diff = PM::sym_diff_mm2(api, native);
+    // Canonical rings preserve orientation; equal sorted ring lists describe exactly the same NonZero region.
+    std::vector<clipper_offset_test::CanonicalRing> api_rings, native_rings;
+    for (const Polygon &ring : api)
+        api_rings.push_back(clipper_offset_test::canonical_ring(ring));
+    for (const Polygon &ring : native)
+        native_rings.push_back(clipper_offset_test::canonical_ring(ring));
+    std::sort(api_rings.begin(), api_rings.end());
+    std::sort(native_rings.begin(), native_rings.end());
+    const double diff = api_rings == native_rings ? 0. : PM::sym_diff_mm2(api, native);
     CHECK(diff < max_sym_diff_mm2);
     // The comparison is not vacuous: something is kept.
     if (!input.empty())

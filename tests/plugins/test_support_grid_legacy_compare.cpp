@@ -7,8 +7,8 @@
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Support/SupportMaterial.hpp"
 
-/* Comparison runs identical object-slicing prefixes, then chooses the new
-   grid family or native legacy generator. Auxiliary-layer contours, heights
+/* Comparison runs one object-slicing prefix, then the new grid family; its layers are
+   detached and the native legacy generator runs on the same object. Auxiliary-layer contours, heights
    and print Z are measured before extrusion roles can affect the comparison.
     Per-Z symmetric difference measures geometry rather than polygon order.
     Original native slabs supply the set of printable thicknesses at each Z.
@@ -18,7 +18,8 @@
     Its region surface caches are reconstructed from current raw slices and
     island fill surfaces because production no longer fills those caches. Its
     concrete extrusion classes are rebuilt from generic tree leaves with the
-    same geometry and effective flow attributes, preserving loop boundaries. */
+    same geometry and effective flow attributes, preserving loop boundaries.
+    Single-layer print Z groups reuse their per-layer overlap areas while retaining both sets of checks. */
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -27,6 +28,8 @@ using SG::measure_layer;
 using SG::prepare_legacy_inputs;
 
 namespace {
+// Slice and compare native/family support for one model, configuration and optional pattern variant.
+void compare(int model_id, const char *style, bool soluble, int interfaces, bool same_tool, const char *variant);
 // Run one model through every style, contact-distance and interface-count combination.
 void run_comparison(int model_id, bool same_tool = false);
 // Check published geometry and contact spacing independently of the native comparison; on_object false
@@ -38,6 +41,21 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
 void check_published_paths(const ExtrusionEntity &entity, const Layer &layer);
 // Hash the published auxiliary layers (Z, thickness, extruder, surface types and points) of the family.
 uint64_t published_hash(const PrintObject &object);
+// Hashes of what the native generator reads from the object layers. geometry: per layer the print Z, the scaled height, the ids of the
+// lower and upper layers (-1 when absent), the slices, the raw slice of every region, and per region island the extruder, the indices
+// (in the layer) of its regions and its fill surfaces (type and polygons). extrusions: per region island and per perimeter, gap fill,
+// infill, ironing, milling, support and support interface bucket, whether it exists, its leaf count and, per leaf in tree order, the
+// effective role, width, height, mm3_per_mm and every point.
+struct ObjectFingerprint {
+    uint64_t geometry = 0, extrusions = 0;
+};
+// Fingerprint the object layers (not the auxiliary ones), to prove that the support steps leave them unmodified.
+ObjectFingerprint object_fingerprint(const PrintObject &object);
+// Count the polyline leaves of an extrusion tree.
+size_t count_extrusion_leaves(const ExtrusionEntity &entity);
+// Mix into hash the effective attributes (role, width, height, mm3_per_mm; the nearest ancestor's when a leaf has none, -1 when no
+// attributes exist) and the points of every polyline leaf of the tree, in tree order.
+void mix_extrusion_leaves(uint64_t &hash, const ExtrusionEntity &entity, const ExtrusionAttributes *attributes = nullptr);
 // Append one comparison result line to the file named by SLIC3R_SUPPORT_COMPARE_TABLE, when it is set.
 void record_comparison(const std::string &section, double slice, double length, double volume, uint64_t hash);
 
@@ -87,6 +105,118 @@ uint64_t published_hash(const PrintObject &object)
             }
     }
     return hash;
+}
+
+// Count the polyline leaves of an extrusion tree.
+size_t count_extrusion_leaves(const ExtrusionEntity &entity)
+{
+    size_t count = entity.has_polyline() ? 1 : 0;
+    for (const ExtrusionEntityUPtr &child : entity.children()) count += count_extrusion_leaves(*child);
+    return count;
+}
+
+// FNV-1a over the 8 bytes of a value, as published_hash() does.
+void mix_value(uint64_t &hash, int64_t value)
+{
+    for (int byte = 0; byte < 8; ++byte) {
+        hash ^= uint64_t(value >> (byte * 8)) & 0xff;
+        hash *= 1099511628211ull;
+    }
+}
+
+// Mix the bits of a floating point value, so that the smallest change of a width, height or flow changes the hash.
+void mix_double(uint64_t &hash, double value)
+{
+    int64_t bits = 0;
+    static_assert(sizeof(bits) == sizeof(value));
+    std::memcpy(&bits, &value, sizeof(bits));
+    mix_value(hash, bits);
+}
+
+// Walk the tree like measure_paths(): a leaf takes the attributes of its nearest ancestor that has some, unless it has its own.
+void mix_extrusion_leaves(uint64_t &hash, const ExtrusionEntity &entity, const ExtrusionAttributes *attributes)
+{
+    if (const ExtrusionAttributes *local = entity.get_property<ExtrusionAttributes>()) attributes = local;
+    if (entity.has_polyline()) {
+        if (attributes == nullptr) {
+            mix_value(hash, -1);
+        } else {
+            mix_value(hash, int64_t(attributes->role));
+            mix_double(hash, double(attributes->width));
+            mix_double(hash, double(attributes->height));
+            mix_double(hash, attributes->mm3_per_mm);
+        }
+        const ArcPolyline &polyline = entity.polyline_ref();
+        mix_value(hash, int64_t(polyline.size()));
+        for (size_t idx = 0; idx < polyline.size(); ++idx) {
+            mix_value(hash, polyline.get_point(idx).x());
+            mix_value(hash, polyline.get_point(idx).y());
+        }
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children()) mix_extrusion_leaves(hash, *child, attributes);
+}
+
+// Walk the object layers (the auxiliary ones are not read) and hash what ObjectFingerprint describes; nothing is modified.
+ObjectFingerprint object_fingerprint(const PrintObject &object)
+{
+    ObjectFingerprint result{1469598103934665603ull, 1469598103934665603ull};
+    const auto mix = mix_value;
+    const auto mix_polygon = [&](const Polygon &polygon) {
+        mix(result.geometry, int64_t(polygon.points.size()));
+        for (const Point &point : polygon.points) {
+            mix(result.geometry, point.x());
+            mix(result.geometry, point.y());
+        }
+    };
+    const auto mix_expolygon = [&](const ExPolygon &expolygon) {
+        mix_polygon(expolygon.contour);
+        mix(result.geometry, int64_t(expolygon.holes.size()));
+        for (const Polygon &hole : expolygon.holes) mix_polygon(hole);
+    };
+    const auto mix_expolygons = [&](const ExPolygons &expolygons) {
+        mix(result.geometry, int64_t(expolygons.size()));
+        for (const ExPolygon &expolygon : expolygons) mix_expolygon(expolygon);
+    };
+    for (const Layer &layer : object.layers()) {
+        mix(result.geometry, layer.scaled_print_z());
+        mix(result.geometry, layer.scaled_height());
+        mix(result.geometry, layer.lower_layer != nullptr ? int64_t(layer.lower_layer->id()) : int64_t(-1));
+        mix(result.geometry, layer.upper_layer != nullptr ? int64_t(layer.upper_layer->id()) : int64_t(-1));
+        mix_expolygons(layer.lslices());
+        for (const LayerRegion &region : layer.regions())
+            mix_expolygons(region.get_raw_slices());
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &work : island.regions_islands()) {
+                mix(result.geometry, int64_t(work.extruder_id()));
+                // The regions of the island, as their indices in the layer.
+                mix(result.geometry, int64_t(work.regions().size()));
+                int64_t region_index = 0;
+                for (const LayerRegion &region : layer.regions()) {
+                    if (work.regions().count(&region) != 0)
+                        mix(result.geometry, region_index);
+                    ++region_index;
+                }
+                mix(result.geometry, int64_t(work.fill_surfaces().size()));
+                for (const Surface &surface : work.fill_surfaces()) {
+                    mix(result.geometry, int64_t(surface.surface_type));
+                    mix_expolygon(surface.expolygon);
+                }
+                // The role index in this fixed list identifies the role in the hash.
+                int64_t role_index = 0;
+                for (const ExtrusionRole role : {LayerRegionIsland::PERIMETERS, LayerRegionIsland::GAP_FILLS, LayerRegionIsland::INFILLS,
+                                                 LayerRegionIsland::IRONINGS, LayerRegionIsland::MILLS, LayerRegionIsland::SUPPORT,
+                                                 LayerRegionIsland::SUPPORT_INTERFACE}) {
+                    mix(result.extrusions, role_index++);
+                    if (!work.has_extrusion(role)) {
+                        mix(result.extrusions, -1);
+                        continue;
+                    }
+                    mix(result.extrusions, int64_t(count_extrusion_leaves(work.extrusion(role))));
+                    mix_extrusion_leaves(result.extrusions, work.extrusion(role));
+                }
+            }
+    }
+    return result;
 }
 
 // The table lets a refactoring of the family prove that every comparison gives the same deviations
@@ -143,7 +273,9 @@ void apply_variant(DynamicPrintConfig &config, const char *variant)
         FAIL("Unknown comparison variant " << variant);
 }
 
-// Slice two owned prints and compare geometry, original slab heights and path totals at each Z; separate same-Z family layers are unioned, and the one-percent tolerance stays fixed.
+// Slice one locally owned print for the supplied variant, with one shared prefix: run the plugin family and its toolpaths, check that the object
+// layers are unmodified, detach the plugin support layers, then run the native generator on the same object, and compare geometry, slab heights
+// and paths per Z; report failed one-percent checks and write a table only when requested.
 void compare(int model_id, const char *style, bool soluble, int interfaces, bool same_tool, const char *variant)
 {
     DYNAMIC_SECTION("model=" << model_id << " style=" << style << " soluble=" << soluble << " interfaces=" << interfaces
@@ -173,28 +305,38 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
             // angle detection differs because native detect_overhangs expands its threshold strip back to the object's edge.
             config.set_deserialize_strict({{"support_material_threshold", "60"}, {"support_material_enforce_layers", "100"}});
         }
-        Print plugin_print, legacy_print;
-        Model plugin_model, legacy_model;
-        Test::init_print({mesh}, plugin_print, plugin_model, config);
-        Test::init_print({mesh}, legacy_print, legacy_model, config);
-        SG::prefix(plugin_print);
-        SG::prefix(legacy_print);
-        REQUIRE(legacy_print.object(0).auxiliary_layers().empty());
-        SG::family(plugin_print);
-        const PrintObject &plugin_object = plugin_print.object(0);
-        const SG::Generated generated_support(plugin_print, plugin_object);
-        check_family(plugin_object, generated_support.support, SG::params(plugin_print, plugin_object), model_id,
+        // One print serves both implementations: the family and its toolpaths run first, their layers are then detached
+        // and the native generator runs on the same object, which the support steps leave unmodified (checked below).
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, config);
+        SG::prefix(print);
+        PrintObject &object = print.object(0);
+        REQUIRE(object.auxiliary_layers().empty());
+        const ObjectFingerprint prefix_fingerprint = object_fingerprint(object);
+        SG::family(print);
+        const SG::Generated generated_support(print, object);
+        check_family(object, generated_support.support, SG::params(print, object), model_id,
                      variant == nullptr || strcmp(variant, "buildplate_only") != 0);
-        SG::toolpaths(plugin_print);
+        SG::toolpaths(print);
+        const ObjectFingerprint support_fingerprint = object_fingerprint(object);
+        REQUIRE(support_fingerprint.geometry == prefix_fingerprint.geometry);
+        REQUIRE(support_fingerprint.extrusions == prefix_fingerprint.extrusions);
+        const char *table_path = std::getenv("SLIC3R_SUPPORT_COMPARE_TABLE");
+        const bool write_table = table_path != nullptr && table_path[0] != 0;
+        // Hashed while the object still holds the layers of the family.
+        const uint64_t plugin_hash = write_table ? published_hash(object) : 0;
 
-        PrintObject &legacy_object = legacy_print.object(0);
-        prepare_legacy_inputs(legacy_object);
-        PrintObjectSupportMaterial generator(&legacy_object, std::make_shared<SlicingParameters>(legacy_object.slicing_parameters()));
+        // The plugin layers stay alive in this vector, declared after the print and the model that outlive it, until the
+        // end of the section. They reference the object only through their own pointers and destroy nothing of it.
+        LayerUPtrs plugin_layers = std::move(object.mutable_auxiliary_layers());
+        REQUIRE(object.auxiliary_layers().empty());
+        prepare_legacy_inputs(object);
+        PrintObjectSupportMaterial generator(&object, std::make_shared<SlicingParameters>(object.slicing_parameters()));
         SG::NativeSlabs native_slabs;
-        SG::native_slabs(legacy_object, generator, native_slabs);
-        generator.generate(legacy_object);
-        const LayerRefs generated = plugin_print.object(0).auxiliary_layers();
-        const LayerRefs legacy = legacy_object.auxiliary_layers();
+        SG::native_slabs(object, generator, native_slabs);
+        const LayerRefs generated = make_ref_view<Layer>(plugin_layers);
+        const LayerRefs legacy = object.auxiliary_layers();
         REQUIRE_FALSE(generated.empty());
         REQUIRE_FALSE(legacy.empty());
         CAPTURE(generated.size(), legacy.size());
@@ -213,9 +355,9 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
                 z_paths[key].count += paths.count;
             }
         }
-        for (const SG::NativeLayers *layers : {&native_slabs.top, &native_slabs.bottom, &native_slabs.base, &native_slabs.interfaces})
-            for (const FFFSupport::SupportGeneratorLayer *slab : *layers)
-                if (!slab->polygons.empty()) native_heights_by_z[slab->scaled_print_z()].insert(slab->scaled_height());
+        // The heights recorded by native_slabs() before layer installation and toolpaths changed the slabs.
+        for (const std::pair<coord_t, coord_t> &slab : native_slabs.heights)
+            native_heights_by_z[slab.first].insert(slab.second);
         REQUIRE(slices_by_z.size() == legacy.size());
         CHECK(heights_by_z == native_heights_by_z);
         CHECK(heights_by_z.begin()->second.size() == 1);
@@ -257,9 +399,9 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
                     // are enabled on that side and the support bucket when it prints it with base
                     // settings. The role writes into the region island of its own tool, which can be a
                     // sibling of the island holding the surface, so the check is per layer.
-                    const bool top_interface_layers = plugin_object.config().support_material_interface_layers.value != 0;
-                    const bool bottom_interface_layers = plugin_object.config().support_material_bottom_interface_layers.is_enabled() ?
-                        plugin_object.config().support_material_bottom_interface_layers.value != 0 : top_interface_layers;
+                    const bool top_interface_layers = object.config().support_material_interface_layers.value != 0;
+                    const bool bottom_interface_layers = object.config().support_material_bottom_interface_layers.is_enabled() ?
+                        object.config().support_material_bottom_interface_layers.value != 0 : top_interface_layers;
                     bool dense_needs_interface = false, dense_surface = false, sparse_surface = false;
                     bool dense_paths = false, sparse_paths = false, interface_paths = false;
                     for (const LayerSliceIsland &island : layer.islands())
@@ -315,14 +457,16 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
         }
         // Report the largest measured deviation only when this section fails.
         INFO("largest deviations: slice=" << maximum_difference << " length=" << maximum_length_difference << " volume=" << maximum_volume_difference);
-        std::ostringstream section;
-        section << "model=" << model_id << " style=" << style << " soluble=" << soluble << " interfaces=" << interfaces
-                << " same_tool=" << same_tool << " variant=" << (variant != nullptr ? variant : "");
-        if (honeycomb)
-            section << " legacy_paths=" << honeycomb_legacy_paths << " plugin_paths=" << honeycomb_plugin_paths
-                    << " legacy_length=" << honeycomb_legacy_length << " plugin_length=" << honeycomb_plugin_length;
-        record_comparison(section.str(), maximum_difference, maximum_length_difference, maximum_volume_difference,
-                          published_hash(plugin_object));
+        if (write_table) {
+            std::ostringstream section;
+            section << "model=" << model_id << " style=" << style << " soluble=" << soluble << " interfaces=" << interfaces
+                    << " same_tool=" << same_tool << " variant=" << (variant != nullptr ? variant : "");
+            if (honeycomb)
+                section << " legacy_paths=" << honeycomb_legacy_paths << " plugin_paths=" << honeycomb_plugin_paths
+                        << " legacy_length=" << honeycomb_legacy_length << " plugin_length=" << honeycomb_plugin_length;
+            record_comparison(section.str(), maximum_difference, maximum_length_difference, maximum_volume_difference,
+                              plugin_hash);
+        }
     }
 }
 
@@ -336,7 +480,7 @@ void run_comparison(int model_id, bool same_tool)
     compare(model_id, style, soluble, interfaces, same_tool, "");
 }
 
-// Check published slabs without changing them; temporary contacts identify adjacent object layers for gap arithmetic, and model_id selects roofs or supporting platforms.
+// Check borrowed slabs without changing them; contacts identify adjacent layers, model_id selects roof/platform expectations, and geometry/spacing failures are reported as checks.
 void check_family(const PrintObject &object, const slic3r_api::Support::Common::GeneratedSupport &support,
                   const slic3r_api::Support::Common::SupportParams &p, int model_id, bool on_object)
 {
@@ -467,7 +611,10 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
     {
         std::map<std::pair<coord_t, coord_t>, std::array<Polygons, 3>> per_layer;
         std::map<coord_t, std::array<Polygons, 3>> per_z;
-        for (const Layer &layer : object.auxiliary_layers())
+        std::map<coord_t, size_t> layers_per_z;
+        std::map<coord_t, std::array<double, 3>> overlap_per_z;
+        for (const Layer &layer : object.auxiliary_layers()) {
+            ++layers_per_z[layer.scaled_print_z()];
             for (const LayerSliceIsland &island : layer.islands())
                 for (const LayerRegionIsland &work : island.regions_islands())
                     for (const Surface &surface : work.fill_surfaces()) {
@@ -478,17 +625,25 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
                         polygons_append(per_layer[{layer.scaled_print_z(), layer.scaled_height()}][kind], surface.expolygon);
                         polygons_append(per_z[layer.scaled_print_z()][kind], surface.expolygon);
                     }
+        }
         for (const auto &[key, kinds] : per_layer)
             for (size_t a = 0; a < 3; ++a)
                 for (size_t b = a + 1; b < 3; ++b) {
                     CAPTURE(key.first, key.second, a, b);
-                    CHECK(area(intersection_ex(kinds[a], kinds[b])) < 1e3);
+                    const double overlap = area(intersection_ex(kinds[a], kinds[b]));
+                    // The three unordered kind pairs (0,1), (0,2), (1,2) use slots 0, 1, 2.
+                    if (layers_per_z.at(key.first) == 1)
+                        overlap_per_z[key.first][a + b - 1] = overlap;
+                    CHECK(overlap < 1e3);
                 }
         for (const auto &[z, kinds] : per_z)
             for (size_t a = 0; a < 3; ++a)
                 for (size_t b = a + 1; b < 3; ++b) {
                     CAPTURE(z, a, b);
-                    CHECK(area(intersection_ex(kinds[a], kinds[b])) < 1e3);
+                    // With one layer at this Z the polygons are identical to those already checked above.
+                    const double overlap = layers_per_z.at(z) == 1 ? overlap_per_z.at(z)[a + b - 1] :
+                        area(intersection_ex(kinds[a], kinds[b]));
+                    CHECK(overlap < 1e3);
                 }
     }
 }

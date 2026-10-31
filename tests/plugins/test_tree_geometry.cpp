@@ -128,6 +128,8 @@ bool same_order(const std::vector<c_bounding_box> &boxes);
 std::vector<c_bounding_box> random_boxes(std::mt19937 &rng, size_t count, coord_t range, coord_t max_side, coord_t step);
 // Check one Clipper result against the native one: same region and, unless told otherwise, same ring count; track the largest difference.
 void check_polygons(const Polygons &mine, const Polygons &native, Largest &largest, bool same_ring_count = true);
+// Check Clipper wrappers on deterministic scenes and return their difference report.
+std::string run_clipper_wrappers();
 // The same for expolygons: same region, same expolygon count, same ring count.
 void check_expolygons(const ExPolygons &mine, const ExPolygons &native, Largest &largest);
 // Rings that tell the fill rules apart, clean or not.
@@ -241,15 +243,17 @@ std::vector<c_bounding_box> random_boxes(std::mt19937 &rng, size_t count, coord_
     return boxes;
 }
 
+// Compare borrowed rings by canonical form or NonZero difference; record statistics and failed area/count checks without changing inputs.
 void check_polygons(const Polygons &mine, const Polygons &native, Largest &largest, bool same_ring_count)
 {
-    const double diff = PM::sym_diff_mm2(mine, native);
+    const bool identical_rings = ST::rings_of(mine) == ST::rings_of(native);
+    const double diff = identical_rings ? 0. : PM::sym_diff_mm2(mine, native);
     CHECK(diff < max_sym_diff_mm2);
     if (same_ring_count)
         CHECK(mine.size() == native.size());
     largest.sym_diff = std::max(largest.sym_diff, diff);
     ++largest.compared;
-    if (ST::rings_of(mine) == ST::rings_of(native))
+    if (identical_rings)
         ++largest.identical_rings;
 }
 
@@ -752,7 +756,7 @@ TEST_CASE("spatial_order gives the exact order of the native AABB tree", "[plugi
 }
 
 namespace {
-// The checks of the random scenes and of the edge cases; returns the largest differences with the native result, for the report case.
+// Compare locally owned deterministic scenes with native operations, reporting failed checks and returning the largest differences as text.
 std::string run_clipper_wrappers()
 {
     std::string report;
@@ -768,8 +772,9 @@ std::string run_clipper_wrappers()
             const ExPolygons a_ex = union_ex(a);
             const ExPolygons b_ex = union_ex(b);
             const slic3r_api::PolygonCollection a_view = view_of(a), b_view = view_of(b);
+            const Polygons clean = union_(a);
 
-            check_polygons(SG::native(TF::polygons_union(storage, a_view)), union_(a), unions);
+            check_polygons(SG::native(TF::polygons_union(storage, a_view)), clean, unions);
             check_polygons(SG::native(TF::polygons_union(storage, a_view, b_view)), union_(a, b), unions);
             check_polygons(SG::native(TF::polygons_union(storage, view_of(a_ex))), union_(a_ex), unions);
             check_polygons(SG::native(TF::polygons_diff(storage, a_view, b_view)), diff(a, b), diffs);
@@ -778,7 +783,6 @@ std::string run_clipper_wrappers()
             check_polygons(SG::native(TF::polygons_intersection(storage, view_of(a_ex), view_of(b_ex))), intersection(a_ex, b_ex), intersections);
 
             // The rings of a without overlap (a union), the counter-clockwise rings of a alone (overlapping, no hole), and expolygons.
-            const Polygons clean = union_(a);
             Polygons ccw_only;
             for (const Polygon &ring : a)
                 if (ring.is_counter_clockwise())
@@ -821,7 +825,7 @@ std::string run_clipper_wrappers()
                 }
             }
 
-            check_expolygons(SG::native(TF::expolygons_union(storage, a_view)), union_ex(a), expolygon_ops);
+            check_expolygons(SG::native(TF::expolygons_union(storage, a_view)), a_ex, expolygon_ops);
             check_expolygons(SG::native(TF::expolygons_union(storage, view_of(a_ex))), union_ex(a_ex), expolygon_ops);
             check_expolygons(SG::native(TF::expolygons_diff(storage, a_view, b_view)), diff_ex(a, b), expolygon_ops);
             check_expolygons(SG::native(TF::expolygons_diff(storage, view_of(a_ex), view_of(b_ex))), diff_ex(a_ex, b_ex), expolygon_ops);
