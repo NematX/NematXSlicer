@@ -5,6 +5,7 @@
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/LegacySupportPaths.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCloseZ.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 
 #include <cmath>
@@ -464,6 +465,41 @@ TEST_CASE("Native support path modulation keeps the paths no footprint touches",
     CHECK(second_attributes->c_extrusion_property_attributes::role == second_role);
     CHECK(second_attributes->c_extrusion_property_attributes::height == 0.2f);
     CHECK(second_attributes->mm3_per_mm() == Approx(0.1));
+}
+
+// With a Z step of 0.04 mm and layers of 0.04 mm, the contact match window (SCALED_EPSILON + 2 * the close-Z limit, about one step) holds the
+// neighbouring object layers too: the match keeps the layer nearest to the expected Z, the lower one on a tie, and none when the window is empty.
+TEST_CASE("Contact match keeps the nearest object layer", "[plugins][support-toolpath-legacy][support-close-z-step]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = SG::config("grid", false, 0);
+    config.set_deserialize_strict({{"z_step", "0.04"}, {"layer_height", "0.04"}, {"first_layer_height", "0.04"},
+                                   {"min_layer_height", "0.04,0.04"}, {"max_layer_height", "0.04,0.04"}});
+    Print print;
+    Model model;
+    Test::init_print({make_cube(10., 10., 1.)}, print, model, config);
+    SG::prefix(print);
+    const PrintObject &host_object = print.object(0);
+    const slic3r_api::Object object = SG::object_view(host_object);
+    const uint32_t count = object.layer_count();
+    REQUIRE(count > 12);
+    const uint32_t k = 10;
+    const coord_t step = scale_to_layer_coord(0.04);
+    REQUIRE(object.layer(k + 1).bottom_z() - object.layer(k).bottom_z() == step);
+    REQUIRE(object.layer(k).print_z() - object.layer(k).bottom_z() == step);
+    const coord_t tolerance = SCALED_EPSILON + 2 * slic3r_api::Support::Common::close_z_tolerance_limit(0.04);
+    REQUIRE(tolerance > step);
+    // Both neighbours lie in the window, yet the layer on the expected Z wins, whichever key is compared.
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(k).bottom_z(), tolerance, true) == k);
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(k).bottom_z() + 3000, tolerance, true) == k);
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(k).bottom_z() - 3000, tolerance, true) == k);
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(k).print_z(), tolerance, false) == k);
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(k).print_z() - 3000, tolerance, false) == k);
+    // Exactly between two layers: the lower one.
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(k).bottom_z() + step / 2, tolerance, true) == k);
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(k).bottom_z() + step / 2 + 100, tolerance, true) == k + 1);
+    // Nothing in the window.
+    CHECK(ToolpathInternal::matched_layer(object, object.layer(count - 1).print_z() + 10 * step, tolerance, false) == count);
 }
 
 // Generates grid/tree supports on variable object heights and runs the registered toolpath providers. Print/model own

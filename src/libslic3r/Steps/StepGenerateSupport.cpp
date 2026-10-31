@@ -6,6 +6,7 @@
 #include "StepGenerateSupport.hpp"
 
 #include <algorithm>
+#include <cassert>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -55,17 +56,24 @@
    output is not published by this step (the families publish through the data tree); the callbacks only read the patterns.
 
    Print z of the support (host pass at the end of run_step). The tool ordering and the print plan need two distinct z of the print to be
-   more than 4 * SCALED_EPSILON (512 units, 0.5 um) apart, and the families choose the z of their layers without seeing each other (the
+   more than 4 * SCALED_EPSILON (512 units, 0.5 um, the minimum tolerance) apart, and the families choose the z of their layers without seeing each other (the
    layers of two objects, or the grid slabs against the layers of their own object). Once every family has published, align_support_z()
    moves the print z of the auxiliary layers (the supports).
    - Scope: one pass per object when the print is printed object by object (complete_objects or parallel_objects_step > 0; both options
      invalidate STEP_SUPPORT), where only the z of an object matter to its own plan; one pass for all objects otherwise.
    - Fixed values: the print z of the object layers (never moved). Movable values: the tops and the bottoms (print_z - height) of the
-     auxiliary layers, so two contiguous layers stay contiguous. Rule (close_z_mapping()): a movable value within 4 * SCALED_EPSILON
+     auxiliary layers, so two contiguous layers stay contiguous. Rule (close_z_mapping()): a movable value within the tolerance
      (inclusive) of a fixed value takes the nearest one (the lower on a tie); the others are swept in ascending order, a value within
-     that distance of the last kept one takes it, otherwise it is kept. A support z moves by at most 4 * SCALED_EPSILON (0.5 um).
-   - The toolpath step recognises the contacts with a margin that covers this move (CONTACT_MATCH_TOLERANCE in LegacySupportPaths.cpp).
-   - Precondition: the object layers are already more than 4 * SCALED_EPSILON apart (two object layers of different objects closer than
+     that distance of the last kept one takes it, otherwise it is kept. A support z moves by at most the tolerance.
+   - Tolerance: max(z_step / 2, 4 * SCALED_EPSILON (0.5 um)), the same rule as the tree family (Common::close_z_tolerance()), with z_step
+     the option of the print (0 for none). The object print z are multiples of the Z step (the layer heights, the first layer height and the
+     raft and support heights are rounded by check_z_step), so two distinct object z are at least a step apart; a support z is within half a
+     step of a second object z only at the exact midpoint of two object z one step apart, where the tie rules decide (the tree takes the
+     upper one, this pass the lower one; the choice of the tree is then fixed for this pass). Should the object layers be closer than that (a plugin choosing the layer heights), the tolerance is bounded by half
+     the smallest distance between two object z of the pass, but never goes below 4 * SCALED_EPSILON, which the tool ordering requires.
+   - The toolpath step recognises the contacts with a margin that covers the moves of the tree family and of this pass (the contact match
+     in LegacySupportPaths.cpp, computed from the same Z step).
+   - Precondition: the object layers are already more than the tolerance apart (two object layers of different objects closer than
      that are a native case, out of scope). Without it the guarantee does not hold.
    - After the move the layers of each object are sorted again by print_z, the thickest first at an equal print_z, which is the order of
      the publication (sort_support_layers()). Layer::id and the interface_id of LayerSupportProperty are creation identifiers and are not
@@ -121,13 +129,14 @@ using PatternCallbacks = SupportPatternCallbacks<run_ctx_generate_support, LazyP
 
 namespace Detail {
 // Both inputs are in scaled units (1 unit = 1 nm), unsorted and may repeat. Pass 1: a movable
-// value within 4 * SCALED_EPSILON (inclusive) of a fixed value takes the nearest fixed value (the lower one on a tie). Pass 2: an ascending
-// sweep over the other movable values keeps the first, and each next value within 4 * SCALED_EPSILON of the last kept one takes its value;
-// otherwise it becomes the kept one. Hence, when the fixed values are more than 4 * SCALED_EPSILON apart, two distinct results (fixed values
-// included) are more than 4 * SCALED_EPSILON apart, and no value moves by more than 4 * SCALED_EPSILON.
-CloseZMapping close_z_mapping(std::vector<coord_t> fixed, std::vector<coord_t> movable)
+// value within the tolerance (inclusive) of a fixed value takes the nearest fixed value (the lower one on a tie). Pass 2: an ascending
+// sweep over the other movable values keeps the first, and each next value within the tolerance of the last kept one takes its value;
+// otherwise it becomes the kept one. Hence, when the fixed values are more than the tolerance apart, two distinct results (fixed values
+// included) are more than the tolerance apart, and no value moves by more than the tolerance. The tolerance must be at least
+// 4 * SCALED_EPSILON, the distance that the tool ordering requires between two distinct print z.
+CloseZMapping close_z_mapping(std::vector<coord_t> fixed, std::vector<coord_t> movable, coord_t tolerance)
 {
-    constexpr coord_t tolerance = 4 * SCALED_EPSILON;
+    assert(tolerance >= slic3r_api::Support::Common::min_close_z_tolerance);
     std::sort(fixed.begin(), fixed.end());
     fixed.erase(std::unique(fixed.begin(), fixed.end()), fixed.end());
     std::sort(movable.begin(), movable.end());
@@ -181,8 +190,9 @@ namespace {
 // movable ones the tops and bottoms of the auxiliary layers. A layer that collapses is an error (the families publish layers far
 // thicker than 1 um; the limit is the minimum height of the Layer constructor). The container is then sorted again (sort_support_layers()). The
 // interface ids of LayerSupportProperty and Layer::id are creation identifiers, not renumbered.
+// z_step is the Z step of the print in mm (0 for none): the tolerance of the mapping is Common::close_z_tolerance() of it and of the object layers.
 // Borrows objects, counts each moved auxiliary-layer bound and updates their owned layers; allocation and collapsed-layer errors propagate.
-void align_support_z(const std::vector<PrintObject *> &objects)
+void align_support_z(const std::vector<PrintObject *> &objects, double z_step)
 {
     std::vector<coord_t> fixed, movable;
     for (const PrintObject *object : objects) {
@@ -193,7 +203,8 @@ void align_support_z(const std::vector<PrintObject *> &objects)
             movable.push_back(layer.scaled_bottom_z());
         }
     }
-    const Detail::CloseZMapping mapping = Detail::close_z_mapping(std::move(fixed), std::move(movable));
+    const coord_t tolerance = slic3r_api::Support::Common::close_z_tolerance(z_step, fixed);
+    const Detail::CloseZMapping mapping = Detail::close_z_mapping(std::move(fixed), std::move(movable), tolerance);
     if (mapping.empty())
         return;
     for (PrintObject *object : objects) {
@@ -205,7 +216,7 @@ void align_support_z(const std::vector<PrintObject *> &objects)
             if (print_z - bottom <= ApiInternal::LayerAccess::min_scaled_height)
                 throw std::runtime_error("A support layer of the object '" + object->model_object()->name + "' at z = " +
                     std::to_string(unscaled(layer->scaled_print_z())) + " mm would be only " + std::to_string(unscaled(print_z - bottom)) +
-                    " mm thick after its print z were kept 0.5 um apart from the others.");
+                    " mm thick after its print z were kept " + std::to_string(unscaled(tolerance)) + " mm apart from the others.");
             if (slic3r_api::Support::Common::Counters::enabled)
                 slic3r_api::Support::Common::Counters::add(slic3r_api::Support::Common::Counters::totals.host_bounds_moved,
                     uint64_t(print_z != layer->scaled_print_z()) + uint64_t(bottom != layer->scaled_bottom_z()));
@@ -259,11 +270,13 @@ void run_step(Orchestrator &orchestrator, Print &print)
     // Printed object by object: the same criterion as DefaultPlanBuilder::use_object_plan (Plugins/Ordering/DefaultPlanBuilder.cpp, local to that file)
     // and Print.cpp:1565. Both options invalidate STEP_SUPPORT (complete_objects through STEP_SKIRT_BRIM, which replays from the same checkpoint),
     // so the scope of the pass is always rebuilt when one of them changes.
+    // The Z step is read like the support plugins do (SupportParams: the z_step option of the print config, in mm).
+    const double z_step = print.config().z_step.value;
     if (print.config().complete_objects.value || print.config().parallel_objects_step.value > 0)
         for (PrintObject *object : objects)
-            align_support_z({ object });
+            align_support_z({ object }, z_step);
     else
-        align_support_z(objects);
+        align_support_z(objects, z_step);
 }
 
 } // namespace Slic3r::Steps::StepGenerateSupport

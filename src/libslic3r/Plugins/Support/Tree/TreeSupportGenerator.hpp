@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCloseZ.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportLayers.hpp"
 #include "TreeRouting.hpp"
 
@@ -47,10 +48,12 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
                          std::vector<RoutedTree> &trees, bool organic, slic3r_api::Support::Common::GeneratedSupport &out,
                          const std::vector<RestingPart> &resting);
 
-// Snaps the bounds of the slabs onto the object print Z values within the layer merge tolerance of them, merges the support
+// Snaps the bounds of the slabs onto the object print Z values within the tolerance of them, merges the support
 // bounds that lie within the tolerance of each other, and merges the slabs that collapse; the rules are explained at the
-// definition. object_zs is sorted and holds no duplicates.
-void align_slab_bounds(const std::vector<coord_t> &object_zs, slic3r_api::Support::Common::GeneratedSupport &out);
+// definition. object_zs is sorted and holds no duplicates. The tolerance is at least the 0.5 um that the tool ordering requires
+// (Common::min_close_z_tolerance, the default); generate_tree_slabs() passes Common::close_z_tolerance() of the Z step.
+void align_slab_bounds(const std::vector<coord_t> &object_zs, slic3r_api::Support::Common::GeneratedSupport &out,
+                       coord_t tolerance = slic3r_api::Support::Common::min_close_z_tolerance);
 
 } // namespace TreeFamily
 } // namespace Slic3r

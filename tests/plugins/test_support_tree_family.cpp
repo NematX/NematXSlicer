@@ -4398,7 +4398,7 @@ TEST_CASE("Close Z support layers are sorted by z then thickness", "[plugins][su
 // 0.4 um apart leave no body between them, and the families publish no support there), so the two moves are chained on a synthetic support:
 // the tree merges a floor contact and a top contact 0.4 um above it (align_slab_bounds), then the mapping of the host pass takes the merged z to
 // the z of a support of another object, 0.5 um lower. The contact moves by more than 640 units in all, and still by at most the contact match
-// tolerance of the toolpaths (SCALED_EPSILON + 2 * 4 * SCALED_EPSILON, LegacySupportPaths.cpp).
+// tolerance of the toolpaths (SCALED_EPSILON + 2 * the close-Z tolerance limit, which is 4 * SCALED_EPSILON without a Z step; LegacySupportPaths.cpp).
 TEST_CASE("Close Z contact moved by the tree and by the pass stays within the contact match", "[plugins][support-tree-family][support-close-z][support-close-z-cumulative]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
@@ -4437,8 +4437,201 @@ TEST_CASE("Close Z contact moved by the tree and by the pass stays within the co
     const coord_t cumulative = std::abs(final_z - contact_top);
     CHECK(cumulative > 640);
     CHECK(cumulative <= 1024);
-    CHECK(cumulative <= SCALED_EPSILON + 2 * (4 * SCALED_EPSILON));
+    CHECK(cumulative <= SCALED_EPSILON + 2 * Common::close_z_tolerance_limit(0.));
 }
+
+// The tolerance of the close-Z passes is max(z_step / 2, 0.5 um), never below the 512 units that the tool ordering requires, and bounded by half the
+// distance between two object Z when the object layers are closer than the Z step suggests.
+TEST_CASE("Close Z tolerance follows the Z step", "[plugins][support-tree-family][support-close-z][support-close-z-pure]")
+{
+    CHECK(Common::min_close_z_tolerance == 512);
+    // Without a Z step, or with one smaller than a micron, the tolerance stays 0.5 um.
+    CHECK(Common::close_z_tolerance_limit(0.) == 512);
+    CHECK(Common::close_z_tolerance_limit(0.001) == 512);
+    CHECK(Common::close_z_tolerance_limit(0.005) == 2500);
+    CHECK(Common::close_z_tolerance_limit(0.04) == 20000);
+    const std::vector<coord_t> layers{ 0, 200000, 400000 };
+    CHECK(Common::close_z_tolerance(0., layers) == 512);
+    CHECK(Common::close_z_tolerance(0.005, layers) == 2500);
+    // Object Z closer than the step: half their distance, but never below 512.
+    CHECK(Common::close_z_tolerance(0.005, { 0, 1500, 200000 }) == 750);
+    CHECK(Common::close_z_tolerance(0.005, { 0, 600, 200000 }) == 512);
+    CHECK(Common::close_z_tolerance(0.005, { 100, 100, 200000 }) == 2500);
+}
+
+// The mapping of the host pass with a tolerance larger than 0.5 um: a movable value 2 um from a fixed one takes it, two movable values 2 um
+// apart merge, and fixed values stay; with the default tolerance (no Z step) none of them is merged.
+TEST_CASE("Close Z mapping with the tolerance of a Z step", "[plugins][support-tree-family][support-close-z][support-close-z-pure]")
+{
+    const coord_t fixed = 1000000, tolerance = Common::close_z_tolerance(0.005, { fixed, fixed + 200000 });
+    REQUIRE(tolerance == 2500);
+    const CloseZ::CloseZMapping mapping = CloseZ::close_z_mapping({ fixed, fixed + 200000 },
+        { fixed - 2000, fixed + 2500, fixed + 2501, fixed + 100000, fixed + 102000 }, tolerance);
+    CHECK(CloseZ::close_z_target(mapping, fixed - 2000) == fixed);
+    CHECK(CloseZ::close_z_target(mapping, fixed + 2500) == fixed);
+    CHECK(CloseZ::close_z_target(mapping, fixed + 2501) == fixed + 2501);
+    CHECK(CloseZ::close_z_target(mapping, fixed + 100000) == fixed + 100000);
+    CHECK(CloseZ::close_z_target(mapping, fixed + 102000) == fixed + 100000);
+    const CloseZ::CloseZMapping plain = CloseZ::close_z_mapping({ fixed, fixed + 200000 },
+        { fixed - 2000, fixed + 100000, fixed + 102000 }, Common::close_z_tolerance(0., { fixed, fixed + 200000 }));
+    CHECK(CloseZ::close_z_target(plain, fixed - 2000) == fixed - 2000);
+    CHECK(CloseZ::close_z_target(plain, fixed + 102000) == fixed + 102000);
+}
+
+namespace {
+// Two base slabs that meet at 1.598 mm, 2 um under the object layer at 1.6 mm, on a print with the given Z step; the tree alignment runs with the tolerance
+// that generate_tree_slabs() computes for it. Returns the tolerance, the top of the lower slab, the bottom of the upper one and the object layer top.
+struct SnapResult {
+    coord_t tolerance, lower_top, upper_bottom, object_top;
+};
+SnapResult tree_snap_near_object_layer(const char *z_step)
+{
+    DynamicPrintConfig config = SG::config("tree", false, 0);
+    config.set_deserialize_strict({ {"z_step", z_step} });
+    Print print;
+    Model model;
+    Test::init_print({ SG::slab() }, print, model, config);
+    SG::prefix(print);
+    const PrintObject &object = print.object(0);
+    std::vector<coord_t> object_zs;
+    for (size_t id = 0; id < object.layer_count(); ++id)
+        object_zs.push_back(object.layer(id).scaled_print_z());
+    const coord_t top = scale_to_layer_coord(1.6), bound = scale_to_layer_coord(1.598);
+    REQUIRE(std::find(object_zs.begin(), object_zs.end(), top) != object_zs.end());
+    const coord_t tolerance = Common::close_z_tolerance(SG::params(print, object).z_step, object_zs);
+    PluginStorage storage;
+    Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
+    Common::GeneratorLayer &lower = Common::add_layer(support, Common::LayerType::Intermediate, bound, scale_to_layer_coord(1.), bound - scale_to_layer_coord(1.));
+    Common::GeneratorLayer &upper = Common::add_layer(support, Common::LayerType::Intermediate, scale_to_layer_coord(2.), bound, scale_to_layer_coord(2.) - bound);
+    support.base = { &lower, &upper };
+    assign_native(lower.polygons, Polygons{ make_circle(scale_d(2.), 1000.) });
+    assign_native(upper.polygons, Polygons{ make_circle(scale_d(1.), 1000.) });
+    TF::align_slab_bounds(object_zs, support, tolerance);
+    return { tolerance, lower.print_z, upper.bottom_z, top };
+}
+} // namespace
+
+// A tree bound 2 um from an object Z is snapped onto it when the printer has a Z step of 0.005 mm (tolerance 2.5 um), and stays where it is without one (0.5 um).
+TEST_CASE("Close Z tree bound near an object layer follows the Z step", "[plugins][support-tree-family][support-close-z][support-close-z-step]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const SnapResult stepped = tree_snap_near_object_layer("0.005");
+    CHECK(stepped.tolerance == 2500);
+    CHECK(stepped.lower_top == stepped.object_top);
+    CHECK(stepped.upper_bottom == stepped.object_top);
+    const SnapResult plain = tree_snap_near_object_layer("0");
+    CHECK(plain.tolerance == 512);
+    CHECK(plain.lower_top == scale_to_layer_coord(1.598));
+    CHECK(plain.upper_bottom == scale_to_layer_coord(1.598));
+}
+
+// Two support bounds 2 um apart (a floor contact top and an overhang contact top, no object layer near) share one Z with a Z step of 0.005 mm,
+// and keep their distance without one.
+TEST_CASE("Close Z support bounds 2 um apart merge with a Z step", "[plugins][support-tree-family][support-close-z][support-close-z-step]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto merged = [](const char *z_step) {
+        DynamicPrintConfig config = SG::config("tree", false, 0);
+        config.set_deserialize_strict({ {"z_step", z_step} });
+        Print print;
+        Model model;
+        Test::init_print({ SG::slab() }, print, model, config);
+        SG::prefix(print);
+        const PrintObject &object = print.object(0);
+        std::vector<coord_t> object_zs;
+        for (size_t id = 0; id < object.layer_count(); ++id)
+            object_zs.push_back(object.layer(id).scaled_print_z());
+        PluginStorage storage;
+        Common::GeneratedSupport support{ reinterpret_cast<storage_handle *>(&storage) };
+        const coord_t floor_top = scale_to_layer_coord(1.1), contact_top = scale_to_layer_coord(1.102);
+        REQUIRE(contact_top - floor_top == 2000);
+        Common::GeneratorLayer &floor_contact = Common::add_layer(support, Common::LayerType::BottomContact, floor_top, scale_to_layer_coord(0.8), scale_to_layer_coord(0.3));
+        Common::GeneratorLayer &overhang_contact = Common::add_layer(support, Common::LayerType::TopContact, contact_top, scale_to_layer_coord(0.902), scale_to_layer_coord(0.2));
+        support.bottom = { &floor_contact };
+        support.top = { &overhang_contact };
+        Polygon floor_circle = make_circle(scale_d(1.), 1000.), overhang_circle = make_circle(scale_d(1.), 1000.);
+        floor_circle.translate(Point(scale_i(-4.), coord_t(0)));
+        overhang_circle.translate(Point(scale_i(4.), coord_t(0)));
+        assign_native(floor_contact.polygons, Polygons{ floor_circle });
+        assign_native(overhang_contact.polygons, Polygons{ overhang_circle });
+        TF::align_slab_bounds(object_zs, support, Common::close_z_tolerance(SG::params(print, object).z_step, object_zs));
+        return std::make_pair(floor_contact.print_z, overhang_contact.print_z);
+    };
+    const std::pair<coord_t, coord_t> stepped = merged("0.005");
+    CHECK(stepped.first == stepped.second);
+    const std::pair<coord_t, coord_t> plain = merged("0");
+    CHECK(plain.second - plain.first == 2000);
+}
+
+// The host pass of STEP_SUPPORT uses the same rule: a support layer 2 um under an object layer is moved onto it with a Z step of 0.005 mm, and stays
+// where it is without one. The layer is added to the object before the pass, and recognised by its id (the pass does not renumber).
+TEST_CASE("Close Z host pass follows the Z step", "[plugins][support-tree-family][support-close-z][support-close-z-step]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto final_z = [](const char *z_step) {
+        DynamicPrintConfig config = SG::config("grid", false, 0);
+        config.set_deserialize_strict({ {"z_step", z_step} });
+        Print print;
+        Model model;
+        Test::init_print({ SG::slab() }, print, model, config);
+        SG::prefix(print);
+        PrintObject &object = print.object(0);
+        constexpr size_t marker = 99999;
+        object.add_auxiliary_layer(marker, scale_to_layer_coord(0.123), scale_to_layer_coord(1.598));
+        SG::family(print);
+        for (const Layer &layer : object.auxiliary_layers())
+            if (layer.id() == marker)
+                return layer.scaled_print_z();
+        FAIL("the marker layer disappeared");
+        return coord_t(0);
+    };
+    CHECK(final_z("0.005") == scale_to_layer_coord(1.6));
+    CHECK(final_z("0") == scale_to_layer_coord(1.598));
+}
+
+// With a Z step of 0.005 mm the contact that lies on an object layer is still recognised as a contact by the toolpaths (the match tolerance is
+// computed from the Z step), also when the contact layer was moved by 3000 units (3 um) after the families published it, more than the old
+// match window (SCALED_EPSILON + 2 * 512 = 1152 units) allowed and within the new one (SCALED_EPSILON + 2 * 2500 = 5128): the paths of its layer
+// match those of the print without a Z step and without a move.
+TEST_CASE("Close Z contact stays a contact with a Z step", "[plugins][support-tree-family][support-close-z][support-close-z-step]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    constexpr coord_t moved_by = 3000;
+    CHECK(moved_by > SCALED_EPSILON + 2 * Common::min_close_z_tolerance);
+    CHECK(moved_by <= SCALED_EPSILON + 2 * Common::close_z_tolerance_limit(0.005));
+    const auto measure = [](const char *z_step, coord_t move) {
+        DynamicPrintConfig config = close_z_gcode_config("grid", 3);
+        config.set_deserialize_strict({ {"z_step", z_step}, {"support_material_contact_distance", "0.4"}, {"support_material_interface_contact_loops", "1"} });
+        Print print;
+        Model model;
+        close_z_place({ { SG::slab(true), Vec3d(100., 100., 0.), {} } }, config, print, model);
+        SG::prefix(print);
+        SG::family(print);
+        const coord_t contact_z = scale_to_layer_coord(3.6);
+        // Like the host pass would: the top of the contact layer moves, its bottom stays.
+        size_t moved = 0;
+        for (const LayerUPtr &layer : print.object(0).mutable_auxiliary_layers())
+            if (move != 0 && layer->scaled_print_z() == contact_z) {
+                ApiInternal::LayerAccess::set_z(*layer, contact_z + move, layer->scaled_height() + move);
+                ++moved;
+            }
+        CHECK((move == 0 || moved > 0));
+        SG::toolpaths(print);
+        CHECK(close_z_pairs(print, false).empty());
+        return close_z_measure_support(print, contact_z + move);
+    };
+    const SG::PathMeasures stepped = measure("0.005", moved_by), reference = measure("0", 0);
+    REQUIRE_FALSE(reference.empty());
+    REQUIRE(stepped.size() == reference.size());
+    for (const auto &entry : reference) {
+        const auto found = stepped.find(entry.first);
+        REQUIRE(found != stepped.end());
+        CAPTURE(entry.first.second, entry.second.count, found->second.count, entry.second.length, found->second.length);
+        CHECK(found->second.count == entry.second.count);
+        CHECK(found->second.length == Approx(entry.second.length).epsilon(0.02));
+    }
+}
+
 namespace {
 const SurfaceType roof_rest_top_type = stModSupport | stPosTop | stDensSolid;
 const SurfaceType roof_rest_floor_type = stModSupport | stPosBottom | stDensSolid | stModBridge;

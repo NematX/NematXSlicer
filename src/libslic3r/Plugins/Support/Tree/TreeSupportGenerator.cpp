@@ -37,7 +37,7 @@
        each resting part of the top contacts (the part over the object on the tip layer, which has no tip: its stack rests on the floor, as in the grid);
    3. place_slabs() fills the span of every interval between extremes, with the middle planned by plan_branch_slabs(); for
       the organic branches, refine_branch_slabs() then cuts the middle slabs whose drawn sections overhang more than the limit;
-   4. align_slab_bounds() snaps every slab bound that lies within the layer merge tolerance of an object print Z onto it,
+   4. align_slab_bounds() snaps every slab bound that lies within the close-Z tolerance (max(z_step / 2, 0.5 um)) of an object print Z onto it,
       merges the support bounds that lie within the tolerance of each other, and merges the slabs that collapse;
    5. the contacts are trimmed by the object outline within both Z gaps, except against the layer they support or rest on; the
       floors and, with interface layers, the top contacts are then trimmed by the bridge footprints of the object layers above
@@ -68,9 +68,6 @@ using slic3r_api::PolygonCollection;
 using slic3r_api::StoredPolygonCollection;
 
 namespace {
-// The tool ordering takes two distinct print Z values that lie within 4 * SCALED_EPSILON of each other for one layer and asserts on them.
-constexpr coord_t layer_merge_tolerance = 4 * SCALED_EPSILON;
-
 // One area per object layer or per Z, in the scratch storage.
 using PolygonList = std::vector<StoredPolygonCollection>;
 // The layer views of the object, indexed by layer id.
@@ -158,13 +155,13 @@ void cut_branch_slab(Common::GeneratedSupport &out, Common::GeneratorLayer &slab
                      std::vector<Common::GeneratorLayer *> &branch_slabs);
 // The print Z of every object layer of every object of the print, sorted and without duplicates.
 std::vector<coord_t> object_print_zs(const slic3r_api::Print &print);
-// The object print Z within the layer merge tolerance of z, or z itself when none lies that close.
-coord_t aligned_z(const std::vector<coord_t> &object_zs, coord_t z);
+// The object print Z within the tolerance of z (the one above first), or z itself when none lies that close.
+coord_t aligned_z(const std::vector<coord_t> &object_zs, coord_t z, coord_t tolerance);
 // The listed slabs of the support: the top and bottom contacts and the base slabs, which publication prints.
 Common::GeneratorLayers listed_slabs(const Common::GeneratedSupport &out);
-// Moves every bound of the listed slabs that lies within the layer merge tolerance of the last kept bound onto that bound; object
+// Moves every bound of the listed slabs that lies within the tolerance of the last kept bound onto that bound; object
 // print Z values are always kept.
-void merge_close_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedSupport &out);
+void merge_close_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedSupport &out, coord_t tolerance);
 // Gives the polygons of every listed slab that collapsed to zero height to a neighbor, then unlists that slab.
 void merge_collapsed_slabs(Common::GeneratedSupport &out);
 // The listed slab of positive height that takes the polygons of a collapsed slab: the same type below, the same type above, then
@@ -249,7 +246,8 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
         std::vector<Common::GeneratorLayer *> branch_slabs = place_slabs(layers, params, settings, overhang, out);
         if (organic)
             refine_branch_slabs(segments, trees, settings, branch_slabs, scratch, context, out);
-        align_slab_bounds(object_print_zs(print), out);
+        const std::vector<coord_t> object_zs = object_print_zs(print);
+        align_slab_bounds(object_zs, out, Common::close_z_tolerance(params.z_step, object_zs));
         // A top contact lies gap_above under the object layer it supports, and a floor lies gap_below over the object layer it rests
         // on, but the other object layers near it (the neighbouring steps of a slope) must stay a full gap away too: only the layer
         // it supports or rests on is kept.
@@ -281,26 +279,29 @@ void generate_tree_slabs(const plugin_run_context *context, const slic3r_api::Pr
     });
 }
 
-// Snaps every bound of the slabs onto the object print Z within the layer merge tolerance of it. The snap is a pure function of
+// Snaps every bound of the slabs onto the object print Z within the tolerance of it. The snap is a pure function of
 // the bound, so a bound shared by two slabs keeps one value and the slabs stay contiguous. merge_close_bounds() then merges the
 // bounds of the listed slabs that lie within the tolerance of the last kept bound, so that two distinct print Z of the support
-// never lie within the tolerance of each other. Each bound moves by at most the tolerance (about 0.5 um), so a slab changes its
-// height by about 1 um at most; the minimum and maximum heights hold within that, an accepted limit. Slabs whose two bounds end
-// on one Z collapse, and merge_collapsed_slabs() moves their polygons to a neighbor.
+// never lie within the tolerance of each other. The tolerance is Common::close_z_tolerance(): max(z_step / 2, 0.5 um), bounded by half the
+// smallest gap between object Z. The object
+// print Z are multiples of the Z step, so two distinct ones are at least a step apart and the object Z, which never move, are never
+// merged with each other. Each bound moves by at most the tolerance, so a slab changes its height by twice that at most; the minimum
+// and maximum heights hold within that, an accepted limit. Slabs whose two bounds end on one Z collapse, and merge_collapsed_slabs()
+// moves their polygons to a neighbor.
 // Borrows sorted object Z values, updates caller-owned slab bounds and counts changed bounds in each pass; collapsed polygons move to neighboring slabs, and allocation failures propagate.
-void align_slab_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedSupport &out)
+void align_slab_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedSupport &out, coord_t tolerance)
 {
     for (Common::GeneratorLayer &slab : out.slabs) {
-        const coord_t bottom_print_z = aligned_z(object_zs, slab.bottom_print_z());
+        const coord_t bottom_print_z = aligned_z(object_zs, slab.bottom_print_z(), tolerance);
         if (Common::Counters::enabled)
             Common::Counters::add(Common::Counters::totals.tree_bounds_moved,
-                uint64_t(bottom_print_z != slab.bottom_print_z()) + uint64_t(aligned_z(object_zs, slab.print_z) != slab.print_z) +
-                uint64_t(aligned_z(object_zs, slab.bottom_z) != slab.bottom_z));
-        slab.print_z = aligned_z(object_zs, slab.print_z);
-        slab.bottom_z = aligned_z(object_zs, slab.bottom_z);
+                uint64_t(bottom_print_z != slab.bottom_print_z()) + uint64_t(aligned_z(object_zs, slab.print_z, tolerance) != slab.print_z) +
+                uint64_t(aligned_z(object_zs, slab.bottom_z, tolerance) != slab.bottom_z));
+        slab.print_z = aligned_z(object_zs, slab.print_z, tolerance);
+        slab.bottom_z = aligned_z(object_zs, slab.bottom_z, tolerance);
         slab.height = slab.print_z - bottom_print_z;
     }
-    merge_close_bounds(object_zs, out);
+    merge_close_bounds(object_zs, out, tolerance);
     merge_collapsed_slabs(out);
 }
 
@@ -717,18 +718,18 @@ std::vector<coord_t> object_print_zs(const slic3r_api::Print &print)
 }
 
 // A bound within the tolerance of an object print Z takes that Z, so the distance stays at the limit that the ordering checks.
-coord_t aligned_z(const std::vector<coord_t> &object_zs, coord_t z)
+coord_t aligned_z(const std::vector<coord_t> &object_zs, coord_t z, coord_t tolerance)
 {
     const std::vector<coord_t>::const_iterator upper = std::lower_bound(object_zs.begin(), object_zs.end(), z);
-    if (upper != object_zs.end() && *upper - z <= layer_merge_tolerance)
+    if (upper != object_zs.end() && *upper - z <= tolerance)
         return *upper;
-    if (upper != object_zs.begin() && z - *std::prev(upper) <= layer_merge_tolerance)
+    if (upper != object_zs.begin() && z - *std::prev(upper) <= tolerance)
         return *std::prev(upper);
     return z;
 }
 
 // Maps nearby sorted slab bounds to retained Z values and updates borrowed slabs in place, preserving fixed object Z values; object_zs must be sorted, and allocation failures propagate.
-void merge_close_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedSupport &out)
+void merge_close_bounds(const std::vector<coord_t> &object_zs, Common::GeneratedSupport &out, coord_t tolerance)
 {
     const Common::GeneratorLayers listed = listed_slabs(out);
     std::vector<coord_t> bounds;
@@ -742,7 +743,7 @@ void merge_close_bounds(const std::vector<coord_t> &object_zs, Common::Generated
     std::vector<coord_t> targets(bounds.size());
     coord_t kept = 0;
     for (size_t idx = 0; idx < bounds.size(); ++idx) {
-        if (idx == 0 || std::binary_search(object_zs.begin(), object_zs.end(), bounds[idx]) || bounds[idx] - kept > layer_merge_tolerance)
+        if (idx == 0 || std::binary_search(object_zs.begin(), object_zs.end(), bounds[idx]) || bounds[idx] - kept > tolerance)
             kept = bounds[idx];
         targets[idx] = kept;
     }

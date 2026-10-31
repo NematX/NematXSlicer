@@ -18,6 +18,7 @@
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 #include "libslic3r/Plugins/Support/Common/ClipperResults.hpp"
 #include "libslic3r/Plugins/Support/Common/ExtrusionLines.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportCloseZ.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportPaths.hpp"
@@ -49,9 +50,14 @@ using SplitPoints = std::map<PointKey, int>;
 
 // How far a support layer may lie from the exact position of a contact (under or over an object layer) and still be matched with that object layer.
 // The tree's own snapping (align_slab_bounds/merge_close_bounds) and the host pass at the end of STEP_SUPPORT can each move a support z by up to
-// 4 * SCALED_EPSILON, so the margin is the matching epsilon plus both moves. It stays far below the spacing of two layers of one object, so it cannot
-// match another layer. It applies to every print: a layer that close to the exact contact position is the contact.
-constexpr coord_t CONTACT_MATCH_TOLERANCE = SCALED_EPSILON + 2 * (4 * SCALED_EPSILON);
+// the close-Z tolerance, max(z_step / 2, 4 * SCALED_EPSILON) (Common::close_z_tolerance_limit(), the largest value that either pass uses), so the
+// margin is the matching epsilon plus both moves, about one Z step. With a layer height of one step the window can hold two object layers (the
+// neighbour is one step away from the expected position even when nothing moved), so matched_layer() keeps only the nearest one to the expected
+// Z. It applies to every print: a layer that close to the exact contact position is the contact.
+coord_t contact_match_tolerance(const Common::SupportParams &geometry)
+{
+    return SCALED_EPSILON + 2 * Common::close_z_tolerance_limit(geometry.z_step);
+}
 
 using PathParams = Common::ToolpathParams;
 // Parts of one support layer's surfaces that are filled separately.
@@ -176,6 +182,7 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
     const Polys top = layer_polygons(storage, layer, SurfaceRole::Top);
     const Polys bottom = layer_polygons(storage, layer, SurfaceRole::Bottom);
     const coord_t z = layer_get_print_z(layer), layer_bottom = z - layer_get_height(layer);
+    const coord_t match_tolerance = contact_match_tolerance(geometry);
     if (!geometry.bottom_published_interfaces_enabled) {
         // Without interface layers the published bottom surfaces are the contact alone.
         parts.bottom_contact.copy_from(bottom);
@@ -185,11 +192,8 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
         parts.bottom_interface = layer_polygons(storage, layer, SurfaceRole::Bottom, 0);
     } else {
         Polys adjacent(storage);
-        for (uint32_t index = first_layer_at(object, layer_bottom - CONTACT_MATCH_TOLERANCE, false); index < object.layer_count(); ++index) {
-            const Layer object_layer = object.layer(index);
-            if (object_layer.print_z() > layer_bottom + CONTACT_MATCH_TOLERANCE) break;
-            if (std::abs(object_layer.print_z() - layer_bottom) <= CONTACT_MATCH_TOLERANCE) Common::append_polygons(adjacent, object_layer.slices());
-        }
+        const uint32_t matched = Internal::matched_layer(object, layer_bottom, match_tolerance, false);
+        if (matched < object.layer_count()) Common::append_polygons(adjacent, object.layer(matched).slices());
         parts.bottom_contact = as_polygons(clipper_intersection(clipper(bottom), clipper(adjacent)));
         parts.bottom_interface = as_polygons(clipper_diff(clipper(bottom), clipper(parts.bottom_contact)));
     }
@@ -198,11 +202,8 @@ LayerParts layer_parts(storage_handle *storage, const Object &object, const laye
         parts.top_contact.copy_from(top);
     } else {
         Polys adjacent(storage);
-        for (uint32_t index = first_layer_at(object, z + scale_to_layer_coord(geometry.gap_above) - CONTACT_MATCH_TOLERANCE, true); index < object.layer_count(); ++index) {
-            const Layer object_layer = object.layer(index);
-            if (object_layer.bottom_z() > z + scale_to_layer_coord(geometry.gap_above) + CONTACT_MATCH_TOLERANCE) break;
-            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) <= CONTACT_MATCH_TOLERANCE) Common::append_polygons(adjacent, object_layer.slices());
-        }
+        const uint32_t matched = Internal::matched_layer(object, z + scale_to_layer_coord(geometry.gap_above), match_tolerance, true);
+        if (matched < object.layer_count()) Common::append_polygons(adjacent, object.layer(matched).slices());
         parts.top_contact = as_polygons(clipper_intersection(clipper(top), clipper(adjacent)));
         parts.top_interface = as_polygons(clipper_diff(clipper(top), clipper(parts.top_contact)));
     }
@@ -617,14 +618,15 @@ void fill_layer_passes(const plugin_run_context *context, const run_ctx_support_
 {
     // Object demand directly above the layer: the removable loops of a top contact follow its outline.
     Polys overhang(storage);
-    if (role == SurfaceRole::Top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops)
-        for (uint32_t index = first_layer_at(object, z + scale_to_layer_coord(geometry.gap_above) - CONTACT_MATCH_TOLERANCE, true); index < object.layer_count(); ++index) {
-            const Layer object_layer = object.layer(index);
-            if (object_layer.bottom_z() > z + scale_to_layer_coord(geometry.gap_above) + CONTACT_MATCH_TOLERANCE) break;
-            if (std::abs(object_layer.bottom_z() - z - scale_to_layer_coord(geometry.gap_above)) > CONTACT_MATCH_TOLERANCE) continue;
+    const coord_t match_tolerance = contact_match_tolerance(geometry);
+    if (role == SurfaceRole::Top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops) {
+        const uint32_t matched = Internal::matched_layer(object, z + scale_to_layer_coord(geometry.gap_above), match_tolerance, true);
+        if (matched < object.layer_count()) {
+            const Layer object_layer = object.layer(matched);
             for (uint32_t island = 0; island < object_layer.island_count(); ++island)
                 Common::append_polygons(overhang, object_layer.island(island).support_demand());
         }
+    }
     StoredExtrusionEntity out(storage);
     const ClipperContext clipper(storage);
     for (Pass &pass : passes) {
@@ -716,6 +718,25 @@ void publish_layer_paths(const plugin_run_context *context, storage_handle *stor
 }
 
 } // namespace
+
+// Scans the window of first_layer_at(expected - tolerance) in layer order and keeps the strictly nearest key, so a tie keeps the first (lower) layer.
+// Owns no geometry, changes no layers and propagates view-access failures.
+uint32_t Internal::matched_layer(const Object &object, coord_t expected, coord_t tolerance, bool bottom)
+{
+    uint32_t best = object.layer_count();
+    coord_t best_distance = tolerance + 1;
+    for (uint32_t index = first_layer_at(object, expected - tolerance, bottom); index < object.layer_count(); ++index) {
+        const Layer object_layer = object.layer(index);
+        const coord_t key = bottom ? object_layer.bottom_z() : object_layer.print_z();
+        if (key > expected + tolerance) break;
+        const coord_t distance = std::abs(key - expected);
+        if (distance < best_distance) {
+            best = index;
+            best_distance = distance;
+        }
+    }
+    return best;
+}
 
 // Split each leaf path of out that a lower footprint cuts, in place: such a path becomes its fragments in printing order. The
 // fragments and their group are neither reversible nor sortable, like the native multipath. A path that no footprint cuts is
