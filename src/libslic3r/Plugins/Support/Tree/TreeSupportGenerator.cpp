@@ -57,10 +57,12 @@
 
    Everything is written on the plugin API: the object and the print are views, the areas are polygon collections of the plugin
    storage. The slabs, which the family publishes, live in the run storage (the polygons of Common::GeneratorLayer). Every
-   temporary area (the keep-out outlines, the branch sections, the intermediate results of the Clipper operations) lives in one
-   scratch storage that exists for the whole of generate_tree_slabs() and is destroyed when it returns; a result that a slab keeps
-   is moved into the polygons of the slab (move_from / append_move_from). A collection of the scratch storage must therefore never be
-   kept after generate_tree_slabs() returns. Drawing indexes inclusive segment and tip Z spans against the requested section
+   temporary area lives in a scratch storage: the keep-out outlines and the branch sections in the parent scratch storage, which
+   exists for the whole of generate_tree_slabs() and is destroyed when it returns, and the circles, unions and trims of the parallel
+   jobs (one job per height or per slab) in the own storage of each job, which is destroyed when the job returns. A result that
+   outlives its storage is moved into a collection of a longer-lived storage (move_from / append_move_from: the content is transferred
+   and the emptied source is freed with its storage), as the polygons of a slab are. A collection of the parent scratch storage must
+   therefore never be kept after generate_tree_slabs() returns, nor one of a job storage after its job. Drawing indexes inclusive segment and tip Z spans against the requested section
    heights before visiting sections; every section's index list follows segment or tree/node input order. */
 
 namespace Slic3r::TreeFamily {
@@ -196,8 +198,8 @@ void trim_slab(Common::GeneratorLayer &slab, const LayerList &layers, const Poly
 // that ends under the bridge threads keeps its footprint: it supports them.
 void trim_bridge_footprints(const Common::GeneratorLayers &slabs, const LayerList &layers, const slic3r_api::Config &print_config,
                             const Common::SupportParams &params, storage_handle *scratch, Common::BridgeFootprintCache &bridge_cache);
-// Adds to every base slab the branches that cross it, then trims each slab against the object within both Z gaps. Tree branches are
-// circles; organic branches are the sections of their meshes, with the stems as circles.
+// Adds to every base slab the branches that cross it, then trims each slab against the object within both Z gaps (one parallel job per slab).
+// Tree branches are circles; organic branches are the sections of their meshes, with the stems as circles.
 void draw_branches(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic, const LayerList &layers,
                    const PolygonList &keep_out, coord_t gap_above, coord_t gap_below, storage_handle *scratch,
                    const plugin_run_context *context, Common::GeneratedSupport &out);
@@ -487,8 +489,8 @@ std::vector<std::vector<uint32_t>> drawing_indices(const std::vector<coord_t> &z
     return indices;
 }
 
-// Indexes borrowed segment spans once for these Z values, then appends selected circles after any organic mesh sections;
-// scratch owns returned sections, inclusive bounds and segment order determine operands, and geometry/cancellation/allocation failures propagate.
+// Indexes borrowed segment spans once for these Z values, then appends selected circles after any organic mesh sections and unites each section,
+// one parallel job per Z; scratch owns returned sections, inclusive bounds and segment order determine operands, and geometry/cancellation/allocation failures propagate.
 PolygonList branch_sections(const std::vector<Segment> &segments, const std::vector<RoutedTree> &trees, bool organic,
                             const std::vector<coord_t> &zs, storage_handle *scratch, const plugin_run_context *context)
 {
@@ -507,12 +509,17 @@ PolygonList branch_sections(const std::vector<Segment> &segments, const std::vec
         spans.push_back(organic && !segment.stem ? std::pair<coord_t, coord_t>{1, 0} :
             std::pair<coord_t, coord_t>{segment.bottom_z, segment.top_z});
     const std::vector<std::vector<uint32_t>> indices = drawing_indices(zs, spans);
-    for (size_t idx = 0; idx < zs.size(); ++idx) {
-        StoredPolygonCollection &section = sections[idx];
-        add_branch_circles(section, scratch, segments, zs[idx], indices[idx]);
-        if (!section.empty())
-            section.move_from(polygons_union(scratch, section));
-    }
+    // The circles of a height and their union read the shared segments and index lists and write the section of that height only, so each
+    // height is an independent job. A job builds its rings and the union in its own storage and moves the result into the section: move_from
+    // transfers the content into the destination collection (owned by the caller's scratch storage) and leaves the emptied source container
+    // to be freed with the storage of the job, so the result survives the job.
+    slic3r_api::parallel_for_storage_with_progress(0, uint32_t(zs.size()), context, nullptr,
+        [&sections, &segments, &zs, &indices](uint32_t idx, storage_handle *job_scratch) {
+            StoredPolygonCollection &section = sections[idx];
+            add_branch_circles(section, job_scratch, segments, zs[idx], indices[idx]);
+            if (!section.empty())
+                section.move_from(polygons_union(job_scratch, section));
+        });
     return sections;
 }
 
@@ -942,14 +949,18 @@ void draw_branches(const std::vector<Segment> &segments, const std::vector<Route
     for (const Common::GeneratorLayer *slab : out.base)
         middles.push_back(slab_middle_z(*slab));
     PolygonList sections = branch_sections(segments, trees, organic, middles, scratch, context);
-    for (size_t idx = 0; idx < out.base.size(); ++idx) {
-        Common::GeneratorLayer *slab = out.base[idx];
-        slab->polygons.append_move_from(sections[idx]);
-        if (!slab->polygons.empty())
-            slab->polygons.move_from(polygons_union(scratch, slab->polygons));
-        // A branch is drawn at the slab middle over the whole slab thickness, so the object must stay a full Z gap away on both sides.
-        trim_slab(*slab, layers, keep_out, gap_above, gap_below, size_t(-1), scratch);
-    }
+    for (size_t idx = 0; idx < out.base.size(); ++idx)
+        out.base[idx]->polygons.append_move_from(sections[idx]);
+    // The union and the trim of a slab read the shared layers and keep-out outlines (no cache is touched) and write the polygons of that slab
+    // only, so each slab is an independent job working in its own storage. The trim result is moved into the polygons of the slab.
+    slic3r_api::parallel_for_storage_with_progress(0, uint32_t(out.base.size()), context, nullptr,
+        [&out, &layers, &keep_out, gap_above, gap_below](uint32_t idx, storage_handle *job_scratch) {
+            Common::GeneratorLayer *slab = out.base[idx];
+            if (!slab->polygons.empty())
+                slab->polygons.move_from(polygons_union(job_scratch, slab->polygons));
+            // A branch is drawn at the slab middle over the whole slab thickness, so the object must stay a full Z gap away on both sides.
+            trim_slab(*slab, layers, keep_out, gap_above, gap_below, size_t(-1), job_scratch);
+        });
 }
 
 // Each contact is drawn at its middle, like the base slabs, and the tip stretches that cross the middle are added to it. So a tip
