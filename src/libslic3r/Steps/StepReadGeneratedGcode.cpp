@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <boost/nowide/fstream.hpp>
 
@@ -107,7 +108,7 @@ void run(Orchestrator &orchestrator,
 
 // Borrow a generated reader result and its matching print config; convert each
 // logical tool's volume with configured filament properties and set only time,
-// filament totals, tower shares and the support flag. Preserve source areas and the
+// the time of layer 0, filament totals, tower shares and the support flag. Preserve source areas and the
 // plan facts; positive diameters are required and allocation/formatting failures propagate.
 // The availability flag is lowered first and raised only after every value is set,
 // so a failure leaves the statistics marked unavailable.
@@ -121,6 +122,10 @@ void fill_print_statistics(const GCodeProcessorResult &result, const PrintConfig
     stats.estimated_print_time_str.clear();
     stats.estimated_print_time[normal] = time;
     stats.estimated_print_time_str[normal] = get_time_dhms(time);
+    // Layer 0 of the Reader includes the moves before the first layer; a result without layer times gives 0, never the
+    // value of a previous reading.
+    const std::vector<float> &layer_times = result.print_statistics.modes[normal].layers_times;
+    stats.first_layer_time = layer_times.empty() ? 0. : double(layer_times.front());
     stats.filament_stats = result.print_statistics.volumes_per_extruder;
     stats.total_extruded_volume = 0.0;
     stats.total_used_filament = 0.0;

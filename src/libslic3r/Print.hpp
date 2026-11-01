@@ -117,7 +117,15 @@ struct PrintStatistics
     bool                            has_support;
 
     std::atomic_bool is_computing_gcode;
-    // True only after the Reader result of the current G-code has been fully converted into the measured totals above.
+    // Seconds that the Reader attributed to its layer 0 (the moves before the first layer included), 0 when the Reader
+    // gave no layer time. Set with the estimated time, so it is valid exactly when statistics_available is.
+    double                          first_layer_time;
+    // Highest layer print Z of the printing plan in millimeters, without the Z offset; 0 without a plan. A plan fact
+    // published when the G-code is written, valid without a Reader pass (like the two layer counts above).
+    double                          max_print_z;
+
+    // True only after the Reader result of the current G-code has been fully converted into the measured totals above
+    // (the estimated times, the filament volumes and the first-layer time).
     // It is the sole signal that the measured values are usable; zero totals never mean "unavailable".
     std::atomic_bool statistics_available;
 
@@ -152,6 +160,8 @@ struct PrintStatistics
         object_layer_count     = 0;
         total_layer_count      = 0;
         has_support            = false;
+        first_layer_time       = 0.;
+        max_print_z            = 0.;
         is_computing_gcode = false;
         statistics_available = false;
     }

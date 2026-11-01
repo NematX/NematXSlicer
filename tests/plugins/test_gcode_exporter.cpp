@@ -36,7 +36,9 @@ Representative direct calls (branches are not a timeline):
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <iomanip>
 #include <iterator>
+#include <locale>
 #include <sstream>
 #include <map>
 #include <stdexcept>
@@ -82,6 +84,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Plugins/PluginApiCompatibility.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/PrintObject.hpp"
 #include "libslic3r/SLAPrint.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
@@ -151,6 +154,11 @@ struct ExporterProbeState
     std::vector<std::pair<std::string, std::string>> export_configuration;
     std::vector<std::pair<std::string, std::string>> export_extrusion_widths;
     std::vector<std::pair<std::string, std::string>> export_statistics;
+    // The numeric statistics (contract 4.2) read by the last EXPORT, with the validity the view reports.
+    slic3r_api::GCodeExportNumericStatisticsView export_numeric;
+    std::vector<slic3r_api::GCodeExportFilamentUsageView> export_filaments;
+    bool export_has_numeric = false;
+    bool export_has_measured = false;
     // Test writer action that changes its open sibling after its stream has been flushed.
     std::function<void()> tamper_sibling_after_write;
     // Print whose user cancellation the CancelAfterWrite mode raises, as the GUI Cancel button does.
@@ -420,6 +428,13 @@ private:
         g_exporter_probe_state.export_configuration.clear();
         g_exporter_probe_state.export_extrusion_widths.clear();
         g_exporter_probe_state.export_statistics.clear();
+        g_exporter_probe_state.export_has_numeric = metadata_view.has_numeric_statistics();
+        g_exporter_probe_state.export_has_measured = metadata_view.has_measured_statistics();
+        g_exporter_probe_state.export_numeric = metadata_view.numeric_statistics();
+        g_exporter_probe_state.export_filaments.clear();
+        const slic3r_api::GCodeExportFilamentListView filaments = metadata_view.filaments();
+        for (size_t index = 0; index < filaments.size(); ++index)
+            g_exporter_probe_state.export_filaments.push_back(filaments.at(index));
         const slic3r_api::GCodeExportMetadataListView configuration = metadata_view.configuration();
         for (size_t index = 0; index < configuration.size(); ++index) {
             const slic3r_api::GCodeExportMetadataEntryView entry = configuration.at(index);
@@ -1421,14 +1436,14 @@ TEST_CASE("Exporter QUERY borrows the Print only through its payload", "[plugins
     }
 }
 
-// The ABI registry exposes exporter 4.1 (4.0 packages accepted), with optional action information and a required Print in QUERY, and rejects earlier majors and unsupported minors.
+// The ABI registry exposes exporter 4.2 (4.0 and 4.1 packages accepted), with optional action information, numeric export statistics and a required Print in QUERY, and rejects earlier majors and unsupported minors.
 TEST_CASE("G-code exporter header is part of the plugin ABI registry", "[plugins][gcode][exporter][abi][export-contract]")
 {
     const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
     REQUIRE(host.size() > size_t(SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT));
     CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].header == "steps/slic3r_step_gcode_export.h");
     CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.major == 4);
-    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.minor == 1);
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.minor == 2);
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.0\n"));
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.1\n"));
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.2\n"));
@@ -1451,7 +1466,8 @@ TEST_CASE("G-code exporter header is part of the plugin ABI registry", "[plugins
     CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=1.0\n"));
     CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.0\n"));
     CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.1\n"));
-    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.2\n"));
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.2\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.3\n"));
 
     // The step list lost the former service value and gained a minor version, so other step plugins are not refused.
     CHECK(SLIC3R_PLUGIN_API_SLICING_STEP_MAJOR == 2);
@@ -1490,14 +1506,14 @@ TEST_CASE("The thumbnail service header is at 2.0 in the plugin ABI registry",
     CHECK(manifest_is_compatible("steps/slic3r_step_gcode_thumbnail.h=1.0\n"));
 }
 
-// Construct short, extended, empty, and malformed ABI 2.1 and 2.2 records; assertions verify borrowed views accept the prefix and reject invalid sizes, lists, and strings without taking ownership.
-TEST_CASE("G-code export metadata views validate the ABI 2.1 prefix and 2.2 statistics", "[plugins][gcode][exporter][abi]")
+// Construct short, extended, empty, and malformed records; assertions verify borrowed views accept the prefix and reject invalid sizes, lists, and strings without taking ownership.
+TEST_CASE("G-code export metadata views validate the prefix and the statistics list", "[plugins][gcode][exporter][abi]")
 {
     raw_gcode_export_metadata truncated = {};
     truncated.struct_size = uint32_t(offsetof(raw_gcode_export_metadata, extrusion_widths));
     truncated.configuration.count = 1;
     CHECK_THROWS_WITH((slic3r_api::GCodeExportMetadataView(&truncated)),
-                      "G-code export metadata has an incomplete 2.1 prefix.");
+                      "G-code export metadata has an incomplete prefix.");
 
     struct ExtendedMetadata
     {
@@ -1522,7 +1538,7 @@ TEST_CASE("G-code export metadata views validate the ABI 2.1 prefix and 2.2 stat
     const slic3r_api::GCodeExportMetadataView invalid_string_view(&invalid_string);
     CHECK_THROWS_AS(invalid_string_view.configuration().at(0), std::invalid_argument);
 
-    // A structure that stops after extrusion_widths (ABI 2.1) has no statistics, even if the bytes after it are not zero.
+    // A structure that stops after extrusion_widths has no statistics, even if the bytes after it are not zero.
     const raw_gcode_export_entry statistic = {"has_support", "1"};
     struct StatisticsMetadata
     {
@@ -1553,6 +1569,88 @@ TEST_CASE("G-code export metadata views validate the ABI 2.1 prefix and 2.2 stat
     const slic3r_api::GCodeExportMetadataEntryView entry = valid_empty_view.extrusion_widths().at(0);
     CHECK(entry.key.empty());
     CHECK(entry.value.empty());
+}
+
+// Build a 4.2 record, then cut its size before the last numeric field (a 4.1 host): the view reads values from the
+// complete record only, shows zeros and an empty tool list for the short one even though its bytes are not zero, and
+// rejects a non-empty tool list without items.
+TEST_CASE("G-code export metadata views read the 4.2 numeric statistics only from a complete record",
+          "[plugins][gcode][exporter][abi][export-contract]")
+{
+    const raw_gcode_export_filament_usage usages[] = {{0, 100., 240.5, 0.5}, {1, 0., 0., 0.}};
+    const raw_gcode_export_entry measured_entry = {"has_support", "0"};
+    raw_gcode_export_metadata full = {};
+    full.statistics.items = &measured_entry;
+    full.statistics.count = 1;
+    full.estimated_time_seconds = 123.5;
+    full.first_layer_time_seconds = 7.25;
+    full.layer_count = 67;
+    full.max_print_z = 20.3;
+    full.filaments.items = usages;
+    full.filaments.count = 2;
+    full.total_length_mm = 100.;
+    full.total_volume_mm3 = 240.5;
+    full.total_weight_g = 0.5;
+
+    full.struct_size = uint32_t(sizeof(full));
+    const slic3r_api::GCodeExportMetadataView full_view(&full);
+    CHECK(full_view.has_numeric_statistics());
+    CHECK(full_view.has_measured_statistics());
+    const slic3r_api::GCodeExportNumericStatisticsView numbers = full_view.numeric_statistics();
+    CHECK(numbers.estimated_time_seconds == 123.5);
+    CHECK(numbers.first_layer_time_seconds == 7.25);
+    CHECK(numbers.layer_count == 67);
+    CHECK(numbers.max_print_z == 20.3);
+    CHECK(numbers.total_length_mm == 100.);
+    CHECK(numbers.total_volume_mm3 == 240.5);
+    CHECK(numbers.total_weight_g == 0.5);
+    const slic3r_api::GCodeExportFilamentListView filaments = full_view.filaments();
+    REQUIRE(filaments.size() == 2);
+    CHECK(filaments.at(0).tool == 0);
+    CHECK(filaments.at(0).length_mm == 100.);
+    CHECK(filaments.at(0).volume_mm3 == 240.5);
+    CHECK(filaments.at(0).weight_g == 0.5);
+    CHECK(filaments.at(1).tool == 1);
+    CHECK_THROWS_AS(filaments.at(2), std::out_of_range);
+
+    // A record that stops before the last field of the group is incomplete (a defensive case, not a real 4.1 size):
+    // nothing of the group is read, and the measured values are not valid even though the statistics list has an entry.
+    full.struct_size = uint32_t(offsetof(raw_gcode_export_metadata, total_weight_g));
+    const slic3r_api::GCodeExportMetadataView short_view(&full);
+    CHECK_FALSE(short_view.has_numeric_statistics());
+    CHECK_FALSE(short_view.has_measured_statistics());
+    CHECK(short_view.numeric_statistics().estimated_time_seconds == 0.);
+    CHECK(short_view.numeric_statistics().layer_count == 0);
+    CHECK(short_view.numeric_statistics().total_weight_g == 0.);
+    CHECK(short_view.filaments().size() == 0);
+
+    // The real 4.1 record ends right after the statistics list. The bytes after it are not zero in this buffer, yet the
+    // view reads the list and nothing of the numeric group.
+    full.struct_size = uint32_t(offsetof(raw_gcode_export_metadata, statistics) + sizeof(full.statistics));
+    const slic3r_api::GCodeExportMetadataView old_view(&full);
+    CHECK(old_view.statistics().size() == 1);
+    CHECK_FALSE(old_view.has_numeric_statistics());
+    CHECK_FALSE(old_view.has_measured_statistics());
+    CHECK(old_view.numeric_statistics().estimated_time_seconds == 0.);
+    CHECK(old_view.numeric_statistics().first_layer_time_seconds == 0.);
+    CHECK(old_view.numeric_statistics().layer_count == 0);
+    CHECK(old_view.numeric_statistics().max_print_z == 0.);
+    CHECK(old_view.numeric_statistics().total_length_mm == 0.);
+    CHECK(old_view.filaments().size() == 0);
+
+    // The measured values need the numeric statistics and a non-empty statistics list: here the list is empty.
+    raw_gcode_export_metadata unmeasured = {};
+    unmeasured.struct_size = uint32_t(sizeof(unmeasured));
+    unmeasured.layer_count = 5;
+    const slic3r_api::GCodeExportMetadataView unmeasured_view(&unmeasured);
+    CHECK(unmeasured_view.has_numeric_statistics());
+    CHECK_FALSE(unmeasured_view.has_measured_statistics());
+    CHECK(unmeasured_view.numeric_statistics().layer_count == 5);
+
+    raw_gcode_export_metadata invalid_filaments = {};
+    invalid_filaments.struct_size = uint32_t(sizeof(invalid_filaments));
+    invalid_filaments.filaments.count = 1;
+    CHECK_THROWS_AS((slic3r_api::GCodeExportMetadataView(&invalid_filaments)), std::invalid_argument);
 }
 
 // Export with a changed config copy and a secret sentinel, import the output, and copy probe-visible metadata during its callback; assertions verify source, ordering, filtering, and region separators.

@@ -54,6 +54,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Print.hpp"
@@ -559,6 +560,65 @@ TEST_CASE("The support flag follows the roles seen by the Reader",
     CHECK_FALSE(statistics.has_support);
 }
 
+// The time of layer 0 is assigned by every fill from the first layer time of the result: a result with layer times
+// gives its first value (the others are ignored), and a following result without layer times resets it to zero
+// instead of keeping the previous value. PrintStatistics::clear() also resets it.
+TEST_CASE("The layer 0 time follows the layer times of the last Reader result",
+          "[plugins][gcode][print-statistics][first-layer]")
+{
+    PrintConfig config;
+    config.filament_diameter.set(std::vector<double>{1.75});
+    config.filament_density.set(std::vector<double>{1.1});
+    config.filament_cost.set(std::vector<double>{20.0});
+    GCodeProcessorResult result;
+    PrintStatistics statistics;
+    CHECK(statistics.first_layer_time == 0.);
+
+    result.print_statistics.modes[0].time = 100.f;
+    result.print_statistics.modes[0].layers_times = {12.5f, 40.f, 47.5f};
+    Steps::StepReadGeneratedGcode::fill_print_statistics(result, config, statistics);
+    CHECK(statistics.first_layer_time == 12.5);
+    CHECK(statistics.estimated_print_time.at(0) == 100.);
+
+    result.print_statistics.modes[0].layers_times.clear();
+    Steps::StepReadGeneratedGcode::fill_print_statistics(result, config, statistics);
+    CHECK(statistics.first_layer_time == 0.);
+    CHECK(statistics.estimated_print_time.at(0) == 100.);
+
+    result.print_statistics.modes[0].layers_times = {3.f};
+    Steps::StepReadGeneratedGcode::fill_print_statistics(result, config, statistics);
+    CHECK(statistics.first_layer_time == 3.);
+    statistics.clear();
+    CHECK(statistics.first_layer_time == 0.);
+}
+
+// The highest layer Z is a plan fact: it is published by STEP_GCODE without a Reader result, it is the print Z of
+// the last layer of the Print and it does not include the Z offset of the printer. It is reset by clear().
+TEST_CASE("The highest layer Z of the plan is published without the Z offset",
+          "[plugins][gcode][print-statistics][plan-facts][max-print-z]")
+{
+    const tbb::global_control concurrency(tbb::global_control::max_allowed_parallelism, 1);
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool with_offset = GENERATE(false, true);
+    CAPTURE(with_offset);
+    ScopedDirectory directory;
+    DynamicPrintConfig config = statistics_config(1);
+    config.set_deserialize_strict("z_offset", with_offset ? "0.5" : "0");
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    print.process();
+    Orchestrator::instance().export_gcode(print, (directory.path() / "reference.gcode").string(), nullptr);
+
+    REQUIRE_FALSE(print.print_statistics().statistics_available.load());
+    REQUIRE(print.object(0).layer_count() == 67);
+    const double last_layer_z = unscaled(print.object(0).layers().back().scaled_print_z());
+    // The cube is 20 mm high, so a Z offset of 0.5 would show as a value above that.
+    CHECK(last_layer_z == Approx(20.).margin(0.31));
+    CHECK(print.print_statistics().max_print_z == Approx(last_layer_z).margin(1e-6));
+    print.print_statistics().clear();
+    CHECK(print.print_statistics().max_print_z == 0.);
+}
 // Export a reread two-tool print with a tower: the lines, their order and formats, the filament-only total cost, the
 // non-zero tower share, the tool changes and the layers follow the body, and the configuration follows the lines.
 TEST_CASE("An exported file lists the statistics before the configuration",

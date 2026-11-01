@@ -8,11 +8,13 @@
 #include <cmath>
 #include <iomanip>
 #include <locale>
+#include <map>
 #include <sstream>
 
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintRegion.hpp"
@@ -23,7 +25,7 @@ G-code export metadata
 
 The file writer owns the final text, while this module serializes host
 configuration, calculates extrusion widths from the first Print object's
-active region settings and formats the statistics measured by the Reader.
+active region settings and computes the statistics measured by the Reader.
 The configuration keys written are those whose definition nature allows the G-code
 destination (ConfigBase::writes_key()): host-only, preset-metadata and one-shot
 settings are refused by their nature. This filter is shared by export metadata and
@@ -37,6 +39,16 @@ the configuration copy. The total cost is the filament cost only (no time cost),
 and the lines "filament used [g]" and "filament cost" exist only when some tool has a
 positive weight, respectively a positive weight and cost. The whole list is empty
 when the Print has no available statistics.
+
+The numeric statistics given to exporters (GCodeExportStatistics) are the very values
+that the text is formatted from: encode_gcode_export_statistics() computes the
+length, volume and weight of each tool once, unrounded, and the text lines only format
+them, so the two cannot disagree. The tools are those of the nozzle diameters of the
+configuration copy, with the same rule for measured tools beyond them (ignored). The
+times come from the Print statistics (seconds, nominal path time without
+acceleration), the layer count and highest Z from the plan facts of the Print, which
+exist without a Reader pass; the measured values are zero when the statistics are
+unavailable.
 
 Representative direct calls (branches are not a timeline):
 
@@ -63,9 +75,8 @@ void encode_gcode_export_configuration(const DynamicPrintConfig &config,
 // Calculate widths from the first Print object's active region settings and return owned labels and values.
 std::vector<std::pair<std::string, std::string>> encode_gcode_export_extrusion_widths(const Print &print);
 
-// Format the measured statistics as owned label/value pairs in file order; empty when they are unavailable.
-std::vector<std::pair<std::string, std::string>> encode_gcode_export_statistics(const Print &print,
-                                                                               const DynamicPrintConfig &config);
+// Compute the numeric statistics and the text lines formed from them; the measured part is empty or zero when they are unavailable.
+GCodeExportStatistics encode_gcode_export_statistics(const Print &print, const DynamicPrintConfig &config);
 
 namespace {
 
@@ -169,27 +180,35 @@ std::vector<std::pair<std::string, std::string>> encode_gcode_export_extrusion_w
 }
 
 // Convert the measured volume of each tool into length, volume, weight and cost with the configuration copy's filament
-// properties, then append the lines in file order. The tool count is the number of nozzle diameters of the configuration copy:
-// a measured tool beyond it is ignored (it is in no per-tool line and no weight or cost total; the tower share is the Print's). The other tool vectors of the configuration
-// should have as many values (a shorter vector reuses its first value). Returns nothing when the statistics are unavailable.
-std::vector<std::pair<std::string, std::string>> encode_gcode_export_statistics(const Print &print,
-                                                                               const DynamicPrintConfig &config)
+// properties, once, then format the text lines in file order from those values. The tool count is the number of nozzle diameters of the configuration copy:
+// a measured tool beyond it is ignored (it is in no per-tool line, no numeric element and no weight or cost total; the tower share is the Print's). The other tool vectors of the configuration
+// should have as many values (a shorter vector reuses its first value). The plan facts are filled even when the statistics are unavailable;
+// the times, the materials and the text entries stay empty or zero then.
+GCodeExportStatistics encode_gcode_export_statistics(const Print &print, const DynamicPrintConfig &config)
 {
-    std::vector<std::pair<std::string, std::string>> entries;
+    GCodeExportStatistics result;
     const PrintStatistics &statistics = print.print_statistics();
+    result.layer_count = statistics.total_layer_count;
+    result.max_print_z = statistics.max_print_z;
     if (!statistics.statistics_available)
-        return entries;
+        return result;
+
+    const uint8_t normal = static_cast<uint8_t>(PrintEstimatedStatistics::ETimeMode::Normal);
+    const std::map<uint8_t, double>::const_iterator normal_time = statistics.estimated_print_time.find(normal);
+    if (normal_time != statistics.estimated_print_time.end())
+        result.estimated_time_seconds = normal_time->second;
+    result.first_layer_time_seconds = statistics.first_layer_time;
 
     const size_t tool_count = config.option<ConfigOptionFloats>("nozzle_diameter")->get_values().size();
     const ConfigOptionFloats &diameters = *config.option<ConfigOptionFloats>("filament_diameter");
     const ConfigOptionFloats &densities = *config.option<ConfigOptionFloats>("filament_density");
     const ConfigOptionFloats &prices = *config.option<ConfigOptionFloats>("filament_cost");
 
-    std::vector<double> millimeters(tool_count, 0.);
+    result.filaments.resize(tool_count);
     std::vector<double> cubic_centimeters(tool_count, 0.);
-    std::vector<double> grams(tool_count, 0.);
     std::vector<double> costs(tool_count, 0.);
-    double total_grams = 0.;
+    for (size_t tool = 0; tool < tool_count; ++tool)
+        result.filaments[tool].tool = tool;
     double total_cost = 0.;
     bool has_weight = false;
     bool has_cost = false;
@@ -197,24 +216,34 @@ std::vector<std::pair<std::string, std::string>> encode_gcode_export_statistics(
         const size_t tool = size_t(tool_volume.first);
         if (tool >= tool_count)
             continue;
-        const double volume = tool_volume.second;
-        millimeters[tool] = volume / (PI * std::pow(0.5 * diameters.get_at(tool), 2.));
-        cubic_centimeters[tool] = volume * 0.001;
-        grams[tool] = cubic_centimeters[tool] * densities.get_at(tool);
-        costs[tool] = grams[tool] * prices.get_at(tool) * 0.001;
-        total_grams += grams[tool];
+        GCodeExportFilamentUsage &usage = result.filaments[tool];
+        usage.volume_mm3 = tool_volume.second;
+        usage.length_mm = usage.volume_mm3 / (PI * std::pow(0.5 * diameters.get_at(tool), 2.));
+        cubic_centimeters[tool] = usage.volume_mm3 * 0.001;
+        usage.weight_g = cubic_centimeters[tool] * densities.get_at(tool);
+        costs[tool] = usage.weight_g * prices.get_at(tool) * 0.001;
+        result.total_length_mm += usage.length_mm;
+        result.total_volume_mm3 += usage.volume_mm3;
+        result.total_weight_g += usage.weight_g;
         total_cost += costs[tool];
-        has_weight |= grams[tool] > 0.;
-        has_cost |= grams[tool] > 0. && costs[tool] > 0.;
+        has_weight |= usage.weight_g > 0.;
+        has_cost |= usage.weight_g > 0. && costs[tool] > 0.;
     }
 
+    std::vector<double> millimeters;
+    std::vector<double> grams;
+    for (const GCodeExportFilamentUsage &usage : result.filaments) {
+        millimeters.push_back(usage.length_mm);
+        grams.push_back(usage.weight_g);
+    }
+    std::vector<std::pair<std::string, std::string>> &entries = result.entries;
     entries.emplace_back(PrintStatistics::FilamentUsedMm, format_tool_values(millimeters));
     entries.emplace_back(PrintStatistics::FilamentUsedCm3, format_tool_values(cubic_centimeters));
     if (has_weight)
         entries.emplace_back(PrintStatistics::FilamentUsedG, format_tool_values(grams));
     if (has_cost)
         entries.emplace_back(PrintStatistics::FilamentCost, format_tool_values(costs));
-    entries.emplace_back(PrintStatistics::TotalFilamentUsedG, format_two_decimals(total_grams));
+    entries.emplace_back(PrintStatistics::TotalFilamentUsedG, format_two_decimals(result.total_weight_g));
     entries.emplace_back(PrintStatistics::TotalFilamentCost, format_two_decimals(total_cost));
     entries.emplace_back(PrintStatistics::TotalFilamentUsedWipeTower,
                          format_two_decimals(statistics.total_wipe_tower_filament_weight));
@@ -222,7 +251,6 @@ std::vector<std::pair<std::string, std::string>> encode_gcode_export_statistics(
     entries.emplace_back("objects layers count", std::to_string(statistics.object_layer_count));
     entries.emplace_back("total layers count", std::to_string(statistics.total_layer_count));
     entries.emplace_back("has_support", statistics.has_support ? "1" : "0");
-    return entries;
+    return result;
 }
-
 } // namespace Slic3r

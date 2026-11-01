@@ -3680,7 +3680,8 @@ Orchestrator::GCodeExporterSelection Orchestrator::select_gcode_exporter(const P
 
 // Run the exporter chosen by `selection` on a borrowed reference. The exporter reads its destination from `config`
 // (setting output_path) and publishes its output itself; this function only prepares what it needs from the host: own the
-// filtered metadata, sliced widths and, when the Print has available statistics, their formatted lines, give it the
+// filtered metadata, sliced widths and, when the Print has available statistics, their formatted lines and numeric values
+// (the plan facts of the numeric part, layer count and highest Z, need no statistics; they are zero without a plan), give it the
 // thumbnail renderer, and run it synchronously. If the exporter asks for inputs while it sets up, the callback
 // of the request asks the requester and the answers are copied into config. QUERY is not run again: the caller selected the exporter. What the
 // exporter reports about its output is recorded in the Print (Print::export_result()) when it reports it, so a failure or
@@ -3711,8 +3712,13 @@ void Orchestrator::export_print(Print &print,
     encode_gcode_export_configuration(config, configuration_entries);
     const std::vector<std::pair<std::string, std::string>> extrusion_width_entries =
         encode_gcode_export_extrusion_widths(print);
-    const std::vector<std::pair<std::string, std::string>> statistics_entries =
-        encode_gcode_export_statistics(print, config);
+    const GCodeExportStatistics statistics = encode_gcode_export_statistics(print, config);
+    const std::vector<std::pair<std::string, std::string>> &statistics_entries = statistics.entries;
+    // The numeric per-tool values are a local array, frozen before metadata takes its address.
+    std::vector<raw_gcode_export_filament_usage> filament_usages;
+    filament_usages.reserve(statistics.filaments.size());
+    for (const GCodeExportFilamentUsage &usage : statistics.filaments)
+        filament_usages.push_back({uint32_t(usage.tool), usage.length_mm, usage.volume_mm3, usage.weight_g});
 
     // The entry vectors own these strings; do not modify them after taking their c_str() pointers.
     std::vector<raw_gcode_export_entry> configuration_views;
@@ -3738,6 +3744,15 @@ void Orchestrator::export_print(Print &print,
     metadata.extrusion_widths.count = extrusion_width_views.size();
     metadata.statistics.items = statistics_views.empty() ? nullptr : statistics_views.data();
     metadata.statistics.count = statistics_views.size();
+    metadata.estimated_time_seconds = statistics.estimated_time_seconds;
+    metadata.first_layer_time_seconds = statistics.first_layer_time_seconds;
+    metadata.layer_count = uint32_t(statistics.layer_count);
+    metadata.max_print_z = statistics.max_print_z;
+    metadata.filaments.items = filament_usages.empty() ? nullptr : filament_usages.data();
+    metadata.filaments.count = filament_usages.size();
+    metadata.total_length_mm = statistics.total_length_mm;
+    metadata.total_volume_mm3 = statistics.total_volume_mm3;
+    metadata.total_weight_g = statistics.total_weight_g;
 
     ExportResultReceiver result_receiver(print);
     ExportInputsReceiver inputs_receiver(*this, print, config, *plugin, std::move(inputs_cb));

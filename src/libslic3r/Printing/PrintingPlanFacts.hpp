@@ -42,7 +42,8 @@ struct PlanFacts
     int32_t toolchanges = 0;
     // Number of PrintingLayerGroup, auxiliary layers included.
     int32_t layer_count = 0;
-    // Highest layer print Z of the plan, 0 without layers.
+    // Highest layer print Z of the plan (scaled), 0 without layers. It is the layer's own print Z: the Z offset of the
+    // printer is not added, as in the historical max_layer_z.
     coord_t max_print_z = 0;
     // Tools having at least one concrete visit, in ascending order, without duplicates.
     std::vector<extruder_index_t> used_tools;

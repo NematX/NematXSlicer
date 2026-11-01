@@ -20,7 +20,7 @@ by the provider. Size-prefixed responses allow optional appended information.
 */
 
 #define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MAJOR 4u
-#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MINOR 1u
+#define SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT_MINOR 2u
 
 #include <stddef.h>
 #include <stdint.h>
@@ -43,6 +43,24 @@ typedef struct raw_gcode_export_list {
     size_t count;
 } raw_gcode_export_list;
 
+/* Measured material of one tool (logical filament), in the units below. */
+typedef struct raw_gcode_export_filament_usage {
+    /* Zero-based tool index; the position of this tool in the per-tool lines of the text statistics. */
+    uint32_t tool;
+    /* Length of filament pushed through the extruder, in millimeters. */
+    double length_mm;
+    /* Extruded volume, in cubic millimeters. */
+    double volume_mm3;
+    /* Weight from the filament density of the configuration, in grams. */
+    double weight_g;
+} raw_gcode_export_filament_usage;
+
+/* Borrowed array of per-tool material; items is null only when count is zero. */
+typedef struct raw_gcode_export_filament_usage_list {
+    const raw_gcode_export_filament_usage *items;
+    size_t count;
+} raw_gcode_export_filament_usage_list;
+
 /* Read-only export metadata borrowed until the synchronous EXPORT callback returns. */
 typedef struct raw_gcode_export_metadata {
     uint32_t struct_size;
@@ -50,6 +68,28 @@ typedef struct raw_gcode_export_metadata {
     raw_gcode_export_list extrusion_widths;
     /* Measured print statistics, empty when they are unavailable. */
     raw_gcode_export_list statistics;
+    /*
+    Since 4.2, the numeric statistics. They are appended as one group: a structure whose
+    struct_size stops before total_weight_g carries none of them. Plan facts (layer_count,
+    max_print_z) are valid once STEP_GCODE has finished. Measured values (the two times and all
+    material values) are valid if and only if the statistics list above is not empty, else
+    they are zero. Plan facts are zero until STEP_GCODE has published them, also for an EXPORT run
+    directly on a reference that STEP_GCODE did not produce.
+    */
+    /* Estimated print time in seconds; nominal path time without acceleration. Zero without measured statistics. */
+    double estimated_time_seconds;
+    /* Seconds that the Reader attributed to its layer 0, moves before the first layer included. Zero without a measure. */
+    double first_layer_time_seconds;
+    /* Number of layers of the printing plan, auxiliary layers included; zero before STEP_GCODE has finished. */
+    uint32_t layer_count;
+    /* Highest layer Z of the printing plan in millimeters, without the Z offset; zero before STEP_GCODE has finished. */
+    double max_print_z;
+    /* Material of every tool of the configuration copy of this export, in tool order, host-owned; empty without measured statistics. */
+    raw_gcode_export_filament_usage_list filaments;
+    /* Sums of the per-tool values above: millimeters, cubic millimeters and grams. Zero without measured statistics. */
+    double total_length_mm;
+    double total_volume_mm3;
+    double total_weight_g;
 } raw_gcode_export_metadata;
 
 /* Choose whether a run checks exporter compatibility or exports the G-code reference. */
@@ -184,6 +224,20 @@ export, for example when the G-code was generated without reading it back; it is
 never empty otherwise, because several entries are unconditional. An exporter
 therefore tests statistics.count == 0 and writes no statistics line in that case. A
 structure whose size stops before the statistics field means no statistics.
+
+Since 4.2 the numeric statistics follow the statistics list (see the structure above). They
+are the unrounded values from which the text above is formatted, computed once with the
+configuration copy of this export: the same tools (those of its nozzle diameters, measured
+tools beyond them are ignored) and its filament diameter and density. Units are seconds,
+millimeters, cubic millimeters and grams. The time is the nominal path time of the Reader,
+without acceleration; no silent-mode time exists. layer_count and max_print_z come from the
+printing plan and do not need the Reader, but they are zero until STEP_GCODE has published them,
+also for an EXPORT run directly on a reference that STEP_GCODE did not produce, even when the
+Print has a plan. The time, material and
+first-layer values are measured: they are valid exactly when the numeric statistics exist and the
+statistics list is not empty. A structure whose size stops before total_weight_g carries no numeric statistics;
+an exporter that needs them treats it as an older host. The filaments array and
+everything it points to are owned by the host and borrowed like the lists above.
 
 The exporter reports its outcome with report_export_result, at most once: a local
 path when it wrote a file that the requester can read, and a label that the

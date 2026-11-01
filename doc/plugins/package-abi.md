@@ -14,7 +14,7 @@ slic3r_slicing_step.h = 2.4
 slic3r_config_def.h = 1.6
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
-steps/slic3r_step_gcode_export.h = 4.1
+steps/slic3r_step_gcode_export.h = 4.2
 slic3r_gcode_thumbnail.h = 2.0
 ```
 
@@ -51,7 +51,7 @@ Data-tree 5.0 removes the branch surface modifier and reserves bit 10. Support-t
 shares the sparse selector. Packages requiring data-tree 4.x or support-toolpath 1.x
 must be rebuilt. Support-step remains 1.3; its publication payload is unchanged.
 
-The G-code exporter step is at 4.1: QUERY requires a borrowed Print in its
+The G-code exporter step is at 4.2: QUERY requires a borrowed Print in its
 payload, while the generic execution-context Print remains null. Exporter 3.x
 packages are incompatible. QUERY reads settings from its configuration argument
 and only computation-stable Print data (applied configuration and selected
@@ -66,6 +66,18 @@ support. The C++ provider view also defaults to removable-media support.
 An empty label uses the GUI's ordinary export label. Incompatible answers do not
 provide action information. The GUI adds the ellipsis and uses suitability only
 for the FFF removable-media action, not as a restriction on chosen file paths.
+Since 4.2 the EXPORT metadata ends with numeric statistics, appended flat after the
+text `statistics` list and read only when `struct_size` covers the last of them
+(`total_weight_g`); a 4.1 host structure carries none and the C++ view reads zeros.
+They are the unrounded values from which the text is formatted, computed once with the
+configuration copy of the export (the tools of its nozzle diameters): the estimated
+time and the time of the Reader's layer 0 in seconds (nominal path time, no
+acceleration; no silent-mode time exists), `layer_count` and `max_print_z` (millimeters,
+without the Z offset) from the printing plan, and a per-tool array of length (mm),
+volume (mm3) and weight (g) with their totals. The plan facts are zero until STEP_GCODE
+has published them, also for a direct export of a reference it did not produce. The times and the material are valid if and
+only if the numeric statistics exist and the text `statistics` list is not empty, else zero. All of it is host memory
+borrowed for the synchronous EXPORT call. Plugins built for 4.1 keep working.
 
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the
