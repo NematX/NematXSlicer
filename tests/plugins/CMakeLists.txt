@@ -243,6 +243,8 @@ if (SLIC3R_STRICT_FREEZE)
         PROPERTIES COMPILE_DEFINITIONS SLIC3R_TEST_STRICT_FREEZE=1)
 endif()
 set_property(TARGET ${_TEST_NAME}_tests PROPERTY FOLDER "tests")
+# The C fixtures include the plugin API headers as a C plugin does: compile them as strict C11, without compiler extensions.
+set_target_properties(${_TEST_NAME}_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 
 if (WIN32)
     target_sources(${_TEST_NAME}_tests PRIVATE plugin_version_metadata.rc)

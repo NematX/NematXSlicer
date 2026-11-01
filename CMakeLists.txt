@@ -8,7 +8,10 @@
 #/|/
 #/|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 #/|/
-cmake_minimum_required(VERSION 3.13)
+cmake_minimum_required(VERSION 3.21)
+# 3.21 is the first version that passes C_STANDARD 11 to MSVC (tests/plugins). The policies stay those of 3.13, so raising the
+# minimum version does not change the build.
+cmake_policy(VERSION 3.13)
 project(Slic3r)
 
 if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/version.date.inc")
