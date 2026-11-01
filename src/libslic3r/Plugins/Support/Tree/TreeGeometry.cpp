@@ -19,8 +19,6 @@ namespace Slic3r::TreeFamily {
 namespace {
 // The points of a regular polygon of num_segments sides centred on the origin.
 std::vector<c_point> make_circle_num_segments(double radius, size_t num_segments);
-// Where a point lies relative to one ring: 0 outside, 1 inside, -1 on the border (the test of ClipperLib::PointInPolygon).
-int ring_crossing(const multipoint_const_view &ring, c_point point);
 // The squared distance from a point to the segment a-b; the closest point of the segment is written to `closest`.
 double squared_distance_to_segment(const LineSegment &segment, const Vec2d &point, Vec2d &closest);
 }
@@ -314,6 +312,8 @@ std::vector<c_point> make_circle_num_segments(double radius, size_t num_segments
     return out;
 }
 
+} // namespace
+
 int ring_crossing(const multipoint_const_view &ring, c_point point)
 {
     // See "The Point in Polygon Problem for Arbitrary Polygons" by Hormann & Agathos. The result flips each time the ray going
@@ -350,6 +350,8 @@ int ring_crossing(const multipoint_const_view &ring, c_point point)
     }
     return result;
 }
+
+namespace {
 
 double squared_distance_to_segment(const LineSegment &segment, const Vec2d &point, Vec2d &closest)
 {

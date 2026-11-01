@@ -151,6 +151,10 @@ using slic3r_api::Support::Common::to_polygons;
 // border_result at once, like the native contains(Polygons, Point, border_result); a ring under 3 points contains nothing.
 bool point_in_polygons(const slic3r_api::PolygonCollection &polygons, c_point point, bool border_result = true);
 
+// Where a point lies relative to one ring: 0 outside, 1 inside, -1 on the border. It is the test of ClipperLib::PointInPolygon (the same
+// crossing rule and the same double cross products), which the host contains() of a polygon applies; a ring under 3 points gives 0.
+int ring_crossing(const multipoint_const_view &ring, c_point point);
+
 /* ============================== 7. nearest point on lines ============================== */
 
 // The closest point found by nearest_on_lines().

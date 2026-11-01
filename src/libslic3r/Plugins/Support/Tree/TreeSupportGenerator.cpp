@@ -13,6 +13,7 @@
 #include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
+#include "libslic3r/Api/plugin/cpp/ParallelFor.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportInterfaces.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportParams.hpp"
@@ -126,12 +127,24 @@ std::vector<std::vector<uint32_t>> drawing_indices(const std::vector<coord_t> &z
 // Appends circles of the indexed stretches crossing the slab middle, interpolating centre/radius; organic indices contain stems only.
 void add_branch_circles(StoredPolygonCollection &circles, storage_handle *storage, const std::vector<Segment> &segments, coord_t middle_z,
                          const std::vector<uint32_t> &indices);
-// The outline overhang of a section over the section below it, in scaled units; an empty section below gives none.
-double section_overhang(const PolygonCollection &upper, const PolygonCollection &lower);
-// Whether a point lies inside an odd number of the polygons of a section, so that the holes of the section are outside of it.
-bool inside_section(const PolygonCollection &section, c_point point);
-// The distance in scaled units from a point to the nearest edge of the polygons.
-double distance_to_outline(const PolygonCollection &polygons, c_point point);
+// A ring of the lower section of an overhang measure, with the bounding box of its points: a point outside the box cannot be inside the ring or
+// on its border, and the ring is at least as far from a point as its box is.
+struct SectionRing {
+    multipoint_const_view points;
+    c_bounding_box box;
+};
+// The outline overhang of a section over the section below it, in scaled units; an empty section below gives none. The result is the exact
+// maximum, except that the measure stops as soon as the maximum exceeds `exceed` and then returns a value above it (for a caller that only
+// compares the overhang with a limit).
+double section_overhang(const PolygonCollection &upper, const PolygonCollection &lower,
+                        double exceed = std::numeric_limits<double>::infinity());
+// The rings of a section with their boxes, in ring order.
+std::vector<SectionRing> section_rings(const PolygonCollection &section);
+// Whether a point lies inside an odd number of the rings of a section, so that the holes of the section are outside of it.
+bool inside_section(const std::vector<SectionRing> &rings, c_point point);
+// The distance in scaled units from a point to the nearest edge of the rings, or any value not above `cutoff` as soon as the nearest edge
+// found so far is not farther than the cutoff.
+double distance_to_outline(const std::vector<SectionRing> &rings, c_point point, double cutoff);
 // Creates the bottom contacts of the roots that rest on the object and of the resting parts of the contacts: one contact per object layer, on the part of
 // its top surfaces that the root circles and the resting parts cover.
 void add_floors(const LayerList &layers, const std::vector<RootRest> &rests, const std::vector<RestingPart> &resting_parts, const PolygonList &keep_out,
@@ -439,11 +452,14 @@ std::vector<OverhangLayer> section_overhang_layers(const LayerList &layers, cons
     std::sort(zs.begin(), zs.end());
     zs.erase(std::unique(zs.begin(), zs.end()), zs.end());
     const PolygonList sections = branch_sections(segments, trees, true, zs, scratch, context);
-    for (OverhangLayer &layer : overhang) {
-        const StoredPolygonCollection &top = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.top_z) - zs.begin())];
-        const StoredPolygonCollection &bottom = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.bottom_z) - zs.begin())];
-        layer.rate = section_overhang(top, bottom) / double(layer.top_z - layer.bottom_z);
-    }
+    // The rate of a layer depends on two read-only sections only, so the layers are independent jobs and each writes its own slot.
+    slic3r_api::parallel_for_storage_with_progress(0, uint32_t(overhang.size()), context, nullptr,
+        [&overhang, &sections, &zs](uint32_t id, storage_handle *) {
+            OverhangLayer &layer = overhang[id];
+            const StoredPolygonCollection &top = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.top_z) - zs.begin())];
+            const StoredPolygonCollection &bottom = sections[size_t(std::lower_bound(zs.begin(), zs.end(), layer.bottom_z) - zs.begin())];
+            layer.rate = section_overhang(top, bottom) / double(layer.top_z - layer.bottom_z);
+        });
     return overhang;
 }
 
@@ -520,44 +536,82 @@ void add_branch_circles(StoredPolygonCollection &circles, storage_handle *storag
 
 // A point of the upper section that lies outside the lower one overhangs by its distance to the lower outline. A section with
 // nothing below it is not measured: it starts on a branch or a stem that is printed below.
-double section_overhang(const PolygonCollection &upper, const PolygonCollection &lower)
+// The result is a maximum of minimum distances, so it does not depend on the order of the work and only work that cannot change it is skipped:
+// a point inside the lower section adds nothing, a point whose nearest edge is found to be not farther than the maximum so far cannot raise
+// it (distance_to_outline() stops there), and the measure ends when the maximum exceeds `exceed`, a limit that the caller only compares with.
+double section_overhang(const PolygonCollection &upper, const PolygonCollection &lower, double exceed)
 {
     if (lower.empty())
         return 0.;
+    const std::vector<SectionRing> rings = section_rings(lower);
     double largest = 0.;
     for (uint32_t ring_idx = 0; ring_idx < upper.size(); ++ring_idx) {
         const multipoint_const_view ring = upper.at(ring_idx).view();
-        for (uint32_t point_idx = 0; point_idx < ring.size; ++point_idx)
-            if (!inside_section(lower, ring.array[point_idx]))
-                largest = std::max(largest, distance_to_outline(lower, ring.array[point_idx]));
+        for (uint32_t point_idx = 0; point_idx < ring.size; ++point_idx) {
+            if (inside_section(rings, ring.array[point_idx]))
+                continue;
+            largest = std::max(largest, distance_to_outline(rings, ring.array[point_idx], largest));
+            if (largest > exceed)
+                return largest;
+        }
     }
     return largest;
 }
 
+// The view of every ring and the box of its points, taken once for all the points measured against the section. A ring without points
+// gets an inverted box, which rejects every point.
+std::vector<SectionRing> section_rings(const PolygonCollection &section)
+{
+    std::vector<SectionRing> rings;
+    rings.reserve(section.size());
+    for (uint32_t ring_idx = 0; ring_idx < section.size(); ++ring_idx) {
+        SectionRing ring{ section.at(ring_idx).view(), slic3r_api::bounding_box_empty() };
+        for (uint32_t idx = 0; idx < ring.points.size; ++idx)
+            slic3r_api::bounding_box_merge(ring.box, ring.points.array[idx]);
+        rings.push_back(ring);
+    }
+    return rings;
+}
+
 // Each ring answers with the contains() of the host (border inside), and the answers are counted, so a point in a hole is outside.
+// ring_crossing() is the crossing test of the host contains() (ClipperLib::PointInPolygon), so a ring answers true for an inside point
+// and for a border point; a point outside the box of a ring is outside the ring and on no border of it, and is not tested.
 // It is kept beside point_in_polygons() on purpose: on a hole border it counts two rings and answers false, so section_overhang()
 // still computes the distance, including floating-point projection rounding, where point_in_polygons(border = true)
 // would answer true and skip it.
-bool inside_section(const PolygonCollection &section, c_point point)
+bool inside_section(const std::vector<SectionRing> &rings, c_point point)
 {
     size_t containing = 0;
-    for (uint32_t ring_idx = 0; ring_idx < section.size(); ++ring_idx)
-        containing += section.at(ring_idx).contains(point) ? 1 : 0;
+    for (const SectionRing &ring : rings) {
+        if (point.x < ring.box.min.x || point.x > ring.box.max.x || point.y < ring.box.min.y || point.y > ring.box.max.y)
+            continue;
+        containing += ring_crossing(ring.points, point) != 0 ? 1 : 0;
+    }
     return containing % 2 == 1;
 }
 
-double distance_to_outline(const PolygonCollection &polygons, c_point point)
+// The minimum of the distances to every edge. A ring is skipped when its box is farther than the nearest edge found so far by more than
+// one scaled unit, and the scan stops when the minimum is not above the cutoff, since the final minimum can only be lower. The margin covers the
+// scaled object coordinates (within about +-1.5e8 units, and differences of that order), where the rounding of the distance formula in double
+// is about 1e-7 unit, far below the margin, so a skipped ring could not have lowered the minimum.
+double distance_to_outline(const std::vector<SectionRing> &rings, c_point point, double cutoff)
 {
+    const Vec2d position = to_vec2d(point);
     double best = std::numeric_limits<double>::max();
-    for (uint32_t ring_idx = 0; ring_idx < polygons.size(); ++ring_idx) {
-        const multipoint_const_view ring = polygons.at(ring_idx).view();
-        for (uint32_t idx = 0; idx < ring.size; ++idx) {
-            const Vec2d a = to_vec2d(ring.array[idx]);
-            const Vec2d ab = to_vec2d(ring.array[(idx + 1) % ring.size]) - a;
-            const Vec2d ap = to_vec2d(point) - a;
+    for (const SectionRing &ring : rings) {
+        const double gap_x = std::max({ double(ring.box.min.x) - position.x(), 0., position.x() - double(ring.box.max.x) });
+        const double gap_y = std::max({ double(ring.box.min.y) - position.y(), 0., position.y() - double(ring.box.max.y) });
+        if (std::sqrt(gap_x * gap_x + gap_y * gap_y) - 1. >= best)
+            continue;
+        for (uint32_t idx = 0; idx < ring.points.size; ++idx) {
+            const Vec2d a = to_vec2d(ring.points.array[idx]);
+            const Vec2d ab = to_vec2d(ring.points.array[(idx + 1) % ring.points.size]) - a;
+            const Vec2d ap = position - a;
             const double len2 = ab.squaredNorm();
             const double t = len2 > 0. ? std::clamp(ap.dot(ab) / len2, 0., 1.) : 0.;
             best = std::min(best, (ap - ab * t).norm());
+            if (best <= cutoff)
+                return best;
         }
     }
     return best;
@@ -651,9 +705,17 @@ void refine_branch_slabs(const std::vector<Segment> &segments, const std::vector
         for (const Common::GeneratorLayer *slab : out.base)
             middles.push_back(slab_middle_z(*slab));
         const PolygonList sections = branch_sections(segments, trees, true, middles, scratch, context);
+        // Whether each pair of neighbouring slabs overhangs more than the limit. The pairs are independent jobs writing their own slot, and the
+        // measure stops once a pair exceeds the limit, since only that comparison is used; the cuts are then chosen serially, in slab order.
+        std::vector<char> exceeds(out.base.size(), 0);
+        if (out.base.size() > 1)
+            slic3r_api::parallel_for_storage_with_progress(1, uint32_t(out.base.size()), context, nullptr,
+                [&exceeds, &sections, &settings](uint32_t idx, storage_handle *) {
+                    exceeds[idx] = section_overhang(sections[idx], sections[idx - 1], settings.max_overhang) > settings.max_overhang ? 1 : 0;
+                });
         std::vector<std::pair<Common::GeneratorLayer *, coord_t>> cuts;
         for (size_t idx = 1; idx < out.base.size(); ++idx) {
-            if (section_overhang(sections[idx], sections[idx - 1]) <= settings.max_overhang)
+            if (!exceeds[idx])
                 continue;
             for (Common::GeneratorLayer *slab : { out.base[idx], out.base[idx - 1] }) {
                 if (std::find(branch_slabs.begin(), branch_slabs.end(), slab) == branch_slabs.end())
