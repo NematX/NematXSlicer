@@ -265,6 +265,10 @@ void apply_variant(DynamicPrintConfig &config, const char *variant)
                                        {"bridge_type", variant + 7}, {"bridge_flow_ratio", "80%"}});
     else if (strcmp(variant, "feet") == 0)
         config.set_deserialize_strict({{"raft_first_layer_expansion", "2"}});
+    else if (strcmp(variant, "interface_increment") == 0)
+        // A turn of 30 degrees per interface id: at 90 degrees consecutive ids give perpendicular lines and ids two apart give
+        // parallel lines (180 degrees); at 30 degrees consecutive ids differ by 30 degrees and ids two apart by 60 degrees.
+        config.set_deserialize_strict({{"support_material_interface_angle_increment", "30"}});
     else if (strcmp(variant, "closing") == 0)
         config.set_deserialize_strict({{"support_material_closing_radius", "1"}});
     else if (strcmp(variant, "buildplate_only") == 0)
@@ -299,6 +303,14 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
             mesh.merge(platform);
         }        CAPTURE(model_id, style, soluble, interfaces, same_tool, variant);
         DynamicPrintConfig config = SG::config(style, soluble, interfaces, same_tool);
+        // Every snug comparison starts its interfaces at 45 degrees (the increment adds to it), set before the variant so that a
+        // variant keeps the last word:
+        // - snug gets a diagonal starting angle next to the 90 degrees of the grid comparisons, so two interface angles are covered;
+        // - no line runs parallel to the straight edges of the cube hole, where it would amplify the small demand difference
+        //   of snug soluble (see the contact loops comparison comment): whole lines would enter or leave;
+        // - the rectilinear-grid base of the snug comparisons uses the interface angle every second layer, so it turns with it.
+        if (strcmp(style, "snug") == 0)
+            config.set_deserialize_strict({{"support_material_interface_angle", "45"}});
         apply_variant(config, variant);
         if (model_id == 3) {
             // The lateral shift equals layer height. Enforcing its layers gives both implementations the full unsupported strip;
@@ -713,6 +725,16 @@ TEST_CASE("Grid legacy comparison: bridge types", "[plugins][support-grid][legac
 TEST_CASE("Grid legacy comparison: foot expansion", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     for (const int model_id : {0, 1})
         for (const char *style : {"grid", "snug"}) compare(model_id, style, false, 3, false, "feet");
+}
+// Compare a positive interface angle increment on the cube with a hole and on the roof over bed and platform (bottom contact on the
+// platform, columns from the bed with the first-layer flange, base-only layers between interface Z). Models 1, 4 and 5 all have bottom
+// contacts and contacts-only layers. On model 5 only the bottom contact and the interfaces on the platform are non-square: the area
+// under the roof is the 8 x 8 mm square, where lengths are nearly independent of the line orientation. The comparison covers lengths
+// and volumes per Z, so it exercises the increment and the interface id numbering of the plugin and the native generator together;
+// the orientation itself is checked for the plugin by the built-in support toolpath test, and not for the native generator.
+TEST_CASE("Grid legacy comparison: interface angle increment", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
+    for (const int model_id : {1, 5})
+        for (const char *style : {"grid", "snug"}) compare(model_id, style, false, 3, false, "interface_increment");
 }
 // Compare a snug closing radius other than the default.
 TEST_CASE("Grid legacy comparison: snug closing radius", "[plugins][support-grid][legacy-compare][support-settings][slow]") {

@@ -126,6 +126,64 @@ struct ScopedBranchProviderOff {
 };
 }
 
+// Check that the built-in support toolpaths (not the native generator) print the interface lines of a support layer at the angle
+// interface_angle + interface_id * increment, for every style. Lines at 0 degrees run along X and lines at 90 degrees along Y: the
+// base settings test below prints its contacts at the base angle 0 along X and fails on any vertical path. The first layer is left out:
+// its flange uses its own angle.
+TEST_CASE("Built-in support toolpaths turn interfaces by the angle increment per interface id", "[plugins][support-toolpath-legacy][support-toolpath]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // Grid and snug with an increment of 90, then snug with no increment.
+    const int case_index = GENERATE(0, 1, 2);
+    const char *style = case_index == 0 ? "grid" : "snug";
+    const bool no_increment = case_index == 2;
+    DynamicPrintConfig config = SG::config(style, false, 3);
+    config.set_deserialize_strict({{"support_material_interface_angle", "90"},
+                                   {"support_material_interface_angle_increment", no_increment ? "0" : "90"}});
+    Print print;
+    Model model;
+    Test::init_print({SG::slab(true)}, print, model, config);
+    SG::prefix(print);
+    SG::family(print);
+    SG::toolpaths(print);
+    // Count of the layers seen for each parity of the interface id.
+    size_t layers_of_parity[2] = {0, 0};
+    for (const Layer &layer : print.object(0).auxiliary_layers()) {
+        if (layer.scaled_print_z() - layer.scaled_height() <= 0) continue;
+        const LayerSupportProperty *property = layer.get_property<LayerSupportProperty>();
+        REQUIRE(property != nullptr);
+        double length_along[2] = {0, 0};
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands()) {
+                if (!region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) continue;
+                std::vector<const ExtrusionEntity *> leaves;
+                collect_leaves(region.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), leaves);
+                for (const ExtrusionEntity *leaf : leaves)
+                    for (const ArcPolyline &line : leaf->as_polylines())
+                        for (size_t index = 1; index < line.size(); ++index) {
+                            const Point delta = line.get_point(index) - line.get_point(index - 1);
+                            length_along[0] += unscaled(double(std::abs(delta.x())));
+                            length_along[1] += unscaled(double(std::abs(delta.y())));
+                        }
+            }
+        const double total = length_along[0] + length_along[1];
+        if (total == 0) continue;
+        // With an increment of 90 an even id prints at 90 or 270 degrees (along Y) and an odd id at 180 or 360 degrees (along X);
+        // with no increment every id prints at 90 degrees (along Y). The links between neighbouring lines are short:
+        // the lines own nearly all the length.
+        const size_t parity = property->interface_id & 1;
+        const size_t expected_axis = no_increment || parity == 0 ? 1 : 0;
+        ++layers_of_parity[parity];
+        CHECK(length_along[expected_axis] > 0.9 * total);
+    }
+    if (no_increment) {
+        REQUIRE(layers_of_parity[0] + layers_of_parity[1] > 0);
+    } else {
+        REQUIRE(layers_of_parity[0] > 0);
+        REQUIRE(layers_of_parity[1] > 0);
+    }
+}
+
 // Check registration, activation and dispatch ordering of the production algorithms: sparse, branch, bottom, top.
 TEST_CASE("Native support toolpath providers are active in role order", "[plugins][support-toolpath-legacy]")
 {

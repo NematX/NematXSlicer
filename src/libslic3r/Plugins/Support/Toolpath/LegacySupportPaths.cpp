@@ -585,11 +585,8 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
         base_angle = interface_angle;
     else if (geometry.angle_height > 0 && int(unscaled(z) / geometry.angle_height) % 2 == 1)
         base_angle += float(M_PI / 2.);
-    float angle = interface_angle;
-    if (geometry.interface_angle_increment == 0 && geometry.style == Common::SupportStyle::Snug)
-        angle += property.interface_id & 1 ? float(-M_PI / 4.) : float(M_PI / 4.);
-    else if (geometry.interface_angle_increment > 0)
-        angle += interface_angle + property.interface_id * Common::radians(float(geometry.interface_angle_increment));
+    // Every style turns its interfaces by the configured increment from one interface id to the next.
+    const float angle = interface_angle + property.interface_id * Common::radians(float(geometry.interface_angle_increment));
     const std::string &contact_pattern = role == SurfaceRole::Top ? geometry.top_pattern_id : geometry.bottom_pattern_id;
     const bool top_as_base = !geometry.top_published_interfaces_enabled, bottom_as_base = !geometry.bottom_published_interfaces_enabled;
     std::vector<Pass> passes;
