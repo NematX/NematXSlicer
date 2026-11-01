@@ -209,6 +209,12 @@ the old standard's activation to missing successors, retaining explicit choices.
 Public priority constants are additive in `slic3r_step_layer_extrusion_edit.h` 1.1;
 fan2.0 and timing1.0 record layouts are unchanged.
 
+Replay qualification compares standard, cooling, dynamic-graph and first-layer
+setting changes on the same `Print` with a coexisting fresh `Print`. It checks
+the complete context, layer duration and ordered leaf speeds/fan pairs, including
+restoration of the initial configuration. Temporal anticipation/kickstart options
+are not part of this chain or its qualification without a generic provider.
+
 Python exposes the same ctypes records through `slic3r_fan_policy`:
 `FanPolicyContext`, `PrintingLayerTimeProperty`, `fan_policy_context_key(api)`,
 `printing_layer_time_property_key(api)`, `validate_fan_policy_context(record, phase)`
