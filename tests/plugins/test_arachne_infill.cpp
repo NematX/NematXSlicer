@@ -25,6 +25,7 @@
 #include "libslic3r/Fill/FillBase.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Geometry/MedialAxis.hpp"
+#include "libslic3r/Geometry/Voronoi.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Plugins/Infill/ArachneInfill.hpp"
@@ -714,4 +715,49 @@ TEST_CASE("Ensuring is a standalone plugin and the smooth variants are gone", "[
     CHECK(plugin->get_step() == INFILL_PATTERN);
     CHECK(Orchestrator::instance().get_plugin("smoothhilbert") == nullptr);
     CHECK(Orchestrator::instance().get_plugin("smoothtriple") == nullptr);
+}
+
+// The island of a branch sheath centreline (a long strip of about 0.3 mm) for which the Voronoi diagram of the rotated input segments has a finite edge
+// with a non-finite vertex: the repair by rotation must reject that diagram and try the next angle, whatever the result. The test guarantees that:
+// - the diagram of the island lines goes through the repair (its state is repaired or not repaired, not "not needed");
+// - the medial axis, built with the parameters of the API call of the branch sheath (MedialAxisExtrusionFactory), returns without aborting;
+// - every point of its output lies inside the bounding box of the island grown by the flow width, and every width is in 0..2 times the maximum medial width.
+// An empty output is accepted: an island narrower than the nozzle yields no line.
+TEST_CASE("The medial axis of a degenerate branch island stays inside the island", "[plugins][voronoi-repair][medial-axis]")
+{
+    const coord_t flow_width = 419999, height = 300000, min_medial = 299256, max_medial = 629999, min_extrusion = 271239;
+    const std::vector<std::pair<coord_t, coord_t>> captured{
+        {-4353392, -4178675}, {-4271397, -4009546}, {-440921, -4004738}, {-282523, -4103582}, {-171659, -4113497},
+        {37611, -4004139}, {-4872750, -4010301}, {-4814617, -4173323}, {-4584344, -4288775}};
+    Points points;
+    for (const std::pair<coord_t, coord_t> &point : captured)
+        points.emplace_back(point.first, point.second);
+    const ExPolygon island(points);
+
+    // The repair was attempted on the lines of the island.
+    // Non-const: construct_voronoi is only instantiated for the iterators of a non-const Lines (as MedialAxis uses it).
+    Lines lines = island.lines();
+    Geometry::VoronoiDiagram diagram;
+    diagram.construct_voronoi(lines.begin(), lines.end());
+    CHECK((diagram.get_state() == Geometry::VoronoiDiagram::State::REPAIR_SUCCESSFUL ||
+           diagram.get_state() == Geometry::VoronoiDiagram::State::REPAIR_UNSUCCESSFUL));
+
+    Geometry::MedialAxis medial_axis(island, max_medial, min_medial, height);
+    medial_axis.use_min_real_width(min_extrusion);
+    medial_axis.set_biggest_width(max_medial);
+    medial_axis.set_stop_at_min_width(true);
+    ThickPolylines centrelines;
+    medial_axis.build(centrelines);
+
+    BoundingBox bounds = get_extents(island);
+    bounds.offset(flow_width);
+    for (const ThickPolyline &centreline : centrelines) {
+        CHECK(centreline.points.size() == centreline.points_width.size());
+        for (const Point &point : centreline.points)
+            CHECK(bounds.contains(point));
+        for (const coord_t width : centreline.points_width) {
+            CHECK(width >= 0);
+            CHECK(width <= 2 * max_medial);
+        }
+    }
 }

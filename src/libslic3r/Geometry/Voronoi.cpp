@@ -305,30 +305,34 @@ VoronoiDiagram::try_to_repair_degenerated_voronoi_diagram_by_rotation(const Segm
     // We want to remap all Voronoi vertices at the endpoints of input segments
     // to ensure that Voronoi vertices at endpoints will be preserved after rotation.
     // So we assign every Voronoi vertices color to map this Vertex into input segments.
-    for (cell_type cell : m_cells) {
-        if (cell.is_degenerate())
-            continue;
+    // The endpoint remapping only matters for a diagram that is accepted. A diagram with a finite edge with a non-finite vertex is rejected (the issue is
+    // returned and the next angle is tried) and its vertices have no integer position, so it is only rotated back.
+    if (issue_type != IssueType::FINITE_EDGE_WITH_NON_FINITE_VERTEX) {
+        for (cell_type cell : m_cells) {
+            if (cell.is_degenerate())
+                continue;
 
-        if (cell.contains_segment()) {
-            if (const SegmentCellRange cell_range = VoronoiUtils::compute_segment_cell_range(cell, segments_rotated.begin(), segments_rotated.end()); cell_range.is_valid()) {
-                if (cell_range.edge_end->vertex1()->color() == 0) {
-                    // Vertex 1 of edge_end points to the starting endpoint of the input segment (from() or line.a).
-                    VD::vertex_type::color_type color = encode_input_segment_endpoint(cell.source_index(), boost::polygon::LOW);
-                    cell_range.edge_end->vertex1()->color(color);
-                }
+            if (cell.contains_segment()) {
+                if (const SegmentCellRange cell_range = VoronoiUtils::compute_segment_cell_range(cell, segments_rotated.begin(), segments_rotated.end()); cell_range.is_valid()) {
+                    if (cell_range.edge_end->vertex1()->color() == 0) {
+                        // Vertex 1 of edge_end points to the starting endpoint of the input segment (from() or line.a).
+                        VD::vertex_type::color_type color = encode_input_segment_endpoint(cell.source_index(), boost::polygon::LOW);
+                        cell_range.edge_end->vertex1()->color(color);
+                    }
 
-                if (cell_range.edge_begin->vertex0()->color() == 0) {
-                    // Vertex 0 of edge_end points to the ending endpoint of the input segment (to() or line.b).
-                    VD::vertex_type::color_type color = encode_input_segment_endpoint(cell.source_index(), boost::polygon::HIGH);
-                    cell_range.edge_begin->vertex0()->color(color);
+                    if (cell_range.edge_begin->vertex0()->color() == 0) {
+                        // Vertex 0 of edge_end points to the ending endpoint of the input segment (to() or line.b).
+                        VD::vertex_type::color_type color = encode_input_segment_endpoint(cell.source_index(), boost::polygon::HIGH);
+                        cell_range.edge_begin->vertex0()->color(color);
+                    }
+                } else {
+                    // This could happen when there is a missing Voronoi vertex even after rotation.
+                    //assert(cell_range.is_valid());
                 }
-            } else {
-                // This could happen when there is a missing Voronoi vertex even after rotation.
-                //assert(cell_range.is_valid());
             }
-        }
 
-        // FIXME @hejllukas: Implement mapping also for source points and not just for source segments.
+            // FIXME @hejllukas: Implement mapping also for source points and not just for source segments.
+        }
     }
 
     // Rotate all Voronoi vertices back.
