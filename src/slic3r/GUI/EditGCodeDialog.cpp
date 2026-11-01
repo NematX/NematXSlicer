@@ -167,6 +167,7 @@ static ParamType get_type(const ConfigOption *optptr) {
     }
 }
 
+// Build the placeholder tree for one script name, showing global read-only states once and appending non-global entries; the dialog owns the created rows and invalid definitions are skipped.
 void EditGCodeDialog::init_params_list(const std::string& custom_gcode_name)
 {
     const auto& custom_gcode_placeholders = custom_gcode_specific_placeholders();
@@ -238,7 +239,7 @@ void EditGCodeDialog::init_params_list(const std::string& custom_gcode_name)
         // TRN: The argument is the name of currently edited custom gcode. The string starts a section of placeholders only available in this gcode.
         wxDataViewItem group = m_params_list->AppendGroup(format_wxstr(_L("Specific for %1%"), custom_gcode_name), "custom-gcode_gcode");
         for (const auto& opt_key : specific_params)
-            if (custom_gcode_specific_config_def.has(opt_key)) {
+            if (!cgp_ro_slicing_states_config_def.has(opt_key) && custom_gcode_specific_config_def.has(opt_key)) {
                 auto def = custom_gcode_specific_config_def.get(opt_key);
                 m_params_list->AppendParam(group, get_type(opt_key, *def), opt_key);
             }
@@ -309,6 +310,7 @@ void EditGCodeDialog::add_selected_value_to_gcode()
     m_gcode_editor->SetFocus();
 }
 
+// Resolve the selected placeholder row without taking ownership, preferring global read-only slicing definitions over preset and script-specific definitions; missing rows leave the tooltip unchanged.
 void EditGCodeDialog::selection_changed(wxDataViewEvent& evt)
 {   
     wxString label;
@@ -319,7 +321,10 @@ void EditGCodeDialog::selection_changed(wxDataViewEvent& evt)
         const ConfigOptionDef*    def     { nullptr };
 
         const auto& full_config = wxGetApp().preset_bundle->full_config();
-        if (const ConfigDef* config_def = full_config.def(); config_def && config_def->has(opt_key)) {
+        if (cgp_ro_slicing_states_config_def.has(opt_key)) {
+            def = cgp_ro_slicing_states_config_def.get(opt_key);
+        }
+        else if (const ConfigDef* config_def = full_config.def(); config_def && config_def->has(opt_key)) {
             def = config_def->get(opt_key);
         }
         else {

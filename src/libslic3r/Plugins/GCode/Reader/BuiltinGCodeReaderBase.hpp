@@ -237,8 +237,7 @@ protected:
 private:
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
-    // Parse one comment-only line using the historical SuperSlicer marker
-    // vocabulary before object markers or neutral-line handling run.
+    // Parse recognized comment-only G-code and publish a state update, marker, or diagnostic.
     bool consume_common_comment(const plugin_run_context &run_context,
                                 const run_ctx_gcode_reader &context,
                                 GCodeStateTracker &state,

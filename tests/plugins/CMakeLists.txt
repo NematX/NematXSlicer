@@ -69,6 +69,7 @@ add_executable(${_TEST_NAME}_tests
     test_gcode_firmware_dialects.cpp
     test_gcode_firmware_state.cpp
     test_gcode_line_parser.cpp
+    test_gcode_layer_height_slider.cpp
     test_gcode_reader_compatibility.cpp
     test_gcode_reader.cpp
     test_gcode_printing_plan_file_writer.cpp

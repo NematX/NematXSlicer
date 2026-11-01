@@ -326,9 +326,7 @@ private:
         }
     }
 
-    // Global and axis slots have only one meaning, so accepting a nonzero
-    // target would create unreachable duplicate state. Per-tool/device slots
-    // deliberately return false here.
+    // Return whether a standard item has one target-zero slot; per-tool/device items keep their target.
     static bool requires_zero_target(uint32_t type)
     {
         switch (type) {
@@ -363,21 +361,21 @@ private:
         case RAW_GCODE_READER_ITEM_LINE_NUMBER:
         case RAW_GCODE_READER_ITEM_READER_ID:
         case RAW_GCODE_READER_ITEM_DIAGNOSTIC_TYPE:
+        case RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT:
             return true;
         default:
             return false;
         }
     }
 
-    // Validate one scalar independently: vocabulary, target domain, finite
-    // transport and the stricter integer/boolean representations.
+    // Validate one scalar item's vocabulary, target, finite value, and stricter integer/boolean representation.
     static void validate_item(const raw_gcode_reader_event_item &item)
     {
         if (!std::isfinite(item.value))
             throw std::invalid_argument("A G-code reader item contains a non-finite value.");
         if (item.type == 0)
             throw std::invalid_argument("A G-code reader item has an invalid type.");
-        if (item.type > RAW_GCODE_READER_ITEM_DIAGNOSTIC_TYPE &&
+        if (item.type > RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT &&
             item.type < RAW_GCODE_READER_ITEM_CUSTOM_BEGIN)
             throw std::invalid_argument("A G-code reader item uses an unknown type.");
         if (item.type >= RAW_GCODE_READER_ITEM_CUSTOM_BEGIN)

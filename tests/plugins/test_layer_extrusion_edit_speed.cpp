@@ -121,6 +121,12 @@ struct ProcessState
     float fan_speed = -1.f;
 };
 
+// Return the resolved mm/s speed of one skirt/brim leaf with the supplied settings.
+float resolved_brim_speed(std::initializer_list<ConfigBase::SetDeserializeItem> overrides);
+
+// Return the resolved mm/s² acceleration of one skirt/brim leaf with the supplied settings.
+float resolved_brim_acceleration(std::initializer_list<ConfigBase::SetDeserializeItem> overrides);
+
 // Preserve and restore the process-wide active plugin set around runner tests.
 class ScopedActivePlugins
 {
@@ -474,6 +480,47 @@ std::map<uint16_t, ObservedLeaf> observed_by_role(const std::vector<ObservedLeaf
     for (const ObservedLeaf &leaf : leaves)
         out[uint16_t(leaf.role())] = leaf;
     return out;
+}
+
+/*
+Run speed editing on one `Skirt` leaf with `brim_speed` overrides and return
+mm/s; the local Print owns the plan and failed REQUIRE checks abort the test.
+*/
+float resolved_brim_speed(std::initializer_list<ConfigBase::SetDeserializeItem> overrides)
+{
+    PreparedSpeedPrint prepared;
+    DynamicPrintConfig config = speed_config({
+        {"first_layer_speed", "100%"}, {"max_print_speed", "73"},
+        {"max_volumetric_speed", "0"}, {"filament_max_speed", "0"},
+        {"filament_max_volumetric_speed", "0"}, {"support_material_speed", "40"}
+    });
+    config.set_deserialize_strict(overrides);
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::Skirt, 0.2}}});
+    run_editors(prepared, {DEFAULT_SPEED_PLUGIN});
+    const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == 1);
+    REQUIRE(leaves.front().role == ExtrusionRole::Skirt);
+    return leaves.front().speed;
+}
+
+/*
+Run acceleration editing on one `Skirt` leaf with support/brim overrides and
+return mm/s²; the local Print owns the plan and failed REQUIRE checks abort it.
+*/
+float resolved_brim_acceleration(std::initializer_list<ConfigBase::SetDeserializeItem> overrides)
+{
+    PreparedSpeedPrint prepared;
+    DynamicPrintConfig config = speed_config({
+        {"default_acceleration", "1000"}, {"first_layer_acceleration", "100%"},
+        {"machine_limits_usage", "ignore"}
+    });
+    config.set_deserialize_strict(overrides);
+    prepare_ordered_plan(prepared, config, {{{ExtrusionRole::Skirt, 0.2}}});
+    run_editors(prepared, {DEFAULT_ACCELERATION_PLUGIN});
+    const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == 1);
+    REQUIRE(leaves.front().role == ExtrusionRole::Skirt);
+    return leaves.front().acceleration;
 }
 
 struct RecordingEditorState
@@ -1627,6 +1674,54 @@ TEST_CASE("Layer extrusion editor resolves brim speed over the support speed",
         // 0.2 mm3/mm at 100 mm/s reaches the 20 mm3/s target.
         CHECK(brim_speed({{"brim_speed", "0"}, {"max_print_speed", "100"},
                           {"max_volumetric_speed", "20"}}) == 100.f);
+    }
+
+    SECTION("zero brim speed uses the autospeed base, not max_print_speed") {
+        CHECK(resolved_brim_speed({{"brim_speed", "0"}, {"max_print_speed", "100"},
+                                   {"max_volumetric_speed", "20"},
+                                   {"autospeed_min_thin_flow", "8"}}) == 40.f);
+    }
+}
+
+/*
+Initialize the plugin runtime, build one in-memory `Skirt` role leaf (the role
+used by skirt/brim paths), run the acceleration editor, and check fixed,
+percentage, zero-inheritance and first-layer results in mm/s². The local print
+owns each plan; Catch2 reports setup or assertion failures.
+*/
+TEST_CASE("Layer extrusion editor resolves brim acceleration over the support acceleration",
+          "[plugins][layer-extrusion-edit][acceleration][brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    SECTION("a brim percentage applies to support acceleration resolved from default") {
+        CHECK(resolved_brim_acceleration({{"support_material_acceleration", "60%"},
+                                          {"brim_acceleration", "50%"}}) == 300.f);
+    }
+
+    SECTION("a fixed brim acceleration is used as is") {
+        CHECK(resolved_brim_acceleration({{"brim_acceleration", "700"}}) == 700.f);
+    }
+
+    SECTION("zero brim acceleration inherits support acceleration") {
+        CHECK(resolved_brim_acceleration({{"support_material_acceleration", "600"},
+                                          {"brim_acceleration", "0"}}) == 600.f);
+    }
+
+    SECTION("zero brim acceleration inherits 80 percent support acceleration") {
+        CHECK(resolved_brim_acceleration({{"support_material_acceleration", "80%"},
+                                          {"brim_acceleration", "0"}}) == 800.f);
+    }
+
+    SECTION("a zero support acceleration leaves the brim percentage based on default") {
+        CHECK(resolved_brim_acceleration({{"support_material_acceleration", "0"},
+                                          {"brim_acceleration", "40%"}}) == 400.f);
+    }
+
+    SECTION("the first-layer ceiling caps brim acceleration") {
+        CHECK(resolved_brim_acceleration({{"support_material_acceleration", "150%"},
+                                          {"brim_acceleration", "150%"},
+                                          {"first_layer_acceleration", "1800"}}) == 1800.f);
     }
 }
 

@@ -1638,6 +1638,8 @@ void GCodeViewer::update_shells_color_by_extruder(const DynamicPrintConfig* conf
         m_shells.volumes.update_colors_by_extruder(config);
 }
 
+// Clears viewer-owned rendering buffers, layer metadata, ranges, and statistics while retaining source references.
+// Returns no status; clearing these containers does not acquire ownership of or mutate the referenced G-code result.
 void GCodeViewer::reset()
 {
     m_moves_count = 0;
@@ -1657,6 +1659,7 @@ void GCodeViewer::reset()
     m_filament_densities = std::vector<float>();
     m_extrusions.reset_ranges();
     m_layers.reset();
+    m_layers_layer_ids.clear();
     m_layers_z_range = { 0, 0 };
     m_roles = std::vector<GCodeExtrusionRole>();
     m_print_statistics.reset();
@@ -1670,6 +1673,14 @@ void GCodeViewer::reset()
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
     m_contained_in_bed = true;
     m_legend_resizer.reset();
+}
+
+// After load() retains a result, maps each displayed Z through its opening move ID; missing heights use the slider's Z-gap rule.
+// Returns an owned vector with one value per displayed Z, leaves viewer state unchanged, and propagates allocation failures.
+std::vector<double> GCodeViewer::get_layers_max_heights() const
+{
+    return calculate_gcode_layer_heights(m_layers.get_zs(), m_layers_layer_ids,
+        m_gcode_result->get().layers_max_height);
 }
 
 void GCodeViewer::render()
@@ -1981,6 +1992,8 @@ void GCodeViewer::export_toolpaths_to_obj(const char* filename) const
     fclose(fp);
 }
 
+// Builds render buffers from ordered result moves; an extrusion opens a layer when its ID meets or exceeds the recorded layer count.
+// The viewer owns generated buffers and IDs, returns no status, and propagates allocation failures.
 void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result)
 {
     // max index buffer size, in bytes
@@ -2923,6 +2936,7 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result)
                 // start a new layer
                 const size_t start_it = (m_layers.empty() && first_travel_s_id != 0) ? first_travel_s_id : last_travel_s_id;
                 m_layers.append(static_cast<double>(move.position.z()), { start_it, move_id });
+                m_layers_layer_ids.emplace_back(move.layer_id);
             } else {
                 // update last layer
                 m_layers.get_ranges().back().last = move_id;
@@ -2952,6 +2966,7 @@ void GCodeViewer::load_toolpaths(const GCodeProcessorResult& gcode_result)
     // replace layers for spiral vase mode
     if (!gcode_result.spiral_vase_layers.empty()) {
         m_layers.reset();
+        m_layers_layer_ids.clear();
         for (const auto& layer : gcode_result.spiral_vase_layers) {
             m_layers.append(layer.first, { layer.second.first, layer.second.second });
         }

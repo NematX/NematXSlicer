@@ -5,6 +5,8 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/* Declares layer and movement sliders, Ruler graduations, and TickCodeInfo G-code markers.
+   Slider controls store Z, time, surface-area, and per-layer-height data used by labels. */
 #ifndef slic3r_GUI_DoubleSlider_hpp_
 #define slic3r_GUI_DoubleSlider_hpp_
 
@@ -258,6 +260,8 @@ public:
     void    SetLayersTimes(const std::vector<float>& layers_times, float total_time);
     void    SetLayersTimes(const std::vector<double>& layers_times);
     void    SetLayersAreas(const std::vector<float>& layers_areas);
+    // Store one supplied display height per slider layer; an empty vector keeps the existing Z-gap labels.
+    void    SetLayersMaxHeights(const std::vector<double>& layers_max_heights);
 
     void    SetDrawMode(bool is_sla_print, bool is_sequential_print);
     void    SetDrawMode(DrawMode mode) { m_draw_mode = mode; }
@@ -353,6 +357,7 @@ private:
     int     get_tick_near_point(const wxPoint& pt);
 
     double      get_scroll_step();
+    // Format a tick label; supplied heights apply only to visible ltHeightWithLayer labels (see calculate_gcode_layer_heights).
     wxString    get_label(int tick, LabelType label_type = ltHeightWithLayer) const;
     void        get_lower_and_higher_position(int& lower_pos, int& higher_pos);
     int         get_tick_from_position(const wxCoord x, const wxCoord y);
@@ -447,6 +452,7 @@ private:
     TickCodeInfo        m_ticks;
     std::vector<double> m_layers_times;
     std::vector<double> m_layers_areas;
+    std::vector<double> m_layers_max_heights;
     std::vector<double> m_layers_values;
     std::vector<std::string>    m_extruder_colors;
     std::string         m_print_obj_idxs;

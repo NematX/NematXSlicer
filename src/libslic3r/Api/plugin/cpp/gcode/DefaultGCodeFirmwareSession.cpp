@@ -18,6 +18,7 @@
 
 #include "libslic3r/Api/plugin/cpp/ExtrusionTreeVisitors.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeLineParser.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeStateTracker.hpp"
 #include "libslic3r/ExtrusionRole.hpp"
@@ -33,6 +34,10 @@ only the Marlin output required to represent the requested state.
 Stationary DEPOSIT leaves carry one point and a volume before the tool multiplier.
 They use the same approach travel and marker order as paths, then emit an E-only
 move at the filament speed of a line with their inherited flow and print speed.
+For scripts, a source extrusion is a plan extrusion linked to a sliced regional
+island; its source layer height comes from that island, not from path attributes.
+The session selects the first such height for a layer or tool group and updates
+it again when an individual source extrusion begins.
 In single-extruder multi-material (SEMM), logical tool IDs select filaments on
 one physical extruder. Tool selection copies runtime state while preserving
 each filament's configured conversions, speeds and device offsets.
@@ -122,57 +127,6 @@ bool extrusion_tree_has_segments(const ExtrusionEntity &root)
     }
     return false;
 }
-
-// Return true when the layer is one of its object's sliced layers, false for
-// an auxiliary layer (support, brim, ...). Object layers are sorted by
-// print_z with one layer per Z, so a binary search finds the only candidate.
-bool is_object_layer(const Layer &layer)
-{
-    const Object object = layer.object();
-    if (!object.valid())
-        return false;
-    uint32_t first = 0;
-    uint32_t count = object.layer_count();
-    while (count > 0) {
-        const uint32_t step = count / 2;
-        if (object.layer(first + step).print_z() < layer.print_z()) {
-            first += step + 1;
-            count -= step + 1;
-        } else {
-            count = step;
-        }
-    }
-    return first < object.layer_count() && object.layer(first).handle() == layer.handle();
-}
-
-class FirstPrintableHeightVisitor final : public ExtrusionTreeConstVisitor<>
-{
-public:
-    std::optional<float> find(const ExtrusionEntity &root)
-    {
-        m_height.reset();
-        traverse(root);
-        return m_height;
-    }
-
-protected:
-    // Borrow a leaf and resolve its inherited height without changing geometry;
-    // deposits count as printable despite having no segments, and invalid heights are ignored.
-    void visit_leaf(ExtrusionEntity entity) override
-    {
-        if (m_height || (entity.segment_count() == 0 && !entity.is_deposit()))
-            return;
-        const EPropertyAttributes *attributes = current_property(EPropertyAttributes::key);
-        if (attributes == nullptr || !is_printable_role(attributes->extrusion_role()))
-            return;
-        const float height = attributes->c_extrusion_property_attributes::height;
-        if (std::isfinite(height) && height > 0.f)
-            m_height = height;
-    }
-
-private:
-    std::optional<float> m_height;
-};
 
 // Convert an optional process acceleration into the integer unit accepted by
 // firmware commands. Absence is meaningful: it leaves the printer's current
@@ -392,8 +346,7 @@ private:
     std::string m_output;
 };
 
-// Copy settings from the borrowed Config and reset owned machine/cache state;
-// invalid tool counts or component settings throw before the session is ready.
+// Copy settings from the borrowed Config and reset owned machine, filament-counter and script-layer state; invalid tool counts or component settings throw before the session is ready, and no Config ownership is retained.
 void DefaultGCodeFirmwareSession::setup(const Config &config)
 {
     // The widest per-tool vector defines how many tool-state objects are
@@ -430,12 +383,18 @@ void DefaultGCodeFirmwareSession::setup(const Config &config)
     m_marker_width.reset();
     m_marker_height.reset();
     m_last_layer_used_filament.assign(m_extruders.size(), 0.0);
+    m_filament_used_mm.assign(m_extruders.size(), 0.0);
+    m_usage_tool.reset();
+    m_usage_start_mm = 0.0;
     m_script_processing_tool.reset();
     m_xyz_relative_mode = false;
     m_units_in_mm = true;
     m_e_relative_mode = config.bool_or_default("use_relative_e_distances", false);
     m_e_position_known = true;
     m_seen_object_group = false;
+    m_current_object_idx = 0;
+    m_layer_num = -1;
+    m_layer_height = 0;
     m_use_firmware_retraction = config.bool_or_default("use_firmware_retraction", false);
     m_single_extruder_multi_material = config.bool_or_default("single_extruder_multi_material", false);
     m_wipe_tag_open = false;
@@ -529,6 +488,7 @@ std::string DefaultGCodeFirmwareSession::begin_print(const Print &print, const C
         m_preamble->begin(print, plan, blocks);
 }
 
+// Inspect a borrowed plan group, increment the sequential object index for later real objects, and return any required start travel; an uninitialized session throws and the group remains unowned.
 std::string DefaultGCodeFirmwareSession::begin_group(const ConstPrintingGroup &group)
 {
     if (!m_is_setup)
@@ -542,71 +502,46 @@ std::string DefaultGCodeFirmwareSession::begin_group(const ConstPrintingGroup &g
         m_seen_object_group = true;
         return {};
     }
+    ++m_current_object_idx;
     return move_to_group_start(group);
 }
 
+// Borrow a valid layer group, validate its listed source heights and calculate
+// the Z gap once. Return owned layer markers using the listed maximum or that
+// gap, forget the cached extrusion marker so the first printable extrusion
+// writes ;HEIGHT: again, set script height from the first source extrusion or
+// the same gap, and advance state without retaining the view. An uninitialized
+// session or non-positive source height throws before state changes; a
+// non-rising source-free Z may still produce a non-positive gap for readers.
 std::string DefaultGCodeFirmwareSession::begin_layer(const ConstPrintingLayerGroup &layer)
 {
     if (!m_is_setup)
         throw std::logic_error("The firmware session was not initialized by begin_print().");
-    const std::optional<float> height = reliable_layer_height(layer);
+    const coord_t z_gap = layer.print_z() - m_layer_print_z;
+    coord_t max_source_height = 0;
+    if (layer.layer_count() > 0) {
+        for (uint32_t layer_idx = 0; layer_idx < layer.layer_count(); ++layer_idx) {
+            const Layer source_layer = layer.layer(layer_idx);
+            if (!source_layer.valid() || source_layer.height() <= 0)
+                throw std::invalid_argument("A source layer needs a positive height.");
+            max_source_height = std::max(max_source_height, source_layer.height());
+        }
+    } else {
+        max_source_height = z_gap;
+    }
     std::string output = ";LAYER_CHANGE\n;Z:" +
-        format_number(unscaled(layer.print_z())) + "\n";
-    if (height)
-        output += ";HEIGHT:" + format_number(*height) + "\n";
+        format_number(unscaled(layer.print_z())) + "\n;MAX_LAYER_HEIGHT:" +
+        format_number(unscaled(max_source_height)) + "\n";
 
+    m_layer_height = first_source_layer_height(layer).value_or(z_gap);
+    ++m_layer_num;
+    m_marker_height.reset();
     m_layer_print_z = layer.print_z();
-    if (height)
-        m_marker_height = *height;
     // A layer boundary is structural, not a machine movement. Explicit travel
     // geometry may first finish a wipe at the preceding Z and then apply a
     // ramped lift. When no such geometry exists, write_leaf_geometry() still
     // provides the legacy straight fallback to the first point at this Z.
     return output;
-}
-
-// Inspect a borrowed group without mutation and return its marker height in mm; invalid
-// or non-positive source layers throw invalid_argument. Without sources, search for the
-// first printable extrusion height, returning nullopt when none is available.
-std::optional<float> DefaultGCodeFirmwareSession::reliable_layer_height(
-    const ConstPrintingLayerGroup &layer) const
-{
-    // One print Z may group objects with different layer heights, an object
-    // layer with an unsynchronized support layer, or several support slabs
-    // published at the same Z. This height only feeds the ;HEIGHT: marker of the layer
-    // change, and write_printable_markers() still writes the exact height before
-    // every extrusion whose height differs from it. The first object layer
-    // describes the layer change; without one, the thinnest layer is used.
-    if (layer.layer_count() > 0) {
-        std::optional<coord_t> object_height;
-        std::optional<coord_t> smallest_height;
-        for (uint32_t layer_idx = 0; layer_idx < layer.layer_count(); ++layer_idx) {
-            const Layer source_layer = layer.layer(layer_idx);
-            if (!source_layer.valid() || source_layer.height() <= 0)
-                throw std::invalid_argument("A source layer needs a positive height.");
-            const coord_t height = source_layer.height();
-            if (!object_height && is_object_layer(source_layer))
-                object_height = height;
-            if (!smallest_height || height < *smallest_height)
-                smallest_height = height;
-        }
-        return float(unscaled(object_height ? *object_height : *smallest_height));
-    }
-
-    FirstPrintableHeightVisitor visitor;
-    for (uint32_t tool_idx = 0; tool_idx < layer.tool_group_count(); ++tool_idx) {
-        const ConstPrintingToolGroup tool_group = layer.tool_group(tool_idx);
-        for (uint32_t extrusion_idx = 0;
-             extrusion_idx < tool_group.extrusion_count(); ++extrusion_idx) {
-            const ExtrusionEntity root = tool_group.extrusion(extrusion_idx).root();
-            if (root.empty())
-                continue;
-            const std::optional<float> height = visitor.find(root);
-            if (height)
-                return height;
-        }
-    }
-    return std::nullopt;
 }
 
 // Borrow attributes, validate dimensions and update marker caches while returning
@@ -664,10 +599,18 @@ std::string DefaultGCodeFirmwareSession::write_seam_marker(const ExtrusionEntity
         format_number(serialized_start.y, precision) + "\n";
 }
 
+// Borrow a valid tool group, select its tool and return the owned selection
+// string; a source height replaces script height only when an ordered extrusion
+// has one. Uninitialized state, an invalid tool or encoder failure propagates;
+// selection failure follows the height update, and the borrowed group is not
+// retained.
 std::string DefaultGCodeFirmwareSession::begin_tool_group(const ConstPrintingToolGroup &tool_group)
 {
     if (!m_is_setup)
         throw std::logic_error("The firmware session was not initialized by begin_print().");
+    const std::optional<coord_t> source_height = first_source_layer_height(tool_group);
+    if (source_height)
+        m_layer_height = *source_height;
     const bool custom_toolchange = has_toolchange_script(tool_group.events().before());
     const bool ordered_toolchange = tool_group_has_semantic_toolchange(tool_group);
     const std::string output = ordered_toolchange ? std::string() :
@@ -675,6 +618,11 @@ std::string DefaultGCodeFirmwareSession::begin_tool_group(const ConstPrintingToo
     return output;
 }
 
+// Borrow a valid extrusion with a root, return an owned string of object-boundary
+// and tree output, and set script height to its source layer before visiting tree
+// events. An invalid session or missing root throws; later transition or visitor
+// failures propagate after the height update. No plan data is owned, and a
+// source-free extrusion leaves the prior height unchanged.
 std::string DefaultGCodeFirmwareSession::write_extrusion(const ConstPrintingExtrusion &extrusion)
 {
     if (!m_is_setup)
@@ -683,10 +631,14 @@ std::string DefaultGCodeFirmwareSession::write_extrusion(const ConstPrintingExtr
     if (root_handle == nullptr)
         throw std::invalid_argument("The PrintingExtrusion has no extrusion root.");
 
+    const std::optional<coord_t> source_height = source_layer_height(extrusion);
+    if (source_height)
+        m_layer_height = *source_height;
     const uint32_t object_id = extrusion.printing_catalog_id();
     // UINT32_MAX is deliberate for print-level auxiliary work and for any
     // extrusion that is outside a physical object-instance boundary.
-    return transition_object(object_id) + write_extrusion_tree(ExtrusionEntity(root_handle));
+    std::string output = transition_object(object_id);
+    return output + write_extrusion_tree(ExtrusionEntity(root_handle));
 }
 
 std::string DefaultGCodeFirmwareSession::write_event(const ExtrusionEntity &event_root)
@@ -888,10 +840,28 @@ const DefaultExtruder &DefaultGCodeFirmwareSession::current_extruder() const
     return extruder(*m_current_extruder_idx);
 }
 
-// Resolve a configured tool, optionally encode its selection, then transfer
-// shared SEMM runtime state before the dialect hook; invalid IDs/encoders throw.
-// Emitted absolute-E selections reset coordinates, not retraction or usage.
-// No ownership changes, and selecting the current tool returns no command.
+// Close the previously selected tool's axis interval and begin one at the selected tool's current used-filament value; callers invoke this immediately after every m_current_extruder_idx change outside setup so m_usage_tool follows, and SEMM state copying does not alter the departing tool's axis; this mutates only session counters, and invalid tool ownership propagates from extruder().
+void DefaultGCodeFirmwareSession::settle_filament_usage()
+{
+    if (m_usage_tool)
+        m_filament_used_mm.at(*m_usage_tool) +=
+            extruder(*m_usage_tool).extrusion_axis().used_filament() - m_usage_start_mm;
+    m_usage_tool = m_current_extruder_idx;
+    m_usage_start_mm = m_usage_tool ?
+        extruder(*m_usage_tool).extrusion_axis().used_filament() : 0.0;
+}
+
+// Copy closed per-tool usage and add the currently selected tool's open axis interval; return values own no session state, and inconsistent tool indices propagate as range failures.
+std::vector<double> DefaultGCodeFirmwareSession::filament_used_mm() const
+{
+    std::vector<double> used = m_filament_used_mm;
+    if (m_usage_tool)
+        used.at(*m_usage_tool) +=
+            extruder(*m_usage_tool).extrusion_axis().used_filament() - m_usage_start_mm;
+    return used;
+}
+
+// Resolve a configured tool, optionally emit its selection, transfer shared SEMM state, and close/open its filament interval; invalid IDs or encoders throw, absolute-E output resets only E coordinates, and selecting the current tool returns no command.
 std::string DefaultGCodeFirmwareSession::select_extruder(extruder_index_t tool_id, bool emit_command)
 {
     DefaultExtruder &selected = extruder(tool_id);
@@ -922,6 +892,7 @@ std::string DefaultGCodeFirmwareSession::select_extruder(extruder_index_t tool_i
         m_e_position_known = true;
     }
     m_current_extruder_idx = tool_id;
+    settle_filament_usage();
     return output;
 }
 
@@ -1520,7 +1491,7 @@ std::string DefaultGCodeFirmwareSession::write_custom_gcode(
     return output;
 }
 
-// Replay borrowed text with the selected Reader and adopt proven machine values.
+// Replay borrowed text with the selected Reader, adopt only proven machine values, and settle the per-tool usage interval after any reported tool change.
 // The retraction state is not adopted: the reader cannot prove it, and only the
 // explicit retraction operations and script declarations change it.
 // Unknown values invalidate caches; Reader or state validation errors propagate.
@@ -1624,6 +1595,7 @@ void DefaultGCodeFirmwareSession::synchronize_after_custom_gcode(const std::stri
         m_current_extruder_idx = static_cast<extruder_index_t>(*active_tool);
     else
         m_current_extruder_idx.reset();
+    settle_filament_usage();
 
     // Reconcile independent peripheral state for every known tool. A missing
     // item clears the cached acknowledgement rather than preserving a stale

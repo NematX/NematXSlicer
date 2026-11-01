@@ -363,10 +363,20 @@ PrintingToolGroup &append_tool(PrintingLayerGroup &layer, const extruder_index_t
     return tool;
 }
 
+/* Attach the perimeter marker to a root; it applies to every loop below it. */
+void mark_perimeter(ExtrusionEntity &entity)
+{
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(&entity));
+    view.get_or_add(slic3r_api::EPropertyPerimeter::key).perimeter_flags(C_EXTRUSION_PERIMETER_FLAG_LOOP);
+}
+
 PrintingExtrusion &append_extrusion(PrintingToolGroup &tool,
                                     ExtrusionEntityUPtr root,
                                     const uint16_t identity)
 {
+    // Synthetic roots stand for perimeter output; seam providers bind only marked loops.
+    if (root != nullptr && !root->empty())
+        mark_perimeter(*root);
     // Mirror production data: retain source geometry in the role bucket, then
     // give PrintingExtrusion an independently owned clone to reorder.
     std::unique_ptr<LayerRegionIsland> source(new LayerRegionIsland(

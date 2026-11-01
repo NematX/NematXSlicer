@@ -908,6 +908,8 @@ private:
     std::vector<ColorRGBA> m_tool_colors;
     std::vector<ColorRGBA> m_filament_colors;
     Layers m_layers;
+    // Opening MoveVertex layer ID for each displayed layer in m_layers order.
+    std::vector<uint16_t> m_layers_layer_ids;
     std::array<unsigned int, 2> m_layers_z_range;
     std::vector<GCodeExtrusionRole> m_roles;
     size_t m_extruders_count;
@@ -966,6 +968,7 @@ public:
     }
     void update_shells_color_by_extruder(const DynamicPrintConfig* config);
 
+    // Clear display buffers, layer metadata, ranges, and statistics before loading new paths.
     void reset();
     void render();
     void render_cog() { m_cog.render(); }
@@ -989,6 +992,8 @@ public:
         return m_max_bounding_box;
     }
     const std::vector<double>& get_layers_zs() const { return m_layers.get_zs(); }
+    // Return heights for loaded viewer layers, using opening move IDs and the retained result's per-layer data.
+    std::vector<double> get_layers_max_heights() const;
 
     const SequentialView& get_sequential_view() const { return m_sequential_view; }
     void update_sequential_view_current(unsigned int first, unsigned int last);
@@ -1031,6 +1036,7 @@ public:
     void load_shells(const Print& print);
 
 private:
+    // Build viewer paths and layer ranges from ordered moves, recording the opening ID of each displayed layer.
     void load_toolpaths(const GCodeProcessorResult& gcode_result);
     // Append translucent generic shells for all configured towers.
     void load_wipetower_shell(const Print& print);

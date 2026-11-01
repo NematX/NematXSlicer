@@ -580,6 +580,8 @@ void BuiltinGCodeReaderBase::process_G28(
                   RAW_GCODE_READER_EVENT_SET_POSITION, items);
 }
 
+// Parse borrowed comment text and return true when a recognized comment publishes state, a marker,
+// or a diagnostic. Invalid parameters publish diagnostics; callback failures propagate and text is not retained.
 bool BuiltinGCodeReaderBase::consume_common_comment(
     const plugin_run_context &run_context,
     const run_ctx_gcode_reader &context,
@@ -664,6 +666,24 @@ bool BuiltinGCodeReaderBase::consume_common_comment(
         publish_items(run_context, context, state,
                       RAW_GCODE_READER_EVENT_STATE_UPDATE,
                       {{RAW_GCODE_READER_ITEM_HEIGHT, 0, height}});
+        return true;
+    }
+
+    // Publish the preceding LAYER_CHANGE's height value as an ordinary state delta;
+    // consumers associate the event with that layer instead of inheriting it later.
+    if (comment == "MAX_LAYER_HEIGHT" || has_prefix(comment, "MAX_LAYER_HEIGHT:")) {
+        double max_layer_height = 0.0;
+        if (comment.size() <= 17 ||
+            !parse_finite_comment_number(comment.substr(17), max_layer_height) ||
+            max_layer_height <= 0.0) {
+            publish_diagnostic(
+                run_context, context, state,
+                RAW_GCODE_READER_DIAGNOSTIC_INVALID_COMMAND_PARAMETERS);
+            return true;
+        }
+        publish_items(run_context, context, state,
+                      RAW_GCODE_READER_EVENT_STATE_UPDATE,
+                      {{RAW_GCODE_READER_ITEM_MAX_LAYER_HEIGHT, 0, max_layer_height}});
         return true;
     }
 

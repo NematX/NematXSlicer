@@ -14,6 +14,8 @@ ordered filtering policy, and projects a target onto line or arc geometry.
 The Cost and Aligned providers own their session state, graph traversal, and
 scoring. They borrow these value-oriented helpers during initialization and
 publish their own immutable results afterward.
+Handles are borrowed: the collector neither owns nor mutates host-owned
+extrusion trees.
 */
 
 #include "SeamCandidatePreparation.hpp"
@@ -54,8 +56,8 @@ double point_distance(c_point a, c_point b);
 void update_attributes(const ExtrusionEntity &entity, raw_extrusion_role &role,
                        double &width);
 
-/* Walk one extrusion subtree, collect independent loops, and summarize metadata
-   that may be stored below the atomic loop carrying the stable handle. */
+/* Inherit roles downward, summarize only segment-bearing perimeter geometry,
+   and collect borrowed atomic loop handles with local SKIRT flags taking priority. */
 TreeSummary collect_tree(const ExtrusionEntity &entity,
                          raw_extrusion_role role, double width,
                          bool perimeter,
@@ -148,6 +150,10 @@ void update_attributes(const ExtrusionEntity &entity, raw_extrusion_role &role,
     if (attributes->width > 0) width = attributes->width;
 }
 
+/* Traverse borrowed nodes without changing them: roles and widths descend, but
+   only nodes with segments prove perimeter roles. A collected loop's own SKIRT
+   marker forces distance-only placement; nested records collapse to its borrowed
+   identity. The caller owns the output vector; cancellation propagates. */
 TreeSummary collect_tree(const ExtrusionEntity &entity,
                          raw_extrusion_role role, double width,
                          bool perimeter,
@@ -156,12 +162,15 @@ TreeSummary collect_tree(const ExtrusionEntity &entity,
 {
     InitializationCancellation::check(run_context);
     update_attributes(entity, role, width);
-    if (entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER) != nullptr)
+    const c_extrusion_property_perimeter *perimeter_marker = static_cast<
+        const c_extrusion_property_perimeter *>(
+            entity.property_data(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+    if (perimeter_marker != nullptr)
         perimeter = true;
     TreeSummary summary;
     summary.has_perimeter_marker = perimeter;
     summary.has_perimeter_role =
-        perimeter && RAW_EXTRUSION_ROLE_IS_PERIMETER(role);
+        perimeter && entity.segment_count() != 0 && RAW_EXTRUSION_ROLE_IS_PERIMETER(role);
     if (perimeter && entity.segment_count() != 0 &&
         RAW_EXTRUSION_ROLE_IS_EXTERNAL_PERIMETER(role)) {
         summary.external.present = true;
@@ -184,9 +193,11 @@ TreeSummary collect_tree(const ExtrusionEntity &entity,
        binding for that atomic identity and suppress records nested inside it. */
     if (entity.is_loop() && !entity.empty() &&
         summary.has_perimeter_marker) {
+        const bool skirt_marker = perimeter_marker != nullptr &&
+            (perimeter_marker->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_SKIRT) != 0;
         loops.resize(first_nested_loop);
         loops.push_back({entity.handle(),
-                         !summary.has_perimeter_role,
+                         skirt_marker || !summary.has_perimeter_role,
                          summary.external.present,
                          summary.external.width});
     }

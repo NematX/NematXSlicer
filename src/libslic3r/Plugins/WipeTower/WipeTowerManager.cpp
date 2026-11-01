@@ -196,7 +196,7 @@ int32_t WipeTowerManager::used_config_keys(raw_used_config_key *keys) const noex
     return count;
 }
 
-// Borrow a valid whole-plan run, bound contour visits by original tool changes, reserve layouts and catalog only nonempty towers before moving generated roots into the plan; a request that printed something is bracketed by one speed-ratio save before its first leaf and one restore after its last, so its tool change runs at 100%; a floating request above the regular tower top is published on its own layer without maintenance; invalid input, service/cancellation and allocation/insertion failures throw without transferring source ownership.
+// Borrow a valid whole-plan run, bound contour visits by original tool changes, reserve layouts and catalog only nonempty towers before moving generated roots into the plan; a request that printed something is bracketed by one speed-ratio save before its first leaf and one restore after its last, so its tool change runs at 100%; a floating request above the regular tower top is published on its own layer without maintenance; stopped dispatch throws silent PluginCancelled so the step rethrows the retained service cause, ordinary dispatch refusal throws runtime_error, and collector failures rethrow their retained exception; invalid input and allocation/insertion failures throw without transferring source ownership.
 void WipeTowerManager::run_impl(const plugin_run_context *run) const
 {
     const run_ctx_generate_wipe_tower *ctx = plugin_ctx_as_generate_wipe_tower(run);
@@ -232,8 +232,11 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
         throw_if_cancelled(run);
         run_ctx_wipe_tower_wipe service = {};
         service.phase = C_WIPE_TOWER_EDIT;
-        if (!ctx->call_wipe_plugin(ctx, idx, &service))
+        if (!ctx->call_wipe_plugin(ctx, idx, &service)) {
+            // A stopped service has its cause retained by the step; only an ordinary refusal needs a manager error.
+            throw_if_cancelled(run);
             throw std::runtime_error("Wipe service EDIT failed.");
+        }
     }
     for (uint32_t idx = 0; idx < ctx->wipe_plugin_count; ++idx) {
         throw_if_cancelled(run);
@@ -242,8 +245,11 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
         service.phase = C_WIPE_TOWER_COLLECT;
         service.report_context = &collector;
         service.report_request = &collect_request;
-        if (!ctx->call_wipe_plugin(ctx, idx, &service))
+        if (!ctx->call_wipe_plugin(ctx, idx, &service)) {
+            // A stopped service has its cause retained by the step; only an ordinary refusal needs a manager error.
+            throw_if_cancelled(run);
             throw std::runtime_error("Wipe service COLLECT failed.");
+        }
         if (collector.failure != nullptr)
             std::rethrow_exception(collector.failure);
     }
@@ -342,8 +348,11 @@ void WipeTowerManager::run_impl(const plugin_run_context *run) const
         service.request = &request;
         service.band = &band;
         service.exit = &exit;
-        if (!ctx->call_wipe_plugin(ctx, collected.plugin_index, &service))
+        if (!ctx->call_wipe_plugin(ctx, collected.plugin_index, &service)) {
+            // A stopped service has its cause retained by the step; only an ordinary refusal needs a manager error.
+            throw_if_cancelled(run);
             throw std::runtime_error("Wipe service GENERATE failed.");
+        }
         exits[visit] = exit;
         const bool outgoing_filled = request.has_outgoing && root_has_content(outgoing);
         const bool incoming_filled = request.has_incoming && root_has_content(incoming);

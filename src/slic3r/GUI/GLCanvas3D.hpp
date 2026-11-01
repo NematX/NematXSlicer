@@ -886,6 +886,8 @@ public:
     bool is_gcode_legend_enabled() const { return m_gcode_viewer.is_legend_enabled(); }
     GCodeViewer::EViewType get_gcode_view_type() const { return m_gcode_viewer.get_view_type(); }
     const std::vector<double>& get_gcode_layers_zs() const;
+    // Return a copy of the displayed G-code layer heights, including Z-gap fallbacks.
+    std::vector<double> get_gcode_layers_max_heights() const;
     std::vector<double> get_volumes_print_zs(bool active_only) const;
     unsigned int get_gcode_options_visibility_flags() const { return m_gcode_viewer.get_options_visibility_flags(); }
     void set_gcode_options_visibility_from_flags(unsigned int flags);

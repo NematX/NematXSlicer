@@ -214,6 +214,11 @@ namespace Slic3r {
         PrintEstimatedStatistics print_statistics;
         std::vector<CustomGCode::Item> custom_gcode_per_print_z;
         std::vector<std::pair<float, std::pair<size_t, size_t>>> spiral_vase_layers;
+        // Greatest layer height in mm of each layer, indexed by MoveVertex::layer_id.
+        // It is the layer's MAX_LAYER_HEIGHT tag, else the greatest explicit HEIGHT
+        // among its extrusions. A layer may remain 0 when it has extrusions without
+        // an explicit HEIGHT, no tag, or an index that was never filled.
+        std::vector<float> layers_max_height;
         // timestamp of creation, to check if it's an old or new one
         std::time_t computed_timestamp = std::time(0);
 
@@ -222,8 +227,13 @@ namespace Slic3r {
 #if ENABLE_GCODE_VIEWER_STATISTICS
         int64_t time{ 0 };
 #endif // ENABLE_GCODE_VIEWER_STATISTICS
+        // Reset branch-specific result metadata, moves and per-layer data for reuse.
         void reset();
     };
+
+    // Return heights for viewer layers (Z entries opened by a move's layer_id), falling back to the slider's Z-gap rule.
+    std::vector<double> calculate_gcode_layer_heights(const std::vector<double>& layer_zs,
+        const std::vector<uint16_t>& opening_layer_ids, const std::vector<float>& layers_max_height);
 
 
     class GCodeProcessor
@@ -251,6 +261,7 @@ namespace Slic3r {
             Estimated_Printing_Time_Placeholder,
             Object_Start_Octoprint,
             Object_End_Octoprint,
+            Max_Layer_Height,
         };
 
         static const std::string& reserved_tag(ETags tag) { return Reserved_Tags[static_cast<unsigned char>(tag)]; }
@@ -522,11 +533,17 @@ namespace Slic3r {
                 m_custom_gcode_per_print_z_id = m_result.custom_gcode_per_print_z.size() - 1;
             }
 
-            void update(float height) {
+            // Correct a pending marker with its capped MoveVertex layer tag or the extrusion-height fallback.
+            void update(float height,
+                        const std::vector<float> &layers_max_height,
+                        const std::vector<bool> &layer_max_height_tagged) {
                 if (!m_move_id.has_value() || !m_custom_gcode_per_print_z_id.has_value())
                     return;
 
                 const Vec3f position = m_result.moves.back().position;
+                const uint16_t layer_id = m_result.moves[*m_move_id].layer_id;
+                if (layer_id < layer_max_height_tagged.size() && layer_max_height_tagged[layer_id])
+                    height = layers_max_height[layer_id];
 
                 GCodeProcessorResult::MoveVertex& move = m_result.moves.emplace_back(m_result.moves[*m_move_id]);
                 move.position = position;
@@ -677,6 +694,9 @@ namespace Slic3r {
         SeamsDetector m_seams_detector;
         std::optional<AxisCoords> m_seam;
         OptionsZCorrector m_options_z_corrector;
+        // Per layer (indexed like GCodeProcessorResult::layers_max_height): true when
+        // the value comes from a MAX_LAYER_HEIGHT tag and must not be raised by extrusions.
+        std::vector<bool> m_layer_max_height_tagged;
         size_t m_last_default_color_id;
         bool m_spiral_vase_active;
         float m_kissslicer_toolchange_time_correction;
@@ -735,6 +755,7 @@ namespace Slic3r {
             return m_time_processor.machines[static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Stealth)].enabled;
         }
         void enable_machine_envelope_processing(bool enabled) { m_time_processor.machine_envelope_processing_enabled = enabled; }
+        // Reset processor and result state before reading a new G-code stream.
         void reset();
 
         const GCodeProcessorResult& get_result() const { return m_result; }
@@ -780,7 +801,7 @@ namespace Slic3r {
         void process_ascii_file(const std::string& filename, std::function<void()> cancel_callback = nullptr);
         void process_binary_file(const std::string& filename, std::function<void()> cancel_callback = nullptr);
 
-        // Process tags embedded into comments
+        // Interpret one embedded comment tag and update processor state.
         void process_tags(const std::string_view comment, bool producers_enabled);
         bool process_producers_tags(const std::string_view comment);
         bool process_prusaslicer_tags(const std::string_view comment);
@@ -800,6 +821,7 @@ namespace Slic3r {
             G1,
             G2G3,
         };
+        // Process borrowed axis/feed values and append any resulting movement vertex.
         void process_G1(const std::array<std::optional<double>, 4>& axes = { std::nullopt, std::nullopt, std::nullopt, std::nullopt },
             const std::optional<double>& feedrate = std::nullopt, G1DiscretizationOrigin origin = G1DiscretizationOrigin::G1,
             const std::optional<unsigned int>& remaining_internal_g1_lines = std::nullopt);
@@ -918,7 +940,17 @@ namespace Slic3r {
         // Rewrite output metadata using measured timing and filament totals.
         void post_process();
 
+        // Store one movement vertex from the current machine state.
         void store_move_vertex(EMoveType type, bool internal_only = false);
+
+        // Return the current layer id capped to MoveVertex's uint16 range.
+        uint16_t current_viewer_layer_id() const;
+        // Record the current layer's MAX_LAYER_HEIGHT tag as its authoritative height.
+        void set_layer_max_height_tag(float height);
+        // Raise an untagged current layer to the known height of an extrusion.
+        void raise_layer_max_height(float extrusion_height);
+        // Return a marker layer's tag height, or its supplied fallback when untagged.
+        float marker_height(uint16_t layer_id, float fallback) const;
 
         void set_extrusion_role(GCodeExtrusionRole role);
 

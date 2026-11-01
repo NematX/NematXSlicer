@@ -91,9 +91,12 @@ Lifetime and failures:
   when present, otherwise outgoing). New visits use alternating band sides.
   Do not retain any of these pointers.
   The reporter returns 1 after copying a request and 0 for invalid arguments or
-  allocation failure. A service must stop on reporter failure and report plugin
-  errors using its host context; the dispatch callback returns 0 on failure and
-  the host preserves the original service diagnostic/exception for the step.
+  allocation failure. On 0, a service must end collection with no further request
+  and return normally without reporting a plugin error. The manager retains the
+  reporter's allocation exception and rethrows it after COLLECT. A service still
+  reports its own failures using its host context; the dispatch callback returns
+  0 on service failure and the host preserves the original service
+  diagnostic/exception for the step.
 */
 #ifndef slic3r_step_wipe_tower_wipe_h_
 #define slic3r_step_wipe_tower_wipe_h_
@@ -162,7 +165,8 @@ typedef struct c_wipe_tower_band {
     double line_spacing;
 } c_wipe_tower_band;
 
-/* Copy a non-NULL request synchronously through the borrowed COLLECT context; return 1 on success or 0 on invalid arguments/allocation failure. */
+/* Copy a non-NULL request synchronously through the borrowed COLLECT context; return 1 on success or 0 on invalid arguments/allocation failure.
+   On 0, the service must end collection normally without further requests or calling report_error; the manager retains and rethrows allocation failures after COLLECT. */
 typedef int32_t (*wipe_tower_report_request_fn)(void *context, const c_wipe_tower_request *request);
 
 /* Borrowed service payload; field availability, ownership, and units are defined above. */

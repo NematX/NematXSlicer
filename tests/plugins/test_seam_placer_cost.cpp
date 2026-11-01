@@ -11,8 +11,10 @@
 #include <string>
 #include <vector>
 
+
 #include "perimeter_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+#include "test_data.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
@@ -32,6 +34,7 @@
 #include "libslic3r/Plugins/SeamPlacer/CostSeamPlacer.hpp"
 #include "libslic3r/Plugins/SeamPlacer/SeamCandidatePreparation.hpp"
 #include "libslic3r/Plugins/SeamPlacer/SeamCostModel.hpp"
+#include "libslic3r/Plugins/SeamPlacer/SeamPlacerRouter.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintObjectRegion.hpp"
@@ -943,6 +946,182 @@ TEST_CASE("Cost seam places distance-only loops by direct distance projection",
         CHECK(projected.x == scale_i(4));
         CHECK(projected.y == 0);
     }
+}
+
+// A brim loop has a geometry-free perimeter-marked parent and a skirt-role leaf;
+// the plan's perimeter bucket must not turn that parent into internal geometry.
+TEST_CASE("Cost seam projects composed brim loops from the perimeter bucket",
+          "[plugins][seam-placer][cost][geometry][regression][composed-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    CostFixture fixture({{"seam_visibility", "0"}, {"seam_angle_cost", "0"},
+                         {"seam_travel_cost", "100%"}});
+    ExtrusionEntity::Children children;
+    children.emplace_back(new ExtrusionEntity(rectangle_loop(0, 0, 10, 10)));
+    const ExtrusionEntity composed(std::move(children), false, false, false);
+    slic3r_api::PrintingExtrusion extrusion = fixture.add(
+        composed, RAW_EXTRUSION_ROLE_PERIMETER);
+    slic3r_api::MutableExtrusionEntity root = extrusion.mutable_root();
+    REQUIRE(root.remove_property(EXTRUSION_PROPERTY_TYPE_ATTRIBUTES));
+    c_extrusion_property_perimeter *perimeter = static_cast<c_extrusion_property_perimeter *>(
+        root.property_data_mutable(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+    REQUIRE(perimeter != nullptr);
+    perimeter->perimeter_idx = -1;
+    perimeter->perimeter_flags = C_EXTRUSION_PERIMETER_FLAG_SKIRT;
+    mark_perimeter_path(root.child_mutable(0), RAW_EXTRUSION_ROLE_SKIRT, 0.624381f);
+    REQUIRE(root.child_mutable(0).remove_property(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+
+    const std::vector<slic3r_api::SeamPlacement::CandidatePreparation::CollectedLoop>
+        collected = slic3r_api::SeamPlacement::CandidatePreparation::collect_perimeter_loops(
+            extrusion.root(), extrusion.role());
+    REQUIRE(collected.size() == 1);
+    CHECK(collected.front().loop == extrusion.root().handle());
+    CHECK(collected.front().distance_only);
+    CHECK_FALSE(collected.front().has_external_geometry);
+
+    const slic3r_api::SeamPlacer placer = create_cost_session(fixture.prepared.print);
+    const c_point start = {root.front().x + scale_i(4), root.front().y - scale_i(3)};
+    const c_point projected = fixture.local(placer.place_seam(
+        extrusion.root(), fixture.region_view(), start));
+    CHECK(projected.x == scale_i(4));
+    CHECK(projected.y == 0);
+}
+
+// Segment-bearing descendants determine perimeter roles independently of empty
+// parents, and a loop-local SKIRT marker overrides even external leaf geometry.
+TEST_CASE("Seam collection isolates geometric roles and local skirt priority",
+          "[plugins][seam-placer][cost][regression][seambrim-options]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    CostFixture fixture;
+    ExtrusionEntity::Children children;
+    children.emplace_back(new ExtrusionEntity(rectangle_loop(0, 0, 10, 10)));
+    const ExtrusionEntity composed(std::move(children), false, false, false);
+    slic3r_api::PrintingExtrusion extrusion = fixture.add(
+        composed, RAW_EXTRUSION_ROLE_PERIMETER);
+    slic3r_api::MutableExtrusionEntity root = extrusion.mutable_root();
+    REQUIRE(root.remove_property(EXTRUSION_PROPERTY_TYPE_ATTRIBUTES));
+
+    SECTION("option 1 ignores the inherited role of a parent without segments")
+    {
+        mark_perimeter_path(root.child_mutable(0), RAW_EXTRUSION_ROLE_SKIRT, 0.4f);
+        REQUIRE(root.child_mutable(0).remove_property(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+        const std::vector<slic3r_api::SeamPlacement::CandidatePreparation::CollectedLoop>
+            collected = slic3r_api::SeamPlacement::CandidatePreparation::collect_perimeter_loops(
+                extrusion.root(), extrusion.role());
+        REQUIRE(collected.size() == 1);
+        CHECK(collected.front().distance_only);
+        CHECK_FALSE(collected.front().has_external_geometry);
+        CHECK_NOTHROW(create_cost_session(fixture.prepared.print));
+    }
+
+    SECTION("option 2 gives the loop-local skirt marker priority over external geometry")
+    {
+        c_extrusion_property_perimeter *perimeter = static_cast<c_extrusion_property_perimeter *>(
+            root.property_data_mutable(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+        REQUIRE(perimeter != nullptr);
+        perimeter->perimeter_flags = C_EXTRUSION_PERIMETER_FLAG_SKIRT;
+        mark_perimeter_path(root.child_mutable(0), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0.4f);
+        REQUIRE(root.child_mutable(0).remove_property(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+        const std::vector<slic3r_api::SeamPlacement::CandidatePreparation::CollectedLoop>
+            collected = slic3r_api::SeamPlacement::CandidatePreparation::collect_perimeter_loops(
+                extrusion.root(), extrusion.role());
+        REQUIRE(collected.size() == 1);
+        CHECK(collected.front().distance_only);
+        CHECK(collected.front().has_external_geometry);
+        const slic3r_api::SeamPlacer placer = create_cost_session(fixture.prepared.print);
+        const c_point start = {root.front().x + scale_i(4), root.front().y - scale_i(3)};
+        const c_point projected = fixture.local(placer.place_seam(
+            extrusion.root(), fixture.region_view(), start));
+        CHECK(projected.x == scale_i(4));
+        CHECK(projected.y == 0);
+
+        // A descendant's SKIRT flag does not override the collected parent's
+        // own marker: its external segments still supply perimeter candidates.
+        perimeter->perimeter_flags = C_EXTRUSION_PERIMETER_FLAG_LOOP;
+        mark_perimeter_path(root.child_mutable(0), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0.4f);
+        c_extrusion_property_perimeter *descendant_marker = static_cast<c_extrusion_property_perimeter *>(
+            root.child_mutable(0).property_data_mutable(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+        REQUIRE(descendant_marker != nullptr);
+        descendant_marker->perimeter_flags = C_EXTRUSION_PERIMETER_FLAG_SKIRT;
+        const std::vector<slic3r_api::SeamPlacement::CandidatePreparation::CollectedLoop>
+            descendant_skirt = slic3r_api::SeamPlacement::CandidatePreparation::collect_perimeter_loops(
+                extrusion.root(), extrusion.role());
+        REQUIRE(descendant_skirt.size() == 1);
+        CHECK(descendant_skirt.front().loop == root.handle());
+        CHECK_FALSE(descendant_skirt.front().distance_only);
+        CHECK(descendant_skirt.front().has_external_geometry);
+    }
+}
+
+// External, travel and internal paths remain one borrowed seam target whether
+// their roles are explicit on children or inherited from an external parent.
+TEST_CASE("Cost seam preserves three composite perimeter role layouts",
+          "[plugins][seam-placer][cost][geometry][regression][seambrim-composites]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const int layout = GENERATE(0, 1, 2);
+    CAPTURE(layout);
+    CostFixture fixture;
+    ExtrusionEntity::Children children;
+    children.emplace_back(new ExtrusionEntity(false, ArcPolyline(Points{
+        Point::new_scale(0, 0), Point::new_scale(10, 0)})));
+    children.emplace_back(new ExtrusionEntity(false, ArcPolyline(Points{
+        Point::new_scale(10, 0), Point::new_scale(10, 10)})));
+    children.emplace_back(new ExtrusionEntity(false, ArcPolyline(Points{
+        Point::new_scale(10, 10), Point::new_scale(0, 10), Point::new_scale(0, 0)})));
+    const ExtrusionEntity composed(std::move(children), false, false, false);
+    slic3r_api::PrintingExtrusion extrusion = fixture.add(
+        composed, layout == 1 ? RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER :
+                  layout == 2 ? RAW_EXTRUSION_ROLE_MIXED : RAW_EXTRUSION_ROLE_NONE);
+    slic3r_api::MutableExtrusionEntity root = extrusion.mutable_root();
+    if (layout != 1)
+        mark_perimeter_path(root.child_mutable(0), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, 0.4f);
+    mark_perimeter_path(root.child_mutable(1), RAW_EXTRUSION_ROLE_TRAVEL, 0.4f);
+    mark_perimeter_path(root.child_mutable(2), RAW_EXTRUSION_ROLE_PERIMETER, 0.4f);
+    const std::vector<slic3r_api::SeamPlacement::CandidatePreparation::CollectedLoop>
+        collected = slic3r_api::SeamPlacement::CandidatePreparation::collect_perimeter_loops(
+            extrusion.root(), extrusion.role());
+    REQUIRE(collected.size() == 1);
+    CHECK(collected.front().loop == root.handle());
+    CHECK_FALSE(collected.front().distance_only);
+    CHECK(collected.front().has_external_geometry);
+    CHECK(collected.front().external_width == Approx(0.4));
+    const slic3r_api::SeamPlacer placer = create_cost_session(fixture.prepared.print);
+    REQUIRE(placer.valid());
+    CHECK_NOTHROW(placer.place_seam(extrusion.root(), fixture.region_view(), root.front()));
+}
+
+// A composed brim needs no external track: both graph-based providers project
+// the approach directly onto the skirt-role leaf of the marked parent loop.
+TEST_CASE("Aligned and Contiguous project composed brim without a track",
+          "[plugins][seam-placer][aligned][contiguous][regression][seambrim-projection]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool aligned = GENERATE(true, false);
+    CAPTURE(aligned);
+    CostFixture fixture;
+    ExtrusionEntity::Children children;
+    children.emplace_back(new ExtrusionEntity(rectangle_loop(0, 0, 10, 10)));
+    const ExtrusionEntity composed(std::move(children), false, false, false);
+    slic3r_api::PrintingExtrusion extrusion = fixture.add(
+        composed, RAW_EXTRUSION_ROLE_PERIMETER);
+    slic3r_api::MutableExtrusionEntity root = extrusion.mutable_root();
+    REQUIRE(root.remove_property(EXTRUSION_PROPERTY_TYPE_ATTRIBUTES));
+    c_extrusion_property_perimeter *perimeter = static_cast<c_extrusion_property_perimeter *>(
+        root.property_data_mutable(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+    REQUIRE(perimeter != nullptr);
+    perimeter->perimeter_flags = C_EXTRUSION_PERIMETER_FLAG_SKIRT;
+    mark_perimeter_path(root.child_mutable(0), RAW_EXTRUSION_ROLE_SKIRT, 0.4f);
+    REQUIRE(root.child_mutable(0).remove_property(EXTRUSION_PROPERTY_TYPE_PERIMETER));
+    const slic3r_api::SeamPlacer placer = aligned ?
+        create_aligned_session(fixture.prepared.print) : create_contiguous_session(fixture.prepared.print);
+    REQUIRE(placer.valid());
+    const c_point start = {root.front().x + scale_i(4), root.front().y - scale_i(3)};
+    const c_point projected = fixture.local(placer.place_seam(
+        extrusion.root(), fixture.region_view(), start));
+    CHECK(projected.x == scale_i(4));
+    CHECK(projected.y == 0);
 }
 
 TEST_CASE("Cost seam binds composed loops and projects analytically onto arcs",
@@ -2279,4 +2458,116 @@ TEST_CASE("Contiguous seam rejects repeated initialization and invalid requests"
             reinterpret_cast<const extrusion_entity_handle *>(&open)),
         fixture.region_view(), {}),
         "Contiguous seam placement needs a non-empty closed loop.");
+}
+
+TEST_CASE("Seam router projects loops without a perimeter marker and keeps marked loops on Cost",
+          "[plugins][seam-placer][cost][router]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const ScopedPluginActivation cost(orchestrator, k_cost_plugin);
+    const std::string seam_selector = Slic3r::Steps::plugin_exclusive_group_option_key(
+        orchestrator, SEAM_PLACER, "seam_placer_plugin");
+    CostFixture fixture({{seam_selector, k_cost_plugin}, {"seam_visibility", "0"},
+                         {"seam_angle_cost", "0"}, {"seam_travel_cost", "0"}});
+    // Keep the root views: a later add may reallocate the tool group's extrusion list.
+    const slic3r_api::ExtrusionEntity marked = fixture.add(
+        rectangle_loop(-8, -8, 2, 2), RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER).root();
+    const slic3r_api::ExtrusionEntity unmarked = fixture.add(
+        rectangle_loop(4, -8, 8, -4), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE,
+        0, nullptr, false).root();
+
+    PluginStorage storage;
+    const slic3r_api::SeamPlacement::SeamPlacerRouter router(
+        reinterpret_cast<orchestrator_handle *>(&orchestrator),
+        slic3r_api::Print(reinterpret_cast<const print_handle *>(&fixture.prepared.print)),
+        slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(
+            &fixture.prepared.print.mutable_printing_plan())),
+        reinterpret_cast<storage_handle *>(&storage));
+
+    const c_point front = unmarked.front();
+    const c_point start = {front.x + scale_i(2), front.y - scale_i(3)};
+    const c_point projected = router.place_seam(unmarked, start);
+    CHECK(projected.x == front.x + scale_i(2));
+    CHECK(projected.y == front.y);
+
+    const slic3r_api::SeamPlacer direct = create_cost_session(fixture.prepared.print);
+    const c_point expected = direct.place_seam(marked, fixture.region_view(), start);
+    const c_point routed = router.place_seam(marked, start);
+    CHECK(routed.x == expected.x);
+    CHECK(routed.y == expected.y);
+}
+
+/*
+Random records loops from its assigned source islands without requiring a
+perimeter marker and rejects a loop absent from that set. FixedDirection chooses
+from loop geometry without relying on a perimeter marker. With only these two
+providers active in each section, the test checks the configured provider and
+the router's approach projection; scoped guards restore their prior activation.
+*/
+TEST_CASE("Seam router projects loops without a perimeter marker for Random and Fixed",
+          "[plugins][seam-placer][router]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const std::string seam_selector = Slic3r::Steps::plugin_exclusive_group_option_key(
+        orchestrator, SEAM_PLACER, "seam_placer_plugin");
+
+    SECTION("Random")
+    {
+        const ScopedPluginActivation fixed(orchestrator, k_fixed_plugin);
+        const ScopedPluginActivation random(orchestrator, k_random_plugin);
+        CostFixture fixture({{seam_selector, k_random_plugin}, {"seam_visibility", "0"}});
+        const PrintRegionConfig &selector_config = fixture.region->region().config();
+        Plugin *selected = Steps::selected_active_plugin_from_group(
+            orchestrator, SEAM_PLACER, "seam_placer_plugin", &selector_config);
+        REQUIRE(selected != nullptr);
+        CHECK(selected->get_id() == "seam_placer.random");
+        const slic3r_api::ExtrusionEntity unmarked = fixture.add(
+            rectangle_loop(4, -8, 8, -4), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE,
+            0, nullptr, false).root();
+        PluginStorage storage;
+        const slic3r_api::SeamPlacement::SeamPlacerRouter router(
+            reinterpret_cast<orchestrator_handle *>(&orchestrator),
+            slic3r_api::Print(reinterpret_cast<const print_handle *>(&fixture.prepared.print)),
+            slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(
+                &fixture.prepared.print.mutable_printing_plan())),
+            reinterpret_cast<storage_handle *>(&storage));
+
+        const c_point front = unmarked.front();
+        const c_point start = {front.x + scale_i(2), front.y - scale_i(3)};
+        const c_point projected = router.place_seam(unmarked, start);
+        CHECK(projected.x == front.x + scale_i(2));
+        CHECK(projected.y == front.y);
+    }
+
+    SECTION("Fixed direction")
+    {
+        const ScopedPluginActivation fixed(orchestrator, k_fixed_plugin);
+        const ScopedPluginActivation random(orchestrator, k_random_plugin);
+        CostFixture fixture({{seam_selector, k_fixed_plugin}, {"seam_visibility", "0"}});
+        const PrintRegionConfig &selector_config = fixture.region->region().config();
+        Plugin *selected = Steps::selected_active_plugin_from_group(
+            orchestrator, SEAM_PLACER, "seam_placer_plugin", &selector_config);
+        REQUIRE(selected != nullptr);
+        CHECK(selected->get_id() == "seam_placer.fixed");
+        const slic3r_api::ExtrusionEntity unmarked = fixture.add(
+            rectangle_loop(4, -8, 8, -4), RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE,
+            0, nullptr, false).root();
+        PluginStorage storage;
+        const slic3r_api::SeamPlacement::SeamPlacerRouter router(
+            reinterpret_cast<orchestrator_handle *>(&orchestrator),
+            slic3r_api::Print(reinterpret_cast<const print_handle *>(&fixture.prepared.print)),
+            slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(
+                &fixture.prepared.print.mutable_printing_plan())),
+            reinterpret_cast<storage_handle *>(&storage));
+
+        // The approach position projects onto the front edge of the rectangle; a
+        // provider-driven answer would return one of its vertices instead.
+        const c_point front = unmarked.front();
+        const c_point start = {front.x + scale_i(2), front.y - scale_i(3)};
+        const c_point projected = router.place_seam(unmarked, start);
+        CHECK(projected.x == front.x + scale_i(2));
+        CHECK(projected.y == front.y);
+    }
 }

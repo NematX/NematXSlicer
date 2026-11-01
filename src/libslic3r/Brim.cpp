@@ -6,6 +6,12 @@
 ///|/
 #include "Brim.hpp"
 
+/* Brim geometry surrounds first-layer object outlines with adhesion paths.
+   extrude_brim_from_tree clips nested offset contours against occupied areas,
+   then emits open paths or closed loop parents. Those closed parents carry the
+   SKIRT marker and a copy of their path's complete attributes; each leaf retains
+   its own flow. */
+
 #include <mutex>
 #include <numeric>
 #include <unordered_set>
@@ -38,6 +44,11 @@
 #endif
 
 namespace Slic3r {
+
+// Clip nested brim contours and append owned paths or loops with matching parent and leaf attributes.
+void extrude_brim_from_tree(const Print &print, std::vector<std::vector<BrimLoop>> &loops,
+                            const Polygons &frontiers, const Flow &flow,
+                            ExtrusionEntityCollection &out, bool reversed);
 
 // Read the optional brim separation offset; an absent plugin-owned setting
 // reads as zero.
@@ -742,6 +753,10 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
 
 //superslicer
 
+// Clip mutable nested contours to the supplied frontiers using the flow width,
+// append owned paths and SKIRT loops to out, and copy complete leaf attributes
+// onto closed parents without changing leaf values. Print cancellation and
+// allocation failures propagate; the input contour tree is consumed in place.
 void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop>>& loops, const Polygons& frontiers, const Flow& flow, ExtrusionEntityCollection& out, bool reversed/*= false*/) {
     if (loops.empty())
         return;
@@ -844,6 +859,8 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
     float height = float(unscaled(print.get_min_first_layer_height()));
     int nextIdx = 0;
     std::function<void(BrimLoop&, ExtrusionEntityCollection*)>* extrude_ptr;
+    // Append owned geometry in nesting order; closed parents copy complete path
+    // attributes while leaves retain their own role, width, height and flow.
     std::function<void(BrimLoop&, ExtrusionEntityCollection*) > extrude = [&mm3_per_mm, &width, &height, &extrude_ptr, &nextIdx, extrude_cw](BrimLoop& to_cut, ExtrusionEntityCollection* parent) {
         DEBUG_TREE_VISIT(*parent, LoopAssertVisitor())
         int idx = nextIdx++;
@@ -862,7 +879,9 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
                 if (pline.back() == pline.front()) {
                     ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     path.polyline() = pline;
-                    to_add.push_back(new ExtrusionLoop(std::move(path), elrSkirt));
+                    ExtrusionLoop *loop = new ExtrusionLoop(std::move(path), elrSkirt);
+                    loop->add_property(loop->paths().front().attributes());
+                    to_add.push_back(loop);
                 } else {
                     ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     extrusion_path->polyline() = pline;
@@ -905,7 +924,9 @@ void extrude_brim_from_tree(const Print& print, std::vector<std::vector<BrimLoop
                 if (pline.back() == pline.front()) {
                     ExtrusionPath path({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     path.polyline() = pline;
-                    to_add.push_back(new ExtrusionLoop(std::move(path), elrSkirt));
+                    ExtrusionLoop *loop = new ExtrusionLoop(std::move(path), elrSkirt);
+                    loop->add_property(loop->paths().front().attributes());
+                    to_add.push_back(loop);
                 } else {
                     ExtrusionPath *extrusion_path = new ExtrusionPath({ExtrusionRole::Skirt, {mm3_per_mm, width, height}}, nullptr, false);
                     extrusion_path->polyline() = pline;

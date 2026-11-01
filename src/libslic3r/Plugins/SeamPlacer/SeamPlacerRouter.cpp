@@ -5,14 +5,17 @@
 
 #include "SeamPlacerRouter.hpp"
 
+#include <cmath>
 #include <limits>
 #include <map>
 #include <memory>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "SeamCandidatePreparation.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_seam_placer.h"
 #include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
@@ -30,6 +33,17 @@ SEAM_PLACER provider, while an ordering worker later receives only an atomic
 closed loop and its current starting position. The router builds the missing
 association before workers start.
 
+A loop "carries a perimeter marker" when the loop itself, one of its ancestors
+or one of its descendants has an EXTRUSION_PROPERTY_TYPE_PERIMETER property;
+CandidatePreparation::collect_perimeter_loops() implements that rule. The Cost,
+Aligned and Contiguous providers bind only those loops at initialization and
+reject any other loop. The router applies the same rule to every provider, so a
+closed loop without a marker gets no session at all. Examples are support
+contact loops and wipe tower loops. Their seam is the point of the loop nearest
+to the approach position, which is the answer the providers already give for
+distance-only loops. The router and the providers must share one marker rule, or
+a loop would reach a provider that never bound it.
+
 The complete construction path is:
 
     SeamPlacerRouter::SeamPlacerRouter()
@@ -40,12 +54,20 @@ The complete construction path is:
     |   `-- OrchestratorView::execute()
     |       `-- one provider session initialization per batch
     `-- build_plan_routes()
-        `-- build_entity_routes() recursively for every extrusion tree
+        `-- for every PrintingExtrusion
+            |-- collect_marked_loops()
+            `-- build_entity_routes() recursively for every extrusion tree
+                `-- select_loop_route() for each marked atomic loop
+
+    SeamPlacerRouter::place_seam()
+    |-- loop without a session: CandidatePreparation::project_onto_loop()
+    `-- marked loop: SeamPlacer::place_seam() of the selected session
 
 The resulting tables are immutable after construction:
 
     PrintRegion handle -> shared SeamPlacer session
-    ExtrusionEntity handle -> selected LayerRegion and shared session
+    ExtrusionEntity handle -> selected LayerRegion and shared session,
+                              or no session for a loop without a marker
 
 Several PrintRegions can select the same provider, so they share one session
 instead of causing repeated initialization. Several loops can use that session
@@ -104,16 +126,35 @@ std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> create_sessio
     std::vector<ProviderBatch> &batches);
 
 /*
+Return the atomic loops of one PrintingExtrusion that carry a perimeter marker.
+The providers bind the same collected loops during initialization, so only these
+loops may be sent to a provider session.
+*/
+std::set<const extrusion_entity_handle *> collect_marked_loops(const PrintingExtrusion &extrusion);
+
+/*
+Choose the provider session for one marked atomic loop. When several
+LayerRegions can describe the loop, the provider priority selects one region
+before the route is stored.
+*/
+LoopRoute select_loop_route(
+    storage_handle *scratch_storage,
+    PrintingPlan &plan,
+    const PrintingExtrusion &extrusion,
+    const ExtrusionEntity &entity,
+    const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> &sessions);
+
+/*
 Resolve all atomic loops below one extrusion entity. A loop is an indivisible
 seam-placement unit; non-loop entities are only traversal nodes and are
-visited recursively. When several LayerRegions can describe a loop, the
-provider priority selects one region before the route is stored.
+visited recursively. An unmarked loop is stored without a session.
 */
 void build_entity_routes(
     storage_handle *scratch_storage,
     PrintingPlan &plan,
     const PrintingExtrusion &extrusion,
     const ExtrusionEntity &entity,
+    const std::set<const extrusion_entity_handle *> &marked_loops,
     const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> &sessions,
     std::map<const extrusion_entity_handle *, LoopRoute> &routes);
 
@@ -138,9 +179,10 @@ struct ProviderBatch
 
 struct LoopRoute
 {
-    // The LayerRegion whose configuration was selected for this loop.
+    // The LayerRegion whose configuration was selected for this loop; unused without a session.
     LayerRegion region;
     // Shared because all loops assigned to one provider use the same session.
+    // Null for a loop without a marker, whose seam place_seam() projects instead.
     std::shared_ptr<SeamPlacer> session;
 };
 
@@ -292,11 +334,69 @@ std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> create_sessio
     return result;
 }
 
+std::set<const extrusion_entity_handle *> collect_marked_loops(const PrintingExtrusion &extrusion)
+{
+    std::set<const extrusion_entity_handle *> marked;
+    for (const CandidatePreparation::CollectedLoop &loop :
+         CandidatePreparation::collect_perimeter_loops(extrusion.root(), extrusion.role()))
+        marked.insert(loop.loop);
+    return marked;
+}
+
+LoopRoute select_loop_route(
+    storage_handle *scratch_storage,
+    PrintingPlan &plan,
+    const PrintingExtrusion &extrusion,
+    const ExtrusionEntity &entity,
+    const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> &sessions)
+{
+    // The resolver follows the PrintingPlan ancestry and returns the
+    // LayerRegions that can legitimately provide configuration for this
+    // atomic loop. It must be done once during construction, not by every
+    // worker request.
+    const std::vector<LayerRegion> candidates =
+        Ordering::TreeOrderingGeometry::resolve_source_layer_regions(
+            scratch_storage, plan, extrusion, entity);
+    LayerRegion selected = candidates.front();
+    const print_region_handle *selected_print_region = selected.print_region().handle();
+    const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>>::const_iterator first =
+        sessions.find(selected_print_region);
+    if (first == sessions.end())
+        throw std::runtime_error(
+            "A loop candidate region has no initialized SEAM_PLACER session.");
+    std::shared_ptr<SeamPlacer> selected_session = first->second;
+
+    if (candidates.size() > 1) {
+        // Providers may rank the same loop differently. Strict comparison
+        // keeps the first source region on an exact tie and therefore
+        // preserves the deterministic plan traversal order.
+        float best_priority = selected_session->get_priority(entity, selected);
+        for (size_t candidate_idx = 1; candidate_idx < candidates.size(); ++candidate_idx) {
+            const LayerRegion candidate = candidates[candidate_idx];
+            const print_region_handle *print_region = candidate.print_region().handle();
+            const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>>::const_iterator found =
+                sessions.find(print_region);
+            if (found == sessions.end())
+                throw std::runtime_error(
+                    "A loop candidate region has no initialized SEAM_PLACER session.");
+            const float priority = found->second->get_priority(entity, candidate);
+            // Strict comparison preserves source-island order on exact ties.
+            if (priority > best_priority) {
+                best_priority = priority;
+                selected = candidate;
+                selected_session = found->second;
+            }
+        }
+    }
+    return LoopRoute{selected, selected_session};
+}
+
 void build_entity_routes(
     storage_handle *scratch_storage,
     PrintingPlan &plan,
     const PrintingExtrusion &extrusion,
     const ExtrusionEntity &entity,
+    const std::set<const extrusion_entity_handle *> &marked_loops,
     const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>> &sessions,
     std::map<const extrusion_entity_handle *, LoopRoute> &routes)
 {
@@ -304,46 +404,13 @@ void build_entity_routes(
     if (entity.empty())
         return;
     if (entity.is_loop()) {
-        // The resolver follows the PrintingPlan ancestry and returns the
-        // LayerRegions that can legitimately provide configuration for this
-        // atomic loop. It must be done once during construction, not by every
-        // worker request.
-        const std::vector<LayerRegion> candidates =
-            Ordering::TreeOrderingGeometry::resolve_source_layer_regions(
-                scratch_storage, plan, extrusion, entity);
-        LayerRegion selected = candidates.front();
-        const print_region_handle *selected_print_region = selected.print_region().handle();
-        const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>>::const_iterator first =
-            sessions.find(selected_print_region);
-        if (first == sessions.end())
-            throw std::runtime_error(
-                "A loop candidate region has no initialized SEAM_PLACER session.");
-        std::shared_ptr<SeamPlacer> selected_session = first->second;
-
-        if (candidates.size() > 1) {
-            // Providers may rank the same loop differently. Strict comparison
-            // keeps the first source region on an exact tie and therefore
-            // preserves the deterministic plan traversal order.
-            float best_priority = selected_session->get_priority(entity, selected);
-            for (size_t candidate_idx = 1; candidate_idx < candidates.size(); ++candidate_idx) {
-                const LayerRegion candidate = candidates[candidate_idx];
-                const print_region_handle *print_region = candidate.print_region().handle();
-                const std::map<const print_region_handle *, std::shared_ptr<SeamPlacer>>::const_iterator found =
-                    sessions.find(print_region);
-                if (found == sessions.end())
-                    throw std::runtime_error(
-                        "A loop candidate region has no initialized SEAM_PLACER session.");
-                const float priority = found->second->get_priority(entity, candidate);
-                // Strict comparison preserves source-island order on exact ties.
-                if (priority > best_priority) {
-                    best_priority = priority;
-                    selected = candidate;
-                    selected_session = found->second;
-                }
-            }
-        }
-
-        if (!routes.emplace(entity.handle(), LoopRoute{selected, selected_session}).second)
+        // A loop without a marker is not bound by any provider. Its route has no
+        // session, and its source regions are not resolved: that lookup throws for
+        // loops without a source island or without an overlapping region.
+        LoopRoute route;
+        if (marked_loops.count(entity.handle()) != 0)
+            route = select_loop_route(scratch_storage, plan, extrusion, entity, sessions);
+        if (!routes.emplace(entity.handle(), route).second)
             throw std::runtime_error(
                 "An atomic loop appears more than once in the PrintingPlan.");
         return;
@@ -353,9 +420,15 @@ void build_entity_routes(
     // visited depth-first so every atomic loop gets exactly one route entry.
     for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
         build_entity_routes(
-            scratch_storage, plan, extrusion, entity.child(child_idx), sessions, routes);
+            scratch_storage, plan, extrusion, entity.child(child_idx),
+            marked_loops, sessions, routes);
 }
 
+/*
+Build the immutable route table by walking all plan extrusions with valid
+scratch storage and provider sessions; plan-owned loop handles are borrowed map
+keys, unmarked loops have no session, and route-resolution failures propagate.
+*/
 std::map<const extrusion_entity_handle *, LoopRoute> build_plan_routes(
     storage_handle *scratch_storage,
     PrintingPlan &plan,
@@ -374,8 +447,11 @@ std::map<const extrusion_entity_handle *, LoopRoute> build_plan_routes(
                 PrintingToolGroup tool = layer.tool_group(tool_idx);
                 for (uint32_t extrusion_idx = 0; extrusion_idx < tool.extrusion_count(); ++extrusion_idx) {
                     const PrintingExtrusion extrusion = tool.extrusion(extrusion_idx);
+                    const std::set<const extrusion_entity_handle *> marked_loops =
+                        collect_marked_loops(extrusion);
                     build_entity_routes(
-                        scratch_storage, plan, extrusion, extrusion.root(), sessions, result);
+                        scratch_storage, plan, extrusion, extrusion.root(),
+                        marked_loops, sessions, result);
                 }
             }
         }
@@ -420,13 +496,20 @@ SeamPlacerRouter::SeamPlacerRouter(orchestrator_handle *orchestrator,
 
 SeamPlacerRouter::~SeamPlacerRouter() = default;
 
+/*
+Return the selected provider's seam for a routed marked loop, or project the
+approach position onto a routed unmarked loop. The loop is borrowed and must be
+a non-empty closed loop in this plan, while start_position is a coordinate value;
+the method does not mutate routing state and returns a point value. Invalid,
+absent, or unprojectable loops raise exceptions, as do provider failures.
+*/
 c_point SeamPlacerRouter::place_seam(const ExtrusionEntity &loop,
                                      const c_point start_position) const
 {
     // The ordering code may call this method repeatedly and concurrently. All
     // provider and region decisions were made during construction, so this
-    // method only performs const map lookup and delegates to the selected
-    // session with the caller's current travel position.
+    // method only performs const map lookup and then either delegates to the
+    // selected session or projects the caller's travel position onto the loop.
     if (!loop.is_loop())
         throw std::invalid_argument(
             "SeamPlacerRouter needs a non-empty fixed continuous closed loop.");
@@ -435,6 +518,17 @@ c_point SeamPlacerRouter::place_seam(const ExtrusionEntity &loop,
     if (route == m_impl->routes.end())
         throw std::runtime_error(
             "The loop has no precomputed regional SEAM_PLACER route.");
+
+    // A loop without a session has no provider binding. Its seam is the nearest
+    // point to the approach position, as the providers use for distance-only loops.
+    if (route->second.session == nullptr) {
+        const std::pair<c_point, double> projection =
+            CandidatePreparation::project_onto_loop(loop, start_position);
+        if (!std::isfinite(projection.second))
+            throw std::runtime_error(
+                "SeamPlacerRouter could not project the approach position onto a loop without a marker.");
+        return projection.first;
+    }
     return route->second.session->place_seam(
         loop, route->second.region, start_position);
 }
