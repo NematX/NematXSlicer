@@ -12,6 +12,7 @@ A collection of plugins for NematXSlicer.
 - [nematx_hole_size_curve](plugins/hole_size_curve/README.md): hole compensation by diameter
 - [nematx_regional_fan](plugins/regional_fan/README.md): fan speed overrides per region and role
 - [nematx_fan_first_layer_program](plugins/fan_first_layer_program/README.md): first-layer fan program with enabled, disabled and ramped layers
+- [nematx_fan_speedup](plugins/fan_speedup/README.md): fan anticipation and kickstart (`fan_speedup_time`, `fan_kickstart`)
 
 ## Build targets
 
