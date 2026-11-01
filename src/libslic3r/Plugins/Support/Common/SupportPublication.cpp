@@ -3,6 +3,7 @@
 #include "SupportCounters.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <map>
 #include <stdexcept>
 #include <utility>
@@ -64,8 +65,19 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
     coord_t z, uint32_t interface_id, std::map<coord_t, uint32_t> &installed_ids, const PublicationZ &metadata,
     const PublicationTools &tools);
 // The islands of a layer from the union of its slabs: the plain pieces of the union (native_expolygons()), except that pieces which the closing
-// by +SCALED_EPSILON then -SCALED_EPSILON joins are replaced by the closed island that contains them.
+// by +SCALED_EPSILON then -SCALED_EPSILON joins are replaced by the closed island that contains them. The closing is first tried on each cluster of
+// pieces and dropped rings that are close enough to interact, and the whole layer is closed only when one of the clusters joins its pieces.
 StoredExPolygonCollection published_islands(storage_handle *storage, const ClipperContext &clipper, const ClipperOperand &united);
+// For each closed island, the indices of the listed plain pieces that it covers most (see the definition); a piece that no island overlaps is in none.
+// The indices in `pieces` are valid indices of `plain`, plain_boxes and closed_boxes hold one box per area of their collection, the inputs are borrowed
+// and unchanged, the result is owned, and geometry/allocation failures propagate.
+std::vector<std::vector<uint32_t>> assign_pieces(const ClipperContext &clipper, const StoredExPolygonCollection &plain,
+    const std::vector<c_bounding_box> &plain_boxes, const std::vector<uint32_t> &pieces, const StoredExPolygonCollection &closed,
+    const std::vector<c_bounding_box> &closed_boxes);
+// The cluster of every box: boxes at most `gap` apart (or overlapping) on both axes, directly or through other boxes, share a cluster. The value is
+// the smallest index of the cluster; the pairs are found by sweeping the boxes sorted by their minimum x. The boxes are borrowed and unchanged, the
+// result is owned (one entry per box), and allocation failures propagate.
+std::vector<uint32_t> box_clusters(const std::vector<c_bounding_box> &boxes, coord_t gap);
 // Records each slab ring's bounding box in slab/ring order for repeated island clipping.
 std::vector<std::vector<c_bounding_box>> publication_slab_bounds(const GeneratorLayers &sorted, size_t begin, size_t end);
 // Collects clipped slab rings for one island in slab order.
@@ -223,21 +235,39 @@ void publish_group(const plugin_run_context *context, const object_handle *objec
     }
 }
 
-/* The closed islands (same offsets and join type as the sparse fill closing) give the order and the joins. Each plain piece is assigned to the closed
-   island that covers most of its area (the closing moves outlines by about a unit, so a vertex test would be unreliable, and the closed island contains
-   the piece up to that rounding). A closed island with exactly one piece is replaced by that piece, whose geometry is then bit-identical to the plain
-   union; one with several pieces is kept, since it is the joined island. A closed island with no piece would need a ring that native_expolygons() keeps in
-   the closed union but dropped from the plain one (rings narrower than ~128 units are dropped by both, from the same operand), so it is not expected; it
-   is skipped, as there is no piece to publish. A piece that no closed island overlaps (not expected either) is kept after the others, so that no geometry
-   is lost. When no closed island has several pieces and no piece is left over, the plain islands are returned as they are, in their own order. The closed
-   islands are in the outside-to-inside order that the host asserts, and a replaced island and its piece are the same shape within a unit, so the order is
-   preserved; a piece inside a hole of another stays in its own closed island unless the closing joins them, in which case that island is the joined one.
+/* The reference: the closed islands (the closing by +SCALED_EPSILON then -SCALED_EPSILON of the union operand, with the offset parameters of the sparse
+   fill closing) give the order and the joins. Each plain piece is assigned to the closed island that covers most of its area (assign_pieces()). A closed
+   island with exactly one piece is replaced by that piece, whose geometry is then bit-identical to the plain union; one with several pieces is kept, since
+   it is the joined island. When no closed island has several pieces, nothing is joined and the plain islands are returned as they are, in their own order.
+   Otherwise a piece that no closed island overlaps (not expected) is kept after the others so that no geometry is lost. The closed islands are in the
+   outside-to-inside order that the host asserts, and a replaced island and its piece are the same shape (the closing fills the gaps between pieces and its
+   unions clean the vertices within SCALED_EPSILON of their neighbours, but leaves a piece with nothing near it where it was), so the order is preserved.
+
+   The reference closes the whole layer, which is costly, so the plain islands are returned without it when the layer can be shown to join nothing. The
+   plain pieces come from native_expolygons(), which drops the rings of small area after the union, but the closing sees the whole operand, so the
+   unfiltered union (raw areas, each with its holes) is used too.
+   - The offset grows an outline by SCALED_EPSILON along its edges and, with the mitered joins and the miter limit used below, by at most
+     miter_limit * SCALED_EPSILON at a sharp corner. Two outlines can only meet if their boxes are at most 2 * miter_limit * SCALED_EPSILON apart on
+     both axes (with one unit of margin for the rounding of the offsets). The boxes of the raw areas (contour and holes) and of the plain pieces are grouped in clusters of
+     boxes that are closer than that, directly or through others. Every plain piece comes from raw areas whose box overlaps its own, so it shares their cluster.
+   - The grown outlines of two clusters are disjoint. The per-ring offsets, the filter of small rings and the union of the whole layer therefore split
+     into those of the clusters, and the reference restricted to the pieces of a cluster is the assignment of the pieces of the cluster to the closed islands of
+     the closing of its raw areas (contour and holes) alone. That closing is the same geometry as the part of the closing of the layer, not necessarily
+     the same vertices: the order of the rings in the operand differs, a cluster that has a single ring after the dilation takes another internal path of the
+     offset, and the union that removes overlapping edges is decided on the whole layer. None of that changes the geometry of clean rings, and the decisions
+     below use only counts of pieces and positive overlap areas.
+   - A cluster with at most one plain piece is not checked: it cannot join pieces, and closed islands without piece are skipped.
+   - A cluster with several pieces is checked: its raw areas, copied exactly into a normalized operand (like the union operand, so the offset treats the
+     rings the same way), are closed and its pieces assigned as the reference does. When a closed island gets several pieces, the full reference runs.
+   A layer with at most one piece joins nothing and is returned at once (the reference returns the same collection).
    Reads the borrowed union operand, returns an owned collection in storage, and geometry/allocation failures propagate. */
 StoredExPolygonCollection published_islands(storage_handle *storage, const ClipperContext &clipper, const ClipperOperand &united)
 {
     StoredExPolygonCollection plain = native_expolygons(united);
-    const StoredExPolygonCollection closed = native_expolygons(clipper_offset2(united, double(SCALED_EPSILON), -double(SCALED_EPSILON)));
-    // The boxes of the contours, computed once for the pre-filter of the overlaps.
+    if (plain.size() <= 1)
+        return plain;
+    const StoredExPolygonCollection raw = united.to_expolygon_collection();
+    // The boxes of the contours, computed once for the pre-filters of the overlaps.
     const auto contour_boxes = [](const StoredExPolygonCollection &areas) {
         std::vector<c_bounding_box> boxes;
         boxes.reserve(areas.size());
@@ -245,35 +275,53 @@ StoredExPolygonCollection published_islands(storage_handle *storage, const Clipp
             boxes.push_back(area.contour().bounding_box());
         return boxes;
     };
-    const std::vector<c_bounding_box> plain_boxes = contour_boxes(plain), closed_boxes = contour_boxes(closed);
-    std::vector<std::vector<uint32_t>> members(closed.size());
-    std::vector<bool> claimed(plain.size(), false);
-    for (uint32_t plain_idx = 0; plain_idx < plain.size(); ++plain_idx) {
-        const ExPolygon piece = plain.at(plain_idx);
-        const c_bounding_box &piece_box = plain_boxes[plain_idx];
-        double best_area = 0.;
-        uint32_t best = 0;
-        for (uint32_t closed_idx = 0; closed_idx < closed.size(); ++closed_idx) {
-            const c_bounding_box &box = closed_boxes[closed_idx];
-            if (piece_box.max.x < box.min.x || box.max.x < piece_box.min.x || piece_box.max.y < box.min.y || box.max.y < piece_box.min.y)
-                continue;
-            const StoredExPolygonCollection common = clipper_intersection(clipper(piece), clipper(closed.at(closed_idx))).to_expolygon_collection();
-            double common_area = 0.;
-            for (const ExPolygon part : common)
-                common_area += part.area();
-            if (common_area > best_area) {
-                best_area = common_area;
-                best = closed_idx;
-            }
-        }
-        if (best_area > 0.) {
-            members[best].push_back(plain_idx);
-            claimed[plain_idx] = true;
-        }
+    const std::vector<c_bounding_box> plain_boxes = contour_boxes(plain);
+    // The miter limit of the closings below, and the largest distance at which they can bridge two outlines.
+    constexpr double closing_miter_limit = 3.;
+    const coord_t reach = coord_t(std::ceil(closing_miter_limit * double(SCALED_EPSILON))) + 1;
+    // One clustering of the raw areas (indices 0..raw.size()-1) and of the plain pieces (the following indices).
+    std::vector<c_bounding_box> all_boxes = contour_boxes(raw);
+    const uint32_t raw_count = raw.size();
+    all_boxes.insert(all_boxes.end(), plain_boxes.begin(), plain_boxes.end());
+    const std::vector<uint32_t> cluster_of = box_clusters(all_boxes, 2 * reach);
+    std::vector<std::vector<uint32_t>> raw_areas_of(all_boxes.size()), pieces_of(all_boxes.size());
+    for (uint32_t raw_idx = 0; raw_idx < raw_count; ++raw_idx)
+        raw_areas_of[cluster_of[raw_idx]].push_back(raw_idx);
+    for (uint32_t plain_idx = 0; plain_idx < plain.size(); ++plain_idx)
+        pieces_of[cluster_of[raw_count + plain_idx]].push_back(plain_idx);
+    bool joined_cluster = false;
+    for (uint32_t cluster = 0; cluster < all_boxes.size() && !joined_cluster; ++cluster) {
+        const std::vector<uint32_t> &pieces = pieces_of[cluster], &areas = raw_areas_of[cluster];
+        if (pieces.size() < 2)
+            continue;
+        StoredExPolygonCollection cluster_raw(storage);
+        expolygons_resize(cluster_raw.mutable_handle(), uint32_t(areas.size()));
+        for (uint32_t idx = 0; idx < areas.size(); ++idx)
+            expolygon_copy(expolygons_at(cluster_raw.mutable_handle(), idx), raw.at(areas[idx]).handle());
+        const StoredExPolygonCollection cluster_closed = native_expolygons(clipper_offset2(clipper(cluster_raw), double(SCALED_EPSILON), -double(SCALED_EPSILON),
+                                                                                           CLIPPER_JOIN_MITER, closing_miter_limit));
+        const std::vector<std::vector<uint32_t>> cluster_members = assign_pieces(clipper, plain, plain_boxes, pieces, cluster_closed, contour_boxes(cluster_closed));
+        for (const std::vector<uint32_t> &members : cluster_members)
+            joined_cluster = joined_cluster || members.size() > 1;
     }
-    const bool joined = std::any_of(members.begin(), members.end(), [](const std::vector<uint32_t> &pieces) { return pieces.size() > 1; });
-    const bool leftover = std::find(claimed.begin(), claimed.end(), false) != claimed.end();
-    if (!joined && !leftover)
+    if (!joined_cluster)
+        return plain;
+
+    // The reference on the whole layer.
+    const StoredExPolygonCollection closed = native_expolygons(clipper_offset2(united, double(SCALED_EPSILON), -double(SCALED_EPSILON),
+                                                                               CLIPPER_JOIN_MITER, closing_miter_limit));
+    std::vector<uint32_t> all_pieces(plain.size());
+    for (uint32_t plain_idx = 0; plain_idx < all_pieces.size(); ++plain_idx)
+        all_pieces[plain_idx] = plain_idx;
+    const std::vector<std::vector<uint32_t>> members = assign_pieces(clipper, plain, plain_boxes, all_pieces, closed, contour_boxes(closed));
+    std::vector<bool> claimed(plain.size(), false);
+    bool joined = false;
+    for (const std::vector<uint32_t> &closed_members : members) {
+        joined = joined || closed_members.size() > 1;
+        for (const uint32_t plain_idx : closed_members)
+            claimed[plain_idx] = true;
+    }
+    if (!joined)
         return plain;
     // The sources in publication order, borrowed from plain and closed.
     std::vector<ExPolygon> sources;
@@ -292,6 +340,76 @@ StoredExPolygonCollection published_islands(storage_handle *storage, const Clipp
     for (uint32_t idx = 0; idx < sources.size(); ++idx)
         expolygon_copy(expolygons_at(islands.mutable_handle(), idx), sources[idx].handle());
     return islands;
+}
+
+/* Each listed plain piece goes to the closed island that covers most of its area (strictly more than none): the closing fills gaps and its unions clean the
+   vertices within SCALED_EPSILON of their neighbours, so the closed outline is not the piece outline and a vertex test would be unreliable. The boxes are a
+   pre-filter of the intersections. The result lists, for every closed island, the indices of its pieces in the order of `pieces`; the inputs are borrowed
+   and unchanged and the failures of the geometry operations propagate. */
+std::vector<std::vector<uint32_t>> assign_pieces(const ClipperContext &clipper, const StoredExPolygonCollection &plain,
+    const std::vector<c_bounding_box> &plain_boxes, const std::vector<uint32_t> &pieces, const StoredExPolygonCollection &closed,
+    const std::vector<c_bounding_box> &closed_boxes)
+{
+    std::vector<std::vector<uint32_t>> members(closed.size());
+    for (const uint32_t plain_idx : pieces) {
+        const ExPolygon piece = plain.at(plain_idx);
+        const c_bounding_box &piece_box = plain_boxes[plain_idx];
+        double best_area = 0.;
+        uint32_t best = 0;
+        for (uint32_t closed_idx = 0; closed_idx < closed.size(); ++closed_idx) {
+            const c_bounding_box &box = closed_boxes[closed_idx];
+            if (piece_box.max.x < box.min.x || box.max.x < piece_box.min.x || piece_box.max.y < box.min.y || box.max.y < piece_box.min.y)
+                continue;
+            const StoredExPolygonCollection common = clipper_intersection(clipper(piece), clipper(closed.at(closed_idx))).to_expolygon_collection();
+            double common_area = 0.;
+            for (const ExPolygon part : common)
+                common_area += part.area();
+            if (common_area > best_area) {
+                best_area = common_area;
+                best = closed_idx;
+            }
+        }
+        if (best_area > 0.)
+            members[best].push_back(plain_idx);
+    }
+    return members;
+}
+
+/* The boxes are visited by increasing minimum x. A box is compared with the following ones while their minimum x is within `gap` of its maximum x
+   (the later ones are farther, since the minimum x only grows), and a pair that is also within `gap` on y is united in a union-find forest whose roots are
+   the smallest index of each cluster, so the result does not depend on the sweep order. */
+std::vector<uint32_t> box_clusters(const std::vector<c_bounding_box> &boxes, coord_t gap)
+{
+    std::vector<uint32_t> parent(boxes.size());
+    for (uint32_t idx = 0; idx < parent.size(); ++idx)
+        parent[idx] = idx;
+    const auto find_root = [&parent](uint32_t idx) {
+        while (parent[idx] != idx) {
+            parent[idx] = parent[parent[idx]];
+            idx = parent[idx];
+        }
+        return idx;
+    };
+    std::vector<uint32_t> order(boxes.size());
+    for (uint32_t idx = 0; idx < order.size(); ++idx)
+        order[idx] = idx;
+    std::sort(order.begin(), order.end(), [&boxes](uint32_t a, uint32_t b) { return boxes[a].min.x < boxes[b].min.x; });
+    for (size_t first = 0; first < order.size(); ++first) {
+        const c_bounding_box &box = boxes[order[first]];
+        for (size_t second = first + 1; second < order.size(); ++second) {
+            const c_bounding_box &other = boxes[order[second]];
+            if (other.min.x - box.max.x > gap)
+                break;
+            if (other.min.y - box.max.y <= gap && box.min.y - other.max.y <= gap) {
+                const uint32_t root_a = find_root(order[first]), root_b = find_root(order[second]);
+                parent[std::max(root_a, root_b)] = std::min(root_a, root_b);
+            }
+        }
+    }
+    std::vector<uint32_t> cluster_of(boxes.size());
+    for (uint32_t idx = 0; idx < cluster_of.size(); ++idx)
+        cluster_of[idx] = find_root(idx);
+    return cluster_of;
 }
 
 // Reads borrowed slabs in [begin,end) without changing geometry, returning owned boxes in exactly their polygon order;

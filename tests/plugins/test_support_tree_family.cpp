@@ -4828,6 +4828,91 @@ TEST_CASE("Joined support pieces leave a distant piece identical to the plain un
         CHECK((*published)[idx].y() == (*expected)[idx].y);
     }
 }
+namespace {
+// Publishes one base slab per entry of `slabs` (one height group), then compares the islands that the publication chose, read from the raw slice of region 0
+// (before the host simplifies the islands), with the whole-layer reference computed here: the closing of the union of the slabs, by +SCALED_EPSILON then
+// -SCALED_EPSILON with mitered joins (limit 3), through native_expolygons(). The two rectangles of the cases are the pieces; the reference joins them into
+// the one closed island that contains `probe`, which must be the only island published. `other_probe` lies in the other rectangle, and the closing gives
+// `closed_count` islands.
+void check_joined_rectangles_published(const std::vector<Polygons> &slabs, c_point probe, c_point other_probe, size_t closed_count)
+{
+    Print print;
+    Model model;
+    Test::init_print({ SG::slab() }, print, model, SG::config("tree", false, 0));
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    Common::GeneratedSupport support{ handle };
+    const coord_t top = scale_to_layer_coord(1.0), height = scale_to_layer_coord(0.2);
+    slic3r_api::StoredPolygonCollection all(handle);
+    for (const Polygons &rings : slabs) {
+        Common::GeneratorLayer &slab = Common::add_layer(support, Common::LayerType::Intermediate, top, top - height, height);
+        support.base.push_back(&slab);
+        assign_native(slab.polygons, rings);
+        all.append_copy_from(slab.polygons);
+    }
+    const slic3r_api::ClipperContext clipper(handle);
+    const slic3r_api::ClipperOperand united = slic3r_api::clipper_union(clipper(all));
+    const slic3r_api::StoredExPolygonCollection closed = Common::native_expolygons(slic3r_api::clipper_offset2(
+        united, double(SCALED_EPSILON), -double(SCALED_EPSILON), CLIPPER_JOIN_MITER, 3.));
+    // The case needs the three areas in the union, and the sliver (or the U) dropped by the filter of the plain union, which leaves the two rectangles as
+    // the only pieces.
+    REQUIRE(united.to_expolygon_collection().size() == 3);
+    const slic3r_api::StoredExPolygonCollection plain = Common::native_expolygons(united);
+    REQUIRE(plain.size() == 2);
+    CHECK(((plain.at(0).contains(probe) && plain.at(1).contains(other_probe)) || (plain.at(1).contains(probe) && plain.at(0).contains(other_probe))));
+    REQUIRE(closed.size() == closed_count);
+    Common::publish(nullptr, SG::object_view(object), SG::params(print, object), support, reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    REQUIRE(object.auxiliary_layers().size() == 1);
+    const ExPolygons &published = object.auxiliary_layers().front().regions().front().get_raw_slices();
+    // The reference island that holds the rectangles.
+    const slic3r_api::ExPolygon *joined = nullptr;
+    std::vector<slic3r_api::ExPolygon> closed_islands;
+    for (const slic3r_api::ExPolygon island : closed)
+        closed_islands.push_back(island);
+    for (const slic3r_api::ExPolygon &island : closed_islands)
+        if (island.contains(probe))
+            joined = &island;
+    REQUIRE(joined != nullptr);
+    REQUIRE(published.size() == 1);
+    const std::vector<c_point> expected = joined->contour().points();
+    REQUIRE(published.front().contour.points.size() == expected.size());
+    for (size_t idx = 0; idx < expected.size(); ++idx) {
+        CHECK(published.front().contour.points[idx].x() == expected[idx].x);
+        CHECK(published.front().contour.points[idx].y() == expected[idx].y);
+    }
+    CHECK(published.front().holes.size() == joined->hole_size());
+}
+} // namespace
+
+// Two rectangles 450 units apart with a thin triangle between them, whose area is under the small-area filter of the plain union but which the closing
+// still sees: it bridges the gaps (125 units on each side), so the reference publishes the rectangles as one joined island.
+TEST_CASE("A dropped sliver between two support pieces still joins them", "[plugins][support-tree-family][support-island]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto rectangle = [](coord_t x0, coord_t x1, coord_t y1) {
+        return Polygon(Points{ Point(x0, coord_t(0)), Point(x1, coord_t(0)), Point(x1, y1), Point(x0, y1) });
+    };
+    const Polygon triangle(Points{ Point(coord_t(125), coord_t(0)), Point(coord_t(325), coord_t(0)), Point(coord_t(225), coord_t(10000)) });
+    check_joined_rectangles_published({ Polygons{ rectangle(-1000, 0, 10000) }, Polygons{ rectangle(450, 1450, 10000) }, Polygons{ triangle } },
+                                      c_point{ -500, 5000 }, c_point{ 950, 5000 }, 1);
+}
+
+// Two rectangles 100 units apart and a far thin U whose ring is dropped by the filter of the plain union but whose closing survives as an island of its
+// own, without piece. The count of closed islands equals the count of pieces, which must not hide the join of the rectangles.
+TEST_CASE("A closed island without piece does not hide a join", "[plugins][support-tree-family][support-island]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const auto rectangle = [](coord_t x0, coord_t x1, coord_t y1) {
+        return Polygon(Points{ Point(x0, coord_t(0)), Point(x1, coord_t(0)), Point(x1, y1), Point(x0, y1) });
+    };
+    const Polygon u_shape(Points{ Point(coord_t(10000), coord_t(0)), Point(coord_t(10440), coord_t(0)), Point(coord_t(10440), coord_t(10000)),
+                                  Point(coord_t(10290), coord_t(200)), Point(coord_t(10150), coord_t(200)), Point(coord_t(10000), coord_t(10000)) });
+    check_joined_rectangles_published({ Polygons{ rectangle(-1000, 0, 10000) }, Polygons{ rectangle(100, 1100, 10000) }, Polygons{ u_shape } },
+                                      c_point{ -500, 5000 }, c_point{ 600, 5000 }, 2);
+}
+
 // The islands of a support layer are what the legacy toolpaths unite (the sparse surfaces are closed by +SCALED_EPSILON then -SCALED_EPSILON): two
 // slabs of one height group 50 units apart publish one island, and the support paths cross no other island. The united fill makes paths that
 // run over both squares: they would have crossed two islands.
