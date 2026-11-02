@@ -25,6 +25,7 @@ const char *const k_branch_id = "support.toolpath.branch_sheath";
 const SurfaceType branch_type = stModSupport | stModBranch | stPosInternal | stDensSparse;
 const SurfaceType sparse_type = stModSupport | stPosInternal | stDensSparse;
 const SurfaceType top_type = stModSupport | stPosTop | stDensSolid;
+const SurfaceType bottom_type = stModSupport | stPosBottom | stDensSolid;
 // SG::config() prints the base support on extruder index 0 and the interfaces on extruder index 1.
 const extruder_index_t base_extruder = 0;
 const extruder_index_t interface_extruder = 1;
@@ -256,6 +257,83 @@ TEST_CASE("Branch slab publishes as a branch surface and yields the area an inte
     CHECK(same_area(surfaces_of(object, branch_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(2., 2., 4., 6.))}));
     CHECK(same_area(surfaces_of(object, sparse_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(12., 2., 16., 6.))}));
     CHECK(same_area(surfaces_of(object, top_type, interface_extruder), ExPolygons{ExPolygon(rect_polygon(4., 2., 8., 6.))}));
+}
+
+// The areas of contact slabs carry the contact bit on both sides, a bridging lower contact carries the bridge and contact bits, a contact keeps the
+// area it shares with an interface, and the base, branch and interface areas carry no contact bit.
+TEST_CASE("Contact slabs publish their areas with the contact bit", "[plugins][support-publication]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    slice_cube(print);
+    PluginStorage storage;
+    GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    add_slab(support, support.top, LayerType::TopContact, rect_polygon(2., 2., 6., 6.));
+    add_slab(support, support.interfaces, LayerType::TopInterface, rect_polygon(4., 2., 8., 6.));
+    add_slab(support, support.bottom, LayerType::BottomContact, rect_polygon(2., 12., 6., 16.));
+    add_slab(support, support.interfaces, LayerType::BottomInterface, rect_polygon(4., 12., 8., 16.));
+    add_slab(support, support.bottom, LayerType::BottomContact, rect_polygon(2., 22., 6., 26.));
+    support.slabs.back().bridging = true;
+    add_slab(support, support.base, LayerType::Base, rect_polygon(12., 2., 16., 6.));
+    add_slab(support, support.base, LayerType::Branch, rect_polygon(12., 12., 16., 16.));
+    publish_support(print, support);
+
+    const PrintObject &object = print.object(0);
+    REQUIRE(object.auxiliary_layers().size() == 1);
+    CHECK(same_area(surfaces_of(object, SurfaceType(top_type | stModContact), interface_extruder), ExPolygons{ExPolygon(rect_polygon(2., 2., 6., 6.))}));
+    CHECK(same_area(surfaces_of(object, top_type, interface_extruder), ExPolygons{ExPolygon(rect_polygon(6., 2., 8., 6.))}));
+    CHECK(same_area(surfaces_of(object, SurfaceType(bottom_type | stModContact), interface_extruder), ExPolygons{ExPolygon(rect_polygon(2., 12., 6., 16.))}));
+    CHECK(same_area(surfaces_of(object, bottom_type, interface_extruder), ExPolygons{ExPolygon(rect_polygon(6., 12., 8., 16.))}));
+    CHECK(same_area(surfaces_of(object, SurfaceType(bottom_type | stModBridge | stModContact), interface_extruder),
+                    ExPolygons{ExPolygon(rect_polygon(2., 22., 6., 26.))}));
+    CHECK(same_area(surfaces_of(object, sparse_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(12., 2., 16., 6.))}));
+    CHECK(same_area(surfaces_of(object, branch_type, base_extruder), ExPolygons{ExPolygon(rect_polygon(12., 12., 16., 16.))}));
+    // The base and branch areas, and the dense areas of a side that are not a contact slab, carry no contact bit.
+    for (const Layer &layer : object.auxiliary_layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces()) {
+                    const SurfaceType type = surface.surface_type;
+                    CAPTURE(surfaceType_to_string(type));
+                    if ((type & stPosInternal) != 0 && (type & stDensSparse) != 0)
+                        CHECK((type & stModContact) == 0);
+                    if (type == top_type || type == bottom_type || type == (bottom_type | stModBridge))
+                        CHECK((type & stModContact) == 0);
+                }
+}
+
+// Without interface layers on a side the remaining dense areas are its contacts: a contact that cannot merge into the base keeps its contact bit,
+// while a mergeable contact is published as sparse base without it.
+TEST_CASE("Contact bit survives a side without interface layers and drops when the contact merges into the base", "[plugins][support-publication]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool same_tool = GENERATE(false, true);
+    CAPTURE(same_tool);
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, SG::config("grid", false, 0, same_tool));
+    SG::prefix(print);
+    PluginStorage storage;
+    GeneratedSupport support{reinterpret_cast<storage_handle *>(&storage)};
+    add_slab(support, support.top, LayerType::TopContact, rect_polygon(2., 2., 6., 6.));
+    publish_support(print, support);
+
+    const PrintObject &object = print.object(0);
+    REQUIRE(object.auxiliary_layers().size() == 1);
+    const ExPolygons area{ExPolygon(rect_polygon(2., 2., 6., 6.))};
+    // Separate support extruders: the contact is dense and keeps the bit.
+    // One support extruder with no base slab: the contact merges into the base.
+    const bool merged = same_tool;
+    CHECK(same_area(surfaces_of(object, merged ? sparse_type : SurfaceType(top_type | stModContact), merged ? base_extruder : interface_extruder), area));
+    CHECK(surfaces_of(object, merged ? SurfaceType(top_type | stModContact) : sparse_type, merged ? interface_extruder : base_extruder).empty());
+    for (const Layer &layer : object.auxiliary_layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces())
+                    if (merged)
+                        CHECK((surface.surface_type & stModContact) == 0);
+                    else
+                        CHECK((surface.surface_type & stModContact) != 0);
 }
 
 // A base slab yields the area it shares with a branch slab, so that area is printed once.

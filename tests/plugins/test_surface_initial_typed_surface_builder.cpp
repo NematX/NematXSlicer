@@ -63,6 +63,24 @@ TEST_CASE("Branch surface modifier marks tree branch bodies on top of support", 
     CHECK(Slic3r::surface_type_to_color_name(surface.surface_type) == "rgb(128,0,128)");
 }
 
+TEST_CASE("Contact surface modifier marks the areas of support contact layers", "[plugins][surface][surface-type]")
+{
+    using namespace slic3r_api;
+    static_assert(uint16_t(Slic3r::stModContact) == RAW_SURFACE_TYPE_MOD_CONTACT, "Host and API contact bits agree");
+    static_assert(RAW_SURFACE_TYPE_MOD_CONTACT == (1 << 11), "The contact bit is bit 11");
+    constexpr raw_surface_type type = srf_type().top().solid().support().contact().raw();
+    CHECK(type == (RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_DENS_SOLID | RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_CONTACT));
+    CHECK(surface_type_is_contact(type));
+    CHECK(surface_type_is_support(type));
+    CHECK_FALSE(surface_type_is_contact(srf_type().top().solid().support().raw()));
+    CHECK(surface_type_modifiers(type) == (RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_MOD_CONTACT));
+    const Slic3r::Surface surface(Slic3r::stPosTop | Slic3r::stDensSolid | Slic3r::stModSupport | Slic3r::stModContact, Slic3r::ExPolygon{});
+    CHECK(surface.has_mod_contact());
+    CHECK_FALSE(Slic3r::Surface(Slic3r::stPosTop | Slic3r::stDensSolid | Slic3r::stModSupport, Slic3r::ExPolygon{}).has_mod_contact());
+    CHECK(Slic3r::surfaceType_to_string(surface.surface_type) == "posTop||densSolid||modSupport||modContact");
+    CHECK(Slic3r::surface_type_to_color_name(surface.surface_type) == "rgb(255,64,0)");
+}
+
 namespace {
 using namespace Slic3r;
 using namespace Slic3r::Test::PerimeterPluginTests;

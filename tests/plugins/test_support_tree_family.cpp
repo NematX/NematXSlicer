@@ -5073,7 +5073,7 @@ RoofRestPublished roof_rest_published(const RoofRest &fixture, bool organic)
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &region : island.regions_islands())
                 for (const Surface &surface : region.fill_surfaces()) {
-                    top = top || (surface.surface_type == roof_rest_top_type && surface.expolygon.contains(point));
+                    top = top || ((surface.surface_type & ~stModContact) == roof_rest_top_type && surface.expolygon.contains(point));
                     branch = branch || (surface.surface_type == branch_type && get_extents(surface.expolygon).min.x() >= beyond_post);
                 }
         if (top)
@@ -5093,7 +5093,7 @@ ExPolygons roof_rest_surfaces(const Print &print, SurfaceType type, coord_t bott
             for (const LayerSliceIsland &island : layer.islands())
                 for (const LayerRegionIsland &region_island : island.regions_islands())
                     for (const Surface &surface : region_island.fill_surfaces())
-                        if (surface.surface_type == type)
+                        if ((surface.surface_type & ~stModContact) == type)
                             surfaces.push_back(surface.expolygon);
     return union_ex(surfaces);
 }

@@ -6,7 +6,7 @@
 #define slic3r_step_support_h_
 
 #define SLIC3R_PLUGIN_API_STEP_SUPPORT_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR 2u
+#define SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR 3u
 
 #include "slic3r_step_common.h"
 #include "slic3r_step_infill.h"
@@ -102,6 +102,21 @@ auxiliary layers marked with LayerSupportProperty, and publishes fill surfaces:
 - support | bottom | solid: lower contacts and interfaces, with bridge added
   when a lower contact uses bridge flow;
 - support | internal | sparse: the support base.
+
+The dense areas of a support contact layer carry RAW_SURFACE_TYPE_MOD_CONTACT:
+the area touching the object above or below and the margin of that contact, that
+is the dense area of the contact layer around it. A bridging lower contact
+carries it too. A dense top or bottom support surface without it is an
+interface of its side. A contact merged into the base (the case below) is
+published as sparse base and carries no contact bit. Families must mark every
+contact area: no host check verifies the marking, and the toolpath algorithms
+read the bit to select contact handling. On a side with interface layers,
+contacts use the configured contact pattern. On a side without interface layers,
+interfaces and contacts both use the base settings and bucket; the bit only
+selects contact handling, such as non-soluble bottom-contact bridging flow.
+A package built against 1.2 does not mark contacts, so its contact areas are
+classified as interfaces: they use interface settings when enabled on that
+side, otherwise base settings and bucket without contact handling.
 
 A contact is published as support | internal | sparse when no interface layer is configured on its
 side and the support regions can merge (one extruder, no bridging contact, and the merged base

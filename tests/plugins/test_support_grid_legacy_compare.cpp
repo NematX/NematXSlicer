@@ -3,8 +3,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iostream>
+#include <set>
 #include <sstream>
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Format/3mf.hpp"
 #include "libslic3r/Support/SupportMaterial.hpp"
 
 /* Comparison runs one object-slicing prefix, then the new grid family; its layers are
@@ -39,7 +42,7 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
 
 // Check that every published leaf carries a positive flow whose height is its layer's thickness.
 void check_published_paths(const ExtrusionEntity &entity, const Layer &layer);
-// Hash the published auxiliary layers (Z, thickness, extruder, surface types and points) of the family.
+// Hash published auxiliary layers including surface types, the contact bit and the partition into surfaces.
 uint64_t published_hash(const PrintObject &object);
 // Hashes of what the native generator reads from the object layers. geometry: per layer the print Z, the scaled height, the ids of the
 // lower and upper layers (-1 when absent), the slices, the raw slice of every region, and per region island the extruder, the indices
@@ -58,6 +61,23 @@ size_t count_extrusion_leaves(const ExtrusionEntity &entity);
 void mix_extrusion_leaves(uint64_t &hash, const ExtrusionEntity &entity, const ExtrusionAttributes *attributes = nullptr);
 // Append one comparison result line to the file named by SLIC3R_SUPPORT_COMPARE_TABLE, when it is set.
 void record_comparison(const std::string &section, double slice, double length, double volume, uint64_t hash);
+struct InterfaceShape;
+struct InterfaceReport;
+struct InterfaceComparison;
+// Accumulate closed-ring and open-line lengths from a borrowed extrusion tree.
+void add_interface_shape(const ExtrusionEntity &entity, bool in_loop, InterfaceShape &shape);
+// Read the top/bottom side from a borrowed layer's typed surfaces.
+const char *interface_side(const Layer &layer);
+// Report borrowed layers by print Z, excluding the first layer and borrowing fallback side names.
+InterfaceReport report_interface_layers(const LayerRefs &layers, const char *who, const std::map<coord_t, std::string> &known_sides = {});
+// Assert matching per-Z path shapes in two borrowed reports.
+void compare_interface_reports(const InterfaceReport &plugin, const InterfaceReport &legacy, const std::string &label);
+// Generate and compare owned interface reports for a borrowed print and label.
+std::vector<InterfaceComparison> check_interface_patterns_of(Print &print, const std::string &label);
+// Compare contact patterns for one model and contact-distance setting.
+void check_interface_pattern(int model_id, bool soluble);
+// Compare filament-distance bridge contacts and the margin-only contact area.
+void check_bridge_contact_pattern();
 
 // Walk the owned tree and check width, height and flow per leaf; the layer stays owned by the caller.
 void check_published_paths(const ExtrusionEntity &entity, const Layer &layer)
@@ -73,8 +93,8 @@ void check_published_paths(const ExtrusionEntity &entity, const Layer &layer)
     for (const ExtrusionEntityUPtr &child : entity.children()) check_published_paths(*child, layer);
 }
 
-// FNV-1a over every value that defines a published support surface, in publication order: equal
-// hashes mean the family published exactly the same layers, before and after a refactoring.
+// FNV-1a over published layer geometry, surface types and the partition into surfaces, in publication order:
+// equal hashes mean equal published layers including the contact bit and surface partition.
 uint64_t published_hash(const PrintObject &object)
 {
     uint64_t hash = 1469598103934665603ull;
@@ -419,7 +439,7 @@ void compare(int model_id, const char *style, bool soluble, int interfaces, bool
                     for (const LayerSliceIsland &island : layer.islands())
                         for (const LayerRegionIsland &region : island.regions_islands()) {
                             for (const Surface &surface : region.fill_surfaces()) {
-                                const SurfaceType type = surface.surface_type;
+                                const SurfaceType type = SurfaceType(surface.surface_type & ~stModContact);
                                 if (type == (stModSupport | stPosInternal | stDensSparse)) sparse_surface = true;
                                 else {
                                     dense_surface = true;
@@ -514,7 +534,7 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &work : island.regions_islands())
                 for (const Surface &surface : work.fill_surfaces())
-                    bridging_bottom = bridging_bottom || surface.surface_type == (stModSupport | stPosBottom | stDensSolid | stModBridge);
+                    bridging_bottom = bridging_bottom || (surface.surface_type & ~stModContact) == (stModSupport | stPosBottom | stDensSolid | stModBridge);
         const bool bridge_thread = p.distance_type == slic3r_api::Support::Common::ContactDistanceType::Filament &&
             bridging_bottom && layer.scaled_height() == scale_to_layer_coord(p.bottom_flow_mm.height);
         CHECK((layer.unscaled_height() <= p.max_support_height + EPSILON || bridge_thread));
@@ -523,7 +543,7 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &work : island.regions_islands())
                 for (const Surface &surface : work.fill_surfaces()) {
-                    const SurfaceType type = surface.surface_type;
+                    const SurfaceType type = SurfaceType(surface.surface_type & ~stModContact);
                     CHECK((type == (stModSupport | stPosTop | stDensSolid) ||
                            type == (stModSupport | stPosBottom | stDensSolid) ||
                            type == (stModSupport | stPosBottom | stDensSolid | stModBridge) ||
@@ -556,9 +576,9 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
             for (const LayerSliceIsland &island : layer.islands())
                 for (const LayerRegionIsland &work : island.regions_islands())
                     for (const Surface &surface : work.fill_surfaces())
-                        if (surface.surface_type == (stModSupport | stPosTop | stDensSolid))
+                        if ((surface.surface_type & ~stModContact) == (stModSupport | stPosTop | stDensSolid))
                             polygons_append(contours, surface.expolygon);
-                        else if (surface.surface_type == (stModSupport | stPosInternal | stDensSparse))
+                        else if ((surface.surface_type & ~stModContact) == (stModSupport | stPosInternal | stDensSparse))
                             polygons_append(base_contours, surface.expolygon);
             // With no interface layer on that side the family publishes a mergeable contact as base,
             // so the contact area then lies inside the sparse surface instead of the top one.
@@ -582,9 +602,9 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
             for (const LayerSliceIsland &island : layer.islands())
                 for (const LayerRegionIsland &work : island.regions_islands())
                     for (const Surface &surface : work.fill_surfaces())
-                        if (surface.surface_type == (stModSupport | stPosBottom | stDensSolid | (p.soluble ? 0 : stModBridge)))
+                        if ((surface.surface_type & ~stModContact) == (stModSupport | stPosBottom | stDensSolid | (p.soluble ? 0 : stModBridge)))
                             polygons_append(contours, surface.expolygon);
-                        else if (surface.surface_type == (stModSupport | stPosInternal | stDensSparse))
+                        else if ((surface.surface_type & ~stModContact) == (stModSupport | stPosInternal | stDensSparse))
                             polygons_append(base_contours, surface.expolygon);
             // Same rule as the top side: a contact typed as base lies inside the sparse surface.
             if (contours.empty() && !(object.config().support_material_bottom_interface_layers.is_enabled() ? object.config().support_material_bottom_interface_layers.value != 0 : object.config().support_material_interface_layers.value != 0))
@@ -630,7 +650,7 @@ void check_family(const PrintObject &object, const slic3r_api::Support::Common::
             for (const LayerSliceIsland &island : layer.islands())
                 for (const LayerRegionIsland &work : island.regions_islands())
                     for (const Surface &surface : work.fill_surfaces()) {
-                        const SurfaceType type = surface.surface_type;
+                        const SurfaceType type = SurfaceType(surface.surface_type & ~stModContact);
                         const size_t kind = type == (stModSupport | stPosTop | stDensSolid) ? 0 :
                             (type == (stModSupport | stPosBottom | stDensSolid) ||
                              type == (stModSupport | stPosBottom | stDensSolid | stModBridge)) ? 1 : 2;
@@ -752,4 +772,359 @@ TEST_CASE("Grid legacy comparison: build plate only restriction, snug", "[plugin
 // their grid contacts and columns by the area the object covers below each layer, so neither puts support on the platform.
 TEST_CASE("Grid legacy comparison: build plate only restriction, grid", "[plugins][support-grid][legacy-compare][support-settings][slow]") {
     compare(5, "grid", false, 3, false, "buildplate_only");
+}
+
+namespace {
+// The interface paths of one layer, split by shape: a loop (an ExtrusionLoop, or a polyline that ends where it starts) is a concentric ring, any other
+// path is an open line of a rectilinear or sparse pattern. Lengths are in millimetres.
+struct InterfaceShape {
+    double closed = 0, open = 0;
+    // 'concentric' when most of the length is closed rings, 'rectilinear' when most is open lines, 'mixed' otherwise.
+    const char *shape() const
+    {
+        const double total = closed + open;
+        return closed >= 0.8 * total ? "concentric" : closed <= 0.2 * total ? "rectilinear" : "mixed";
+    }
+};
+
+// Borrow the tree and recursively add each leaf's millimetre length to the caller's closed/open totals;
+// loop membership or coincident endpoints selects closed, no geometry changes, and traversal failures propagate.
+void add_interface_shape(const ExtrusionEntity &entity, bool in_loop, InterfaceShape &shape)
+{
+    if (entity.has_polyline()) {
+        const ArcPolyline &line = entity.polyline_ref();
+        const bool closed = in_loop || (line.size() > 2 && line.front() == line.back());
+        (closed ? shape.closed : shape.open) += unscaled(line.length());
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        add_interface_shape(*child, in_loop || entity.is_loop(), shape);
+}
+
+// Borrow a layer and scan its typed surfaces, returning a static top/bottom/both/unknown label without mutation;
+// surface-access failures propagate and no ownership transfers.
+const char *interface_side(const Layer &layer)
+{
+    bool top = false, bottom = false;
+    for (const LayerSliceIsland &island : layer.islands())
+        for (const LayerRegionIsland &region : island.regions_islands())
+            for (const Surface &surface : region.fill_surfaces()) {
+                top = top || (surface.surface_type & stPosTop) != 0;
+                bottom = bottom || (surface.surface_type & stPosBottom) != 0;
+            }
+    return top && bottom ? "both" : top ? "top" : bottom ? "bottom" : "?";
+}
+
+// The interface paths of the layers of one print Z (layers of one Z with different heights are added together): their shape, the side and the height.
+struct ZInterface {
+    InterfaceShape shape;
+    std::string side;
+    double height = 0;
+};
+
+// The report of one generator: one entry per print Z that has interface paths, in print Z order, and the text of the same lines. The first layer is
+// skipped (its flange is rectilinear with a perimeter by design). A layer whose side is unknown ("?", the native layers carry no typed surfaces) takes
+// the side that `known_sides` holds for its print Z, when it has one.
+struct InterfaceReport {
+    std::string text;
+    std::map<coord_t, ZInterface> by_z;
+    // Layers and layers not concentric per side, as text.
+    std::string summary() const
+    {
+        std::map<std::string, std::pair<size_t, size_t>> per_side;
+        for (const auto &[z, entry] : by_z) {
+            std::pair<size_t, size_t> &counts = per_side[entry.side];
+            ++counts.first;
+            counts.second += std::string(entry.shape.shape()) != "concentric" ? 1 : 0;
+        }
+        std::ostringstream out;
+        for (const auto &[side, counts] : per_side)
+            out << side << ": " << counts.first << " (" << counts.second << " not concentric)  ";
+        return out.str();
+    }
+    // Copy the side names into an owned map keyed by print Z.
+    std::map<coord_t, std::string> sides_by_z() const
+    {
+        std::map<coord_t, std::string> sides;
+        for (const auto &[z, entry] : by_z)
+            sides[z] = entry.side;
+        return sides;
+    }
+};
+// Borrows layers, label and fallback side names, groups path measures by print Z and skips the first layer;
+// returns an owned report without changing the inputs; allocation and view failures propagate.
+InterfaceReport report_interface_layers(const LayerRefs &layers, const char *who, const std::map<coord_t, std::string> &known_sides)
+{
+    InterfaceReport report;
+    for (const Layer &layer : layers) {
+        if (layer.scaled_bottom_z() <= 0)
+            continue;
+        InterfaceShape shape;
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                if (region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE))
+                    add_interface_shape(region.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), false, shape);
+        if (shape.closed + shape.open <= 0)
+            continue;
+        std::string side = interface_side(layer);
+        if (side == "?") {
+            const std::map<coord_t, std::string>::const_iterator known = known_sides.find(layer.scaled_print_z());
+            if (known != known_sides.end())
+                side = known->second;
+        }
+        ZInterface &entry = report.by_z[layer.scaled_print_z()];
+        entry.shape.closed += shape.closed;
+        entry.shape.open += shape.open;
+        entry.side = entry.side.empty() ? side : entry.side;
+        entry.height = layer.unscaled_height();
+        std::ostringstream line;
+        line << "  " << who << " z=" << layer.unscaled_print_z() << " height=" << layer.unscaled_height() << " side=" << side << " closed="
+             << shape.closed << " open=" << shape.open << " -> " << shape.shape() << "\n";
+        report.text += line.str();
+    }
+    return report;
+}
+
+// Print both reports, then check the plugin against the native generator print Z by print Z: the same layers have interface paths and each has the same
+// shape. Inputs are borrowed and unchanged; a print Z present on one side only fails the test, and allocation/output failures propagate.
+void compare_interface_reports(const InterfaceReport &plugin, const InterfaceReport &legacy, const std::string &label)
+{
+    UNSCOPED_INFO("interface layers of the plugin (" << plugin.summary() << "):\n" << plugin.text
+                  << "interface layers of the legacy generator (" << legacy.summary() << "):\n" << legacy.text);
+    std::cout << "[interface-pattern] " << label << "\nplugin " << plugin.summary() << "\n" << plugin.text << "legacy " << legacy.summary() << "\n"
+              << legacy.text;
+    std::set<coord_t> zs;
+    for (const auto &[z, entry] : plugin.by_z)
+        zs.insert(z);
+    for (const auto &[z, entry] : legacy.by_z)
+        zs.insert(z);
+    for (const coord_t z : zs) {
+        INFO(label << " print z " << unscaled(z));
+        const std::map<coord_t, ZInterface>::const_iterator plugin_entry = plugin.by_z.find(z), legacy_entry = legacy.by_z.find(z);
+        if (plugin_entry == plugin.by_z.end() || legacy_entry == legacy.by_z.end()) {
+            FAIL_CHECK("the interface layer exists only in the " << (plugin_entry == plugin.by_z.end() ? "legacy generator" : "plugin"));
+            continue;
+        }
+        CHECK(std::string(plugin_entry->second.shape.shape()) == std::string(legacy_entry->second.shape.shape()));
+    }
+}
+
+// The interface reports of both generators for one object.
+struct InterfaceComparison {
+    InterfaceReport plugin, legacy;
+};
+
+// Runs the family and its toolpaths, then compares the interface shapes of the plugin against the native generator layer by layer for every object,
+// and returns owned reports for each object. The print and label are borrowed; the print keeps the native auxiliary layers,
+// detached plugin layers are destroyed locally, and generation/allocation failures propagate or fail the test.
+std::vector<InterfaceComparison> check_interface_patterns_of(Print &print, const std::string &label)
+{
+    SG::family(print);
+    SG::toolpaths(print);
+    std::vector<InterfaceComparison> comparisons;
+    for (size_t object_idx = 0; object_idx < print.objects().size(); ++object_idx) {
+        PrintObject &object = print.object(object_idx);
+        LayerUPtrs plugin_layers = std::move(object.mutable_auxiliary_layers());
+        prepare_legacy_inputs(object);
+        PrintObjectSupportMaterial generator(&object, std::make_shared<SlicingParameters>(object.slicing_parameters()));
+        SG::NativeSlabs native_slabs;
+        SG::native_slabs(object, generator, native_slabs);
+        const InterfaceReport plugin_report = report_interface_layers(make_ref_view<Layer>(plugin_layers), "plugin");
+        const InterfaceReport legacy_report = report_interface_layers(object.auxiliary_layers(), "legacy", plugin_report.sides_by_z());
+        compare_interface_reports(plugin_report, legacy_report, label + " object " + std::to_string(object_idx));
+        REQUIRE_FALSE(plugin_report.by_z.empty());
+        comparisons.push_back(InterfaceComparison{plugin_report, legacy_report});
+    }
+    return comparisons;
+}
+
+// Slice one model (0: a roof over the bed; 5: the same roof partly over a low platform, so support also lands on the object) with three top and three
+// bottom interface layers, both contact patterns concentric and no contact loops, and compare the plugin with the native generator.
+void check_interface_pattern(int model_id, bool soluble)
+{
+    DYNAMIC_SECTION("model=" << model_id << " soluble=" << soluble) {
+        TriangleMesh mesh;
+        if (model_id == 0) {
+            mesh = SG::slab();
+        } else {
+            // The roof of the slab overhangs both the bed and a low platform under its far end, so part of the support lands on the object.
+            mesh = SG::slab();
+            TriangleMesh platform = make_cube(4., 8., 0.8);
+            platform.translate(8.f, 0.f, 0.f);
+            mesh.merge(platform);
+        }
+        DynamicPrintConfig config = SG::config("grid", soluble, 3, false);
+        config.set_deserialize_strict({{"support_material_top_interface_pattern", "concentric"},
+                                       {"support_material_bottom_interface_pattern", "concentric"},
+                                       {"support_material_interface_contact_loops", "0"}});
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, config);
+        SG::prefix(print);
+        check_interface_patterns_of(print, "model=" + std::to_string(model_id) + " soluble=" + std::to_string(soluble));
+        if (model_id == 5)
+            CHECK(!print.object(0).auxiliary_layers().empty());
+    }
+}
+
+// A bridge with a filament contact distance: under a layer with bridges the family places a second top contact, a bridging height under the top of the
+// layer, next to the normal one. Both are contacts of the same object layer, and the toolpaths must print the layer of the bridge contact as a contact
+// (concentric here) as the native generator does, whichever object layer is at the contact distance above it.
+void check_bridge_contact_pattern()
+{
+    SECTION("bridge with a filament contact distance") {
+        DynamicPrintConfig config = SG::config("grid", false, 3, false);
+        config.set_deserialize_strict({{"support_material_top_interface_pattern", "concentric"},
+                                       {"support_material_bottom_interface_pattern", "concentric"},
+                                       {"support_material_interface_contact_loops", "0"},
+                                       {"support_material_contact_distance_type", "filament"},
+                                       {"bridge_type", "nozzle"}, {"bridge_flow_ratio", "80%"}});
+        Print print;
+        Model model;
+        Test::init_print({Test::mesh(Test::TestMesh::bridge)}, print, model, config);
+        SG::prefix(print);
+        // The precondition: some object layer has two top contacts (the normal one and the bridge one).
+        const SG::Generated generated(print, print.object(0));
+        const slic3r_api::Support::Common::SupportParams geometry = SG::params(print, print.object(0));
+        std::map<size_t, size_t> contacts_per_layer;
+        for (const slic3r_api::Support::Common::GeneratorLayer *slab : generated.support.top)
+            if (!slab->polygons.empty())
+                ++contacts_per_layer[slab->object_above];
+        const bool has_bridge_contact = std::any_of(contacts_per_layer.begin(), contacts_per_layer.end(),
+            [](const std::pair<const size_t, size_t> &entry) { return entry.second > 1; });
+        REQUIRE(has_bridge_contact);
+        // The remaining contact margin lies outside the slices of the object layer above the gap
+        // (bottom Z 5.0, contact print Z 4.8 plus the 0.2 gap), so intersecting those slices finds no contact;
+        // the published contact bit still selects the contact pattern for the margin area.
+        const slic3r_api::Support::Common::GeneratorLayer *margin_contact = nullptr;
+        for (const slic3r_api::Support::Common::GeneratorLayer *slab : generated.support.top)
+            if (slab->type == slic3r_api::Support::Common::LayerType::TopContact && slab->print_z == scale_i(4.8) && !slab->polygons.empty()) {
+                const Layer *above = nullptr;
+                for (const Layer &object_layer : print.object(0).layers())
+                    if (object_layer.scaled_bottom_z() == slab->print_z + scale_i(geometry.gap_above))
+                        above = &object_layer;
+                REQUIRE(above != nullptr);
+                CHECK(above == &print.object(0).layer(slab->object_above));
+                CHECK(intersection_ex(SG::native(slab->polygons), above->lslices()).empty());
+                margin_contact = slab;
+            }
+        REQUIRE(margin_contact != nullptr);
+        const std::vector<InterfaceComparison> comparisons = check_interface_patterns_of(print, "bridge with a filament contact distance");
+        REQUIRE(comparisons.size() == 1);
+        for (const InterfaceReport *report : {&comparisons.front().plugin, &comparisons.front().legacy}) {
+            const std::map<coord_t, ZInterface>::const_iterator layer = report->by_z.find(scale_i(4.8));
+            REQUIRE(layer != report->by_z.end());
+            CHECK(std::string(layer->second.shape.shape()) == "concentric");
+        }
+    }
+}
+} // namespace
+
+// The configured interface pattern applies to the contact layers only, as in the native generator; the intermediate interface layers stay rectilinear.
+// The family must give every layer the same shape as the native generator, layer by layer.
+TEST_CASE("Grid legacy comparison: interface pattern follows the native contact layers", "[plugins][support-grid][legacy-compare][support-pattern]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const int model_id : {0, 5})
+        for (const bool soluble : {false, true})
+            check_interface_pattern(model_id, soluble);
+    check_bridge_contact_pattern();
+    SECTION("concentric top contacts and rectilinear bottom contacts on model 5") {
+        TriangleMesh mesh = SG::slab();
+        TriangleMesh platform = make_cube(4., 8., 0.8);
+        platform.translate(8.f, 0.f, 0.f);
+        mesh.merge(platform);
+        DynamicPrintConfig config = SG::config("grid", false, 3, false);
+        config.set_deserialize_strict({{"support_material_top_interface_pattern", "concentric"},
+                                       {"support_material_bottom_interface_pattern", "rectilinear"},
+                                       {"support_material_interface_contact_loops", "0"}});
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, config);
+        SG::prefix(print);
+        SG::family(print);
+        SG::toolpaths(print);
+        PrintObject &object = print.object(0);
+        const InterfaceReport plugin = report_interface_layers(object.auxiliary_layers(), "plugin");
+        std::set<coord_t> top_contacts, bottom_contacts;
+        // Contact bits and position bits identify each side independently of the selected path pattern.
+        for (const Layer &layer : object.auxiliary_layers()) {
+            if (layer.scaled_bottom_z() <= 0) continue;
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    for (const Surface &surface : region.fill_surfaces()) {
+                        if ((surface.surface_type & stModContact) == 0) continue;
+                        if ((surface.surface_type & stPosTop) != 0) top_contacts.insert(layer.scaled_print_z());
+                        if ((surface.surface_type & stPosBottom) != 0) bottom_contacts.insert(layer.scaled_print_z());
+                    }
+        }
+        REQUIRE_FALSE(top_contacts.empty());
+        REQUIRE_FALSE(bottom_contacts.empty());
+        for (const coord_t z : top_contacts) {
+            CAPTURE(z);
+            REQUIRE(plugin.by_z.count(z) == 1);
+            CHECK(plugin.by_z.at(z).side == "top");
+            CHECK(std::string(plugin.by_z.at(z).shape.shape()) == "concentric");
+        }
+        for (const coord_t z : bottom_contacts) {
+            CAPTURE(z);
+            REQUIRE(plugin.by_z.count(z) == 1);
+            CHECK(plugin.by_z.at(z).side == "bottom");
+            CHECK(std::string(plugin.by_z.at(z).shape.shape()) == "rectilinear");
+        }
+        LayerUPtrs plugin_layers = std::move(object.mutable_auxiliary_layers());
+        prepare_legacy_inputs(object);
+        PrintObjectSupportMaterial generator(&object, std::make_shared<SlicingParameters>(object.slicing_parameters()));
+        SG::NativeSlabs native_slabs;
+        SG::native_slabs(object, generator, native_slabs);
+        const InterfaceReport legacy = report_interface_layers(object.auxiliary_layers(), "legacy", plugin.sides_by_z());
+        compare_interface_reports(plugin, legacy, "model 5 distinct top and bottom patterns");
+    }
+}
+
+// The same comparison on a project file (SLIC3R_SUPPORT_3MF names a 3mf with its configuration), so a project's own support setup is compared as a
+// whole: for every print Z with interface paths, the plugin and the native generator print their shape, side and height. Run it with
+//   plugins_tests "[support-pattern-file]" with SLIC3R_SUPPORT_3MF=<path>
+// (the case is hidden: its tag starts with '.', so it runs only when selected). The configuration of the file is applied over the support test
+// configuration, and the support toolpath providers of the family are selected as in the other comparisons.
+TEST_CASE("Support interface pattern matches the native contact layers on a project file", "[.][support-pattern-file]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const char *path = std::getenv("SLIC3R_SUPPORT_3MF");
+    if (path == nullptr || path[0] == 0) {
+        WARN("SLIC3R_SUPPORT_3MF is not set: no project file to compare");
+        return;
+    }
+    Model model;
+    DynamicPrintConfig loaded_config;
+    ConfigSubstitutionContext substitutions{ForwardCompatibilitySubstitutionRule::EnableSilent};
+    std::string sections;
+    REQUIRE(load_3mf(path, loaded_config, substitutions, &model, false, false, &sections));
+    REQUIRE(model.objects().size() > 0);
+    // The support test configuration, the file over it, then the toolpath providers of the family again (the file holds the defaults).
+    DynamicPrintConfig config = SG::config("grid", false, 3, false);
+    config.apply(loaded_config, true);
+    // 0 means "the current extruder" for the plugin family. The native generator only takes a one-based extruder (it throws for 0, and nothing in the
+    // slicer calls it any more), so the comparison uses extruder 1, which is the same extruder for a file with a single extruder.
+    for (const char *key : {"support_material_extruder", "support_material_interface_extruder"})
+        if (config.opt_int(key) == 0)
+            config.set_deserialize_strict({{key, "1"}});
+    for (const std::pair<const char *, const char *> &provider : {
+        std::pair<const char *, const char *>{"support_toolpath_sparse", "support.toolpath.legacy_sparse"},
+        {"support_toolpath_branch", "support.toolpath.branch_sheath"},
+        {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom"},
+        {"support_toolpath_top_interface", "support.toolpath.legacy_top"}}) {
+        const std::string key = Steps::plugin_exclusive_group_option_key(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, provider.first);
+        if (!key.empty())
+            config.set_deserialize_strict({{key, std::string(provider.second)}});
+    }
+    Print print;
+    for (ModelObject &object : model.objects())
+        print.auto_assign_extruders(&object);
+    print.apply(model, config);
+    const std::pair<PrintBase::PrintValidationError, std::string> validation = print.validate();
+    UNSCOPED_INFO("print validation: " << validation.second);
+    REQUIRE(validation.first == PrintBase::PrintValidationError::pveNone);
+    print.set_status_silent();
+    SG::prefix(print);
+    check_interface_patterns_of(print, std::string("file ") + path);
 }

@@ -94,6 +94,12 @@ bool Surface::has_mod_branch() const
     return has(stModBranch);
 }
 
+// True when the surface is a dense area of a support contact layer.
+bool Surface::has_mod_contact() const
+{
+    return has(stModContact);
+}
+
 BoundingBox get_extents(const Surface &surface)
 {
     return get_extents(surface.expolygon.contour);
@@ -147,6 +153,7 @@ const std::string surface_type_to_color_name(const SurfaceType surface_type, flo
 {
     // The all-bits-set value is the diagnostic invalid sentinel, not a support type.
     if (surface_type != SurfaceType(-1) && (surface_type & stModBranch) != 0) return (std::string("rgb(")+std::to_string(int(saturation*128))+",0,"+std::to_string(int(saturation*128))+")"); // purple
+    if (surface_type != SurfaceType(-1) && (surface_type & stModContact) != 0) return (std::string("rgb(")+std::to_string(int(saturation*255))+","+std::to_string(int(saturation*64))+",0)"); // dark orange
     if (surface_type != SurfaceType(-1) && (surface_type & stModSupport) != 0) return (std::string("rgb(")+std::to_string(int(saturation*255))+","+std::to_string(int(saturation*128))+",0)"); // orange
     if ((surface_type & stPosTop) != 0) return (std::string("rgb(")+std::to_string(int(saturation*255))+",0,0)"); // "red";
     if (surface_type == (stPosBottom | stDensSolid | stModBridge)) return (std::string("rgb(0,0,")+std::to_string(int(saturation*255))+")"); // "blue";
@@ -187,6 +194,8 @@ void export_surface_type_legend_to_svg(SVG &svg, const Point &pos)
     svg.draw_legend(Point(pos_x, pos_y), "support"        , surface_type_to_color_name(stModSupport));
     pos_x += step_x;
     svg.draw_legend(Point(pos_x, pos_y), "support branch" , surface_type_to_color_name(stModSupport | stModBranch));
+    pos_x += step_x;
+    svg.draw_legend(Point(pos_x, pos_y), "support contact", surface_type_to_color_name(stModSupport | stModContact));
     // 2nd row
     pos_x = pos_x0;
     pos_y = pos(1) + scale_i(2.8);
@@ -272,6 +281,11 @@ std::string surfaceType_to_string(SurfaceType st)
         if (!str.empty())
             str += "||";
         str += "modBranch";
+    }
+    if ((st & stModContact) != 0) {
+        if (!str.empty())
+            str += "||";
+        str += "modContact";
     }
     return str.empty() ? "none" : str;
 }

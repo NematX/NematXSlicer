@@ -620,7 +620,7 @@ TEST_CASE("STEP_SUPPORT pattern callbacks contain a failing run and empty the pa
 TEST_CASE("STEP_SUPPORT payload keeps its 1.1 members first and compiles as C", "[plugins][support-pattern-service]")
 {
     // A family built against 1.1 reads print and object at these offsets; the pattern members come after them.
-    CHECK(SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR == 2u);
+    CHECK(SLIC3R_PLUGIN_API_STEP_SUPPORT_MINOR == 3u);
     CHECK(offsetof(run_ctx_generate_support, print) == 0);
     CHECK(offsetof(run_ctx_generate_support, object) == sizeof(void *));
     CHECK(offsetof(run_ctx_generate_support, host_context) == 2 * sizeof(void *));

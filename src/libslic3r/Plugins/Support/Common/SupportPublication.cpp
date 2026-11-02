@@ -23,7 +23,9 @@
    keep the exact geometry of the union (published_islands()). Rebuilding slices
    creates islands before region membership is locked. Each island then gets one work region per
    extruder that prints on it, holding dense top or bottom surfaces, or sparse internal support
-   surfaces (base slabs, and branch slabs typed as branch surfaces), each typed by its role.
+   surfaces (base slabs, and branch slabs typed as branch surfaces), each typed by its role. The areas of the contact slabs of a side
+   (and every bridging lower area) are marked as contact; the other dense areas are the interfaces of the side. A contact keeps the area it shares with
+   an interface, so the total area of a side does not depend on the marking, and a contact merged into the base (no interface layer on its side) is base.
    Publication gives each area one owner: the lower surfaces lose the areas the upper ones print,
    the branch and the base lose the areas any interface covers, and the base also loses the areas a
    branch prints. It does not separate bridged lower slabs from non-bridged ones, so the family must
@@ -40,9 +42,12 @@
 
 namespace slic3r_api::Support::Common {
 namespace {
-// Role rings owned by publication storage, kept in separate collections until overlap resolution.
+// Role rings owned by publication storage, kept in separate collections until overlap resolution. top_surfaces and bottom_surfaces hold every upper
+// and every non-bridging lower ring, contacts included, so the owners of the areas are resolved on the same operands whatever the contact marking;
+// top_contact_surfaces and bottom_contact_surfaces repeat the rings of the contact slabs of their side. Bridging lower rings are always contacts.
+// After resolve_island_surfaces() the contact collections hold the contact areas and top_surfaces and bottom_surfaces the interface areas only.
 struct IslandSurfaces {
-    StoredPolygonCollection top_surfaces, bridge_surfaces, bottom_surfaces, sparse_surfaces, branch_surfaces;
+    StoredPolygonCollection top_surfaces, top_contact_surfaces, bridge_surfaces, bottom_surfaces, bottom_contact_surfaces, sparse_surfaces, branch_surfaces;
 };
 
 // Group ranges and contact/base metadata for one exact print Z in the sorted borrowed slab list.
@@ -87,7 +92,7 @@ IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperCon
 // Copies only rings whose bounding boxes can touch the island, preserving their original order.
 PolygonCollection island_slab_polygons(StoredPolygonCollection &filtered, const PolygonCollection &polygons,
     const std::vector<c_bounding_box> &bounds, const c_bounding_box &island_bounds);
-// Removes role overlaps in top/lower/branch/base precedence.
+// Removes role overlaps in top/lower/branch/base precedence, then splits each side into its contact and interface areas.
 void resolve_island_surfaces(const ClipperContext &clipper, IslandSurfaces &areas);
 // Installs typed surfaces by extruder on the borrowed island.
 void install_island_surfaces(const plugin_run_context *context, storage_handle *storage, const ClipperContext &clipper,
@@ -437,8 +442,8 @@ IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperCon
 {
     // Clip every slab of this layer to the island and collect the role surfaces: upper
     // (top), lower (bottom, bridged or not), sparse base and branch bodies.
-    StoredPolygonCollection top_surfaces(storage), bridge_surfaces(storage), bottom_surfaces(storage),
-        sparse_surfaces(storage), branch_surfaces(storage);
+    StoredPolygonCollection top_surfaces(storage), top_contact_surfaces(storage), bridge_surfaces(storage), bottom_surfaces(storage),
+        bottom_contact_surfaces(storage), sparse_surfaces(storage), branch_surfaces(storage);
     const c_bounding_box island_bounds = island_slice.contour().bounding_box();
     for (size_t j = begin; j < end; ++j) {
         const GeneratorLayer &slab = *sorted[j];
@@ -470,12 +475,20 @@ IslandSurfaces collect_island_surfaces(storage_handle *storage, const ClipperCon
         StoredPolygonCollection clipped = clipper_intersection(clipper(nearby), clipper(island_slice)).to_polygon_collection();
         if (branch) branch_surfaces.append_move_from(clipped);
         else if (base || typed_as_base) sparse_surfaces.append_move_from(clipped);
-        else if (top) top_surfaces.append_move_from(clipped);
-        else if (bridge) bridge_surfaces.append_move_from(clipped);
-        else bottom_surfaces.append_move_from(clipped);
+        else if (top) {
+            // The areas of a top contact slab are also kept apart, to be marked as contact.
+            if (slab.type == LayerType::TopContact)
+                top_contact_surfaces.append_copy_from(clipped);
+            top_surfaces.append_move_from(clipped);
+        } else if (bridge) bridge_surfaces.append_move_from(clipped);
+        else {
+            if (slab.type == LayerType::BottomContact)
+                bottom_contact_surfaces.append_copy_from(clipped);
+            bottom_surfaces.append_move_from(clipped);
+        }
     }
-    return IslandSurfaces{std::move(top_surfaces), std::move(bridge_surfaces), std::move(bottom_surfaces),
-        std::move(sparse_surfaces), std::move(branch_surfaces)};
+    return IslandSurfaces{std::move(top_surfaces), std::move(top_contact_surfaces), std::move(bridge_surfaces), std::move(bottom_surfaces),
+        std::move(bottom_contact_surfaces), std::move(sparse_surfaces), std::move(branch_surfaces)};
 }
 
 // Copies borrowed rings into storage only when their cached boxes are not strictly disjoint from the island contour box;
@@ -507,7 +520,8 @@ PolygonCollection island_slab_polygons(StoredPolygonCollection &filtered, const 
 void resolve_island_surfaces(const ClipperContext &clipper, IslandSurfaces &areas)
 {
     StoredPolygonCollection &top_surfaces = areas.top_surfaces, &bridge_surfaces = areas.bridge_surfaces,
-        &bottom_surfaces = areas.bottom_surfaces, &sparse_surfaces = areas.sparse_surfaces, &branch_surfaces = areas.branch_surfaces;
+        &bottom_surfaces = areas.bottom_surfaces, &sparse_surfaces = areas.sparse_surfaces, &branch_surfaces = areas.branch_surfaces,
+        &top_contact_surfaces = areas.top_contact_surfaces, &bottom_contact_surfaces = areas.bottom_contact_surfaces;
     // One owner per area: the upper surfaces keep every area they share with a lower
     // one, the branch keeps the areas no interface covers, and the base keeps only the
     // areas that neither an interface nor a branch covers.
@@ -523,6 +537,20 @@ void resolve_island_surfaces(const ClipperContext &clipper, IslandSurfaces &area
     branch_surfaces = Internal::resolve_overlap(branch_surfaces, covered);
     sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, covered);
     sparse_surfaces = Internal::resolve_overlap(sparse_surfaces, branch_surfaces);
+    // Split each side into the contact areas and the interface areas, after the owners are known, so that the owners do not depend on the marking. A contact
+    // keeps the area it shares with an interface of its side, and a lower contact loses what the upper surfaces print, as the lower surfaces do. Bridging
+    // lower areas stay whole: they are contacts.
+    if (!top_contact_surfaces.empty()) {
+        Counters::add(Counters::totals.unions);
+        top_contact_surfaces = clipper_union(clipper(top_contact_surfaces)).to_polygon_collection();
+        top_surfaces = Internal::resolve_overlap(top_surfaces, top_contact_surfaces);
+    }
+    if (!bottom_contact_surfaces.empty()) {
+        bottom_contact_surfaces = Internal::resolve_overlap(bottom_contact_surfaces, top_union);
+        Counters::add(Counters::totals.unions);
+        bottom_contact_surfaces = clipper_union(clipper(bottom_contact_surfaces)).to_polygon_collection();
+        bottom_surfaces = Internal::resolve_overlap(bottom_surfaces, bottom_contact_surfaces);
+    }
 }
 
 // Normalizes borrowed role rings in type order, then installs surfaces on island-owned work regions in extruder order;
@@ -531,7 +559,8 @@ void install_island_surfaces(const plugin_run_context *context, storage_handle *
     layer_island_handle *island, const IslandSurfaces &areas, extruder_index_t base_extruder, extruder_index_t interface_extruder)
 {
     const StoredPolygonCollection &top_surfaces = areas.top_surfaces, &bridge_surfaces = areas.bridge_surfaces,
-        &bottom_surfaces = areas.bottom_surfaces, &sparse_surfaces = areas.sparse_surfaces, &branch_surfaces = areas.branch_surfaces;
+        &bottom_surfaces = areas.bottom_surfaces, &sparse_surfaces = areas.sparse_surfaces, &branch_surfaces = areas.branch_surfaces,
+        &top_contact_surfaces = areas.top_contact_surfaces, &bottom_contact_surfaces = areas.bottom_contact_surfaces;
     // Surfaces of one extruder, in the native order of their types.
     std::map<extruder_index_t, std::vector<std::pair<StoredExPolygonCollection, raw_surface_type>>> surfaces;
     // Borrows role rings, counts a nonempty union and stores its converted result by extruder/type; storage owns geometry and allocation/Clipper failures propagate.
@@ -542,8 +571,11 @@ void install_island_surfaces(const plugin_run_context *context, storage_handle *
             surfaces[extruder].emplace_back(native_expolygons(clipper_union(clipper(area))), type);
         }
     };
+    // Contacts before the interfaces of their side; a bridging lower area is a contact.
+    add(interface_extruder, top_contact_surfaces, srf_type().top().solid().support().contact().raw());
     add(interface_extruder, top_surfaces, srf_type().top().solid().support().raw());
-    add(interface_extruder, bridge_surfaces, srf_type().bottom().solid().bridge().support().raw());
+    add(interface_extruder, bridge_surfaces, srf_type().bottom().solid().bridge().support().contact().raw());
+    add(interface_extruder, bottom_contact_surfaces, srf_type().bottom().solid().support().contact().raw());
     add(interface_extruder, bottom_surfaces, srf_type().bottom().solid().support().raw());
     add(base_extruder, sparse_surfaces, srf_type().internal().sparse().support().raw());
     add(base_extruder, branch_surfaces, srf_type().internal().sparse().support().branch().raw());

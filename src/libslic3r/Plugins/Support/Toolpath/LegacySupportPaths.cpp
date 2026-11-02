@@ -26,12 +26,14 @@
 
 /* Support surfaces describe printable areas, not paths. This file chooses the
    pattern plugin that fills each area and keeps the spacing fixed between layers.
-   Contacts are separated from intermediate interfaces by the adjacent object
-   slices; bridge surfaces identify non-soluble bottom contacts. Contact loops
+   Contacts are separated from intermediate interfaces by the contact modifier
+    that the publication sets on the dense areas of contact layers, even on sides
+    without interface layers; unmarked dense surfaces remain interfaces. Contact loops
    leave small circular breaks for removal. Overlapping slabs split paths and
    reduce their flow in proportion to the remaining thickness. Each role prints
-   only its own surfaces: with no interface layers its contact is printed as base
-   on that same surface, and no area moves to another role. The generated paths
+   only its own surfaces: with no interface layers a contact that cannot merge
+   into the base keeps its own role, while a mergeable contact is published as
+   base and printed by the base role instead. The generated paths
    are published into the island that holds them, with the tool of the role.
    Filling precedes island assignment, so nearby contours can join in the union.
 
@@ -64,9 +66,9 @@ using PathParams = Common::ToolpathParams;
 struct LayerParts {
     explicit LayerParts(storage_handle *storage) : base(storage), top_contact(storage), top_interface(storage), bottom_contact(storage), bottom_interface(storage) {}
     Polys base;             // sparse columns
-    Polys top_contact;      // top surfaces touching the object above
-    Polys top_interface;    // remaining top surfaces
-    Polys bottom_contact;   // bottom bridge surfaces, or bottom surfaces touching the object below
+    Polys top_contact;      // top surfaces marked as contact
+    Polys top_interface;    // remaining top surfaces (the intermediate interfaces)
+    Polys bottom_contact;   // bottom surfaces marked as contact (bridges included)
     Polys bottom_interface; // remaining bottom surfaces
 };
 // One filler pass: a polygon set printed with the same settings.
@@ -85,12 +87,13 @@ struct Fragment {
 
 // Convert a Clipper result into a flat polygon collection, like the native polygon booleans.
 Polys as_polygons(ClipperOperand &&result);
-// Read the fill surfaces of one role in a region island; bridge 1 or 0 keeps only bridge or non-bridge surfaces.
-Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge = -1);
+// Read the fill surfaces of one role in a region island; bridge 1 or 0 keeps only bridge or non-bridge surfaces, contact 1 or 0 only those with or without the
+// contact bit.
+Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge = -1, int contact = -1);
 // Collect one role across the islands of a support layer before any union.
-Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge = -1);
-// Split one support layer's typed surfaces into the parts that are filled separately.
-LayerParts layer_parts(storage_handle *storage, const Object &object, const layer_handle *layer, const PathParams &params);
+Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge = -1, int contact = -1);
+// Split one support layer's typed surfaces into the parts that are filled separately: sparse, and the contact and interface areas of each side.
+LayerParts layer_parts(storage_handle *storage, const layer_handle *layer);
 // Join the upper contact and its intermediate interfaces, which the top role fills in one pass.
 void fuse_parts(LayerParts &parts);
 // Whether any of the polylines crosses the area.
@@ -145,7 +148,7 @@ Polys as_polygons(ClipperOperand &&result)
 }
 
 // Filters borrowed region surfaces by support role and optional bridge bit, copying contour-then-holes rings into caller storage; branch bodies are excluded and allocation failures propagate.
-Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge)
+Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge, int contact)
 {
     Polys result(storage);
     const raw_surface_type mask = RAW_SURFACE_TYPE_MOD_SUPPORT | (role == SurfaceRole::Sparse ?
@@ -155,58 +158,36 @@ Polys role_polygons(storage_handle *storage, const layer_region_island_handle *r
         const surface_handle *surface = layer_region_island_get_fill_surface(region, index);
         const raw_surface_type type = surface_get_type(surface);
         // Branch bodies belong to the branch role, which no legacy role prints.
-        if ((type & mask) != mask || surface_type_is_branch(type) || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge))) continue;
+        if ((type & mask) != mask || surface_type_is_branch(type) || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge)) ||
+            (contact >= 0 && surface_type_is_contact(type) != bool(contact))) continue;
         Common::append_polygons(result, ExPolygon(surface_get_expolygon(surface)));
     }
     return result;
 }
 
-Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge)
+Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge, int contact)
 {
     Polys result(storage);
     for (uint32_t island_index = 0; island_index < layer_count_island(layer); ++island_index) {
         const layer_island_handle *island = layer_get_island(layer, island_index);
         for (uint32_t region_index = 0; region_index < layer_island_count_region_island(island); ++region_index)
-            result.append_move_from(role_polygons(storage, layer_island_get_region_island(island, region_index), role, bridge));
+            result.append_move_from(role_polygons(storage, layer_island_get_region_island(island, region_index), role, bridge, contact));
     }
     return result;
 }
 
-// Splits borrowed support-layer roles against the same object's adjacent slices into owned contact/interface areas; layer Z and parameters belong to that object, and geometry/allocation failures propagate.
-LayerParts layer_parts(storage_handle *storage, const Object &object, const layer_handle *layer, const PathParams &params)
+// Splits borrowed support-layer roles into the contact areas and the interface areas, owned by the caller's storage. The publication sets the contact bit
+// on the dense areas of a contact layer, bridging lower areas included; a contact merged into the base is published as sparse base without the bit and is
+// printed by the base role. The bit separates contacts from interfaces on both sides regardless of interface-layer settings;
+// unmarked dense surfaces remain interfaces. Geometry/allocation failures propagate.
+LayerParts layer_parts(storage_handle *storage, const layer_handle *layer)
 {
-    const Common::SupportParams &geometry = params.geometry;
-    const ClipperContext clipper(storage);
     LayerParts parts(storage);
     parts.base = layer_polygons(storage, layer, SurfaceRole::Sparse);
-    const Polys top = layer_polygons(storage, layer, SurfaceRole::Top);
-    const Polys bottom = layer_polygons(storage, layer, SurfaceRole::Bottom);
-    const coord_t z = layer_get_print_z(layer), layer_bottom = z - layer_get_height(layer);
-    const coord_t match_tolerance = contact_match_tolerance(geometry);
-    if (!geometry.bottom_published_interfaces_enabled) {
-        // Without interface layers the published bottom surfaces are the contact alone.
-        parts.bottom_contact.copy_from(bottom);
-    } else if (!geometry.soluble) {
-        // A non-soluble bottom contact is printed as a bridge over the object top surface.
-        parts.bottom_contact = layer_polygons(storage, layer, SurfaceRole::Bottom, 1);
-        parts.bottom_interface = layer_polygons(storage, layer, SurfaceRole::Bottom, 0);
-    } else {
-        Polys adjacent(storage);
-        const uint32_t matched = Internal::matched_layer(object, layer_bottom, match_tolerance, false);
-        if (matched < object.layer_count()) Common::append_polygons(adjacent, object.layer(matched).slices());
-        parts.bottom_contact = as_polygons(clipper_intersection(clipper(bottom), clipper(adjacent)));
-        parts.bottom_interface = as_polygons(clipper_diff(clipper(bottom), clipper(parts.bottom_contact)));
-    }
-    if (!geometry.top_published_interfaces_enabled) {
-        // Without interface layers the published top surfaces are the contact alone.
-        parts.top_contact.copy_from(top);
-    } else {
-        Polys adjacent(storage);
-        const uint32_t matched = Internal::matched_layer(object, z + scale_to_layer_coord(geometry.gap_above), match_tolerance, true);
-        if (matched < object.layer_count()) Common::append_polygons(adjacent, object.layer(matched).slices());
-        parts.top_contact = as_polygons(clipper_intersection(clipper(top), clipper(adjacent)));
-        parts.top_interface = as_polygons(clipper_diff(clipper(top), clipper(parts.top_contact)));
-    }
+    parts.bottom_contact = layer_polygons(storage, layer, SurfaceRole::Bottom, -1, 1);
+    parts.bottom_interface = layer_polygons(storage, layer, SurfaceRole::Bottom, -1, 0);
+    parts.top_contact = layer_polygons(storage, layer, SurfaceRole::Top, -1, 1);
+    parts.top_interface = layer_polygons(storage, layer, SurfaceRole::Top, -1, 0);
     return parts;
 }
 
@@ -573,7 +554,7 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
     const Common::SupportParams &geometry = params.geometry;
     const coord_t z = layer_get_print_z(layer), height = layer_get_height(layer), bottom = z - height;
     const bool bridging = !geometry.soluble;
-    LayerParts parts = layer_parts(storage, object, layer, params);
+    LayerParts parts = layer_parts(storage, layer);
     fuse_parts(parts);
     const LayerSupportProperty &property = *static_cast<const LayerSupportProperty *>(
         plugin_property_data(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT));

@@ -31,7 +31,7 @@ namespace Slic3r {
 /// a SurfaceType should be composed of a Position & density flag
 /// Position: top, bottom, internal
 /// Density: solid, sparse, void
-/// Optional modifiers describe bridge flow or membership in a support auxiliary layer.
+/// Optional modifiers describe bridge flow, membership in a support auxiliary layer, or a support contact.
 enum SurfaceType  : uint16_t { 
     stNone = 0,
     /// Position: Top horizontal surface, visible from the top.
@@ -56,6 +56,13 @@ enum SurfaceType  : uint16_t {
     stModSupport = 1 << 9,
     /// Branch modifier: the surface is the body of a tree branch, printed by the branch toolpath role.
     stModBranch = 1 << 10,
+    /// Contact modifier: the dense areas of a support contact layer, the layer placed against the object (under it for a top surface, resting on it for a
+    /// bottom surface): the area touching the object above or below and the margin of that contact, that is the dense area of the contact layer around it.
+    /// Bridging bottom contacts carry it. A dense top or bottom support surface without it is an interface of its side, and a contact merged into the base
+    /// is published as sparse base without it. On a side without interface layers, interfaces and contacts both use the base settings and bucket;
+    /// the bit only selects contact handling, such as non-soluble bottom-contact bridging flow.
+    /// Support families must mark every contact area; no host check verifies the marking.
+    stModContact = 1 << 11,
 };
 inline SurfaceType operator|(SurfaceType a, SurfaceType b) {
     return static_cast<SurfaceType>(static_cast<uint16_t>(a) | static_cast<uint16_t>(b));
@@ -211,6 +218,8 @@ public:
     bool has_mod_support() const;
     // True when the surface is the body of a tree branch.
     bool has_mod_branch() const;
+    // True when the surface is a dense area of a support contact layer.
+    bool has_mod_contact() const;
 };
 
 typedef std::vector<Surface> Surfaces;

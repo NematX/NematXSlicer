@@ -17,6 +17,8 @@
    the typed surfaces. Leaf checks resolve inherited flow attributes, so both
    native paths and generic API wrappers are tested in their published form.
    A failing pattern checks that a legacy algorithm preserves its sole error message.
+   Synthetic dense bottom surfaces distinguish marked bridging contacts from unmarked
+   interfaces even when interface layers are disabled; both retain base-role settings.
    Two cases drive the internal helpers directly: synthetic slabs for height
     modulation and plain arguments for the filler pattern choice. A variable-height grid/tree case runs the full support
     toolpath dispatcher, reports modulation counters and checks published heights and height-scaled flow. */
@@ -124,6 +126,60 @@ struct ScopedBranchProviderOff {
     ScopedBranchProviderOff() { REQUIRE(Orchestrator::instance().set_plugin_active("support.toolpath.branch_sheath", false)); }
     ~ScopedBranchProviderOff() { Orchestrator::instance().set_plugin_active("support.toolpath.branch_sheath", true); }
 };
+}
+
+// Publish one dense lower surface without interfaces: only the contact modifier selects bridging contact flow.
+TEST_CASE("Dense surfaces without interfaces require the contact bit for contact flow", "[plugins][support-toolpath-legacy]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool contact = GENERATE(false, true);
+    DynamicPrintConfig config = SG::config("grid", false, 0, false);
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    const slic3r_api::Support::Common::SupportParams geometry = SG::params(print, object);
+    REQUIRE_FALSE(geometry.bottom_published_interfaces_enabled);
+    REQUIRE_FALSE(geometry.soluble);
+    const ExPolygons subject{ExPolygon(Polygon({Point(0, 0), Point(scale_i(10.), 0),
+        Point(scale_i(10.), scale_i(10.)), Point(0, scale_i(10.))}))};
+    PluginStorage storage;
+    const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
+        reinterpret_cast<storage_handle *>(&storage), slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
+        slic3r_api::Object(reinterpret_cast<const object_handle *>(&object)),
+        slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&subject)),
+        scale_i(0.2), scale_i(0.6), scale_i(0.5));
+    REQUIRE(built.created);
+    layer_handle *layer = object_get_auxiliary_layer(reinterpret_cast<const object_handle *>(&object), 0);
+    REQUIRE(layer_get_print_z(layer) - layer_get_height(layer) > 0);
+    REQUIRE(plugin_property_get_or_add_data_mutable(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()), layer_get_properties_mutable(layer),
+        PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT) != nullptr);
+    layer_region_island_handle *region = layer_island_get_or_create_region_island(
+        layer_get_island_mutable(layer, 0), nullptr, 0, 0);
+    REQUIRE(region != nullptr);
+    slic3r_api::StoredSurfaceCollection surfaces(reinterpret_cast<storage_handle *>(&storage));
+    const raw_surface_type type = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_BOTTOM |
+        RAW_SURFACE_TYPE_DENS_SOLID | (contact ? RAW_SURFACE_TYPE_MOD_CONTACT : 0);
+    surfaces.append(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&subject.front())), type);
+    REQUIRE(slic3r_api::LayerRegionIsland(region).set_fill_surfaces(&surfaces));
+
+    SG::toolpaths(print);
+
+    PathCounts counts;
+    for (const Layer &support_layer : object.auxiliary_layers())
+        for (const LayerSliceIsland &island : support_layer.islands())
+            for (const LayerRegionIsland &region_island : island.regions_islands()) {
+                REQUIRE(region_island.has_extrusion(LayerRegionIsland::SUPPORT));
+                check_paths(region_island.extrusion(LayerRegionIsland::SUPPORT), LayerRegionIsland::SUPPORT, counts, false);
+            }
+    REQUIRE(counts.base > 0);
+    CHECK(counts.interface == 0);
+    if (contact)
+        CHECK(counts.bridges == counts.base);
+    else
+        CHECK(counts.bridges == 0);
 }
 
 // Check that the built-in support toolpaths (not the native generator) print the interface lines of a support layer at the angle
@@ -711,7 +767,7 @@ TEST_CASE("Native contacts print with base settings without interface layers", "
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &region : island.regions_islands())
                 for (const Surface &surface : region.fill_surfaces()) {
-                    const SurfaceType type = surface.surface_type;
+                    const SurfaceType type = SurfaceType(surface.surface_type & ~stModContact);
                     if (type == (stModSupport | stPosTop | stDensSolid) ||
                         type == (stModSupport | stPosBottom | stDensSolid) ||
                         type == (stModSupport | stPosBottom | stDensSolid | stModBridge))

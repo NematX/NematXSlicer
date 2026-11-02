@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 4u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 6u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 7u
 
 /*
 Data-tree access for a sliced Print.
@@ -177,6 +177,14 @@ typedef uint16_t raw_surface_type;
 
 /* Branch modifier: the surface is the body of a tree branch, printed by the branch toolpath role. */
 #define RAW_SURFACE_TYPE_MOD_BRANCH (1 << 10)
+
+/* Contact modifier: marks the dense areas of a support contact layer, the layer placed against the object (under it for a top surface, resting on it for a
+   bottom surface): the area touching the object above or below and the margin of that contact, that is the dense area of the contact layer around it.
+   Bridging bottom contacts carry it. A dense top or bottom support surface without it is an interface of its side, and a contact merged into the base is
+   published as sparse base without it. Support families must set it on every contact area; no host check verifies the marking. Toolpath algorithms read
+   it. On a side without interface layers, interfaces and contacts both use the base settings and bucket; the bit only selects contact handling,
+   such as non-soluble bottom-contact bridging flow. */
+#define RAW_SURFACE_TYPE_MOD_CONTACT (1 << 11)
 
 /* Check if flag is set */
 #define RAW_SURFACE_TYPE_HAS(type, flag) (((type) & (flag)) != 0)

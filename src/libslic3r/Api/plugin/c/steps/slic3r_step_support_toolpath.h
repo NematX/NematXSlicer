@@ -6,7 +6,7 @@
 #define slic3r_step_support_toolpath_h_
 
 #define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MAJOR 1u
-#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MINOR 2u
+#define SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MINOR 3u
 
 #include "slic3r_step_common.h"
 #include "slic3r_step_infill.h"
@@ -91,8 +91,19 @@ property. Their region-island surfaces carry RAW_SURFACE_TYPE_MOD_SUPPORT plus
 position and density bits: support | bottom | solid for lower contacts and
 interfaces, support | internal | sparse for the base, and support | top | solid
 for upper contacts and interfaces. A lower contact using bridge flow also
-carries the bridge modifier. Algorithms distinguish contacts from intermediate
-interfaces themselves when needed. A tree branch body carries
+carries the bridge modifier. RAW_SURFACE_TYPE_MOD_CONTACT marks the dense areas
+of a support contact layer: the area touching the object above or below and the
+margin of that contact, that is the dense area of the contact layer around it; a
+bridging lower contact carries it too. Families must set it on every contact
+area; no host check verifies the marking. A dense top or bottom surface without
+it is an interface of its side, and a contact merged into the base is published
+as sparse base without it. On a side without interface layers, interfaces and
+contacts both use the base settings and bucket; the bit only selects contact
+handling, such as non-soluble bottom-contact bridging flow. Algorithms that
+separate contacts from intermediate interfaces read this bit. A package built
+against 1.2 does not mark contacts, so its contact areas are classified as
+interfaces: they use interface settings when enabled on that side, otherwise
+base settings and bucket without contact handling. A tree branch body carries
 RAW_SURFACE_TYPE_MOD_BRANCH on top of support | internal | sparse.
 
 Toolpath algorithms declare one role through their exclusive group:

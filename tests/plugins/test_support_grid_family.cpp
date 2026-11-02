@@ -185,7 +185,7 @@ TEST_CASE("Grid variable height contacts slabs and export follow each roof", "[p
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &region : island.regions_islands())
                 for (const Surface &surface : region.fill_surfaces())
-                    if (surface.surface_type == (stModSupport | stPosBottom | stDensSolid | stModBridge))
+                    if ((surface.surface_type & ~stModContact) == (stModSupport | stPosBottom | stDensSolid | stModBridge))
                         published_bottom_bridge = true;
     CHECK(published_bottom_bridge);
     for (size_t bay = 1; bay < 4; ++bay) {
@@ -342,12 +342,18 @@ TEST_CASE("Grid family publishes top bottom and base surfaces without extrusions
                 CHECK_FALSE(region.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE));
                 for (const Surface &surface : region.fill_surfaces()) {
                     const SurfaceType type = surface.surface_type;
-                    CHECK((type == top_type || type == bottom_type || type == (bottom_type | stModBridge) || type == base_type));
+                    // The contact bit marks the dense areas of a contact layer, so it is masked only on the top and bottom
+                    // surfaces of this test; the sparse base never carries it.
+                    const bool dense_side = (type & (stPosTop | stPosBottom)) != 0;
+                    const SurfaceType bare = dense_side ? SurfaceType(type & ~stModContact) : type;
+                    if ((type & stPosInternal) != 0 && (type & stDensSparse) != 0)
+                        CHECK((type & stModContact) == 0);
+                    CHECK((bare == top_type || bare == bottom_type || bare == (bottom_type | stModBridge) || bare == base_type));
                     CHECK(diff_ex(ExPolygons{surface.expolygon}, ExPolygons{island.get_slice()}).empty());
-                    if (type == top_type) { top = true; CHECK(region.extruder_id() == 1); }
-                    if (type == bottom_type || type == (bottom_type | stModBridge)) { bottom = true; CHECK(region.extruder_id() == 1); }
-                    if (type == base_type) { sparse = true; CHECK(region.extruder_id() == 0); }
-                    if (type == (bottom_type | stModBridge)) CHECK_FALSE(soluble);
+                    if (bare == top_type) { top = true; CHECK(region.extruder_id() == 1); }
+                    if (bare == bottom_type || bare == (bottom_type | stModBridge)) { bottom = true; CHECK(region.extruder_id() == 1); }
+                    if (bare == base_type) { sparse = true; CHECK(region.extruder_id() == 0); }
+                    if (bare == (bottom_type | stModBridge)) CHECK_FALSE(soluble);
                 }
             }
     }
@@ -417,12 +423,12 @@ TEST_CASE("Grid family layer heights and contact gaps respect object Z", "[plugi
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &region : island.regions_islands())
                 for (const Surface &surface : region.fill_surfaces()) {
-                    if (surface.surface_type == (stModSupport | stPosTop | stDensSolid)) {
+                    if ((surface.surface_type & ~stModContact) == (stModSupport | stPosTop | stDensSolid)) {
                         // Contact and intermediate interface share a type; the highest dense top slab touches this single roof.
                         highest_top = std::max(highest_top, layer.scaled_print_z());
                         CHECK(layer.scaled_print_z() <= scale_to_layer_coord(4. - params.gap_above));
                     }
-                    if (sync && surface.surface_type == (stModSupport | stPosInternal | stDensSparse) && layer.unscaled_print_z() < 3.) {
+                    if (sync && (surface.surface_type & ~stModContact) == (stModSupport | stPosInternal | stDensSparse) && layer.unscaled_print_z() < 3.) {
                         bool found = false;
                         for (const Layer &object_layer : object.layers()) found = found || object_layer.scaled_print_z() == layer.scaled_print_z();
                         CHECK(found);
@@ -451,7 +457,7 @@ TEST_CASE("Synchronized grid bottom contacts retain separation above the object"
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &region : island.regions_islands())
                 for (const Surface &surface : region.fill_surfaces())
-                    if (surface.surface_type == (stModSupport | stPosBottom | stDensSolid | stModBridge)) {
+                    if ((surface.surface_type & ~stModContact) == (stModSupport | stPosBottom | stDensSolid | stModBridge)) {
                         found = true;
                         CHECK(layer.unscaled_print_z() - layer.unscaled_height() == Approx(0.8 + 0.23));
                         CHECK(layer.unscaled_height() >= 0.05 - EPSILON);
@@ -539,7 +545,7 @@ TEST_CASE("Synchronized support shares close top and bottom contacts without a s
         for (const LayerSliceIsland &island : layer.islands())
             for (const LayerRegionIsland &work : island.regions_islands())
                 for (const Surface &surface : work.fill_surfaces())
-                    if (surface.surface_type == (stModSupport | stPosBottom | stDensSolid | stModBridge)) {
+                    if ((surface.surface_type & ~stModContact) == (stModSupport | stPosBottom | stDensSolid | stModBridge)) {
                         bottom_contact = true;
                         CHECK(layer.unscaled_print_z() == Approx(1.25));
                         CHECK(layer.unscaled_height() == Approx(0.22));

@@ -211,6 +211,19 @@ class PythonSurfaceViewTests(unittest.TestCase):
         self.assertTrue(surface_type_is_support(branch.raw()))
         self.assertFalse(surface_type_is_branch(views.srf_type().internal().sparse().support().raw()))
 
+    def test_contact_surface_type_builder_and_predicate(self):
+        """The contact modifier marks the areas of a support contact layer and composes with support, position and density."""
+        from slic3r_api import surface_type_is_contact, surface_type_is_support
+
+        views = self.surfaces
+        contact = views.srf_type().top().solid().support().contact()
+        self.assertEqual(contact.raw(), views.RAW_SURFACE_TYPE_POS_TOP | views.RAW_SURFACE_TYPE_DENS_SOLID |
+                         views.RAW_SURFACE_TYPE_MOD_SUPPORT | views.RAW_SURFACE_TYPE_MOD_CONTACT)
+        self.assertEqual(views.RAW_SURFACE_TYPE_MOD_CONTACT, 1 << 11)
+        self.assertTrue(surface_type_is_contact(contact.raw()))
+        self.assertTrue(surface_type_is_support(contact.raw()))
+        self.assertFalse(surface_type_is_contact(views.srf_type().top().solid().support().raw()))
+
     def test_append_like_move_uses_the_same_stable_snapshot(self):
         host = ReallocatingSurfaceHost()
         api = type("Api", (), {"host": host})()
