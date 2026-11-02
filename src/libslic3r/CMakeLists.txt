@@ -499,6 +499,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/PatternService.hpp
 	Plugins/Support/Common/PerimeterFill.cpp
 	Plugins/Support/Common/PerimeterFill.hpp
+	Plugins/Support/Common/SupportBridgeStrokes.cpp
+	Plugins/Support/Common/SupportBridgeStrokes.hpp
 	Plugins/Support/Common/SupportCloseZ.hpp
 	Plugins/Support/Common/SupportCounters.cpp
 	Plugins/Support/Common/SupportCounters.hpp
@@ -523,6 +525,8 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Grid/SupportFamilyGrid.hpp
 	Plugins/Support/SupportDemandBridgeRemoval.cpp
 	Plugins/Support/SupportDemandBridgeRemoval.hpp
+	Plugins/Support/SupportDemandBridgeInfillRemoval.cpp
+	Plugins/Support/SupportDemandBridgeInfillRemoval.hpp
 	Plugins/Support/SupportDemandBuildplateOnly.cpp
 	Plugins/Support/SupportDemandBuildplateOnly.hpp
 	Plugins/Support/SupportDemandModifiers.cpp

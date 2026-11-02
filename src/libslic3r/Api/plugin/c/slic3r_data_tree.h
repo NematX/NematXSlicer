@@ -528,7 +528,8 @@ SLIC3R_HOST_API const expolygon_collection_handle *layer_island_get_infill_no_ov
 Borrow the areas of this island that ask for support. STEP_SUPPORT_DEMAND
 writes them (it runs right after STEP_POST_SLICING); plugins up to STEP_SUPPORT
 may refine them with support_demand_get_island_mutable() (bridge removal in
-STEP_POST_PERIMETER); support generation reads them. Any step may read them;
+STEP_POST_PERIMETER, bridged infill removal in STEP_POST_INFILL); support
+generation reads them. Any step may read them;
 before STEP_SUPPORT_DEMAND the collection is empty. A valid island
 returns a collection owned by that island; it may be empty and must not be
 freed. Null returns null.

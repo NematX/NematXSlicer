@@ -15,7 +15,9 @@ namespace slic3r_api { namespace Support { namespace SupportDemandBridgeRemovalP
 // The demand is written by STEP_SUPPORT_DEMAND (overhangs, painting, modifier
 // volumes). When dont_support_bridges is enabled, this plugin removes the demand
 // under straight perimeter and gap-fill spans whose ends are both supported by
-// the lower layer.
+// the lower layer. The demand under the bridge infill lines is removed by
+// support.demand.bridge_infill_removal, at STEP_POST_INFILL. The demand of the
+// enforcers is not kept (known limit of this version).
 class SupportDemandBridgeRemoval : public PluginBase
 {
 public:

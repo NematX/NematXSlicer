@@ -43,7 +43,8 @@ TEST_CASE("Production demand registrations include all producers and filters", "
     std::ostringstream contents;
     contents << stream.rdbuf();
     for (const char *id : {"support.demand.overhangs", "support.demand.painting", "support.demand.modifiers",
-                           "support.demand.bridge_removal", "support.demand.buildplate_only"}) {
+                           "support.demand.bridge_removal", "support.demand.bridge_infill_removal",
+                           "support.demand.buildplate_only"}) {
         REQUIRE(orchestrator.get_plugin(id) != nullptr);
         CHECK(orchestrator.is_plugin_active(id));
         CHECK(contents.str().find(std::string(id) + " = 1") != std::string::npos);
@@ -51,6 +52,11 @@ TEST_CASE("Production demand registrations include all producers and filters", "
     const Plugin &filter = *orchestrator.get_plugin("support.demand.buildplate_only");
     CHECK(filter.get_step() == STEP_SUPPORT_DEMAND);
     CHECK(filter.get_priority() == 100);
+    // The bridge infill removal reads the printed bridge lines, so it runs after the infill step.
+    const Plugin &infill_removal = *orchestrator.get_plugin("support.demand.bridge_infill_removal");
+    CHECK(infill_removal.get_step() == STEP_POST_INFILL);
+    CHECK(std::any_of(infill_removal.get_used_config_keys().begin(), infill_removal.get_used_config_keys().end(),
+                      [](const Plugin::UsedConfigKey &key) { return key.key == "dont_support_bridges"; }));
     CHECK(std::any_of(filter.get_used_config_keys().begin(), filter.get_used_config_keys().end(),
                       [](const Plugin::UsedConfigKey &key) { return key.key == "support_material_buildplate_only"; }));
 }

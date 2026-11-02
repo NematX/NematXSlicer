@@ -146,6 +146,7 @@ after the available plugin set is known.
 #include "libslic3r/Plugins/Surface/InfillRegionCompatibilitySplitter.hpp"
 #include "libslic3r/Plugins/Surface/SolidShells.hpp"
 #include "libslic3r/Plugins/Surface/TopSurfaceExpansion.hpp"
+#include "libslic3r/Plugins/Support/SupportDemandBridgeInfillRemoval.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandBridgeRemoval.hpp"
 #include "libslic3r/Plugins/WipeTower/ToolChangeUnretract.hpp"
 #include "libslic3r/Plugins/WipeTower/ToolChangeWipe.hpp"
@@ -961,6 +962,8 @@ void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Support::SupportDemandBuildplateOnlyPlugin::register_support_demand_buildplate_only_plugin);
     register_builtin_plugin(orchestrator, "support.demand.bridge_removal",
         slic3r_api::Support::SupportDemandBridgeRemovalPlugin::register_support_demand_bridge_removal_plugin);
+    register_builtin_plugin(orchestrator, "support.demand.bridge_infill_removal",
+        slic3r_api::Support::SupportDemandBridgeInfillRemovalPlugin::register_support_demand_bridge_infill_removal_plugin);
     register_builtin_plugin(orchestrator, "support.family.grid",
         slic3r_api::Support::Grid::register_support_family_grid_plugin);
     register_builtin_plugin(orchestrator, "support.family.tree",

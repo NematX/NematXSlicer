@@ -38,7 +38,11 @@ extrusions, or support extrusions. If it needs to modify generated infill, it
 must ask the host for exactly that bucket through the callback below. This keeps
 the ownership rule simple for plugin authors: normal traversal is read-only,
 and every writable part of the host data tree is exposed by an explicit function
-in the step payload.
+in the step payload. The support demand of the layer islands is the one other
+writable part: support_demand_get_island_mutable() accepts it in this step (the
+demand is editable from STEP_SUPPORT_DEMAND through STEP_SUPPORT), so a plugin
+can refine it from the printed infill lines, which are final here (for example the
+bridge infill lines that are anchored on the layer below).
 */
 typedef extrusion_entity_handle *(*post_infill_get_region_island_mutable_extrusion_fn)(
     const layer_region_island_handle *region_island,

@@ -21,7 +21,8 @@ This step builds, for every layer island of the object, the areas that ask for
 support. It runs right after STEP_POST_SLICING, before the perimeters, so every
 later step can read the demand with layer_island_get_support_demand(). Support
 generation consumes it; plugins of the steps between may refine it with
-support_demand_get_island_mutable() (bridge removal in STEP_POST_PERIMETER).
+support_demand_get_island_mutable() (bridge removal in STEP_POST_PERIMETER, bridged
+infill removal in STEP_POST_INFILL).
 
 The demand is stored in each LayerSliceIsland. It is empty when the step
 starts; plugins run in priority order and each one reads and edits what the

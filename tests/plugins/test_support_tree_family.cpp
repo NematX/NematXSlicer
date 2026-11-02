@@ -5273,6 +5273,9 @@ TEST_CASE("Tree roof half over a platform and half over the bed", "[plugins][sup
 // at 3.6 mm from the middle of the roof in y, while the floor of the platform does. The check is made on the floors generated for the slabs (the
 // published ones are widened by the bottom expansion). The floor of the platform is [1.4, 1.6] (top 1.2 + gap 0.2) and the shelf [0.6, 0.8] (top
 // 0.4 + gap 0.2).
+// The platform underside keeps its demand because the bridge infill prints diagonally at the default fill angle, so the bridge infill removal
+// does not apply there (only the perimeters narrow it). Once bridges print in their detected direction, this test will need a geometry whose
+// underside is not a two-sided bridge.
 TEST_CASE("Tree resting part floors stop at the first support", "[plugins][support-tree-family][support-tree-roof-rest]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
