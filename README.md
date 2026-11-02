@@ -17,3 +17,12 @@ A collection of plugins for NematXSlicer.
 ## Build targets
 
 The packaging helper follows the target toolchain and provides output directories for Windows x86_64 and ARM64, Linux x86_64 and ARM64, and macOS ARM64. The ZIP filename stays compatible with the host plugin repository; binaries and ZIPs are separated by target OS, architecture, and build configuration. Only Windows x86_64 has been built and tested in this workspace. The other four combinations are supported by the CMake layout but have not been validated here.
+
+## Cross-package tests
+
+`tests/fan_chain/test_fan_chain.py` exports one generated model through the three fan packages (regional fan, first-layer program, anticipation and kickstart) with the host fan policies, and compares it with the same export without `nematx-fan-speedup`: Override region keeping its value except during the 100% pulses of kicks (a pulse may cover a whole short sequence; the region may start up to `fan_speedup_time` earlier), instants compared with the plugin's 0.1 s placement tolerance, first-layer program and short-layer cooling outside it, kicks followed by their target, extruded volume, layers and geometry kept, deterministic exports. It builds its datadirs from the ones prepared by the build:
+
+```
+cmake --build .build --config Debug -- /m
+python tests/fan_chain/test_fan_chain.py --host-executable "C:/path/to/build/src/Debug/Slic3r_console.exe" --runtime-path "C:/path/to/deps/usr/local/bin"
+```
