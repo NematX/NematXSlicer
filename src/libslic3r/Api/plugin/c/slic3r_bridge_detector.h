@@ -39,6 +39,14 @@ typedef struct bridge_detector_create_input {
     int32_t layer_id;
 } bridge_detector_create_input;
 
+/*
+Query contract of the detector:
+- detect_angle() succeeds when a direction was found, also when only lines anchored at one end exist (a cantilever);
+- coverage() keeps only the lines anchored at both ends: it is empty for a cantilever;
+- coverage() and unsupported_edges() REPLACE the content of the output collection (the previous content is
+  discarded, element views borrowed from it become invalid); to gather the results of several detectors, give each
+  query its own collection and combine them afterwards. They return the number of items written.
+*/
 struct bridge_detector_vtable {
     void (*destroy)(void *detector_ctx);
     int32_t (*detect_angle)(void *detector_ctx, double bridge_direction_override);
