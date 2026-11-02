@@ -3,6 +3,7 @@
 #include "libslic3r/Api/plugin/cpp/HoleCompensation.hpp"
 #include "libslic3r/Api/plugin/cpp/FanPolicy.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingLayerTimeProperty.hpp"
+#include "libslic3r/Api/plugin/cpp/PrintingPlanTimeEstimator.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/ArcGeometry.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 
@@ -43,6 +44,8 @@ protected:
 
 // Constructing a derived session pulls its vtable and implementations into a
 // real shared library. A compile-only test would miss unresolved SDK symbols.
+// Including the estimator interface also checks that its detailed value records
+// can be parsed with the copied public SDK alone; it does not run host timing.
 extern "C" PROBE_EXPORT int gcode_sdk_probe();
 
 extern "C" PROBE_EXPORT int gcode_sdk_probe()

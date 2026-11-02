@@ -108,6 +108,7 @@ layer_extrusion_edit.first_layer_flow = 1
 layer_extrusion_edit.speed.default = 1
 layer_extrusion_edit.acceleration.default = 1
 layer_extrusion_edit.travel_deceleration.default = 1
+layer_extrusion_edit.speed.slowdown = 1
 layer_extrusion_edit.fan.default = 1
 layer_extrusion_edit.fan.cooling = 1
 layer_extrusion_edit.fan.first_layers = 1

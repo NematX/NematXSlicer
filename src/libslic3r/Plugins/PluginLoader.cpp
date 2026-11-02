@@ -124,6 +124,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/Infill/SmoothPattern.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetraction.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/CoolingSlowdown.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetractionLift.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateRetractionWipe.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/CreateToolChange.hpp"
@@ -840,6 +841,8 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::LayerExtrusionEdit::DefaultAccelerationPlugin::register_default_acceleration_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.travel_deceleration.default",
         slic3r_api::LayerExtrusionEdit::DefaultTravelDecelerationPlugin::register_default_travel_deceleration_plugin);
+    register_builtin_plugin(orchestrator, "layer_extrusion_edit.speed.slowdown",
+        slic3r_api::LayerExtrusionEdit::CoolingSlowdownPlugin::register_cooling_slowdown_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.fan.cooling",
         slic3r_api::LayerExtrusionEdit::FanCoolingPlugin::register_fan_cooling_plugin);
     register_builtin_plugin(orchestrator, "layer_extrusion_edit.fan.first_layers",

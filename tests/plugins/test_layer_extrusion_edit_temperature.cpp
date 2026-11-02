@@ -423,6 +423,9 @@ std::string export_tool_change_order_fixture(int idle_temperature = 150)
     config.first_layer_bed_temperature.set(std::vector<int>{0, 0});
     config.bed_temperature.set(std::vector<int>{0, 0});
     config.chamber_temperature.set(std::vector<int>{0, 0});
+    // The exact movement lines below carry no F word: a short-layer slowdown
+    // would change the speed and add one, and this test is about tool order.
+    config.slowdown_below_layer_time.set(std::vector<double>{0., 0.});
     config.ooze_prevention.value = true;
     config.idle_temperature.set(std::vector<int>{-1, idle_temperature});
     config.idle_temperature.set_enabled(true);

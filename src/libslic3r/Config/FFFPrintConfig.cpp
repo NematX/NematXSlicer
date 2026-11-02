@@ -1191,6 +1191,7 @@ void init_categories(PrintConfigDef &definition)
         // "fan_always_on", (now default_fan_speed)
         // "min_fan_speed", (now fan_printer_min_speed)
         "overhangs_dynamic_fan_speed",
+        "slowdown_below_layer_time",
         "max_speed_reduction",
         "min_print_speed",
         // custom gcode
@@ -5934,6 +5935,20 @@ void init_fff_params(PrintConfigDef &definition)
     });
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionEnum<SlicingMode>(SlicingMode::Regular));
+
+    def = definition.add("slowdown_below_layer_time", coFloats, ptFFF);
+    def->label = L("Slow down if layer print time is below");
+    def->category = OptionCategory::cooling;
+    def->invalidates_step = STEP_LAYER_EXTRUSION_EDIT;
+    def->tooltip = L("If layer print time is estimated below this number of seconds, print moves "
+        "speed will be scaled down to extend duration to this value, if possible."
+        "\nSet zero to disable.");
+    def->sidetext = L("approximate seconds");
+    def->min = 0;
+    def->max = 1000;
+    def->mode = comExpert | comPrusa;
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionFloats{ 5 });
 
     def = definition.add("small_perimeter_speed", coFloatOrPercent, ptFFF);
     def->label = L("Speed");

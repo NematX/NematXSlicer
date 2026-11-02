@@ -1,5 +1,6 @@
 #include "libslic3r/Api/plugin/c/slic3r_fan_policy.h"
 #include "libslic3r/Api/plugin/c/slic3r_printing_layer_time.h"
+#include "libslic3r/Api/plugin/cpp/PrintingPlanTimeEstimator.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/BuiltinGCodeReaderBase.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.hpp"
 

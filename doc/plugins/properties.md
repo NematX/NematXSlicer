@@ -132,8 +132,29 @@ means a producer ran its timing model after speed/slowdown changes; it does not
 mean measured machine time or provide intra-movement timing. Both origins
 require finite, nonnegative seconds. A producer must republish after modifying
 speeds. `FanCooling` keeps valid RESOLVED records and recomputes
-other durations in one ordered estimation pass. No post-slowdown producer is
-implemented by these contracts.
+other durations in one ordered estimation pass.
+
+The built-in `layer_extrusion_edit.speed.slowdown` runs at priority 16, before
+the fan stages. It is active by default; `slowdown_below_layer_time=0` disables
+its work for that tool. For a short layer it lowers the fastest eligible paths
+toward a common speed, within `min_print_speed` and `max_speed_reduction`.
+A zero minimum removes the speed floor; reduction values 0% and 100% both mean
+no reduction cap. Positive intermediate percentages bound the reduction from
+each path's original speed. Unreachable goals stop at these bounds.
+
+Only geometric leaf speeds change: geometry, order, flow, acceleration, pressure
+advance and stationary deposit rates remain intact. Excluded roles, synthetic
+gaps and fixed deposits still count toward the whole-layer duration. The detailed
+estimator numbers geometric leaves in traversal order and returns gaps/deposits
+as `unattributed_seconds`, so inserting a deposit never shifts geometric ranks.
+The plugin publishes RESOLVED for layers with an enabled threshold, even if no
+speed changed. It publishes nothing on disabled layers.
+
+Compared with the legacy CoolingBuffer model, successive tool thresholds use
+current durations after earlier slowdowns, and each potential gain is capped by
+the path's maximum duration. This allows reachable goals to be met when an
+uncapped intermediate gain would overestimate available slowing. The legacy
+CoolingBuffer export path and its script handling remain separate and unchanged.
 
 Fan references are distinct from extrusion requests. `configured_percent` keeps
 normalized filament input (`-1` disabled, historical `1` mapped to `0`), while
@@ -200,8 +221,7 @@ With a disabled dynamic graph, a configured `overhangs_fan_speed` is honored
 Missing overhang requests wait for the closed perimeter-family reference;
 upstream Automatic overhangs retain bridge-role ramp exceptions. Dynamic cooling
 never lowers an existing request above its own ceiling. A disabled default fan
-uses ramp(100) as the dynamic ceiling, not a manufactured stop. The advanced E/D/G
-program, slowdown solver and temporal processing remain separate future work.
+uses ramp(100) as the dynamic ceiling, not a manufactured stop.
 
 Each extracted plugin owns its existing option definitions and invalidates
 `STEP_LAYER_EXTRUSION_EDIT`. Shipped defaults enable all four; migration copies

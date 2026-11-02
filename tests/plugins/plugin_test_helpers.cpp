@@ -105,6 +105,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/LayerExtrusionEdit/FanCooling.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFan.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravel.hpp"
+#include "libslic3r/Plugins/LayerExtrusionEdit/CoolingSlowdown.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.hpp"
 #include "libslic3r/Plugins/LayerExtrusionEdit/FirstLayerFlow.hpp"
 #include "libslic3r/Plugins/Ordering/DefaultOrdering.hpp"
@@ -894,6 +895,7 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DefaultFanPlugin::register_default_fan_plugin(
             orchestrator_handle_value);
+        slic3r_api::LayerExtrusionEdit::CoolingSlowdownPlugin::register_cooling_slowdown_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::FanCoolingPlugin::register_fan_cooling_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::FirstLayerFanPlugin::register_first_layer_fan_plugin(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::DynamicFanPlugin::register_dynamic_fan_plugin(orchestrator_handle_value);
@@ -1072,6 +1074,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.acceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.travel_deceleration.default");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.default");
+        activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.speed.slowdown");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.cooling");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.first_layers");
         activate_plugin_or_fail(orchestrator, "layer_extrusion_edit.fan.dynamic");

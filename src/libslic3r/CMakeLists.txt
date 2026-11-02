@@ -393,6 +393,8 @@ set(SLIC3R_SOURCES
 	Plugins/Infill/SmoothPattern.hpp
 	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.cpp
 	Plugins/LayerExtrusionEdit/AvoidCrossingPerimetersTravel.hpp
+	Plugins/LayerExtrusionEdit/CoolingSlowdown.cpp
+	Plugins/LayerExtrusionEdit/CoolingSlowdown.hpp
 	Plugins/LayerExtrusionEdit/CreateRetraction.cpp
 	Plugins/LayerExtrusionEdit/CreateRetraction.hpp
 	Plugins/LayerExtrusionEdit/CreateRetractionLift.cpp
@@ -433,6 +435,8 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/ExtrusionProcessParameterHelpers.hpp
 	Plugins/LayerExtrusionEdit/RegionalProcessParameterHelpers.cpp
 	Plugins/LayerExtrusionEdit/RegionalProcessParameterHelpers.hpp
+	Plugins/LayerExtrusionEdit/SlowdownSolver.cpp
+	Plugins/LayerExtrusionEdit/SlowdownSolver.hpp
 	Plugins/LayerExtrusionEdit/TravelConnectionHelpers.cpp
 	Plugins/LayerExtrusionEdit/TravelConnectionHelpers.hpp
 	Plugins/Ordering/AdvancedExtrusionTreeOrdering.cpp

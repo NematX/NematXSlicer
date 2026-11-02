@@ -99,6 +99,7 @@ add_executable(${_TEST_NAME}_tests
     test_layer_extrusion_edit_lift.cpp
     test_layer_extrusion_edit_retraction.cpp
     test_layer_extrusion_edit_retraction_wipe.cpp
+    test_layer_extrusion_edit_slowdown_solver.cpp
     test_layer_extrusion_edit_toolchange.cpp
     test_layer_extrusion_edit_transition_scope.cpp
     test_layer_extrusion_edit_travel.cpp

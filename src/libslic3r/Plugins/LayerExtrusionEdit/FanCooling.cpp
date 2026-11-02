@@ -38,7 +38,8 @@ const raw_used_config_key k_used[] = {
     {"slowdown_below_layer_time", RAW_CO_VECTOR_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"travel_speed", RAW_CO_FLOAT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
 };
-const char *const k_defined[] = {"fan_below_layer_time", "max_fan_speed", "slowdown_below_layer_time"};
+// slowdown_below_layer_time is a base host setting (FFFPrintConfig), only read here.
+const char *const k_defined[] = {"fan_below_layer_time", "max_fan_speed"};
 
 // Keep the existing filament option metadata under a single active owner.
 void initialize_settings(orchestrator_handle *orch);
@@ -133,27 +134,6 @@ void initialize_settings(orchestrator_handle *orch)
     def.default_serialized_value = "100";
     if (orchestrator_create_option_def(orch, &def) != OPTION_DEF_ERROR_OK)
         throw std::runtime_error("Cannot register max_fan_speed.");
-
-    def = raw_config_option_def_init();
-    def.opt_key = "slowdown_below_layer_time";
-    def.type = RAW_CO_VECTOR_FLOAT;
-    def.container_type = RAW_CONTAINER_TYPE_PLATER;
-    def.option_preset_type = RAW_PRESET_TYPE_FFF_FILAMENT;
-    def.printer_technology = RAW_PT_FFF;
-    def.invalidates_step = STEP_LAYER_EXTRUSION_EDIT;
-    def.category = RAW_OPTION_CATEGORY_COOLING;
-    def.label = "Slow down if layer print time is below";
-    def.tooltip = "If layer print time is estimated below this number of seconds, print moves speed will be scaled down to extend duration to this value, if possible.\nSet zero to disable.";
-    def.sidetext = "approximate seconds";
-    def.is_vector_extruder = 1;
-    def.has_min = def.has_max = 1;
-    def.min_value = 0;
-    def.max_value = 1000;
-    def.precision = 6;
-    def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_PRUSA;
-    def.default_serialized_value = "5";
-    if (orchestrator_create_option_def(orch, &def) != OPTION_DEF_ERROR_OK)
-        throw std::runtime_error("Cannot register slowdown_below_layer_time.");
 }
 
 void FanCooling::setup_impl(const plugin_run_context *run, uint32_t) const

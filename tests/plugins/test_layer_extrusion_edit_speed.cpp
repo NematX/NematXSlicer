@@ -110,6 +110,7 @@ constexpr const char *DEFAULT_SPEED_PLUGIN = "layer_extrusion_edit.speed.default
 constexpr const char *DEFAULT_ACCELERATION_PLUGIN = "layer_extrusion_edit.acceleration.default";
 constexpr const char *DEFAULT_FAN_PLUGIN = "layer_extrusion_edit.fan.default";
 constexpr const char *FAN_COOLING_PLUGIN = "layer_extrusion_edit.fan.cooling";
+constexpr const char *SLOWDOWN_PLUGIN = "layer_extrusion_edit.speed.slowdown";
 constexpr const char *FIRST_LAYER_FAN_PLUGIN = "layer_extrusion_edit.fan.first_layers";
 constexpr const char *DYNAMIC_FAN_PLUGIN = "layer_extrusion_edit.fan.dynamic";
 constexpr const char *DEFAULT_ENTRY_STATE_PLUGIN = "layer_extrusion_edit.entry_state.default";
@@ -126,6 +127,8 @@ struct ExtrusionSpec
     float pressure_advance = -1.f;
     float fan_speed = -1.f;
     bool force_e_per_mm = false;
+    // Add a collinear point halfway, making a two-segment path of the same length.
+    bool middle_point = false;
 };
 
 struct ObservedLeaf
@@ -228,6 +231,8 @@ std::unique_ptr<ExtrusionPath> make_path(const ExtrusionSpec &spec, const size_t
     std::unique_ptr<ExtrusionPath> path = std::make_unique<ExtrusionPath>(attributes, nullptr, true);
     const coord_t y = scale_i(11. + double(path_idx));
     path->polyline().append(Point(scale_i(11.), y));
+    if (spec.middle_point)
+        path->polyline().append(Point(scale_i(20.), y));
     path->polyline().append(Point(scale_i(29.), y));
     if (spec.existing_speed > 0.f || spec.existing_acceleration > 0.f ||
         spec.pressure_advance > 0.f) {
@@ -2834,6 +2839,20 @@ TEST_CASE("PrintingPlan time estimator inherits deposit flow and counts both gap
     REQUIRE(estimates.size() == 1);
     // 18/20 + 10/10 + 1/(20*0.2) + 10/10 + 10/20 seconds.
     CHECK(estimates.front().duration_seconds == Approx(3.65));
+    const std::vector<slic3r_api::PrintingLayerTimeDetail> details =
+        slic3r_api::PrintingPlanTimeEstimator(config_view).estimate_detailed(plan_view);
+    REQUIRE(details.size() == 1);
+    REQUIRE(details.front().leaves.size() == 2);
+    CHECK(details.front().leaves[0].leaf_rank == 0);
+    CHECK(details.front().leaves[0].duration_seconds == Approx(0.9));
+    CHECK(details.front().leaves[1].leaf_rank == 1);
+    CHECK(details.front().leaves[1].duration_seconds == Approx(0.5));
+    // The fixed deposit and both synthetic gaps belong to no geometric leaf.
+    CHECK(details.front().unattributed_seconds == Approx(2.25));
+    double detailed_total = details.front().unattributed_seconds;
+    for (const slic3r_api::PrintingLeafTime &leaf : details.front().leaves)
+        detailed_total += leaf.duration_seconds;
+    CHECK(detailed_total == Approx(estimates.front().duration_seconds));
 }
 
 TEST_CASE("PrintingPlan time estimator rejects malformed deposits before timing",
@@ -3597,7 +3616,8 @@ TEST_CASE("Fan host policies keep separate priorities configuration owners and r
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     const char *ids[] = {DEFAULT_FAN_PLUGIN, FAN_COOLING_PLUGIN, FIRST_LAYER_FAN_PLUGIN, DYNAMIC_FAN_PLUGIN};
     const int priorities[] = {20, 22, 24, 26};
-    const size_t defined_counts[] = {12, 3, 2, 0};
+    // slowdown_below_layer_time is a base host setting: FanCooling only reads it.
+    const size_t defined_counts[] = {12, 2, 2, 0};
     std::set<std::string> owners;
     for (size_t idx = 0; idx < 4; ++idx) {
         Plugin *plugin = Orchestrator::instance().get_plugin(ids[idx]);
@@ -3613,7 +3633,18 @@ TEST_CASE("Fan host policies keep separate priorities configuration owners and r
             CHECK(definition->invalidates_step == STEP_LAYER_EXTRUSION_EDIT);
         }
     }
-    CHECK(owners.size() == 17);
+    CHECK(owners.size() == 16);
+    CHECK(owners.count("slowdown_below_layer_time") == 0);
+    const ConfigOptionDef *slowdown_def = PrintConfigDef::instance().get("slowdown_below_layer_time");
+    REQUIRE(slowdown_def != nullptr);
+    CHECK(slowdown_def->invalidates_step == STEP_LAYER_EXTRUSION_EDIT);
+    Plugin *slowdown = Orchestrator::instance().get_plugin(SLOWDOWN_PLUGIN);
+    REQUIRE(slowdown != nullptr);
+    // After every speed editor (max 15) and before the first fan policy (20).
+    CHECK(slowdown->get_priority() == 16);
+    CHECK(slowdown->get_step() == STEP_LAYER_EXTRUSION_EDIT);
+    CHECK(slowdown->get_exclusive_group().empty());
+    CHECK(slowdown->get_defined_config_keys().empty());
 }
 
 TEST_CASE("Acceleration plugin owns its settings and activation rules",
@@ -3986,6 +4017,103 @@ TEST_CASE("Composable fan stages pass their declared linear STL export catalogue
     }
 }
 
+TEST_CASE("Short-layer slowdown and cooling pass their declared linear STL export catalogue",
+          "[plugins][plugin-e2e][slowdown-e2e]")
+{
+    namespace E2E = Test::PluginE2E;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedActivePlugins active({SLOWDOWN_PLUGIN, DEFAULT_SPEED_PLUGIN, DEFAULT_FAN_PLUGIN,
+        FAN_COOLING_PLUGIN, FIRST_LAYER_FAN_PLUGIN, DYNAMIC_FAN_PLUGIN, "ordering.extrusion_tree.advanced"}, true);
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"},
+        {"slowdown_below_layer_time", "5"}, {"min_print_speed", "10"}, {"max_speed_reduction", "90%"},
+        {"travel_speed", "100"}, {"default_fan_speed", "20"}, {"max_fan_speed", "100"},
+        {"fan_below_layer_time", "60"}, {"disable_fan_first_layers", "0"}, {"full_fan_speed_layer", "0"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const std::string ordering_key = Steps::plugin_exclusive_group_option_key(host, STEP_ORDERING, "ordering.extrusion_tree");
+    REQUIRE_FALSE(ordering_key.empty());
+    baseline.set_deserialize_strict(ordering_key, "ordering.extrusion_tree.advanced");
+    const std::vector<E2E::Domain> domains = {
+        {{"max_speed_reduction"}, {{"unbounded-zero", {{"max_speed_reduction", "0%"}}},
+            {"half-reduction", {{"max_speed_reduction", "50%"}}}, {"unbounded-full", {{"max_speed_reduction", "100%"}}}}},
+        {{"min_print_speed"}, {{"no-floor", {{"min_print_speed", "0"}}},
+            {"low-floor", {{"min_print_speed", "1"}}}, {"high-floor", {{"min_print_speed", "80"}}}}},
+        {{"slowdown_below_layer_time"}, {{"disabled", {{"slowdown_below_layer_time", "0"}}},
+            {"already-long", {{"slowdown_below_layer_time", "0.001"}}}, {"long-goal", {{"slowdown_below_layer_time", "30"}}}}},
+        {{"travel_speed"}, {{"slow-travel", {{"travel_speed", "40"}}}, {"fast-travel", {{"travel_speed", "200"}}}}},
+        {{"fan_below_layer_time"}, {{"no-time-fan", {{"fan_below_layer_time", "0"}}},
+            {"short-time-fan", {{"fan_below_layer_time", "10"}}}}},
+        {{"max_fan_speed"}, {{"fan-stop", {{"max_fan_speed", "0"}}}, {"fan-half", {{"max_fan_speed", "50"}}}}}
+    };
+    const TriangleMesh mesh = E2E::stl_fixture(false);
+    std::vector<std::string> baseline_moves;
+    bool saw_reduced_speed = false;
+    for (const E2E::Case &test : E2E::linear_cases(host, {SLOWDOWN_PLUGIN, FAN_COOLING_PLUGIN}, baseline, domains)) {
+        INFO(test.name);
+        const DynamicPrintConfig config = E2E::apply_case(baseline, test);
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, config);
+        print.process();
+        const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+        std::string code;
+        try {
+            code = Test::GCode::read_text_file(host.export_gcode_cli(print, path.string()));
+            Test::GCode::remove_output_pair(path);
+        } catch (...) {
+            Test::GCode::remove_output_pair(path);
+            throw;
+        }
+        REQUIRE(print.printing_plan() != nullptr);
+        CHECK((code.find("M106") != std::string::npos || code.find("M107") != std::string::npos));
+        // Only feedrates may differ: compare every emitted motion/extrusion token
+        // in order, skipping commands that set a feedrate without any movement.
+        std::vector<std::string> moves;
+        std::istringstream lines(code);
+        std::string line;
+        while (std::getline(lines, line)) {
+            std::istringstream words(line.substr(0, line.find(';')));
+            std::string command;
+            words >> command;
+            if (command != "G0" && command != "G1" && command != "G2" && command != "G3")
+                continue;
+            std::string motion = command;
+            std::string word;
+            while (words >> word)
+                if (word.front() != 'F') motion += " " + word;
+            if (motion != command) moves.push_back(std::move(motion));
+        }
+        REQUIRE_FALSE(moves.empty());
+        if (baseline_moves.empty()) baseline_moves = moves;
+        CHECK(moves == baseline_moves);
+        const slic3r_api::Config config_view(Slic3r::ApiHost::to_config_handle(&print.config()));
+        const slic3r_api::ConstPrintingPlan plan_view(
+            reinterpret_cast<const printing_plan_handle *>(print.printing_plan()));
+        const std::vector<slic3r_api::PrintingLayerTimeEstimate> totals =
+            slic3r_api::PrintingPlanTimeEstimator(config_view).estimate(plan_view);
+        size_t resolved_count = 0;
+        for (const slic3r_api::PrintingLayerTimeEstimate &total : totals) {
+            const PrintingLayerGroup &layer = print.printing_plan()->groups[total.group_idx].layers[total.layer_group_idx];
+            if (layer.tool_groups.empty()) continue;
+            const slic3r_api::ConstPrintingLayerGroup layer_view(
+                reinterpret_cast<const printing_layer_group_handle *>(&layer));
+            const PrintingLayerTimeProperty *time = registered_layer_time_property_key().get(layer_view.properties());
+            REQUIRE(time != nullptr);
+            CHECK(time->duration_seconds == Approx(total.duration_seconds).epsilon(1e-6));
+            if (time->is_resolved()) ++resolved_count;
+        }
+        if (config.opt_float("slowdown_below_layer_time", 0) == 0.0)
+            CHECK(resolved_count == 0);
+        else
+            CHECK(resolved_count > 0);
+        for (const ObservedLeaf &leaf : observed_plan_leaves(print))
+            if (leaf.role == ExtrusionRole::Perimeter && leaf.speed < 10.f)
+                saw_reduced_speed = true;
+    }
+    CHECK(saw_reduced_speed);
+}
+
 TEST_CASE("Default speed declared settings pass a linear STL export matrix",
           "[plugins][plugin-e2e][layer-extrusion-edit][speed-e2e]")
 {
@@ -4150,5 +4278,756 @@ TEST_CASE("First-layer flow feeds the volumetric speed limit",
         const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
         REQUIRE(leaves.size() == 1);
         CHECK(leaves.front().speed == Approx(60.f));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Short-layer slowdown plugin (layer_extrusion_edit.speed.slowdown)
+// ---------------------------------------------------------------------------
+// The numerical rules are covered by test_layer_extrusion_edit_slowdown_solver.cpp;
+// the cases below check the adapter: leaf classification, speed writing, the
+// published RESOLVED duration, its use by FanCooling and the invalidation.
+// Leaves carry their own speed (100 mm/s) because no speed plugin runs here.
+
+namespace {
+
+// Printing config with an explicit slowdown goal. min_print_speed 10 and
+// max_speed_reduction 90 % are the defaults, written here so that the tests do
+// not depend on them.
+DynamicPrintConfig slowdown_config(const char *goal = "5")
+{
+    return speed_config({{"slowdown_below_layer_time", goal}, {"min_print_speed", "10"},
+                         {"max_speed_reduction", "90"}, {"travel_speed", "100"}});
+}
+
+// A leaf that already carries its own speed.
+ExtrusionSpec slowdown_spec(ExtrusionRole role, float speed = 100.f)
+{
+    ExtrusionSpec spec{role, 0.2};
+    spec.existing_speed = speed;
+    return spec;
+}
+
+// Printed layers of the plan (the fixture may also create empty layer groups).
+std::vector<PrintingLayerGroup *> printed_layers(PreparedSpeedPrint &prepared)
+{
+    std::vector<PrintingLayerGroup *> layers;
+    for (PrintingGroup &group : prepared.print.mutable_printing_plan().groups)
+        for (PrintingLayerGroup &layer : group.layers)
+            if (!layer.tool_groups.empty())
+                layers.push_back(&layer);
+    return layers;
+}
+
+// Duration of the n-th printed layer according to the shared time model.
+double estimate_printed_layer(PreparedSpeedPrint &prepared, size_t n = 0)
+{
+    PrintingPlan &plan = prepared.print.mutable_printing_plan();
+    const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
+    const slic3r_api::Config config_view(Slic3r::ApiHost::to_config_handle(&prepared.print.config()));
+    const std::vector<slic3r_api::PrintingLayerTimeEstimate> estimates =
+        slic3r_api::PrintingPlanTimeEstimator(config_view).estimate(plan_view);
+    size_t printed = 0;
+    for (const slic3r_api::PrintingLayerTimeEstimate &estimate : estimates)
+        if (!plan.groups[estimate.group_idx].layers[estimate.layer_group_idx].tool_groups.empty() && printed++ == n)
+            return estimate.duration_seconds;
+    FAIL("printed layer not found");
+    return -1.;
+}
+
+// Time property of the n-th printed layer, or nullptr when none is published.
+const PrintingLayerTimeProperty *layer_time(PreparedSpeedPrint &prepared, size_t n = 0)
+{
+    PrintingLayerGroup &layer = *printed_layers(prepared).at(n);
+    const slic3r_api::PrintingLayerGroup view(reinterpret_cast<printing_layer_group_handle *>(&layer));
+    return registered_layer_time_property_key().get(view.properties());
+}
+
+// Effective speed of every plan leaf in plan order.
+std::vector<float> leaf_speeds(PreparedSpeedPrint &prepared)
+{
+    std::vector<float> speeds;
+    for (const ObservedLeaf &leaf : observed_plan_leaves(prepared.print))
+        speeds.push_back(leaf.speed);
+    return speeds;
+}
+
+// Published duration and leaf speeds, copied so they can be compared across Prints.
+struct SlowdownResult
+{
+    std::vector<float> speeds;
+    double duration = -1.;
+    // Compare owned process values exactly across replayed and fresh plans.
+    bool operator==(const SlowdownResult &other) const { return speeds == other.speeds && duration == other.duration; }
+};
+
+// Describe copied slowdown results in Catch diagnostics without plan access.
+std::ostream &operator<<(std::ostream &os, const SlowdownResult &result)
+{
+    os << "t " << result.duration << " speeds";
+    for (float speed : result.speeds)
+        os << " " << speed;
+    return os;
+}
+
+// Copy ordered speeds and the optional whole-layer duration for replay checks.
+SlowdownResult capture_slowdown(PreparedSpeedPrint &prepared)
+{
+    SlowdownResult out;
+    out.speeds = leaf_speeds(prepared);
+    if (const PrintingLayerTimeProperty *time = layer_time(prepared))
+        out.duration = time->duration_seconds;
+    return out;
+}
+
+// Three 100 mm/s leaves of 18 mm each: about 0.55 s per layer before slowdown.
+std::vector<std::vector<ExtrusionSpec>> short_layer_specs()
+{
+    return {{slowdown_spec(ExtrusionRole::Perimeter), slowdown_spec(ExtrusionRole::InternalInfill),
+             slowdown_spec(ExtrusionRole::SolidInfill)}};
+}
+
+// Append a second visit (tool group) of `extruder_id` to the layer, holding a
+// copy of the first extrusion; returns the new tool group.
+PrintingToolGroup &append_tool_visit(PrintingLayerGroup &layer, uint32_t extruder_id)
+{
+    layer.tool_groups.emplace_back();
+    layer.tool_groups.back().extruder_id = extruder_id;
+    PrintingExtrusion copy;
+    copy.root.reset(layer.tool_groups.front().extrusions.front().root->clone());
+    layer.tool_groups.back().extrusions.emplace_back(std::move(copy));
+    return layer.tool_groups.back();
+}
+} // namespace
+
+TEST_CASE("Slowdown stretches a short layer to its goal and publishes the resolved duration",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, slowdown_config(), short_layer_specs());
+    REQUIRE(estimate_printed_layer(prepared) < 1.);
+    REQUIRE(layer_time(prepared) == nullptr);
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const PrintingLayerTimeProperty *time = layer_time(prepared);
+    REQUIRE(time != nullptr);
+    CHECK(time->is_resolved());
+    // The 10 mm/s floor would allow about 5.4 s, so the goal is reachable and reached.
+    CHECK(time->duration_seconds == Approx(5.0).epsilon(1e-5));
+    // The published value is what the time model gives on the edited plan.
+    CHECK(estimate_printed_layer(prepared) == Approx(time->duration_seconds).epsilon(1e-6));
+    // Equal leaves are slowed together to one common speed, within the bounds.
+    const std::vector<float> speeds = leaf_speeds(prepared);
+    REQUIRE(speeds.size() == 3);
+    CHECK(speeds[0] == Approx(speeds[1]));
+    CHECK(speeds[0] == Approx(speeds[2]));
+    CHECK(speeds[0] < 100.f);
+    CHECK(speeds[0] >= 10.f);
+}
+
+TEST_CASE("Slowdown keeps an interleaved deposit fixed and pairs both geometric leaves",
+          "[plugins][layer-extrusion-edit][slowdown][deposit][time-estimator]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    DynamicPrintConfig config = slowdown_config("10");
+    config.set_deserialize_strict("min_print_speed", "1");
+    config.set_deserialize_strict("max_speed_reduction", "99");
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter, 20.f),
+        slowdown_spec(ExtrusionRole::SupportMaterial, 40.f), slowdown_spec(ExtrusionRole::InternalInfill)}});
+    PrintingLayerGroup &layer = *printed_layers(prepared).front();
+    ExtrusionEntityCollection &root = dynamic_cast<ExtrusionEntityCollection &>(
+        *layer.tool_groups.front().extrusions.front().root);
+    REQUIRE(root.size() == 3);
+    ExtrusionPath &deposit = dynamic_cast<ExtrusionPath &>(root.child(1));
+    const Point center = deposit.first_point();
+    deposit.polyline() = ArcPolyline();
+    deposit.polyline().append(center);
+    deposit.add_property(ExtrusionPropertySpecialCommand(ExtrusionPropertySpecialCommand::Code::DEPOSIT, 0.5));
+    const double flow = deposit.get_property<ExtrusionAttributes>()->mm3_per_mm;
+    REQUIRE(flow > 0.0);
+    const double fixed_seconds = 0.5 / (40.0 * flow);
+    const slic3r_api::ConstPrintingPlan plan_view(
+        reinterpret_cast<const printing_plan_handle *>(prepared.print.printing_plan()));
+    const slic3r_api::Config config_view(Slic3r::ApiHost::to_config_handle(&prepared.print.config()));
+    const slic3r_api::PrintingPlanTimeEstimator estimator(config_view);
+    const std::vector<slic3r_api::PrintingLayerTimeDetail> before = estimator.estimate_detailed(plan_view);
+    const slic3r_api::PrintingLayerTimeDetail *measured = nullptr;
+    for (const slic3r_api::PrintingLayerTimeDetail &detail : before)
+        if (!detail.leaves.empty()) {
+            REQUIRE(measured == nullptr);
+            measured = &detail;
+        }
+    REQUIRE(measured != nullptr);
+    REQUIRE(measured->leaves.size() == 2);
+    CHECK(measured->leaves[0].leaf_rank == 0);
+    CHECK(measured->leaves[0].speed_mm_per_s == 20.f);
+    CHECK(measured->leaves[1].leaf_rank == 1);
+    CHECK(measured->leaves[1].speed_mm_per_s == 100.f);
+    CHECK(measured->unattributed_seconds >= fixed_seconds);
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    REQUIRE(root.size() == 3);
+    CHECK(deposit.polyline().size() == 1);
+    CHECK(deposit.first_point() == center);
+    CHECK(deposit.get_property<ExtrusionPropertySpecialCommand>()->extra_data == 0.5);
+    CHECK(deposit.get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 40.f);
+    CHECK(deposit.get_property<ExtrusionAttributes>()->mm3_per_mm == flow);
+    CHECK(root.child(0).get_property<ExtrusionPropertySpeed>()->speed_mm_per_s < 20.f);
+    CHECK(root.child(2).get_property<ExtrusionPropertySpeed>()->speed_mm_per_s < 100.f);
+    const PrintingLayerTimeProperty *resolved = layer_time(prepared);
+    REQUIRE(resolved != nullptr);
+    CHECK(resolved->is_resolved());
+    CHECK(resolved->duration_seconds == Approx(10.0).epsilon(1e-5));
+    CHECK(estimate_printed_layer(prepared) == Approx(resolved->duration_seconds).epsilon(1e-6));
+    const std::vector<slic3r_api::PrintingLayerTimeDetail> after = estimator.estimate_detailed(plan_view);
+    REQUIRE(after.size() == before.size());
+    for (size_t idx = 0; idx < before.size(); ++idx) {
+        CHECK(after[idx].unattributed_seconds == before[idx].unattributed_seconds);
+        CHECK(after[idx].leaves.size() == before[idx].leaves.size());
+    }
+}
+
+TEST_CASE("Slowdown keeps the speed of non-slowable roles and counts their time",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    // Unreachable goal: every slowable leaf goes to the 10 mm/s floor, the others stay at 100.
+    prepare_ordered_plan(prepared, slowdown_config("1000"), {{
+        slowdown_spec(ExtrusionRole::Perimeter), slowdown_spec(ExtrusionRole::OverhangPerimeter),
+        slowdown_spec(ExtrusionRole::BridgeInfill), slowdown_spec(ExtrusionRole::InternalBridgeInfill),
+        slowdown_spec(ExtrusionRole::Travel), slowdown_spec(ExtrusionRole::None),
+        slowdown_spec(ExtrusionRole::WipeTower), slowdown_spec(ExtrusionRole::Milling)}});
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const std::map<uint16_t, ObservedLeaf> by_role = observed_by_role(observed_plan_leaves(prepared.print));
+    for (const ExtrusionRole role : {ExtrusionRole::Perimeter, ExtrusionRole::InternalBridgeInfill}) {
+        INFO(role());
+        REQUIRE(by_role.count(uint16_t(role())) == 1);
+        CHECK(by_role.at(uint16_t(role())).speed == Approx(10.f).margin(1e-3));
+    }
+    for (const ExtrusionRole role : {ExtrusionRole::OverhangPerimeter, ExtrusionRole::BridgeInfill, ExtrusionRole::Travel,
+                                     ExtrusionRole::None, ExtrusionRole::WipeTower, ExtrusionRole::Milling}) {
+        INFO(role());
+        REQUIRE(by_role.count(uint16_t(role())) == 1);
+        CHECK(by_role.at(uint16_t(role())).speed == 100.f);
+    }
+    // The fixed leaves and the synthetic travels stay in the published total.
+    const PrintingLayerTimeProperty *time = layer_time(prepared);
+    REQUIRE(time != nullptr);
+    CHECK(time->duration_seconds == Approx(estimate_printed_layer(prepared)).epsilon(1e-6));
+    CHECK(time->duration_seconds > 2 * 18. / 10. + 6 * 18. / 100.);
+}
+
+TEST_CASE("Slowdown leaves paths already under the minimum speed untouched",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, slowdown_config("1000"), {{
+        slowdown_spec(ExtrusionRole::Perimeter, 8.f), slowdown_spec(ExtrusionRole::InternalInfill)}});
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const std::vector<float> speeds = leaf_speeds(prepared);
+    REQUIRE(speeds.size() == 2);
+    CHECK(speeds[0] == Approx(8.f).margin(1e-6));
+    CHECK(speeds[1] == Approx(10.f).margin(1e-3));
+}
+
+TEST_CASE("Slowdown does nothing and publishes nothing when every threshold is zero",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, slowdown_config("0"), short_layer_specs());
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    CHECK(layer_time(prepared) == nullptr);
+    for (float speed : leaf_speeds(prepared))
+        CHECK(speed == 100.f);
+}
+
+TEST_CASE("Slowdown keeps acceleration and pressure advance and writes a direct speed on inheriting leaves",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    ExtrusionSpec own = slowdown_spec(ExtrusionRole::Perimeter);
+    own.existing_acceleration = 1000.f;
+    own.pressure_advance = 0.05f;
+    // The second leaf has no process property: it inherits it from the root.
+    prepare_ordered_plan(prepared, slowdown_config(), {{own, ExtrusionSpec{ExtrusionRole::InternalInfill, 0.2}}});
+    PrintingLayerGroup &layer = *printed_layers(prepared).front();
+    REQUIRE(layer.tool_groups.size() == 1);
+    REQUIRE(layer.tool_groups.front().extrusions.size() == 1);
+    slic3r_api::MutableExtrusionEntity root(
+        reinterpret_cast<extrusion_entity_handle *>(layer.tool_groups.front().extrusions.front().root.get()));
+    root.get_or_add(slic3r_api::EPropertySpeed::key).speed(100.f).acceleration(800.f);
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == 2);
+    for (const ObservedLeaf &leaf : leaves)
+        CHECK(leaf.speed < 100.f);
+    // Own property: only the speed changed.
+    REQUIRE(leaves[0].direct_process != nullptr);
+    CHECK(leaves[0].acceleration == 1000.f);
+    CHECK(leaves[0].direct_process->pressure_adv == Approx(0.05f));
+    // Inheriting leaf: a new direct property with the other fields unset.
+    REQUIRE(leaves[1].direct_process != nullptr);
+    CHECK(leaves[1].direct_process->accel_mm_per_s2 < 0.f);
+    CHECK(leaves[1].direct_process->pressure_adv < 0.f);
+    CHECK(leaves[1].acceleration == 800.f);
+    // The root keeps what it had: only leaves are edited.
+    const slic3r_api::EPropertySpeed *root_speed = root.get(slic3r_api::EPropertySpeed::key);
+    REQUIRE(root_speed != nullptr);
+    CHECK(root_speed->speed_mm_per_s == 100.f);
+}
+
+TEST_CASE("Slowdown handles a multi-point path like a two-point path of the same length",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // A path is one leaf (one legacy block): both plans must get the same speed.
+    SlowdownResult results[2];
+    for (const bool middle_point : {false, true}) {
+        PreparedSpeedPrint prepared;
+        ExtrusionSpec spec = slowdown_spec(ExtrusionRole::Perimeter);
+        spec.middle_point = middle_point;
+        prepare_ordered_plan(prepared, slowdown_config("1"), {{spec}});
+        run_editors(prepared, {SLOWDOWN_PLUGIN});
+        results[middle_point ? 1 : 0] = capture_slowdown(prepared);
+        REQUIRE(results[middle_point ? 1 : 0].speeds.size() == 1);
+    }
+    CHECK(results[0].speeds[0] < 100.f);
+    CHECK(results[0].speeds[0] == Approx(results[1].speeds[0]));
+    CHECK(results[0].duration == Approx(results[1].duration));
+    // 18 mm in 1 s.
+    CHECK(results[1].speeds[0] == Approx(18.f).epsilon(1e-4));
+}
+
+TEST_CASE("Slowdown shares the goal between separate visits of the same extruder",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    DynamicPrintConfig config = slowdown_config();
+    config.set_deserialize_strict("min_print_speed", "1");
+    config.set_deserialize_strict("max_speed_reduction", "99");
+    prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter)}});
+    append_tool_visit(*printed_layers(prepared).front(), 0);
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const std::vector<float> speeds = leaf_speeds(prepared);
+    REQUIRE(speeds.size() == 2);
+    CHECK(speeds[0] == Approx(speeds[1]));
+    CHECK(speeds[0] < 100.f);
+    const PrintingLayerTimeProperty *time = layer_time(prepared);
+    REQUIRE(time != nullptr);
+    CHECK(time->duration_seconds == Approx(5.0).epsilon(1e-5));
+    CHECK(estimate_printed_layer(prepared) == Approx(5.0).epsilon(1e-5));
+}
+
+TEST_CASE("Slowdown with a disabled extruder keeps its leaves and counts their time",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    // Extruder 0 has a 5 s goal, extruder 1 none.
+    DynamicPrintConfig config = slowdown_config("5,0");
+    config.set_deserialize_strict("nozzle_diameter", "0.4,0.4");
+    config.set_deserialize_strict("min_print_speed", "1,1");
+    config.set_deserialize_strict("max_speed_reduction", "99,99");
+    prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter)}});
+    append_tool_visit(*printed_layers(prepared).front(), 1);
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const std::vector<float> speeds = leaf_speeds(prepared);
+    REQUIRE(speeds.size() == 2);
+    CHECK(speeds[0] < 100.f);
+    CHECK(speeds[1] == 100.f);
+    const PrintingLayerTimeProperty *time = layer_time(prepared);
+    REQUIRE(time != nullptr);
+    CHECK(time->is_resolved());
+    CHECK(time->duration_seconds == Approx(5.0).epsilon(1e-5));
+}
+
+TEST_CASE("Slowdown handles an extruder with a goal that prints nothing in the layer",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    // Extruder 1 has a higher goal but is absent from the layer: only extruder 0 counts.
+    DynamicPrintConfig config = slowdown_config("5,50");
+    config.set_deserialize_strict("min_print_speed", "1");
+    config.set_deserialize_strict("max_speed_reduction", "99");
+    prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter)}});
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const PrintingLayerTimeProperty *time = layer_time(prepared);
+    REQUIRE(time != nullptr);
+    CHECK(time->duration_seconds == Approx(5.0).epsilon(1e-5));
+}
+
+TEST_CASE("Fan cooling follows the layer duration after the slowdown",
+          "[plugins][layer-extrusion-edit][slowdown][fan-policy][fan][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    // Extruder 0 slows layers under 3 s and cools under 10 s; extruder 1 wants 10 s.
+    // The layer ends at 10 s because of extruder 1, so extruder 0 cools at its
+    // minimum fan speed; the estimate before the slowdown (0.5 s) would give the maximum.
+    DynamicPrintConfig config = slowdown_config("3,10");
+    config.set_deserialize_strict("nozzle_diameter", "0.4,0.4");
+    config.set_deserialize_strict("min_print_speed", "1,1");
+    config.set_deserialize_strict("max_speed_reduction", "99,99");
+    config.set_deserialize_strict("default_fan_speed", "20");
+    config.set_deserialize_strict("perimeter_fan_speed", "-1");
+    config.set_deserialize_strict("max_fan_speed", "100");
+    config.set_deserialize_strict("fan_below_layer_time", "10");
+    config.set_deserialize_strict("disable_fan_first_layers", "0");
+    config.set_deserialize_strict("full_fan_speed_layer", "0");
+    prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter)}});
+    append_tool_visit(*printed_layers(prepared).front(), 1);
+    const double before = estimate_printed_layer(prepared);
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN, DYNAMIC_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN, FAN_COOLING_PLUGIN,
+                           DEFAULT_FAN_PLUGIN});
+
+    const PrintingLayerTimeProperty *time = layer_time(prepared);
+    REQUIRE(time != nullptr);
+    CHECK(time->is_resolved());
+    CHECK(time->duration_seconds == Approx(10.0).epsilon(1e-5));
+
+    const slic3r_api::Config config_view(Slic3r::ApiHost::to_config_handle(&prepared.print.config()));
+    const slic3r_api::FanPolicy::Settings settings = slic3r_api::FanPolicy::read_settings(config_view, 0);
+    const auto expected = [&](double seconds) {
+        return slic3r_api::FanPolicy::close_first_layers(
+            slic3r_api::FanPolicy::apply_layer_time(slic3r_api::FanPolicy::make_base(settings), settings, seconds),
+            settings, 0);
+    };
+    const int after_percent = expected(time->duration_seconds).roles[RAW_FAN_ROLE_PERIMETER].percent;
+    const int estimated_percent = expected(before).roles[RAW_FAN_ROLE_PERIMETER].percent;
+    REQUIRE(after_percent != estimated_percent);
+
+    const PluginPropertyKey<slic3r_api::FanPolicy::Context> context_key = slic3r_api::FanPolicy::context_property_key(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    PrintingToolGroup &tool = printed_layers(prepared).front()->tool_groups.front();
+    const slic3r_api::PrintingToolGroup tool_view(reinterpret_cast<printing_tool_group_handle *>(&tool));
+    const slic3r_api::FanPolicy::Context *context = context_key.get(tool_view.properties());
+    REQUIRE(context != nullptr);
+    CHECK(context->roles[RAW_FAN_ROLE_PERIMETER].percent == after_percent);
+}
+
+TEST_CASE("Fan cooling keeps resolved layers and estimates the layers without a resolved duration",
+          "[plugins][layer-extrusion-edit][slowdown][fan-policy][fan][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    // Extruder 0 has a goal, extruder 1 none; the second layer is printed by extruder 1 only.
+    DynamicPrintConfig config = slowdown_config("5,0");
+    config.set_deserialize_strict("nozzle_diameter", "0.4,0.4");
+    config.set_deserialize_strict("min_print_speed", "1,1");
+    config.set_deserialize_strict("max_speed_reduction", "99,99");
+    config.set_deserialize_strict("fan_below_layer_time", "10");
+    prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter)},
+                                            {slowdown_spec(ExtrusionRole::Perimeter)}});
+    REQUIRE(printed_layers(prepared).size() == 2);
+    printed_layers(prepared).back()->tool_groups.front().extruder_id = 1;
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN, DYNAMIC_FAN_PLUGIN, FIRST_LAYER_FAN_PLUGIN, FAN_COOLING_PLUGIN,
+                           DEFAULT_FAN_PLUGIN});
+
+    const PrintingLayerTimeProperty *first = layer_time(prepared, 0);
+    REQUIRE(first != nullptr);
+    CHECK(first->is_resolved());
+    CHECK(first->duration_seconds == Approx(5.0).epsilon(1e-5));
+    const PrintingLayerTimeProperty *second = layer_time(prepared, 1);
+    REQUIRE(second != nullptr);
+    CHECK_FALSE(second->is_resolved());
+    CHECK(second->duration_seconds == Approx(estimate_printed_layer(prepared, 1)).epsilon(1e-6));
+}
+
+TEST_CASE("Slowdown settings changes on the same Print match a fresh Print and the initial result returns",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // Each change is cumulative and must visibly change the result: the floor
+    // (30 mm/s, goal no longer reachable), the reduction cap (50 %), then no slowdown.
+    const std::vector<std::pair<const char *, const char *>> changes = {
+        {"min_print_speed", "30"}, {"max_speed_reduction", "50"}, {"slowdown_below_layer_time", "0"}};
+    std::vector<DynamicPrintConfig> configs{slowdown_config()};
+    for (const auto &[key, value] : changes) {
+        configs.push_back(configs.back());
+        configs.back().set_deserialize_strict(key, value);
+    }
+
+    PreparedSpeedPrint reused;
+    prepare_ordered_plan(reused, configs.front(), short_layer_specs());
+    for (slicing_step_t step : Steps::execution_order()) {
+        reused.print.mark_step_executed(step);
+        if (step == STEP_ORDERING)
+            break;
+    }
+    REQUIRE(reused.print.save_ordering_checkpoint());
+    const auto replay = [&](const DynamicPrintConfig &config, Print::ApplyStatus expected) {
+        REQUIRE(reused.print.apply(reused.model, config) == expected);
+        if (expected == Print::APPLY_STATUS_INVALIDATED)
+            reused.print.prepare_checkpoint_resume();
+        run_editors(reused, {SLOWDOWN_PLUGIN});
+        reused.print.mark_step_executed(STEP_LAYER_EXTRUSION_EDIT);
+        return capture_slowdown(reused);
+    };
+    const auto fresh_result = [](const DynamicPrintConfig &config) {
+        PreparedSpeedPrint fresh;
+        prepare_ordered_plan(fresh, config, short_layer_specs());
+        REQUIRE(fresh.print.apply(fresh.model, config) == Print::APPLY_STATUS_UNCHANGED);
+        run_editors(fresh, {SLOWDOWN_PLUGIN});
+        return capture_slowdown(fresh);
+    };
+
+    SlowdownResult initial;
+    SlowdownResult previous;
+    for (size_t idx = 0; idx < configs.size(); ++idx) {
+        INFO(idx);
+        const SlowdownResult resumed = replay(configs[idx], idx == 0 ? Print::APPLY_STATUS_UNCHANGED : Print::APPLY_STATUS_INVALIDATED);
+        REQUIRE(resumed.speeds.size() == 3);
+        CHECK(resumed == fresh_result(configs[idx]));
+        if (idx == 0)
+            initial = resumed;
+        else
+            CHECK_FALSE(resumed == previous);
+        previous = resumed;
+    }
+    // The last change disables the slowdown: original speeds, nothing published.
+    CHECK(previous.speeds == std::vector<float>(3, 100.f));
+    CHECK(previous.duration < 0.);
+    // Restoring every setting gives back the initial result.
+    CHECK(replay(configs.front(), Print::APPLY_STATUS_INVALIDATED) == initial);
+
+    // The three settings are read by the plugin, so each invalidates the edit step.
+    for (const char *key : {"min_print_speed", "max_speed_reduction", "slowdown_below_layer_time"}) {
+        INFO(key);
+        const ConfigOptionDef *def = reused.print.config().def()->get(key);
+        REQUIRE(def != nullptr);
+        CHECK(def->invalidates_step == STEP_LAYER_EXTRUSION_EDIT);
+    }
+}
+
+TEST_CASE("Detailed time estimate splits a layer into leaves and unattributed time that sum to the total",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, slowdown_config(), short_layer_specs());
+    append_tool_visit(*printed_layers(prepared).front(), 0);
+    PrintingPlan &plan = prepared.print.mutable_printing_plan();
+    const slic3r_api::PrintingPlan plan_view(reinterpret_cast<printing_plan_handle *>(&plan));
+    const slic3r_api::Config config_view(Slic3r::ApiHost::to_config_handle(&prepared.print.config()));
+    const slic3r_api::PrintingPlanTimeEstimator estimator(config_view);
+    const std::vector<slic3r_api::PrintingLayerTimeEstimate> totals = estimator.estimate(plan_view);
+    const std::vector<slic3r_api::PrintingLayerTimeDetail> details = estimator.estimate_detailed(plan_view);
+    REQUIRE(totals.size() == details.size());
+    size_t checked = 0;
+    for (size_t idx = 0; idx < totals.size(); ++idx) {
+        double sum = details[idx].unattributed_seconds;
+        for (const slic3r_api::PrintingLeafTime &leaf : details[idx].leaves)
+            sum += leaf.duration_seconds;
+        CHECK(details[idx].group_idx == totals[idx].group_idx);
+        CHECK(details[idx].layer_group_idx == totals[idx].layer_group_idx);
+        CHECK(sum == Approx(totals[idx].duration_seconds).epsilon(1e-9));
+        checked += details[idx].leaves.size();
+    }
+    // 3 leaves in the first visit, 3 in the copied visit, ranked per extrusion.
+    CHECK(checked == 6);
+    for (const slic3r_api::PrintingLayerTimeDetail &detail : details)
+        if (!detail.leaves.empty()) {
+            CHECK(detail.unattributed_seconds > 0.);
+            CHECK(detail.leaves.back().tool_idx == 1);
+            CHECK(detail.leaves.back().leaf_rank == 2);
+        }
+}
+
+namespace {
+// Collect, in tree order, the entities that own segments and no child.
+void collect_leaf_handles(slic3r_api::MutableExtrusionEntity entity, std::vector<slic3r_api::MutableExtrusionEntity> &out)
+{
+    for (uint32_t idx = 0; idx < entity.child_count(); ++idx)
+        collect_leaf_handles(entity.child_mutable(idx), out);
+    if (entity.child_count() == 0 && entity.segment_count() > 0)
+        out.push_back(entity);
+}
+
+// All the leaves of the printed layer, in plan order.
+std::vector<slic3r_api::MutableExtrusionEntity> printed_leaf_handles(PreparedSpeedPrint &prepared)
+{
+    std::vector<slic3r_api::MutableExtrusionEntity> leaves;
+    for (PrintingToolGroup &tool : printed_layers(prepared).front()->tool_groups)
+        for (PrintingExtrusion &extrusion : tool.extrusions)
+            collect_leaf_handles(slic3r_api::MutableExtrusionEntity(
+                reinterpret_cast<extrusion_entity_handle *>(extrusion.root.get())), leaves);
+    return leaves;
+}
+
+// A straight segment between two points given in mm, with Z offsets in mm.
+c_extrusion_segment straight_segment(double x0, double y0, double x1, double y1, double z0 = 0., double z1 = 0.)
+{
+    c_extrusion_segment segment = {};
+    segment.point_a = {scale_i(x0), scale_i(y0)};
+    segment.point_b = {scale_i(x1), scale_i(y1)};
+    segment.z_offset_a = scale_i(z0);
+    segment.z_offset_b = scale_i(z1);
+    return segment;
+}
+
+// The three connected segments used by the multi-segment test: a line, a 60 degree
+// arc (chord 3 mm, radius 3 mm) and a line that rises by 0.3 mm. About 9.16 mm.
+std::array<c_extrusion_segment, 3> line_arc_rise_segments()
+{
+    std::array<c_extrusion_segment, 3> segments = {
+        straight_segment(11., 12., 14., 12.), straight_segment(14., 12., 17., 12.),
+        straight_segment(17., 12., 20., 12., 0., 0.3)};
+    segments[1].radius = float(scale_i(3.)); // radii are scaled coordinates
+    segments[1].orientation = RAW_EXTRUSION_ARC_ORIENTATION_CCW;
+    return segments;
+}
+} // namespace
+
+TEST_CASE("Slowdown gives a multi-segment path with an arc and a Z change the speed of the equivalent paths",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::array<c_extrusion_segment, 3> segments = line_arc_rise_segments();
+    SlowdownResult results[2];
+    for (const bool split : {false, true}) {
+        PreparedSpeedPrint prepared;
+        std::vector<ExtrusionSpec> specs(split ? 3 : 1, slowdown_spec(ExtrusionRole::Perimeter));
+        // Goal 0.8 s: the 9.16 mm path lasts 0.092 s at 100 mm/s and 0.916 s at the 10 mm/s floor.
+        prepare_ordered_plan(prepared, slowdown_config("0.8"), {specs});
+        std::vector<slic3r_api::MutableExtrusionEntity> leaves = printed_leaf_handles(prepared);
+        REQUIRE(leaves.size() == specs.size());
+        if (split)
+            for (size_t idx = 0; idx < 3; ++idx)
+                REQUIRE(leaves[idx].set_segments(&segments[idx], 1));
+        else
+            REQUIRE(leaves.front().set_segments(segments.data(), 3));
+        run_editors(prepared, {SLOWDOWN_PLUGIN});
+        results[split ? 1 : 0] = capture_slowdown(prepared);
+        const PrintingLayerTimeProperty *time = layer_time(prepared);
+        REQUIRE(time != nullptr);
+        CHECK(time->duration_seconds == Approx(0.8).epsilon(1e-5));
+        CHECK(estimate_printed_layer(prepared) == Approx(time->duration_seconds).epsilon(1e-6));
+    }
+    // One path is one block: it gets the speed that three equal-speed pieces get.
+    REQUIRE(results[0].speeds.size() == 1);
+    REQUIRE(results[1].speeds.size() == 3);
+    for (float speed : results[1].speeds)
+        CHECK(speed == Approx(results[0].speeds[0]));
+    CHECK(results[0].speeds[0] == Approx(100.f * 0.0916f / 0.8f).epsilon(2e-2));
+    CHECK(results[0].duration == Approx(results[1].duration));
+}
+
+TEST_CASE("Slowdown keeps leaves of non-eligible roles, including roles outside its table",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    const auto raw_role = [](uint32_t raw) { return ExtrusionRole(static_cast<ExtrusionRoleModifier>(raw)); };
+    const ExtrusionRole overhang_external = raw_role(RAW_EXTRUSION_ROLE_OVERHANG_EXTERNAL_PERIMETER);
+    const ExtrusionRole wipe = raw_role(RAW_EXTRUSION_ROLE_TRAVEL | RAW_EXTRUSION_ROLE_WIPE);
+    // A perimeter that also carries the "solid" modifier is not in the table.
+    const ExtrusionRole modified = raw_role(RAW_EXTRUSION_ROLE_PERIMETER | RAW_EXTRUSION_ROLE_SOLID);
+    prepare_ordered_plan(prepared, slowdown_config("1000"), {{
+        slowdown_spec(ExtrusionRole::Perimeter), slowdown_spec(overhang_external), slowdown_spec(wipe),
+        slowdown_spec(ExtrusionRole::Travel), slowdown_spec(modified)}});
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    const std::map<uint16_t, ObservedLeaf> by_role = observed_by_role(observed_plan_leaves(prepared.print));
+    REQUIRE(by_role.size() == 5);
+    CHECK(by_role.at(uint16_t(ExtrusionRole(ExtrusionRole::Perimeter)())).speed == Approx(10.f).margin(1e-3));
+    for (const ExtrusionRole role : {overhang_external, wipe, ExtrusionRole(ExtrusionRole::Travel), modified}) {
+        INFO(role());
+        REQUIRE(by_role.count(uint16_t(role())) == 1);
+        CHECK(by_role.at(uint16_t(role())).speed == Approx(100.f).margin(1e-6));
+    }
+}
+
+TEST_CASE("Slowdown handles layers in two sequential printing groups, first layer included",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedSpeedPrint prepared;
+    prepare_ordered_plan(prepared, slowdown_config(), {short_layer_specs().front(), short_layer_specs().front()});
+    // Move the second printed layer into its own group, after the first one.
+    PrintingPlan &plan = prepared.print.mutable_printing_plan();
+    PrintingGroup &first = plan.groups.front();
+    size_t second_idx = first.layers.size();
+    size_t printed = 0;
+    for (size_t idx = 0; idx < first.layers.size(); ++idx)
+        if (!first.layers[idx].tool_groups.empty() && ++printed == 2)
+            second_idx = idx;
+    REQUIRE(second_idx < first.layers.size());
+    PrintingGroup second;
+    second.plan_identity = first.plan_identity;
+    second.printing_catalog_ids = first.printing_catalog_ids;
+    second.layers.push_back(std::move(first.layers[second_idx]));
+    first.layers.erase(first.layers.begin() + std::ptrdiff_t(second_idx));
+    plan.groups.push_back(std::move(second));
+    REQUIRE(plan.groups.size() == 2);
+
+    run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+    REQUIRE(printed_layers(prepared).size() == 2);
+    for (size_t layer = 0; layer < 2; ++layer) {
+        INFO(layer);
+        const PrintingLayerTimeProperty *time = layer_time(prepared, layer);
+        REQUIRE(time != nullptr);
+        CHECK(time->is_resolved());
+        CHECK(time->duration_seconds == Approx(5.0).epsilon(1e-5));
+        // The layer entered from the other group is measured with the carried position.
+        CHECK(estimate_printed_layer(prepared, layer) == Approx(time->duration_seconds).epsilon(1e-6));
+    }
+}
+
+TEST_CASE("Slowdown reduction cap decides when it is tighter than the minimum speed, per extruder",
+          "[plugins][layer-extrusion-edit][slowdown][printing-plan]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    // Unreachable goal, minimum speed 1 mm/s: the lowest speed is max(1, 100 * (1 - reduction)).
+    struct Case { const char *reduction; float expected_speed; };
+    for (const Case &c : {Case{"0,0", 1.f}, Case{"90,90", 10.f}, Case{"100,100", 1.f}}) {
+        INFO(c.reduction);
+        PreparedSpeedPrint prepared;
+        DynamicPrintConfig config = slowdown_config("1000,1000");
+        config.set_deserialize_strict("nozzle_diameter", "0.4,0.4");
+        config.set_deserialize_strict("min_print_speed", "1,1");
+        config.set_deserialize_strict("max_speed_reduction", c.reduction);
+        prepare_ordered_plan(prepared, config, {{slowdown_spec(ExtrusionRole::Perimeter)}});
+        append_tool_visit(*printed_layers(prepared).front(), 1);
+        // The Print must hold two values for each setting, so both tools read them.
+        const PrintConfig &print_config = prepared.print.config();
+        REQUIRE(print_config.max_speed_reduction.size() == 2);
+        REQUIRE(print_config.min_print_speed.size() == 2);
+        REQUIRE(print_config.slowdown_below_layer_time.size() == 2);
+        CHECK(print_config.max_speed_reduction.get_at(0) == print_config.max_speed_reduction.get_at(1));
+
+        run_editors(prepared, {SLOWDOWN_PLUGIN});
+
+        const std::vector<float> speeds = leaf_speeds(prepared);
+        REQUIRE(speeds.size() == 2);
+        CHECK(speeds[0] == Approx(c.expected_speed).margin(1e-3));
+        CHECK(speeds[1] == Approx(c.expected_speed).margin(1e-3));
     }
 }
