@@ -98,7 +98,6 @@ Representative direct calls (branches are not a timeline):
 #include "ExtrusionEntity.hpp"
 #include "format.hpp"
 #include "GCode/AvoidCrossingPerimeters.hpp"
-#include "GCode/CoolingBuffer.hpp"
 #include "GCode/ExtrusionProcessor.hpp"
 #include "GCode/FanMover.hpp"
 #include "GCode/FindReplace.hpp"
@@ -2032,6 +2031,8 @@ static inline bool arc_welder_enabled(const PrintConfig& print_config)
         print_config.max_volumetric_extrusion_rate_slope_positive == 0.;
 }
 
+static std::string strip_internal_markers(std::string &&gcode_in); // defined before process_layers()
+
 // Write prepared borrowed Print layers to the borrowed stream with an export-owned global tower and copied tool ordering; update writer/statistics and optional thumbnails, clear borrowing layers on exit, and propagate cancellation/script/output failures.
 void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, ThumbnailsGeneratorCallback thumbnail_cb)
 {
@@ -2400,9 +2401,6 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
     }
      this->m_throw_if_canceled();
 
-    m_cooling_buffer = make_unique<CoolingBuffer>(*this);
-    m_cooling_buffer->set_current_extruder(initial_extruder_id);
-
     // Emit machine envelope limits for the Marlin firmware.
     this->print_machine_envelope(file, print);
 
@@ -2737,11 +2735,8 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                 } else {
                     set_extra_lift(0, 0, print.config(), m_writer, initial_extruder_id);
                 }
-                // Reset the cooling buffer internal state (the current position, feed rate, accelerations).
-                m_cooling_buffer->reset(this->writer().get_position());
-                m_cooling_buffer->set_current_extruder(initial_extruder_id);
                 // Process all layers of a single object instance (sequential mode) with a parallel pipeline:
-                // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
+                // Generate G-code, filter it (see process_layers() in GCode.hpp), run the G-code analyser
                 // and export G-code into file.
                 this->process_layers(print, status_monitor, *it_tool_ordering, collect_layers_to_print(object, status_monitor),
                                      *print_object_instance_sequential_active - object.instances().data(),
@@ -3220,7 +3215,7 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                 //    }
                 //    parallel_layers_to_print = {parallel_layers_to_print.begin() + idx, parallel_layers_to_print.end()};
                 //    // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
-                //    // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
+                //    // Generate G-code, filter it (see process_layers() in GCode.hpp), run the G-code analyser
                 //    // and export G-code into file.
                 //    this->process_layers(print, status_monitor, parallel_ordering, print_object_instances_ordering, parallel_layers_to_print, preamble_to_put_start_layer, file);
                 //}
@@ -3276,14 +3271,15 @@ void GCodeGenerator::_do_export(Print& print_mod, GCodeOutputStream &file, Thumb
                     this->m_throw_if_canceled();
                 }
                 // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
-                // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
+                // Generate G-code, filter it (see process_layers() in GCode.hpp), run the G-code analyser
                 // and export G-code into file.
                 this->process_layers(print, status_monitor, print.tool_orderings().front(), print_object_instances_ordering, layers_to_print, preamble_to_put_start_layer, file);
             }
         }
     }
     // Write end commands to file.
-    file.write(this->retract_and_wipe());
+    // Written outside of the pipeline: it carries a ";_WIPE" marker, remove it here.
+    file.write(strip_internal_markers(this->retract_and_wipe()));
     //if needed, write the gcode_label_objects_end
     {
         std::string gcode;
@@ -3413,7 +3409,7 @@ void GCodeGenerator::_move_to_print_object(std::string& gcode_out, const Print& 
 {
     // Move to the origin position for the copy we're going to print.
     // This happens before Z goes down to layer 0 again, so that no collision happens hopefully.
-    m_enable_cooling_markers = false; // we're not filtering these moves through CoolingBuffer
+    m_enable_cooling_markers = false; // no speed/fan markers for these moves
     m_avoid_crossing_perimeters->use_external_mp_once();
     set_extra_lift(m_last_layer_z_, 0, print.config(), m_writer, initial_extruder_id);
     gcode_out.append(this->retract_and_wipe());
@@ -3429,8 +3425,46 @@ void GCodeGenerator::_move_to_print_object(std::string& gcode_out, const Print& 
     this->placeholder_parser().set("current_object_idx", int(finished_objects));
 }
 
+// Remove the internal markers from G-code produced by this generator.
+// The generator tags its output with ";_" markers (";_EXTRUDE_SET_SPEED", ";_EXTRUDE_END", ";_EXTRUDETYPE_", ";_WIPE", ...).
+// Only the pressure equalizer reads them (the slowdown and the fan are applied by plugins), so none of them may be written.
+// Rule: each line is cut at its first ";_" (what follows is a marker), trailing blanks are removed, and a line left empty
+// is dropped. The ";_GP_*" placeholders of GCodeProcessor are written directly to the stream, outside of this cleaning.
+// Invariant: a marker is complete in the processed string (a whole layer, or a whole block like the final wipe).
+// Limit: a ";_" in a custom G-code script inserted into the generated G-code is cut as well.
+// Do NOT apply it to the config block or to the notes, which are written verbatim and may contain ";_".
+static std::string strip_internal_markers(std::string &&gcode_in)
+{
+    const std::string_view gcode(gcode_in);
+    if (gcode.find(";_"sv) == std::string_view::npos)
+        return std::move(gcode_in);
+    std::string out;
+    out.reserve(gcode.size());
+    for (size_t pos = 0; pos < gcode.size();) {
+        size_t eol = gcode.find('\n', pos);
+        eol = eol == std::string_view::npos ? gcode.size() : eol + 1;
+        std::string_view line = gcode.substr(pos, eol - pos);
+        pos = eol;
+        const size_t marker = line.find(";_"sv);
+        if (marker == std::string_view::npos) {
+            out.append(line);
+            continue;
+        }
+        const bool has_eol = line.back() == '\n';
+        line = line.substr(0, marker);
+        while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
+            line.remove_suffix(1);
+        if (line.empty())
+            continue;
+        out.append(line);
+        if (has_eol)
+            out.push_back('\n');
+    }
+    return out;
+}
+
 // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
-// Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
+// Generate G-code, filter it (see process_layers() in GCode.hpp), run the G-code analyser
 // and export G-code into file.
 void GCodeGenerator::process_layers(
     const Print                                                         &print,
@@ -3515,7 +3549,6 @@ void GCodeGenerator::process_layers(
                     return LayerResult::make_nop_layer_result();
                  this->m_throw_if_canceled();
                 LayerResult result = this->process_layer(print, status_monitor, layer.second, *layer_tools,
-                                                         &layer == &layers_to_print.back(),
                                                          &print_object_instances_ordering, size_t(-1));
                 result.gcode = preamble + result.gcode;
                 preamble.clear();
@@ -3530,7 +3563,7 @@ void GCodeGenerator::process_layers(
             this->m_throw_if_canceled();
             CNumericLocalesSetter locales_setter;
             spiral_vase->enable(in.spiral_vase_enable);
-            return LayerResult{ spiral_vase->process_layer(std::move(in.gcode)), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+            return LayerResult{ spiral_vase->process_layer(std::move(in.gcode)), in.layer_id, in.spiral_vase_enable};
         });
     const auto pressure_equalizer = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
         [this, pressure_equalizer = this->m_pressure_equalizer.get()](LayerResult in) -> LayerResult {
@@ -3538,13 +3571,12 @@ void GCodeGenerator::process_layers(
             CNumericLocalesSetter locales_setter;
             return pressure_equalizer->process_layer(std::move(in));
         });
-    const auto cooling = tbb::make_filter<LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
-        [this, cooling_buffer = this->m_cooling_buffer.get()](LayerResult in) -> std::string {
-             if (in.nop_layer_result)
-                return in.gcode;
+    // Where the cooling buffer used to be: after the pressure equalizer (which reads the markers), before the movers
+    // and the find-replace (which must not see them). Converts the layer result into a string.
+    const auto strip_markers = tbb::make_filter<LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
+        [this](LayerResult in) -> std::string {
              this->m_throw_if_canceled();
-             CNumericLocalesSetter locales_setter;
-             return cooling_buffer->process_layer(std::move(in.gcode), in.layer_id, in.cooling_buffer_flush);
+             return strip_internal_markers(std::move(in.gcode));
         });
     const auto find_replace = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
         [this, find_replace = this->m_find_replace.get()](std::string s) -> std::string {
@@ -3595,7 +3627,7 @@ void GCodeGenerator::process_layers(
     if (m_pressure_equalizer)
         pipeline_to_layerresult = pipeline_to_layerresult & pressure_equalizer;
 
-    tbb::filter<LayerResult, std::string> pipeline_to_string = cooling & temperature_mover & fan_mover;
+    tbb::filter<LayerResult, std::string> pipeline_to_string = strip_markers & temperature_mover & fan_mover;
     if (m_find_replace)
         pipeline_to_string = pipeline_to_string & find_replace;
 
@@ -3609,7 +3641,7 @@ void GCodeGenerator::process_layers(
 }
 
 // Process all layers of a single object instance (sequential mode) with a parallel pipeline:
-// Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
+// Generate G-code, filter it (see process_layers() in GCode.hpp), run the G-code analyser
 // and export G-code into file.
 void GCodeGenerator::process_layers(
     const Print                             &print,
@@ -3679,7 +3711,6 @@ void GCodeGenerator::process_layers(
                 if(!layer_tool_ptr)
                     return LayerResult::make_nop_layer_result();
                 LayerResult result = this->process_layer(print, status_monitor, {std::move(layer)}, *layer_tool_ptr,
-                                                         &layer == &layers_to_print.back(),
                                                          nullptr, single_object_idx);
                 result.gcode = preamble + result.gcode;
                 preamble.clear();
@@ -3694,7 +3725,7 @@ void GCodeGenerator::process_layers(
             this->m_throw_if_canceled();
             CNumericLocalesSetter locales_setter;
             spiral_vase->enable(in.spiral_vase_enable);
-            return { spiral_vase->process_layer(std::move(in.gcode)), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush };
+            return { spiral_vase->process_layer(std::move(in.gcode)), in.layer_id, in.spiral_vase_enable };
         });
     const auto pressure_equalizer = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
         [this, pressure_equalizer = this->m_pressure_equalizer.get()](LayerResult in) -> LayerResult {
@@ -3702,12 +3733,12 @@ void GCodeGenerator::process_layers(
              CNumericLocalesSetter locales_setter;
              return pressure_equalizer->process_layer(std::move(in));
         });
-    const auto cooling = tbb::make_filter<LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
-        [this, cooling_buffer = this->m_cooling_buffer.get()](LayerResult in)->std::string {
-            if (in.nop_layer_result)
-                return in.gcode;
-            this->m_throw_if_canceled();            CNumericLocalesSetter locales_setter;
-            return cooling_buffer->process_layer(std::move(in.gcode), in.layer_id, in.cooling_buffer_flush);
+    // Where the cooling buffer used to be: after the pressure equalizer (which reads the markers), before the movers
+    // and the find-replace (which must not see them). Converts the layer result into a string.
+    const auto strip_markers = tbb::make_filter<LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
+        [this](LayerResult in)->std::string {
+            this->m_throw_if_canceled();
+            return strip_internal_markers(std::move(in.gcode));
         });
     const auto find_replace = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
         [this, find_replace = this->m_find_replace.get()](std::string s) -> std::string {
@@ -3757,7 +3788,7 @@ void GCodeGenerator::process_layers(
     if (m_pressure_equalizer)
         pipeline_to_layerresult = pipeline_to_layerresult & pressure_equalizer;
 
-    tbb::filter<LayerResult, std::string> pipeline_to_string = cooling & temperature_mover & fan_mover;
+    tbb::filter<LayerResult, std::string> pipeline_to_string = strip_markers & temperature_mover & fan_mover;
     if (m_find_replace)
         pipeline_to_string = pipeline_to_string & find_replace;
 
@@ -4552,7 +4583,6 @@ LayerResult GCodeGenerator::process_layer(
     // Set of object & print layers of the same PrintObject and with the same print_z.
     const ObjectsLayerToPrint               &layers,
     const LayerTools                        &layer_tools,
-    const bool                               last_layer,
     // Pairs of PrintObject index and its instance index.
     const std::vector<const PrintInstance*> *ordering,
     // If set to size_t(-1), then print all copies of all objects.
@@ -4568,7 +4598,6 @@ LayerResult GCodeGenerator::process_layer(
     // First object, support and raft layer, if available.
     const Layer         *object_layer  = nullptr;
     const Layer  *support_layer = nullptr;
-    const Layer  *raft_layer    = nullptr;
     /*const*/ size_t layer_id = size_t(-1);
     for (const ObjectLayerToPrint &l : layers) {
         if(l.layer())
@@ -4578,8 +4607,6 @@ LayerResult GCodeGenerator::process_layer(
         if (l.auxiliary_layer) {
             if (! support_layer)
                 support_layer = l.auxiliary_layer;
-            if (! raft_layer && support_layer->id() < support_layer->object()->slicing_parameters().raft_layers())
-                raft_layer = support_layer;
         }
         assert(l.layer() == nullptr || layer_id == l.layer()->id());
     }
@@ -4587,7 +4614,7 @@ LayerResult GCodeGenerator::process_layer(
     const Layer         &layer         = (object_layer != nullptr) ? *object_layer : *support_layer;
     assert(layer_id < layer_count() || !layer.has_extrusions());
     assert(layer_id == layer.id());
-    LayerResult   result { {}, layer.id(), false, last_layer, false};
+    LayerResult   result { {}, layer.id(), false, false};
     if (layer_tools.extruders.empty())
         // Nothing to extrude.
         return result;
@@ -5158,7 +5185,6 @@ LayerResult GCodeGenerator::process_layer(
     log_memory_info();
 
     result.gcode = std::move(gcode);
-    result.cooling_buffer_flush = object_layer || raft_layer || last_layer;
     return result;
 }
 

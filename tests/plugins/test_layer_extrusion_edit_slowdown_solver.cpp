@@ -1,16 +1,11 @@
 #include <catch2/catch.hpp>
 
 #include <limits>
-#include <sstream>
 #include <stdexcept>
 #include <utility>
 #include <vector>
 
 #include "libslic3r/Plugins/LayerExtrusionEdit/SlowdownSolver.hpp"
-#include "libslic3r/GCode.hpp"
-#include "libslic3r/GCode/CoolingBuffer.hpp"
-#include "libslic3r/Model.hpp"
-#include "plugin_test_helpers.hpp"
 
 /*
 Pure numerical tests of the short-layer slowdown solver
@@ -27,8 +22,6 @@ comment of each test gives the closed-form derivation of its expectation.
 
 Both intentional legacy differences have separate numeric oracles. Repeated
 calls must preserve the input and produce identical output; invalid inputs throw.
-The legacy comparison additionally runs CoolingBuffer on the same straight paths
-with one tool, where neither of the two intentional model differences applies.
 */
 
 namespace {
@@ -316,58 +309,4 @@ TEST_CASE("Solver finds the factor when all lines are bounded and the first gues
     CHECK(result.lines[0][0].speed_mm_per_s == Approx(25.f).margin(1e-3));
     CHECK(result.lines[1][0].speed_mm_per_s == Approx(50.f).margin(1e-3));
     CHECK(result.total_seconds == Approx(6.0).margin(1e-3));
-}
-
-TEST_CASE("Solver matches legacy CoolingBuffer when neither model difference applies",
-          "[plugins][layer-extrusion-edit][slowdown][slowdown-legacy]")
-{
-    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
-    for (double goal : {1.0, 2.5, 10.0, 1000.0}) {
-        INFO(goal);
-        const Result result = solve(make_layer({make_extruder(goal, 10., 0.9,
-            {{1., 100.f, true}, {1., 50.f, true}})}));
-        Slic3r::DynamicPrintConfig dynamic = Slic3r::DynamicPrintConfig::full_print_config();
-        dynamic.set_deserialize_strict({{"slowdown_below_layer_time", std::to_string(goal)},
-            {"min_print_speed", "10"}, {"max_speed_reduction", "90%"},
-            {"fan_below_layer_time", "0"}, {"disable_fan_first_layers", "0"}});
-        Slic3r::Print print;
-        Slic3r::Model model;
-        print.apply(model, dynamic);
-        Slic3r::GCodeGenerator generator;
-        generator.apply_print_configs(print);
-        generator.writer().set_extruders({0});
-        generator.writer().set_tool(0);
-        Slic3r::CoolingBuffer cooling(generator);
-        cooling.reset(Slic3r::Vec3d::Zero());
-        // A role marker opens each scope that _EXTRUDE_END closes. Feedrate
-        // markers alone do not open scopes in the legacy writer's protocol.
-        const std::string role_start = std::string(";_EXTRUDETYPE_") +
-            char('A' + uint8_t(Slic3r::GCodeExtrusionRole::Perimeter)) + "\n";
-        const std::string output = cooling.process_layer(
-            role_start + "G1 F6000;_EXTRUDE_SET_SPEED\nG1 X100 E1\n;_EXTRUDE_END\n" +
-            role_start + "G1 F3000;_EXTRUDE_SET_SPEED\nG1 X150 E2\n;_EXTRUDE_END\n", 0, true);
-        std::vector<double> speeds;
-        double current_speed = 0.0;
-        std::istringstream lines(output);
-        std::string line;
-        while (std::getline(lines, line)) {
-            std::istringstream words(line.substr(0, line.find(';')));
-            std::string command;
-            words >> command;
-            if (command != "G1") continue;
-            std::string word;
-            bool moves = false;
-            while (words >> word) {
-                if (word.front() == 'F') current_speed = std::stod(word.substr(1)) / 60.;
-                if (word.front() == 'X') moves = true;
-            }
-            if (moves) speeds.push_back(current_speed);
-        }
-        REQUIRE(speeds.size() == 2);
-        // CoolingBuffer emits integer mm/min feedrates, losing at most one unit.
-        CHECK(speeds[0] == Approx(result.lines[0][0].speed_mm_per_s).margin(1. / 60.));
-        CHECK(speeds[1] == Approx(result.lines[0][1].speed_mm_per_s).margin(1. / 60.));
-        const double timing_quantization = 150. * (1. / 60.) / (10. * (10. - 1. / 60.));
-        CHECK(100. / speeds[0] + 50. / speeds[1] == Approx(result.total_seconds).margin(timing_quantization));
-    }
 }

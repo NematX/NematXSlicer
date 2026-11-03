@@ -62,7 +62,6 @@ namespace Slic3r {
 
 // Forward declarations.
 class AvoidCrossingPerimeters;
-class CoolingBuffer;
 class ExtrusionPropertyCustomGcode;
 class ExtrusionPropertyModifier;
 class ExtrusionPropertySpecialCommand;
@@ -116,13 +115,11 @@ struct LayerResult {
     size_t      layer_id;
     // Is spiral vase post processing enabled for this layer?
     bool        spiral_vase_enable { false };
-    // Should the cooling buffer content be flushed at the end of this layer?
-    bool        cooling_buffer_flush { false };
     // Is indicating if this LayerResult should be processed, or it is just inserted artificial LayerResult.
     // It is used for the pressure equalizer because it needs to buffer one layer back.
     bool        nop_layer_result { false };
 
-    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, false, true}; }
+    static LayerResult make_nop_layer_result() { return {"", std::numeric_limits<coord_t>::max(), false, true}; }
 };
 
 namespace GCode {
@@ -308,7 +305,6 @@ private:
         // Set of object & print layers of the same PrintObject and with the same print_z.
         const ObjectsLayerToPrint       &layers,
         const LayerTools  				&layer_tools,
-        const bool                       last_layer,
 		// Pairs of PrintObject index and its instance index.
 		const std::vector<const PrintInstance*> *ordering,
         // If set to size_t(-1), then print all copies of all objects.
@@ -316,8 +312,8 @@ private:
         size_t                           single_object_idx = size_t(-1)
         );
     // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
-    // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
-    // and export G-code into file.
+    // Generate G-code, run the filters (vase mode, pressure equalizer, internal marker removal, temperature and fan movers,
+    // find-replace) and write it to the output stream, which runs the G-code analyser.
     void process_layers(
         const Print                                                   &print,
         Print::StatusMonitor                                          &status_monitor,
@@ -327,8 +323,8 @@ private:
         std::string                                                   &preamble,
         GCodeOutputStream                                             &output_stream);
     // Process all layers of a single object instance (sequential mode) with a parallel pipeline:
-    // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
-    // and export G-code into file.
+    // Generate G-code, run the filters (vase mode, pressure equalizer, internal marker removal, temperature and fan movers,
+    // find-replace) and write it to the output stream, which runs the G-code analyser.
     void process_layers(
         const Print                             &print,
         Print::StatusMonitor                    &status_monitor,
@@ -489,9 +485,10 @@ private:
     std::unique_ptr<RetractWhenCrossingPerimeters> m_retract_when_crossing_perimeters;
     std::unique_ptr<GCode::TravelObstacleTracker> m_travel_obstacle_tracker;
     bool                                m_enable_loop_clipping;
-    // If enabled, the G-code generator will put following comments at the ends
-    // of the G-code lines: _EXTRUDE_SET_SPEED, _WIPE, _BRIDGE_FAN_START, _BRIDGE_FAN_END, _BRIDGE_INTERNAL_FAN_START, _BRIDGE_INTERNAL_FAN_END
-    // Those comments are received and consumed (removed from the G-code) by the CoolingBuffer.pm Perl module.
+    // If enabled, the G-code generator tags its output with internal ";_" markers:
+    // - read by the Pressure Equalizer: _EXTRUDE_SET_SPEED[_MAYBE] (end of a G1 F line) and _EXTRUDE_END;
+    // - not read by anything any more: _WIPE, _EXTRUDETYPE_, _SET_MIN_FAN_SPEED, _RESET_MIN_FAN_SPEED, _TOOLCHANGE.
+    // All of them are removed by strip_internal_markers() (GCode.cpp): in the process_layers() pipelines and on the final wipe.
     bool                                m_enable_cooling_markers;
     // Markers for the Pressure Equalizer to recognize the extrusion type.
     // The Pressure Equalizer removes the markers from the final G-code.
@@ -575,7 +572,6 @@ private:
     double                              m_last_speed_mm_per_sec;
     bool                                m_need_z_reset_after_path_3D = false;
 
-    std::unique_ptr<CoolingBuffer>      m_cooling_buffer;
     std::unique_ptr<SpiralVase>         m_spiral_vase;
     //to know the current spiral layer. Only for process_layer. began at 1, 0 means no spiral. Negative means disbaled spiral.
     int32_t                             m_spiral_vase_layer = 0;

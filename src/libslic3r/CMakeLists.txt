@@ -902,8 +902,6 @@ set(SLIC3R_SOURCES
     GCode/Thumbnails.hpp
     GCode/ConflictChecker.cpp
     GCode/ConflictChecker.hpp
-    GCode/CoolingBuffer.cpp
-    GCode/CoolingBuffer.hpp
     GCode/ExtrusionProcessor.cpp
     GCode/ExtrusionProcessor.hpp
     GCode/FanMover.cpp

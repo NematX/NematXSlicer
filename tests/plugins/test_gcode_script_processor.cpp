@@ -1070,6 +1070,89 @@ TEST_CASE("ExtrusionPrinter names every custom G-code kind",
     CHECK(printed_kind(static_cast<ExtrusionPropertyCustomGcodeText::Code>(99)).find(
               "\"kind\":\"unknown\"") != std::string::npos);
 }
+TEST_CASE("Legacy export with pressure equalizer and final wipe leaves no internal marker",
+          "[plugins][gcode][legacy][custom-gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({
+        { "start_gcode", "" },
+        { "end_gcode", "" },
+        { "gcode_comments", "1" },
+        { "max_volumetric_extrusion_rate_slope_positive", "1000" },
+        { "max_volumetric_extrusion_rate_slope_negative", "1000" },
+        { "retract_length", "2" },
+        { "wipe", "1" },
+        { "use_relative_e_distances", "1" },
+        { "remaining_times", "1" },
+        // ";_" in a verbatim section (config block, notes) must not be cut.
+        { "notes", "a;_b" }
+    });
+
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    print.process();
+
+    GCodeGenerator generator;
+    const boost::filesystem::path output_path = temporary_gcode_path();
+    remove_output_pair(output_path);
+    const std::string output_path_string = output_path.string();
+    generator.do_export(&print, output_path_string.c_str());
+    const std::string exported = read_text_file(output_path);
+    remove_output_pair(output_path);
+
+    // The config block is written verbatim: the notes keep their ";_", and the markers are only looked for in the
+    // generated G-code before it.
+    const size_t config_begin = exported.find("_config = begin");
+    REQUIRE(config_begin != std::string::npos);
+    CHECK(exported.find("; notes = a;_b\n", config_begin) != std::string::npos);
+    std::string generated = exported.substr(0, config_begin);
+    // The notes are also written verbatim in the header.
+    CHECK(generated.find("\n; a;_b\n") != std::string::npos);
+    for (size_t pos; (pos = generated.find("a;_b")) != std::string::npos;)
+        generated.erase(pos, 4);
+
+    // The pressure equalizer needs the markers to be emitted, and none of them may be written.
+    CHECK(generated.find(";_") == std::string::npos);
+    // The ";_GP_" placeholders survive up to the post-processing, which turns them into M73.
+    CHECK(generated.find("\nM73 ") != std::string::npos);
+    CHECK(generated.find("_GP_") == std::string::npos);
+
+    // The last layer is printed: it has a positive extrusion move (relative E).
+    const size_t last_layer = generated.rfind(";LAYER_CHANGE");
+    REQUIRE(last_layer != std::string::npos);
+    CHECK(generated.find(";LAYER_CHANGE") != last_layer);
+    // One ";LAYER_CHANGE" per layer of the cube (no raft, no support): the layer buffered by the pressure equalizer
+    // is written too. The count comes from the sliced object (20 mm cube at the default heights), not a literal.
+    REQUIRE(print.objects().size() == 1);
+    const size_t expected_layers = print.objects().front().layer_count();
+    CHECK(expected_layers > 1);
+    size_t layer_changes = 0;
+    for (size_t pos = 0; (pos = generated.find("\n;LAYER_CHANGE\n", pos)) != std::string::npos; ++pos)
+        ++layer_changes;
+    CHECK(layer_changes == expected_layers);
+    size_t last_extrusion = std::string::npos;
+    for (size_t pos = last_layer; pos < generated.size();) {
+        size_t eol = generated.find('\n', pos);
+        eol = eol == std::string::npos ? generated.size() : eol;
+        const std::string line = generated.substr(pos, eol - pos);
+        const size_t e = line.find(" E");
+        if (line.compare(0, 3, "G1 ") == 0 && line.find(" X") != std::string::npos && e != std::string::npos &&
+            e + 2 < line.size() && line[e + 2] != '-')
+            last_extrusion = pos;
+        pos = eol + 1;
+    }
+    REQUIRE(last_extrusion != std::string::npos);
+
+    // The wipe written after the last extrusion (the one which carries ";_WIPE" before the cleaning).
+    const size_t last_wipe = generated.rfind(";WIPE_START");
+    REQUIRE(last_wipe != std::string::npos);
+    CHECK(last_wipe > last_extrusion);
+    CHECK(generated.find(";WIPE_END", last_wipe) != std::string::npos);
+}
+
 TEST_CASE("Legacy custom scripts substitute and update machine state",
           "[plugins][gcode][legacy][custom-gcode]")
 {
@@ -1092,7 +1175,10 @@ TEST_CASE("Legacy custom scripts substitute and update machine state",
     remove_output_pair(output_path);
     const std::string output_path_string = output_path.string();
     generator.do_export(&print, output_path_string.c_str());
+    const std::string exported = read_text_file(output_path);
     remove_output_pair(output_path);
+    // No internal generator marker (";_EXTRUDE_SET_SPEED", ";_EXTRUDETYPE_", ...) may reach the file.
+    CHECK(exported.find(";_") == std::string::npos);
 
     // This is the same parser entry point and diagnostic name used by the
     // SCRIPT branch of GCodeGenerator::apply_property().

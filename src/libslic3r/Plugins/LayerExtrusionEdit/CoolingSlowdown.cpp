@@ -64,7 +64,6 @@ The cache is rebuilt in serialized setup and read by disjoint layer callbacks.
 Invalid geometry, changed leaf layout and cancellation propagate as errors.
 The numeric solver uses current durations between tool thresholds and caps each
 gain at its maximum duration; these differ from the legacy CoolingBuffer model.
-CoolingBuffer remains available to the independent legacy export path.
 
 Slowable roles (copied from the legacy `cooldown_marker_init`): perimeter,
 external perimeter, internal/solid/top solid infill, ironing, internal bridge

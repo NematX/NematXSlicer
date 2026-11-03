@@ -77,8 +77,7 @@ public:
         { return m_tool == nullptr || m_tool->id() != tool_id; }
     std::string set_tool(uint16_t tool_id)
         { return this->need_toolchange(tool_id) ? this->toolchange(tool_id) : ""; }
-    // Prefix of the toolchange G-code line, to be used by the CoolingBuffer to separate sections of the G-code
-    // printed with the same extruder.
+    // Prefix of the toolchange G-code line.
     std::string toolchange_prefix() const;
     std::string toolchange(uint16_t tool_id);
     // in mm/s
@@ -130,10 +129,9 @@ public:
     // Returns whether this flavor supports separate print and travel acceleration.
     static bool supports_separate_travel_acceleration(GCodeFlavor flavor);
 
-    // To be called by the CoolingBuffer from another thread.
+    // Stateless variant: it can be called from any thread.
     static std::string set_fan(const GCodeFlavor gcode_flavor, bool gcode_comments, uint8_t speed, uint8_t tool_fan_offset, bool is_fan_percentage, const std::string_view comment = {});
     // To be called by the main thread. It always emits the G-code, it does remember the previous state to be able to reset after the wipe tower (but remove that when the wipe tower will be extrusions and not string).
-    // Keeping the state is left to the CoolingBuffer, which runs asynchronously on another thread.
     std::string set_fan(uint8_t speed, uint16_t default_tool = 0);
     uint8_t get_fan() { return m_last_fan_speed; }
 

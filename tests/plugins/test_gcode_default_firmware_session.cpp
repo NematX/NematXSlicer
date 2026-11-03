@@ -5764,6 +5764,8 @@ TEST_CASE("Legacy text export uses the dynamic thumbnail service",
         const std::string marker = id == "BIQU" ? ";00040004" : "; thumbnail_" + id + " begin";
         CHECK(calls == 1);
         CHECK(count_occurrences(text, marker) == 1);
+        // No internal generator marker (";_EXTRUDE_SET_SPEED", ";_EXTRUDETYPE_", ...) may reach the file.
+        CHECK(text.find(";_") == std::string::npos);
         if (id == "BIQU") CHECK(text.find(marker) == 0);
         else if (id == "QOI") CHECK(text.find(marker) > text.find(";thumbnail-test-end"));
         else CHECK(text.find(marker) < text.find(";thumbnail-test-start"));
