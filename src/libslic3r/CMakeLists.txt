@@ -50,6 +50,8 @@ set(SLIC3R_SOURCES
 	Api/host/ExportInputs.hpp
 	Api/host/GCodeExportMetadata.cpp
 	Api/host/GCodeExportMetadata.hpp
+	Api/host/GCodeExportObjects.cpp
+	Api/host/GCodeExportObjects.hpp
 	Api/host/GCodeReaderResultBuilder.cpp
 	Api/host/GCodeReaderResultBuilder.hpp
 	Api/host/GCodeReaderService.cpp
@@ -184,6 +186,8 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/gcode/GCodeExportMetadataViews.hpp
 	Api/plugin/cpp/gcode/GCodeFilePublisher.cpp
 	Api/plugin/cpp/gcode/GCodeFilePublisher.hpp
+	Api/plugin/cpp/gcode/GCodePrivateFile.cpp
+	Api/plugin/cpp/gcode/GCodePrivateFile.hpp
 	Api/plugin/cpp/gcode/GCodeTextEnvelope.cpp
 	Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp
 	Api/plugin/cpp/gcode/DefaultExtruder.cpp

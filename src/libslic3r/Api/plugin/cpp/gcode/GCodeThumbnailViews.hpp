@@ -500,6 +500,36 @@ inline raw_gcode_thumbnail_color parse_thumbnail_color(const std::string &text,
 }
 
 } // namespace detail
+// Build one render request at an explicit pixel size from the borrowed visual settings.
+inline raw_gcode_thumbnail_render_request gcode_thumbnail_request_for_size(const Config &config, uint32_t width, uint32_t height)
+{
+    raw_gcode_thumbnail_render_request request = {};
+    request.struct_size = sizeof(request);
+    request.width = width;
+    request.height = height;
+    request.camera = RAW_GCODE_THUMBNAIL_CAMERA_ISOMETRIC;
+    request.projection = RAW_GCODE_THUMBNAIL_PROJECTION_ORTHOGRAPHIC;
+    request.framing = RAW_GCODE_THUMBNAIL_FRAMING_AUTO;
+    request.color_mode = raw_gcode_thumbnail_color_mode(
+        config.enum_or_default("thumbnail_color_mode", RAW_GCODE_THUMBNAIL_COLOR_BY_FILAMENT));
+    request.background = raw_gcode_thumbnail_background(
+        config.enum_or_default("thumbnail_background", RAW_GCODE_THUMBNAIL_BACKGROUND_TRANSPARENT));
+    request.show_bed = config.bool_or_default("thumbnails_with_bed", true) ? 1 : 0;
+    request.printable_only = 1;
+    request.parts_only = config.bool_or_default("thumbnails_with_support", false) ? 0 : 1;
+    request.with_format_tag = config.bool_or_default("thumbnails_tag_format", false) ? 1 : 0;
+    request.uniform_color = detail::parse_thumbnail_color(
+        config.string_or_default("thumbnails_color", "#018aff"), {1, 138, 255, 255});
+    request.background_color = detail::parse_thumbnail_color(
+        config.string_or_default("thumbnail_background_color", "#ffffff"), {255, 255, 255, 255});
+    request.camera_position = {1.0, -1.0, 1.0};
+    request.camera_target = {0.0, 0.0, 0.0};
+    request.camera_up = {0.0, 0.0, 1.0};
+    request.custom_scale = 1.0;
+    return request;
+}
+
+// Build requests for configured positive integral sizes using the selected text provider and placement.
 inline std::vector<GCodeThumbnailRequest> default_gcode_thumbnail_requests(const Config &config)
 {
     std::vector<GCodeThumbnailRequest> requests;
@@ -521,30 +551,7 @@ inline std::vector<GCodeThumbnailRequest> default_gcode_thumbnail_requests(const
             size.x > double(UINT32_MAX) || size.y > double(UINT32_MAX))
             throw std::invalid_argument("Thumbnail dimensions must be finite positive integers.");
 
-        raw_gcode_thumbnail_render_request request = {};
-        request.struct_size = sizeof(request);
-        request.width = uint32_t(size.x);
-        request.height = uint32_t(size.y);
-        // Reserved camera fields describe the only view implemented by the host.
-        request.camera = RAW_GCODE_THUMBNAIL_CAMERA_ISOMETRIC;
-        request.projection = RAW_GCODE_THUMBNAIL_PROJECTION_ORTHOGRAPHIC;
-        request.framing = RAW_GCODE_THUMBNAIL_FRAMING_AUTO;
-        request.color_mode = raw_gcode_thumbnail_color_mode(
-            config.enum_or_default("thumbnail_color_mode", RAW_GCODE_THUMBNAIL_COLOR_BY_FILAMENT));
-        request.background = raw_gcode_thumbnail_background(
-            config.enum_or_default("thumbnail_background", RAW_GCODE_THUMBNAIL_BACKGROUND_TRANSPARENT));
-        request.show_bed = config.bool_or_default("thumbnails_with_bed", true) ? 1 : 0;
-        request.printable_only = 1;
-        request.parts_only = config.bool_or_default("thumbnails_with_support", false) ? 0 : 1;
-        request.with_format_tag = config.bool_or_default("thumbnails_tag_format", false) ? 1 : 0;
-        request.uniform_color = detail::parse_thumbnail_color(
-            config.string_or_default("thumbnails_color", "#018aff"), {1, 138, 255, 255});
-        request.background_color = detail::parse_thumbnail_color(
-            config.string_or_default("thumbnail_background_color", "#ffffff"), {255, 255, 255, 255});
-        request.camera_position = {1.0, -1.0, 1.0};
-        request.camera_target = {0.0, 0.0, 0.0};
-        request.camera_up = {0.0, 0.0, 1.0};
-        request.custom_scale = 1.0;
+        const raw_gcode_thumbnail_render_request request = gcode_thumbnail_request_for_size(config, uint32_t(size.x), uint32_t(size.y));
         requests.push_back({request, {}, placement, false});
     }
     return requests;
