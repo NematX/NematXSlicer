@@ -47,6 +47,7 @@ add_executable(${_TEST_NAME}_tests
     test_extrusion_ordered_leaf.cpp
     test_geometry_primitives.cpp
     test_extrusion_split_by_areas.cpp
+    test_arc_polyline_split.cpp
     test_extrusion_views.cpp
     fan_policy_c_fixture.c
     test_fan_policy.cpp
@@ -110,6 +111,7 @@ add_executable(${_TEST_NAME}_tests
     test_gyroid_pattern.cpp
     test_heater_temperature.cpp
     test_host_preferences.cpp
+    test_host_simple_filament.cpp
     test_infill_pattern_init.cpp
     test_infill_pattern_lists.cpp
     test_layer_extrusion_edit_entry_state.cpp
@@ -442,7 +444,18 @@ if (TARGET python_plugin_loader)
     )
 endif()
 
-add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "[plugins]" ${CATCH_EXTRA_ARGS})
+# Export tests write into source/build/temp; create it without removing existing files.
+get_filename_component(_plugins_export_directory
+    "${CMAKE_CURRENT_SOURCE_DIR}/../../build/temp" ABSOLUTE)
+add_test(NAME plugins_tests_prepare_exports
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${_plugins_export_directory}")
+set_tests_properties(plugins_tests_prepare_exports PROPERTIES
+    FIXTURES_SETUP plugins_exports_directory)
+
+# Hidden cases are manual benchmarks, a baseline dump or external-plugin integration.
+add_test(${_TEST_NAME}_tests ${_TEST_NAME}_tests "[plugins]~[.]" ${CATCH_EXTRA_ARGS})
+set_tests_properties(${_TEST_NAME}_tests PROPERTIES
+    FIXTURES_REQUIRED plugins_exports_directory)
 
 # Hidden probes intentionally stop their process, so a separate driver checks
 # the guard's status and diagnostic without aborting the ordinary plugin suite.

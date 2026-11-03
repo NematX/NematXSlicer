@@ -4,20 +4,25 @@ group:filament_spool_weight_event:Filament
 	setting:id$0:filament_colour
 	setting:id$0:filament_diameter
 	setting:id$0:filament_density
-	setting:id$0:filament_cost
-	setting:id$0:filament_spool_weight
+	setting:tags$Advanced$Expert$Prusa:id$0:filament_cost
+	setting:tags$Advanced$Expert$Prusa:id$0:filament_spool_weight
+group:Filament
+	setting:tags$Simple:id$0:extrusion_multiplier
+	setting:tags$Simple:script:depends$temperature$first_layer_temperature:int:max$1500:label$Temperature:tooltip$Sets nozzle temperatures for the filament preset being edited (first layer and other layers).:s_easy_temp
+	setting:tags$Simple:script:depends$bed_temperature$first_layer_bed_temperature:enum$custom$Custom$glue$With glue$noglue$Without glue:label$Bed:tooltip$Sets bed temperatures for the filament preset being edited (first layer and other layers).:s_bed_fil_fff
+end_group
 group:Flow
-	setting:id$0:extrusion_multiplier
+	setting:tags$Advanced$Expert$Prusa:id$0:extrusion_multiplier
 	setting:id$0:filament_fill_top_flow_ratio
 	setting:id$0:filament_first_layer_flow_ratio
 group:Temperature °C
 	line:Extruder
-		setting:id$0:first_layer_temperature
-		setting:id$0:temperature
+		setting:tags$Advanced$Expert$Prusa:id$0:first_layer_temperature
+		setting:tags$Advanced$Expert$Prusa:id$0:temperature
 	end_line
 	line:Bed
-		setting:id$0:first_layer_bed_temperature
-		setting:id$0:label$Other layers:bed_temperature
+		setting:tags$Advanced$Expert$Prusa:id$0:first_layer_bed_temperature
+		setting:tags$Advanced$Expert$Prusa:id$0:label$Other layers:bed_temperature
 	end_line
 	setting:id$0:chamber_temperature
 	setting:id$0:label$Idle:idle_temperature
