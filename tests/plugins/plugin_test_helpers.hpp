@@ -1,13 +1,36 @@
 #ifndef test_plugins_plugin_test_helpers_hpp_
 #define test_plugins_plugin_test_helpers_hpp_
 
+#include <set>
+#include <string>
+#include <utility>
+
 /* Shared provider startup finalizes option definitions once; before that freeze it records
-   rejection results for nature values 16 and 0x100, and acceptance results for 5 and 10. */
+   rejection results for nature values 16 and 0x100, and acceptance results for 5 and 10.
+   Call ensure_plugin_test_runtime_initialized() before using the shared runtime.
+   Then plugin_test_startup_sets() returns the provider ids, activation flags, selector keys
+   and layout fragment ids copied at startup, unaffected by later tests.
+   A provider is a registered plugin; a selector is a setting that chooses a provider.
+   A layout fragment describes part of the settings UI.
+   Example: const auto &sets = Slic3r::Test::Plugins::plugin_test_startup_sets(); */
 
 struct orchestrator_handle;
 namespace Slic3r { struct PluginPackageLoadReport; }
 
 namespace Slic3r::Test::Plugins {
+
+// These sets record the providers, selectors and layout fragments present before individual tests run.
+struct PluginTestStartupSets
+{
+    std::set<std::string> provider_ids;
+    // Tests use these ids to restore startup activation after other tests change it.
+    std::set<std::string> active_provider_ids;
+    std::set<std::string> selector_keys;
+    std::set<std::pair<std::string, std::string>> ui_fragments;
+};
+
+// Initialize the shared runtime if needed and return its unchanged startup sets.
+const PluginTestStartupSets &plugin_test_startup_sets();
 
 // C API result recorded for an invalid nature during shared option registration.
 extern int plugin_test_invalid_nature_result;

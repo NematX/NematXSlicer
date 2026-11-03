@@ -91,6 +91,12 @@ std::string plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
                                               slicing_step_t step,
                                               const std::string &group_id);
 
+// Return the generated selector definition for the given plugin-defined exclusive group.
+StepExclusiveGroup plugin_exclusive_group_definition(const Orchestrator &orchestrator,
+                                                      slicing_step_t step,
+                                                      const std::string &group_id,
+                                                      const Plugin &first_plugin);
+
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator);
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,

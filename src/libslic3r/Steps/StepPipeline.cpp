@@ -542,6 +542,17 @@ void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin
 
 } // namespace
 
+// Build metadata through the same constructor used by selection, borrowing the host and provider.
+// The returned group owns its strings; refresh its raw pointers after moving it. No registration or
+// configuration changes occur, and allocation failures propagate to the caller.
+StepExclusiveGroup plugin_exclusive_group_definition(const Orchestrator &orchestrator,
+                                                      slicing_step_t step,
+                                                      const std::string &group_id,
+                                                      const Plugin &first_plugin)
+{
+    return make_plugin_exclusive_group(orchestrator, step, group_id, first_plugin);
+}
+
 std::string plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
                                               const slicing_step_t step,
                                               const std::string &group_id)

@@ -1,4 +1,15 @@
-/* Shared test startup registers module-owned plugins and config definitions once, then applies test activation choices. */
+/* This file initializes the plugin runtime shared by plugin tests.
+   Providers are plugins registered with Orchestrator, the runtime's plugin manager.
+   Selectors are settings that choose a provider; layout fragments describe pieces of the settings UI.
+
+   Initialization registers providers and settings, applies activation choices, then copies
+   provider ids, selector keys and layout fragment ids before individual tests run.
+   Call graph:
+     plugin_test_startup_sets
+       ensure_plugin_test_runtime_initialized
+         register_config_option_or_fail
+         activate_plugin_or_fail
+   The copied sets remain unchanged when later tests register or activate providers. */
 #include "plugin_test_helpers.hpp"
 
 #include "probe_pattern_plugin.hpp"
@@ -32,6 +43,7 @@
 #endif
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
@@ -109,6 +121,7 @@
 #include "libslic3r/Plugins/WipeTower/WipeTowerManager.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/SLA/SLAPrintConfig.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 #include "plugins_cpp/FlatAreaLayerHeight/FlatAreaLayerHeight.hpp"
 #include "plugins_cpp/DenseInfill/DenseInfill.hpp"
 #include "plugins_cpp/ExtraPerimeterOverhangWave/ExtraPerimeterOverhangWave.hpp"
@@ -123,6 +136,8 @@ int plugin_test_roundtrip_nature_result = OPTION_DEF_ERROR_INTERNAL;
 }
 
 namespace {
+
+Slic3r::Test::Plugins::PluginTestStartupSets g_startup_sets;
 
 constexpr char k_exclusive_pruning_failed_plugin_id[] = "slic3r.test.exclusive_pruning.failed";
 constexpr char k_exclusive_pruning_valid_plugin_id[] = "slic3r.test.exclusive_pruning.valid";
@@ -659,6 +674,10 @@ void activate_plugin_or_fail(Slic3r::Orchestrator &orchestrator, const char *plu
 
 namespace Slic3r::Test::Plugins {
 
+// Initialize the shared runtime once and borrow its owned identity sets for the process lifetime.
+// Lookup changes no activation or configuration after initialization; startup/allocation failures propagate.
+const PluginTestStartupSets &plugin_test_startup_sets();
+
 // A function-local static caches successful initialization once per process; this no-argument
 // void function registers and activates providers in the process-wide Orchestrator.
 // The Orchestrator owns the registered Plugin objects, which borrow the provider instances; those
@@ -670,6 +689,8 @@ namespace Slic3r::Test::Plugins {
 // finalization. Call before Slic3r::Print or DynamicPrintConfig::full_print_config(). A missing
 // expected plugin is logged then asserted; a failed option or test-provider registration, or a
 // Python plugin load, can throw std::runtime_error.
+// Copy finalized startup provider/activation, selector and layout identities for order-independent read-only test enumeration.
+// The sets own their strings; initialization/allocation failures propagate and no individual test registration enters the sets.
 void ensure_plugin_test_runtime_initialized()
 {
     static bool initialized = []() {
@@ -1019,9 +1040,31 @@ void ensure_plugin_test_runtime_initialized()
         initialize_fff_print_config_cache();
         initialize_sla_print_config_cache();
         PrintConfigDef::instance_mutable().finalize();
+        // Copy every startup identity after option and fragment creation; later test registrations cannot enter these sets.
+        for (Plugin *plugin : orchestrator.registered_plugins()) {
+            g_startup_sets.provider_ids.insert(plugin->get_id());
+            if (orchestrator.is_plugin_active(plugin)) g_startup_sets.active_provider_ids.insert(plugin->get_id());
+            const std::map<slicing_step_t, Steps::StepExclusiveGroup> &whole_steps = Steps::get_exclusive_steps();
+            const std::map<slicing_step_t, Steps::StepExclusiveGroup>::const_iterator whole = whole_steps.find(plugin->get_step());
+            std::string key;
+            if (whole != whole_steps.end()) key = whole->second.option_key_storage;
+            else if (!plugin->get_exclusive_group().empty())
+                key = Steps::plugin_exclusive_group_option_key(orchestrator, plugin->get_step(), plugin->get_exclusive_group());
+            if (!key.empty() && PrintConfigDef::instance().get(key) != nullptr) g_startup_sets.selector_keys.insert(key);
+        }
+        const char *const layouts[] = {"print.ui", "printer_fff.ui", "filament.ui", "printer_sla.ui"};
+        for (const char *layout : layouts)
+            for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file(layout))
+                g_startup_sets.ui_fragments.emplace(layout, fragment.fragment_id);
         return true;
     }();
     (void)initialized;
+}
+
+const PluginTestStartupSets &plugin_test_startup_sets()
+{
+    ensure_plugin_test_runtime_initialized();
+    return g_startup_sets;
 }
 
 bool python_plugin_test_runtime_available()
