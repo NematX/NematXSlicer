@@ -42,6 +42,8 @@ considered loaded when its registration succeeds, not only when it becomes
 active. Exclusive step groups use stable plugin IDs as stored enum values and
 user-facing names as labels; their setting and GUI fragment are created only
 after the available plugin set is known.
+Step-module selector traits control fallback layouts and provider-setting activation
+rules; provider-specific fragments take precedence across the supported layouts.
 */
 
 #include "PluginLoader.hpp"
@@ -162,10 +164,12 @@ bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fr
 // Register module-owned built-ins with a non-null borrowed host; registrations and diagnostics are retained by the host.
 void register_builtin_plugins(orchestrator_handle *orchestrator);
 
-// Register selector-conditioned GUI rules for settings used by exclusive providers.
+// Register selector-conditioned GUI rules for provider settings when enabled by the group's traits.
 void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
                                           const Steps::StepExclusiveGroup &group,
                                           const std::vector<Plugin *> &plugins);
+// Register copied fallback fragments in trait-selected layouts unless a provider already placed the group.
+void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator);
 
 using RegisterPluginFn = void (*)(orchestrator_handle *);
 using PluginAbiVersionFn = int32_t (*)(slic3r_major_minor_version *);
@@ -834,22 +838,21 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
 
 
 /*
-For each non-thumbnail provider, add a STRING_EQUALS activation reason for every setting it declares
-as read, so that reason enables the setting when the provider ID is selected. The setting remains
-visible in the profile for other selections without presenting that provider's controls as active;
+When group traits enable provider-setting rules, add a STRING_EQUALS activation reason for each
+setting read by a provider. That reason enables the setting when its provider ID is selected.
+The setting remains visible in the profile for other selections without presenting that provider's controls as active;
 other rules may independently activate the same setting. This registers rule metadata without
 changing configuration values. The ordered plugin list contains active non-null providers, and the
 group option key is populated. The group, plugins, and key strings are borrowed; GuiRuleRegistry
-copies clause strings during add() or queues them until a target definition exists. Thumbnail
-consumers may acquire several encoders independently of the default selector, so their shared
-renderer controls must remain editable and receive no selector rules. Invalid registrations are
-logged by the registry and ignored here; allocation failures propagate.
+copies clause strings during add() or queues them until a target definition exists. Groups with
+provider_settings_rules disabled add no selector-conditioned activation reasons. Invalid registrations
+are logged by the registry and ignored here; allocation failures propagate.
 */
 void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
                                            const Steps::StepExclusiveGroup &group,
                                            const std::vector<Plugin *> &plugins)
 {
-    if (group.step == GCODE_THUMBNAIL)
+    if (!group.traits.provider_settings_rules)
         return;
     for (const Plugin *plugin : plugins) {
         for (const Plugin::UsedConfigKey &setting : plugin->get_used_config_keys()) {
@@ -919,6 +922,9 @@ bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fr
     return false;
 }
 
+// Build owned metadata for borrowed active providers and register copied fallback fragments in trait-declared layouts.
+// Provider placements in any supported layout win; existing fragments are retained, no print/configuration values or
+// provider ownership changes occur, and allocation failures propagate.
 void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator)
 {
     for (Steps::StepExclusivePluginGroup plugin_group : Steps::active_exclusive_plugin_groups(orchestrator)) {
@@ -928,11 +934,11 @@ void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator)
         // generated setting name.
         const Steps::StepExclusiveGroup &group = plugin_group.group;
         // A feature plugin may place the selector next to its own controls.
-        // The generic Notes-page selector is only a fallback for groups that
+        // The trait-placed generated selector is a fallback for groups that
         // did not already publish an explicit placement fragment.
         if (has_ui_fragment_in_layout(orchestrator, group.group_id))
             continue;
-        orchestrator.add_ui_fragment("print.ui", group.group_id.c_str(), group.ui_fragment.c_str(), 0);
+        orchestrator.add_ui_fragment(group.traits.ui_target_file.c_str(), group.group_id.c_str(), group.ui_fragment.c_str(), 0);
     }
 }
 

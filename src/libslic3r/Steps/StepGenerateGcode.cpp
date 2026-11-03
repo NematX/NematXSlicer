@@ -42,6 +42,9 @@ the active STEP_GCODE writer. The writer receives the source Print, read-only
 PrintingPlan, borrowed firmware session, and resolved final output path.
 Selectors for the writer, firmware and thumbnail services invalidate this G-code
 step, which consumes their selections when producing the output artifact.
+The thumbnail selector uses the serialized key thumbnails_format. Consumers can
+request encoders independently of that default, so shared renderer settings have
+no selector-conditioned activation rules.
 
 Before crossing that plugin boundary, the step validates the process speed of
 every geometric leaf and explicit E-only extrusion command, including those in
@@ -64,6 +67,8 @@ void register_selector_traits(Orchestrator &orchestrator);
 
 // Copy output/printer-preset traits into the borrowed host, which owns the strings; output and firmware show singleton selectors.
 // G-code, firmware and thumbnail selectors declare STEP_GCODE invalidation.
+// Thumbnail declarations read singleton ids, and the exact encoder group adds its stable key and strict selection.
+// Encoder settings remain independent of the default selector; an empty page/group uses the Notes placement fallback.
 // No print/configuration or provider ownership changes.
 // Duplicate/conflicting installation asserts and allocation errors propagate.
 void register_selector_traits(Orchestrator &orchestrator)
@@ -83,9 +88,18 @@ void register_selector_traits(Orchestrator &orchestrator)
     thumbnail.category = RAW_OPTION_CATEGORY_OUTPUT;
     thumbnail.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
     thumbnail.invalidates_step = STEP_GCODE;
-    const int32_t thumbnail_registered = orchestrator.register_builtin_step_selector(GCODE_THUMBNAIL, std::move(thumbnail));
+    thumbnail.read_with_one_provider = true;
+    thumbnail.provider_settings_rules = false;
+    thumbnail.ui_target_file = "print.ui";
+    const int32_t thumbnail_registered = orchestrator.register_builtin_step_selector(GCODE_THUMBNAIL, thumbnail);
     assert(thumbnail_registered == 1);
     (void)thumbnail_registered;
+    thumbnail.exclusive_group = "thumbnail_encoder_plugin";
+    thumbnail.option_key = "thumbnails_format";
+    thumbnail.strict_selection = true;
+    const int32_t encoder_registered = orchestrator.register_builtin_step_selector(GCODE_THUMBNAIL, std::move(thumbnail));
+    assert(encoder_registered == 1);
+    (void)encoder_registered;
 }
 
 namespace {

@@ -268,7 +268,7 @@ StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
                                                const std::string &group_id, const Plugin &first_plugin);
 // Copy provider text into a group's owned metadata and rebuild its fragment, without registering configuration.
 void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin *> &plugins);
-// Preserve declared/historical option keys or generate an owned sanitized identity without registration.
+// Use a declared stable option key or generate an owned sanitized identity without registration.
 std::string option_key_for_plugin_group(const Orchestrator &orchestrator, slicing_step_t step, const std::string &group_id);
 
 std::string exclusive_group_ui_fragment(const std::string &key,
@@ -306,15 +306,12 @@ std::string sanitized_config_key_part(const std::string &text)
     return out.empty() ? "plugin_group" : out;
 }
 
-// Read borrowed host traits and identities to preserve a declared or thumbnail key, otherwise generate a sanitized key.
+// Read borrowed host traits and identities to preserve a declared key, otherwise generate a sanitized key.
 // The result owns its bytes; no state or ownership changes occur and allocation failures propagate.
 std::string option_key_for_plugin_group(const Orchestrator &orchestrator,
                                         slicing_step_t step,
                                         const std::string &group_id)
 {
-    // Thumbnail encoding uses this established serialized configuration key.
-    if (step == GCODE_THUMBNAIL && group_id == "thumbnail_encoder_plugin")
-        return "thumbnails_format";
     const StepSelectorTraits *traits = orchestrator.step_selector(step, group_id);
     if (traits != nullptr && !traits->option_key.empty()) return traits->option_key;
     const Orchestrator::DynamicStepInfo *step_info = orchestrator.step_info(step);
@@ -665,10 +662,10 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
 Resolve providers by serialized enum ID because activation may reorder entries in the registered
 table. The group, configuration, and plugin list are borrowed and unchanged; the returned plugin is
 borrowed. An empty list returns null; missing configuration or a missing option returns the first
-provider. A singleton bypasses the stored id unless its read_with_one_provider trait or the thumbnail
-service requests reading. A matching ID returns its provider. Unknown IDs return null for strict
-traits or the thumbnail encoder group, otherwise the first provider. An out-of-table enum serializes
-to an empty string and follows the unknown-ID path; serialization/allocation failures propagate.
+provider. A singleton bypasses the stored id unless its read_with_one_provider trait requests reading.
+A matching ID returns its provider. Unknown IDs return null for strict traits, otherwise the first
+provider. An out-of-table enum serializes to an empty string and follows the unknown-ID path;
+serialization/allocation failures propagate.
 */
 Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
                                    const std::vector<Plugin *> &plugins,
@@ -676,8 +673,7 @@ Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
 {
     if (plugins.empty())
         return nullptr;
-    if (config == nullptr || (plugins.size() == 1 && !group.traits.read_with_one_provider &&
-                              group.step != GCODE_THUMBNAIL))
+    if (config == nullptr || (plugins.size() == 1 && !group.traits.read_with_one_provider))
         return plugins.front();
 
     const ConfigOption *option = config->option(group.option_def.opt_key);
@@ -689,8 +685,7 @@ Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
         if (plugin->get_id() == selected_id)
             return plugin;
 
-    if (group.traits.strict_selection ||
-        (group.step == GCODE_THUMBNAIL && group.group_id == "thumbnail_encoder_plugin"))
+    if (group.traits.strict_selection)
         return nullptr;
     return plugins.front();
 }

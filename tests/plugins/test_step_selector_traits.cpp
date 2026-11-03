@@ -43,6 +43,25 @@ private:
     std::vector<std::pair<Plugin *, bool>> m_saved;
 };
 
+class ThumbnailActivationGuard
+{
+public:
+    // Borrow the host and copy all thumbnail-step flags before mutations; allocations may throw without changing activations.
+    explicit ThumbnailActivationGuard(Orchestrator &host) : m_host(host)
+    {
+        for (Plugin *plugin : host.registered_plugins())
+            if (plugin->get_step() == GCODE_THUMBNAIL) m_saved.emplace_back(plugin, host.is_plugin_active(plugin));
+    }
+    // Restore the saved activation flags; the plugin manager and providers must outlive this guard.
+    ~ThumbnailActivationGuard()
+    {
+        for (const std::pair<Plugin *, bool> &entry : m_saved) m_host.set_plugin_active(entry.first, entry.second);
+    }
+private:
+    Orchestrator &m_host;
+    std::vector<std::pair<Plugin *, bool>> m_saved;
+};
+
 class SelectorTraitsProbe final : public slic3r_api::PluginBase
 {
 public:
@@ -305,6 +324,117 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
             CHECK(group.option_def.option_preset_type == declared->option_preset_type);
         }
     }
+}
+
+// Check the thumbnail declarations and the key, placement and selection rules used to describe encoder choices.
+TEST_CASE("Thumbnail selector traits are declared by the G-code module",
+          "[plugins][step-pipeline][selector-traits][thumbnail]")
+{
+    Orchestrator &host = Orchestrator::instance();
+    const StepSelectorTraits *whole = host.step_selector(GCODE_THUMBNAIL, "");
+    const StepSelectorTraits *encoder = host.step_selector(GCODE_THUMBNAIL, "thumbnail_encoder_plugin");
+    REQUIRE(whole != nullptr);
+    REQUIRE(encoder != nullptr);
+    CHECK(host.step_selector_is_builtin(GCODE_THUMBNAIL, ""));
+    CHECK(host.step_selector_is_builtin(GCODE_THUMBNAIL, "thumbnail_encoder_plugin"));
+    CHECK(encoder != whole);
+    CHECK(whole->exclusive_group.empty());
+    CHECK(whole->option_key.empty());
+    CHECK_FALSE(whole->strict_selection);
+    CHECK(whole->read_with_one_provider);
+    CHECK_FALSE(whole->provider_settings_rules);
+    CHECK(encoder->exclusive_group == "thumbnail_encoder_plugin");
+    CHECK(encoder->option_key == "thumbnails_format");
+    CHECK(encoder->strict_selection);
+    CHECK(encoder->read_with_one_provider);
+    CHECK_FALSE(encoder->provider_settings_rules);
+    CHECK_FALSE(encoder->show_with_one_provider);
+    CHECK_FALSE(encoder->auto_value);
+    CHECK_FALSE(encoder->value_when_absent.has_value());
+    CHECK(encoder->container_type == RAW_CONTAINER_TYPE_PROJECT);
+    CHECK(encoder->category == RAW_OPTION_CATEGORY_OUTPUT);
+    CHECK(encoder->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+    REQUIRE(encoder->invalidates_step.has_value());
+    CHECK(*encoder->invalidates_step == STEP_GCODE);
+    CHECK(encoder->ui_target_file == "print.ui");
+    CHECK(encoder->ui_page.empty());
+    CHECK(encoder->ui_group.empty());
+    CHECK(host.step_selector(GCODE_THUMBNAIL, "other_encoder_group") == whole);
+
+    SelectorTraitsProbe probe(reinterpret_cast<orchestrator_handle *>(&host));
+    Plugin provider(probe.c_instance(), "Slic3r", "");
+    Steps::StepExclusiveGroup group = Steps::plugin_exclusive_group_definition(
+        host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", provider);
+    CHECK(group.option_key_storage == "thumbnails_format");
+    CHECK(group.traits.strict_selection);
+    CHECK(group.traits.read_with_one_provider);
+    CHECK_FALSE(group.traits.provider_settings_rules);
+    CHECK(group.ui_fragment == "page:Notes\ngroup:Exclusive step plugins\nline:" + group.label_storage +
+                              "\nsetting:thumbnails_format\nend_line\n");
+    group.set_enum_plugins({{"JPG", "JPEG"}, {"PNG", "PNG"}});
+    REQUIRE(group.option_def.default_serialized_value != nullptr);
+    CHECK(std::string(group.option_def.default_serialized_value) == "PNG");
+    const Steps::StepExclusiveGroup other = Steps::plugin_exclusive_group_definition(
+        host, GCODE_THUMBNAIL, "other_encoder_group", provider);
+    CHECK(other.option_key_storage != "thumbnails_format");
+    CHECK_FALSE(other.traits.strict_selection);
+    CHECK(other.traits.read_with_one_provider);
+    CHECK_FALSE(other.traits.provider_settings_rules);
+}
+
+// Check that GUI rules do not depend on the thumbnail selector and invalid choices select no encoder, even with one active.
+// Use the registered selector's choices and restore activation flags after the checks.
+TEST_CASE("Thumbnail selector traits keep encoder settings independent and read singleton ids",
+          "[plugins][step-pipeline][selector-traits][thumbnail][gui-rules]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const std::string key = Steps::plugin_exclusive_group_option_key(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin");
+    REQUIRE(key == "thumbnails_format");
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->enum_def);
+    const std::vector<std::string> ids = definition->enum_def->values();
+    REQUIRE(ids.size() >= 2);
+    for (const std::string &id : ids) {
+        const Plugin *member = host.get_plugin(id);
+        REQUIRE(member != nullptr);
+        REQUIRE(member->get_step() == GCODE_THUMBNAIL);
+        REQUIRE(member->get_exclusive_group() == "thumbnail_encoder_plugin");
+    }
+    bool non_thumbnail_rule = false;
+    for (const Orchestrator::PluginGuiRule &rule : host.gui_rules().rules())
+        for (const Orchestrator::PluginGuiRuleClause &clause : rule.clauses) {
+            CHECK(clause.condition_key != key);
+            if (clause.condition == RAW_GUI_RULE_CONDITION_STRING_EQUALS &&
+                clause.condition_key == "step_layer_height_plugin") non_thumbnail_rule = true;
+        }
+    CHECK(non_thumbnail_rule);
+    ThumbnailActivationGuard guard(host);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == GCODE_THUMBNAIL)
+            REQUIRE(host.set_plugin_active(plugin, std::find(ids.begin(), ids.end(), plugin->get_id()) != ids.end()));
+    const std::vector<Plugin *> members = host.get_active_plugins_for_step(GCODE_THUMBNAIL);
+    REQUIRE(members.size() == ids.size());
+    Plugin *first = members.front();
+    Plugin *alternate = members.back();
+    REQUIRE(first != alternate);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(key, alternate->get_id());
+    CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &config) == alternate);
+    REQUIRE(config.optptr(key) != nullptr);
+    config.optptr(key)->set_int(1000000);
+    REQUIRE(config.option(key)->serialize().empty());
+    CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &config) == nullptr);
+    for (Plugin *member : members) REQUIRE(host.set_plugin_active(member, member == first));
+    CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &config) == nullptr);
+    config.set_deserialize_strict(key, alternate->get_id());
+    CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &config) == nullptr);
+    config.set_deserialize_strict(key, first->get_id());
+    CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &config) == first);
+    DynamicConfig absent;
+    CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &absent) == first);
+    CHECK(Steps::selected_active_plugin_from_group(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", nullptr) == first);
 }
 
 // Read the exact host declaration and construct local metadata without registering options or changing activations.
