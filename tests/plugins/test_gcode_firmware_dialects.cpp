@@ -2249,6 +2249,7 @@ std::string export_labelled_cubes(bool relative_e, uint16_t tools = 1,
     return output;
 }} // namespace
 
+// Inspect the process-owned firmware catalog without rendering; check all six fan definitions and the total including printer/plate/software identity, reporting mismatches through Catch.
 TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
           "[plugins][gcode][firmware][bambu][config]")
 {
@@ -2265,8 +2266,8 @@ TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
         used.insert(key.key);
     for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys())
         defined.insert(key.key);
-    // The three other settings (printer model id, nozzle type, plate type) are checked in test_bambu_config_export.cpp.
-    CHECK(plugin->get_defined_config_keys().size() == 9);
+    // Printer model id, nozzle type and plate type have translation tests; software identity has exporter tests.
+    CHECK(plugin->get_defined_config_keys().size() == 10);
     for (size_t idx = 0; idx < 6; ++idx) {
         INFO(keys[idx]);
         const ConfigOptionDef *def = PrintConfigDef::instance().get(keys[idx]);

@@ -178,6 +178,7 @@ const raw_used_config_key k_bambu_used_config_keys[] = {
     {"during_print_exhaust_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT},
     {"complete_print_exhaust_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT},
     {"printer_model_id", RAW_CO_STRING, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER},
+    {"bambu_slicer_identity", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER},
     {"nozzle_type", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER},
     {"curr_bed_type", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINT}
 };
@@ -202,7 +203,15 @@ const key_value_string_pair_t k_bed_type_values[] = {
     {"Supertack Plate", "Supertack Plate"}
 };
 
+// Software identities offered by the Bambu archive exporter; the first is the default.
+const key_value_string_pair_t k_bambu_identity_values[] = {
+    {"superslicer", "SuperSlicer"}, {"orcaslicer", "OrcaSlicer"}, {"bambustudio", "BambuStudio"}
+};
+
 const FirmwareSettingDefinition k_bambu_settings[] = {
+    {"bambu_slicer_identity", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER, "superslicer", "Slicer identity",
+     "Software identity written in Bambu sliced archives. This does not change printer authorization.",
+     k_bambu_identity_values, uint32_t(std::size(k_bambu_identity_values)), RAW_OPTION_CATEGORY_GENERAL},
     {"platter_fan", RAW_CO_BOOL, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER, "0", "Platter fan",
      "Enable the chamber-side platter cooling fan (M106 P2 S0-255). Its speed is set by the filament's Platter fan speed."},
     {"support_air_filtration", RAW_CO_BOOL, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER, "0", "Air filtration / exhaust fan",
@@ -228,8 +237,8 @@ const FirmwareSettingDefinition k_bambu_settings[] = {
 static_assert(std::size(k_bambu_used_config_keys) == std::size(k_bambu_settings) + 1,
               "Bambu reads its own settings and the core retraction length.");
 
-// The host owns copies of these nine definitions. Integer vectors are percentages
-// in [0,100]; bool vectors follow filament selection. No borrowed data is retained.
+// The host owns copies of these definitions. Integer vectors are percentages
+// in [0,100]; bool vectors follow filament selection. No borrowed data is retained; definition failures throw and abort provider initialization.
 void create_bambu_settings(orchestrator_handle *orchestrator)
 {
     for (const FirmwareSettingDefinition &setting : k_bambu_settings) {
@@ -263,7 +272,8 @@ void create_bambu_settings(orchestrator_handle *orchestrator)
     orchestrator_add_ui_fragment(orchestrator, "printer_fff.ui", "bambu_printer_identity",
         "page:General:printer\ngroup:Firmware\n"
         "\tsetting:insert$aftersetting$gcode_flavor:printer_model_id\n"
-        "\tsetting:insert$aftersetting$printer_model_id:nozzle_type\n", 1);
+        "\tsetting:insert$aftersetting$printer_model_id:bambu_slicer_identity\n"
+        "\tsetting:insert$aftersetting$bambu_slicer_identity:nozzle_type\n", 1);
     orchestrator_add_ui_fragment(orchestrator, "print.ui", "bambu_plate_type",
         "page:Output options\ngroup:Platter\n"
         "\tsetting:insert$aftersetting$duplicate_distance:curr_bed_type\n", 1);

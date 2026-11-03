@@ -8,6 +8,10 @@ Wipe manager tests lend a test-only service to the host. The service reports
 real changes between consecutive concrete tool visits and writes one local
 straight line per band. Constructed plans isolate insertion and ownership;
 the sliced-print test exercises the export-side ordering and downstream path.
+copy_gcode_export_objects, checking owned footprints after real tower generation.
+
+Operation notes:
+- The plate metadata test follows build_instance_plan :  StepGenerateWipeTower :
 
 Representative direct calls (branches are not a timeline):
 
@@ -33,6 +37,7 @@ Representative direct calls (branches are not a timeline):
 #include "plugin_test_helpers.hpp"
 #include "test_data.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/host/GCodeExportObjects.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_wipetower.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
@@ -527,6 +532,33 @@ TEST_CASE("Wipe manager ABI versions advertise the new payload and service", "[p
         {"steps/slic3r_step_wipetower.h", {1, 0}}}).compatible());
     CHECK(validate_plugin_api_requirements({versions.front(), versions[SLIC3R_PLUGIN_API_STEP_WIPETOWER],
         versions[SLIC3R_PLUGIN_API_STEP_WIPE_TOWER_WIPE]}).compatible());
+}
+
+// Read two rotated generated towers from the final plan; later configuration changes must not change their coverage.
+TEST_CASE("Bambu plate metadata reads generated tower geometry", "[plugins][wipe-tower][wipe_tower][bambu3mf][f4c]")
+{
+    WipeActivation active;
+    Print print;
+    Model model;
+    build_instance_plan(print, model, false, false);
+    const_cast<PrintObjectConfig &>(print.object(0).config()).wipe_tower_rotation_angle.value = 90.;
+    Steps::StepGenerateWipeTower::run_step(Orchestrator::instance(), print);
+    const ApiHost::GCodeExportDescription generated = ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&print));
+    REQUIRE(generated.wipe_tower.present);
+    CHECK(generated.wipe_tower.area > 0.);
+    CHECK(generated.wipe_tower.layer_height == Approx(.2));
+    CHECK(generated.wipe_tower.bbox[2] - generated.wipe_tower.bbox[0] > 99.);
+    size_t synthetic = 0;
+    for (const ApiHost::GCodeExportObject &entry : generated.objects) synthetic += entry.real ? 0 : 1;
+    CHECK(synthetic == 2);
+    const_cast<PrintObjectConfig &>(print.object(0).config()).wipe_tower_width.value = 999.;
+    const_cast<PrintObjectConfig &>(print.object(0).config()).wipe_tower_rotation_angle.value = 0.;
+    const ApiHost::GCodeExportDescription retained = ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&print));
+    CHECK(retained.wipe_tower.bbox == generated.wipe_tower.bbox);
+    CHECK(retained.wipe_tower.area == generated.wipe_tower.area);
+    Print unserved;
+    build_plan(unserved, false);
+    CHECK_FALSE(ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&unserved)).wipe_tower.present);
 }
 
 // Inspect borrowed service bands and plan-owned maintenance before source extrusions, asserting layer heights, rounded reservations, provenance and rigid XY transformation; failures remain visible.

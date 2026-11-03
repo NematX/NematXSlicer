@@ -71,6 +71,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/Plugins/GCode/FeatureGCode.hpp"
 #include "libslic3r/Plugins/GCode/CustomGCodePerPrintZ.hpp"
 #include "libslic3r/Plugins/GCode/Exporter/BinaryGCodeExporter.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/BambuGCodeExporter.hpp"
 #include "libslic3r/Plugins/GCode/Exporter/DefaultGCodeExporter.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp"
 #include "libslic3r/Plugins/GCode/Thumbnail/BuiltinGCodeThumbnails.hpp"
@@ -789,6 +790,8 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::GCodeGeneration::Exporter::register_binary_gcode_exporter_plugin(
             orchestrator_handle_value);
+        slic3r_api::GCodeGeneration::Exporter::register_bambu_gcode_exporter_plugin(
+            orchestrator_handle_value);
         slic3r_api::GCodeGeneration::PostProcessScriptsPlugin::register_post_process_scripts_plugin(
             orchestrator_handle_value);
         register_gcode_exporter_test_providers(orchestrator_handle_value);
@@ -951,6 +954,7 @@ void ensure_plugin_test_runtime_initialized()
         else
             orchestrator.set_plugin_active("gcode.exporter.simple", false);
         activate_plugin_or_fail(orchestrator, "gcode.exporter.bgcode");
+        activate_plugin_or_fail(orchestrator, "gcode.exporter.bambu3mf");
         activate_plugin_or_fail(orchestrator, "test.gcode.exporter.probe");
         activate_plugin_or_fail(orchestrator, "test.gcode.exporter.raw_query");
         activate_plugin_or_fail(orchestrator, "test.gcode.exporter.nofile");
