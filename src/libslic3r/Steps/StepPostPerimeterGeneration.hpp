@@ -10,11 +10,17 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
+/* This interface lets StepPipeline run plugins that edit perimeter output and infill areas.
+   Register the settings metadata defined by StepSelectorTraits.hpp with register_selector_traits()
+   at host startup. For a print, use prepare(), validate_pre(), run_step() and validate_post(). */
 namespace Slic3r {
 class Orchestrator;
 class Print;
 
 namespace Steps::StepPostPerimeterGeneration {
+
+// Declare host selector traits for post-perimeter processing on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
 
 void clear(Print &print);
 void prepare(Print &print);

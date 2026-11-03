@@ -35,6 +35,21 @@
 #include "libslic3r/Surface.hpp"
 
 namespace Slic3r::Steps::StepGenerateInfill {
+
+// Install the infill-generation selector declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_INFILL;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    traits.invalidates_step = STEP_INFILL;
+    traits.show_with_one_provider = false;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_INFILL, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 namespace {
 
 bool surface_needs_infill(const Surface &surface)

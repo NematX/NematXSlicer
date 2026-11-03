@@ -30,6 +30,21 @@ source trees before any plugin can consume or reorder the clones.
 
 namespace Slic3r::Steps::StepExtrusionOrdering {
 
+// Install the extrusion-ordering selector declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+// Copy output/print-preset traits into the borrowed host, which owns the strings; no print/configuration data changes.
+// Duplicate/conflicting installation asserts and allocation errors propagate without transferring provider ownership.
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_OUTPUT;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_ORDERING, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
+
 namespace {
 
 enum class SourceObjectStatus {

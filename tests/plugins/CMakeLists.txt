@@ -127,6 +127,7 @@ add_executable(${_TEST_NAME}_tests
     test_slice_volume.cpp
     test_step_pipeline_invalidation.cpp
     test_step_selector_snapshot.cpp
+    test_step_selector_traits.cpp
     test_dense_infill.cpp
     test_support_demand_modifiers.cpp
     test_support_demand_overhangs.cpp

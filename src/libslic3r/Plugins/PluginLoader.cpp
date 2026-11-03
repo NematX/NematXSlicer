@@ -156,6 +156,9 @@ after the available plugin set is known.
 namespace Slic3r {
 namespace {
 
+// Check a borrowed fragment id across the host's supported layout files without registering UI content.
+bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fragment_id);
+
 // Register module-owned built-ins with a non-null borrowed host; registrations and diagnostics are retained by the host.
 void register_builtin_plugins(orchestrator_handle *orchestrator);
 
@@ -899,6 +902,8 @@ bool has_ui_fragment(Orchestrator &orchestrator,
     return false;
 }
 
+// Search copied fragment lists in the host's layout order using a borrowed host and fragment id.
+// No registration, configuration or ownership changes occur; lookup/allocation failures propagate and absence returns false.
 bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fragment_id)
 {
     /*
@@ -908,14 +913,7 @@ bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fr
     fallback must then stay silent, otherwise the same setting appears twice in
     the GUI.
     */
-    static const char *const k_layout_files[] = {
-        "print.ui",
-        "printer_fff.ui",
-        "filament.ui",
-        "printer_sla.ui"
-    };
-
-    for (const char *target_file : k_layout_files)
+    for (const std::string &target_file : Orchestrator::ui_layout_files())
         if (has_ui_fragment(orchestrator, target_file, fragment_id))
             return true;
     return false;

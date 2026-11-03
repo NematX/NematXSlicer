@@ -1,5 +1,6 @@
 
 #include "StepPrepareForPeriemters.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_pre_perimeter.h"
 #include "libslic3r/Print.hpp"
@@ -7,7 +8,32 @@
 
 #include "StepRunner.hpp"
 
+/* This module runs perimeter-preparation plugins and clears auxiliary layers used for skirts and brims.
+   It also registers selector metadata defined by StepSelectorTraits.hpp with Orchestrator, the plugin manager.
+   Call graph:
+     register_selector_traits
+       Orchestrator::register_builtin_step_selector
+     clear
+       PrintObject::clear_auxiliary_layers
+       Print::reset_auxiliary_object
+     run_step
+       Detail::run_object_step_plugins
+   Plugins receive the print and each object's data through the step context. */
+
 namespace Slic3r::Steps::StepPrepareForPeriemters {
+
+// Install the perimeter-preparation selector declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_PERIMETER;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_PRE_PERIMETER, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 
 void clear(Print &print)
 {

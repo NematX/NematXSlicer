@@ -4,6 +4,7 @@
 ///|/
 
 #include "StepReadGeneratedGcode.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 
 #include <array>
 #include <cmath>
@@ -36,6 +37,21 @@ and their firmware-selected reader IDs remain owned by Print after export.
 */
 
 namespace Slic3r::Steps::StepReadGeneratedGcode {
+
+// Install the G-code reader service selector preset/category declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+// Copy output/printer-preset traits into the borrowed host, which owns the strings; no print/configuration data changes.
+// Duplicate/conflicting installation asserts and allocation errors propagate without transferring provider ownership.
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_OUTPUT;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+    const int32_t registered = orchestrator.register_builtin_step_selector(GCODE_READER, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 
 // Borrow the host/Print and reader ID, stream the Print-owned source into an
 // owned result, then replace the caller's result only on success. The source

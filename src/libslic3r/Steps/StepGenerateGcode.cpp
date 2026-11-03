@@ -57,6 +57,34 @@ can replace the built-in implementation without changing the pipeline runner.
 
 namespace Slic3r::Steps::StepGenerateGcode {
 
+// Install G-code, firmware and thumbnail selector preset/category declarations on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+// Copy output/printer-preset traits into the borrowed host, which owns the strings; output and firmware show singleton selectors.
+// G-code and firmware declare STEP_GCODE invalidation; thumbnail invalidation comes from the service rule in make_exclusive_group.
+// No print/configuration or provider ownership changes.
+// Duplicate/conflicting installation asserts and allocation errors propagate.
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits output;
+    output.category = RAW_OPTION_CATEGORY_OUTPUT;
+    output.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+    output.invalidates_step = STEP_GCODE;
+    output.show_with_one_provider = true;
+    const int32_t output_registered = orchestrator.register_builtin_step_selector(STEP_GCODE, output);
+    assert(output_registered == 1);
+    (void)output_registered;
+    const int32_t firmware_registered = orchestrator.register_builtin_step_selector(GCODE_FIRMWARE, std::move(output));
+    assert(firmware_registered == 1);
+    (void)firmware_registered;
+    StepSelectorTraits thumbnail;
+    thumbnail.category = RAW_OPTION_CATEGORY_OUTPUT;
+    thumbnail.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+    const int32_t thumbnail_registered = orchestrator.register_builtin_step_selector(GCODE_THUMBNAIL, std::move(thumbnail));
+    assert(thumbnail_registered == 1);
+    (void)thumbnail_registered;
+}
+
 namespace {
 
 constexpr size_t MaximumReportedValidationErrors = 10;

@@ -18,7 +18,35 @@
 #include "StepPipeline.hpp"
 #include "StepRunner.hpp"
 
+/* This module collects the areas that plugins identify as needing support for each print object.
+   Orchestrator is the plugin manager; StepSelectorTraits.hpp defines the selector metadata registered here.
+   Call graph:
+     register_selector_traits
+       Orchestrator::register_builtin_step_selector
+     run_step
+       State::reset
+       selected_or_active_plugins_for_step
+       State::demand_for
+       Plugin::setup
+       Plugin::setup_run
+       Plugin::run
+   Plugins read print objects and settings and write support requests into State.
+   Plugins run in sequence; each plugin's per-object work runs in parallel. */
+
 namespace Slic3r::Steps::StepSupportDemand {
+
+// Install the support-demand selector declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_SUPPORT;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_SUPPORT_DEMAND, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 
 State::State() = default;
 State::~State() = default;

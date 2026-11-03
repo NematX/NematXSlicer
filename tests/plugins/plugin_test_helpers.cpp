@@ -1044,16 +1044,16 @@ void ensure_plugin_test_runtime_initialized()
         for (Plugin *plugin : orchestrator.registered_plugins()) {
             g_startup_sets.provider_ids.insert(plugin->get_id());
             if (orchestrator.is_plugin_active(plugin)) g_startup_sets.active_provider_ids.insert(plugin->get_id());
-            const std::map<slicing_step_t, Steps::StepExclusiveGroup> &whole_steps = Steps::get_exclusive_steps();
-            const std::map<slicing_step_t, Steps::StepExclusiveGroup>::const_iterator whole = whole_steps.find(plugin->get_step());
+            const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &whole_steps = Steps::get_exclusive_steps();
+            const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator whole = whole_steps.find(plugin->get_step());
             std::string key;
-            if (whole != whole_steps.end()) key = whole->second.option_key_storage;
+            if (whole != whole_steps.end())
+                key = Steps::make_exclusive_step_group(orchestrator, plugin->get_step(), whole->second).option_key_storage;
             else if (!plugin->get_exclusive_group().empty())
                 key = Steps::plugin_exclusive_group_option_key(orchestrator, plugin->get_step(), plugin->get_exclusive_group());
             if (!key.empty() && PrintConfigDef::instance().get(key) != nullptr) g_startup_sets.selector_keys.insert(key);
         }
-        const char *const layouts[] = {"print.ui", "printer_fff.ui", "filament.ui", "printer_sla.ui"};
-        for (const char *layout : layouts)
+        for (const std::string &layout : Orchestrator::ui_layout_files())
             for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file(layout))
                 g_startup_sets.ui_fragments.emplace(layout, fragment.fragment_id);
         return true;

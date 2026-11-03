@@ -20,6 +20,27 @@ Wipe roots are plan-owned synthetic geometry with fixed execution order.
 
 namespace Slic3r::Steps::StepGenerateWipeTower {
 
+// Install wipe-tower generation and wipe-service selector declarations on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits tower;
+    tower.category = RAW_OPTION_CATEGORY_OUTPUT;
+    tower.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    tower.invalidates_step = STEP_WIPETOWER;
+    tower.show_with_one_provider = false;
+    const int32_t tower_registered = orchestrator.register_builtin_step_selector(STEP_WIPETOWER, std::move(tower));
+    assert(tower_registered == 1);
+    (void)tower_registered;
+    StepSelectorTraits wipe;
+    wipe.category = RAW_OPTION_CATEGORY_OUTPUT;
+    wipe.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    const int32_t wipe_registered = orchestrator.register_builtin_step_selector(WIPE_TOWER_WIPE, std::move(wipe));
+    assert(wipe_registered == 1);
+    (void)wipe_registered;
+}
+
 // No source-tree output belongs to this step; plan rollback owns removal.
 void clear(Print &print);
 // No preparation changes are required before whole-plan dispatch.

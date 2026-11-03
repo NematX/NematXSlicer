@@ -6,6 +6,7 @@
 /* The pipeline defines executable order, checkpoint replay, and metadata for
    built-in producer and service steps. Exclusive groups select one provider;
    active setting requirements check that provider's declared option keys.
+   Step modules declare selector traits; the identity table supplies stable keys and text to definition construction.
    Requested preview reads also fill Print's measured statistics; CLI reads are explicit. */
 #include "StepPipeline.hpp"
 
@@ -248,8 +249,23 @@ namespace {
 
 // Recognize built-in producer and service identities without changing scheduling state; unknown values return false.
 bool is_known_builtin_step(slicing_step_t step);
-// Map producer and service identities to option categories; unclassified steps use the slicing category.
-raw_option_category option_category_for_step(slicing_step_t step);
+// Copy the named group's selector traits, falling back to the whole step and then default traits.
+StepSelectorTraits selector_traits_of(const Orchestrator &orchestrator, slicing_step_t step, const std::string &group_id);
+// Return the declared invalidation step, then the registered dynamic or built-in step, or STEP_ANY if unknown.
+slicing_step_t selector_invalidation_step(const Orchestrator &orchestrator, slicing_step_t step, const StepSelectorTraits &traits);
+// Build UI layout text from the group's placement and line label, using Notes when no placement is declared.
+std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std::string &line_label);
+// Build a selector description; its raw option pointers refer to its own strings and need refreshing after moves.
+StepExclusiveGroup make_exclusive_group(slicing_step_t step, const std::string &group_id, const std::string &key,
+                                       const std::string &label, const std::string &line_label, const std::string &tooltip,
+                                       StepSelectorTraits traits, slicing_step_t invalidates_step);
+// Build a plugin group using borrowed provider text and resolved host traits; owned metadata is returned.
+StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator, slicing_step_t step,
+                                               const std::string &group_id, const Plugin &first_plugin);
+// Copy provider text into a group's owned metadata and rebuild its fragment, without registering configuration.
+void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin *> &plugins);
+// Preserve declared/historical option keys or generate an owned sanitized identity without registration.
+std::string option_key_for_plugin_group(const Orchestrator &orchestrator, slicing_step_t step, const std::string &group_id);
 
 std::string exclusive_group_ui_fragment(const std::string &key,
                                         const std::string &line_label)
@@ -286,13 +302,17 @@ std::string sanitized_config_key_part(const std::string &text)
     return out.empty() ? "plugin_group" : out;
 }
 
+// Read borrowed host traits and identities to preserve a declared or thumbnail key, otherwise generate a sanitized key.
+// The result owns its bytes; no state or ownership changes occur and allocation failures propagate.
 std::string option_key_for_plugin_group(const Orchestrator &orchestrator,
                                         slicing_step_t step,
                                         const std::string &group_id)
 {
-    // Preserve the historical key; its dynamic enum now stores provider ids.
+    // Thumbnail encoding uses this established serialized configuration key.
     if (step == GCODE_THUMBNAIL && group_id == "thumbnail_encoder_plugin")
         return "thumbnails_format";
+    const StepSelectorTraits *traits = orchestrator.step_selector(step, group_id);
+    if (traits != nullptr && !traits->option_key.empty()) return traits->option_key;
     const Orchestrator::DynamicStepInfo *step_info = orchestrator.step_info(step);
     const std::string step_identity = step_info != nullptr ?
         sanitized_config_key_part(step_info->name) : std::to_string(int(step));
@@ -345,55 +365,25 @@ bool is_known_builtin_step(slicing_step_t step)
     }
 }
 
-// Classify the supplied step for option presentation, returning slicing for unclassified values without mutation.
-raw_option_category option_category_for_step(slicing_step_t step)
+StepSelectorTraits selector_traits_of(const Orchestrator &orchestrator, slicing_step_t step, const std::string &group_id)
 {
-    switch (step) {
-    case STEP_PERIMETER:
-    case STEP_POST_PERIMETER:
-    case STEP_PRE_PERIMETER:
-        return RAW_OPTION_CATEGORY_PERIMETER;
-    case STEP_INFILL:
-    case STEP_INFILL_GROUP:
-    case STEP_PRE_INFILL:
-    case STEP_POST_INFILL:
-        return RAW_OPTION_CATEGORY_INFILL;
-    case STEP_SUPPORT:
-    case STEP_SUPPORT_DEMAND:
-    case STEP_SUPPORT_SPOT:
-        return RAW_OPTION_CATEGORY_SUPPORT;
-    case STEP_GCODE:
-    case GCODE_FIRMWARE:
-    case GCODE_THUMBNAIL:
-    case GCODE_READER:
-    case STEP_ORDERING:
-    case STEP_WIPETOWER:
-    case WIPE_TOWER_WIPE:
-    case STEP_LAYER_STICHING:
-        return RAW_OPTION_CATEGORY_OUTPUT;
-    default:
-        return RAW_OPTION_CATEGORY_SLICING;
-    }
+    const StepSelectorTraits *declared = orchestrator.step_selector(step, group_id);
+    return declared != nullptr ? *declared : StepSelectorTraits();
 }
 
-raw_option_preset_type option_preset_type_for_step(slicing_step_t step)
+slicing_step_t selector_invalidation_step(const Orchestrator &orchestrator, slicing_step_t step, const StepSelectorTraits &traits)
 {
-    /*
-    Exclusive selectors are normal config options, so their preset family must
-    match the GUI file that displays them. Most step selectors are print-profile
-    choices, but G-code backend selection belongs next to printer firmware
-    settings and therefore has to be stored in the printer preset.
-    */
-    static const std::map<slicing_step_t, raw_option_preset_type> s_step_preset_types = {
-        { STEP_GCODE, RAW_PRESET_TYPE_FFF_PRINTER },
-        { GCODE_FIRMWARE, RAW_PRESET_TYPE_FFF_PRINTER },
-        { GCODE_THUMBNAIL, RAW_PRESET_TYPE_FFF_PRINTER },
-        { GCODE_READER, RAW_PRESET_TYPE_FFF_PRINTER }
-    };
+    if (traits.invalidates_step) return *traits.invalidates_step;
+    const Orchestrator::DynamicStepInfo *info = orchestrator.step_info(step);
+    if (info != nullptr) return info->invalidates_step;
+    return is_known_builtin_step(step) ? step : STEP_ANY;
+}
 
-    const std::map<slicing_step_t, raw_option_preset_type>::const_iterator found =
-        s_step_preset_types.find(step);
-    return found == s_step_preset_types.end() ? RAW_PRESET_TYPE_FFF_PRINT : found->second;
+std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std::string &line_label)
+{
+    if (group.traits.ui_page.empty()) return exclusive_group_ui_fragment(group.option_key_storage, line_label);
+    return "page:" + group.traits.ui_page + "\n" + "group:" + group.traits.ui_group + "\n" +
+           "line:" + line_label + "\n" + "setting:" + group.option_key_storage + "\n" + "end_line\n";
 }
 
 /*
@@ -408,10 +398,10 @@ StepExclusiveGroup make_exclusive_group(slicing_step_t step,
                                         const std::string &group_id,
                                         const std::string &key,
                                         const std::string &label,
-                                        raw_option_category category,
                                         const std::string &line_label,
                                         const std::string &tooltip,
-                                        raw_option_preset_type option_preset_type)
+                                        StepSelectorTraits traits,
+                                        slicing_step_t invalidates_step)
 {
     StepExclusiveGroup group = {};
     group.group_id = group_id;
@@ -419,45 +409,34 @@ StepExclusiveGroup make_exclusive_group(slicing_step_t step,
     group.label_storage = label;
     group.tooltip_storage = tooltip;
     group.step = step;
+    group.traits = std::move(traits);
 
     raw_config_option_def def = raw_config_option_def_init();
     def.type = RAW_CO_ENUM;
     def.gui_type = RAW_GUI_TYPE_SELECT_CLOSE;
-    def.container_type = RAW_CONTAINER_TYPE_PROJECT;
+    def.container_type = group.traits.container_type;
     // Request removal of inactive plugin IDs from this selector during finalization.
     def.contains_plugin_id = 1;
-    def.option_preset_type = option_preset_type;
+    def.option_preset_type = group.traits.option_preset_type;
     def.printer_technology = RAW_PT_FFF;
-    def.category = category;
+    def.category = group.traits.category;
     // Service selectors invalidate the consuming pipeline step rather than
     // pretending that the service itself is independently executable.
     def.invalidates_step =
         (step == GCODE_FIRMWARE || step == GCODE_THUMBNAIL || step == GCODE_READER) ?
-            STEP_GCODE : step;
+            STEP_GCODE : invalidates_step;
+    if (step == GCODE_FIRMWARE || step == GCODE_THUMBNAIL || step == GCODE_READER)
+        group.traits.invalidates_step = def.invalidates_step;
     def.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI;
     group.option_def = def;
 
-    group.ui_fragment = exclusive_group_ui_fragment(group.option_key_storage, line_label);
+    group.ui_fragment = plugin_group_ui_fragment(group, line_label);
     group.refresh_storage_pointers();
     return group;
 }
 
-StepExclusiveGroup make_exclusive_step_group(slicing_step_t step,
-                                             const char *key,
-                                             const char *label,
-                                             raw_option_category category,
-                                             const char *line_label)
-{
-    return make_exclusive_group(step,
-                                key,
-                                key,
-                                label,
-                                category,
-                                line_label,
-                                "Choose which active plugin owns this exclusive slicing step.",
-                                option_preset_type_for_step(step));
-}
-
+// Copy resolved traits and borrowed provider text into an owned definition without registering configuration.
+// Raw pointers borrow returned storage and require refresh after moves; allocation errors propagate.
 StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
                                                slicing_step_t step,
                                                const std::string &group_id,
@@ -472,19 +451,15 @@ StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
         "Choose which active plugin owns this exclusive plugin group." :
         first_plugin.get_exclusive_group_tooltip();
 
+    const StepSelectorTraits traits = selector_traits_of(orchestrator, step, group_id);
     StepExclusiveGroup group = make_exclusive_group(step,
                                                     group_id,
                                                     key,
                                                     label,
-                                                    option_category_for_step(step),
                                                     label,
                                                     tooltip,
-                                                    option_preset_type_for_step(step));
-    const Orchestrator::DynamicStepInfo *step_info = orchestrator.step_info(step);
-    if (step_info != nullptr)
-        group.option_def.invalidates_step = step_info->invalidates_step;
-    else if (!is_known_builtin_step(step))
-        group.option_def.invalidates_step = STEP_ANY;
+                                                    traits,
+                                                    selector_invalidation_step(orchestrator, step, traits));
 
     /*
     Seam placement is selected by the effective PrintRegion configuration.
@@ -494,6 +469,10 @@ StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
     if (step == SEAM_PLACER && group_id == "seam_placer_plugin") {
         group.option_def.container_type = RAW_CONTAINER_TYPE_REGION;
         group.option_def.invalidates_step = STEP_ORDERING;
+        group.traits.container_type = group.option_def.container_type;
+        group.traits.invalidates_step = group.option_def.invalidates_step;
+        group.traits.ui_page = "Perimeters & Shell";
+        group.traits.ui_group = "Seam";
         group.ui_fragment =
             "page:Perimeters & Shell\n"
             "group:Seam\n"
@@ -505,6 +484,8 @@ StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
     return group;
 }
 
+// Copy the first active provider's nonempty text into group-owned storage and rebuild its trait-driven fragment.
+// Provider pointers are borrowed, raw group pointers are refreshed, no options are registered, and allocations may throw.
 void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin *> &plugins)
 {
     // The selector belongs to the group, not to one plugin. When plugin authors
@@ -529,8 +510,8 @@ void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin
                     "setting:" + group.option_key_storage + "\n"
                     "end_line\n";
             } else {
-                group.ui_fragment = exclusive_group_ui_fragment(
-                    group.option_key_storage, group.label_storage);
+                group.ui_fragment = plugin_group_ui_fragment(
+                    group, group.label_storage);
             }
         }
         if (!plugin->get_exclusive_group_tooltip().empty())
@@ -541,6 +522,41 @@ void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin
 }
 
 } // namespace
+
+// Build owned selector metadata and its fragment from borrowed identity text and copied module traits.
+// Refresh raw pointers after moving the result; no configuration/registration changes occur and allocations may throw.
+StepExclusiveGroup make_exclusive_step_group(const Orchestrator &orchestrator, slicing_step_t step,
+                                             const StepExclusiveIdentity &identity)
+{
+    const StepSelectorTraits traits = selector_traits_of(orchestrator, step, identity.key);
+    return make_exclusive_group(step, identity.key, identity.key, identity.label, identity.line_label,
+                                "Choose which active plugin owns this exclusive slicing step.", traits,
+                                selector_invalidation_step(orchestrator, step, traits));
+}
+
+// Install copied host traits by calling each owner module with this borrowed host, without touching print/configuration data.
+// This runs inside the host constructor: modules must not call Orchestrator::instance(), which would recurse into singleton
+// initialization. Each module asserts successful registration; allocation errors propagate and no provider ownership changes.
+void register_builtin_step_selectors(Orchestrator &orchestrator)
+{
+    StepLayerHeightGeneration::register_selector_traits(orchestrator);
+    StepSlicing::register_selector_traits(orchestrator);
+    StepPrepareForPeriemters::register_selector_traits(orchestrator);
+    StepGeneratePerimeter::register_selector_traits(orchestrator);
+    StepPostPerimeterGeneration::register_selector_traits(orchestrator);
+    StepPrepareInfill::register_selector_traits(orchestrator);
+    StepGroupInfillRegions::register_selector_traits(orchestrator);
+    StepGenerateInfill::register_selector_traits(orchestrator);
+    StepPostInfillGeneration::register_selector_traits(orchestrator);
+    StepSupportDemand::register_selector_traits(orchestrator);
+    StepGenerateSupport::register_selector_traits(orchestrator);
+    StepDetectSupportSpots::register_selector_traits(orchestrator);
+    StepExtrusionOrdering::register_selector_traits(orchestrator);
+    StepGenerateWipeTower::register_selector_traits(orchestrator);
+    StepLayerStiching::register_selector_traits(orchestrator);
+    StepGenerateGcode::register_selector_traits(orchestrator);
+    StepReadGeneratedGcode::register_selector_traits(orchestrator);
+}
 
 // Build metadata through the same constructor used by selection, borrowing the host and provider.
 // The returned group owns its strings; refresh its raw pointers after moving it. No registration or
@@ -602,39 +618,40 @@ void StepExclusiveGroup::set_enum_plugins(const std::vector<std::pair<std::strin
     refresh_storage_pointers();
 }
 
-const std::map<slicing_step_t, StepExclusiveGroup> &get_exclusive_steps()
+const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
 {
-    static const std::map<slicing_step_t, StepExclusiveGroup> s_groups = {
-        {STEP_LAYER_HEIGHT,       make_exclusive_step_group(STEP_LAYER_HEIGHT,       "step_layer_height_plugin",       "Layer height plugin",       RAW_OPTION_CATEGORY_SLICING,   "Layer height step plugin")},
-        {STEP_SLICING,            make_exclusive_step_group(STEP_SLICING,            "step_slicing_plugin",            "Slicing plugin",            RAW_OPTION_CATEGORY_SLICING,   "Slicing step plugin")},
-        {STEP_PERIMETER,          make_exclusive_step_group(STEP_PERIMETER,          "step_perimeter_plugin",          "Perimeter plugin",          RAW_OPTION_CATEGORY_PERIMETER, "Perimeter step plugin")},
-        {STEP_INFILL_GROUP,       make_exclusive_step_group(STEP_INFILL_GROUP,       "step_infill_group_plugin",       "Infill grouping plugin",    RAW_OPTION_CATEGORY_INFILL,    "Infill grouping step plugin")},
-        {STEP_INFILL,             make_exclusive_step_group(STEP_INFILL,             "step_infill_plugin",             "Infill plugin",             RAW_OPTION_CATEGORY_INFILL,    "Infill step plugin")},
-        {STEP_SUPPORT,            make_exclusive_step_group(STEP_SUPPORT,            "step_support_plugin",            "Support plugin",            RAW_OPTION_CATEGORY_SUPPORT,   "Support step plugin")},
-        {STEP_WIPETOWER,          make_exclusive_step_group(STEP_WIPETOWER,          "step_wipetower_plugin",          "Wipe tower plugin",         RAW_OPTION_CATEGORY_OUTPUT,    "Wipe tower step plugin")},
-        {STEP_LAYER_STICHING,     make_exclusive_step_group(STEP_LAYER_STICHING,     "step_layer_stiching_plugin",     "Layer stitching plugin",    RAW_OPTION_CATEGORY_OUTPUT,    "Layer stitching step plugin")},
-        {STEP_GCODE,              make_exclusive_step_group(STEP_GCODE,              "step_gcode_plugin",              "G-code plugin",             RAW_OPTION_CATEGORY_OUTPUT,    "G-code step plugin")},
-        {GCODE_FIRMWARE,          make_exclusive_step_group(GCODE_FIRMWARE,          "gcode_firmware_plugin",          "G-code firmware",           RAW_OPTION_CATEGORY_OUTPUT,    "G-code firmware")}
+    static const std::map<slicing_step_t, StepExclusiveIdentity> s_groups = {
+        {STEP_LAYER_HEIGHT,   {"step_layer_height_plugin",   "Layer height plugin",    "Layer height step plugin"}},
+        {STEP_SLICING,        {"step_slicing_plugin",        "Slicing plugin",         "Slicing step plugin"}},
+        {STEP_PERIMETER,      {"step_perimeter_plugin",      "Perimeter plugin",       "Perimeter step plugin"}},
+        {STEP_INFILL_GROUP,   {"step_infill_group_plugin",   "Infill grouping plugin", "Infill grouping step plugin"}},
+        {STEP_INFILL,         {"step_infill_plugin",         "Infill plugin",          "Infill step plugin"}},
+        {STEP_SUPPORT,        {"step_support_plugin",        "Support plugin",         "Support step plugin"}},
+        {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
+        {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
+        {STEP_GCODE,          {"step_gcode_plugin",          "G-code plugin",          "G-code step plugin"}},
+        {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}}
     };
     return s_groups;
 }
 
+// Build owned groups for borrowed active providers using module traits and provider text, without registering options.
+// Empty/hidden singletons are omitted, provider pointers remain borrowed, and allocation errors propagate.
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator)
 {
     std::vector<StepExclusivePluginGroup> out;
-    const std::map<slicing_step_t, StepExclusiveGroup> &exclusive_steps = get_exclusive_steps();
+    const std::map<slicing_step_t, StepExclusiveIdentity> &exclusive_steps = get_exclusive_steps();
 
-    // Host-defined unique steps always have exactly one exclusive group. This
-    // keeps old "replace this whole step" plugins and plugin-declared groups in
-    // the same selection model.
-    for (const std::pair<const slicing_step_t, StepExclusiveGroup> &entry : exclusive_steps) {
+    // A whole-step selector covers every provider of that step, regardless of each provider's own group name.
+    for (const std::pair<const slicing_step_t, StepExclusiveIdentity> &entry : exclusive_steps) {
         std::vector<Plugin *> active_plugins = orchestrator.get_active_plugins_for_step(entry.first);
-        // The printer layout anchors the firmware selector to the G-code selector even with one writer.
-        if (active_plugins.empty() || (active_plugins.size() == 1 && entry.first != GCODE_FIRMWARE && entry.first != STEP_GCODE))
+        StepExclusiveGroup definition = make_exclusive_step_group(orchestrator, entry.first, entry.second);
+        // Some declarations display a selector even when only one provider is available.
+        if (active_plugins.empty() || (active_plugins.size() == 1 && !definition.traits.show_with_one_provider))
             continue;
 
         StepExclusivePluginGroup plugin_group;
-        plugin_group.group = entry.second;
+        plugin_group.group = std::move(definition);
         plugin_group.group.refresh_storage_pointers();
         apply_plugin_group_text(plugin_group.group, active_plugins);
         plugin_group.plugins = std::move(active_plugins);
@@ -661,7 +678,8 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
                 plugins_by_group_id[plugin->get_exclusive_group()].push_back(plugin);
 
         for (const std::pair<const std::string, std::vector<Plugin *>> &entry : plugins_by_group_id) {
-            if (entry.second.size() <= 1)
+            const StepSelectorTraits traits = selector_traits_of(orchestrator, step_plugins.first, entry.first);
+            if (entry.second.empty() || (entry.second.size() == 1 && !traits.show_with_one_provider))
                 continue;
 
             StepExclusivePluginGroup plugin_group;
@@ -709,6 +727,9 @@ Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
     return plugins.front();
 }
 
+// Resolve borrowed active providers and settings using whole-step identities or named-group metadata.
+// Zero/one active provider returns directly; returned pointers remain host-owned, no settings/print data change,
+// and allocation failures propagate while multi-provider selectors resolve through their generated definitions.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,
                                                           const ConfigBase *config)
@@ -717,10 +738,10 @@ std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestr
     if (active_plugins.size() <= 1)
         return active_plugins;
 
-    const std::map<slicing_step_t, StepExclusiveGroup> &exclusive_steps = get_exclusive_steps();
-    const std::map<slicing_step_t, StepExclusiveGroup>::const_iterator exclusive_it = exclusive_steps.find(step);
+    const std::map<slicing_step_t, StepExclusiveIdentity> &exclusive_steps = get_exclusive_steps();
+    const std::map<slicing_step_t, StepExclusiveIdentity>::const_iterator exclusive_it = exclusive_steps.find(step);
     if (exclusive_it != exclusive_steps.end()) {
-        StepExclusiveGroup group = exclusive_it->second;
+        StepExclusiveGroup group = make_exclusive_step_group(orchestrator, step, exclusive_it->second);
         group.refresh_storage_pointers();
         Plugin *selected = selected_plugin_from_group(group, active_plugins, config);
         return selected != nullptr ? std::vector<Plugin *>{ selected } : std::vector<Plugin *>{};

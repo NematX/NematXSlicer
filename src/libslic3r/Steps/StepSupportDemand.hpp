@@ -13,6 +13,10 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
+/* This interface lets StepPipeline collect support requests in State, indexed by print object.
+   Register the settings metadata defined by StepSelectorTraits.hpp with register_selector_traits()
+   at host startup. run_step() creates or fills State; pass it to support generation afterward.
+   State::reset() discards the collected requests. */
 namespace Slic3r {
 class Orchestrator;
 class Print;
@@ -21,6 +25,9 @@ class PrintObject;
 namespace ApiHost::Steps { class SupportDemandSet; }
 
 namespace Steps::StepSupportDemand {
+
+// Declare host selector traits for support-demand processing on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
 
 class State
 {

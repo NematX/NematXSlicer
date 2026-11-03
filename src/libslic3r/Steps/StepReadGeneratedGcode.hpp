@@ -17,6 +17,9 @@ struct PrintStatistics;
 
 namespace Steps::StepReadGeneratedGcode {
 
+// Declare host selector traits for G-code reader services on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
 /*
 Generated G-code reading and print statistics
 ==============================
@@ -32,6 +35,10 @@ a requested viewer result do not trigger reading in the pipeline.
 
 The caller decides whether a Reader failure is fatal. run() reports failures as
 exceptions and never removes or modifies the producer-owned source file.
+
+At host startup, register_selector_traits(orchestrator) declares the reader's
+settings metadata. StepSelectorTraits.hpp defines that metadata; the reading
+entry points below supply the requested preview or print statistics.
 */
 // Build a viewer result from the published source using the specified reader.
 void run(Orchestrator &orchestrator,

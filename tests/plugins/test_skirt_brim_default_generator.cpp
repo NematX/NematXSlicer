@@ -447,7 +447,7 @@ TEST_CASE("STEP_SKIRT_BRIM exposes a brim exclusive group but is not exclusive i
     CHECK(pattern_requires_ears);
     CHECK(detection_requires_ears);
 
-    const std::map<slicing_step_t, Steps::StepExclusiveGroup> &exclusive_steps = Steps::get_exclusive_steps();
+    const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &exclusive_steps = Steps::get_exclusive_steps();
     CHECK(exclusive_steps.find(STEP_SKIRT_BRIM) == exclusive_steps.end());
 }
 

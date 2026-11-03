@@ -8,9 +8,12 @@
 
 /* Pipeline execution and selection metadata. Exclusive groups select one
    provider independently of other groups on the same step. Active setting
-   requirements use that group selection to check declared option support. */
+   requirements use that group selection to check declared option support.
+   Whole-step identities hold keys and display text; StepSelectorTraits.hpp defines the settings
+   and UI placement rules declared by each step module. */
 
 #include "libslic3r/Api/plugin/c/slic3r_gcode_thumbnail.h"
+#include "libslic3r/Api/host/StepSelectorTraits.hpp"
 #include <cstdint>
 #include <functional>
 #include <map>
@@ -64,6 +67,8 @@ struct StepExclusiveGroup
     std::string label_storage;
     std::string tooltip_storage;
     slicing_step_t step;
+    // Owned module traits, with scope, invalidation and placement adjusted to match the effective definition.
+    StepSelectorTraits traits;
     raw_config_option_def option_def;
     std::string ui_fragment;
     std::vector<raw_gui_rule> gui_activation_rules;
@@ -83,7 +88,16 @@ struct StepExclusivePluginGroup
     std::vector<Plugin *> plugins;
 };
 
-const std::map<slicing_step_t, StepExclusiveGroup> &get_exclusive_steps();
+// These keys and labels identify settings that select a provider for an entire step.
+struct StepExclusiveIdentity
+{
+    const char *key;
+    const char *label;
+    const char *line_label;
+};
+
+// Return the keys and labels of selectors for entire steps.
+const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps();
 
 // Return the stable generated option key used by a plugin-defined exclusive
 // group. Consumers use this to report the exact regional selector that failed.
@@ -97,7 +111,15 @@ StepExclusiveGroup plugin_exclusive_group_definition(const Orchestrator &orchest
                                                       const std::string &group_id,
                                                       const Plugin &first_plugin);
 
+// Build a selector definition and UI fragment from its identity and module traits without registration or configuration changes.
+StepExclusiveGroup make_exclusive_step_group(const Orchestrator &orchestrator, slicing_step_t step,
+                                             const StepExclusiveIdentity &identity);
+// Declare built-in selector traits through modules using only the supplied host, including during host construction.
+void register_builtin_step_selectors(Orchestrator &orchestrator);
+
+// Build generated selector metadata for active groups using their module declarations and provider text.
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator);
+// Return the active providers selected for the whole step or its named groups by the supplied settings.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,
                                                           const ConfigBase *config);

@@ -26,11 +26,42 @@
 
 #include "StepRunner.hpp"
 
+/* This module runs the selected slicing plugin and combines its region slices into layer islands.
+   Orchestrator is the plugin manager; StepSelectorTraits.hpp defines the selector metadata registered here.
+   Call graph:
+     register_selector_traits
+       Orchestrator::register_builtin_step_selector
+     run_step
+       validate_pre
+       prepare -> recreate_object_layers -> object_layers_from_layer_profile
+       selected_or_active_plugin_for_step
+       Plugin::setup
+       Plugin::setup_run
+       Plugin::run
+       recompute_layer_slices_from_raw_regions
+       validate_post
+   Layer profiles determine layer intervals; plugins write region slices. Objects run in parallel. */
+
 namespace Slic3r {
 LayerUPtrs new_layers(PrintObject *print_object, const std::vector<double> &object_layers);
 }
 
 namespace Slic3r::Steps::StepSlicing {
+
+// Install the slicing selector declaration without changing configuration or print data.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_SLICING;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    traits.invalidates_step = STEP_SLICING;
+    traits.show_with_one_provider = false;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_SLICING, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 namespace {
 
 std::vector<double> object_layers_from_layer_profile(const std::vector<coord_t> &layer_profile)

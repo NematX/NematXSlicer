@@ -12,11 +12,18 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
+/* This interface lets StepPipeline run wipe managers over the printing plan.
+   Register the settings metadata defined by StepSelectorTraits.hpp with register_selector_traits()
+   at host startup. For a print, use prepare(), validate_pre(), run_step() and validate_post();
+   clear() leaves output removal to plan rollback. */
 namespace Slic3r {
 class Orchestrator;
 class Print;
 
 namespace Steps::StepGenerateWipeTower {
+
+// Declare host selector traits for wipe-tower generation and wiping on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
 
 void clear(Print &print);
 void prepare(Print &print);

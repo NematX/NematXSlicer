@@ -11,11 +11,18 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
+/* This interface lets StepPipeline produce a G-code file and optional thumbnails.
+   Register the settings metadata defined by StepSelectorTraits.hpp with register_selector_traits()
+   at host startup. For a print, use prepare(), validate_pre(), run_step() and validate_post();
+   run_step() returns the output path. */
 namespace Slic3r {
 class Orchestrator;
 class Print;
 
 namespace Steps::StepGenerateGcode {
+
+// Declare host selector traits for G-code generation, firmware and thumbnail services on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
 
 void clear(Print &print);
 void prepare(Print &print);

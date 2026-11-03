@@ -60,6 +60,7 @@ set(SLIC3R_SOURCES
 	Api/host/Orchestrator.hpp
 	Api/host/Plugin.cpp
 	Api/host/Plugin.hpp
+	Api/host/StepSelectorTraits.hpp
 	Api/host/slic3r_bridge_detector.cpp
 	Api/host/slic3r_clipper.cpp
 	Api/host/slic3r_config.cpp

@@ -174,13 +174,14 @@ void append_registered(std::vector<std::string> &rows, const Orchestrator &host,
         for (const Plugin *plugin : host.registered_plugins())
             if (provider_ids.count(plugin->get_id()) != 0 && plugin->get_exclusive_group() == identity.second)
                 key = Steps::plugin_exclusive_group_option_key(host, plugin->get_step(), identity.second);
-        for (const std::pair<const slicing_step_t, Steps::StepExclusiveGroup> &entry : Steps::get_exclusive_steps())
-            if (entry.second.group_id == identity.second) key = entry.second.option_key_storage;
+        for (const std::pair<const slicing_step_t, Steps::StepExclusiveIdentity> &entry : Steps::get_exclusive_steps()) {
+            const Steps::StepExclusiveGroup group = Steps::make_exclusive_step_group(host, entry.first, entry.second);
+            if (group.group_id == identity.second) key = group.option_key_storage;
+        }
         if (excluded_keys.count(key) == 0) native_fragments.emplace(identity, key);
     }
     std::set<std::pair<std::string, std::string>> captured_fragments;
-    const char *const files[] = {"print.ui", "printer_fff.ui", "filament.ui", "printer_sla.ui"};
-    for (const char *file : files)
+    for (const std::string &file : Orchestrator::ui_layout_files())
         for (const Orchestrator::PluginUiFragment &fragment : host.ui_fragments_for_file(file)) {
             if (groups.count(fragment.fragment_id) == 0) continue;
             const std::map<std::pair<std::string, std::string>, std::string>::const_iterator native =
@@ -336,10 +337,11 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
     std::vector<std::string> rows;
     std::set<std::string> keys;
     std::set<std::string> groups;
-    for (const std::pair<const slicing_step_t, Steps::StepExclusiveGroup> &entry : Steps::get_exclusive_steps()) {
-        append_group(rows, "table|" + std::to_string(int(entry.first)), entry.second);
-        keys.insert(entry.second.option_key_storage);
-        groups.insert(entry.second.group_id);
+    for (const std::pair<const slicing_step_t, Steps::StepExclusiveIdentity> &entry : Steps::get_exclusive_steps()) {
+        Steps::StepExclusiveGroup group = Steps::make_exclusive_step_group(host, entry.first, entry.second);
+        append_group(rows, "table|" + std::to_string(int(entry.first)), group);
+        keys.insert(group.option_key_storage);
+        groups.insert(group.group_id);
     }
     // Startup identities include every loaded provider and generated selector, independently of later test registrations.
     const Test::Plugins::PluginTestStartupSets &startup = Test::Plugins::plugin_test_startup_sets();

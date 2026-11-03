@@ -2,7 +2,8 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* The orchestrator owns plugin registration and run contexts, and resolves service invalidation to executable producers. */
+/* The orchestrator owns plugin registration and run contexts, and resolves service invalidation to executable producers.
+   Step modules copy host selector declarations into a protected registry before plugins can register. */
 #include "Orchestrator.hpp"
 #include "GCodeReaderService.hpp"
 #include "GCodeThumbnailRenderer.hpp"
@@ -20,6 +21,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <tuple>
 #include <utility>
 
 #include <boost/filesystem.hpp>
@@ -51,6 +53,9 @@
 #include "Plugin.hpp"
 
 namespace Slic3r {
+
+// Compare every owned selector field without reading providers or configuration and without mutation.
+static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelectorTraits &rhs);
 
 // Compare normalized definitions and report the first differing field.
 static bool config_option_def_compatible(const ConfigOptionDef &existing, const ConfigOptionDef &candidate, std::string *reason);
@@ -739,9 +744,10 @@ int32_t orchestrator_selected_plugin_used_config_keys(orchestrator_handle *me,
 namespace Slic3r {
 
 // Initialize the host registries and reserve built-in runtime identities.
-// The singleton owns this state until process shutdown.
+// The singleton owns copied selector traits until shutdown; allocation failures propagate and no print data is accessed.
 Orchestrator::Orchestrator()
 {
+    Steps::register_builtin_step_selectors(*this);
     link_config_definition_api();
     // Zero is a real schema identity, not an allocation failure. Registering it
     // here lets generic callers resolve the portable Reader schema by name
@@ -781,6 +787,77 @@ Orchestrator::Orchestrator()
     // today, but using the registry keeps the storage key and future plugin
     // path identical from the model's point of view.
     m_generic_facets_annotations.emplace_back(builtin_seam_facets_annotation_definition());
+}
+
+// Compare copied fields, including empty optionals and strings; no host state changes or ownership transfer occurs.
+// The borrowed inputs must remain alive during comparison, which cannot fail.
+static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelectorTraits &rhs)
+{
+    return std::tie(lhs.exclusive_group, lhs.container_type, lhs.invalidates_step, lhs.category,
+                    lhs.option_preset_type, lhs.ui_target_file, lhs.ui_page, lhs.ui_group, lhs.option_key,
+                    lhs.strict_selection, lhs.read_with_one_provider, lhs.show_with_one_provider,
+                    lhs.value_when_absent, lhs.provider_settings_rules, lhs.auto_value) ==
+           std::tie(rhs.exclusive_group, rhs.container_type, rhs.invalidates_step, rhs.category,
+                    rhs.option_preset_type, rhs.ui_target_file, rhs.ui_page, rhs.ui_group, rhs.option_key,
+                    rhs.strict_selection, rhs.read_with_one_provider, rhs.show_with_one_provider,
+                    rhs.value_when_absent, rhs.provider_settings_rules, rhs.auto_value);
+}
+
+// Return immutable process-owned layout names without reading configuration or transferring ownership.
+// First-use allocation failures propagate; no host registry or print data is changed.
+const std::vector<std::string> &Orchestrator::ui_layout_files()
+{
+    static const std::vector<std::string> files {"print.ui", "printer_fff.ui", "filament.ui", "printer_sla.ui"};
+    return files;
+}
+
+// Validate and move owned traits into the host registry, leaving existing declarations intact on rejection.
+// Status is 1 added, 0 identical, -1 invalid or -2 conflict; no configuration/print data changes and allocations may throw.
+int32_t Orchestrator::register_builtin_step_selector(slicing_step_t step, StepSelectorTraits traits)
+{
+    if (step == STEP_NONE || step == STEP_ANY) return -1;
+    if (traits.container_type != RAW_CONTAINER_TYPE_PROJECT && traits.container_type != RAW_CONTAINER_TYPE_OBJECT &&
+        traits.container_type != RAW_CONTAINER_TYPE_REGION) return -1;
+    if (traits.category < RAW_OPTION_CATEGORY_PERIMETER || traits.category > RAW_OPTION_CATEGORY_MILLING) return -1;
+    if (traits.option_preset_type == RAW_PRESET_TYPE_NONE || traits.option_preset_type >= RAW_PRESET_TYPE_COUNT) return -1;
+    if (std::find(ui_layout_files().begin(), ui_layout_files().end(), traits.ui_target_file) == ui_layout_files().end()) return -1;
+    if (traits.ui_page.empty() != traits.ui_group.empty()) return -1;
+    if (!traits.option_key.empty()) {
+        if (traits.exclusive_group.empty()) return -1;
+        for (size_t i = 0; i < traits.option_key.size(); ++i) {
+            const char ch = traits.option_key[i];
+            if (!(ch == '_' || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (i != 0 && ch >= '0' && ch <= '9'))) return -1;
+        }
+    }
+    if (traits.invalidates_step && *traits.invalidates_step != STEP_NONE &&
+        Steps::execution_index(*traits.invalidates_step) == Steps::execution_order().size()) return -1;
+    const std::pair<slicing_step_t, std::string> key {step, traits.exclusive_group};
+    const std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits>::const_iterator found = m_step_selectors.find(key);
+    if (found != m_step_selectors.end()) {
+        if (same_selector_traits(found->second, traits)) return 0;
+        BOOST_LOG_TRIVIAL(warning) << "Selector traits already declared; keeping the first declaration.";
+        return -2;
+    }
+    m_step_selectors.emplace(key, std::move(traits));
+    return 1;
+}
+
+// Borrow the exact host entry or its whole-step fallback, returning null for undeclared steps.
+// Registry-owned pointers remain valid until host destruction; lookup changes no state and temporary-key allocation may throw.
+const StepSelectorTraits *Orchestrator::step_selector(slicing_step_t step, const std::string &exclusive_group) const
+{
+    std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits>::const_iterator found =
+        m_step_selectors.find({step, exclusive_group});
+    if (found == m_step_selectors.end() && !exclusive_group.empty()) found = m_step_selectors.find({step, std::string()});
+    return found == m_step_selectors.end() ? nullptr : &found->second;
+}
+
+// Check exact membership in the host-only registry; a whole-step fallback does not declare a named group.
+// The group name is borrowed, no state or ownership changes, and an absent entry returns false; temporary-key allocation may throw.
+bool Orchestrator::step_selector_is_builtin(slicing_step_t step, const std::string &exclusive_group) const
+{
+    return m_step_selectors.find({step, exclusive_group}) != m_step_selectors.end();
 }
 
 // Return the function-local singleton; its plugin objects remain valid until shutdown.

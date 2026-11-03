@@ -5,7 +5,16 @@
 // hands a failure to Detail::contain_callback_failure() (which stops the step) and returns NULL. Once a
 // stop is requested it returns NULL at once. After the plugins finish, empty roots are removed.
 
+/* StepSelectorTraits.hpp defines the selector metadata this module registers with Orchestrator, the plugin manager.
+   Call graph:
+     register_selector_traits
+       Orchestrator::register_builtin_step_selector
+     run_step
+       Detail::run_object_step_plugin
+       remove_empty_region_islands
+   Plugins edit infill extrusion roots through the callback described above; empty results are removed afterward. */
 #include "StepPostInfillGeneration.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 
 #include <algorithm>
 #include <cassert>
@@ -23,6 +32,19 @@
 #include "libslic3r/Steps/StepRunner.hpp"
 
 namespace Slic3r::Steps::StepPostInfillGeneration {
+
+// Install the post-infill selector declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_INFILL;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_POST_INFILL, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 namespace {
 
 LayerRegionIsland *to_layer_region_island(const layer_region_island_handle *handle)

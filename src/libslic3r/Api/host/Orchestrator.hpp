@@ -5,6 +5,9 @@
 #ifndef slic3r_Orchestrator_hpp_
 #define slic3r_Orchestrator_hpp_
 
+/* The host owns plugin registrations and copied selector declarations. Step modules install host
+   traits during construction; lookups borrow an exact group or whole-step entry without touching print data. */
+
 #include <atomic>
 #include <cassert>
 #include <map>
@@ -31,6 +34,7 @@
 #include "libslic3r/Config/GuiRuleRegistry.hpp"
 
 #include "Plugin.hpp"
+#include "StepSelectorTraits.hpp"
 
 namespace Slic3r {
 
@@ -394,6 +398,15 @@ public:
     // Look up runtime step metadata by stable namespaced name.
     const DynamicStepInfo *step_info(const char *namespaced_name) const;
 
+    // Copy host selector traits; return 1 added, 0 identical, -1 invalid, or -2 conflicting declaration.
+    int32_t register_builtin_step_selector(slicing_step_t step, StepSelectorTraits traits);
+    // Borrow exact host group traits, then whole-step traits, or null when neither is declared.
+    const StepSelectorTraits *step_selector(slicing_step_t step, const std::string &exclusive_group) const;
+    // Check whether this exact step/group has a protected host declaration, without whole-step fallback.
+    bool step_selector_is_builtin(slicing_step_t step, const std::string &exclusive_group) const;
+    // Borrow the layout filenames accepted by selector declarations and searched for fragments.
+    static const std::vector<std::string> &ui_layout_files();
+
     // Execute the normal setup/setup_run/run lifecycle for one plugin. The
     // payload array remains owned by the caller for the duration of this call.
     raw_plugin_execution_status execute_plugin(Plugin &plugin,
@@ -578,7 +591,7 @@ private:
         bool external_plugin = false;
     };
 
-    // Construct the empty process-wide registry.
+    // Construct the process-wide registry with copied built-in selector declarations.
     Orchestrator();
     // Close one registration scope; the caller must own an active scope.
     void end_plugin_registration_scope();
@@ -608,6 +621,8 @@ private:
     std::vector<PropertyInfo> m_custom_property_infos;
     slic3r_property_type m_next_custom_property_type { SLIC3R_PROPERTY_TYPE_CUSTOM_BEGIN };
     std::map<slicing_step_t, DynamicStepInfo> m_dynamic_step_infos;
+    // This registry contains only copied host declarations; membership records host provenance.
+    std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits> m_step_selectors;
     uint32_t m_next_dynamic_step { uint32_t(SLICING_STEP_CUSTOM_BEGIN) };
     std::map<std::string, RuntimeIdRegistry> m_runtime_id_registries;
     std::vector<GenericFacetsAnnotationDefinition> m_generic_facets_annotations;

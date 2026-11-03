@@ -6,7 +6,15 @@
 // Detail::contain_callback_failure(), which records it and stops the step. Once a stop is requested, the
 // writers return 0 at once without touching the island and without a new message.
 
+/* StepSelectorTraits.hpp defines the selector metadata this module registers with Orchestrator, the plugin manager.
+   Call graph:
+     register_selector_traits
+       Orchestrator::register_builtin_step_selector
+     run_step
+       Detail::run_object_step_plugins
+   Plugins read print settings and edit island extrusion roots and infill areas through the callbacks described above. */
 #include "StepPostPerimeterGeneration.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 
 #include <utility>
 
@@ -22,6 +30,19 @@
 #include "StepRunner.hpp"
 
 namespace Slic3r::Steps::StepPostPerimeterGeneration {
+
+// Install the post-perimeter selector declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_PERIMETER;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_POST_PERIMETER, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 namespace {
 
 LayerSliceIsland *to_layer_island(const layer_island_handle *handle)

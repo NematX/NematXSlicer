@@ -4,6 +4,7 @@
 ///|/
 
 #include "StepLayerHeightGeneration.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
 
 #include <atomic>
 #include <cmath>
@@ -25,7 +26,37 @@
 #endif
 #include "StepRunner.hpp"
 
+/* This module runs the selected layer-height plugin to produce each object's layer descriptors.
+   Orchestrator is the plugin manager; StepSelectorTraits.hpp defines the selector metadata registered here.
+   Call graph:
+     register_selector_traits
+       Orchestrator::register_builtin_step_selector
+     run_step
+       validate_pre
+       selected_or_active_plugin_for_step
+       Plugin::setup
+       Plugin::setup_run
+       Plugin::run
+       validate_post
+   Plugins read model profiles and print settings and write generated layer descriptors.
+   Objects run in parallel; clear() removes generated descriptors but preserves model profiles. */
+
 namespace Slic3r::Steps::StepLayerHeightGeneration {
+
+// Install the layer-height selector declaration without changing configuration or print data.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_SLICING;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    traits.invalidates_step = STEP_LAYER_HEIGHT;
+    traits.show_with_one_provider = false;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_LAYER_HEIGHT, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 
 void clear(Print &print)
 {

@@ -648,13 +648,15 @@ TEST_CASE("Exclusive selectors resolve active providers by identifier",
                 orchestrator, id.c_str(), should_be_active));
         }
 
-        const std::map<slicing_step_t, Steps::StepExclusiveGroup> &exclusive_steps =
+        const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &exclusive_steps =
             Steps::get_exclusive_steps();
-        const std::map<slicing_step_t, Steps::StepExclusiveGroup>::const_iterator perimeter_group =
+        const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator perimeter_group =
             exclusive_steps.find(STEP_PERIMETER);
         REQUIRE(perimeter_group != exclusive_steps.end());
-        CHECK(perimeter_group->second.group_id == "step_perimeter_plugin");
-        CHECK(perimeter_group->second.option_key_storage == "step_perimeter_plugin");
+        const Steps::StepExclusiveGroup perimeter_definition = Steps::make_exclusive_step_group(
+            orchestrator, STEP_PERIMETER, perimeter_group->second);
+        CHECK(perimeter_definition.group_id == "step_perimeter_plugin");
+        CHECK(perimeter_definition.option_key_storage == "step_perimeter_plugin");
 
         const std::vector<Plugin *> active_generators =
             orchestrator.get_active_plugins_for_step(STEP_PERIMETER);
@@ -664,14 +666,14 @@ TEST_CASE("Exclusive selectors resolve active providers by identifier",
 
         DynamicPrintConfig perimeter_config;
         perimeter_config.set_deserialize_strict(
-            perimeter_group->second.option_key_storage, arachne->get_id());
+            perimeter_group->second.key, arachne->get_id());
         std::vector<Plugin *> selected_generators = Steps::selected_or_active_plugins_for_step(
             orchestrator, STEP_PERIMETER, &perimeter_config);
         REQUIRE(selected_generators.size() == 1);
         CHECK(selected_generators.front()->get_id() == arachne->get_id());
 
         perimeter_config.set_deserialize_strict(
-            perimeter_group->second.option_key_storage, simple->get_id());
+            perimeter_group->second.key, simple->get_id());
         selected_generators = Steps::selected_or_active_plugins_for_step(
             orchestrator, STEP_PERIMETER, &perimeter_config);
         REQUIRE(selected_generators.size() == 1);

@@ -10,11 +10,15 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
+/* Extrusion ordering exposes its lifecycle and the category of selectors belonging to this step. */
 namespace Slic3r {
 class Orchestrator;
 class Print;
 
 namespace Steps::StepExtrusionOrdering {
+
+// Declare host selector traits for extrusion ordering on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
 
 void clear(Print &print);
 void prepare(Print &print);

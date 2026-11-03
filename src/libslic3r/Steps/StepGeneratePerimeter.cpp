@@ -36,6 +36,21 @@
 #include "libslic3r/SurfaceCollection.hpp"
 
 namespace Slic3r::Steps::StepGeneratePerimeter {
+
+// Install the perimeter-generation selector declaration on the supplied host.
+void register_selector_traits(Orchestrator &orchestrator);
+
+void register_selector_traits(Orchestrator &orchestrator)
+{
+    StepSelectorTraits traits;
+    traits.category = RAW_OPTION_CATEGORY_PERIMETER;
+    traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    traits.invalidates_step = STEP_PERIMETER;
+    traits.show_with_one_provider = false;
+    const int32_t registered = orchestrator.register_builtin_step_selector(STEP_PERIMETER, std::move(traits));
+    assert(registered == 1);
+    (void)registered;
+}
 namespace {
 
 // STEP_PERIMETER turns sliced layer islands into perimeter extrusion trees and
@@ -69,6 +84,20 @@ namespace {
 // they do not directly mutate unrelated layer/object state. This keeps the host
 // responsible for pointer lifetime, cancellation, tree synchronization, and the
 // final data layout consumed by surface generation and infill.
+//
+// Selector registration and host dispatch:
+// Orchestrator is the plugin manager; StepSelectorTraits.hpp defines the selector metadata registered here.
+// Call graph:
+//   register_selector_traits
+//     Orchestrator::register_builtin_step_selector
+//   run_step
+//     count_layer_islands
+//     Plugin::setup
+//     run_generator_for_island
+//       Plugin::setup_run
+//       Plugin::run
+// Plugins read sliced islands and region settings. The host writes perimeter trees and infill areas
+// to those islands. Islands run in sequence; callback failures are contained at the C boundary.
 struct PerimeterTreeNode
 {
     explicit PerimeterTreeNode(const ExPolygon &area)
