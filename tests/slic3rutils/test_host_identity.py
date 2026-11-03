@@ -88,6 +88,19 @@ class IdentityTests(unittest.TestCase):
         for key, value in (("MAJOR", 3), ("MINOR", 0), ("PATCH", 0)):
             self.assertIn(f'set(CPACK_PACKAGE_VERSION_{key} "{value}")', cmake)
 
+    def test_nematx_skips_automatic_downloader_registration(self):
+        source = (ROOT / "src/slic3r/GUI/GUI_App.cpp").read_text(encoding="utf-8")
+        startup = source.split("bool GUI_App::config_wizard_startup()", 1)[1]
+        startup = startup.split("void GUI_App::prepare_plugin_updates_on_startup()", 1)[0]
+        startup = " ".join(startup.split())
+        self.assertIn(
+            'if constexpr (std::string_view(SLIC3R_APP_KEY) != "NematXSlicer") { '
+            'if (is_editor() && m_last_app_conf_lower_version && app_config->get_bool("downloader_url_registered")) { '
+            'show_downloader_registration_dialog(); return true; } }',
+            startup,
+        )
+        self.assertNotIn("app_config->set(", startup)
+
     def test_png_and_icns(self):
         icons = ROOT / "resources/icons"
         for name in ("NematXSlicer", "NematXSlicer-gcodeviewer"):

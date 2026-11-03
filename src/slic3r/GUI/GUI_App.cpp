@@ -4582,10 +4582,13 @@ bool GUI_App::config_wizard_startup()
         run_wizard(ConfigWizard::RR_DATA_LEGACY);
         return true;
     } 
-#ifndef __APPLE__    
-    else if (is_editor() && m_last_app_conf_lower_version && app_config->get_bool("downloader_url_registered")) {
-        show_downloader_registration_dialog();
-        return true;
+#ifndef __APPLE__
+    // NematXSlicer must not take over the shared Printables URL handler on startup.
+    if constexpr (std::string_view(SLIC3R_APP_KEY) != "NematXSlicer") {
+        if (is_editor() && m_last_app_conf_lower_version && app_config->get_bool("downloader_url_registered")) {
+            show_downloader_registration_dialog();
+            return true;
+        }
     }
 #endif
     return false;
