@@ -29,6 +29,8 @@
 Polyline types store scaled points and expose geometry operations. ArcPolyline
 also retains segment radii and optional point Z offsets; translating its points
 preserves arc geometry and permits a single point used as a deposit position.
+Distance splitting creates two owned paths with interpolated Z at their common
+cut point. Short XY segments remain when their endpoints differ in Z.
 */
 namespace Slic3r {
 
@@ -319,6 +321,11 @@ public:
     bool                  at_least_length(distf_t length) const;
     std::pair<int, Point> foot_pt(const Point &pt) const;
     void                  split_at(Point &point, ArcPolyline &p1, ArcPolyline &p2) const;
+    // Split a valid path by internal-unit XY distance, interpolating Z without
+    // changing the source. Outputs must be distinct, empty and not alias this;
+    // a nonempty source requires SCALED_EPSILON < distance < length(). Empty
+    // input leaves both outputs empty. Assertions check preconditions; allocation
+    // failures propagate.
     void                  split_at(distf_t distance, ArcPolyline &p1, ArcPolyline &p2) const;
     void                  clip_start(distf_t dist);
     void                  clip_end(distf_t dist);

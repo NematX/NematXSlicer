@@ -30,6 +30,14 @@
 Polyline operations act on scaled point sequences. ArcPolyline operations keep
 arc metadata aligned with endpoints, including diagnostic centers in Debug;
 translation preserves lengths and accepts a one-point position with no segments.
+Distance splitting walks the original segments, interpolates Z at the cut and
+copies the remaining vertices into independent outputs. Endpoint cleanup may
+remove a short XY segment only when doing so also preserves its Z.
+
+    ArcPolyline::split_at(distance)
+    |-- walk linear / arc lengths and find the cut
+    |-- interpolate the common endpoint and copy the remaining segments
+    `-- remove a short final prefix segment only when its endpoint Z agrees
 */
 namespace Slic3r {
 
@@ -1379,6 +1387,9 @@ void ArcPolyline::split_at(distf_t distance, ArcPolyline &p1, ArcPolyline &p2) c
     assert(distance > SCALED_EPSILON);
     if (distance < SCALED_EPSILON) return;
     assert(this->is_valid());
+#ifdef _DEBUG
+    p1.is_3D = p2.is_3D = this->is_3D && m_z_offset != nullptr;
+#endif
     p1.m_path.push_back(m_path.front());
     if (m_z_offset)
         p1.z_offsets_raw_mutable().push_back(m_z_offset->front());
@@ -1505,7 +1516,8 @@ void ArcPolyline::split_at(distf_t distance, ArcPolyline &p1, ArcPolyline &p2) c
     assert(p1.m_path.back().point == p2.m_path.front().point);
     //now fill p2
     while (idx < m_path.size()) {
-        assert(!p2.m_path.back().point.coincides_with_epsilon(m_path[idx].point));
+        assert(!p2.m_path.back().point.coincides_with_epsilon(m_path[idx].point) ||
+               (m_z_offset && p2.m_z_offset->back() != (*m_z_offset)[idx]));
         p2.m_path.push_back(m_path[idx]);
         if (m_z_offset)
             p2.z_offsets_raw_mutable().push_back((*m_z_offset)[idx]);
@@ -1526,12 +1538,13 @@ void ArcPolyline::split_at(distf_t distance, ArcPolyline &p1, ArcPolyline &p2) c
         }
     }
     //check if the last p1 segment is long enough
-    if (p1.size() > 3 && p1.back().distance_to_square(p1.get_point(p1.size()-2)) < SCALED_EPSILON * SCALED_EPSILON) {
+    if (p1.size() > 3 && p1.back().distance_to_square(p1.get_point(p1.size()-2)) < SCALED_EPSILON * SCALED_EPSILON &&
+        (!p1.m_z_offset || p1.m_z_offset->back() == (*p1.m_z_offset)[p1.size()-2])) {
         //to short of a segment, move the previous point (even if arc, should be short enough of a move)
         p1.m_path[p1.size()-2].point = p1.back();
         p1.m_path.pop_back();
         if (p1.m_z_offset) {
-            (*p1.m_z_offset)[p1.size()-2] = p1.m_z_offset->back();
+            // The retained endpoint already has the same Z as the removed one.
             p1.m_z_offset->pop_back();
         }
     }

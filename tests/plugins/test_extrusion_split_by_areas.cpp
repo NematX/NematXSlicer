@@ -10,6 +10,8 @@ The fixtures deliberately provide complete, non-overlapping partitions. The
 API contract leaves overlap and missing-coverage behavior undefined, so these
 tests focus on stable handles, source order, preserved extrusion state and the
 exact ArcPolyline geometry reconstructed after temporary clipping.
+Direct distance-split regressions also cover short XY segments carrying a Z
+change, before this primitive is used by any regional or length-based splitter.
 */
 
 #include <catch2/catch.hpp>
@@ -86,6 +88,67 @@ void collect_fragment(extrusion_entity_handle *fragment, uint32_t area_index, vo
 }
 
 } // namespace
+
+TEST_CASE("ArcPolyline distance splitting preserves Z changes at a nearby vertex",
+          "[plugins][extrusion][arc-polyline-split-z]")
+{
+    const coord_t unit = scale_i(10.);
+    const coord_t offset = SCALED_EPSILON / 2;
+    const Points points{Point(0, 0), Point(unit, 0), Point(2 * unit, 0),
+                        Point(2 * unit + offset, 0), Point(3 * unit, 0)};
+    for (bool changing_z : {false, true}) {
+        CAPTURE(changing_z);
+        ArcPolyline source(points);
+        for (size_t idx = 0; idx < source.size(); ++idx)
+            source.set_z_offset(idx, changing_z ? coord_t(idx) * unit : 100);
+        ArcPolyline prefix, suffix;
+        // Reach the short source segment before the usual epsilon snap chooses
+        // its endpoint. Cleanup may remove it only when its Z is unchanged.
+        source.split_at(distf_t(2 * unit + SCALED_EPSILON + SCALED_EPSILON / 4), prefix, suffix);
+
+        REQUIRE(prefix.size() == (changing_z ? 4 : 3));
+        REQUIRE(suffix.size() == 2);
+        CHECK(prefix.back() == Point(2 * unit + offset, 0));
+        CHECK(suffix.front() == prefix.back());
+        CHECK(suffix.back() == source.back());
+        CHECK(prefix.z_offset(prefix.size() - 1) == (changing_z ? 3 * unit : 100));
+        CHECK(suffix.z_offset(0) == prefix.z_offset(prefix.size() - 1));
+        if (changing_z) {
+            CHECK(prefix.get_point(2) == Point(2 * unit, 0));
+            CHECK(prefix.z_offset(2) == 2 * unit);
+        }
+        CHECK(prefix.length() + suffix.length() == Approx(source.length()).margin(1.));
+        REQUIRE(source.size() == points.size());
+        for (size_t idx = 0; idx < source.size(); ++idx) {
+            CHECK(source.get_point(idx) == points[idx]);
+            CHECK(source.z_offset(idx) == (changing_z ? coord_t(idx) * unit : 100));
+        }
+    }
+}
+
+TEST_CASE("ArcPolyline distance splitting keeps a short XY segment with distinct Z",
+          "[plugins][extrusion][arc-polyline-split-z]")
+{
+    const coord_t unit = scale_i(10.);
+    const coord_t offset = SCALED_EPSILON / 4;
+    ArcPolyline source(Points{Point(0, 0), Point(unit, 0), Point(unit + offset, 0), Point(2 * unit, 0)});
+    for (size_t idx = 0; idx < source.size(); ++idx)
+        source.set_z_offset(idx, coord_t(idx) * unit);
+    ArcPolyline prefix, suffix;
+    source.split_at(distf_t(unit / 2), prefix, suffix);
+
+    REQUIRE(prefix.size() == 2);
+    REQUIRE(suffix.size() == 4);
+    CHECK(prefix.z_offset(1) == unit / 2);
+    CHECK(suffix.z_offset(0) == prefix.z_offset(1));
+    CHECK(suffix.get_point(1) == Point(unit, 0));
+    CHECK(suffix.get_point(2) == Point(unit + offset, 0));
+    CHECK(suffix.z_offset(1) == unit);
+    CHECK(suffix.z_offset(2) == 2 * unit);
+    CHECK(suffix.back() == source.back());
+    CHECK(prefix.length() + suffix.length() == Approx(source.length()).margin(1.));
+    CHECK(source.is_valid());
+}
 
 TEST_CASE("Extrusion leaves split by area in source order",
           "[plugins][extrusion][split-by-areas]")
