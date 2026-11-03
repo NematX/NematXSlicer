@@ -800,8 +800,14 @@ set(SLIC3R_SOURCES
     Format/3mf.hpp
     Format/AMF.cpp
     Format/AMF.hpp
+    Format/BambuConfigExport.cpp
+    Format/BambuConfigExport.hpp
     Format/BBConfig.cpp
     Format/BBConfig.hpp
+    Format/CustomVariables.cpp
+    Format/CustomVariables.hpp
+    Format/OrcaConfigKeys.cpp
+    Format/OrcaConfigKeys.hpp
     Format/bbs_3mf.hpp
     Format/bbs_3mf.cpp
     Format/OBJ.cpp

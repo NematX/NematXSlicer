@@ -2265,7 +2265,8 @@ TEST_CASE("Bambu firmware owns and declares its six chamber fan settings",
         used.insert(key.key);
     for (const Plugin::DefinedConfigKey &key : plugin->get_defined_config_keys())
         defined.insert(key.key);
-    CHECK(plugin->get_defined_config_keys().size() == 6);
+    // The three other settings (printer model id, nozzle type, plate type) are checked in test_bambu_config_export.cpp.
+    CHECK(plugin->get_defined_config_keys().size() == 9);
     for (size_t idx = 0; idx < 6; ++idx) {
         INFO(keys[idx]);
         const ConfigOptionDef *def = PrintConfigDef::instance().get(keys[idx]);

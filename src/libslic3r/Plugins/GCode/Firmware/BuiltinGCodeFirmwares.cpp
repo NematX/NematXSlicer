@@ -92,6 +92,10 @@ struct FirmwareSettingDefinition
     const char *default_value;
     const char *label;
     const char *tooltip;
+    // Closed list of the accepted values (RAW_CO_ENUM only); the serialized names are Orca's.
+    const key_value_string_pair_t *enum_pairs = nullptr;
+    uint32_t enum_pair_count = 0;
+    raw_option_category category = RAW_OPTION_CATEGORY_COOLING;
 };
 
 struct FirmwareDefinition
@@ -110,8 +114,8 @@ struct FirmwareDefinition
     size_t defined_key_count = 0;
 };
 
-// Create Bambu's printer capabilities and per-filament fan settings, copying
-// definitions and UI text into the borrowed host. Option-definition errors throw;
+// Create Bambu's printer identity, nozzle type, plate type and per-filament fan settings,
+// copying definitions and UI text into the borrowed host. Option-definition errors throw;
 // UI-fragment registration reports failures through its host status, not exceptions.
 void create_bambu_settings(orchestrator_handle *orchestrator);
 
@@ -172,7 +176,30 @@ const raw_used_config_key k_bambu_used_config_keys[] = {
     {"platter_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT},
     {"activate_air_filtration", RAW_CO_VECTOR_BOOL, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT},
     {"during_print_exhaust_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT},
-    {"complete_print_exhaust_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT}
+    {"complete_print_exhaust_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT},
+    {"printer_model_id", RAW_CO_STRING, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER},
+    {"nozzle_type", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER},
+    {"curr_bed_type", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINT}
+};
+
+// The nozzle materials of Orca's nozzle_type, as serialized in its project settings.
+const key_value_string_pair_t k_nozzle_type_values[] = {
+    {"undefine", "Undefined"},
+    {"hardened_steel", "Hardened steel"},
+    {"stainless_steel", "Stainless steel"},
+    {"tungsten_carbide", "Tungsten carbide"},
+    {"brass", "Brass"}
+};
+
+// The plate types of Orca's curr_bed_type, as serialized in its project settings ("Default Plate"
+// is left out: Orca never writes it at project level).
+const key_value_string_pair_t k_bed_type_values[] = {
+    {"Cool Plate", "Cool Plate"},
+    {"Engineering Plate", "Engineering Plate"},
+    {"High Temp Plate", "High Temp Plate"},
+    {"Textured PEI Plate", "Textured PEI Plate"},
+    {"Textured Cool Plate", "Textured Cool Plate"},
+    {"Supertack Plate", "Supertack Plate"}
 };
 
 const FirmwareSettingDefinition k_bambu_settings[] = {
@@ -187,12 +214,21 @@ const FirmwareSettingDefinition k_bambu_settings[] = {
     {"during_print_exhaust_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT, "60", "Exhaust fan speed during print",
      "Exhaust speed during printing (M106 P3 S0-255), using the maximum among used filaments with Activate air filtration. Requires Air filtration / exhaust fan in printer settings."},
     {"complete_print_exhaust_fan_speed", RAW_CO_VECTOR_INT, RAW_CONTAINER_TYPE_PLATER, RAW_PRESET_TYPE_FFF_FILAMENT, "80", "Exhaust fan speed after print",
-     "Exhaust speed after end G-code (M106 P3 S0-255), using the maximum among used filaments with Activate air filtration. Requires Air filtration / exhaust fan in printer settings."}
+     "Exhaust speed after end G-code (M106 P3 S0-255), using the maximum among used filaments with Activate air filtration. Requires Air filtration / exhaust fan in printer settings."},
+    {"printer_model_id", RAW_CO_STRING, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER, "", "Printer model id",
+     "Bambu Lab identifier of the printer model (for example BL-P001 for the X1 Carbon). The Bambu project export writes it in the slice information, it is never written in the project settings.",
+     nullptr, 0, RAW_OPTION_CATEGORY_GENERAL},
+    {"nozzle_type", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINTER, "undefine", "Nozzle type",
+     "Material of the nozzle. The Bambu project export writes it once for every extruder.",
+     k_nozzle_type_values, uint32_t(std::size(k_nozzle_type_values)), RAW_OPTION_CATEGORY_GENERAL},
+    {"curr_bed_type", RAW_CO_ENUM, RAW_CONTAINER_TYPE_PROJECT, RAW_PRESET_TYPE_FFF_PRINT, "Cool Plate", "Plate type",
+     "Type of the build plate the print is made for. The Bambu project export writes it with Orca's plate names.",
+     k_bed_type_values, uint32_t(std::size(k_bed_type_values)), RAW_OPTION_CATEGORY_OUTPUT}
 };
 static_assert(std::size(k_bambu_used_config_keys) == std::size(k_bambu_settings) + 1,
-              "Bambu reads its fan settings and the core retraction length.");
+              "Bambu reads its own settings and the core retraction length.");
 
-// The host owns copies of these six definitions. Integer vectors are percentages
+// The host owns copies of these nine definitions. Integer vectors are percentages
 // in [0,100]; bool vectors follow filament selection. No borrowed data is retained.
 void create_bambu_settings(orchestrator_handle *orchestrator)
 {
@@ -203,12 +239,13 @@ void create_bambu_settings(orchestrator_handle *orchestrator)
         def.container_type = setting.container;
         def.option_preset_type = setting.preset;
         def.printer_technology = RAW_PT_FFF;
-        def.category = RAW_OPTION_CATEGORY_COOLING;
+        def.category = setting.category;
         def.label = setting.label;
         def.tooltip = setting.tooltip;
         def.mode = RAW_CONFIG_OPTION_MODE_EXPERT | RAW_CONFIG_OPTION_MODE_SUSI;
         def.is_vector_extruder = setting.preset == RAW_PRESET_TYPE_FFF_FILAMENT;
         def.default_serialized_value = setting.default_value;
+        def.enum_def.value_label_pairs = {setting.enum_pairs, setting.enum_pair_count};
         if (def.type == RAW_CO_VECTOR_INT) {
             def.sidetext = "%";
             def.has_min = 1;
@@ -223,6 +260,13 @@ void create_bambu_settings(orchestrator_handle *orchestrator)
         "page:General:printer\ngroup:Cooling fan\n"
         "\tsetting:insert$aftersetting$fan_percentage:platter_fan\n"
         "\tsetting:insert$aftersetting$platter_fan:support_air_filtration\n", 1);
+    orchestrator_add_ui_fragment(orchestrator, "printer_fff.ui", "bambu_printer_identity",
+        "page:General:printer\ngroup:Firmware\n"
+        "\tsetting:insert$aftersetting$gcode_flavor:printer_model_id\n"
+        "\tsetting:insert$aftersetting$printer_model_id:nozzle_type\n", 1);
+    orchestrator_add_ui_fragment(orchestrator, "print.ui", "bambu_plate_type",
+        "page:Output options\ngroup:Platter\n"
+        "\tsetting:insert$aftersetting$duplicate_distance:curr_bed_type\n", 1);
     orchestrator_add_ui_fragment(orchestrator, "filament.ui", "bambu_chamber_fans_filament",
         "page:Cooling:time\ngroup:insert$aftergroup$Fan speed - default:Chamber fans\n"
         "\tsetting:id$0:platter_fan_speed\n\tsetting:id$0:activate_air_filtration\n"

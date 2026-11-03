@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_offset_contacts.cpp
     test_clipper_offset_parity.cpp
     test_clipper_offset_strategies.cpp
+    test_bambu_config_export.cpp
     test_config_translations.cpp
     test_deferred_callback_exception.cpp
     test_extrusion_continuity.cpp

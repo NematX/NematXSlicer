@@ -15,6 +15,7 @@
 
 #include <boost/beast/core/detail/base64.hpp>
 
+#include "libslic3r/Format/CustomVariables.hpp"
 #include "libslic3r/Plugins/GCode/Reader/BambuGCodeReaderItems.hpp"
 
 /*
@@ -216,14 +217,6 @@ std::string encode_rank_mask(uint32_t rank);
 // exponential form; real pressure advance values are far inside that range.
 std::string format_pressure_advance(double value);
 
-// Read the `name = value` lines of printer_custom_variables like the placeholder parser:
-// one variable per line, cut at the first `=`, names and values trimmed of all white
-// space, `\r` dropped,
-// a quoted value loses its quotes and a later line replaces an earlier one of the same
-// name (a name with inner spaces or invalid characters never matches the names looked
-// up, so it needs no check; spaces at the edges are trimmed).
-std::map<std::string, std::string> parse_custom_variables(const std::string &text);
-
 std::string encode_rank_mask(const uint32_t rank)
 {
     const uint64_t mask = uint64_t(1) << rank;
@@ -244,34 +237,6 @@ std::string format_pressure_advance(const double value)
     stream.precision(4);
     stream << value;
     return stream.str();
-}
-
-std::map<std::string, std::string> parse_custom_variables(const std::string &text)
-{
-    // Every white space character is trimmed, like boost::algorithm::trim.
-    const auto trim = [](std::string value) {
-        const auto is_blank = [](const unsigned char c) { return std::isspace(c) != 0; };
-        const size_t first = size_t(std::find_if_not(value.begin(), value.end(), is_blank) - value.begin());
-        if (first == value.size())
-            return std::string();
-        const size_t last = size_t(std::find_if_not(value.rbegin(), value.rend(), is_blank).base() - value.begin());
-        return value.substr(first, last - first);
-    };
-    std::map<std::string, std::string> variables;
-    std::istringstream lines(text);
-    std::string line;
-    while (std::getline(lines, line)) {
-        line.erase(std::remove(line.begin(), line.end(), '\r'), line.end());
-        const size_t equal = line.find('=');
-        if (equal == std::string::npos)
-            continue;
-        const std::string name = trim(line.substr(0, equal));
-        std::string value = trim(line.substr(equal + 1));
-        if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
-            value = value.substr(1, value.size() - 2);
-        variables[name] = value;
-    }
-    return variables;
 }
 
 } // namespace
@@ -401,7 +366,7 @@ void BambuGCodeFirmwareSession::setup_firmware(const Config &config)
     // printer_custom_variables is deliberately not declared as a used key (it would
     // grey the field for other firmwares); absent variables write nothing.
     const std::map<std::string, std::string> variables =
-        parse_custom_variables(config.string_or_default("printer_custom_variables", ""));
+        Slic3r::parse_custom_variable_lines(config.string_or_default("printer_custom_variables", ""));
     const auto scan = variables.find("scan_first_layer");
     std::string scan_value = scan != variables.end() ? scan->second : std::string();
     std::transform(scan_value.begin(), scan_value.end(), scan_value.begin(),
