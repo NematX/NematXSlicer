@@ -269,6 +269,44 @@ TEST_CASE("Whole-step selector traits come from their owner module",
     }
 }
 
+// Check that firmware, thumbnail and reader declarations make selector changes require G-code generation to run again.
+TEST_CASE("G-code service selector invalidation comes from the owner modules",
+          "[plugins][step-pipeline][selector-traits][gcode]")
+{
+    Orchestrator &host = Orchestrator::instance();
+    SelectorTraitsProbe probe(reinterpret_cast<orchestrator_handle *>(&host));
+    Plugin provider(probe.c_instance(), "Slic3r", "");
+    const std::pair<slicing_step_t, const char *> services[] = {
+        {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
+        {GCODE_READER, "reader_invalidation_probe"}
+    };
+    for (const std::pair<slicing_step_t, const char *> &service : services) {
+        INFO(int(service.first));
+        const StepSelectorTraits *declared = host.step_selector(service.first, "");
+        REQUIRE(declared != nullptr);
+        CHECK(host.step_selector_is_builtin(service.first, ""));
+        REQUIRE(declared->invalidates_step.has_value());
+        CHECK(*declared->invalidates_step == STEP_GCODE);
+        CHECK(declared->category == RAW_OPTION_CATEGORY_OUTPUT);
+        CHECK(declared->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+        const char *const groups[] = {service.second, "service_invalidation_probe"};
+        for (const char *group_id : groups) {
+            INFO(group_id);
+            const StepSelectorTraits *resolved = host.step_selector(service.first, group_id);
+            REQUIRE(resolved != nullptr);
+            REQUIRE(resolved->invalidates_step.has_value());
+            CHECK(*resolved->invalidates_step == STEP_GCODE);
+            const Steps::StepExclusiveGroup group = Steps::plugin_exclusive_group_definition(
+                host, service.first, group_id, provider);
+            REQUIRE(group.traits.invalidates_step.has_value());
+            CHECK(*group.traits.invalidates_step == STEP_GCODE);
+            CHECK(group.option_def.invalidates_step == *declared->invalidates_step);
+            CHECK(group.option_def.category == declared->category);
+            CHECK(group.option_def.option_preset_type == declared->option_preset_type);
+        }
+    }
+}
+
 // Read the exact host declaration and construct local metadata without registering options or changing activations.
 // The neutral group on the same service proves that scope, placement and invalidation are group-specific.
 TEST_CASE("Regional seam selector traits are declared by the ordering module",

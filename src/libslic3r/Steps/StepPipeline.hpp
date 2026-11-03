@@ -67,7 +67,7 @@ struct StepExclusiveGroup
     std::string label_storage;
     std::string tooltip_storage;
     slicing_step_t step;
-    // Owned module traits, with scope, invalidation and placement adjusted to match the effective definition.
+    // These are declared or default traits; option_def stores the resolved invalidation step, including any registry fallback.
     StepSelectorTraits traits;
     raw_config_option_def option_def;
     std::string ui_fragment;

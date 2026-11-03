@@ -34,20 +34,23 @@ Print material totals convert consumed mm3 to filament mm, grams and cost using
 each logical tool's configured diameter, density and price per kg. The tower
 share uses the WipeTower role and does not require object labels. Source paths
 and their firmware-selected reader IDs remain owned by Print after export.
+Reader selector declarations invalidate STEP_GCODE, which produces the source artifact.
 */
 
 namespace Slic3r::Steps::StepReadGeneratedGcode {
 
-// Install the G-code reader service selector preset/category declaration on the supplied host.
+// Install the G-code reader service selector declaration with G-code invalidation on the supplied host.
 void register_selector_traits(Orchestrator &orchestrator);
 
-// Copy output/printer-preset traits into the borrowed host, which owns the strings; no print/configuration data changes.
+// Copy output/printer-preset traits and STEP_GCODE invalidation into the borrowed host, which owns the strings.
+// No print/configuration data changes.
 // Duplicate/conflicting installation asserts and allocation errors propagate without transferring provider ownership.
 void register_selector_traits(Orchestrator &orchestrator)
 {
     StepSelectorTraits traits;
     traits.category = RAW_OPTION_CATEGORY_OUTPUT;
     traits.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+    traits.invalidates_step = STEP_GCODE;
     const int32_t registered = orchestrator.register_builtin_step_selector(GCODE_READER, std::move(traits));
     assert(registered == 1);
     (void)registered;

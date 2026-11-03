@@ -36,10 +36,12 @@
 STEP_GCODE bridge
 =================
 
-The G-code step is now a plugin boundary. Earlier pipeline steps build a
+The G-code step is a plugin boundary. Earlier pipeline steps build a
 PrintingPlan, then this step creates the selected firmware session and invokes
 the active STEP_GCODE writer. The writer receives the source Print, read-only
 PrintingPlan, borrowed firmware session, and resolved final output path.
+Selectors for the writer, firmware and thumbnail services invalidate this G-code
+step, which consumes their selections when producing the output artifact.
 
 Before crossing that plugin boundary, the step validates the process speed of
 every geometric leaf and explicit E-only extrusion command, including those in
@@ -57,11 +59,11 @@ can replace the built-in implementation without changing the pipeline runner.
 
 namespace Slic3r::Steps::StepGenerateGcode {
 
-// Install G-code, firmware and thumbnail selector preset/category declarations on the supplied host.
+// Install G-code, firmware and thumbnail selector declarations with G-code invalidation on the supplied host.
 void register_selector_traits(Orchestrator &orchestrator);
 
 // Copy output/printer-preset traits into the borrowed host, which owns the strings; output and firmware show singleton selectors.
-// G-code and firmware declare STEP_GCODE invalidation; thumbnail invalidation comes from the service rule in make_exclusive_group.
+// G-code, firmware and thumbnail selectors declare STEP_GCODE invalidation.
 // No print/configuration or provider ownership changes.
 // Duplicate/conflicting installation asserts and allocation errors propagate.
 void register_selector_traits(Orchestrator &orchestrator)
@@ -80,6 +82,7 @@ void register_selector_traits(Orchestrator &orchestrator)
     StepSelectorTraits thumbnail;
     thumbnail.category = RAW_OPTION_CATEGORY_OUTPUT;
     thumbnail.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+    thumbnail.invalidates_step = STEP_GCODE;
     const int32_t thumbnail_registered = orchestrator.register_builtin_step_selector(GCODE_THUMBNAIL, std::move(thumbnail));
     assert(thumbnail_registered == 1);
     (void)thumbnail_registered;

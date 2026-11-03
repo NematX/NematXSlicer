@@ -424,13 +424,8 @@ StepExclusiveGroup make_exclusive_group(slicing_step_t step,
     def.option_preset_type = group.traits.option_preset_type;
     def.printer_technology = RAW_PT_FFF;
     def.category = group.traits.category;
-    // Service selectors invalidate the consuming pipeline step rather than
-    // pretending that the service itself is independently executable.
-    def.invalidates_step =
-        (step == GCODE_FIRMWARE || step == GCODE_THUMBNAIL || step == GCODE_READER) ?
-            STEP_GCODE : invalidates_step;
-    if (step == GCODE_FIRMWARE || step == GCODE_THUMBNAIL || step == GCODE_READER)
-        group.traits.invalidates_step = def.invalidates_step;
+    // Use the caller's resolved invalidation step so all selector descriptions follow the same rules.
+    def.invalidates_step = invalidates_step;
     def.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_SUSI;
     group.option_def = def;
 
