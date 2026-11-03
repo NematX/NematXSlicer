@@ -1,9 +1,11 @@
 #include <catch2/catch.hpp>
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
 
+#include "plugin_test_helpers.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
@@ -12,11 +14,34 @@
 
 /* Step modules install host-owned selector declarations during host construction. A whole-step
    declaration supplies defaults to named groups, while an exact group replaces every field.
-   These tests read the process host and build local metadata without registering provider options;
-   the generated-selector snapshot checks the serialized definitions and layout strings separately. */
+   Local metadata checks read the process host without registering provider options. Selection checks
+   initialize the shared runtime and restore scoped activation changes. The generated-selector snapshot
+   checks the serialized definitions and layout strings separately. */
 
 namespace {
 using namespace Slic3r;
+
+// Compare both public seam selection paths against a borrowed expected provider without changing configuration or activation.
+void check_seam_selection(Orchestrator &host, const ConfigBase *config, const Plugin *expected);
+
+class SeamActivationGuard
+{
+public:
+    // Borrow the host and copy all seam-step activations before mutations; allocation failures propagate without activation changes.
+    explicit SeamActivationGuard(Orchestrator &host) : m_host(host)
+    {
+        for (Plugin *plugin : host.registered_plugins())
+            if (plugin->get_step() == SEAM_PLACER) m_saved.emplace_back(plugin, host.is_plugin_active(plugin));
+    }
+    // Restore the saved flags through the host API; the borrowed host/providers must outlive this noexcept cleanup.
+    ~SeamActivationGuard()
+    {
+        for (const std::pair<Plugin *, bool> &entry : m_saved) m_host.set_plugin_active(entry.first, entry.second);
+    }
+private:
+    Orchestrator &m_host;
+    std::vector<std::pair<Plugin *, bool>> m_saved;
+};
 
 class SelectorTraitsProbe final : public slic3r_api::PluginBase
 {
@@ -35,6 +60,18 @@ private:
     // Ignore the borrowed context; no output or state is produced and this callback cannot fail.
     void run_impl(const plugin_run_context *) const override {}
 };
+
+// Read borrowed configuration through group and step resolution and assert the borrowed expected provider or empty result.
+// No host/configuration mutation or ownership transfer occurs; assertion and serialization/allocation failures propagate.
+void check_seam_selection(Orchestrator &host, const ConfigBase *config, const Plugin *expected)
+{
+    CHECK(Steps::selected_active_plugin_from_group(host, SEAM_PLACER, "seam_placer_plugin", config) == expected);
+    const std::vector<Plugin *> selected = Steps::selected_or_active_plugins_for_step(host, SEAM_PLACER, config);
+    if (expected != nullptr) {
+        REQUIRE(selected.size() == 1);
+        CHECK(selected.front() == expected);
+    } else CHECK(selected.empty());
+}
 } // namespace
 
 // Declare owned dynamic-step traits and construct local groups from borrowed provider metadata.
@@ -230,4 +267,111 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         CHECK(group.ui_fragment == "page:Notes\ngroup:Exclusive step plugins\nline:" +
                                    std::string(identity->second.line_label) + "\nsetting:" + identity->second.key + "\nend_line\n");
     }
+}
+
+// Read the exact host declaration and construct local metadata without registering options or changing activations.
+// The neutral group on the same service proves that scope, placement and invalidation are group-specific.
+TEST_CASE("Regional seam selector traits are declared by the ordering module",
+          "[plugins][step-pipeline][selector-traits][seam]")
+{
+    Orchestrator &host = Orchestrator::instance();
+    const StepSelectorTraits *seam = host.step_selector(SEAM_PLACER, "seam_placer_plugin");
+    REQUIRE(seam != nullptr);
+    CHECK(host.step_selector_is_builtin(SEAM_PLACER, "seam_placer_plugin"));
+    CHECK(seam->exclusive_group == "seam_placer_plugin");
+    CHECK(seam->container_type == RAW_CONTAINER_TYPE_REGION);
+    REQUIRE(seam->invalidates_step.has_value());
+    CHECK(*seam->invalidates_step == STEP_ORDERING);
+    CHECK(seam->category == RAW_OPTION_CATEGORY_SLICING);
+    CHECK(seam->option_preset_type == RAW_PRESET_TYPE_FFF_PRINT);
+    CHECK(seam->ui_target_file == "print.ui");
+    CHECK(seam->ui_page == "Perimeters & Shell");
+    CHECK(seam->ui_group == "Seam");
+    CHECK(seam->strict_selection);
+    CHECK_FALSE(seam->read_with_one_provider);
+    CHECK_FALSE(seam->show_with_one_provider);
+    CHECK(seam->provider_settings_rules);
+    CHECK_FALSE(seam->auto_value);
+    CHECK_FALSE(seam->value_when_absent.has_value());
+    CHECK(seam->option_key.empty());
+    CHECK(host.step_selector(SEAM_PLACER, "other") == nullptr);
+    CHECK_FALSE(host.step_selector_is_builtin(SEAM_PLACER, "other"));
+    SelectorTraitsProbe probe(reinterpret_cast<orchestrator_handle *>(&host));
+    Plugin provider(probe.c_instance(), "Slic3r", "");
+    const Steps::StepExclusiveGroup other = Steps::plugin_exclusive_group_definition(host, SEAM_PLACER, "other", provider);
+    CHECK(other.option_def.container_type == RAW_CONTAINER_TYPE_PROJECT);
+    CHECK(other.option_def.invalidates_step == STEP_ANY);
+    CHECK(other.option_def.category == RAW_OPTION_CATEGORY_SLICING);
+    CHECK(other.option_def.option_preset_type == RAW_PRESET_TYPE_FFF_PRINT);
+    CHECK_FALSE(other.traits.strict_selection);
+    CHECK_FALSE(other.traits.read_with_one_provider);
+    CHECK(other.ui_fragment == "page:Notes\ngroup:Exclusive step plugins\nline:other\nsetting:" +
+                              other.option_key_storage + "\nend_line\n");
+}
+
+// Activate only finalized seam enum members, excluding providers registered by later tests, and restore every saved flag.
+// Configurations own their values and borrow finalized enum maps; provider text and selection are read without print changes.
+// Missing runtime metadata fails assertions; allocation/serialization failures propagate through the activation guard.
+TEST_CASE("Regional seam selection preserves strict multi-provider and unread singleton choices",
+          "[plugins][step-pipeline][selector-traits][seam]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const std::string key = Steps::plugin_exclusive_group_option_key(host, SEAM_PLACER, "seam_placer_plugin");
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->enum_def);
+    const std::vector<std::string> ids = definition->enum_def->values();
+    REQUIRE(ids.size() >= 2);
+    for (const std::string &id : ids) {
+        const Plugin *member = host.get_plugin(id);
+        REQUIRE(member != nullptr);
+        REQUIRE(member->get_step() == SEAM_PLACER);
+        REQUIRE(member->get_exclusive_group() == "seam_placer_plugin");
+    }
+    SeamActivationGuard guard(host);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == SEAM_PLACER)
+            REQUIRE(host.set_plugin_active(plugin, std::find(ids.begin(), ids.end(), plugin->get_id()) != ids.end()));
+    const std::vector<Plugin *> members = host.get_active_plugins_for_step(SEAM_PLACER);
+    REQUIRE(members.size() == ids.size());
+    Plugin *first = members.front();
+    Plugin *alternate = members.back();
+    REQUIRE(first != alternate);
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict(key, alternate->get_id());
+    check_seam_selection(host, &config, alternate);
+    DynamicConfig absent;
+    check_seam_selection(host, &absent, first);
+    check_seam_selection(host, nullptr, first);
+    REQUIRE(config.optptr(key) != nullptr);
+    config.optptr(key)->set_int(1000000);
+    REQUIRE(config.option(key)->serialize().empty());
+    check_seam_selection(host, &config, nullptr);
+
+    // Provider callbacks supply display text; generic fragment construction applies the declared regional placement.
+    REQUIRE(!first->get_exclusive_group_label().empty());
+    REQUIRE(!first->get_exclusive_group_tooltip().empty());
+    const Steps::StepExclusiveGroup direct = Steps::plugin_exclusive_group_definition(
+        host, SEAM_PLACER, "seam_placer_plugin", *first);
+    CHECK(direct.label_storage == first->get_exclusive_group_label());
+    CHECK(direct.tooltip_storage == first->get_exclusive_group_tooltip());
+    bool generated_seam = false;
+    for (const Steps::StepExclusivePluginGroup &entry : Steps::active_exclusive_plugin_groups(host)) {
+        if (entry.group.step != SEAM_PLACER || entry.group.group_id != "seam_placer_plugin") continue;
+        generated_seam = true;
+        CHECK(entry.group.label_storage == direct.label_storage);
+        CHECK(entry.group.tooltip_storage == direct.tooltip_storage);
+        CHECK(entry.group.ui_fragment == direct.ui_fragment);
+    }
+    CHECK(generated_seam);
+
+    for (Plugin *member : members) REQUIRE(host.set_plugin_active(member, member == first));
+    check_seam_selection(host, &config, first);
+    config.set_deserialize_strict(key, alternate->get_id());
+    check_seam_selection(host, &config, first);
+    config.set_deserialize_strict(key, first->get_id());
+    check_seam_selection(host, &config, first);
+    check_seam_selection(host, &absent, first);
+    check_seam_selection(host, nullptr, first);
 }

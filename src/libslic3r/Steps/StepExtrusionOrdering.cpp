@@ -5,6 +5,8 @@ STEP_ORDERING preflight and plugin execution
 The source LayerRegionIsland perimeter trees are cloned into PrintingPlan by
 the ordering step. The preflight below checks the loop metadata on those
 source trees before any plugin can consume or reorder the clones.
+Seam placement chooses the start of closed extrusion loops from regional settings.
+Its selector belongs to this module because a changed placement replays ordering.
 */
 #include "StepExtrusionOrdering.hpp"
 
@@ -30,10 +32,11 @@ source trees before any plugin can consume or reorder the clones.
 
 namespace Slic3r::Steps::StepExtrusionOrdering {
 
-// Install the extrusion-ordering selector declaration on the supplied host.
+// Install extrusion-ordering traits and the exact regional seam selector declaration on the supplied host.
 void register_selector_traits(Orchestrator &orchestrator);
 
-// Copy output/print-preset traits into the borrowed host, which owns the strings; no print/configuration data changes.
+// Copy output traits and exact regional seam traits into the borrowed host, which owns the strings.
+// Seam selection invalidates ordering and keeps stored-id reading disabled for a singleton; no print/configuration data changes.
 // Duplicate/conflicting installation asserts and allocation errors propagate without transferring provider ownership.
 void register_selector_traits(Orchestrator &orchestrator)
 {
@@ -43,6 +46,20 @@ void register_selector_traits(Orchestrator &orchestrator)
     const int32_t registered = orchestrator.register_builtin_step_selector(STEP_ORDERING, std::move(traits));
     assert(registered == 1);
     (void)registered;
+
+    StepSelectorTraits seam;
+    seam.exclusive_group = "seam_placer_plugin";
+    seam.container_type = RAW_CONTAINER_TYPE_REGION;
+    seam.invalidates_step = STEP_ORDERING;
+    seam.category = RAW_OPTION_CATEGORY_SLICING;
+    seam.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    seam.ui_page = "Perimeters & Shell";
+    seam.ui_group = "Seam";
+    seam.strict_selection = true;
+    seam.read_with_one_provider = false;
+    const int32_t seam_registered = orchestrator.register_builtin_step_selector(SEAM_PLACER, std::move(seam));
+    assert(seam_registered == 1);
+    (void)seam_registered;
 }
 
 namespace {

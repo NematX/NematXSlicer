@@ -10,14 +10,17 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
-/* Extrusion ordering exposes its lifecycle and the category of selectors belonging to this step. */
+/* This interface lets StepPipeline order extrusion paths and choose where closed loops start.
+   Register the settings metadata defined by StepSelectorTraits.hpp with register_selector_traits()
+   at host startup. For a print, use prepare(), validate_pre(), run_step() and validate_post().
+   Seam settings apply per region; changing them requires ordering to run again. */
 namespace Slic3r {
 class Orchestrator;
 class Print;
 
 namespace Steps::StepExtrusionOrdering {
 
-// Declare host selector traits for extrusion ordering on the supplied host.
+// Register settings metadata for extrusion ordering and per-region seam placement with the supplied plugin manager.
 void register_selector_traits(Orchestrator &orchestrator);
 
 void clear(Print &print);

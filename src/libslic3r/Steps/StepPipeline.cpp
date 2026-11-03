@@ -64,6 +64,10 @@
 
 namespace Slic3r::Steps {
 
+// Resolve one borrowed group provider from borrowed configuration, using stored-id policy traits without mutation.
+Plugin *selected_plugin_from_group(const StepExclusiveGroup &group, const std::vector<Plugin *> &plugins,
+                                   const ConfigBase *config);
+
 const std::vector<slicing_step_t> &execution_order()
 {
     static const std::vector<slicing_step_t> steps {
@@ -461,25 +465,6 @@ StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
                                                     traits,
                                                     selector_invalidation_step(orchestrator, step, traits));
 
-    /*
-    Seam placement is selected by the effective PrintRegion configuration.
-    Other plugin groups keep their project-level selector because their
-    consumers execute one implementation for the complete print.
-    */
-    if (step == SEAM_PLACER && group_id == "seam_placer_plugin") {
-        group.option_def.container_type = RAW_CONTAINER_TYPE_REGION;
-        group.option_def.invalidates_step = STEP_ORDERING;
-        group.traits.container_type = group.option_def.container_type;
-        group.traits.invalidates_step = group.option_def.invalidates_step;
-        group.traits.ui_page = "Perimeters & Shell";
-        group.traits.ui_group = "Seam";
-        group.ui_fragment =
-            "page:Perimeters & Shell\n"
-            "group:Seam\n"
-            "line:" + label + "\n"
-            "setting:" + key + "\n"
-            "end_line\n";
-    }
     group.refresh_storage_pointers();
     return group;
 }
@@ -499,20 +484,7 @@ void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin
 
         if (!plugin->get_exclusive_group_label().empty()) {
             group.label_storage = plugin->get_exclusive_group_label();
-            if (group.step == SEAM_PLACER &&
-                group.group_id == "seam_placer_plugin") {
-                // Keep this regional service selector beside the other seam
-                // settings even when a provider supplies a friendlier label.
-                group.ui_fragment =
-                    "page:Perimeters & Shell\n"
-                    "group:Seam\n"
-                    "line:" + group.label_storage + "\n"
-                    "setting:" + group.option_key_storage + "\n"
-                    "end_line\n";
-            } else {
-                group.ui_fragment = plugin_group_ui_fragment(
-                    group, group.label_storage);
-            }
+            group.ui_fragment = plugin_group_ui_fragment(group, group.label_storage);
         }
         if (!plugin->get_exclusive_group_tooltip().empty())
             group.tooltip_storage = plugin->get_exclusive_group_tooltip();
@@ -697,11 +669,11 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
 /*
 Resolve providers by serialized enum ID because activation may reorder entries in the registered
 table. The group, configuration, and plugin list are borrowed and unchanged; the returned plugin is
-borrowed. An empty list returns null, while missing configuration, a missing option, or one
-non-thumbnail provider returns the first provider. A matching ID returns its provider. Unknown
-regional seam or thumbnail IDs return null so a stale seam choice cannot silently move seam
-placement; other unknown IDs retain the first-provider fallback. An out-of-table enum serializes to
-an empty string and follows this same unknown-ID path.
+borrowed. An empty list returns null; missing configuration or a missing option returns the first
+provider. A singleton bypasses the stored id unless its read_with_one_provider trait or the thumbnail
+service requests reading. A matching ID returns its provider. Unknown IDs return null for strict
+traits or the thumbnail encoder group, otherwise the first provider. An out-of-table enum serializes
+to an empty string and follows the unknown-ID path; serialization/allocation failures propagate.
 */
 Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
                                    const std::vector<Plugin *> &plugins,
@@ -709,7 +681,8 @@ Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
 {
     if (plugins.empty())
         return nullptr;
-    if (config == nullptr || (plugins.size() == 1 && group.step != GCODE_THUMBNAIL))
+    if (config == nullptr || (plugins.size() == 1 && !group.traits.read_with_one_provider &&
+                              group.step != GCODE_THUMBNAIL))
         return plugins.front();
 
     const ConfigOption *option = config->option(group.option_def.opt_key);
@@ -721,7 +694,7 @@ Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
         if (plugin->get_id() == selected_id)
             return plugin;
 
-    if ((group.step == SEAM_PLACER && group.group_id == "seam_placer_plugin") ||
+    if (group.traits.strict_selection ||
         (group.step == GCODE_THUMBNAIL && group.group_id == "thumbnail_encoder_plugin"))
         return nullptr;
     return plugins.front();
