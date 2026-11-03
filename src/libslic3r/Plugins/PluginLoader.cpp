@@ -59,6 +59,7 @@ Representative direct calls (branches are not a timeline):
 
 #include "PluginLoader.hpp"
 #include "PluginRepository.hpp"
+#include "NematXBuiltinPlugins.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -1293,6 +1294,8 @@ void load_plugins()
         load_plugins_from_repository_impl(
             config_dir / "plugins", orchestrator_handle_ptr,
             default_plugin_config_available ? &default_plugin_config.bundled_exact : nullptr);
+
+    register_builtin_plugin(orchestrator_handle_ptr, "NematX modules", register_nematx_builtin_plugins);
 
     // A successfully registered external plugin is the authoritative source
     // for its provider association. Backfill old profiles when that relation

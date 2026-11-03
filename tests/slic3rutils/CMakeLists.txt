@@ -41,6 +41,10 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME host_printbed_shader_resources COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_printbed_shader.py)
 set(_identity_output ${CMAKE_CURRENT_BINARY_DIR}/identity-checks/$<CONFIG>)
 add_test(NAME host_identity_resources COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test_host_identity.py --output-dir ${_identity_output} --cmake ${CMAKE_COMMAND})
+add_test(NAME host_nematx_builtin_build COMMAND ${Python3_EXECUTABLE}
+    ${CMAKE_CURRENT_SOURCE_DIR}/test_nematx_builtin_plugins.py
+    --output-dir ${CMAKE_CURRENT_BINARY_DIR}/nematx-build-checks/$<CONFIG>
+    --cmake ${CMAKE_COMMAND})
 add_test(NAME host_identity_i18n COMMAND host_i18n_tests ${_identity_output}/catalogues)
 set_tests_properties(host_identity_resources PROPERTIES FIXTURES_SETUP host_identity_catalogues)
 set_tests_properties(host_identity_i18n PROPERTIES FIXTURES_REQUIRED host_identity_catalogues)

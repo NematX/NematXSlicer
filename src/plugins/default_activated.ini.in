@@ -6,6 +6,7 @@
 @SLIC3R_BUNDLED_EXACT_PLUGIN_ENTRIES@
 [activated]
 ; Plugin ids enabled on a fresh profile.
+@SLIC3R_NEMATX_DEFAULT_ACTIVATIONS@
 standard_layer_height_generator = 1
 gui_rules.core = 1
 slice_volume = 1

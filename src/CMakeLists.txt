@@ -188,6 +188,7 @@ foreach(_bundled_exact_plugin_package IN LISTS _bundled_exact_plugin_packages)
         "${_bundled_exact_id}.slicer_version = ${_bundled_exact_slicer_version}\n")
 endforeach()
 file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated-resources/plugins")
+get_property(SLIC3R_NEMATX_DEFAULT_ACTIVATIONS GLOBAL PROPERTY SLIC3R_NEMATX_DEFAULT_ACTIVATIONS)
 configure_file("${CMAKE_CURRENT_SOURCE_DIR}/plugins/default_activated.ini.in"
                "${SLIC3R_GENERATED_DEFAULT_ACTIVATED_FILE}" @ONLY)
 
