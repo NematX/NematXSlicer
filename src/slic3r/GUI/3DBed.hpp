@@ -116,6 +116,7 @@ private:
     void render_internal(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, float scale_factor,
         bool show_texture, bool picking, double show_camera_grid);
     void render_system(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_texture, double show_camera_grid);
+    // Draw cached SVG/PNG textures with source alpha; requires an active GL context and borrows the canvas for redraws.
     void render_texture(bool bottom, GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix);
     void render_model(const Transform3d& view_matrix, const Transform3d& projection_matrix);
     void render_custom(GLCanvas3D& canvas, const Transform3d& view_matrix, const Transform3d& projection_matrix, bool bottom, bool show_texture, bool picking, double show_camera_grid);

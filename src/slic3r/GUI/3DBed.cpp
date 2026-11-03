@@ -43,6 +43,8 @@ the corresponding render data before it is drawn again.
 These meshes and buffers are display resources, not printable model geometry.
 Bed3D owns its prepared resources and uses the active OpenGL context when it
 creates, updates or releases GPU objects.
+SVG textures retain their alpha above the bed as well as below it; the shader's
+bottom-side attenuation remains separate from transparent pixels in the image.
 
 Representative direct calls (branches are not a timeline):
 
@@ -55,6 +57,7 @@ Representative direct calls (branches are not a timeline):
 
     Bed3D::render()
         `-- render_internal()
+            `-- render_texture(): load/cache SVG or PNG, then blend through printbed
 */
 static const float GROUND_Z = -0.02f;
 static const Slic3r::ColorRGBA DEFAULT_MODEL_COLOR             = Slic3r::ColorRGBA::DARK_GRAY();
@@ -585,6 +588,7 @@ void Bed3D::render_texture(bool bottom, GLCanvas3D& canvas, const Transform3d& v
         shader->set_uniform("view_model_matrix", view_matrix);
         shader->set_uniform("projection_matrix", projection_matrix);
         shader->set_uniform("transparent_background", bottom);
+        shader->set_uniform("solid_color", false);
         shader->set_uniform("svg_source", boost::algorithm::iends_with(m_texture.get_source(), ".svg"));
 
         glsafe(::glEnable(GL_DEPTH_TEST));

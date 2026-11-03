@@ -7,6 +7,7 @@ const vec3 back_color_light = vec3(0.365, 0.365, 0.365);
 
 uniform sampler2D texture;
 uniform bool transparent_background;
+uniform bool solid_color;
 uniform bool svg_source;
 
 varying vec2 tex_coord;
@@ -20,7 +21,7 @@ vec4 svg_color()
     vec3 back_color = vec3(mix(back_color_light, back_color_dark, smoothstep(0.0, 0.5, length(abs(tex_coord.xy) - vec2(0.5)))));
 
     // blends foreground with background
-    return vec4(mix(back_color, fore_color.rgb, fore_color.a), transparent_background ? fore_color.a : 1.0);
+    return vec4(mix(back_color, fore_color.rgb, fore_color.a), (transparent_background || !solid_color) ? fore_color.a : 1.0);
 }
 
 vec4 non_svg_color()
