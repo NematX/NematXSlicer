@@ -171,8 +171,7 @@ public:
     GCodeGenerator& operator=(const GCodeGenerator&) = delete;
     GCodeGenerator& operator=(GCodeGenerator&&) = delete;
 
-    // throws std::runtime_exception on error,
-    // throws CanceledException through print->throw_if_canceled().
+    // Export native text outside this Print's active STEP_GCODE, propagating export and cancellation failures.
     void            do_export(Print* print, const char* path, GCodeProcessorResult* result = nullptr, ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
 
     // Exported for the helper classes (OozePrevention, Wipe) and for the Perl binding for unit tests.

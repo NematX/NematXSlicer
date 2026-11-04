@@ -41,6 +41,17 @@
    Owned child trees and property resources travel with the exchanged content.
    The surrounding slicing/ordering step is responsible for excluding concurrent
    edits; these operations do not make a shared tree safe for concurrent mutation.
+
+   Base geometry queries inspect stored content rather than a derived legacy
+   view's cached representation. Empty events do not break XY continuity; local
+   geometry is nonempty when it contains a point, regardless of its dynamic type.
+
+       is_continuous()
+           |-- m_can_sort [reject an order that planners may still change]
+           |-- children -> ExtrusionEntity::empty() [skip geometric absences]
+           `-- first_point() / last_point() [compare exact stored XY joins]
+       is_collection() -> is_continuous() [classify child content]
+       is_loop() -> is_continuous() [require nonempty XY closure]
 */
 
 namespace Slic3r {
@@ -462,6 +473,8 @@ bool simplify_extrusion_tree(ExtrusionEntity &root)
     return simplify_extrusion_tree_recursive(root, EffectiveExtrusionProperties());
 }
 
+// Read stored child order through base content queries, ignoring empty geometry and comparing exact XY joins;
+// sortable nodes return false, null children assert in Debug and are skipped otherwise; ownership and content stay unchanged.
 bool ExtrusionEntity::is_continuous() const
 {
     // A sortable node explicitly gives path planners permission to reorder its
@@ -476,27 +489,33 @@ bool ExtrusionEntity::is_continuous() const
     const ExtrusionEntity *previous_non_empty = nullptr;
     for (const ExtrusionEntityUPtr &child : this->children()) {
         assert(child);
-        if (child == nullptr || child->empty())
+        if (child == nullptr || child->ExtrusionEntity::empty())
             continue;
         if (!child->is_continuous())
             return false;
-        if (previous_non_empty != nullptr && previous_non_empty->last_point() != child->first_point())
+        if (previous_non_empty != nullptr &&
+            previous_non_empty->ExtrusionEntity::last_point() != child->ExtrusionEntity::first_point())
             return false;
         previous_non_empty = child.get();
     }
     return true;
 }
 
+// Classify stored non-leaf content by ordered continuity, without virtual loop classification;
+// return false for leaves or continuous sequences, leaving content and ownership unchanged.
 bool ExtrusionEntity::is_collection() const
 {
-    return !this->is_leaf() && !this->is_continuous() && !this->is_loop();
+    return !this->is_leaf() && !this->is_continuous();
 }
 
+// Read base content recursively and require nonempty continuous geometry with equal XY endpoints;
+// Z offsets do not affect this predicate, empty content returns false, and no state or ownership changes.
 bool ExtrusionEntity::is_loop() const
 {
-    if (this->empty())
+    if (this->ExtrusionEntity::empty())
         return false;
-    return this->is_continuous() && this->first_point() == this->last_point();
+    return this->is_continuous() &&
+        this->ExtrusionEntity::first_point() == this->ExtrusionEntity::last_point();
 }
 
 void ExtrusionEntity::set_can_sort_reverse(bool can_sort, bool can_reverse)
@@ -553,25 +572,29 @@ void ExtrusionEntity::reverse()
     std::reverse(children->begin(), children->end());
 }
 
+// Borrow the first stored XY point through base content queries, skipping null or geometrically empty children;
+// return the existing NOT_A_POINT sentinel when no point exists, without allocation or ownership changes.
 const Point& ExtrusionEntity::first_point() const
 {
     if (const ArcPolyline *polyline = this->polyline_or_null())
         return polyline->empty() ? NOT_A_POINT : polyline->front();
     if (!this->is_leaf())
         for (const ExtrusionEntityUPtr &child : this->children())
-            if (child && !child->empty())
-                return child->first_point();
+            if (child && !child->ExtrusionEntity::empty())
+                return child->ExtrusionEntity::first_point();
     return NOT_A_POINT;
 }
 
+// Borrow the last stored XY point through base content queries in reverse child order, skipping null or empty children;
+// return the existing NOT_A_POINT sentinel when no point exists, without allocation or ownership changes.
 const Point& ExtrusionEntity::last_point() const
 {
     if (const ArcPolyline *polyline = this->polyline_or_null())
         return polyline->empty() ? NOT_A_POINT : polyline->back();
     if (!this->is_leaf())
         for (Children::const_reverse_iterator it = this->children().rbegin(); it != this->children().rend(); ++it)
-            if (*it && !(*it)->empty())
-                return (*it)->last_point();
+            if (*it && !(*it)->ExtrusionEntity::empty())
+                return (*it)->ExtrusionEntity::last_point();
     return NOT_A_POINT;
 }
 
@@ -753,6 +776,8 @@ coordf_t ExtrusionEntity::length() const
     return len;
 }
 
+// Inspect local polyline content or recurse through base child content, treating null children and monostate as empty;
+// return whether no stored point exists, without allocation, mutation or ownership changes.
 bool ExtrusionEntity::empty() const
 {
     if (const ArcPolyline *polyline = this->polyline_or_null())
@@ -760,7 +785,7 @@ bool ExtrusionEntity::empty() const
 
     if (!this->is_leaf())
         for (const ExtrusionEntityUPtr &child : this->children())
-            if (child && !child->empty())
+            if (child && !child->ExtrusionEntity::empty())
                 return false;
     return true;
 }

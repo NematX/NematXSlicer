@@ -29,9 +29,11 @@ Representative direct calls (branches are not a timeline):
 */
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <memory>
 #include <set>
@@ -2068,7 +2070,8 @@ TEST_CASE("Default firmware accepts different object layer heights in the by-lay
     });
 }
 
-// Export two owned cubes with different layer heights, verify each object's first extrusion marker, and read the output with the plugin reader; pipeline, export and parsing failures propagate.
+// Export two owned cubes with different layer heights, observe STEP_GCODE through
+// progress and STEP_NONE after export, then verify object markers and reader output.
 TEST_CASE("Default firmware exports different object layer heights in the by-layer plan",
           "[plugins][gcode][firmware][markers]")
 {
@@ -2096,10 +2099,22 @@ TEST_CASE("Default firmware exports different object layer heights in the by-lay
     const boost::filesystem::path output_path = temporary_gcode_path();
     remove_output_pair(output_path);
     std::string output;
+    std::atomic<uint32_t> gcode_progress_calls{0};
+    // Progress observes the reference-generation step without moving thumbnail
+    // rendering back from STEP_EXPORT. Workers may report concurrently.
+    print.set_status_callback([&print, &gcode_progress_calls](const PrintBase::SlicingStatus &) {
+        if (print.running_step() == STEP_GCODE)
+            gcode_progress_calls.fetch_add(1, std::memory_order_relaxed);
+    });
+    CHECK(print.running_step() == STEP_NONE);
     try {
         Orchestrator::instance().export_gcode(print, output_path.string(), nullptr);
+        CHECK(gcode_progress_calls.load(std::memory_order_relaxed) > 0);
+        CHECK(print.running_step() == STEP_NONE);
+        print.set_status_callback(nullptr);
         output = read_text_file(output_path);
     } catch (...) {
+        print.set_status_callback(nullptr);
         remove_output_pair(output_path);
         throw;
     }
@@ -5581,6 +5596,26 @@ TEST_CASE("Thumbnail configuration preserves serialized ids and binary codec lim
     REQUIRE(requests.size() == 1);
     CHECK(requests.front().render.color_mode == RAW_GCODE_THUMBNAIL_COLOR_UNIFORM);
 }
+
+#ifndef NDEBUG
+// Deliberately enter the native exporter under this Print's active STEP_GCODE marker; the routing assertion
+// must terminate before status or file effects. Explicit hidden-tag selection isolates the expected process failure.
+TEST_CASE("Legacy export rejects the active pipeline G-code context",
+          "[.][legacy-routing-assert]")
+{
+    const boost::filesystem::path output_path = boost::filesystem::absolute(
+        boost::filesystem::path(TEST_DATA_DIR).parent_path().parent_path() /
+        "build" / "temp" / boost::filesystem::unique_path("legacy-routing-%%%%-%%%%.gcode"));
+    REQUIRE_FALSE(boost::filesystem::exists(output_path));
+    REQUIRE_FALSE(boost::filesystem::exists(output_path.string() + ".tmp"));
+    std::cout << "LEGACY_ROUTING_PROBE_PATH=" << output_path.string() << std::endl;
+    Print print;
+    print.set_running_step(STEP_GCODE);
+    GCodeGenerator generator;
+    generator.do_export(&print, output_path.string().c_str());
+    FAIL("The active STEP_GCODE context must stop at the legacy exporter routing assertion");
+}
+#endif
 
 TEST_CASE("Legacy text export uses the dynamic thumbnail service",
           "[plugins][gcode][legacy][thumbnails]")

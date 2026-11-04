@@ -41,6 +41,11 @@
    Example after a publication caller has validated its destination and donor:
        destination.swap_content(prepared);
    This single nonthrowing exchange is not itself a multi-root transaction.
+
+   Base continuity and endpoint queries follow stored content, even after a
+   legacy path or loop has acquired generic children. Continuity uses exact XY
+   joins and ignores empty geometry, not event ordering semantics. Borrowed
+   endpoint references remain valid only until the owning content changes.
 */
 
 namespace Slic3r {
@@ -146,6 +151,7 @@ public:
     bool has_polyline() const;
     bool is_leaf() const;
     bool is_nop() const;
+    // Check stored child order for exact XY continuity, ignoring geometrically empty children.
     bool is_continuous() const;
 
     const ArcPolyline* polyline_or_null() const;
@@ -188,7 +194,9 @@ public:
 
     virtual ExtrusionRole role() const;
     virtual bool has_role(ExtrusionRole test_role) const;
+    // Classify non-leaf content that does not form an ordered continuous sequence.
     virtual bool is_collection() const;
+    // Base implementation checks nonempty continuous XY closure; Loop and MultiEntity overrides return true and false respectively.
     virtual bool is_loop() const;
     bool can_sort() const { return m_can_sort && this->is_collection(); }
     virtual bool can_reverse() const { return this->can_sort() || m_can_reverse; }
@@ -198,7 +206,9 @@ public:
     virtual ExtrusionEntity* clone_move() { return new ExtrusionEntity(std::move(*this)); }
     virtual ~ExtrusionEntity() = default;
     virtual void reverse();
+    // Borrow the first stored XY point, skipping empty children, or the no-point sentinel.
     virtual const Point& first_point() const;
+    // Borrow the last stored XY point, skipping empty children, or the no-point sentinel.
     virtual const Point& last_point() const;
     // Returns an approximately middle point of a path, loop or an extrusion collection.
     // Used to get a sample point of an extrusion or extrusion collection, which is possibly deep inside its island.
@@ -219,6 +229,7 @@ public:
     virtual void   collect_points(Points &dst) const;
     virtual ArcPolylines as_polylines() const { ArcPolylines dst; this->collect_polylines(dst); return dst; }
     virtual coordf_t length() const;
+    // Check recursively whether base content contains no stored geometry points.
     virtual bool empty() const;
     virtual double total_volume() const;
     virtual void visit(ExtrusionVisitor &visitor);
@@ -234,9 +245,9 @@ Remove transparent structural collection children from an extrusion tree.
 The function keeps the current node in place and only deletes direct children
 that are plain collections carrying no state different from their parent. This
 is useful after plugin processing, where small wrapper collections are often
-created to group temporary output. Loops, continuous multipaths and leaf
-extrusions are intentionally left untouched because their structure carries
-printing semantics.
+created to group temporary output. Continuous sequences and leaf extrusions
+are left untouched; a discontinuous node can be a collection regardless of
+its dynamic type.
 */
 bool simplify_extrusion_tree(ExtrusionEntity &root);
 

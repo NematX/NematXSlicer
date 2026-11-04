@@ -299,6 +299,73 @@ TEST_CASE("Ordered extrusion scope exposes its four compact layouts",
     }
 }
 
+// Own a valid legacy Loop below a fixed generic parent, apply both real transition boundaries and compare
+// const content, moved resources and stable handles; scope or allocation failures propagate without owning borrowed views.
+TEST_CASE("Real transition scope preserves a legacy Loop under its generic parent",
+          "[plugins][layer-extrusion-edit][transition-scope][extrusion-hybrid][hybrid-real-scope]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    auto path = make_path(Point(1000, 1000), Point(11000, 1000));
+    path->polyline().append(Point(11000, 11000));
+    path->polyline().append(Point(1000, 11000));
+    path->polyline().append(Point(1000, 1000));
+    const ExtrusionEntity &original_path = *path;
+    const ArcPolyline geometry = original_path.polyline_ref();
+    auto loop = std::make_unique<ExtrusionLoop>(std::move(*path));
+    loop->add_property(ExtrusionPropertySpeed(29.f));
+    loop->add_property(ExtrusionPropertyCustomGcodeText("M117 scope contour"));
+    ExtrusionEntity *loop_address = loop.get();
+    const ExtrusionEntity &original_loop = *loop;
+    const ExtrusionEntity *path_address = &original_loop.child(0);
+    ExtrusionEntity parent(ExtrusionEntity::Children(), false, false, false);
+    parent.append_child(std::move(loop));
+    const uint8_t flags = slic3r_api::PRINTING_EXTRUSION_SCOPE_INCOMING_TRANSITION |
+                          slic3r_api::PRINTING_EXTRUSION_SCOPE_OUTGOING_TRANSITION;
+    OrderedExtrusionScope scope = slic3r_api::LayerExtrusionEdit::ExtrusionScope::ensure_scope(
+        entity_view(*loop_address), scope_property_key(), flags);
+    const ExtrusionEntity &parent_view = parent;
+    const ExtrusionEntity &scope_view = parent_view.child(0);
+    CHECK(&scope_view == loop_address);
+    CHECK(scope.root().handle() == reinterpret_cast<extrusion_entity_handle *>(loop_address));
+    REQUIRE(scope_view.child_count() == 4);
+    CHECK(scope.travel().handle() == reinterpret_cast<const extrusion_entity_handle *>(&scope_view.child(0)));
+    CHECK(scope.before().handle() == reinterpret_cast<const extrusion_entity_handle *>(&scope_view.child(1)));
+    CHECK(scope.content().handle() == reinterpret_cast<const extrusion_entity_handle *>(&scope_view.child(2)));
+    CHECK(scope.after().handle() == reinterpret_cast<const extrusion_entity_handle *>(&scope_view.child(3)));
+    CHECK(scope.has_incoming_transition());
+    CHECK(scope.has_outgoing_transition());
+    CHECK(scope_property(scope_view).flags == flags);
+    for (size_t index : {size_t(0), size_t(1), size_t(3)}) {
+        CHECK(scope_view.child(index).is_leaf());
+        CHECK(scope_view.child(index).polyline_or_null() == nullptr);
+        CHECK(scope_view.child(index).child_count() == 0);
+    }
+    const ExtrusionEntity &content = scope_view.child(2);
+    REQUIRE(content.child_count() == 1);
+    CHECK(&content.child(0) == path_address);
+    CHECK(scope_view.get_property<ExtrusionPropertySpeed>() == nullptr);
+    CHECK(scope_view.get_property<ExtrusionPropertyCustomGcode>() == nullptr);
+    REQUIRE(content.get_property<ExtrusionPropertySpeed>() != nullptr);
+    CHECK(content.get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 29.f);
+    const auto *text = content.get_property<ExtrusionPropertyCustomGcode>();
+    REQUIRE(text != nullptr);
+    CHECK(content.custom_gcode_string(*text) == "M117 scope contour");
+    CHECK(content.get_property<ExtrusionAttributes>() == nullptr);
+    REQUIRE(content.child(0).get_property<ExtrusionAttributes>() != nullptr);
+    CHECK(content.child(0).get_property<ExtrusionAttributes>()->extrusion_role() == ExtrusionRole::Perimeter);
+    const ArcPolyline &actual = content.child(0).polyline_ref();
+    REQUIRE(actual.size() == geometry.size());
+    CHECK(actual.has_z_offset() == geometry.has_z_offset());
+    for (size_t index = 0; index < geometry.size(); ++index) {
+        CHECK(actual.get_point(index) == geometry.get_point(index));
+        CHECK(actual.z_offset(index) == geometry.z_offset(index));
+        CHECK(actual.get_arc(index).radius == geometry.get_arc(index).radius);
+        CHECK(actual.get_arc(index).orientation == geometry.get_arc(index).orientation);
+    }
+    CHECK(extrusion_is_continuous(entity_view(parent).handle()) == 1);
+    CHECK(extrusion_is_loop(entity_view(parent).handle()) == 1);
+}
+
 TEST_CASE("Phased scopes move direct properties and resources with content",
           "[plugins][layer-extrusion-edit][transition-scope][scope-helper]")
 {

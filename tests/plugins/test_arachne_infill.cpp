@@ -266,6 +266,8 @@ std::vector<std::string> native_entities(const ExPolygon &polygon, const raw_inf
     return entities;
 }
 
+// Generate into local owned storage from borrowed surface/settings, retain the output view throughout child traversal
+// and return owned snapshots; generation/allocation failures propagate and Catch reports shape or permission mismatches.
 std::vector<std::string> plugin_entities(const ExPolygon &polygon, const raw_infill_pattern_params &raw,
                                          const Arachne::WallToolPathsSettings &settings)
 {
@@ -280,7 +282,8 @@ std::vector<std::string> plugin_entities(const ExPolygon &polygon, const raw_inf
     slic3r_api::Infill::fill_concentric_surface(ctx, handle, nullptr, settings);
     std::vector<std::string> entities;
     REQUIRE(output.child_count() <= 1);
-    for (const slic3r_api::ExtrusionEntity group : output.readonly().children()) {
+    const slic3r_api::ExtrusionEntity output_view = output.readonly();
+    for (const slic3r_api::ExtrusionEntity group : output_view.children()) {
         CHECK_FALSE(group.sortable());
         CHECK_FALSE(group.reversible());
         for (const slic3r_api::ExtrusionEntity child : group.children())
@@ -340,6 +343,8 @@ std::string native_ensuring(const ExPolygon &polygon, const raw_infill_pattern_p
     return tree;
 }
 
+// Generate into local owned storage from borrowed surface/settings, retain the output view throughout child traversal
+// and return an owned tree snapshot; generation/allocation failures propagate and Catch reports invalid output shape.
 std::string plugin_ensuring(const ExPolygon &polygon, const raw_infill_pattern_params &raw,
                             const Arachne::WallToolPathsSettings &settings)
 {
@@ -354,7 +359,8 @@ std::string plugin_ensuring(const ExPolygon &polygon, const raw_infill_pattern_p
     slic3r_api::Infill::fill_ensuring_surface(ctx, handle, nullptr, settings);
     REQUIRE(output.child_count() <= 1);
     std::string tree;
-    for (const slic3r_api::ExtrusionEntity group : output.readonly().children())
+    const slic3r_api::ExtrusionEntity output_view = output.readonly();
+    for (const slic3r_api::ExtrusionEntity group : output_view.children())
         tree = snapshot(group);
     return tree;
 }
