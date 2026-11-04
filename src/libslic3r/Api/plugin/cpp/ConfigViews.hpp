@@ -150,14 +150,17 @@ public:
     bool is_enabled(uint32_t idx = 0) const { return config_option_is_enabled(handle(), int32_t(idx)) != 0; }
     bool is_vector() const { return config_option_is_vector(handle()) != 0; }
 
-    // Serialized values are the stable comparison form used by config diffs
-    // and by plugin selectors. They are useful when the C++ enum type is not
-    // available on the plugin side.
+    // Return the option's serialized text; throw std::runtime_error if serialization fails or the length changes between calls.
     std::string serialize() const {
         const uint32_t needed = config_option_serialize(handle(), nullptr, 0);
+        if (needed == std::numeric_limits<uint32_t>::max())
+            throw std::runtime_error("The configuration option could not be serialized.");
         std::string out(needed + 1, '\0');
-        if (needed > 0)
-            config_option_serialize(handle(), &out[0], needed + 1);
+        const uint32_t written = config_option_serialize(handle(), &out[0], needed + 1);
+        if (written == std::numeric_limits<uint32_t>::max())
+            throw std::runtime_error("The configuration option could not be serialized.");
+        if (written != needed)
+            throw std::runtime_error("The configuration option changed while it was being serialized.");
         out.resize(needed);
         return out;
     }

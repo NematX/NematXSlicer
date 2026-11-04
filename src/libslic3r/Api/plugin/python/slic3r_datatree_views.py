@@ -593,11 +593,16 @@ class ConfigOption(DataTreeView):
         return float(self.api.host.c_float_or_percent_get_effective_value(ctypes.byref(value), float(ratio_over)))
 
     def serialize(self) -> str:
+        """Return serialized text; raise RuntimeError if serialization fails or its length changes between calls."""
         needed = int(self.api.host.config_option_serialize(self.c_handle(), None, 0))
-        if needed == 0:
-            return ""
+        if needed == 0xFFFFFFFF:
+            raise RuntimeError("The configuration option could not be serialized")
         out = ctypes.create_string_buffer(needed + 1)
         written = int(self.api.host.config_option_serialize(self.c_handle(), out, len(out)))
+        if written == 0xFFFFFFFF:
+            raise RuntimeError("The configuration option could not be serialized")
+        if written != needed:
+            raise RuntimeError("The configuration option changed while it was being serialized")
         return out.value[:written].decode("utf-8", errors="replace")
 
     def vector_empty(self) -> bool:
@@ -605,14 +610,19 @@ class ConfigOption(DataTreeView):
         return not vector or bool(self.api.host.config_option_vector_empty(vector))
 
     def vector_serialize_at(self, idx: int) -> str:
+        """Return one vector item's text; raise RuntimeError if serialization fails or its length changes between calls."""
         vector = self.api.host.config_option_vector_cast(self.c_handle())
         if not vector:
             return ""
         needed = int(self.api.host.config_option_vector_serialize_at(vector, int(idx), None, 0))
-        if needed == 0:
-            return ""
+        if needed == 0xFFFFFFFF:
+            raise RuntimeError("The configuration option could not be serialized")
         out = ctypes.create_string_buffer(needed + 1)
         written = int(self.api.host.config_option_vector_serialize_at(vector, int(idx), out, len(out)))
+        if written == 0xFFFFFFFF:
+            raise RuntimeError("The configuration option could not be serialized")
+        if written != needed:
+            raise RuntimeError("The configuration option changed while it was being serialized")
         return out.value[:written].decode("utf-8", errors="replace")
 
 

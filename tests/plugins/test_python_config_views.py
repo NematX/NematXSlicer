@@ -216,6 +216,57 @@ class PythonConfigViewTests(unittest.TestCase):
         api.host = ConfigHost(self.generated)
         return self.views.Config(api, 1)
 
+    def test_option_serialization_failure_is_not_an_empty_value(self):
+        """Check RuntimeError for the 0xFFFFFFFF failure result or changed lengths, and preserve valid empty text."""
+        for results in ([0xFFFFFFFF], [5, 0xFFFFFFFF]):
+            with self.subTest(results=results):
+                config = self.make_config()
+                responses = iter(results)
+                config.api.host.config_option_serialize = lambda *args: next(responses)
+                option = self.views.ConfigOption(config.api, 14)
+                with self.assertRaises(RuntimeError) as raised:
+                    option.serialize()
+                self.assertEqual(str(raised.exception), "The configuration option could not be serialized")
+        for results in ([5, 6], [0, 1]):
+            with self.subTest(results=results):
+                config = self.make_config()
+                responses = iter(results)
+                config.api.host.config_option_serialize = lambda *args: next(responses)
+                option = self.views.ConfigOption(config.api, 14)
+                with self.assertRaises(RuntimeError) as raised:
+                    option.serialize()
+                self.assertEqual(str(raised.exception), "The configuration option changed while it was being serialized")
+        config = self.make_config()
+        config.api.host.config_option_serialize = lambda *args: 0
+        self.assertEqual(self.views.ConfigOption(config.api, 14).serialize(), "")
+
+    def test_vector_item_serialization_failure_is_not_an_empty_value(self):
+        """Check RuntimeError for the 0xFFFFFFFF failure result or changed item lengths, and preserve valid empty text."""
+        for results in ([0xFFFFFFFF], [5, 0xFFFFFFFF]):
+            with self.subTest(results=results):
+                config = self.make_config()
+                responses = iter(results)
+                config.api.host.config_option_vector_cast = lambda option: option
+                config.api.host.config_option_vector_serialize_at = lambda *args: next(responses)
+                option = self.views.ConfigOption(config.api, 12)
+                with self.assertRaises(RuntimeError) as raised:
+                    option.vector_serialize_at(0)
+                self.assertEqual(str(raised.exception), "The configuration option could not be serialized")
+        for results in ([5, 6], [0, 1]):
+            with self.subTest(results=results):
+                config = self.make_config()
+                responses = iter(results)
+                config.api.host.config_option_vector_cast = lambda option: option
+                config.api.host.config_option_vector_serialize_at = lambda *args: next(responses)
+                option = self.views.ConfigOption(config.api, 12)
+                with self.assertRaises(RuntimeError) as raised:
+                    option.vector_serialize_at(0)
+                self.assertEqual(str(raised.exception), "The configuration option changed while it was being serialized")
+        config = self.make_config()
+        config.api.host.config_option_vector_cast = lambda option: option
+        config.api.host.config_option_vector_serialize_at = lambda *args: 0
+        self.assertEqual(self.views.ConfigOption(config.api, 12).vector_serialize_at(0), "")
+
     def test_typed_string_point_and_graph_accessors(self):
         config = self.make_config()
 

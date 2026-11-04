@@ -5,6 +5,13 @@
 
 /*
 Tests for plugin-owned temporary configurations.
+Serialization checks use options that throw or change length between calls to verify
+that C functions report failures and C++ views throw instead of returning empty text.
+Call graph for these checks:
+  TEST_CASE (serialization failures)
+    config_option_serialize -> ThrowingSerializedOption::serialize
+    config_option_vector_serialize_at
+    slic3r_api::ConfigOption::serialize -> ChangingSerializedOption::serialize
 
 The suite exercises the C ABI as a plugin sees it, then uses the C++ wrappers
 to verify buffer ownership. The core SCFG codec is covered separately
@@ -75,6 +82,81 @@ the host log, independently of the returned registration status.
 #include "libslic3r/miniz_extension.hpp"
 
 namespace {
+
+class ChangingSerializedOption final : public Slic3r::ConfigOptionString
+{
+public:
+    // Set the text length returned by the first serialization call.
+    explicit ChangingSerializedOption(size_t first_size) : m_first_size(first_size) {}
+    // Return text one byte longer after the first call to simulate a change between the length query and copy.
+    std::string serialize() const override
+    {
+        return std::string(m_first_size + (m_calls++ == 0 ? 0 : 1), 'x');
+    }
+private:
+    size_t m_first_size;
+    mutable unsigned int m_calls = 0;
+};
+
+class ThrowingSerializedOption final : public Slic3r::ConfigOptionString
+{
+public:
+    // Set the serialization call number that will throw.
+    explicit ThrowingSerializedOption(unsigned int fail_on) : ConfigOptionString("value"), m_fail_on(fail_on) {}
+    // Throw an integer on the selected call to check that the C API catches exceptions beyond std::exception.
+    std::string serialize() const override
+    {
+        if (++m_calls == m_fail_on) throw 1;
+        return value;
+    }
+private:
+    unsigned int m_fail_on;
+    mutable unsigned int m_calls = 0;
+};
+
+// Check C error returns and buffer clearing, and C++ exceptions for serialization failures and changed lengths.
+TEST_CASE("Option serialization failures stay inside the C ABI and reach C++ callers",
+          "[plugins][config][c-api]")
+{
+    ThrowingSerializedOption failing(1);
+    const config_option_handle *handle = reinterpret_cast<const config_option_handle *>(&failing);
+    char out[] = "unchanged";
+    CHECK(config_option_serialize(handle, out, sizeof(out)) == std::numeric_limits<uint32_t>::max());
+    CHECK(out[0] == '\0');
+    CHECK(config_option_serialize(nullptr, nullptr, 0) == 0);
+    Slic3r::ConfigOptionString empty;
+    CHECK(config_option_serialize(reinterpret_cast<const config_option_handle *>(&empty), nullptr, 0) == 0);
+    for (unsigned int fail_on : {1u, 2u}) {
+        ThrowingSerializedOption option(fail_on);
+        const slic3r_api::ConfigOption view(reinterpret_cast<const config_option_handle *>(&option));
+        CHECK_THROWS_WITH(view.serialize(), "The configuration option could not be serialized.");
+    }
+    Slic3r::ConfigOptionFloat scalar(1.0);
+    Slic3r::ConfigOptionFloats vector{1.0};
+    for (Slic3r::ConfigOption *option : {static_cast<Slic3r::ConfigOption *>(&scalar),
+                                      static_cast<Slic3r::ConfigOption *>(&vector)}) {
+        config_option_handle *mutable_handle = reinterpret_cast<config_option_handle *>(option);
+        config_option_set_float(mutable_handle, std::numeric_limits<double>::quiet_NaN(), 0);
+        char buffer[] = "unchanged";
+        CHECK(config_option_serialize(mutable_handle, buffer, sizeof(buffer)) == std::numeric_limits<uint32_t>::max());
+        CHECK(buffer[0] == '\0');
+        const slic3r_api::ConfigOption view(mutable_handle);
+        CHECK_THROWS_WITH(view.serialize(), "The configuration option could not be serialized.");
+    }
+    const config_option_vector_handle *vector_handle = config_option_vector_cast(
+        reinterpret_cast<const config_option_handle *>(&vector));
+    char buffer[] = "unchanged";
+    CHECK(config_option_vector_serialize_at(vector_handle, 0, buffer, sizeof(buffer)) == std::numeric_limits<uint32_t>::max());
+    CHECK(buffer[0] == '\0');
+    CHECK(config_option_vector_serialize_at(nullptr, 0, nullptr, 0) == 0);
+    CHECK(config_option_vector_serialize_at(vector_handle, -1, nullptr, 0) == 0);
+    CHECK(config_option_vector_serialize_at(vector_handle, 1, nullptr, 0) == 0);
+    for (size_t first_size : {size_t(5), size_t(0)}) {
+        ChangingSerializedOption option(first_size);
+        const slic3r_api::ConfigOption view(reinterpret_cast<const config_option_handle *>(&option));
+        CHECK_THROWS_WITH(view.serialize(), "The configuration option changed while it was being serialized.");
+    }
+}
 
 // This unregistered metadata copy models a provider that declares no setting
 // support; the borrowed ABI callbacks are never executed by these checks.

@@ -108,6 +108,11 @@ SLIC3R_HOST_API int32_t            config_option_equals(const config_option_hand
 SLIC3R_HOST_API int32_t            config_option_less(const config_option_handle *me, const config_option_handle *other);
 SLIC3R_HOST_API void               config_option_copy(config_option_handle *dst, const config_option_handle *src);
 
+/* Serialize a borrowed option and return the full byte length excluding the terminator.
+Pass NULL/0 to query the length. A writable buffer receives at most max_size-1
+bytes and a terminator. Empty values and NULL handles return 0. A serialization
+failure (for example a non-finite floating-point value) returns UINT32_MAX and
+clears a writable buffer; no exception escapes. */
 SLIC3R_HOST_API uint32_t config_option_serialize(const config_option_handle *me, char *out, uint32_t max_size);
 SLIC3R_HOST_API int32_t config_option_deserialize(config_option_handle *me, const char *str, int32_t append);
 
@@ -137,7 +142,7 @@ SLIC3R_HOST_API int32_t config_option_vector_empty(const config_option_vector_ha
 /*
 Serialize one existing vector item. The return value follows the same two-call
 buffer contract as config_option_serialize(). Invalid handles or indices return
-zero.
+zero; a serialization failure returns UINT32_MAX.
 */
 SLIC3R_HOST_API uint32_t config_option_vector_serialize_at(
     const config_option_vector_handle *me, int32_t idx, char *out, uint32_t max_size);

@@ -4,6 +4,7 @@
 ///|/
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -12,6 +13,20 @@
 #include "libslic3r/Api/plugin/c/slic3r_config_option.h"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
+
+/* This file exposes typed configuration reads and changes to C plugins through handles to host-owned options.
+   Callers must keep the options alive; these functions do not take ownership.
+
+   Serialization reads an option and copies its text into the caller's buffer.
+   Call graph:
+     config_option_serialize
+       to_option -> ConfigOption::serialize
+       copy_string_out
+     config_option_vector_serialize_at
+       to_option_vector -> ConfigOptionVectorBase::serialize_at
+       copy_string_out
+   Serialization exceptions stay inside the C boundary and return UINT32_MAX,
+   distinct from an empty value's zero length. Typed setters change the referenced option. */
 
 namespace Slic3r {
 
@@ -409,7 +424,13 @@ uint32_t config_option_serialize(const config_option_handle *me, char *out, uint
 {
     if (me == nullptr)
         return 0;
-    return Slic3r::copy_string_out(Slic3r::to_option(me)->serialize(), out, max_size);
+    try {
+        return Slic3r::copy_string_out(Slic3r::to_option(me)->serialize(), out, max_size);
+    } catch (...) {
+        if (out != nullptr && max_size > 0)
+            out[0] = '\0';
+        return std::numeric_limits<uint32_t>::max();
+    }
 }
 
 int32_t config_option_deserialize(config_option_handle *me, const char *str, int32_t append)
@@ -578,7 +599,13 @@ uint32_t config_option_vector_serialize_at(const config_option_vector_handle *me
 {
     if (me == nullptr || idx < 0 || uint32_t(idx) >= Slic3r::to_option_vector(me)->size())
         return 0;
-    return Slic3r::copy_string_out(Slic3r::to_option_vector(me)->serialize_at(idx), out, max_size);
+    try {
+        return Slic3r::copy_string_out(Slic3r::to_option_vector(me)->serialize_at(idx), out, max_size);
+    } catch (...) {
+        if (out != nullptr && max_size > 0)
+            out[0] = '\0';
+        return std::numeric_limits<uint32_t>::max();
+    }
 }
 
 int32_t config_option_vector_deserialize_at(config_option_vector_handle *me, int32_t idx, const char *str)
