@@ -663,11 +663,18 @@ struct SpeedPartitionKey
 using AutospeedPartitions = std::map<AutospeedPartitionKey, RegionalProcessPartition>;
 using SpeedPartitions = std::map<SpeedPartitionKey, RegionalProcessPartition>;
 
-// Resolve the role speed through the legacy percentage fallback hierarchy.
+// Resolve mm/s from borrowed regional/object settings. Percentages use their
+// parent role, or the per-flow autospeed base when that parent is zero. Return
+// zero for the caller's autospeed/max-print fallback; configuration errors propagate.
 double role_speed(const ExtrusionSettingsContext &context,
                   raw_extrusion_role role,
                   bool full_overhang_speed,
                   double auto_base);
+
+// Resolve a role speed whose zero value means autospeed instead of its parent.
+// An absent option uses parent. Percentages use parent; non-positive results
+// select auto_base, which is zero during the initial autospeed scan.
+double role_speed_or_auto(const Config &config, const char *key, double parent, double auto_base);
 
 // Resolve first-layer percentages before any minimum or physical speed cap.
 double first_layer_ceiling(const ExtrusionSettingsContext &context, raw_extrusion_role role, double base);
@@ -814,6 +821,12 @@ bool SpeedPartitionKey::operator<(const SpeedPartitionKey &rhs) const
     return has_volumetric_flow < rhs.has_volumetric_flow;
 }
 
+double role_speed_or_auto(const Config &config, const char *key, double parent, double auto_base)
+{
+    const double value = config.effective_float_or_percent_or_default(key, parent, parent);
+    return value > 0.0 ? value : auto_base;
+}
+
 double role_speed(const ExtrusionSettingsContext &context,
                   raw_extrusion_role role,
                   bool full_overhang_speed,
@@ -823,7 +836,7 @@ double role_speed(const ExtrusionSettingsContext &context,
     // evaluated against the preceding value, ending at the autospeed base.
     const Config &region = context.region_config;
     const double perimeter = effective_value(region, "perimeter_speed", auto_base);
-    const double external = effective_value(region, "external_perimeter_speed", perimeter);
+    const double external = role_speed_or_auto(region, "external_perimeter_speed", perimeter, auto_base);
     const double solid = effective_value(region, "solid_infill_speed", auto_base);
     const double bridge = effective_value(region, "bridge_speed", auto_base);
     // Support speed follows the autospeed base. It is also the base of the
@@ -835,9 +848,7 @@ double role_speed(const ExtrusionSettingsContext &context,
     // speed, while zero means autospeed for that feature itself, whatever the
     // support speed is.
     if (RAW_EXTRUSION_ROLE_IS_SKIRT(role)) {
-        const double brim = context.object_config.effective_float_or_percent_or_default(
-            "brim_speed", support, 0.0);
-        return brim > 0.0 ? brim : auto_base;
+        return role_speed_or_auto(context.object_config, "brim_speed", support, auto_base);
     }
     if (RAW_EXTRUSION_ROLE_IS_SUPPORT(role)) {
         if (!RAW_EXTRUSION_ROLE_IS_SUPPORT_INTERFACE(role))
@@ -849,22 +860,26 @@ double role_speed(const ExtrusionSettingsContext &context,
     if (RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_MILL))
         return region.float_or_default("milling_speed", 0.0);
     if (role == RAW_EXTRUSION_ROLE_GAP_FILL)
-        return effective_value(region, "gap_fill_speed", perimeter);
+        return role_speed_or_auto(region, "gap_fill_speed", perimeter, auto_base);
     if (role == RAW_EXTRUSION_ROLE_THIN_WALL)
-        return effective_value(region, "thin_walls_speed", external);
+        return role_speed_or_auto(region, "thin_walls_speed", external, auto_base);
+    // Ironing is an absolute speed or a percentage of the top solid speed. When the
+    // top solid speed is zero, a percentage applies to the autospeed base, like every
+    // other percentage of a zero parent; without autospeed that base is zero and the
+    // speed falls back to max_print_speed.
     if (RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_IRONING))
         return effective_value(region, "ironing_speed",
-                               effective_value(region, "top_solid_infill_speed", solid));
+                               role_speed_or_auto(region, "top_solid_infill_speed", solid, auto_base));
 
     // Infill refines solid and bridge bases according to its exact role.
     if (RAW_EXTRUSION_ROLE_IS_INFILL(role)) {
         if (RAW_EXTRUSION_ROLE_IS_BRIDGE(role))
             return RAW_EXTRUSION_ROLE_IS_EXTERNAL(role) ? bridge :
-                effective_value(region, "internal_bridge_speed", bridge);
+                role_speed_or_auto(region, "internal_bridge_speed", bridge, auto_base);
         if (RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_SOLID))
             return RAW_EXTRUSION_ROLE_IS_EXTERNAL(role) ?
-                effective_value(region, "top_solid_infill_speed", solid) : solid;
-        return effective_value(region, "infill_speed", solid);
+                role_speed_or_auto(region, "top_solid_infill_speed", solid, auto_base) : solid;
+        return role_speed_or_auto(region, "infill_speed", solid, auto_base);
     }
 
     // Fully unsupported perimeters use overhang speed; other perimeters keep
@@ -873,7 +888,7 @@ double role_speed(const ExtrusionSettingsContext &context,
         const bool use_overhang = full_overhang_speed ||
             (RAW_EXTRUSION_ROLE_IS_BRIDGE(role) && region.bool_or_default("overhangs", false));
         if (use_overhang)
-            return effective_value(region, "overhangs_speed", bridge);
+            return role_speed_or_auto(region, "overhangs_speed", bridge, auto_base);
         return RAW_EXTRUSION_ROLE_IS_EXTERNAL(role) ? external : perimeter;
     }
     return 0.0;

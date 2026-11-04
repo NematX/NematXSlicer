@@ -23,3 +23,13 @@ first-layer flow pass.
 First-layer speed percentages use the original role or per-flow autospeed base,
 before the first-layer minimum and physical print/filament caps. A zero
 `first_layer_infill_speed` (absolute or percent) falls back to `first_layer_speed`.
+
+An explicit zero (including `0%`) selects autospeed for external perimeters,
+gap fill, thin walls, top solid infill, internal bridges, ordinary infill and
+overhangs. It no longer inherits the parent role's explicit speed. These roles
+participate in the autospeed minimum-flow scan unless the thin-flow setting
+excludes them. Without an autospeed target, zero falls back to `max_print_speed`.
+Percentages of a zero parent use the autospeed base when one is available,
+including ironing over a zero top-solid speed. First-layer and filament caps
+still apply after role resolution. Existing profiles using zero to inherit a
+parent speed must use `100%` explicitly to retain that behavior.

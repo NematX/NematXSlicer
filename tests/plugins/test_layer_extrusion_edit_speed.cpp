@@ -145,6 +145,14 @@ struct ProcessState
 // Return the resolved mm/s speed of one skirt/brim leaf with the supplied settings.
 float resolved_brim_speed(std::initializer_list<ConfigBase::SetDeserializeItem> overrides);
 
+using SettingOverrides = std::vector<std::pair<std::string, std::string>>;
+
+// Resolve one first-layer leaf per role with distinct explicit parent speeds,
+// then apply overrides so accidental inheritance of a zero role speed is visible.
+// The local Print owns the plan; setup or assertion failures abort the test.
+std::map<uint16_t, float> resolved_role_speeds(const std::vector<ExtrusionSpec> &specs,
+                                               const SettingOverrides &overrides);
+
 // Return the resolved mm/s² acceleration of one skirt/brim leaf with the supplied settings.
 float resolved_brim_acceleration(std::initializer_list<ConfigBase::SetDeserializeItem> overrides);
 
@@ -527,6 +535,29 @@ float resolved_brim_speed(std::initializer_list<ConfigBase::SetDeserializeItem> 
     REQUIRE(leaves.size() == 1);
     REQUIRE(leaves.front().role == ExtrusionRole::Skirt);
     return leaves.front().speed;
+}
+
+std::map<uint16_t, float> resolved_role_speeds(const std::vector<ExtrusionSpec> &specs,
+                                               const SettingOverrides &overrides)
+{
+    PreparedSpeedPrint prepared;
+    DynamicPrintConfig config = speed_config({
+        {"perimeter_speed", "31"}, {"external_perimeter_speed", "19"},
+        {"solid_infill_speed", "53"}, {"bridge_speed", "27"},
+        {"overhangs", "1"}, {"first_layer_speed", "100%"}, {"first_layer_min_speed", "0"},
+        {"filament_max_speed", "0"}, {"filament_max_volumetric_speed", "0"}
+    });
+    for (const std::pair<std::string, std::string> &item : overrides)
+        config.set_deserialize_strict(item.first, item.second);
+    prepare_ordered_plan(prepared, config, {specs});
+    run_editors(prepared, {DEFAULT_SPEED_PLUGIN});
+    const std::vector<ObservedLeaf> leaves = observed_plan_leaves(prepared.print);
+    REQUIRE(leaves.size() == specs.size());
+    std::map<uint16_t, float> speeds;
+    for (const ObservedLeaf &leaf : leaves)
+        speeds[uint16_t(leaf.role())] = leaf.speed;
+    REQUIRE(speeds.size() == specs.size());
+    return speeds;
 }
 
 /*
@@ -1803,6 +1834,159 @@ TEST_CASE("Layer extrusion editor resolves brim speed over the support speed",
 }
 
 /*
+Check that a zero value (and a zero percentage) of each role speed that refines a
+parent speed selects autospeed, or max_print_speed without autospeed, rather than
+the parent speed, and that the first-layer, filament speed and filament
+volumetric ceilings then apply as for an explicit speed. One plan per scenario
+holds the seven roles. The local Prints own their plans; Catch2 reports setup or
+assertion failures.
+*/
+TEST_CASE("Layer extrusion editor resolves a zero role speed as autospeed",
+          "[plugins][layer-extrusion-edit][speed][roles][zero-speed]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    const SettingOverrides without_autospeed = {{"max_print_speed", "73"}, {"max_volumetric_speed", "0"}};
+    const SettingOverrides with_autospeed = {{"max_print_speed", "100"}, {"max_volumetric_speed", "20"},
+                                             {"autospeed_min_thin_flow", "8"}};
+    struct Scenario { const SettingOverrides &base; SettingOverrides ceiling; float expected; };
+    const Scenario scenarios[] = {
+        {without_autospeed, {}, 73.f},
+        {without_autospeed, {{"first_layer_speed", "30"}}, 30.f},
+        {without_autospeed, {{"filament_max_speed", "25"}}, 25.f},
+        {without_autospeed, {{"filament_max_volumetric_speed", "6"}}, 30.f},
+        {with_autospeed, {}, 40.f},
+        {with_autospeed, {{"first_layer_speed", "30"}}, 30.f},
+        {with_autospeed, {{"filament_max_speed", "25"}}, 25.f},
+        {with_autospeed, {{"filament_max_volumetric_speed", "6"}}, 30.f}
+    };
+    const std::vector<ExtrusionSpec> specs = {
+        {ExtrusionRole::ExternalPerimeter, 0.2}, {ExtrusionRole::GapFill, 0.2},
+        {ExtrusionRole::ThinWall, 0.2}, {ExtrusionRole::TopSolidInfill, 0.2},
+        {ExtrusionRole::InternalBridgeInfill, 0.2}, {ExtrusionRole::InternalInfill, 0.2},
+        {ExtrusionRole::OverhangPerimeter, 0.2}
+    };
+    for (const char *zero : {"0", "0%"})
+        for (const Scenario &scenario : scenarios) {
+            CAPTURE(zero, scenario.expected, scenario.ceiling.size());
+            SettingOverrides overrides = scenario.base;
+            overrides.insert(overrides.end(), scenario.ceiling.begin(), scenario.ceiling.end());
+
+            // Every role speed is zero: no role may take its parent's speed.
+            SettingOverrides all_zero = overrides;
+            for (const char *option : {"external_perimeter_speed", "gap_fill_speed", "thin_walls_speed",
+                                       "top_solid_infill_speed", "internal_bridge_speed",
+                                       "infill_speed", "overhangs_speed"})
+                all_zero.emplace_back(option, zero);
+            for (const std::pair<const uint16_t, float> &role_speed : resolved_role_speeds(specs, all_zero)) {
+                CAPTURE(role_speed.first);
+                CHECK(role_speed.second == scenario.expected);
+            }
+
+            // The thin wall parent (external perimeter, 19 mm/s) stays explicit here.
+            SettingOverrides thin_only = overrides;
+            thin_only.emplace_back("thin_walls_speed", zero);
+            CHECK(resolved_role_speeds({{ExtrusionRole::ThinWall, 0.2}}, thin_only)
+                      .at(uint16_t(ExtrusionRole::ThinWall) ) == scenario.expected);
+        }
+}
+
+/*
+With the thin-flow floor disabled, gap fill and thin walls take part in the
+automatic volumetric target; enabled at zero they are excluded from it. The
+target is min(smallest flow * max_print_speed, max_volumetric_speed), and each
+leaf gets min(target / its flow, max_print_speed). Local Prints own the plans.
+*/
+TEST_CASE("Layer extrusion editor derives each zero role speed from its own flow",
+          "[plugins][layer-extrusion-edit][speed][roles][zero-speed][autospeed]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    const std::vector<ExtrusionSpec> specs = {
+        {ExtrusionRole::ExternalPerimeter, 0.1}, {ExtrusionRole::BridgeInfill, 0.4},
+        {ExtrusionRole::GapFill, 0.05}
+    };
+    const SettingOverrides base = {
+        {"external_perimeter_speed", "0"}, {"bridge_speed", "0"}, {"gap_fill_speed", "0"},
+        {"max_print_speed", "100"}, {"max_volumetric_speed", "50"}
+    };
+    const auto speeds = [&specs, &base](const char *thin_flow) {
+        SettingOverrides overrides = base;
+        overrides.emplace_back("autospeed_min_thin_flow", thin_flow);
+        return resolved_role_speeds(specs, overrides);
+    };
+
+    // Excluded gap fill: target = min(0.1 * 100, 50) = 10 mm3/s.
+    const std::map<uint16_t, float> excluded = speeds("0");
+    CHECK(excluded.at(uint16_t(ExtrusionRole::ExternalPerimeter)) == Approx(100.));
+    CHECK(excluded.at(uint16_t(ExtrusionRole::BridgeInfill)) == Approx(25.));
+    CHECK(excluded.at(uint16_t(ExtrusionRole::GapFill)) == Approx(100.));
+
+    // Gap fill included: target = min(0.05 * 100, 50) = 5 mm3/s.
+    const std::map<uint16_t, float> included = speeds("!0");
+    CHECK(included.at(uint16_t(ExtrusionRole::ExternalPerimeter)) == Approx(50.));
+    CHECK(included.at(uint16_t(ExtrusionRole::BridgeInfill)) == Approx(12.5));
+    CHECK(included.at(uint16_t(ExtrusionRole::GapFill)) == Approx(100.));
+}
+
+/*
+A percentage of a zero parent applies to the autospeed base, not to the parent's
+own fallback and not to the whole base. Without autospeed there is no base, so the
+speed falls back to max_print_speed itself. This covers the perimeter -> external perimeter and top solid -> ironing chains.
+Local Prints own the plans; Catch2 reports failures.
+*/
+TEST_CASE("Layer extrusion editor applies a percentage of a zero parent to the autospeed base",
+          "[plugins][layer-extrusion-edit][speed][roles][zero-speed]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+
+    const SettingOverrides without_autospeed = {{"max_print_speed", "73"}, {"max_volumetric_speed", "0"}};
+    const SettingOverrides with_autospeed = {{"max_print_speed", "100"}, {"max_volumetric_speed", "20"},
+                                             {"autospeed_min_thin_flow", "8"}};
+    const std::vector<ExtrusionSpec> perimeters = {
+        {ExtrusionRole::Perimeter, 0.2}, {ExtrusionRole::ExternalPerimeter, 0.2}
+    };
+    const std::vector<ExtrusionSpec> top_and_ironing = {
+        {ExtrusionRole::TopSolidInfill, 0.2}, {ExtrusionRole::Ironing, 0.2}
+    };
+
+    SECTION("external perimeter percentage of a zero perimeter speed, without autospeed") {
+        SettingOverrides overrides = without_autospeed;
+        overrides.emplace_back("perimeter_speed", "0");
+        overrides.emplace_back("external_perimeter_speed", "50%");
+        const std::map<uint16_t, float> speeds = resolved_role_speeds(perimeters, overrides);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::Perimeter)) == 73.f);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::ExternalPerimeter)) == 73.f);
+    }
+
+    SECTION("external perimeter percentage of a zero perimeter speed, with autospeed") {
+        SettingOverrides overrides = with_autospeed;
+        overrides.emplace_back("perimeter_speed", "0");
+        overrides.emplace_back("external_perimeter_speed", "50%");
+        const std::map<uint16_t, float> speeds = resolved_role_speeds(perimeters, overrides);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::Perimeter)) == 40.f);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::ExternalPerimeter)) == 20.f);
+    }
+
+    SECTION("ironing percentage of a zero top solid speed, without autospeed") {
+        SettingOverrides overrides = without_autospeed;
+        overrides.emplace_back("top_solid_infill_speed", "0");
+        overrides.emplace_back("ironing_speed", "50%");
+        const std::map<uint16_t, float> speeds = resolved_role_speeds(top_and_ironing, overrides);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::TopSolidInfill)) == 73.f);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::Ironing)) == 73.f);
+    }
+
+    SECTION("ironing percentage of a zero top solid speed, with autospeed") {
+        SettingOverrides overrides = with_autospeed;
+        overrides.emplace_back("top_solid_infill_speed", "0");
+        overrides.emplace_back("ironing_speed", "50%");
+        const std::map<uint16_t, float> speeds = resolved_role_speeds(top_and_ironing, overrides);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::TopSolidInfill)) == 40.f);
+        CHECK(speeds.at(uint16_t(ExtrusionRole::Ironing)) == 20.f);
+    }
+}
+/*
 Initialize the plugin runtime, build one in-memory `Skirt` role leaf (the role
 used by skirt/brim paths), run the acceleration editor, and check fixed,
 percentage, zero-inheritance and first-layer results in mm/s². The local print
@@ -2067,7 +2251,7 @@ TEST_CASE("Layer extrusion editor supports autospeed percentages and thin-flow f
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
     PreparedSpeedPrint prepared;
     const DynamicPrintConfig config = speed_config({
-        {"perimeter_speed", "50%"}, {"gap_fill_speed", "0"},
+        {"perimeter_speed", "50%"}, {"gap_fill_speed", "100%"},
         {"default_acceleration", "1000"}, {"max_print_speed", "100"},
         {"max_volumetric_speed", "20"}, {"autospeed_min_thin_flow", "50%"},
         {"first_layer_speed", "100%"}, {"first_layer_acceleration", "100%"},
