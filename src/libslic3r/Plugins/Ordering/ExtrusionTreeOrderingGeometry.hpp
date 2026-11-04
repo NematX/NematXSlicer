@@ -39,7 +39,9 @@ void reverse_tree(
     MutableExtrusionEntity entity,
     const plugin_run_context *run_ctx = nullptr);
 
-/* Rotate a fixed closed loop so its first and last point equal seam. */
+/* Rotate a fixed closed loop so its first and last point equal seam, or the end of the
+   child path that the seam is within SCALED_EPSILON / 2 of: a seam that close to the end
+   of a child is moved onto it instead of splitting off a one-point closing leaf. */
 void rotate_loop_to_seam(storage_handle *scratch_storage,
                          MutableExtrusionEntity loop,
                          c_point seam,

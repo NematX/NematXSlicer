@@ -1,5 +1,6 @@
 #include <catch2/catch.hpp>
 
+#include <cmath>
 #include <initializer_list>
 #include <memory>
 #include <stdexcept>
@@ -21,6 +22,7 @@
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
+#include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 
 /*
@@ -578,5 +580,53 @@ TEST_CASE("STEP_ORDERING precondition validates perimeter loop metadata",
         CHECK(thrown_message.find("missing direct ExtrusionPropertyLoopRole/EPropertyPerimeter") !=
               std::string::npos);
         CHECK(fixture.print().printing_plan() == nullptr);
+    }
+}
+
+TEST_CASE("Rotating a composed loop to a seam next to a fragment end keeps its fragments valid",
+          "[plugins][ordering][seam]")
+{
+    // ArcPolyline::split_at() returns a one-point piece when the seam is within
+    // SCALED_EPSILON / 2 of an end of the path. The rotation must move such a seam
+    // onto the fragment boundary instead of keeping that piece as a closing leaf.
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    const auto point = [](const double x, const double y) {
+        return c_point{static_cast<decltype(c_point::x)>(std::llround(x * 1e6)),
+                       static_cast<decltype(c_point::y)>(std::llround(y * 1e6))};
+    };
+    const auto rotate_square_loop = [&](const c_point seam, const c_point boundary) {
+        slic3r_api::StoredExtrusionEntity first(handle, {point(0, 0), point(10, 0), point(10, 10)});
+        slic3r_api::StoredExtrusionEntity second(handle, {point(10, 10), point(0, 10), point(0, 0)});
+        slic3r_api::StoredExtrusionEntity loop(handle);
+        loop.append_child_move(first.mutable_view());
+        loop.append_child_move(second.mutable_view());
+        loop.disable_sort().disable_reverse();
+        REQUIRE(loop.readonly().is_loop());
+        const distf_t length = loop.readonly().length();
+
+        slic3r_api::Ordering::TreeOrderingGeometry::rotate_loop_to_seam(handle, loop.mutable_view(), seam, nullptr);
+
+        CHECK(loop.readonly().is_loop());
+        CHECK(loop.readonly().length() == length);
+        CHECK(slic3r_api::points_equal(loop.readonly().front(), boundary));
+        CHECK(slic3r_api::points_equal(loop.readonly().back(), boundary));
+        REQUIRE(loop.child_count() == 2);
+        for (uint32_t child_idx = 0; child_idx < loop.child_count(); ++child_idx)
+            CHECK(loop.child(child_idx).point_count() >= 2);
+    };
+
+    SECTION("near the start of a fragment")
+    {
+        c_point seam = point(0, 0);
+        seam.x += SCALED_EPSILON / 4;
+        rotate_square_loop(seam, point(0, 0));
+    }
+
+    SECTION("near the end of a fragment")
+    {
+        c_point seam = point(10, 10);
+        seam.y -= SCALED_EPSILON / 4;
+        rotate_square_loop(seam, point(10, 10));
     }
 }

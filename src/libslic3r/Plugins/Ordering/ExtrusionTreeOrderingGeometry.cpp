@@ -49,6 +49,14 @@ Representative direct calls:
     reverse_tree()
         |-- entity.reverse() [path leaf]
         `-- reverse_tree() [recursive child paths before reversing child order]
+
+    rotate_loop_to_seam()
+        |-- projected_point_on_entity() [find the nearest line/arc position]
+        |-- rotate_local_loop_to_seam() [rotate a single stored polyline]
+        `-- compare child endpoints with split_at's epsilon before splitting
+
+Scratch storage owns temporary paths; input trees remain borrowed during each
+call. Cancellation and invalid loop geometry propagate to the ordering provider.
 */
 
 /* Find the nearest point on any local line or arc in one entity subtree. */
@@ -342,9 +350,15 @@ void rotate_loop_to_seam(storage_handle *scratch_storage,
     std::unique_ptr<StoredExtrusionEntity> closing_piece;
     MutableExtrusionEntity child = loop.child_mutable(containing_idx);
     if (child.point_count() > 0) {
-        if (points_equal(projected, child.local_front())) {
+        // ArcPolyline::split_at() returns a one-point piece when the seam is within
+        // SCALED_EPSILON / 2 of an end of the path, and that piece would become a
+        // degenerate closing leaf. Such a seam is already at the child boundary.
+        const Slic3r::Point projected_point(projected.x, projected.y);
+        if (projected_point.coincides_with_epsilon(
+                Slic3r::Point(child.local_front().x, child.local_front().y))) {
             start_idx = containing_idx;
-        } else if (points_equal(projected, child.local_back())) {
+        } else if (projected_point.coincides_with_epsilon(
+                       Slic3r::Point(child.local_back().x, child.local_back().y))) {
             start_idx = (containing_idx + 1) % loop.child_count();
         } else {
             /* Keep the source handle for the suffix and append a cloned prefix. */
