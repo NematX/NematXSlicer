@@ -1,5 +1,46 @@
-// Exercises core clipping and plugin views with local geometry; path coordinates retain direction
-// and tests that inspect collection indices also retain the order returned by clipping.
+/*
+Test the geometry operations available to plugins through the C API and its
+C++ wrappers: polygon unions and offsets, polyline clipping, conversion of
+polygon trees, and distance queries with LineDistancer.
+
+The tests build their geometry in memory, without a Print or slicing pipeline.
+Coordinates use the slicer's scaled integer units. Helpers such as point_mm()
+and rectangle_mm() accept millimeters and perform that conversion.
+
+Polygon operations are compared with the corresponding native slicer functions.
+Conversion tests also inspect Clipper's polygon tree directly. An island is an
+outer contour together with its holes. These tests check that conversion keeps
+every contour, hole and vertex intact while placing containing islands before
+the islands inside them. Explicit expected orders also check stable sorting.
+
+Polyline comparisons preserve every bend and each path's direction. They may
+ignore the order of separate paths, but tests of collection indices or result
+ordering check that order explicitly. Other cases verify geometry cleanup,
+unchanged inputs, independent results and error reporting through C and C++.
+
+LineDistancer finds distances and nearby line segments. Its tests compare
+indexed queries with an exhaustive scan, then check copied geometry, index
+invalidation and concurrent reads. A separate opt-in benchmark measures time
+without imposing a timing assertion.
+
+Representative calls in the boolean-conversion tests:
+
+    TEST_CASE
+        `-- check_sdk_boolean_geometry()
+            |-- ClipperLib::Clipper::Execute()
+            |-- append_engine_islands()
+            |   `-- append_engine_islands() [recursive]
+            |-- clipper_execute()
+            |-- clipper_shapes_to_expolygons()
+            |-- island_signatures()
+            |-- check_union_island_order()
+            `-- Slic3r::union_ex() [union case only]
+
+Input geometry belongs to local test values; views borrow it during calls.
+PluginStorage owns results created through the C API and remains alive while
+they are inspected. Ownership tests also clear the inputs before reading the
+results again, so sharing input memory cannot pass unnoticed.
+*/
 #include <catch2/catch.hpp>
 
 #include <chrono>
@@ -8,6 +49,7 @@
 #include <limits>
 #include <random>
 #include <set>
+#include <sstream>
 #include <algorithm>
 #include "libslic3r/Api/plugin/cpp/LineDistancer.hpp"
 
@@ -107,6 +149,514 @@ DirectedPaths directed_paths(const slic3r_api::PolylineCollection &paths)
     std::sort(result.begin(), result.end());
     return result;
 }
+}
+
+namespace {
+// Construct owned literal fragments in internal scaled units; the first has one hole and the other three have none, with allocation failures propagated and no Print or external data dependency.
+Slic3r::ExPolygons recorded_union_fragments();
+// Inspect borrowed contour containment in original result order and emit Catch assertions matching layer reconstruction; never reorder or mutate geometry, and diagnostics/allocation failures remain visible.
+void check_union_island_order(const Slic3r::ExPolygons &islands, const char *stage);
+// Recursively copy borrowed engine contours before descendants into caller-owned polygons, retaining hole membership; no engine/storage mutation occurs and allocation failures propagate.
+void append_engine_islands(const Slic3r::ClipperLib::PolyNode &node, Slic3r::ExPolygons &out);
+
+Slic3r::ExPolygons recorded_union_fragments()
+{
+    using Slic3r::Point;
+    using Slic3r::Polygon;
+    return {
+        Slic3r::ExPolygon(Polygon{
+            Point(-11012588, 10233305), Point(-11003483, 10279077), Point(-10906900, 10512252), Point(-10880968, 10551061), Point(-10551064, 10880969),
+            Point(-10512252, 10906902), Point(-10279080, 11003486), Point(-10233304, 11012591), Point(10233305, 11012591), Point(10279081, 11003486),
+            Point(10512251, 10906903), Point(10551065, 10880968), Point(10880968, 10551065), Point(10906903, 10512251), Point(11003486, 10279081),
+            Point(11012591, 10233305), Point(11012591, -10233304), Point(11003486, -10279080), Point(10906902, -10512252), Point(10880969, -10551064),
+            Point(10551061, -10880968), Point(10512252, -10906900), Point(10279077, -11003483), Point(10233305, -11012588), Point(11, -11012588),
+            Point(11, -12606380), Point(10324365, -12605756), Point(10324348, -12325628), Point(10355223, -12604049), Point(10462139, -12592193),
+            Point(10474032, -12590354), Point(10660460, -12553272), Point(10672151, -12550419), Point(10782694, -12518362), Point(10796899, -12513402),
+            Point(11188065, -12352770), Point(11199370, -12347529), Point(11301535, -12294522), Point(11314140, -12287123), Point(11495441, -12167579),
+            Point(11505866, -12159995), Point(11596113, -12087766), Point(11607442, -12077644), Point(12059409, -11627484), Point(12068843, -11617096),
+            Point(12158172, -11508250), Point(12166366, -11497202), Point(12272926, -11337721), Point(12279997, -11325924), Point(12346399, -11201693),
+            Point(12352442, -11188866), Point(12513404, -10796900), Point(12518364, -10782696), Point(12550423, -10672151), Point(12553276, -10660457),
+            Point(12590358, -10474027), Point(12592196, -10462135), Point(12604905, -10347536), Point(12605759, -10332095), Point(12607005, 10305853),
+            Point(12606331, 10319599), Point(12592543, 10459582), Point(12590525, 10473185), Point(12553108, 10661301), Point(12549766, 10674644),
+            Point(12508871, 10809454), Point(12504074, 10822799), Point(12340727, 11213776), Point(12334190, 11227329), Point(12278695, 11328157),
+            Point(12272445, 11338440), Point(12166843, 11496488), Point(12159732, 11506199), Point(12087676, 11596229), Point(12077356, 11607757),
+            Point(11607757, 12077356), Point(11596229, 12087676), Point(11505864, 12160000), Point(11495438, 12167585), Point(11314141, 12287124),
+            Point(11301537, 12294522), Point(11199378, 12347526), Point(11188073, 12352768), Point(10796902, 12513404), Point(10782697, 12518364),
+            Point(10672152, 12550423), Point(10660458, 12553276), Point(10473185, 12590525), Point(10459582, 12592543), Point(10319603, 12606330),
+            Point(10305866, 12607005), Point(-10305865, 12607005), Point(-10319602, 12606330), Point(-10459581, 12592543), Point(-10473184, 12590525),
+            Point(-10661300, 12553108), Point(-10674643, 12549766), Point(-10809453, 12508871), Point(-10822798, 12504074), Point(-11213773, 12340729),
+            Point(-11227323, 12334192), Point(-11328151, 12278699), Point(-11338435, 12272449), Point(-11496487, 12166843), Point(-11506199, 12159733),
+            Point(-11596233, 12087672), Point(-11607761, 12077352), Point(-12077359, 11607750), Point(-12087679, 11596222), Point(-12159995, 11505866),
+            Point(-12167579, 11495441), Point(-12287123, 11314140), Point(-12294522, 11301535), Point(-12347529, 11199370), Point(-12352770, 11188065),
+            Point(-12513402, 10796899), Point(-12518362, 10782694), Point(-12550419, 10672151), Point(-12553272, 10660460), Point(-12590522, 10473189),
+            Point(-12592540, 10459584), Point(-12606327, 10319604), Point(-12607002, 10305867), Point(-12607002, 11), Point(-11012588, 11)},
+            Polygon{Point(10360791, -11272845), Point(10451468, -11491759), Point(10440706, -11496217), Point(10418443, -11502970), Point(10407018, -11505243)}),
+        Slic3r::ExPolygon(Polygon{
+            Point(-9978430, 9978433), Point(9978433, 9978433), Point(9978433, -9978430), Point(11, -9978430), Point(11, -10538686),
+            Point(10162833, -10538686), Point(10265791, -10496039), Point(10456641, -10305191), Point(10258561, -10107110), Point(10538689, -10107110),
+            Point(10538689, 10162833), Point(10496042, 10265792), Point(10265792, 10496042), Point(10162833, 10538689), Point(-10162831, 10538689),
+            Point(-10265790, 10496042), Point(-10496039, 10265791), Point(-10538686, 10162833), Point(-10538686, 11), Point(-9978430, 11)}),
+        Slic3r::ExPolygon(Polygon{
+            Point(11, -12606380), Point(11, -11012588), Point(-10233303, -11012588), Point(-10279079, -11003483), Point(-10512249, -10906900),
+            Point(-10551063, -10880965), Point(-10880965, -10551063), Point(-10906900, -10512249), Point(-11003483, -10279079), Point(-11012588, -10233303),
+            Point(-11012588, 11), Point(-12607002, 11), Point(-12607002, -10305864), Point(-12606327, -10319601), Point(-12592540, -10459580),
+            Point(-12590522, -10473183), Point(-12553105, -10661299), Point(-12549763, -10674642), Point(-12508868, -10809452), Point(-12504071, -10822797),
+            Point(-12340724, -11213774), Point(-12334187, -11227327), Point(-12278692, -11328155), Point(-12272442, -11338438), Point(-12166840, -11496486),
+            Point(-12159729, -11506197), Point(-12087673, -11596227), Point(-12077353, -11607755), Point(-11607755, -12077353), Point(-11596227, -12087673),
+            Point(-11505862, -12159997), Point(-11495436, -12167582), Point(-11314139, -12287121), Point(-11301535, -12294519), Point(-11199376, -12347523),
+            Point(-11188071, -12352765), Point(-10796900, -12513401), Point(-10782695, -12518361), Point(-10672150, -12550420), Point(-10660456, -12553273),
+            Point(-10473183, -12590522), Point(-10459580, -12592540), Point(-10319597, -12606328), Point(-10305851, -12607002)}),
+        Slic3r::ExPolygon(Polygon{
+            Point(11, -9978430), Point(-9978430, -9978430), Point(-9978430, 11), Point(-10538686, 11), Point(-10538686, -10162831),
+            Point(-10496039, -10265790), Point(-10265790, -10496039), Point(-10162831, -10538686), Point(11, -10538686)})
+    };
+}
+
+void check_union_island_order(const Slic3r::ExPolygons &islands, const char *stage)
+{
+    INFO(stage);
+    for (size_t later = 1; later < islands.size(); ++later)
+        for (size_t earlier = 0; earlier < later; ++earlier) {
+            CAPTURE(later, earlier);
+            const Slic3r::BoundingBox outer(islands[later].contour.points);
+            const Slic3r::BoundingBox inner(islands[earlier].contour.points);
+            CHECK_FALSE((outer.contains(inner) && islands[later].contour.contains(islands[earlier].contour.first_point())));
+        }
+}
+
+void append_engine_islands(const Slic3r::ClipperLib::PolyNode &node, Slic3r::ExPolygons &out)
+{
+    if (!node.IsHole()) {
+        Slic3r::ExPolygon island(Slic3r::Polygon(node.Contour));
+        for (const Slic3r::ClipperLib::PolyNode *hole : node.Childs)
+            island.holes.emplace_back(hole->Contour);
+        out.push_back(std::move(island));
+    }
+    for (const Slic3r::ClipperLib::PolyNode *child : node.Childs)
+        append_engine_islands(*child, out);
+}
+}
+
+// Union four owned scaled fragments without Print, compare SDK/native order and independently inspect the same engine options before storage conversion; results remain owned by local storage/values and failures are ordinary Catch diagnostics.
+TEST_CASE("SDK union preserves layer island order for four recorded fragments", "[plugins][clipper][union-sdk-order]")
+{
+    const Slic3r::ExPolygons fragments = recorded_union_fragments();
+    REQUIRE(fragments.size() == 4);
+    CHECK(fragments[0].contour.size() == 125);
+    CHECK(fragments[0].holes.size() == 1);
+    CHECK(fragments[1].contour.size() == 20);
+    CHECK(fragments[2].contour.size() == 44);
+    CHECK(fragments[3].contour.size() == 9);
+    const Slic3r::ExPolygons native = Slic3r::union_ex(fragments);
+    REQUIRE(native.size() == 2);
+    check_union_island_order(native, "native union_ex");
+    Slic3r::PluginStorage owned_storage;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&owned_storage);
+    const slic3r_api::ExPolygonCollection input(reinterpret_cast<const expolygon_collection_handle *>(&fragments));
+    const slic3r_api::ClipperContext clipper(storage);
+    const slic3r_api::StoredExPolygonCollection sdk = slic3r_api::clipper_union(clipper(input)).to_expolygon_collection();
+    const Slic3r::ExPolygons &sdk_islands = *reinterpret_cast<const Slic3r::ExPolygons *>(sdk.handle());
+    REQUIRE(sdk_islands.size() == 2);
+    check_union_island_order(sdk_islands, "SDK clipper_union to_expolygon_collection");
+    CHECK(Slic3r::area(sdk_islands) == Approx(Slic3r::area(native)).epsilon(1e-12));
+
+    Slic3r::ClipperLib::Clipper engine;
+    for (const Slic3r::ExPolygon &fragment : fragments) {
+        engine.AddPath(fragment.contour.points, Slic3r::ClipperLib::ptSubject, true);
+        for (const Slic3r::Polygon &hole : fragment.holes)
+            engine.AddPath(hole.points, Slic3r::ClipperLib::ptSubject, true);
+    }
+    Slic3r::ClipperLib::PolyTree tree;
+    REQUIRE(engine.Execute(Slic3r::ClipperLib::ctUnion, tree, Slic3r::ClipperLib::pftNonZero, Slic3r::ClipperLib::pftNonZero));
+    Slic3r::ExPolygons engine_islands;
+    append_engine_islands(tree, engine_islands);
+    REQUIRE(engine_islands.size() == 2);
+    CAPTURE(tree.ChildCount());
+    // Two engine roots preserve the recorded inverse containment order; only SDK materialization promises the repaired order.
+    REQUIRE(tree.ChildCount() == 2);
+    CHECK(Slic3r::BoundingBox(engine_islands[1].contour.points).contains(Slic3r::BoundingBox(engine_islands[0].contour.points)));
+    CHECK(engine_islands[1].contour.contains(engine_islands[0].contour.first_point()));
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> converted = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
+    const Slic3r::ExPolygons converted_islands = converted->to_expolygons();
+    REQUIRE(converted_islands.size() == 2);
+    check_union_island_order(converted_islands, "direct engine tree, SDK conversion");
+
+    // The native ExPolygon union first materializes flat Paths, then unions those Paths into its PolyTree.
+    Slic3r::ClipperLib::Clipper flat_engine;
+    for (const Slic3r::ExPolygon &fragment : fragments) {
+        flat_engine.AddPath(fragment.contour.points, Slic3r::ClipperLib::ptSubject, true);
+        for (const Slic3r::Polygon &hole : fragment.holes)
+            flat_engine.AddPath(hole.points, Slic3r::ClipperLib::ptSubject, true);
+    }
+    Slic3r::ClipperLib::Paths normalized_paths;
+    REQUIRE(flat_engine.Execute(Slic3r::ClipperLib::ctUnion, normalized_paths,
+        Slic3r::ClipperLib::pftNonZero, Slic3r::ClipperLib::pftNonZero));
+    Slic3r::ClipperLib::Clipper hierarchy_engine;
+    hierarchy_engine.AddPaths(normalized_paths, Slic3r::ClipperLib::ptSubject, true);
+    Slic3r::ClipperLib::PolyTree normalized_tree;
+    REQUIRE(hierarchy_engine.Execute(Slic3r::ClipperLib::ctUnion, normalized_tree,
+        Slic3r::ClipperLib::pftNonZero, Slic3r::ClipperLib::pftNonZero));
+    CHECK(normalized_tree.ChildCount() == 1);
+    Slic3r::ExPolygons normalized_islands;
+    append_engine_islands(normalized_tree, normalized_islands);
+    REQUIRE(normalized_islands.size() == 2);
+    check_union_island_order(normalized_islands, "two-pass engine tree, explicit parent-first walk");
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> normalized_conversion =
+        Slic3r::ApiClipper::make_polytree_shapes(std::move(normalized_tree));
+    const Slic3r::ExPolygons normalized_converted = normalized_conversion->to_expolygons();
+    REQUIRE(normalized_converted.size() == 2);
+    check_union_island_order(normalized_converted, "two-pass engine tree, unchanged SDK conversion");
+    CHECK(Slic3r::area(normalized_converted) == Approx(Slic3r::area(native)).epsilon(1e-12));
+}
+
+namespace {
+// Serialize each borrowed contour and hole in exact vertex order into owned strings; only whole-island order is optionally ignored, no coordinates change, and allocation failures propagate.
+std::vector<std::string> island_signatures(const Slic3r::ExPolygons &islands, bool ignore_order = true);
+// Build disjoint translated copies with at most one hole each, restore their exact borrowed rings on engine-owned nodes, and permute the roots; node ownership remains with the tree and invalid test inputs fail through Catch.
+Slic3r::ClipperLib::PolyTree independent_test_roots(const Slic3r::ExPolygons &islands, const std::vector<size_t> &permutation);
+// Construct six owned disjoint islands with explicit contour boxes 600/500/400/300/100/100 mm2 and holes on A/C/F; every ring is literal via rectangle_mm, all allocations are local, and failures propagate.
+Slic3r::ExPolygons independent_cycle_islands();
+// Run borrowed subjects/clips through separate default NonZero engines and SDK storage, compare every ordered ring before/after conversion, and assert layer order plus native union area/count; all outputs are local owners and failures remain visible.
+void check_sdk_boolean_geometry(const Slic3r::ExPolygons &subjects, const Slic3r::ExPolygons &clips, clipper_operation_t operation);
+
+std::vector<std::string> island_signatures(const Slic3r::ExPolygons &islands, bool ignore_order)
+{
+    std::vector<std::string> signatures;
+    for (const Slic3r::ExPolygon &island : islands) {
+        std::ostringstream key;
+        key << "C:";
+        for (const Slic3r::Point &point : island.contour.points) key << point.x() << ',' << point.y() << ';';
+        for (const Slic3r::Polygon &hole : island.holes) {
+            key << "H:";
+            for (const Slic3r::Point &point : hole.points) key << point.x() << ',' << point.y() << ';';
+        }
+        signatures.push_back(key.str());
+    }
+    if (ignore_order) std::sort(signatures.begin(), signatures.end());
+    return signatures;
+}
+
+Slic3r::ClipperLib::PolyTree independent_test_roots(const Slic3r::ExPolygons &islands, const std::vector<size_t> &permutation)
+{
+    Slic3r::ClipperLib::Clipper engine;
+    std::vector<Slic3r::BoundingBox> translated_boxes;
+    for (size_t index = 0; index < islands.size(); ++index) {
+        REQUIRE(islands[index].holes.size() <= 1);
+        Slic3r::ExPolygon translated = islands[index];
+        const Slic3r::BoundingBox box(translated.contour.points);
+        translated.translate(Slic3r::Point(Slic3r::scale_i(1000. * double(index + 1)), 0) - box.min);
+        translated_boxes.emplace_back(translated.contour.points);
+        engine.AddPath(translated.contour.points, Slic3r::ClipperLib::ptSubject, true);
+        for (const Slic3r::Polygon &hole : translated.holes) engine.AddPath(hole.points, Slic3r::ClipperLib::ptSubject, true);
+    }
+    Slic3r::ClipperLib::PolyTree tree;
+    REQUIRE(engine.Execute(Slic3r::ClipperLib::ctUnion, tree, Slic3r::ClipperLib::pftNonZero, Slic3r::ClipperLib::pftNonZero));
+    REQUIRE(tree.Childs.size() == islands.size());
+    REQUIRE(permutation.size() == islands.size());
+    Slic3r::ClipperLib::PolyNodes roots;
+    for (const size_t index : permutation) {
+        REQUIRE(index < islands.size());
+        const Slic3r::ClipperLib::PolyNodes::iterator found = std::find_if(tree.Childs.begin(), tree.Childs.end(), [&translated_boxes, index](const Slic3r::ClipperLib::PolyNode *node) { return Slic3r::BoundingBox(node->Contour) == translated_boxes[index]; });
+        REQUIRE(found != tree.Childs.end());
+        Slic3r::ClipperLib::PolyNode *node = *found;
+        REQUIRE(node->Childs.size() == islands[index].holes.size());
+        node->Contour = islands[index].contour.points;
+        for (size_t hole = 0; hole < node->Childs.size(); ++hole) node->Childs[hole]->Contour = islands[index].holes[hole].points;
+        roots.push_back(node);
+    }
+    tree.Childs = std::move(roots);
+    return tree;
+}
+
+Slic3r::ExPolygons independent_cycle_islands()
+{
+    Slic3r::ExPolygons source{
+        Slic3r::ExPolygon(rectangle_mm(0., 0., 60., 10.)),
+        Slic3r::ExPolygon(rectangle_mm(100., 0., 150., 10.)),
+        Slic3r::ExPolygon(rectangle_mm(200., 0., 240., 10.)),
+        Slic3r::ExPolygon(rectangle_mm(300., 0., 330., 10.)),
+        Slic3r::ExPolygon(rectangle_mm(400., 0., 410., 10.)),
+        Slic3r::ExPolygon(rectangle_mm(500., 0., 505., 20.))};
+    source[0].holes.push_back(rectangle_mm(1., 1., 59., 9.));
+    source[2].holes.push_back(rectangle_mm(201., 1., 239., 9.));
+    source[5].holes.push_back(rectangle_mm(501., 1., 504., 19.));
+    for (Slic3r::ExPolygon &island : source)
+        for (Slic3r::Polygon &hole : island.holes) hole.make_clockwise();
+    return source;
+}
+
+void check_sdk_boolean_geometry(const Slic3r::ExPolygons &subjects, const Slic3r::ExPolygons &clips, clipper_operation_t operation)
+{
+    Slic3r::ClipperLib::Clipper engine;
+    for (const Slic3r::ExPolygon &island : subjects) {
+        engine.AddPath(island.contour.points, Slic3r::ClipperLib::ptSubject, true);
+        for (const Slic3r::Polygon &hole : island.holes) engine.AddPath(hole.points, Slic3r::ClipperLib::ptSubject, true);
+    }
+    if (operation != CLIPPER_OPERATION_UNION)
+        for (const Slic3r::ExPolygon &island : clips) {
+            engine.AddPath(island.contour.points, Slic3r::ClipperLib::ptClip, true);
+            for (const Slic3r::Polygon &hole : island.holes) engine.AddPath(hole.points, Slic3r::ClipperLib::ptClip, true);
+        }
+    const Slic3r::ClipperLib::ClipType type = operation == CLIPPER_OPERATION_UNION ? Slic3r::ClipperLib::ctUnion : operation == CLIPPER_OPERATION_INTERSECTION ? Slic3r::ClipperLib::ctIntersection : operation == CLIPPER_OPERATION_DIFFERENCE ? Slic3r::ClipperLib::ctDifference : Slic3r::ClipperLib::ctXor;
+    Slic3r::ClipperLib::PolyTree tree;
+    REQUIRE(engine.Execute(type, tree, Slic3r::ClipperLib::pftNonZero, Slic3r::ClipperLib::pftNonZero));
+    Slic3r::ExPolygons raw;
+    append_engine_islands(tree, raw);
+    Slic3r::PluginStorage storage_owner;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&storage_owner);
+    const slic3r_api::ClipperContext context(storage);
+    const slic3r_api::ExPolygonCollection subject_view(reinterpret_cast<const expolygon_collection_handle *>(&subjects));
+    const slic3r_api::ExPolygonCollection clip_view(reinterpret_cast<const expolygon_collection_handle *>(&clips));
+    const clipper_shapes_handle *shape = ::clipper_execute(storage, operation, context(subject_view).handle(), operation == CLIPPER_OPERATION_UNION ? nullptr : context(clip_view).handle());
+    REQUIRE(shape != nullptr);
+    const expolygon_collection_handle *output = ::clipper_shapes_to_expolygons(storage, shape);
+    REQUIRE(output != nullptr);
+    const Slic3r::ExPolygons &converted = *reinterpret_cast<const Slic3r::ExPolygons *>(output);
+    CHECK(island_signatures(converted) == island_signatures(raw));
+    check_union_island_order(converted, "SDK boolean preserves geometry and layer order");
+    if (operation == CLIPPER_OPERATION_UNION) {
+        const Slic3r::ExPolygons native = Slic3r::union_ex(subjects);
+        CHECK(converted.size() == native.size());
+        CHECK(Slic3r::area(converted) == Approx(Slic3r::area(native)).epsilon(1.e-12));
+    }
+}
+}
+
+// Materialize a deliberately inverted forest with nested rings, large holes and unequal disjoint boxes; require the explicit box-area permutation, equal-key stability and exact preservation of every original ring.
+TEST_CASE("SDK multi-root box ordering has an explicit stable permutation", "[plugins][clipper][union-sdk-order]")
+{
+    Slic3r::ExPolygons source{
+        Slic3r::ExPolygon(rectangle_mm(0., 0., 100., 100.)),
+        Slic3r::ExPolygon(rectangle_mm(2., 2., 98., 98.)),
+        Slic3r::ExPolygon(rectangle_mm(4., 4., 96., 96.)),
+        Slic3r::ExPolygon(rectangle_mm(200., 0., 220., 20.)),
+        Slic3r::ExPolygon(rectangle_mm(240., 0., 250., 40.)),
+        Slic3r::ExPolygon(rectangle_mm(280., 0., 285., 5.))};
+    source[0].holes.push_back(rectangle_mm(1., 1., 99., 99.));
+    source[1].holes.push_back(rectangle_mm(3., 3., 97., 97.));
+    source[0].holes.front().make_clockwise();
+    source[1].holes.front().make_clockwise();
+    REQUIRE(source[0].area() < source[2].area());
+    Slic3r::ClipperLib::PolyTree tree = independent_test_roots(source, {2, 5, 4, 1, 3, 0});
+    Slic3r::ExPolygons raw;
+    append_engine_islands(tree, raw);
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
+    const Slic3r::ExPolygons converted = shapes->to_expolygons();
+    const std::vector<size_t> expected{0, 1, 2, 4, 3, 5};
+    REQUIRE(converted.size() == expected.size());
+    for (size_t index = 0; index < expected.size(); ++index) {
+        CAPTURE(index);
+        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[expected[index]].contour.points));
+    }
+    CHECK(island_signatures(converted) == island_signatures(raw));
+    check_union_island_order(converted, "box order with net-area trap and equal-box stability");
+}
+
+// Convert B/A/E/C/D/F to A/B/C/D/E/F using independent cycles (0,1) and (2,3,4), fixed slot 5 and stable equal-area E/F; verify explicit positions and every owned ring, with failures reported by Catch.
+TEST_CASE("SDK box ordering completes independent permutation cycles", "[plugins][clipper][union-sdk-order][union-sdk-cycles]")
+{
+    const Slic3r::ExPolygons source = independent_cycle_islands();
+    Slic3r::ClipperLib::PolyTree tree = independent_test_roots(source, {1, 0, 4, 2, 3, 5});
+    REQUIRE(tree.ChildCount() == 6);
+    Slic3r::ExPolygons raw;
+    append_engine_islands(tree, raw);
+    const std::vector<std::string> raw_rings = island_signatures(raw, false);
+    const std::vector<std::string> expected_rings = island_signatures(source, false);
+    const std::vector<size_t> expected_sources{1, 0, 3, 4, 2, 5};
+    REQUIRE(raw_rings.size() == expected_sources.size());
+    REQUIRE(expected_rings.size() == expected_sources.size());
+    for (size_t index = 0; index < expected_sources.size(); ++index)
+        CHECK(raw_rings[expected_sources[index]] == expected_rings[index]);
+    const Slic3r::BoundingBox e(source[4].contour.points), f(source[5].contour.points);
+    CHECK(e.size().x() * e.size().y() == f.size().x() * f.size().y());
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
+    const Slic3r::ExPolygons converted = shapes->to_expolygons();
+    REQUIRE(converted.size() == source.size());
+    for (size_t index = 0; index < source.size(); ++index) {
+        CAPTURE(index);
+        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[index].contour.points));
+    }
+    CHECK(island_signatures(converted, false) == expected_rings);
+    CHECK(island_signatures(converted) == island_signatures(raw));
+    CHECK(island_signatures(converted, false)[5] == raw_rings[5]);
+    check_union_island_order(converted, "two independent cycles, fixed slot and equal-area stability");
+}
+
+// Convert the same six roots already ordered A/B/C/D/E/F through the multi-root early return; compare exact traversal order and rings, including the unequal-shape equal-area pair and fixed hole-bearing island.
+TEST_CASE("SDK sorted multi-root conversion preserves exact traversal", "[plugins][clipper][union-sdk-order][union-sdk-sorted]")
+{
+    const Slic3r::ExPolygons source = independent_cycle_islands();
+    Slic3r::ClipperLib::PolyTree tree = independent_test_roots(source, {0, 1, 2, 3, 4, 5});
+    REQUIRE(tree.ChildCount() == 6);
+    Slic3r::ExPolygons raw;
+    append_engine_islands(tree, raw);
+    const std::vector<std::string> expected_rings = island_signatures(source, false);
+    REQUIRE(island_signatures(raw, false) == expected_rings);
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
+    const Slic3r::ExPolygons converted = shapes->to_expolygons();
+    REQUIRE(converted.size() == source.size());
+    CHECK(island_signatures(converted, false) == expected_rings);
+    CHECK(island_signatures(converted, false) == island_signatures(raw, false));
+    for (size_t index = 0; index < source.size(); ++index) {
+        CAPTURE(index);
+        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[index].contour.points));
+    }
+    check_union_island_order(converted, "already sorted multi-root sequence including stable ties");
+}
+
+// Convert two owned roots A/B with C under A's hole although B contains C; require A/B/C across subtree boundaries and preserve the exact multiset of rings, with failures reported by Catch.
+TEST_CASE("SDK multi-root ordering interleaves containing roots and descendants", "[plugins][clipper][union-sdk-order][union-sdk-interleaving]")
+{
+    Slic3r::ExPolygon a(rectangle_mm(0., 0., 100., 100.));
+    a.holes.push_back(rectangle_mm(1., 1., 99., 99.));
+    a.holes.front().make_clockwise();
+    Slic3r::ExPolygon b(rectangle_mm(10., 10., 90., 90.));
+    b.holes.push_back(rectangle_mm(11., 11., 89., 89.));
+    b.holes.front().make_clockwise();
+    const Slic3r::ExPolygons source{a, b, Slic3r::ExPolygon(rectangle_mm(20., 20., 80., 80.))};
+    Slic3r::ClipperLib::PolyTree tree = independent_test_roots(source, {0, 2, 1});
+    Slic3r::ClipperLib::PolyNode *root_a = tree.Childs[0];
+    Slic3r::ClipperLib::PolyNode *child_c = tree.Childs[1];
+    Slic3r::ClipperLib::PolyNode *root_b = tree.Childs[2];
+    REQUIRE(root_a->ChildCount() == 1);
+    root_a->Childs.front()->Childs.push_back(child_c);
+    child_c->Parent = root_a->Childs.front();
+    tree.Childs = {root_a, root_b};
+    REQUIRE(tree.ChildCount() == 2);
+    Slic3r::ExPolygons raw;
+    append_engine_islands(tree, raw);
+    REQUIRE(raw.size() == 3);
+    CHECK(Slic3r::BoundingBox(raw[1].contour.points) == Slic3r::BoundingBox(source[2].contour.points));
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
+    const Slic3r::ExPolygons converted = shapes->to_expolygons();
+    REQUIRE(converted.size() == 3);
+    for (size_t index = 0; index < source.size(); ++index) {
+        CAPTURE(index);
+        CHECK(Slic3r::BoundingBox(converted[index].contour.points) == Slic3r::BoundingBox(source[index].contour.points));
+    }
+    CHECK(island_signatures(converted) == island_signatures(raw));
+    check_union_island_order(converted, "interleaving A/B/C instead of root-grouped A/C/B");
+}
+
+// Preserve the original multi-level branch order of a one-root tree even when smaller siblings precede larger ones; moving the guard would change this exact sequence, while all rings remain independently checked.
+TEST_CASE("SDK single-root conversion preserves all levels and branches", "[plugins][clipper][union-sdk-order]")
+{
+    Slic3r::ExPolygon outer(rectangle_mm(0., 0., 100., 100.));
+    outer.holes.push_back(rectangle_mm(1., 1., 99., 99.));
+    outer.holes.front().make_clockwise();
+    Slic3r::ExPolygon branch(rectangle_mm(20., 20., 60., 60.));
+    branch.holes.push_back(rectangle_mm(22., 22., 58., 58.));
+    branch.holes.front().make_clockwise();
+    const Slic3r::ExPolygons source{outer, Slic3r::ExPolygon(rectangle_mm(5., 5., 7., 7.)), branch, Slic3r::ExPolygon(rectangle_mm(24., 24., 56., 56.))};
+    Slic3r::ClipperLib::Clipper engine;
+    for (const Slic3r::ExPolygon &island : source) {
+        engine.AddPath(island.contour.points, Slic3r::ClipperLib::ptSubject, true);
+        for (const Slic3r::Polygon &hole : island.holes) engine.AddPath(hole.points, Slic3r::ClipperLib::ptSubject, true);
+    }
+    Slic3r::ClipperLib::PolyTree tree;
+    REQUIRE(engine.Execute(Slic3r::ClipperLib::ctUnion, tree, Slic3r::ClipperLib::pftNonZero, Slic3r::ClipperLib::pftNonZero));
+    REQUIRE(tree.ChildCount() == 1);
+    REQUIRE(tree.Childs.front()->ChildCount() == 1);
+    Slic3r::ClipperLib::PolyNodes &siblings = tree.Childs.front()->Childs.front()->Childs;
+    REQUIRE(siblings.size() == 2);
+    std::sort(siblings.begin(), siblings.end(), [](const Slic3r::ClipperLib::PolyNode *a, const Slic3r::ClipperLib::PolyNode *b) { return Slic3r::BoundingBox(a->Contour).size().x() < Slic3r::BoundingBox(b->Contour).size().x(); });
+    Slic3r::ExPolygons raw;
+    append_engine_islands(tree, raw);
+    REQUIRE(raw.size() == 4);
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
+    const Slic3r::ExPolygons converted = shapes->to_expolygons();
+    CHECK(island_signatures(converted, false) == island_signatures(raw, false));
+    check_union_island_order(converted, "single root with multiple levels and unequal sibling sizes");
+}
+
+// Exercise concave disjoint contours whose first vertex touches the other's boundary, point contacts and overlapping inputs; exact stored rings and layer order must survive conversion and every SDK boolean.
+TEST_CASE("SDK box ordering handles concave bays and boundary contacts", "[plugins][clipper][union-sdk-order]")
+{
+    const Slic3r::Polygon bay({point_mm(0., 0.), point_mm(30., 0.), point_mm(30., 5.), point_mm(5., 5.), point_mm(5., 25.), point_mm(30., 25.), point_mm(30., 30.), point_mm(0., 30.)});
+    const Slic3r::Polygon triangle({point_mm(5., 15.), point_mm(10., 10.), point_mm(10., 20.)});
+    REQUIRE(bay.contains(triangle.front()));
+    REQUIRE_FALSE(Slic3r::contains(bay, point_mm(8., 15.), false));
+    const Slic3r::ExPolygons source{Slic3r::ExPolygon(bay), Slic3r::ExPolygon(triangle)};
+    Slic3r::ClipperLib::PolyTree tree = independent_test_roots(source, {1, 0});
+    Slic3r::ExPolygons raw;
+    append_engine_islands(tree, raw);
+    const std::unique_ptr<Slic3r::ApiClipper::ClipperShapes> shapes = Slic3r::ApiClipper::make_polytree_shapes(std::move(tree));
+    const Slic3r::ExPolygons converted = shapes->to_expolygons();
+    CHECK(island_signatures(converted) == island_signatures(raw));
+    REQUIRE(converted.size() == 2);
+    CHECK(converted.front().contour.points == bay.points);
+    check_union_island_order(converted, "concave bay with first vertex on boundary");
+    const Slic3r::ExPolygons touching{Slic3r::ExPolygon(rectangle_mm(0., 0., 20., 20.)), Slic3r::ExPolygon(rectangle_mm(20., 20., 25., 25.)), Slic3r::ExPolygon(rectangle_mm(10., -5., 30., 5.))};
+    const Slic3r::ExPolygons clip{Slic3r::ExPolygon(rectangle_mm(5., -10., 22., 22.))};
+    for (const clipper_operation_t operation : {CLIPPER_OPERATION_UNION, CLIPPER_OPERATION_INTERSECTION, CLIPPER_OPERATION_DIFFERENCE, CLIPPER_OPERATION_XOR}) {
+        CAPTURE(operation);
+        check_sdk_boolean_geometry(touching, clip, operation);
+    }
+}
+
+// Keep borrowed ExPolygon collections in exact source order, including hole membership; only operation-backed trees may reorder their independent owned materializations.
+TEST_CASE("SDK borrowed ExPolygon conversion preserves exact source order", "[plugins][clipper][union-sdk-order]")
+{
+    const Slic3r::ExPolygons source{Slic3r::ExPolygon(rectangle_mm(50., 0., 55., 5.)), rectangle_with_two_holes(), Slic3r::ExPolygon(rectangle_mm(80., 0., 90., 10.))};
+    const std::vector<std::string> before = island_signatures(source, false);
+    Slic3r::PluginStorage storage_owner;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&storage_owner);
+    const slic3r_api::ClipperContext context(storage);
+    const slic3r_api::ExPolygonCollection input(reinterpret_cast<const expolygon_collection_handle *>(&source));
+    const slic3r_api::StoredExPolygonCollection output = context(input).to_expolygon_collection();
+    const Slic3r::ExPolygons &copied = *reinterpret_cast<const Slic3r::ExPolygons *>(output.handle());
+    CHECK(island_signatures(copied, false) == before);
+    CHECK(island_signatures(source, false) == before);
+}
+
+// Compare every offset ring before ExPolygon conversion with all converted contours/holes; list order may change but no vertex, direction or ring is allowed to change or disappear.
+TEST_CASE("SDK offset tree conversion preserves every ring exactly", "[plugins][clipper][union-sdk-order]")
+{
+    const Slic3r::ExPolygons source{rectangle_with_two_holes(), Slic3r::ExPolygon(rectangle_mm(50., 0., 55., 5.))};
+    Slic3r::PluginStorage storage_owner;
+    storage_handle *storage = reinterpret_cast<storage_handle *>(&storage_owner);
+    const slic3r_api::ClipperContext context(storage);
+    const slic3r_api::ExPolygonCollection input(reinterpret_cast<const expolygon_collection_handle *>(&source));
+    const slic3r_api::ClipperOperand offset = slic3r_api::clipper_offset(context(input), Slic3r::scale_i(.25));
+    const slic3r_api::StoredPolygonCollection flat = offset.to_polygon_collection();
+    const slic3r_api::StoredExPolygonCollection grouped = offset.to_expolygon_collection();
+    const Slic3r::Polygons &raw = *reinterpret_cast<const Slic3r::Polygons *>(flat.handle());
+    const Slic3r::ExPolygons &converted = *reinterpret_cast<const Slic3r::ExPolygons *>(grouped.handle());
+    Slic3r::ExPolygons raw_rings, converted_rings;
+    for (const Slic3r::Polygon &ring : raw) raw_rings.emplace_back(ring);
+    for (const Slic3r::ExPolygon &island : converted) {
+        converted_rings.emplace_back(island.contour);
+        for (const Slic3r::Polygon &hole : island.holes) converted_rings.emplace_back(hole);
+    }
+    REQUIRE(converted.size() == 2);
+    CHECK(island_signatures(converted_rings) == island_signatures(raw_rings));
+    check_union_island_order(converted, "offset tree conversion order without ring changes");
+}
+
+// Generate fixed-seed rings, islands, concave components, point contacts and overlaps for all four booleans; compare every coordinate/hole against raw engine output and native union area/island count without weakening empty-result checks.
+TEST_CASE("SDK boolean conversion preserves generated geometry and topological order", "[plugins][clipper][union-sdk-order]")
+{
+    std::mt19937 random(0xC7102026u);
+    for (size_t iteration = 0; iteration < 128; ++iteration) {
+        CAPTURE(iteration);
+        const double jitter = double(random() % 5);
+        Slic3r::ExPolygon outer(rectangle_mm(0., 0., 60., 60.));
+        outer.holes.push_back(rectangle_mm(5., 5., 55., 55.));
+        outer.holes.front().make_clockwise();
+        Slic3r::ExPolygons subjects{outer, Slic3r::ExPolygon(rectangle_mm(10. + jitter, 10., 20. + jitter, 20.)),
+            Slic3r::ExPolygon(Slic3r::Polygon{point_mm(80., 0.), point_mm(110., 0.), point_mm(110., 5.), point_mm(85., 5.), point_mm(85., 25.), point_mm(110., 25.), point_mm(110., 30.), point_mm(80., 30.)})};
+        if (iteration % 3 == 0) subjects.emplace_back(rectangle_mm(60., 60., 65. + jitter, 65. + jitter));
+        if (iteration % 3 == 1) subjects.emplace_back(rectangle_mm(50., -2. - jitter, 80., 10.));
+        if (iteration % 3 == 2) subjects.emplace_back(rectangle_mm(30., 30., 40., 40.));
+        std::shuffle(subjects.begin(), subjects.end(), random);
+        const double x = double(int(random() % 110) - 5);
+        const double y = double(int(random() % 55) - 5);
+        const Slic3r::ExPolygons clips{Slic3r::ExPolygon(rectangle_mm(x, y, x + 15. + double(random() % 40), y + 15. + double(random() % 40)))};
+        for (const clipper_operation_t operation : {CLIPPER_OPERATION_UNION, CLIPPER_OPERATION_INTERSECTION, CLIPPER_OPERATION_DIFFERENCE, CLIPPER_OPERATION_XOR}) {
+            CAPTURE(operation);
+            check_sdk_boolean_geometry(subjects, clips, operation);
+        }
+    }
 }
 
 TEST_CASE("Batch polyline clipping matches core directed paths and owns results", "[plugins][clipper][clipper-batch]")

@@ -25,6 +25,30 @@
 
 #include "Orchestrator.hpp"
 
+/*
+Shape adapters lend input collections to the plugin API or own operation results.
+Converting an owned PolyTree keeps every contour and hole intact. A single root
+uses the existing parent-first traversal; several roots need a stable geometric
+ordering because the engine may expose nested islands as independent roots.
+Offsets also own PolyTrees, so their island order may change without changing
+vertices. Borrowed ExPolygons retain source order. PathListShapes uses its
+separate conversion without this tree-ordering step.
+
+Result collections own their copied geometry. Sorting moves complete islands,
+never their vertices; temporary allocations and their failures stay local.
+
+Operation notes:
+- make_*_shapes() :  select a borrowed adapter or retain an owned result
+- traverse_pt() :  copy contours with their holes, parents first
+- order_tree_islands() :  rank multiple roots by decreasing box area
+
+Representative direct calls (branches are not a timeline):
+
+    PolyTreeShapes::to_expolygons()
+        |-- traverse_pt()
+        `-- order_tree_islands()
+*/
+
 namespace Slic3r {
 
 // Retain the shape through the locked storage registry; null shapes return null and insertion errors leave no tracked handle.
@@ -46,6 +70,9 @@ static ClipperLib::Paths concat_paths(const ApiClipper::ClipperShapes *first, co
 }
 
 namespace ApiClipper {
+
+// Stable 128-bit box keys map destinations to original sources; skip sorted input or rotate cycles through one owned temporary, preserving equal-key order and all geometry; local allocation failures propagate.
+static void order_tree_islands(ExPolygons &islands);
 
 // Signed 128-bit value split into words: ordering the pairs (hi, lo) orders the values.
 struct WideKey {
@@ -257,10 +284,13 @@ public:
         return out;
     }
 
+    // Copy an owned tree and, only with multiple roots, stably rank all simple disjoint-or-strictly-nested contours by decreasing box area; holes stay attached, equal box areas retain order, and allocation failures propagate.
     ExPolygons to_expolygons() const override
     {
         ExPolygons out;
         traverse_pt(&m_tree, &out);
+        // A one-pass tree can expose nested islands as independent roots; box area orders containers before contents in O(V + N log N), while also reordering unequal disjoint boxes.
+        if (m_tree.ChildCount() > 1) order_tree_islands(out);
         return out;
     }
 
@@ -552,6 +582,35 @@ public:
 private:
     const ExPolygons *m_expolygons;
 };
+
+static void order_tree_islands(ExPolygons &islands)
+{
+    std::vector<std::pair<Int128, size_t>> ranked;
+    ranked.reserve(islands.size());
+    for (size_t index = 0; index < islands.size(); ++index) {
+        const BoundingBox box(islands[index].contour.points);
+        const Point dimensions = box.size();
+        ranked.emplace_back(Int128::multiply(dimensions.x(), dimensions.y()), index);
+    }
+    const auto by_descending_box_area = [](const std::pair<Int128, size_t> &a, const std::pair<Int128, size_t> &b) { return a.first > b.first; };
+    if (std::is_sorted(ranked.begin(), ranked.end(), by_descending_box_area)) return;
+    std::stable_sort(ranked.begin(), ranked.end(), by_descending_box_area);
+    // Move each permutation cycle through one temporary so holes stay with their contour.
+    for (size_t start = 0; start < ranked.size(); ++start) {
+        if (ranked[start].second == start) continue;
+        ExPolygon temporary;
+        temporary = std::move(islands[start]);
+        size_t current = start;
+        while (ranked[current].second != start) {
+            const size_t next = ranked[current].second;
+            islands[current] = std::move(islands[next]);
+            ranked[current].second = current;
+            current = next;
+        }
+        islands[current] = std::move(temporary);
+        ranked[current].second = current;
+    }
+}
 
 /* ---- Zero-width bridge detection -------------------------------------
 Two edges overlap along a positive length only if they lie on the same line.
