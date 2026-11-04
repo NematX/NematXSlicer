@@ -62,15 +62,12 @@ can replace the built-in implementation without changing the pipeline runner.
 
 namespace Slic3r::Steps::StepGenerateGcode {
 
-// Install G-code, firmware and thumbnail selector declarations with G-code invalidation on the supplied host.
+// Copy application text, catalogue names and output/printer selection rules into the borrowed host; all three selectors recompute G-code.
+// Writer line text is separate from its stage-table label; output and firmware show singleton selectors.
+// Encoders read singleton ids strictly, keep their stable key and independent settings, and use Notes when placement is empty.
+// Print data and provider ownership are unchanged; conflicts assert, and allocation errors propagate.
 void register_selector_traits(Orchestrator &orchestrator);
 
-// Copy output/printer-preset traits into the borrowed host, which owns the strings; output and firmware show singleton selectors.
-// G-code, firmware and thumbnail selectors declare STEP_GCODE invalidation.
-// Thumbnail declarations read singleton ids, and the exact encoder group adds its stable key and strict selection.
-// Encoder settings remain independent of the default selector; an empty page/group uses the Notes placement fallback.
-// No print/configuration or provider ownership changes.
-// Duplicate/conflicting installation asserts and allocation errors propagate.
 void register_selector_traits(Orchestrator &orchestrator)
 {
     StepSelectorTraits output;
@@ -81,9 +78,30 @@ void register_selector_traits(Orchestrator &orchestrator)
     const int32_t output_registered = orchestrator.register_builtin_step_selector(STEP_GCODE, output);
     assert(output_registered == 1);
     (void)output_registered;
-    const int32_t firmware_registered = orchestrator.register_builtin_step_selector(GCODE_FIRMWARE, std::move(output));
+    Orchestrator::ExclusiveGroupDefinition writer;
+    writer.traits = output;
+    writer.traits.exclusive_group = "step_gcode_plugin";
+    writer.traits.option_key = "step_gcode_plugin";
+    writer.label = "G-code plugin";
+    writer.line_label = "G-code plugin";
+    writer.tooltip = "Selects how STEP_GCODE creates the output artifact.";
+    writer.translation_domain = "Slic3r";
+    const int32_t writer_group_registered = orchestrator.register_builtin_exclusive_group(STEP_GCODE, std::move(writer));
+    assert(writer_group_registered == 1);
+    (void)writer_group_registered;
+    const int32_t firmware_registered = orchestrator.register_builtin_step_selector(GCODE_FIRMWARE, output);
     assert(firmware_registered == 1);
     (void)firmware_registered;
+    Orchestrator::ExclusiveGroupDefinition firmware;
+    firmware.traits = std::move(output);
+    firmware.traits.exclusive_group = "gcode_firmware_plugin";
+    firmware.traits.option_key = "gcode_firmware_plugin";
+    firmware.label = "G-code firmware";
+    firmware.tooltip = "Selects the firmware session used by PrintingPlan output writers.";
+    firmware.translation_domain = "Slic3r";
+    const int32_t firmware_group_registered = orchestrator.register_builtin_exclusive_group(GCODE_FIRMWARE, std::move(firmware));
+    assert(firmware_group_registered == 1);
+    (void)firmware_group_registered;
     StepSelectorTraits thumbnail;
     thumbnail.category = RAW_OPTION_CATEGORY_OUTPUT;
     thumbnail.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
@@ -97,7 +115,12 @@ void register_selector_traits(Orchestrator &orchestrator)
     thumbnail.exclusive_group = "thumbnail_encoder_plugin";
     thumbnail.option_key = "thumbnails_format";
     thumbnail.strict_selection = true;
-    const int32_t encoder_registered = orchestrator.register_builtin_step_selector(GCODE_THUMBNAIL, std::move(thumbnail));
+    Orchestrator::ExclusiveGroupDefinition encoder;
+    encoder.traits = std::move(thumbnail);
+    encoder.label = "Thumbnail encoding";
+    encoder.tooltip = "Selects the encoding used for thumbnails embedded in G-code files.";
+    encoder.translation_domain = "Slic3r";
+    const int32_t encoder_registered = orchestrator.register_builtin_exclusive_group(GCODE_THUMBNAIL, std::move(encoder));
     assert(encoder_registered == 1);
     (void)encoder_registered;
 }

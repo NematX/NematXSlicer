@@ -18,6 +18,7 @@ using namespace Slic3r::Test::PerimeterPluginTests;
 
 } // namespace
 
+// Read registered perimeter descriptions without mutation and check execution priority separately from the classic algorithm's preference.
 TEST_CASE("ClassicPerimeterGenerator is registered and selectable skeleton", "[plugins][perimeter][classic-generator]")
 {
     // This test protects the STEP_PERIMETER skeleton: the plugin appears as a
@@ -31,7 +32,8 @@ TEST_CASE("ClassicPerimeterGenerator is registered and selectable skeleton", "[p
     CHECK(plugin->get_id() == CLASSIC_PERIMETER_GENERATOR);
     CHECK(plugin->get_name() == "Classic perimeter generator");
     CHECK(plugin->get_step() == STEP_PERIMETER);
-    CHECK(plugin->get_priority() == 5);
+    CHECK(plugin->get_priority() == 0);
+    CHECK(plugin->get_exclusive_group_priority() == 5);
 
     const DynamicPrintConfig config = perimeter_config({{"perimeters", "1"}});
     const ExPolygon surface = rectangle_expolygon(-10., -10., 10., 10.);

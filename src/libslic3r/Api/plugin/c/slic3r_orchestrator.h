@@ -2,14 +2,33 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+/* This header lets plugins register objects and resources, run jobs and report diagnostics.
+   The host is the slicer application. An orchestrator_handle is a borrowed
+   reference to its plugin manager; callers must not delete it.
+
+   Introduce instances with orchestrator_register_plugin(), or use
+   orchestrator_register_plugin_from_package() to identify their installed
+   directory explicitly. orchestrator_is_plugin_registered() includes disabled
+   instances; orchestrator_find_plugin() finds enabled ones for execution.
+   Package-loading functions bracket resource registration and record load errors.
+
+   A service is a directly callable plugin job. Select a registered instance,
+   then orchestrator_execute_plugin() prepares and runs its per-call data.
+   Step and property registration functions name processing stages and associated
+   values; their function comments describe ownership and valid call times.
+
+   Logging writes UTF-8 text at a severity, a category from fatal through trace.
+   orchestrator_send_log() uses the application's configured logger rather than
+   a plugin library's private logger. It does not create a package error.
+   orchestrator_set_error_message() instead stores an explanation and returns
+   a diagnostic id for initialization or cleanup callbacks to return on failure.
+   Warning, error and progress reporting during execution use plugin_host_context,
+   a borrowed reference describing the current application call. */
 #ifndef slic3r_orchestrator_h_
 #define slic3r_orchestrator_h_
 
-/* Version 3 removes the GUI rule action and group fields: every rule is now
-an independent activation reason and the target is enabled when any of them is
-true. */
 #define SLIC3R_PLUGIN_API_ORCHESTRATOR_MAJOR 3u
-#define SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR 4u
+#define SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR 5u
 
 /*
 Property registration guide:
@@ -118,6 +137,28 @@ SLIC3R_HOST_API void orchestrator_register_plugin(
     orchestrator_handle *orch,
     plugin_instance plugin
 );
+
+/* Return 1 for a registered id, including disabled instances, or 0 for invalid
+   inputs, missing ids or failure. References remain borrowed and activation is
+   unchanged. A NULL orchestrator returns 0; exceptions do not escape. */
+SLIC3R_HOST_API int32_t orchestrator_is_plugin_registered(orchestrator_handle *orchestrator, const char *plugin_id);
+
+/* Severity numbers match the application's logging verbosity levels. */
+typedef enum raw_plugin_log_level {
+    RAW_PLUGIN_LOG_FATAL = 0,
+    RAW_PLUGIN_LOG_ERROR = 1,
+    RAW_PLUGIN_LOG_WARNING = 2,
+    RAW_PLUGIN_LOG_INFO = 3,
+    RAW_PLUGIN_LOG_DEBUG = 4,
+    RAW_PLUGIN_LOG_TRACE = 5
+} raw_plugin_log_level;
+
+/* Log borrowed UTF-8 text through the application's configured logger outputs
+   and severity filters. NULL orchestrator selects application logging as usual; it does
+   not attribute a package diagnostic or change load/activation state. NULL text,
+   invalid severity and logging failures have no effect; no exception escapes. */
+SLIC3R_HOST_API void orchestrator_send_log(orchestrator_handle *orchestrator,
+    raw_plugin_log_level severity, const char *message);
 
 /*
 Declare jointly activated plugins. Strings are copied. Repeated declarations
@@ -298,6 +339,9 @@ typedef enum raw_plugin_package_load_error_code {
     RAW_PLUGIN_PACKAGE_LOAD_ERROR_API_HEADER_VERSION_MISMATCH = 15
 } raw_plugin_package_load_error_code;
 
+/* Start the package's loading record and make its copied directory current on this thread.
+   Pair with finish for the same borrowed application/path, including errors.
+   Nested instance registrations preserve that directory for later group descriptions; exceptions cannot cross C. */
 SLIC3R_HOST_API void orchestrator_begin_plugin_package_load(
     orchestrator_handle *orch,
     const char *package_root
@@ -308,6 +352,8 @@ SLIC3R_HOST_API void orchestrator_report_plugin_package_load_error(
     raw_plugin_package_load_error_code code,
     const char *detail
 );
+/* Finish the package's loading record and release its matching current-directory record, including after errors.
+   References remain borrowed, other loading records are unchanged, and exceptions cannot cross C. */
 SLIC3R_HOST_API void orchestrator_finish_plugin_package_load(
     orchestrator_handle *orch,
     const char *package_root
@@ -652,7 +698,7 @@ SLIC3R_HOST_API void orchestrator_plugin_report_progress(plugin_host_context *ho
 /*
 Register one UTF-8 diagnostic message for the lifetime of the running
 application and return its id. A plugin callback reports a failure by returning
-that id (plugin_clear_fn and future status-returning callbacks); the host then
+that id (plugin_initialize_fn or plugin_clear_fn); the host then
 resolves the id, logs the text and queues it as a Plater notification.
 
 Returns PLUGIN_ERROR_GENERAL (1) when orchestrator is NULL, when message is NULL

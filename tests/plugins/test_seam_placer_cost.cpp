@@ -566,6 +566,7 @@ Resolve seam and perimeter providers by enum ID in separate Catch2 sections. Sco
 provider activation, each DynamicPrintConfig owns its options, and selected Plugin pointers are
 borrowed; empty provider results or unexpected IDs fail assertions without changing registration.
 */
+// Check selection using test-owned settings without registering options. Temporary activation is restored on failure.
 TEST_CASE("Exclusive selectors resolve active providers by identifier",
           "[plugins][config][seam-placer]")
 {
@@ -592,11 +593,14 @@ TEST_CASE("Exclusive selectors resolve active providers by identifier",
                 active_seam_providers.push_back(plugin);
         REQUIRE(active_seam_providers.size() == 3);
         CHECK(active_seam_providers[0]->get_id() == k_contiguous_plugin);
-        CHECK(active_seam_providers[0]->get_priority() == 800);
+        CHECK(active_seam_providers[0]->get_priority() == 600);
+        CHECK(active_seam_providers[0]->get_exclusive_group_priority() == 20);
         CHECK(active_seam_providers[1]->get_id() == k_fixed_plugin);
-        CHECK(active_seam_providers[1]->get_priority() == 900);
+        CHECK(active_seam_providers[1]->get_priority() == 600);
+        CHECK(active_seam_providers[1]->get_exclusive_group_priority() == 30);
         CHECK(active_seam_providers[2]->get_id() == k_random_plugin);
-        CHECK(active_seam_providers[2]->get_priority() == 1000);
+        CHECK(active_seam_providers[2]->get_priority() == 600);
+        CHECK(active_seam_providers[2]->get_exclusive_group_priority() == 40);
         Plugin *regional_test_provider = orchestrator.get_plugin(k_regional_seam_plugin);
         REQUIRE(regional_test_provider != nullptr);
         CHECK(regional_test_provider->get_step() == SEAM_PLACER);
@@ -633,10 +637,13 @@ TEST_CASE("Exclusive selectors resolve active providers by identifier",
         REQUIRE(arachne != nullptr);
         CHECK(simple->get_step() == STEP_PERIMETER);
         CHECK(simple->get_priority() == 0);
+        CHECK(simple->get_exclusive_group_priority() == 0);
         CHECK(classic->get_step() == STEP_PERIMETER);
-        CHECK(classic->get_priority() == 5);
+        CHECK(classic->get_priority() == 0);
+        CHECK(classic->get_exclusive_group_priority() == 5);
         CHECK(arachne->get_step() == STEP_PERIMETER);
-        CHECK(arachne->get_priority() == 10);
+        CHECK(arachne->get_priority() == 0);
+        CHECK(arachne->get_exclusive_group_priority() == 10);
 
         std::vector<std::unique_ptr<ScopedPluginActivation>> perimeter_activation;
         for (Plugin *plugin : orchestrator.registered_plugins()) {
@@ -661,8 +668,9 @@ TEST_CASE("Exclusive selectors resolve active providers by identifier",
         const std::vector<Plugin *> active_generators =
             orchestrator.get_active_plugins_for_step(STEP_PERIMETER);
         REQUIRE(active_generators.size() == 2);
-        CHECK(active_generators[0]->get_id() == classic->get_id());
-        CHECK(active_generators[1]->get_id() == arachne->get_id());
+        CHECK(active_generators[0]->get_id() == arachne->get_id());
+        CHECK(active_generators[1]->get_id() == classic->get_id());
+        CHECK(Steps::default_provider_from_group(active_generators) == classic);
 
         DynamicPrintConfig perimeter_config;
         perimeter_config.set_deserialize_strict(
@@ -681,6 +689,7 @@ TEST_CASE("Exclusive selectors resolve active providers by identifier",
     }
 }
 
+// Read registered seam descriptions without mutation and check execution priority, alternative preferences and required settings.
 TEST_CASE("Cost seam metadata is the default regional provider",
           "[plugins][seam-placer][cost]")
 {
@@ -697,15 +706,20 @@ TEST_CASE("Cost seam metadata is the default regional provider",
     REQUIRE(fixed != nullptr);
     REQUIRE(random != nullptr);
     CHECK(aligned->get_name() == "Aligned");
-    CHECK(aligned->get_priority() == 700);
+    CHECK(aligned->get_priority() == 600);
+    CHECK(aligned->get_exclusive_group_priority() == 10);
     CHECK(aligned->get_dependencies().empty());
     CHECK(contiguous->get_name() == "Contiguous");
-    CHECK(contiguous->get_priority() == 800);
+    CHECK(contiguous->get_priority() == 600);
+    CHECK(contiguous->get_exclusive_group_priority() == 20);
     CHECK(contiguous->get_dependencies().empty());
     CHECK(cost->get_name() == "Cost-based");
     CHECK(cost->get_priority() == 600);
-    CHECK(fixed->get_priority() == 900);
-    CHECK(random->get_priority() == 1000);
+    CHECK(cost->get_exclusive_group_priority() == 0);
+    CHECK(fixed->get_priority() == 600);
+    CHECK(fixed->get_exclusive_group_priority() == 30);
+    CHECK(random->get_priority() == 600);
+    CHECK(random->get_exclusive_group_priority() == 40);
     CHECK(cost->get_dependencies().empty());
     const std::vector<Plugin::UsedConfigKey> used = cost->get_used_config_keys();
     REQUIRE(used.size() == 3);

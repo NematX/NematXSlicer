@@ -149,6 +149,7 @@ registry's explanation cache but does not alter provider activation, while faile
 missing options, a wrong menu/default, or a disabled setting. Identifier-versus-label matching is
 covered by test_fff_print_gui_rules.cpp:804-829, where perimeter-generator labels differ from IDs.
 */
+// Read shared startup descriptions without changing settings and check execution priority separately from alternative preference.
 TEST_CASE("Exclusive selectors prune failed providers and match GUI rules by ID",
           "[plugins][config][gui-rules][options]")
 {
@@ -163,7 +164,8 @@ TEST_CASE("Exclusive selectors prune failed providers and match GUI rules by ID"
     const Plugin *valid = orchestrator.get_plugin(valid_id);
     REQUIRE(failed != nullptr);
     REQUIRE(valid != nullptr);
-    CHECK(failed->get_priority() < valid->get_priority());
+    CHECK(failed->get_priority() == valid->get_priority());
+    CHECK(failed->get_exclusive_group_priority() < valid->get_exclusive_group_priority());
     CHECK_FALSE(orchestrator.is_plugin_active(failed));
     CHECK_FALSE(orchestrator.is_plugin_active(valid));
 

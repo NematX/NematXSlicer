@@ -42,6 +42,9 @@ using GUI::into_u8;
 
 namespace Search {
 
+// Return an owned search entry for the borrowed setting and category, preserving verbatim labels/tooltips; allocations may throw.
+static SearchOption create_option(const std::string& opt_key, const int32_t opt_idx, Preset::Type type, const GroupAndCategory& gc);
+
 static char marker_by_type(Preset::Type type, PrinterTechnology pt)
 {
     if (Preset::TYPE_FFF_FILAMENT == type) {
@@ -106,15 +109,15 @@ static SearchOption create_option(const std::string& opt_key, const int32_t opt_
     wxString local_label;
     if (opt.full_label.empty()) {
         label = opt.label;
-        local_label = GUI::I18N::translate_in_domain(opt.label, opt.translation_domain);
+        local_label = GUI::I18N::translate_in_domain(opt.label, opt.translation_domain, opt.untranslated);
     } else {
         if (opt.label.empty() || opt.label.front() == '_') {
             label = opt.full_label;
-            local_label = GUI::I18N::translate_in_domain(opt.full_label, opt.translation_domain);
+            local_label = GUI::I18N::translate_in_domain(opt.full_label, opt.translation_domain, opt.untranslated);
         } else {
             label = opt.full_label + " (" + opt.label + ')';
-            local_label = GUI::I18N::translate_in_domain(opt.full_label, opt.translation_domain) + " (" +
-                          GUI::I18N::translate_in_domain(opt.label, opt.translation_domain) + ')';
+            local_label = GUI::I18N::translate_in_domain(opt.full_label, opt.translation_domain, opt.untranslated) + " (" +
+                          GUI::I18N::translate_in_domain(opt.label, opt.translation_domain, opt.untranslated) + ')';
         }
     }
 
@@ -123,8 +126,8 @@ static SearchOption create_option(const std::string& opt_key, const int32_t opt_
                                     (label + suffix).ToStdWstring(), (local_label + suffix_local).ToStdWstring(),
                                     gc.group.ToStdWstring(), _(gc.group).ToStdWstring(),
                                     category.ToStdWstring(), GUI::Tab::translate_category(category, type).ToStdWstring() ,
-                                    wxString(opt.tooltip).ToStdWstring(), GUI::I18N::translate_in_domain(opt.tooltip, opt.translation_domain).ToStdWstring(),
-                                    boost::algorithm::to_lower_copy(wxString(opt.tooltip).ToStdWstring()), boost::algorithm::to_lower_copy(GUI::I18N::translate_in_domain(opt.tooltip, opt.translation_domain).ToStdWstring()) };
+                                    wxString(opt.tooltip).ToStdWstring(), GUI::I18N::translate_in_domain(opt.tooltip, opt.translation_domain, opt.untranslated).ToStdWstring(),
+                                    boost::algorithm::to_lower_copy(wxString(opt.tooltip).ToStdWstring()), boost::algorithm::to_lower_copy(GUI::I18N::translate_in_domain(opt.tooltip, opt.translation_domain, opt.untranslated).ToStdWstring()) };
     return SearchOption{};
 
 }
@@ -524,7 +527,7 @@ void OptionsSearcher::append_script_option(const ConfigOptionDef &opt,
     if (label.IsEmpty())
         return;
     wxString tooltip = opt.tooltip;
-    const wxString translated_tooltip = GUI::I18N::translate_in_domain(opt.tooltip, opt.translation_domain);
+    const wxString translated_tooltip = GUI::I18N::translate_in_domain(opt.tooltip, opt.translation_domain, opt.untranslated);
     wxString tooltip_lc = tooltip;
     tooltip_lc.LowerCase();
 
@@ -539,7 +542,7 @@ void OptionsSearcher::append_script_option(const ConfigOptionDef &opt,
         idx,
         opt.mode,
         label.ToStdWstring(),
-        GUI::I18N::translate_in_domain(into_u8(label), opt.translation_domain).ToStdWstring(),
+        GUI::I18N::translate_in_domain(into_u8(label), opt.translation_domain, opt.untranslated).ToStdWstring(),
         gc.group.ToStdWstring(),
         _(gc.group).ToStdWstring(),
         gc.category.ToStdWstring(),

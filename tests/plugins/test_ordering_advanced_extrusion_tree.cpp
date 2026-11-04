@@ -31,6 +31,28 @@
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 
+/* This file tests advanced extrusion ordering, seam choices and invalid inputs.
+   An extrusion is a material-depositing movement. Source extrusion trees group
+   those movements; PrintingPlan is the output movement plan. A seam is the
+   starting point selected for a closed extrusion loop.
+
+   OrderingSeamPlugin supplies a controlled seam service, a directly callable
+   job; OrderingSeamSession supplies the result for one use of that job. The
+   test temporarily enables it in Orchestrator, the application's plugin manager.
+   Its group preference ranks it among alternatives without changing execution order.
+
+   TEST_CASE declarations, executed by the test runner, construct source data,
+   call run_advanced_ordering(), then inspect PrintingPlan and diagnostics.
+   Tests check deterministic seam positions and ordering, including invalid
+   input and service-initialization failures, without permanently replacing
+   the application's normal enabled plugins.
+
+   Call graph:
+     TEST_CASE
+       run_advanced_ordering
+         OrchestratorView::execute
+           Orchestrator::execute_plugin */
+
 /*
 Advanced extrusion-tree ordering tests
 ======================================
@@ -46,6 +68,9 @@ is not used as test-only identity metadata.
 */
 
 namespace {
+// Execute the advanced provider on the borrowed print's mutable plan using prepared source regions; return the execution status.
+// Missing providers fail REQUIRE, and the plan remains print-owned.
+raw_plugin_execution_status run_advanced_ordering(Slic3r::Print &print);
 
 using namespace Slic3r;
 using namespace Slic3r::Printing;
@@ -217,7 +242,10 @@ private:
         static const char *dependencies[] = { nullptr };
         return dependencies;
     }
-    int32_t priority_impl() const noexcept override { return 0; }
+    // Return the priority shared by seam-placement jobs. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 600; }
+    // Return -1 to prefer this test service over application alternatives. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return -1; }
 
     void run_impl(const plugin_run_context *run_ctx) const override
     {
@@ -467,6 +495,7 @@ raw_plugin_execution_status run_advanced_ordering(Print &print)
 
 } // namespace
 
+// Read registered ordering descriptions without mutation and check execution priority separately from alternative preference.
 TEST_CASE("Advanced extrusion-tree ordering registers beside the fallback",
           "[plugins][ordering][advanced-extrusion-tree]")
 {
@@ -478,7 +507,9 @@ TEST_CASE("Advanced extrusion-tree ordering registers beside the fallback",
     REQUIRE(fallback != nullptr);
     CHECK(advanced->get_step() == STEP_ORDERING);
     CHECK(advanced->get_priority() == 1050);
-    CHECK(fallback->get_priority() == 1100);
+    CHECK(fallback->get_priority() == 1050);
+    CHECK(advanced->get_exclusive_group_priority() == 0);
+    CHECK(fallback->get_exclusive_group_priority() == 20);
     CHECK(advanced->get_exclusive_group() == "ordering.extrusion_tree");
     CHECK(fallback->get_exclusive_group() == advanced->get_exclusive_group());
 

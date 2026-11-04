@@ -18,6 +18,10 @@
 #include "libslic3r/Plugins/PrintingPlan/PrintingLayerEntryStateProperties.h"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultLayerEntryStatePlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_layer_entry_state_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 /*
@@ -100,8 +104,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -220,16 +222,6 @@ const char *DefaultLayerEntryState::exclusive_group_impl() const noexcept
     return "layer_extrusion_edit.entry_state";
 }
 
-const char *DefaultLayerEntryState::exclusive_group_label_impl() const noexcept
-{
-    return "Layer entry state";
-}
-
-const char *DefaultLayerEntryState::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how parallel layer editors receive their planned entry state.";
-}
-
 slicing_step_t DefaultLayerEntryState::step_impl() const noexcept
 {
     return STEP_LAYER_EXTRUSION_EDIT;
@@ -305,6 +297,12 @@ void register_default_layer_entry_state_plugin(orchestrator_handle *orchestrator
 {
     orchestrator_register_plugin(
         orchestrator, DefaultLayerEntryState::instance(orchestrator).c_instance());
+    const plugin_instance member = DefaultLayerEntryState::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Layer entry state";
+    definition.tooltip = "Selects how parallel layer editors receive their planned entry state.";
+    DefaultLayerEntryState::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::DefaultLayerEntryStatePlugin

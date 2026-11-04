@@ -309,11 +309,6 @@ private:
         return "Writes ordered firmware chunks to one atomically published output file.";
     }
     const char *exclusive_group_impl() const noexcept override { return "step_gcode_plugin"; }
-    const char *exclusive_group_label_impl() const noexcept override { return "G-code plugin"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects how STEP_GCODE creates the output artifact.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_GCODE; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 0; }

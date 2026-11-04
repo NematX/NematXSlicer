@@ -66,6 +66,9 @@ struct StepExclusiveGroup
     std::string option_key_storage;
     std::string label_storage;
     std::string tooltip_storage;
+    std::string translation_domain_storage;
+    std::string default_provider_id;
+    bool member_declared = false;
     slicing_step_t step;
     // These are declared or default traits; option_def stores the resolved invalidation step, including any registry fallback.
     StepSelectorTraits traits;
@@ -78,14 +81,21 @@ struct StepExclusiveGroup
     std::vector<std::string> enum_labels;
     std::vector<key_value_string_pair_t> enum_pairs;
 
+    // Point the C description at this group's owned text, catalogue name, choices and default; call after moving the group.
+    // Settings and plugins are unchanged; rebuilding choice pointers may allocate.
     void refresh_storage_pointers();
-    void set_enum_plugins(const std::vector<std::pair<std::string, std::string>> &plugin_ids_and_labels);
+    // Copy choices in group-priority/id order and retain their default, keeping automatic selection first when enabled.
+    // The group owns choice/default strings and borrows the application; unknown ids use 100, and allocations may throw.
+    void set_enum_plugins(const Orchestrator &orchestrator,
+                          const std::vector<std::pair<std::string, std::string>> &plugin_ids_and_labels,
+                          const std::string &default_provider_id);
 };
 
 struct StepExclusivePluginGroup
 {
     StepExclusiveGroup group;
     std::vector<Plugin *> plugins;
+    bool whole_step = false;
 };
 
 // These keys and labels identify settings that select a provider for an entire step.
@@ -98,12 +108,20 @@ struct StepExclusiveIdentity
 
 // Return the keys and labels of selectors for entire steps.
 const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps();
+// Recognize built-in and registered dynamic selector stages, excluding NONE and ANY.
+bool selector_step_is_registered(const Orchestrator &orchestrator, slicing_step_t step);
+// Borrow the supplied candidate with smallest group priority, then smallest id; an empty list returns null.
+// Candidates must be nonnull; activation is not checked.
+Plugin *default_provider_from_group(const std::vector<Plugin *> &plugins);
 
 // Return the stable generated option key used by a plugin-defined exclusive
 // group. Consumers use this to report the exact regional selector that failed.
 std::string plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
                                               slicing_step_t step,
                                               const std::string &group_id);
+// Return a generated key without consulting descriptions or reserving it.
+std::string generated_plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
+                                                        slicing_step_t step, const std::string &group_id);
 
 // Return the generated selector definition for the given plugin-defined exclusive group.
 StepExclusiveGroup plugin_exclusive_group_definition(const Orchestrator &orchestrator,
@@ -117,7 +135,7 @@ StepExclusiveGroup make_exclusive_step_group(const Orchestrator &orchestrator, s
 // Declare built-in selector traits through modules using only the supplied host, including during host construction.
 void register_builtin_step_selectors(Orchestrator &orchestrator);
 
-// Build generated selector metadata for active groups using their module declarations and provider text.
+// Build selector descriptions for enabled groups using registered setting rules and retained text.
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator);
 // Return the active providers selected for the whole step or its named groups by the supplied settings.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
@@ -135,9 +153,9 @@ Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator,
                                           const std::string &exclusive_group,
                                           const ConfigBase *config);
 
-// Return the first active setting unsupported by its selected exclusive-group provider.
+// Return the first setting unsupported by its enabled member, using retained group text from the borrowed application.
 std::optional<std::string> unsupported_active_setting(
-    const ConfigDef &definitions, const ConfigBase &config,
+    const Orchestrator &orchestrator, const ConfigDef &definitions, const ConfigBase &config,
     const std::function<const Plugin *(const std::string &group_id)> &selected_plugin_of_group);
 
 // Written execution order for the migrated pipeline. The order is intentionally

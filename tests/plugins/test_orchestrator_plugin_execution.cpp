@@ -5,7 +5,9 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <memory>
 #include <stdexcept>
+#include <type_traits>
 #include <string>
 #include <thread>
 #include <utility>
@@ -26,6 +28,30 @@
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/Utils.hpp"
+
+/* This file tests plugin registration, callable jobs and error reporting.
+   The host is the slicer application; Orchestrator manages its plugins.
+   A service is a plugin job invoked directly rather than a whole slicing stage.
+
+   ServicePluginState holds controlled behavior and counters. Build its C ABI
+   instance (the binary-callable function table plus object pointer), then use
+   register_service_plugin(). Registered state lasts for the process because
+   calls retain borrowed pointers. ActivePluginGuard restores temporary activation.
+
+   TEST_CASE, the test runner's case declaration, exercises manager execution
+   through preparation and run calls, cancellation and diagnostics. Separate
+   local Plugin wrappers check function tables with explicit byte counts without registering
+   them. InitializerExceptionProbe uses PluginBase, the C++-to-C adapter, to
+   verify initialization return codes disable a member with one explanation.
+
+   Main test calls:
+     TEST_CASE
+       register_service_plugin
+         Orchestrator::register_plugin
+       Orchestrator::initialize_plugins
+         service_initialize
+       Orchestrator::execute_plugin
+         service_setup / service_run */
 
 namespace {
 
@@ -54,6 +80,9 @@ struct ServicePluginState
     std::vector<const char *> dependencies;
     slicing_step_t step = STEP_NONE;
     int32_t priority = 0;
+    int32_t group_priority = 100;
+    const char *exclusive_group = ServiceGroup;
+    bool reject_auto_during_initialize = false;
     CallbackAction setup_action = CallbackAction::None;
     CallbackAction setup_run_action = CallbackAction::None;
     CallbackAction run_action = CallbackAction::None;
@@ -71,6 +100,21 @@ ServicePluginState g_service_low;
 ServicePluginState g_service_high;
 ServicePluginState g_private_numeric;
 ServicePluginState g_private_numeric_alt;
+// Register dynamic/private-stage service alternatives with equal execution priorities and distinct group priorities.
+// Permanent test objects remain borrowed; failed stage allocation/registration fails REQUIRE or propagates allocation errors.
+void ensure_service_plugins_registered();
+// Register a permanent borrowed test plugin and copy its group text as application data; private numeric stages keep default rules.
+// Slicing data is unchanged; assertions and allocation failures reach the test runner.
+void register_service_plugin(Orchestrator &orchestrator, ServicePluginState &state);
+// Borrow the complete function table, including the test object's preference function; no state changes or failures occur.
+const plugin_vtable *service_vtable();
+// Return one test state's copied group preference without changing state or transferring ownership; the call cannot fail.
+int32_t service_group_priority(void *context);
+// Return the state's borrowed permanent group id without changing state or transferring ownership; the call cannot fail.
+const char *service_group(void *context);
+// Submit a deliberately null condition only when requested; the C boundary records failure of the current initializer.
+// Context/storage remain borrowed, no option is inserted, and zero is returned while the manager retains the rejection.
+int32_t service_initialize(void *context, storage_handle *storage);
 
 struct ProgressCapture
 {
@@ -116,19 +160,9 @@ const char *service_description(void *)
     return "Test provider for generic orchestrator execution.";
 }
 
-const char *service_group(void *)
+const char *service_group(void *context)
 {
-    return ServiceGroup;
-}
-
-const char *service_group_label(void *)
-{
-    return "Generic service test provider";
-}
-
-const char *service_group_tooltip(void *)
-{
-    return "Choose the provider used by the generic execution API test.";
+    return static_cast<ServicePluginState *>(context)->exclusive_group;
 }
 
 slicing_step_t service_step(void *context)
@@ -157,7 +191,14 @@ int32_t service_defined_config_keys(void *, const char **)
     return 0;
 }
 
-void service_initialize(void *, storage_handle *) {}
+int32_t service_initialize(void *context, storage_handle *)
+{
+    ServicePluginState &state = *static_cast<ServicePluginState *>(context);
+    if (state.reject_auto_during_initialize)
+        orchestrator_register_selector_auto_choice(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+            state.step, state.exclusive_group, nullptr, "organic", state.id);
+    return PLUGIN_ERROR_OK;
+}
 
 void service_setup(void *context, const plugin_run_context *run_context, uint32_t run_count)
 {
@@ -213,15 +254,19 @@ void service_run(void *context, const plugin_run_context *run_context)
     perform_callback_action(state, run_context, state.run_action);
 }
 
+int32_t service_group_priority(void *context)
+{
+    return static_cast<ServicePluginState *>(context)->group_priority;
+}
+
 const plugin_vtable *service_vtable()
 {
     static const plugin_vtable table = {
+        sizeof(plugin_vtable),
         &service_id,
         &service_name,
         &service_description,
         &service_group,
-        &service_group_label,
-        &service_group_tooltip,
         &service_step,
         &service_dependencies,
         &service_priority,
@@ -230,7 +275,9 @@ const plugin_vtable *service_vtable()
         &service_initialize,
         &service_setup,
         &service_setup_run,
-        &service_run
+        &service_run,
+        nullptr,
+        &service_group_priority
     };
     return &table;
 }
@@ -242,7 +289,17 @@ void register_service_plugin(Orchestrator &orchestrator, ServicePluginState &sta
     plugin_instance instance = {};
     instance.ctx = &state;
     instance.vt = service_vtable();
+    Orchestrator::PluginRegistrationScope scope = orchestrator.plugin_registration_scope({}, false);
     REQUIRE(orchestrator.register_plugin(instance));
+    if (Steps::selector_step_is_registered(orchestrator, state.step)) {
+        raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+        definition.exclusive_group = ServiceGroup;
+        definition.declaring_plugin_id = state.id;
+        definition.label = "Generic service test provider";
+        definition.tooltip = "Choose the provider used by the generic execution API test.";
+        REQUIRE(orchestrator_register_exclusive_group(reinterpret_cast<orchestrator_handle *>(&orchestrator),
+                                                     state.step, &definition) == 1);
+    }
 }
 
 class ClearTrackingPlugin final : public slic3r_api::PluginBase
@@ -330,22 +387,63 @@ void ensure_service_plugins_registered()
 
     g_service_low.id = "slic3r.test.generic_service.low";
     g_service_low.step = step;
-    g_service_low.priority = -10;
+    g_service_low.priority = 0;
+    g_service_low.group_priority = -10;
     g_service_high.id = "slic3r.test.generic_service.high";
     g_service_high.step = step;
-    g_service_high.priority = 10;
+    g_service_high.priority = 0;
+    g_service_high.group_priority = 10;
     g_private_numeric.id = "slic3r.test.private_numeric_service";
     g_private_numeric.step = static_cast<slicing_step_t>(12001);
     g_private_numeric.priority = 0;
+    g_private_numeric.group_priority = 0;
     g_private_numeric_alt.id = "slic3r.test.private_numeric_service_alt";
     g_private_numeric_alt.step = g_private_numeric.step;
-    g_private_numeric_alt.priority = 1;
+    g_private_numeric_alt.priority = 0;
+    g_private_numeric_alt.group_priority = 1;
 
     register_service_plugin(orchestrator, g_service_low);
     register_service_plugin(orchestrator, g_service_high);
     register_service_plugin(orchestrator, g_private_numeric);
     register_service_plugin(orchestrator, g_private_numeric_alt);
 }
+
+class InitializerExceptionProbe final : public slic3r_api::PluginBase
+{
+public:
+    enum class Failure { Standard, Unknown, RejectedChoice };
+    // Borrow the application and permanent id, and retain the failure mode without registering or taking ownership.
+    InitializerExceptionProbe(orchestrator_handle *host, const char *id, Failure failure)
+        : PluginBase(host), m_host(host), m_id(id), m_failure(failure) {}
+    // Borrow the permanent id without state changes, allocation or failure.
+    const char *id() const noexcept { return m_id; }
+private:
+    // Borrow the permanent id without state changes or failure.
+    const char *id_impl() const noexcept override { return m_id; }
+    // Return the post-slicing step while keeping this provider's own singleton group.
+    slicing_step_t step_impl() const noexcept override { return STEP_POST_SLICING; }
+    // Return the constant execution priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Return no dependencies without accessing host state or failing.
+    const char *const *dependencies_impl() const noexcept override { return nullptr; }
+    // Throw an exception or submit a rejected automatic choice, leaving borrowed storage unused.
+    // The C adapter returns an error id. The application must keep the first explanation and disable this plugin without changing print data.
+    void inilialize_impl(storage_handle *) const override
+    {
+        if (m_failure == Failure::RejectedChoice) {
+            slic3r_api::OrchestratorView(m_host).register_selector_auto_choice(
+                STEP_POST_SLICING, m_id, "", "organic", m_id);
+            return;
+        }
+        if (m_failure == Failure::Unknown) throw 42;
+        throw std::runtime_error("Unexpected initializer exception");
+    }
+    // Ignore the borrowed run context without changing Print data or failing.
+    void run_impl(const plugin_run_context *) const override {}
+    orchestrator_handle *m_host;
+    const char *m_id;
+    Failure m_failure;
+};
 
 class ActivePluginGuard
 {
@@ -381,6 +479,219 @@ private:
 };
 
 } // namespace
+
+// Initialize one permanent C++ test plugin and require one attributed failure, with no exception escaping its C adapter.
+// Temporary activation is restored, and a rejected choice must keep its first explanation without duplicates.
+TEST_CASE("PluginBase initializer exceptions disable the provider and preserve prior rejection diagnostics",
+          "[plugins][orchestrator][initialization][selector-auto]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    static InitializerExceptionProbe standard(handle, "slic3r.test.initialize.standard", InitializerExceptionProbe::Failure::Standard);
+    static InitializerExceptionProbe unknown(handle, "slic3r.test.initialize.unknown", InitializerExceptionProbe::Failure::Unknown);
+    static InitializerExceptionProbe rejected(handle, "slic3r.test.initialize.rejected", InitializerExceptionProbe::Failure::RejectedChoice);
+    InitializerExceptionProbe *probe = nullptr;
+    std::string expected;
+    SECTION("Standard exception without a preceding rejection") { probe = &standard; expected = "Unexpected initializer exception"; }
+    SECTION("Unknown exception without a preceding rejection") { probe = &unknown; expected = "Unknown C++ exception in plugin initialization"; }
+    SECTION("Host rejection is retained instead of the SDK exception") { probe = &rejected; expected = "Invalid automatic selector preference"; }
+    REQUIRE(probe != nullptr);
+    if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+    ActivePluginGuard active(host, {probe->id()});
+    host.consume_plugin_messages();
+    CHECK_NOTHROW(host.initialize_plugins());
+    CHECK_FALSE(host.is_plugin_active(probe->id()));
+    size_t attributed = 0;
+    for (const Orchestrator::PluginMessage &message : host.consume_plugin_messages())
+        if (message.plugin_id == probe->id()) {
+            ++attributed;
+            CHECK(message.level == Orchestrator::PluginMessageLevel::Error);
+            CHECK(message.step == STEP_POST_SLICING);
+            CHECK(message.message.find(expected) != std::string::npos);
+            CHECK(message.message.find("Cannot register selector automatic choice") == std::string::npos);
+        }
+    CHECK(attributed == 1);
+}
+
+// Copy test-owned function tables, checking the required byte count and each optional field boundary independently.
+// Wrappers borrow local objects without registration or print changes. Invalid tables must throw before reading descriptions.
+TEST_CASE("Group preference defaults to 100 when the optional ABI callback is omitted",
+          "[plugins][orchestrator][abi][selector-group-priority]")
+{
+    static_assert(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR == 4u && SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR == 0u,
+                  "Sized provider metadata requires plugin_types 4.0.");
+    static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 5u,
+                  "Complete group declarations require config_def 1.5.");
+    static_assert(SLIC3R_PLUGIN_API_ORCHESTRATOR_MAJOR == 3u && SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR == 5u,
+                  "Registration queries and application logging require orchestrator 3.5.");
+    static_assert(std::is_same<plugin_initialize_fn, int32_t (*)(void *, storage_handle *)>::value,
+                  "Initialization returns a diagnostic id through the plugin_types 4.0 interface.");
+    static_assert(offsetof(plugin_vtable, struct_size) == 0, "Provider table size is its first field.");
+    static_assert(offsetof(plugin_vtable, clear) > offsetof(plugin_vtable, run), "Cleanup follows the required prefix.");
+    static_assert(offsetof(plugin_vtable, get_exclusive_group_priority) > offsetof(plugin_vtable, clear),
+                  "Group preference is an independent optional tail.");
+    static_assert(offsetof(raw_exclusive_group_def, declaring_plugin_id) > offsetof(raw_exclusive_group_def, exclusive_group),
+                  "The complete descriptor names its registered declaring member.");
+    ServicePluginState state;
+    state.id = "slic3r.test.sized_metadata";
+    state.step = STEP_POST_INFILL;
+    state.group_priority = -3;
+    const uint32_t required = uint32_t(offsetof(plugin_vtable, run) + sizeof(service_vtable()->run));
+    const uint32_t clear_end = uint32_t(offsetof(plugin_vtable, clear) + sizeof(service_vtable()->clear));
+    const uint32_t priority_end = uint32_t(offsetof(plugin_vtable, get_exclusive_group_priority) +
+                                           sizeof(service_vtable()->get_exclusive_group_priority));
+    for (uint32_t size : {required, clear_end - 1, clear_end, priority_end - 1, priority_end}) {
+        INFO(size);
+        plugin_vtable table = *service_vtable();
+        table.struct_size = size;
+        Plugin plugin({&state, &table}, "Slic3r", "");
+        CHECK(plugin.get_exclusive_group_priority() == (size >= priority_end ? -3 : 100));
+        CHECK_FALSE(plugin.has_clear());
+        // Changing the original table must not replace the copied execution function.
+        table.run = nullptr;
+        plugin_run_context context = {};
+        state.allow_null_payload = true;
+        plugin.run(context);
+        CHECK(state.run_count.load() > 0);
+    }
+    plugin_vtable table = *service_vtable();
+    table.get_exclusive_group_priority = nullptr;
+    Plugin omitted({&state, &table}, "Slic3r", "");
+    CHECK(omitted.get_exclusive_group_priority() == 100);
+    table = *service_vtable();
+    state.group_priority = 7;
+    Plugin positive({&state, &table}, "Slic3r", "");
+    CHECK(positive.get_exclusive_group_priority() == 7);
+    table.struct_size = required - 1;
+    table.get_id = nullptr;
+    CHECK_THROWS_WITH(Plugin({&state, &table}, "Slic3r", ""), Catch::Contains("incomplete required prefix"));
+    table.struct_size = sizeof(table);
+    CHECK_THROWS_WITH(Plugin({&state, &table}, "Slic3r", ""), Catch::Contains("missing callbacks"));
+    struct ExtendedTable { plugin_vtable table; uint64_t unknown; } extended = {*service_vtable(), 42};
+    extended.table.struct_size = sizeof(extended);
+    Plugin future({&state, &extended.table}, "Slic3r", "");
+    CHECK(future.get_exclusive_group_priority() == 7);
+}
+
+// Copy the C++ adapter's cleanup function at each optional-field boundary, then change the original table and invoke the copy.
+// Wrappers borrow the tracking object. Cleanup receives null borrowed references and only increments counters.
+TEST_CASE("Sized callback tables retain cleanup only when its complete pointer is covered",
+          "[plugins][orchestrator][abi][clear][selector-group-priority]")
+{
+    Orchestrator &host = Orchestrator::instance();
+    ClearTrackingPlugin probe(reinterpret_cast<orchestrator_handle *>(&host), "slic3r.test.sized_clear");
+    const plugin_instance original = probe.c_instance();
+    const uint32_t required = uint32_t(offsetof(plugin_vtable, run) + sizeof(original.vt->run));
+    const uint32_t clear_end = uint32_t(offsetof(plugin_vtable, clear) + sizeof(original.vt->clear));
+    const uint32_t preference_end = uint32_t(offsetof(plugin_vtable, get_exclusive_group_priority) +
+                                              sizeof(original.vt->get_exclusive_group_priority));
+    for (uint32_t size : {required, clear_end - 1, clear_end, preference_end - 1, preference_end}) {
+        INFO(size);
+        probe.reset();
+        plugin_vtable table = *original.vt;
+        table.struct_size = size;
+        Plugin normalized({original.ctx, &table}, "Slic3r", "");
+        CHECK(normalized.has_clear() == (size >= clear_end));
+        CHECK(normalized.get_exclusive_group_priority() == 100);
+        table.clear = nullptr;
+        CHECK(normalized.clear(nullptr, nullptr) == PLUGIN_ERROR_OK);
+        CHECK(probe.clear_count() == (size >= clear_end ? 1u : 0u));
+        CHECK(probe.clear_print() == nullptr);
+    }
+}
+
+// Initialize only permanent no-op plugins, then finalize test-owned choice lists with temporary activation restored afterward.
+// Rejection disables A. Filtering must preserve C,B order and retained text without adding application settings.
+TEST_CASE("Whole-step perimeter defaults include providers with distinct exclusive group names",
+          "[plugins][orchestrator][selector-group-priority][selector-auto]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    bool whole_step = false;
+    SECTION("Plugin-group metadata remains retained after initialization failure") { whole_step = false; }
+    SECTION("Whole-step candidates ignore their individual group names") { whole_step = true; }
+    const slicing_step_t step = whole_step ? STEP_PERIMETER : host.register_step("slic3r.test.finalize_default", STEP_INFILL);
+    static ServicePluginState group_states[3];
+    static ServicePluginState whole_states[3];
+    ServicePluginState *states = whole_step ? whole_states : group_states;
+    const char *const group_ids[] = {"slic3r.test.finalize.group.a", "slic3r.test.finalize.group.c", "slic3r.test.finalize.group.b"};
+    const char *const whole_ids[] = {"slic3r.test.finalize.whole.a", "slic3r.test.finalize.whole.c", "slic3r.test.finalize.whole.b"};
+    const char *const *ids = whole_step ? whole_ids : group_ids;
+    const int32_t priorities[] = {0, 20, 10};
+    const char *const groups[] = {"finalize.a", "finalize.c", "finalize.b"};
+    {
+        Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+        for (size_t index = 0; index < 3; ++index) {
+            states[index].id = ids[index];
+            states[index].step = step;
+            states[index].group_priority = priorities[index];
+            states[index].exclusive_group = whole_step ? groups[index] : "finalize.group";
+            states[index].reject_auto_during_initialize = index == 0;
+            if (host.get_plugin(ids[index]) == nullptr)
+                REQUIRE(host.register_plugin({&states[index], service_vtable()}));
+            REQUIRE(host.set_plugin_active(ids[index], false));
+        }
+        if (!whole_step) {
+            raw_exclusive_group_def declaration = raw_exclusive_group_def_init();
+            declaration.exclusive_group = "finalize.group";
+            declaration.declaring_plugin_id = ids[0];
+            declaration.label = "Retained A";
+            declaration.tooltip = "Retained A tooltip";
+            declaration.container_type = RAW_CONTAINER_TYPE_REGION;
+            CHECK(orchestrator_register_exclusive_group(handle, step, &declaration) >= 0);
+        }
+    }
+    ActivePluginGuard active(host, {ids[0], ids[1], ids[2]});
+    const std::string effective_group = whole_step ? "step_perimeter_plugin" : "finalize.group";
+    host.elect_exclusive_group_definition(step, effective_group);
+    const Orchestrator::ExclusiveGroupDefinition retained = host.exclusive_group_definition_or_default(step, effective_group);
+    ConfigOptionDef local;
+    local.type = coEnum;
+    local.contains_plugin_id = true;
+    local.label = retained.label;
+    local.tooltip = retained.tooltip;
+    local.translation_domain = retained.translation_domain;
+    local.set_enum_as_closed_for_scripted_enum({{ids[0], "A"}, {ids[1], "C"}, {ids[2], "B"}});
+    std::unique_ptr<ConfigOption> initial(local.create_empty_option());
+    REQUIRE(initial->deserialize(ids[0]));
+    local.set_default_value(initial.release());
+    CHECK(local.default_value->serialize() == ids[0]);
+    host.initialize_plugins();
+    CHECK_FALSE(host.is_plugin_active(ids[0]));
+    bool diagnosed = false;
+    for (const Orchestrator::PluginMessage &message : host.consume_plugin_messages())
+        if (message.plugin_id == ids[0] && message.step == step &&
+            message.level == Orchestrator::PluginMessageLevel::Error && !message.message.empty())
+            diagnosed = true;
+    CHECK(diagnosed);
+    REQUIRE(host.is_plugin_active(ids[1]));
+    REQUIRE(host.is_plugin_active(ids[2]));
+    const Orchestrator::SelectorIdentity identity {whole_step ? Orchestrator::SelectorIdentityKind::WholeStep :
+        Orchestrator::SelectorIdentityKind::PluginGroup, step, whole_step ? std::string() : effective_group};
+    host.finalize_selector_option(local, identity, false);
+    CHECK((local.enum_def->values() == std::vector<std::string>{ids[1], ids[2]}));
+    CHECK(local.default_value->serialize() == ids[2]);
+    CHECK(local.label == retained.label);
+    CHECK(local.tooltip == retained.tooltip);
+    CHECK(local.translation_domain == retained.translation_domain);
+    CHECK(host.exclusive_group_definition_or_default(step, effective_group).label == retained.label);
+    CHECK(host.exclusive_group_definition_or_default(step, effective_group).traits.container_type == retained.traits.container_type);
+    CHECK(Steps::default_provider_from_group(host.get_active_plugins_for_step(step)) == host.get_plugin(ids[2]));
+    DynamicPrintConfig config;
+    CHECK(Steps::selected_or_active_plugins_for_step(host, step, &config) == std::vector<Plugin *>{host.get_plugin(ids[2])});
+    config.set_key_value(whole_step ? "step_perimeter_plugin" :
+        Steps::plugin_exclusive_group_option_key(host, step, effective_group), new ConfigOptionString("obsolete"));
+    CHECK(Steps::selected_or_active_plugins_for_step(host, step, &config) == std::vector<Plugin *>{host.get_plugin(ids[2])});
+    ConfigOptionDef automatic;
+    automatic.type = coEnum;
+    automatic.contains_plugin_id = true;
+    automatic.set_enum_as_closed_for_scripted_enum({{"auto", "Automatic"}, {ids[0], "A"}, {ids[1], "C"}, {ids[2], "B"}});
+    host.finalize_selector_option(automatic, identity, true);
+    CHECK((automatic.enum_def->values() == std::vector<std::string>{"auto", ids[1], ids[2]}));
+    CHECK(automatic.default_value->serialize() == "auto");
+}
 
 TEST_CASE("PluginProgress publishes terminal completion without hiding later phases",
           "[plugins][progress]")

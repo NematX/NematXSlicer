@@ -24,6 +24,10 @@ and final materialization flags.
 #include "TravelConnectionHelpers.hpp"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultTravelPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_travel_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 using namespace TravelConnection;
@@ -45,11 +49,11 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
+    // Return the preference for straight travel. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
     const char *progress_message_format_impl() const noexcept override;
     void setup_impl(const plugin_run_context *run_ctx, uint32_t run_count) const override;
     void setup_run_impl(const plugin_run_context *run_ctx) const override;
@@ -88,16 +92,6 @@ const char *DefaultTravel::description_impl() const noexcept
 const char *DefaultTravel::exclusive_group_impl() const noexcept
 {
     return "layer_extrusion_edit.travel";
-}
-
-const char *DefaultTravel::exclusive_group_label_impl() const noexcept
-{
-    return "Travel generation";
-}
-
-const char *DefaultTravel::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how discontinuities between ordered extrusion leaves become travels.";
 }
 
 slicing_step_t DefaultTravel::step_impl() const noexcept
@@ -161,6 +155,12 @@ void DefaultTravel::run_impl(const plugin_run_context *run_ctx) const
 void register_default_travel_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(orchestrator, DefaultTravel::instance(orchestrator).c_instance());
+    const plugin_instance member = DefaultTravel::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Travel generation";
+    definition.tooltip = "Selects how discontinuities between ordered extrusion leaves become travels.";
+    DefaultTravel::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::DefaultTravelPlugin

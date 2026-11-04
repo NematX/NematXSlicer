@@ -36,6 +36,12 @@ namespace Slic3r
 namespace GUI
 {
 
+// Create a settings menu for the borrowed parent/item and sort by display labels; the caller owns the menu, and allocations may throw.
+static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_object_settings, wxDataViewItem item);
+// Return an owned copy of a borrowed entry's stored display label, or translate its supplied label when the key is unknown.
+// Settings are unchanged, and allocation failures propagate.
+static wxString settings_option_label(const std::pair<std::string, std::string> &entry);
+
 static PrinterTechnology printer_technology()
 {
     return wxGetApp().preset_bundle->printers.get_selected_preset().printer_technology();
@@ -343,6 +349,14 @@ static int GetSelectedChoices(  wxArrayInt& selections,
     return static_cast<int>(selections.GetCount());
 }
 
+static wxString settings_option_label(const std::pair<std::string, std::string> &entry)
+{
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(entry.first);
+    if (definition != nullptr)
+        return from_u8(definition->full_label.empty() ? definition->translated_label() : definition->translated_full_label());
+    return _(entry.second);
+}
+
 static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_object_settings, wxDataViewItem item/*, ModelConfig& config*/)
 {
     wxMenu* menu = new wxMenu;
@@ -352,7 +366,7 @@ static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_obje
     // sort by lexicographic order
     for (auto& cat2idname : categories) {
         std::sort(cat2idname.second.begin(), cat2idname.second.end(),
-            [](const std::pair< std::string, std::string>& e1, const std::pair< std::string, std::string>& e2)->bool {return (_(e1.second)) < (_(e2.second)); });
+            [](const std::pair< std::string, std::string>& e1, const std::pair< std::string, std::string>& e2)->bool {return settings_option_label(e1) < settings_option_label(e2); });
     }
 
     auto get_selected_options_for_category = [categories, item](const wxString& category_name) {
@@ -367,7 +381,7 @@ static wxMenu* create_settings_popupmenu(wxMenu* parent_menu, const bool is_obje
                 int sel = 0;
                 //sort per label, because there isn't a better one.
                 for (const std::pair<std::string, std::string>& pair_strid_strname : cat2idname.second) {
-                    names.Add(_(pair_strid_strname.second));
+                    names.Add(settings_option_label(pair_strid_strname));
                     if (find(opt_keys.begin(), opt_keys.end(), pair_strid_strname.first) != opt_keys.end())
                         selections.Add(sel);
                     sel++;

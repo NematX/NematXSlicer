@@ -55,6 +55,19 @@ class OrchestratorBridgeHost:
         self.registered_step = (address(orchestrator), name.decode(), int(invalidates))
         return 10001 if name else 0
 
+    def orchestrator_register_exclusive_group(self, orchestrator, step, definition):
+        """Copy description fields during the call without retaining borrowed ctypes storage."""
+        value = definition._obj
+        self.group_declaration = (address(orchestrator), int(step), {
+            name: getattr(value, name) for name, _type in value._fields_
+        })
+        return getattr(self, "declaration_result", 1)
+
+    def orchestrator_register_selector_auto_choice(self, orchestrator, step, *fields):
+        """Copy automatic-selection arguments before their temporary strings expire."""
+        self.auto_choice = (address(orchestrator), int(step), tuple(fields))
+        return getattr(self, "declaration_result", 1)
+
     def orchestrator_step_name(self, _orchestrator, step):
         return b"example.service" if int(step) == 10001 else None
 
@@ -245,6 +258,71 @@ class PythonOrchestratorBridgeViewTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             foreign.execute(plugin)
+
+    def test_register_exclusive_group_copies_descriptor_fields(self):
+        """Check copied group fields, presence flags and registration result handling."""
+        api, host = self.make_api()
+        view = self.orchestrator_views.OrchestratorView(api)
+        fields = dict(exclusive_group="group.Mixed", declaring_plugin_id="example.provider",
+                      label="Group label", tooltip="Group tooltip",
+                      container_type=self.generated.RAW_CONTAINER_TYPE_REGION,
+                      category=self.generated.RAW_OPTION_CATEGORY_INFILL,
+                      option_preset_type=self.generated.RAW_PRESET_TYPE_FFF_PRINT,
+                      ui_target_file="filament.ui", ui_page="Infill", ui_group="Selectors",
+                      option_key="example_selector", invalidates_step=self.generated.STEP_NONE,
+                      strict_selection=True, read_with_one_provider=True, show_with_one_provider=True,
+                      provider_settings_rules=False, auto_value=True, value_when_absent="")
+        self.assertTrue(view.register_exclusive_group(10001, **fields))
+        orchestrator, step, copied = host.group_declaration
+        self.assertEqual((orchestrator, step), (10, 10001))
+        self.assertEqual(copied["struct_size"], ctypes.sizeof(self.generated.RawExclusiveGroupDef))
+        for name, expected in fields.items():
+            if isinstance(expected, str):
+                expected = expected.encode("utf-8")
+            self.assertEqual(copied[name], expected, name)
+        self.assertEqual(copied["has_invalidates_step"], 1)
+        self.assertEqual(copied["has_value_when_absent"], 1)
+        host.declaration_result = 0
+        self.assertFalse(view.register_exclusive_group(10001, **fields))
+        host.declaration_result = -1
+        with self.assertRaises(ValueError):
+            view.register_exclusive_group(10001, **fields)
+        self.assertIn("slic3r_config_def.h", view.register_exclusive_group.__slic3r_abi_headers__)
+
+    def test_register_selector_auto_choice_passes_owned_bytes(self):
+        """Check encoded automatic-choice arguments and registration result handling."""
+        api, host = self.make_api()
+        view = self.orchestrator_views.OrchestratorView(api)
+        args = (10001, "group", "style", "organic", "example.provider")
+        self.assertTrue(view.register_selector_auto_choice(*args))
+        self.assertEqual(host.auto_choice, (10, 10001, (b"group", b"style", b"organic", b"example.provider")))
+        host.declaration_result = 0
+        self.assertFalse(view.register_selector_auto_choice(*args))
+        host.declaration_result = -2
+        with self.assertRaises(ValueError):
+            view.register_selector_auto_choice(*args)
+
+    def test_plugin_declarations_force_owner_and_preserve_obsolete_slots(self):
+        """Check declaring-owner enforcement and compatibility of obsolete text arguments."""
+        api, host = self.make_api()
+        base = self.api_module.PluginBase
+        omitted = base("example.provider", 10001)
+        self.assertFalse(hasattr(omitted, "exclusive_group_label"))
+        self.assertFalse(hasattr(omitted, "exclusive_group_tooltip"))
+        self.assertEqual(omitted.exclusive_group_priority, 100)
+        positional = base("example.provider", 10001, "Name", "Description", 0,
+                          None, None, None, "group", "", "")
+        self.assertEqual(positional.dependencies, [])
+        self.assertEqual(positional.used_config_keys, [])
+        self.assertEqual(positional.defined_config_keys, [])
+        self.assertEqual(positional.exclusive_group, "group")
+        self.assertEqual(positional.exclusive_group_label, "")
+        self.assertEqual(positional.exclusive_group_tooltip, "")
+        self.assertEqual(positional.exclusive_group_definitions, [])
+        self.assertIs(omitted.declare_exclusive_group(label="Explicit", declaring_plugin_id="foreign"), omitted)
+        self.api_module._register_exclusive_group_definitions(api, omitted, "example.provider", 10001)
+        self.assertEqual(host.group_declaration[2]["declaring_plugin_id"], b"example.provider")
+        self.assertEqual(host.group_declaration[2]["label"], b"Explicit")
 
     def test_runtime_ids_are_registered_and_resolved_inside_their_type(self):
         api, host = self.make_api()

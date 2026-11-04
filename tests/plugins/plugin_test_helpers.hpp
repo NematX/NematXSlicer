@@ -46,11 +46,17 @@ void register_regional_seam_test_provider(orchestrator_handle *orchestrator);
 void register_gcode_reader_test_providers(orchestrator_handle *orchestrator);
 // Register the shared-storage allocation probe before option finalization.
 void register_plugin_storage_test_provider(orchestrator_handle *orchestrator);
+// Register external-package selector cases before shared startup finalizes settings.
+void register_external_selector_catalog_providers(orchestrator_handle *orchestrator);
 // Register and initialize the shared plugin runtime and FFF/SLA print config caches once; call before constructing Slic3r::Print or DynamicPrintConfig::full_print_config(). Missing expected plugins log an error and call assert(false), not a return value.
 void ensure_plugin_test_runtime_initialized();
 bool python_plugin_test_runtime_available();
 // Return the owned startup snapshot, unaffected by tests clearing live reports.
 const PluginPackageLoadReport &python_invalid_clear_package_report();
+// Borrow the saved package report for a preference below or above the signed 32-bit range.
+const PluginPackageLoadReport &python_priority_package_report(bool upper);
+// Borrow saved startup log text containing warnings for obsolete Python attributes.
+const std::string &python_metadata_warnings();
 /* True when the runtime reported the empty plugin-id option list fixture. */
 bool plugin_test_empty_option_list_error_reported();
 

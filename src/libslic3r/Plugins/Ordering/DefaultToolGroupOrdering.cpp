@@ -18,6 +18,10 @@
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_tool_group_ordering_plugin(orchestrator_handle *orch);
+
 namespace {
 
 /*
@@ -430,11 +434,6 @@ private:
         return "Orders tool sections in each printing group to reduce tool changes between layers.";
     }
     const char *exclusive_group_impl() const noexcept override { return k_group_tools; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Tool ordering"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects how STEP_ORDERING orders extruder/tool sections.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_ORDERING; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 100; }
@@ -469,6 +468,13 @@ private:
 void register_default_tool_group_ordering_plugin(orchestrator_handle *orch)
 {
     orchestrator_register_plugin(orch, DefaultToolGroupOrdering::instance(orch).c_instance());
+    const plugin_instance member = DefaultToolGroupOrdering::instance(orch).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.category = RAW_OPTION_CATEGORY_OUTPUT;
+    definition.label = "Tool ordering";
+    definition.tooltip = "Selects how STEP_ORDERING orders extruder/tool sections.";
+    DefaultToolGroupOrdering::instance(orch).register_exclusive_group(STEP_ORDERING, definition);
 }
 
 }}} // namespace slic3r_api::Ordering::DefaultOrderingPlugin

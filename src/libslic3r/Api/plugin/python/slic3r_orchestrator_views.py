@@ -3,18 +3,26 @@
 #/|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #/|/
 
-"""Borrowed Python views for generic plugin discovery and execution.
+"""This module lets Python code find plugins, describe selection settings and execute jobs.
 
-An ``OrchestratorView`` never owns the host orchestrator. A ``PluginView`` is
-also borrowed and remains valid only until that orchestrator is destroyed. It
-may identify an inactive plugin, but it can be executed only through the same
-orchestrator that produced it.
+The host is the slicer application. Orchestrator manages its plugins, objects
+that perform slicing jobs. Construct OrchestratorView with the API object, then
+find_plugin() obtains an enabled PluginView. Both references borrow application
+objects and must not outlive the manager.
 
-Generic execution runs the complete native lifecycle synchronously: setup,
-parallel setup_run calls, a barrier, then parallel run calls. Payload objects
-are opaque to this module and are kept alive until the native call returns.
-Concurrent or recursive execution of the same plugin instance is forbidden by
-the C contract.
+An exclusive group contains alternative plugins for one processing stage. Its
+selector is a setting naming a member. register_exclusive_group() copies a
+description while the member's package directory is current during loading.
+register_selector_auto_choice() copies a setting key/value condition and
+preferred member. The application retains these strings after the call.
+
+execute() accepts per-call payloads, data whose interpretation belongs to
+the plugin, and keeps them alive until the C call returns. It calls setup once,
+prepares individual calls with setup_run, waits, then calls run. Preparations
+and runs within one execution may be parallel. Execute a PluginView only through
+the OrchestratorView that returned it. Executions are synchronous; concurrent
+or recursive executions of the same plugin instance are not supported. Start
+executions sequentially and use the parallelism within their callbacks.
 """
 
 from __future__ import annotations
@@ -29,6 +37,10 @@ from slic3r_api_generated import (
     RAW_CO_NONE,
     RAW_PLUGIN_EXECUTION_INVALID_ARGUMENT,
     RawPluginRunPayload,
+    RawExclusiveGroupDef,
+    RAW_CONTAINER_TYPE_PROJECT,
+    RAW_OPTION_CATEGORY_SLICING,
+    RAW_PRESET_TYPE_FFF_PRINT,
     STEP_NONE,
 )
 from slic3r_bridge_detector_views import BridgeDetector, create_bridge_detector
@@ -148,6 +160,49 @@ class OrchestratorView:
                 f"dynamic step {namespaced_name!r} could not be registered"
             )
         return step
+
+    @abi_requires_headers("slic3r_config_def.h")
+    def register_exclusive_group(self, step, *, exclusive_group, declaring_plugin_id, label="", tooltip="",
+                                 container_type=RAW_CONTAINER_TYPE_PROJECT, category=RAW_OPTION_CATEGORY_SLICING,
+                                 option_preset_type=RAW_PRESET_TYPE_FFF_PRINT, ui_target_file="print.ui",
+                                 ui_page="", ui_group="", option_key="", invalidates_step=None,
+                                 strict_selection=False, read_with_one_provider=False, show_with_one_provider=False,
+                                 provider_settings_rules=True, auto_value=False, value_when_absent=None):
+        """Copy a group description naming its registered member; return False for a duplicate and raise ValueError on rejection."""
+        definition = RawExclusiveGroupDef()
+        definition.struct_size = ctypes.sizeof(RawExclusiveGroupDef)
+        encoded = {key: value.encode("utf-8") for key, value in (
+            ("exclusive_group", exclusive_group), ("declaring_plugin_id", declaring_plugin_id),
+            ("label", label), ("tooltip", tooltip), ("ui_target_file", ui_target_file or "print.ui"),
+            ("ui_page", ui_page), ("ui_group", ui_group), ("option_key", option_key))}
+        for key, value in encoded.items():
+            setattr(definition, key, value)
+        definition.container_type = int(container_type)
+        definition.category = int(category)
+        definition.option_preset_type = int(option_preset_type)
+        definition.has_invalidates_step = int(invalidates_step is not None)
+        definition.invalidates_step = STEP_NONE if invalidates_step is None else int(invalidates_step)
+        definition.strict_selection = int(bool(strict_selection))
+        definition.read_with_one_provider = int(bool(read_with_one_provider))
+        definition.show_with_one_provider = int(bool(show_with_one_provider))
+        definition.provider_settings_rules = int(bool(provider_settings_rules))
+        definition.auto_value = int(bool(auto_value))
+        absent = None if value_when_absent is None else value_when_absent.encode("utf-8")
+        definition.has_value_when_absent = int(absent is not None)
+        definition.value_when_absent = absent
+        result = int(self.api.host.orchestrator_register_exclusive_group(self.c_handle(), int(step), ctypes.byref(definition)))
+        if result < 0:
+            raise ValueError("Cannot register step selector traits")
+        return result == 1
+
+    @abi_requires_headers("slic3r_config_def.h")
+    def register_selector_auto_choice(self, step, exclusive_group, condition_key, condition_value, provider_id):
+        """Copy a setting condition and preferred member; return False for a duplicate and raise ValueError on rejection."""
+        encoded = [value.encode("utf-8") for value in (exclusive_group, condition_key, condition_value, provider_id)]
+        result = int(self.api.host.orchestrator_register_selector_auto_choice(self.c_handle(), int(step), *encoded))
+        if result < 0:
+            raise ValueError("Cannot register selector automatic choice")
+        return result == 1
 
     def step_name(self, step: int) -> str:
         """Copy a dynamic step name; built-in and unknown steps return empty."""

@@ -34,6 +34,8 @@ the remaining plan.
 */
 
 namespace {
+// Execute only the fallback tree-ordering provider through the real host on the borrowed print-owned plan; execution failure fails REQUIRE.
+void run_tree_ordering(Slic3r::Print &print);
 using namespace Slic3r;
 using namespace Slic3r::Printing;
 using namespace Slic3r::Test::PerimeterPluginTests;
@@ -271,7 +273,6 @@ void attach_plan_identity(PrintingPlan &plan)
     }
 }
 
-/* Execute only the fallback tree-ordering provider through the real host. */
 void run_tree_ordering(Print &print)
 {
     attach_plan_identity(print.mutable_printing_plan());
@@ -284,6 +285,7 @@ void run_tree_ordering(Print &print)
 
 } // namespace
 
+// Read registered ordering descriptions and check compatible properties without changing plugin ownership.
 TEST_CASE("EntryPointProperty has one compatible private dynamic contract",
           "[plugins][ordering][extrusion-tree-ordering][properties]")
 {
@@ -294,7 +296,8 @@ TEST_CASE("EntryPointProperty has one compatible private dynamic contract",
     Plugin *plugin = orchestrator.get_plugin(TREE_ORDERING_PLUGIN);
     REQUIRE(plugin != nullptr);
     CHECK(plugin->get_step() == STEP_ORDERING);
-    CHECK(plugin->get_priority() == 1100);
+    CHECK(plugin->get_priority() == 1050);
+    CHECK(plugin->get_exclusive_group_priority() == 20);
     CHECK(plugin->get_exclusive_group() == "ordering.extrusion_tree");
     CHECK(plugin->get_dependencies().empty());
 

@@ -110,6 +110,7 @@ TYPE_ALIASES = {
     "raw_option_preset_type": "uint32_t",
     "raw_printer_technology": "int",
     "raw_plugin_package_load_error_code": "int",
+    "raw_plugin_log_level": "int",
     "raw_plugin_execution_status": "int",
     "raw_volume_type": "int",
     "slicing_step_t": "uint16_t",

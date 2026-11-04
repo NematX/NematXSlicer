@@ -3,11 +3,38 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* The pipeline defines executable order, checkpoint replay, and metadata for
-   built-in producer and service steps. Exclusive groups select one provider;
-   active setting requirements check that provider's declared option keys.
-   Step modules declare selector traits; the identity table supplies stable keys and text to definition construction.
-   Requested preview reads also fill Print's measured statistics; CLI reads are explicit. */
+/* This file coordinates slicing stages and selects the plugins that perform them.
+   A pipeline is an ordered series of processing stages, called steps. Print
+   holds one slicing job's data; Orchestrator is the slicer application's manager
+   of plugins, components that implement jobs within those steps.
+
+   StepPipeline::run_slice() runs geometry processing; run_gcode() produces the
+   printer-command file, and run() combines both. Checkpoint identifies a saved
+   boundary between stages. clear_checkpoint_outputs() discards results after
+   that boundary when changed settings require recomputation. Producer steps
+   create results; service steps describe callable jobs used by those producers.
+
+   An exclusive group is a set of alternative plugins for one step. Its selector
+   is a setting naming a member. StepExclusiveGroup owns the text and enum (list
+   of choices) used to describe that setting; set_enum_plugins() fills choices
+   ordered by group preference, the rank among alternatives, then id.
+   plugin_exclusive_group_definition() uses descriptions already retained by
+   Orchestrator. selected_plugin_from_group() reads settings, tries automatic
+   key/value conditions when requested, then resolves a selected or default member.
+   Required-setting checks ensure selected members can read their declared keys.
+
+   Output reading is separate from slicing. Requested preview reads also fill
+   Print statistics measured from generated commands. Command-line output reading
+   occurs only when explicitly requested.
+
+   Call graph:
+     StepPipeline::run
+       run_slice
+         run_step_if_requested
+       run_gcode
+         run_step_if_requested
+     selected_active_plugin_from_group
+       selected_plugin_from_group */
 #include "StepPipeline.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -64,9 +91,37 @@
 
 namespace Slic3r::Steps {
 
-// Resolve one borrowed group provider from borrowed configuration, using stored-id policy traits without mutation.
-Plugin *selected_plugin_from_group(const StepExclusiveGroup &group, const std::vector<Plugin *> &plugins,
+// Install copied host traits through owner modules without changing print data; modules must not recurse into Orchestrator::instance().
+// Called during host construction; registration conflicts assert, allocation errors propagate, and provider ownership is unchanged.
+void register_builtin_step_selectors(Orchestrator &orchestrator);
+// Build owned descriptions for borrowed active providers without registering settings; omit empty or hidden singleton groups.
+// Provider pointers stay borrowed, and allocation errors propagate.
+std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator);
+// Resolve borrowed active providers/settings through whole-step identities or named-group descriptions, including singleton groups.
+// Returned pointers stay host-owned, settings/print data are unchanged, and allocation failures propagate.
+std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator, slicing_step_t step, const ConfigBase *config);
+// Resolve one enabled member of the borrowed named group through retained descriptions and configuration; absent groups return null.
+// Providers stay host-owned, settings are unchanged, and allocation failures propagate.
+Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator, slicing_step_t step, const std::string &exclusive_group, const ConfigBase *config);
+// Resolve by serialized enum id because activation can reorder entries; group, configuration and candidates stay borrowed and unchanged.
+// Empty lists return null; missing configuration uses the group-priority default, and absent options use declared/automatic/default choices.
+// Try automatic conditions in registration order, ignoring one disabled marker; the first matching condition naming an active member selects it, otherwise use the default.
+// Singleton non-auto ids are bypassed unless read_with_one_provider is set.
+// Unknown ids return null for strict selection, otherwise the active default; out-of-table enums serialize empty, and allocation/serialization failures propagate.
+Plugin *selected_plugin_from_group(const Orchestrator &orchestrator, const StepExclusiveGroup &group, const std::vector<Plugin *> &plugins,
                                    const ConfigBase *config);
+// Borrow the supplied candidate with smallest group priority, then smallest id; an empty list returns null.
+// Candidates must be nonnull; activation is not checked.
+Plugin *default_provider_from_group(const std::vector<Plugin *> &plugins);
+// Recognize built-in and registered dynamic stages, including seam placement, but not NONE or ANY; the borrowed application is unchanged.
+bool selector_step_is_registered(const Orchestrator &orchestrator, slicing_step_t step);
+// Return an owned default key from borrowed stage/group names without reading descriptions or changing registrations.
+// Unknown stages keep their numeric id, and allocation failures propagate.
+std::string generated_plugin_exclusive_group_option_key(const Orchestrator &orchestrator, slicing_step_t step, const std::string &group_id);
+// Borrow setting data and member lookup, returning the first owned support error or nullopt; required defaults must match their value types.
+// Inputs are not retained or changed; lookup, comparison and formatting failures propagate.
+std::optional<std::string> unsupported_active_setting(const Orchestrator &orchestrator, const ConfigDef &definitions, const ConfigBase &config,
+    const std::function<const Plugin *(const std::string &group_id)> &selected_plugin_of_group);
 
 const std::vector<slicing_step_t> &execution_order()
 {
@@ -263,12 +318,15 @@ std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std:
 StepExclusiveGroup make_exclusive_group(slicing_step_t step, const std::string &group_id, const std::string &key,
                                        const std::string &label, const std::string &line_label, const std::string &tooltip,
                                        StepSelectorTraits traits, slicing_step_t invalidates_step);
-// Build a plugin group using borrowed provider text and resolved host traits; owned metadata is returned.
+// Copy setting rules and retained group text into an owned description without creating a setting.
+// Raw pointers borrow returned storage and require refresh after moves; allocation errors propagate.
 StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator, slicing_step_t step,
                                                const std::string &group_id, const Plugin &first_plugin);
-// Copy provider text into a group's owned metadata and rebuild its fragment, without registering configuration.
-void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin *> &plugins);
-// Use a declared stable option key or generate an owned sanitized identity without registration.
+// Copy retained group text and catalogue name, preserving application line text, then rebuild window-layout instructions.
+// No description is chosen again; the group owns copied strings, settings are unchanged, and allocations may throw.
+void apply_plugin_group_text(const Orchestrator &orchestrator, StepExclusiveGroup &group, const std::string &line_label);
+// Use the borrowed group's explicit key unless it belongs to the entire stage, which needs a separate generated group key.
+// Return an owned key without changing registrations; allocation failures propagate.
 std::string option_key_for_plugin_group(const Orchestrator &orchestrator, slicing_step_t step, const std::string &group_id);
 
 std::string exclusive_group_ui_fragment(const std::string &key,
@@ -306,19 +364,16 @@ std::string sanitized_config_key_part(const std::string &text)
     return out.empty() ? "plugin_group" : out;
 }
 
-// Read borrowed host traits and identities to preserve a declared key, otherwise generate a sanitized key.
-// The result owns its bytes; no state or ownership changes occur and allocation failures propagate.
 std::string option_key_for_plugin_group(const Orchestrator &orchestrator,
                                         slicing_step_t step,
                                         const std::string &group_id)
 {
     const StepSelectorTraits *traits = orchestrator.step_selector(step, group_id);
-    if (traits != nullptr && !traits->option_key.empty()) return traits->option_key;
-    const Orchestrator::DynamicStepInfo *step_info = orchestrator.step_info(step);
-    const std::string step_identity = step_info != nullptr ?
-        sanitized_config_key_part(step_info->name) : std::to_string(int(step));
-    return "exclusive_group_" + step_identity + "_" +
-           sanitized_config_key_part(group_id) + "_plugin";
+    const std::map<slicing_step_t, StepExclusiveIdentity> &whole_steps = get_exclusive_steps();
+    const std::map<slicing_step_t, StepExclusiveIdentity>::const_iterator whole = whole_steps.find(step);
+    if (traits != nullptr && !traits->option_key.empty() &&
+        (whole == whole_steps.end() || traits->option_key != whole->second.key)) return traits->option_key;
+    return generated_plugin_exclusive_group_option_key(orchestrator, step, group_id);
 }
 
 // Compare the numeric identity with the built-in list; services are recognized but are not added to execution order.
@@ -431,8 +486,6 @@ StepExclusiveGroup make_exclusive_group(slicing_step_t step,
     return group;
 }
 
-// Copy resolved traits and borrowed provider text into an owned definition without registering configuration.
-// Raw pointers borrow returned storage and require refresh after moves; allocation errors propagate.
 StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
                                                slicing_step_t step,
                                                const std::string &group_id,
@@ -440,55 +493,38 @@ StepExclusiveGroup make_plugin_exclusive_group(const Orchestrator &orchestrator,
 {
     const std::string key = plugin_exclusive_group_option_key(
         orchestrator, step, group_id);
-    const std::string label = first_plugin.get_exclusive_group_label().empty() ?
-        group_id :
-        first_plugin.get_exclusive_group_label();
-    const std::string tooltip = first_plugin.get_exclusive_group_tooltip().empty() ?
-        "Choose which active plugin owns this exclusive plugin group." :
-        first_plugin.get_exclusive_group_tooltip();
-
-    const StepSelectorTraits traits = selector_traits_of(orchestrator, step, group_id);
+    (void)first_plugin;
+    const Orchestrator::ExclusiveGroupDefinition definition = orchestrator.exclusive_group_definition_or_default(step, group_id);
+    const StepSelectorTraits &traits = definition.traits;
     StepExclusiveGroup group = make_exclusive_group(step,
                                                     group_id,
                                                     key,
-                                                    label,
-                                                    label,
-                                                    tooltip,
+                                                    definition.label,
+                                                    definition.label,
+                                                    definition.tooltip,
                                                     traits,
                                                     selector_invalidation_step(orchestrator, step, traits));
 
-    group.refresh_storage_pointers();
+    apply_plugin_group_text(orchestrator, group, definition.label);
     return group;
 }
 
-// Copy the first active provider's nonempty text into group-owned storage and rebuild its trait-driven fragment.
-// Provider pointers are borrowed, raw group pointers are refreshed, no options are registered, and allocations may throw.
-void apply_plugin_group_text(StepExclusiveGroup &group, const std::vector<Plugin *> &plugins)
+void apply_plugin_group_text(const Orchestrator &orchestrator, StepExclusiveGroup &group, const std::string &line_label)
 {
-    // The selector belongs to the group, not to one plugin. When plugin authors
-    // provide group text, the first active plugin in execution order owns the
-    // wording so every project sees one stable label for that group.
-    for (const Plugin *plugin : plugins) {
-        if (plugin == nullptr)
-            continue;
-        if (plugin->get_exclusive_group_label().empty() && plugin->get_exclusive_group_tooltip().empty())
-            continue;
-
-        if (!plugin->get_exclusive_group_label().empty()) {
-            group.label_storage = plugin->get_exclusive_group_label();
-            group.ui_fragment = plugin_group_ui_fragment(group, group.label_storage);
-        }
-        if (!plugin->get_exclusive_group_tooltip().empty())
-            group.tooltip_storage = plugin->get_exclusive_group_tooltip();
-        group.refresh_storage_pointers();
-        return;
-    }
+    const Orchestrator::ExclusiveGroupDefinition definition = orchestrator.exclusive_group_definition_or_default(group.step, group.group_id);
+    group.label_storage = definition.label;
+    group.tooltip_storage = definition.tooltip;
+    group.translation_domain_storage = definition.translation_domain;
+    group.member_declared = !definition.plugin_id.empty();
+    if (group.traits.auto_value)
+        group.tooltip_storage += " Automatic selection uses the first matching active preference, otherwise the active group default.";
+    const std::string &host_line = definition.line_label.empty() ? line_label : definition.line_label;
+    group.ui_fragment = plugin_group_ui_fragment(group, group.member_declared ? std::string() : host_line);
+    group.refresh_storage_pointers();
 }
 
 } // namespace
 
-// Build owned selector metadata and its fragment from borrowed identity text and copied module traits.
-// Refresh raw pointers after moving the result; no configuration/registration changes occur and allocations may throw.
 StepExclusiveGroup make_exclusive_step_group(const Orchestrator &orchestrator, slicing_step_t step,
                                              const StepExclusiveIdentity &identity)
 {
@@ -498,9 +534,6 @@ StepExclusiveGroup make_exclusive_step_group(const Orchestrator &orchestrator, s
                                 selector_invalidation_step(orchestrator, step, traits));
 }
 
-// Install copied host traits by calling each owner module with this borrowed host, without touching print/configuration data.
-// This runs inside the host constructor: modules must not call Orchestrator::instance(), which would recurse into singleton
-// initialization. Each module asserts successful registration; allocation errors propagate and no provider ownership changes.
 void register_builtin_step_selectors(Orchestrator &orchestrator)
 {
     StepLayerHeightGeneration::register_selector_traits(orchestrator);
@@ -520,11 +553,48 @@ void register_builtin_step_selectors(Orchestrator &orchestrator)
     StepLayerStiching::register_selector_traits(orchestrator);
     StepGenerateGcode::register_selector_traits(orchestrator);
     StepReadGeneratedGcode::register_selector_traits(orchestrator);
+    for (const std::pair<const slicing_step_t, StepExclusiveIdentity> &entry : get_exclusive_steps()) {
+        if (orchestrator.exclusive_group_definition(entry.first, entry.second.key) == nullptr) {
+            Orchestrator::ExclusiveGroupDefinition definition;
+            definition.traits = selector_traits_of(orchestrator, entry.first, entry.second.key);
+            definition.traits.exclusive_group = entry.second.key;
+            definition.traits.option_key = entry.second.key;
+            definition.label = entry.second.label;
+            definition.tooltip = "Choose which active plugin owns this exclusive slicing step.";
+            definition.translation_domain = "Slic3r";
+            const int32_t result = orchestrator.register_builtin_exclusive_group(entry.first, std::move(definition));
+            assert(result == 1);
+            (void)result;
+        }
+        orchestrator.register_selector_option(entry.second.key,
+            {Orchestrator::SelectorIdentityKind::WholeStep, entry.first, {}}, false);
+    }
 }
 
-// Build metadata through the same constructor used by selection, borrowing the host and provider.
-// The returned group owns its strings; refresh its raw pointers after moving it. No registration or
-// configuration changes occur, and allocation failures propagate to the caller.
+bool selector_step_is_registered(const Orchestrator &orchestrator, slicing_step_t step)
+{
+    return step != STEP_NONE && step != STEP_ANY &&
+        (step == SEAM_PLACER || is_known_builtin_step(step) || orchestrator.step_info(step) != nullptr);
+}
+
+std::string generated_plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
+                                                        slicing_step_t step, const std::string &group_id)
+{
+    const Orchestrator::DynamicStepInfo *info = orchestrator.step_info(step);
+    const std::string identity = info != nullptr ? sanitized_config_key_part(info->name) : std::to_string(int(step));
+    return "exclusive_group_" + identity + "_" + sanitized_config_key_part(group_id) + "_plugin";
+}
+
+Plugin *default_provider_from_group(const std::vector<Plugin *> &plugins)
+{
+    Plugin *best = nullptr;
+    for (Plugin *plugin : plugins)
+        if (best == nullptr || plugin->get_exclusive_group_priority() < best->get_exclusive_group_priority() ||
+            (plugin->get_exclusive_group_priority() == best->get_exclusive_group_priority() && plugin->get_id() < best->get_id()))
+            best = plugin;
+    return best;
+}
+
 StepExclusiveGroup plugin_exclusive_group_definition(const Orchestrator &orchestrator,
                                                       slicing_step_t step,
                                                       const std::string &group_id,
@@ -550,6 +620,7 @@ void StepExclusiveGroup::refresh_storage_pointers()
     }
     if (!tooltip_storage.empty())
         option_def.tooltip = tooltip_storage.c_str();
+    option_def.translation_domain = translation_domain_storage.empty() ? nullptr : translation_domain_storage.c_str();
 
     enum_pairs.clear();
     enum_pairs.reserve(enum_values.size());
@@ -562,20 +633,32 @@ void StepExclusiveGroup::refresh_storage_pointers()
 
     option_def.enum_def.value_label_pairs.items = enum_pairs.empty() ? nullptr : enum_pairs.data();
     option_def.enum_def.value_label_pairs.count = uint32_t(enum_pairs.size());
-    option_def.default_serialized_value = enum_values.empty() ? "" : enum_values.front().c_str();
-    // PNG remains the standard default even if a third-party encoder sorts first.
-    if (step == GCODE_THUMBNAIL && group_id == "thumbnail_encoder_plugin")
-        for (const std::string &id : enum_values)
-            if (id == "PNG") option_def.default_serialized_value = id.c_str();
+    option_def.default_serialized_value = traits.auto_value ? SLIC3R_SELECTOR_AUTO_VALUE : default_provider_id.c_str();
 }
 
-void StepExclusiveGroup::set_enum_plugins(const std::vector<std::pair<std::string, std::string>> &plugin_ids_and_labels)
+void StepExclusiveGroup::set_enum_plugins(const Orchestrator &orchestrator,
+                                         const std::vector<std::pair<std::string, std::string>> &plugin_ids_and_labels,
+                                         const std::string &preferred_id)
 {
+    std::vector<std::pair<std::string, std::string>> ordered = plugin_ids_and_labels;
+    std::sort(ordered.begin(), ordered.end(), [&orchestrator](const std::pair<std::string, std::string> &lhs,
+                                                           const std::pair<std::string, std::string> &rhs) {
+        const Plugin *left = orchestrator.get_plugin(lhs.first);
+        const Plugin *right = orchestrator.get_plugin(rhs.first);
+        const int32_t left_priority = left != nullptr ? left->get_exclusive_group_priority() : 100;
+        const int32_t right_priority = right != nullptr ? right->get_exclusive_group_priority() : 100;
+        return left_priority != right_priority ? left_priority < right_priority : lhs.first < rhs.first;
+    });
+    default_provider_id = preferred_id;
     enum_values.clear();
     enum_labels.clear();
     enum_values.reserve(plugin_ids_and_labels.size());
     enum_labels.reserve(plugin_ids_and_labels.size());
-    for (const std::pair<std::string, std::string> &plugin : plugin_ids_and_labels) {
+    if (traits.auto_value) {
+        enum_values.emplace_back(SLIC3R_SELECTOR_AUTO_VALUE);
+        enum_labels.emplace_back("Automatic");
+    }
+    for (const std::pair<std::string, std::string> &plugin : ordered) {
         enum_values.emplace_back(plugin.first);
         enum_labels.emplace_back(plugin.second.empty() ? plugin.first : plugin.second);
     }
@@ -599,8 +682,6 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
     return s_groups;
 }
 
-// Build owned groups for borrowed active providers using module traits and provider text, without registering options.
-// Empty/hidden singletons are omitted, provider pointers remain borrowed, and allocation errors propagate.
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator)
 {
     std::vector<StepExclusivePluginGroup> out;
@@ -615,9 +696,10 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
             continue;
 
         StepExclusivePluginGroup plugin_group;
+        plugin_group.whole_step = true;
         plugin_group.group = std::move(definition);
         plugin_group.group.refresh_storage_pointers();
-        apply_plugin_group_text(plugin_group.group, active_plugins);
+        apply_plugin_group_text(orchestrator, plugin_group.group, entry.second.line_label);
         plugin_group.plugins = std::move(active_plugins);
         out.push_back(std::move(plugin_group));
     }
@@ -649,7 +731,6 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
             StepExclusivePluginGroup plugin_group;
             plugin_group.group = make_plugin_exclusive_group(
                 orchestrator, step_plugins.first, entry.first, *entry.second.front());
-            apply_plugin_group_text(plugin_group.group, entry.second);
             plugin_group.plugins = entry.second;
             out.push_back(std::move(plugin_group));
         }
@@ -658,41 +739,43 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
     return out;
 }
 
-/*
-Resolve providers by serialized enum ID because activation may reorder entries in the registered
-table. The group, configuration, and plugin list are borrowed and unchanged; the returned plugin is
-borrowed. An empty list returns null; missing configuration or a missing option returns the first
-provider. A singleton bypasses the stored id unless its read_with_one_provider trait requests reading.
-A matching ID returns its provider. Unknown IDs return null for strict traits, otherwise the first
-provider. An out-of-table enum serializes to an empty string and follows the unknown-ID path;
-serialization/allocation failures propagate.
-*/
-Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
+Plugin *selected_plugin_from_group(const Orchestrator &orchestrator, const StepExclusiveGroup &group,
                                    const std::vector<Plugin *> &plugins,
                                    const ConfigBase *config)
 {
     if (plugins.empty())
         return nullptr;
-    if (config == nullptr || (plugins.size() == 1 && !group.traits.read_with_one_provider))
-        return plugins.front();
+    if (config == nullptr)
+        return default_provider_from_group(plugins);
 
     const ConfigOption *option = config->option(group.option_def.opt_key);
-    if (option == nullptr)
-        return plugins.front();
-
-    const std::string selected_id = option->serialize();
+    const std::optional<std::string> absent = option == nullptr ? group.traits.value_when_absent : std::nullopt;
+    if (!group.traits.auto_value && plugins.size() == 1 && !group.traits.read_with_one_provider) return plugins.front();
+    const std::string selected_id = option != nullptr ? option->serialize() : absent ? *absent : std::string();
+    if (group.traits.auto_value && ((option == nullptr && !absent) || selected_id == SLIC3R_SELECTOR_AUTO_VALUE)) {
+        for (const SelectorAutoChoice &choice : orchestrator.selector_auto_choices()) {
+            if (choice.step != group.step || choice.exclusive_group != group.group_id) continue;
+            const ConfigOption *condition = config->option(choice.condition_key);
+            if (condition == nullptr) continue;
+            std::string value = condition->serialize();
+            if (!value.empty() && value.front() == '!') value.erase(value.begin());
+            if (value != choice.condition_value) continue;
+            for (Plugin *plugin : plugins)
+                if (plugin->get_id() == choice.provider_id) return plugin;
+        }
+        return default_provider_from_group(plugins);
+    }
+    if (plugins.size() == 1 && !group.traits.read_with_one_provider) return plugins.front();
+    if (option == nullptr && !absent) return default_provider_from_group(plugins);
     for (Plugin *plugin : plugins)
         if (plugin->get_id() == selected_id)
             return plugin;
 
     if (group.traits.strict_selection)
         return nullptr;
-    return plugins.front();
+    return default_provider_from_group(plugins);
 }
 
-// Resolve borrowed active providers and settings using whole-step identities or named-group metadata.
-// Empty steps return directly; every exclusive group resolves through its generated definition, including singletons.
-// Returned pointers remain host-owned, no settings/print data change, and allocation failures propagate.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,
                                                           const ConfigBase *config)
@@ -706,7 +789,7 @@ std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestr
     if (exclusive_it != exclusive_steps.end()) {
         StepExclusiveGroup group = make_exclusive_step_group(orchestrator, step, exclusive_it->second);
         group.refresh_storage_pointers();
-        Plugin *selected = selected_plugin_from_group(group, active_plugins, config);
+        Plugin *selected = selected_plugin_from_group(orchestrator, group, active_plugins, config);
         return selected != nullptr ? std::vector<Plugin *>{ selected } : std::vector<Plugin *>{};
     }
 
@@ -735,7 +818,7 @@ std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestr
         StepExclusiveGroup group = make_plugin_exclusive_group(
             orchestrator, step, group_id, *group_plugins.front());
         group.refresh_storage_pointers();
-        Plugin *selected = selected_plugin_from_group(group, group_plugins, config);
+        Plugin *selected = selected_plugin_from_group(orchestrator, group, group_plugins, config);
         if (selected != nullptr)
             selected_plugins.push_back(selected);
     }
@@ -770,15 +853,11 @@ Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator,
     StepExclusiveGroup group = make_plugin_exclusive_group(
         orchestrator, step, exclusive_group, *group_plugins.front());
     group.refresh_storage_pointers();
-    return selected_plugin_from_group(group, group_plugins, config);
+    return selected_plugin_from_group(orchestrator, group, group_plugins, config);
 }
 
-// Borrow definitions/config and a resolver returning borrowed group providers;
-// compare required values with their typed defaults and return the first owned,
-// translatable error, or nullopt. Required definitions need compatible defaults;
-// resolver/comparison/formatting failures propagate. No input is mutated or retained.
 std::optional<std::string> unsupported_active_setting(
-    const ConfigDef &definitions, const ConfigBase &config,
+    const Orchestrator &orchestrator, const ConfigDef &definitions, const ConfigBase &config,
     const std::function<const Plugin *(const std::string &group_id)> &selected_plugin_of_group)
 {
     for (const auto &[key, definition] : definitions.options) {
@@ -798,10 +877,12 @@ std::optional<std::string> unsupported_active_setting(
             }))
             continue;
 
-        const std::string &group = plugin->get_exclusive_group_label().empty() ?
-            definition.required_plugin_group : plugin->get_exclusive_group_label();
+        const std::map<slicing_step_t, StepExclusiveIdentity>::const_iterator whole = get_exclusive_steps().find(plugin->get_step());
+        const std::string group_id = whole != get_exclusive_steps().end() ? whole->second.key : plugin->get_exclusive_group();
+        const Orchestrator::ExclusiveGroupDefinition group_definition =
+            orchestrator.exclusive_group_definition_or_default(plugin->get_step(), group_id);
         return format(_u8L("The setting \"%1%\" (%2%) is active, but the plugin \"%3%\" (%4%) selected in the \"%5%\" group does not support it."),
-                      key, definition.translated_label(), plugin->get_name(), plugin->get_id(), group);
+                      key, definition.translated_label(), plugin->get_name(), plugin->get_id(), group_definition.label);
     }
     return std::nullopt;
 }

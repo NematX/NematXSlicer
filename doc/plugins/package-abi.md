@@ -8,7 +8,8 @@ package_version = 1.0.0
 slicer_version = 2.7.63.0-alpha+UNKNOWN
 
 [abi]
-slic3r_plugin_types.h = 1.0
+slic3r_plugin_types.h = 4.0
+slic3r_orchestrator.h = 3.5
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
 ```
@@ -21,6 +22,13 @@ The vtable contract `slic3r_plugin_types.h` is mandatory. Required major version
 must match the host; required minor versions must not exceed it. `0.0` denotes
 an unused contract. Unknown nonzero requirements, duplicate keys, invalid
 versions and missing ABI declarations are incompatible.
+
+The plugin-types 4.0 initialization callback returns an error identifier: zero
+means success; nonzero results disable the instance with a diagnostic. The
+orchestrator 3.5 interface supplies activation-independent registration lookup
+and application-side logging. Package manifests and native version tables use
+these public header macros; generated Python bindings derive their callback
+return types and requirements from the same headers.
 
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the

@@ -39,6 +39,10 @@ fan_speed_percent and decides whether a physical fan command is necessary.
 #include "libslic3r/Plugins/PrintingPlan/PrintingLayerTimeProperty.h"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultFanPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_fan_plugin(orchestrator_handle *orch);
+
 namespace {
 
 using namespace ProcessParameterHelpers;
@@ -595,8 +599,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -950,11 +952,6 @@ const char *DefaultFan::description_impl() const noexcept
     return "Assign fan speed from extrusion role, layer duration, and filament cooling settings.";
 }
 const char *DefaultFan::exclusive_group_impl() const noexcept { return "layer_extrusion_edit.fan"; }
-const char *DefaultFan::exclusive_group_label_impl() const noexcept { return "Fan speed"; }
-const char *DefaultFan::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how fan speed is assigned to ordered extrusion paths.";
-}
 slicing_step_t DefaultFan::step_impl() const noexcept { return STEP_LAYER_EXTRUSION_EDIT; }
 const char *const *DefaultFan::dependencies_impl() const noexcept { return k_no_dependencies; }
 int32_t DefaultFan::priority_impl() const noexcept { return 20; }
@@ -1095,6 +1092,12 @@ void DefaultFan::run_impl(const plugin_run_context *run_ctx) const
 void register_default_fan_plugin(orchestrator_handle *orch)
 {
     orchestrator_register_plugin(orch, DefaultFan::instance(orch).c_instance());
+    const plugin_instance member = DefaultFan::instance(orch).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Fan speed";
+    definition.tooltip = "Selects how fan speed is assigned to ordered extrusion paths.";
+    DefaultFan::instance(orch).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::DefaultFanPlugin

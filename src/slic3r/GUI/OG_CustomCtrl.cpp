@@ -219,7 +219,7 @@ wxPoint OG_CustomCtrl::get_pos(const Line& line, Field* field_in/* = nullptr*/)
                 if (is_multioption_line && !option.label.empty()) {
                     std::string opt_label = (option.label.empty() || option.label.back() != '_') ? option.label : option.label.substr(0, option.label.size() - 1);
                     // FIXME: 'Top' & 'Bottom'  require localization with context 'Layers'
-                    label = I18N::translate_in_domain(opt_label, option.translation_domain);
+                    label = I18N::translate_in_domain(opt_label, option.translation_domain, option.untranslated);
                     bool no_dots = label.empty() || option.label.back() == '_';
                     if (!no_dots)
                         label += ":";
@@ -717,7 +717,6 @@ void OG_CustomCtrl::CtrlLine::render_separator(wxDC& dc, wxCoord v_pos)
     dc.SetPen(old_pen);
 }
 
-//TODO push string manipulation out of the render loop (tooltip replace, adding ':')
 void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord v_pos)
 {
     if (is_separator()) {
@@ -815,14 +814,14 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord v_pos)
         ConfigOptionDef option = opt.opt;
 
         //tooltip for labels
-        wxString option_tooltip = I18N::translate_in_domain(option.tooltip, option.translation_domain);
+        wxString option_tooltip = I18N::translate_in_domain(option.tooltip, option.translation_domain, option.untranslated);
         update_Slic3r_string(option_tooltip);
 
         // add label if any
         if (is_multioption_line && !option.label.empty()) {
             std::string opt_label = (option.label.empty() || option.label.back() != '_') ? option.label : option.label.substr(0, option.label.size() - 1);
             // FIXME: 'Top' & 'Bottom'  require localization with context 'Layers'
-            wxString label = I18N::translate_in_domain(opt_label, option.translation_domain);
+            wxString label = I18N::translate_in_domain(opt_label, option.translation_domain, option.untranslated);
             bool no_dots = label.empty() || option.label.back() == '_';
             if (!no_dots)
                 label += ":";
@@ -873,7 +872,7 @@ void OG_CustomCtrl::CtrlLine::render(wxDC& dc, wxCoord v_pos)
 
         // add sidetext if any
         if ( (!option.sidetext.empty() || ctrl->opt_group->sidetext_width > 0 || option.sidetext_width > 0 ) && option.sidetext_width != 0)
-            h_pos = draw_text(dc, wxPoint(h_pos, v_pos), I18N::translate_in_domain(option.sidetext, option.translation_domain), option_tooltip, nullptr, (option.sidetext_width > 0 ? option.sidetext_width : ctrl->opt_group->sidetext_width ) * ctrl->m_em_unit);
+            h_pos = draw_text(dc, wxPoint(h_pos, v_pos), I18N::translate_in_domain(option.sidetext, option.translation_domain, option.untranslated), option_tooltip, nullptr, (option.sidetext_width > 0 ? option.sidetext_width : ctrl->opt_group->sidetext_width ) * ctrl->m_em_unit);
 
         if (opt.opt_key != option_set.back().opt_key || opt.opt_idx != option_set.back().opt_idx) //! istead of (opt != option_set.back())
             h_pos += lround(0.6 * ctrl->m_em_unit);

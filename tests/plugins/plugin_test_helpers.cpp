@@ -18,8 +18,13 @@
 #include <cstdlib>
 #include <limits>
 #include <stdexcept>
+#include <sstream>
 
 #include <boost/log/trivial.hpp>
+#include <boost/log/core.hpp>
+#include <boost/log/sinks/sync_frontend.hpp>
+#include <boost/log/sinks/text_ostream_backend.hpp>
+#include <boost/make_shared.hpp>
 
 #ifdef SLIC3R_TEST_PYTHON_PLUGINS
 #ifdef _WIN32
@@ -47,6 +52,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r/Plugins/GCode/FeatureGCode.hpp"
 #include "libslic3r/Plugins/GCode/CustomGCodePerPrintZ.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp"
@@ -129,6 +135,20 @@
 #include "plugins_cpp/Polyholes/Polyholes.hpp"
 
 namespace Slic3r::Test::Plugins {
+// Borrow immutable startup identity sets after shared initialization; later test registrations are excluded and startup/allocation failures propagate.
+const PluginTestStartupSets &plugin_test_startup_sets();
+// Complete shared startup and borrow its saved report for the lower or upper signed-32-bit priority error.
+// Reports outlive clearing application reports; plugin state is unchanged, and startup failures propagate.
+const PluginPackageLoadReport &python_priority_package_report(bool upper);
+// Complete shared startup and borrow immutable saved log text for obsolete Python attributes; startup/allocation failures propagate.
+const std::string &python_metadata_warnings();
+// Register/activate permanent providers once, finalize settings and FFF/SLA config caches, and copy startup identities before tests add registrations.
+// The manager owns wrappers borrowing static providers; call before Print or full_print_config().
+// Disable regional seam/storage probes and aligned, contiguous, cost and random seam placers; the failed selector probe is disabled during initialization,
+// its expected diagnostic is filtered, and the valid selector probe is disabled after finalization.
+// Missing expected plugins log and assert; registration, Python loading and allocation failures propagate.
+void ensure_plugin_test_runtime_initialized();
+
 int plugin_test_invalid_nature_result = OPTION_DEF_ERROR_INTERNAL;
 int plugin_test_high_invalid_nature_result = OPTION_DEF_ERROR_INTERNAL;
 int plugin_test_combined_nature_result = OPTION_DEF_ERROR_INTERNAL;
@@ -184,7 +204,10 @@ private:
         return no_dependencies;
     }
 
-    int32_t priority_impl() const noexcept override { return m_priority; }
+    // Return the common execution priority for test alternatives. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Return this provider's copied preference without effects or failures.
+    int32_t exclusive_group_priority_impl() const noexcept override { return m_priority; }
 
     // The host first queries the count with a null buffer, then supplies one slot. This callback
     // writes one borrowed key description without changing provider state or failing.
@@ -247,6 +270,8 @@ private:
 void register_config_introspection_fixture(orchestrator_handle *orchestrator);
 void register_config_option_or_fail(orchestrator_handle *orchestrator,
                                     const raw_config_option_def &definition);
+// Register choice-list examples before finalization applies stored patches and removes unavailable members.
+// The application copies strings without changing slicing data; rejected registrations or patches throw.
 void register_plugin_option_list_fixtures(orchestrator_handle *orchestrator);
 // Register the selector providers before the shared menu and GUI rules are built.
 void register_exclusive_pruning_test_plugins(orchestrator_handle *orchestrator);
@@ -259,6 +284,13 @@ bool g_empty_option_list_error_reported = false;
 
 bool g_python_plugins_loaded = false;
 Slic3r::PluginPackageLoadReport g_python_invalid_clear_package_report;
+Slic3r::PluginPackageLoadReport g_python_priority_low_report;
+Slic3r::PluginPackageLoadReport g_python_priority_high_report;
+std::string g_python_metadata_warnings;
+
+// Load the process-owned Python library and save startup diagnostics and application-log output before tests can clear reports.
+// Temporarily admit warnings and restore the log level on failure; missing runtime returns false, and missing reports throw.
+bool load_python_plugins_for_tests(orchestrator_handle *orchestrator);
 
 boost::filesystem::path current_executable_dir()
 {
@@ -336,12 +368,35 @@ bool load_python_plugins_for_tests(orchestrator_handle *orchestrator)
 #endif
 
     using RegisterPluginFn = void (*)(orchestrator_handle *);
-    reinterpret_cast<RegisterPluginFn>(proc)(orchestrator);
+    typedef boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend> LogSink;
+    const boost::shared_ptr<std::ostringstream> messages = boost::make_shared<std::ostringstream>();
+    const boost::shared_ptr<LogSink> sink = boost::make_shared<LogSink>();
+    sink->locked_backend()->add_stream(messages);
+    boost::log::core::get()->add_sink(sink);
+    const unsigned previous_logging_level = Slic3r::get_logging_level();
+    // The application defaults to errors only, which rejects warnings before any capture sink sees them.
+    Slic3r::set_logging_level(previous_logging_level < 2 ? 2 : previous_logging_level);
+    try { reinterpret_cast<RegisterPluginFn>(proc)(orchestrator); }
+    catch (...) {
+        Slic3r::set_logging_level(previous_logging_level);
+        boost::log::core::get()->remove_sink(sink);
+        throw;
+    }
+    Slic3r::set_logging_level(previous_logging_level);
+    sink->flush();
+    boost::log::core::get()->remove_sink(sink);
+    g_python_metadata_warnings = messages->str();
     const Slic3r::PluginPackageLoadReport *report = Slic3r::Orchestrator::instance().plugin_package_load_report(
         "python.test.clear.invalid_registration");
     if (report == nullptr)
         throw std::runtime_error("Invalid Python clear package was not discovered.");
     g_python_invalid_clear_package_report = *report;
+    report = Slic3r::Orchestrator::instance().plugin_package_load_report("python.test.priority.low");
+    if (report == nullptr) throw std::runtime_error("Low Python priority package was not discovered.");
+    g_python_priority_low_report = *report;
+    report = Slic3r::Orchestrator::instance().plugin_package_load_report("python.test.priority.high");
+    if (report == nullptr) throw std::runtime_error("High Python priority package was not discovered.");
+    g_python_priority_high_report = *report;
     return true;
 }
 
@@ -395,8 +450,6 @@ void register_exclusive_pruning_test_plugins(orchestrator_handle *orchestrator)
         throw std::runtime_error("Could not register the valid exclusive-selector test provider.");
 }
 
-// Register the fixtures used by the plugin-defined option list tests. They must
-// exist before the runtime applies deferred option definition patches.
 void register_plugin_option_list_fixtures(orchestrator_handle *orchestrator)
 {
     const auto register_enum = [orchestrator](const char *key,
@@ -446,6 +499,12 @@ void register_plugin_option_list_fixtures(orchestrator_handle *orchestrator)
 
     register_enum("test.infill.prune_list", prune_entries, 2, 1);
     register_enum("test.infill.empty_list", empty_entries, 1, 1);
+    static const key_value_string_pair_t nonselector_auto_entries[] = {
+        {"auto", "Not a provider"},
+        {k_exclusive_pruning_failed_plugin_id, "Failed provider"},
+        {k_exclusive_pruning_valid_plugin_id, "Valid provider"}
+    };
+    register_enum("test.selector.nonselector_auto", nonselector_auto_entries, 3, 1);
 
     // A contribution recorded before the target list exists must survive a
     // replication patch: replication is applied first, then contributions, so
@@ -674,23 +733,6 @@ void activate_plugin_or_fail(Slic3r::Orchestrator &orchestrator, const char *plu
 
 namespace Slic3r::Test::Plugins {
 
-// Initialize the shared runtime once and borrow its owned identity sets for the process lifetime.
-// Lookup changes no activation or configuration after initialization; startup/allocation failures propagate.
-const PluginTestStartupSets &plugin_test_startup_sets();
-
-// A function-local static caches successful initialization once per process; this no-argument
-// void function registers and activates providers in the process-wide Orchestrator.
-// The Orchestrator owns the registered Plugin objects, which borrow the provider instances; those
-// instances stay owned by function-local statics in plugin sources and test files. Option
-// definitions are finalized and FFF/SLA print-config caches are initialized. The regional seam and
-// storage test providers, plus the aligned, contiguous, cost, and random seam placers, are
-// deactivated. The failing exclusive-selector test provider is disabled during initialization, and
-// its one expected option diagnostic is filtered; the valid test provider is disabled after option
-// finalization. Call before Slic3r::Print or DynamicPrintConfig::full_print_config(). A missing
-// expected plugin is logged then asserted; a failed option or test-provider registration, or a
-// Python plugin load, can throw std::runtime_error.
-// Copy finalized startup provider/activation, selector and layout identities for order-independent read-only test enumeration.
-// The sets own their strings; initialization/allocation failures propagate and no individual test registration enters the sets.
 void ensure_plugin_test_runtime_initialized()
 {
     static bool initialized = []() {
@@ -701,6 +743,7 @@ void ensure_plugin_test_runtime_initialized()
         Orchestrator &orchestrator = Orchestrator::instance();
         orchestrator_handle *orchestrator_handle_value =
             reinterpret_cast<orchestrator_handle *>(&orchestrator);
+        Orchestrator::PluginRegistrationScope builtin_scope = orchestrator.plugin_registration_scope({}, false);
         register_config_introspection_fixture(orchestrator_handle_value);
         register_plugin_option_list_fixtures(orchestrator_handle_value);
         slic3r_api::StandardLayerHeightGeneratorPlugin::register_standard_layer_height_generator_plugin(
@@ -771,6 +814,7 @@ void ensure_plugin_test_runtime_initialized()
                 throw std::runtime_error("Cannot register the pattern probe test provider");
         }
         register_exclusive_pruning_test_plugins(orchestrator_handle_value);
+        register_external_selector_catalog_providers(orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateToolChangePlugin::register_create_tool_change_plugin(
             orchestrator_handle_value);
         slic3r_api::LayerExtrusionEdit::CreateTransitionScopePlugin::register_create_transition_scope_plugin(
@@ -1009,6 +1053,9 @@ void ensure_plugin_test_runtime_initialized()
         visibility->second.set_default_value(new ConfigOptionBool(false));
         orchestrator.finalize_plugin_option_defs();
         orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);
+        orchestrator.set_plugin_active("com.example.selector", false);
+        orchestrator.set_plugin_active("com.example.selector.foreign", false);
+        orchestrator.set_plugin_active("com.example.selector.missing", false);
         {
             // Capture the empty plugin-id list diagnostic without hiding it
             // from tests that assert plugin messages later.
@@ -1084,6 +1131,18 @@ bool plugin_test_empty_option_list_error_reported()
 }
 
 #ifdef SLIC3R_TEST_PYTHON_PLUGINS
+const PluginPackageLoadReport &python_priority_package_report(bool upper)
+{
+    ensure_plugin_test_runtime_initialized();
+    return upper ? g_python_priority_high_report : g_python_priority_low_report;
+}
+
+const std::string &python_metadata_warnings()
+{
+    ensure_plugin_test_runtime_initialized();
+    return g_python_metadata_warnings;
+}
+
 const PluginPackageLoadReport &python_invalid_clear_package_report()
 {
     ensure_plugin_test_runtime_initialized();

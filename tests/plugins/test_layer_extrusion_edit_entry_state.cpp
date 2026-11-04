@@ -111,8 +111,6 @@ private:
         return "Checks layer entry-state publication barriers.";
     }
     const char *exclusive_group_impl() const noexcept override { return ""; }
-    const char *exclusive_group_label_impl() const noexcept override { return ""; }
-    const char *exclusive_group_tooltip_impl() const noexcept override { return ""; }
     slicing_step_t step_impl() const noexcept override { return STEP_LAYER_EXTRUSION_EDIT; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return -60; }

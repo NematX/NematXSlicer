@@ -23,7 +23,40 @@
 #include "libslic3r/Api/plugin/cpp/ParallelFor.hpp"
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 
+/* This plugin grows extra overhang perimeters and registers their selection setting.
+   A perimeter is an extrusion following a part boundary. An overhang extends
+   beyond the layer below; an anchor is extra extrusion connected to supported
+   material. This implementation grows waves of anchors into unsupported areas.
+
+   The host is the slicer application. register_plugin() registers the
+   ExtraPerimeterOverhangWave instance and describes its selector, the setting
+   choosing between wave construction and the alternative shrink-based algorithm.
+   These alternatives form an exclusive group: only the selected member performs
+   this feature. Execution ordering is separate from preference among alternatives.
+
+   The application calls inilialize_impl() to install settings-window layout, then
+   setup_run_impl() to estimate work and run_impl() to modify perimeter results.
+   Run data is supplied in plugin_run_context, a borrowed description of one
+   call. Layers are processed in parallel, using lower-layer support to grow
+   and clip the extra paths.
+
+   Main calls:
+     register_plugin
+       register_extra_perimeter_overhang_wave_plugin
+         register_exclusive_group
+     inilialize_impl
+       orchestrator_add_ui_fragment
+     setup_run_impl
+       progress().add_max
+     run_impl
+       parallel_for_storage_with_progress
+         process_layer */
+
 namespace slic3r_api { namespace Perimeter { namespace ExtraPerimeterOverhangWavePlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_extra_perimeter_overhang_wave_plugin(orchestrator_handle *orch);
+
 
 namespace {
 
@@ -1034,16 +1067,6 @@ const char *ExtraPerimeterOverhangWave::exclusive_group_impl() const noexcept
     return k_extra_overhang_perimeters_group;
 }
 
-const char *ExtraPerimeterOverhangWave::exclusive_group_label_impl() const noexcept
-{
-    return "Extra overhang perimeter strategy";
-}
-
-const char *ExtraPerimeterOverhangWave::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Choose the algorithm used to add extra perimeter anchors under overhangs.";
-}
-
 slicing_step_t ExtraPerimeterOverhangWave::step_impl() const noexcept
 {
     return STEP_POST_PERIMETER;
@@ -1056,7 +1079,7 @@ const char *const *ExtraPerimeterOverhangWave::dependencies_impl() const noexcep
 
 int32_t ExtraPerimeterOverhangWave::priority_impl() const noexcept
 {
-    return -19;
+    return -20;
 }
 
 int32_t ExtraPerimeterOverhangWave::used_config_keys(raw_used_config_key *keys) const noexcept
@@ -1129,6 +1152,13 @@ void ExtraPerimeterOverhangWave::run_impl(const plugin_run_context *run_ctx) con
 void register_extra_perimeter_overhang_wave_plugin(orchestrator_handle *orch)
 {
     orchestrator_register_plugin(orch, ExtraPerimeterOverhangWave::instance(orch).c_instance());
+    const plugin_instance member = ExtraPerimeterOverhangWave::instance(orch).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.category = RAW_OPTION_CATEGORY_PERIMETER;
+    definition.label = "Extra overhang perimeter strategy";
+    definition.tooltip = "Choose the algorithm used to add extra perimeter anchors under overhangs.";
+    ExtraPerimeterOverhangWave::instance(orch).register_exclusive_group(STEP_POST_PERIMETER, definition);
 }
 
 }}} // namespace slic3r_api::Perimeter::ExtraPerimeterOverhangWavePlugin

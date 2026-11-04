@@ -64,6 +64,7 @@ struct RecordingPluginState
     bool created_empty_gap_fill_root = false;
     bool changed_fill_areas = false;
     bool rejected_perimeter_bucket = false;
+    int32_t group_priority = 100;
 };
 
 RecordingPluginState g_pre_first  = {"test.pre_perimeter.first", STEP_PRE_PERIMETER, -10};
@@ -80,7 +81,7 @@ RecordingPluginState g_pre_group_first = {
 RecordingPluginState g_pre_group_second = {
     "test.pre_perimeter.group.second",
     STEP_PRE_PERIMETER,
-    5,
+    -5,
     "test.pre_perimeter.exclusive_group",
     "Second label should not win",
     "Second tooltip should not win."
@@ -93,7 +94,7 @@ RecordingPluginState g_pre_legacy_base = {
 RecordingPluginState g_pre_legacy_alternative = {
     "test.pre_perimeter.legacy_alternative",
     STEP_PRE_PERIMETER,
-    3,
+    -3,
     "test.pre_perimeter.legacy_base",
     "Legacy replacement group",
     "Choose between a legacy plugin and one of its alternatives."
@@ -124,6 +125,15 @@ RecordingPluginState *const g_recording_plugins[] = {
     &g_post_infill_inactive,
     &g_post_infill_mutator
 };
+// Register permanent borrowed test objects and copy their group descriptions into the application without changing print data.
+// Rejected registrations fail assertions or throw; descriptions become application-owned.
+void register_recording_plugins();
+// Borrow the complete function table, including the test object's preference function; no state changes or failures occur.
+const plugin_vtable *recording_vtable();
+// Ignore borrowed initialization arguments and return success without state changes or failure.
+int32_t recording_initialize(void *, storage_handle *);
+// Return one test state's copied group preference without changing state or transferring ownership; the call cannot fail.
+int32_t recording_group_priority(void *plugin_ctx);
 
 const_strings_t recording_get_dependencies(void *)
 {
@@ -151,16 +161,6 @@ const char *recording_get_exclusive_group(void *plugin_ctx)
     return static_cast<RecordingPluginState *>(plugin_ctx)->exclusive_group;
 }
 
-const char *recording_get_exclusive_group_label(void *plugin_ctx)
-{
-    return static_cast<RecordingPluginState *>(plugin_ctx)->exclusive_group_label;
-}
-
-const char *recording_get_exclusive_group_tooltip(void *plugin_ctx)
-{
-    return static_cast<RecordingPluginState *>(plugin_ctx)->exclusive_group_tooltip;
-}
-
 slicing_step_t recording_get_step(void *plugin_ctx)
 {
     return static_cast<RecordingPluginState *>(plugin_ctx)->step;
@@ -181,7 +181,7 @@ int32_t recording_defined_config_keys(void *, const char **)
     return 0;
 }
 
-void recording_initialize(void *, storage_handle *) {}
+int32_t recording_initialize(void *, storage_handle *) { return PLUGIN_ERROR_OK; }
 
 void fill_payload_event(const plugin_run_context *run_ctx, RecordedEvent &event)
 {
@@ -359,15 +359,19 @@ void recording_run(void *plugin_ctx, const plugin_run_context *run_ctx)
         mutate_post_infill_outputs(state, run_ctx);
 }
 
+int32_t recording_group_priority(void *plugin_ctx)
+{
+    return static_cast<RecordingPluginState *>(plugin_ctx)->group_priority;
+}
+
 const plugin_vtable *recording_vtable()
 {
     static const plugin_vtable vt = {
+        sizeof(plugin_vtable),
         &recording_get_id,
         &recording_get_name,
         &recording_get_description,
         &recording_get_exclusive_group,
-        &recording_get_exclusive_group_label,
-        &recording_get_exclusive_group_tooltip,
         &recording_get_step,
         &recording_get_dependencies,
         &recording_get_priority,
@@ -376,7 +380,9 @@ const plugin_vtable *recording_vtable()
         &recording_initialize,
         &recording_setup,
         &recording_setup_run,
-        &recording_run
+        &recording_run,
+        nullptr,
+        &recording_group_priority
     };
     return &vt;
 }
@@ -384,6 +390,11 @@ const plugin_vtable *recording_vtable()
 void register_recording_plugins()
 {
     Orchestrator &orchestrator = Orchestrator::instance();
+    Orchestrator::PluginRegistrationScope scope = orchestrator.plugin_registration_scope({}, false);
+    g_pre_group_first.group_priority = 0;
+    g_pre_group_second.group_priority = 10;
+    g_pre_legacy_base.group_priority = 0;
+    g_pre_legacy_alternative.group_priority = 10;
     for (RecordingPluginState *state : g_recording_plugins) {
         if (orchestrator.get_plugin(state->id) != nullptr)
             continue;
@@ -392,6 +403,16 @@ void register_recording_plugins()
         instance.ctx = state;
         instance.vt = recording_vtable();
         REQUIRE(orchestrator.register_plugin(instance));
+        if (state->exclusive_group_label[0] != '\0' || state->exclusive_group_tooltip[0] != '\0') {
+            raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+            definition.declaring_plugin_id = state->id;
+            definition.exclusive_group = state->exclusive_group;
+            definition.label = state->exclusive_group_label;
+            definition.tooltip = state->exclusive_group_tooltip;
+            definition.category = RAW_OPTION_CATEGORY_PERIMETER;
+            REQUIRE(orchestrator_register_exclusive_group(reinterpret_cast<orchestrator_handle *>(&orchestrator),
+                                                         state->step, &definition) == 1);
+        }
     }
 }
 
@@ -853,9 +874,8 @@ TEST_CASE("Explicit exclusive groups select one object-step plugin", "[plugins][
         g_pre_group_second.id
     });
 
-    // The two grouped plugins are alternatives. The group text used by the GUI
-    // selector comes from the first active plugin in execution order, while the
-    // additive pre-perimeter plugin stays outside the selector.
+    // Rebuilding descriptions must retain the enabled describing member with the smallest preference number.
+    Orchestrator::instance().elect_exclusive_group_definition(STEP_PRE_PERIMETER, g_pre_group_first.exclusive_group);
     const std::vector<Steps::StepExclusivePluginGroup> groups =
         Steps::active_exclusive_plugin_groups(Orchestrator::instance());
     const Steps::StepExclusivePluginGroup *group =
@@ -902,6 +922,7 @@ TEST_CASE("A plugin without explicit group can receive an alternative", "[plugin
         g_pre_legacy_alternative.id
     });
 
+    orchestrator.elect_exclusive_group_definition(STEP_PRE_PERIMETER, g_pre_legacy_base.id);
     const std::vector<Steps::StepExclusivePluginGroup> groups =
         Steps::active_exclusive_plugin_groups(orchestrator);
     const Steps::StepExclusivePluginGroup *group =

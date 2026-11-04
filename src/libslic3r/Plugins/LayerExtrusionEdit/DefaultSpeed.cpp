@@ -47,6 +47,10 @@ and hoist acceleration without depending on this strategy.
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultSpeedPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_speed_plugin(orchestrator_handle *orch);
+
 namespace {
 
 using namespace ProcessParameterHelpers;
@@ -780,8 +784,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -1422,16 +1424,6 @@ const char *DefaultSpeed::exclusive_group_impl() const noexcept
     return "layer_extrusion_edit.speed";
 }
 
-const char *DefaultSpeed::exclusive_group_label_impl() const noexcept
-{
-    return "Extrusion speed";
-}
-
-const char *DefaultSpeed::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how ordered layer extrusions receive their process speed.";
-}
-
 slicing_step_t DefaultSpeed::step_impl() const noexcept
 {
     return STEP_LAYER_EXTRUSION_EDIT;
@@ -1540,6 +1532,12 @@ void DefaultSpeed::run_impl(const plugin_run_context *run_ctx) const
 void register_default_speed_plugin(orchestrator_handle *orch)
 {
     orchestrator_register_plugin(orch, DefaultSpeed::instance(orch).c_instance());
+    const plugin_instance member = DefaultSpeed::instance(orch).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Extrusion speed";
+    definition.tooltip = "Selects how ordered layer extrusions receive their process speed.";
+    DefaultSpeed::instance(orch).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::DefaultSpeedPlugin

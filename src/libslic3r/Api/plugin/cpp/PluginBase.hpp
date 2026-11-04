@@ -11,42 +11,40 @@
 #include <cstdint>
 #include <cstdio>
 #include <exception>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin.h"
+#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 
 /*
-PluginBase.hpp
-==============
+PluginBase and PluginProgress: writing a C++ plugin through the C interface
+=======================================================================
 
-This file is the small C++ SDK layer used to write plugins without manually
-building a C ABI vtable.
+The host is the slicer application. A plugin is an object that performs work at
+a processing stage, called a step. PluginBase adapts a derived C++ class to the
+C ABI, the binary calling interface used by the host. It builds the function
+table and contains exceptions at its callbacks, so a plugin need not write that
+table or the C-to-C++ wrappers itself.
 
-It contains two main helpers:
+PluginProgress is the thread-safe work counter owned by PluginBase. A plugin
+estimates its work during preparation, then reports completed units during
+execution. The host displays the progress it receives; it does not infer how
+much work a plugin will perform.
 
-- PluginBase:
-  Derive your C++ plugin class from PluginBase, implement the *_impl() virtual
-  methods, then register `YourPlugin::instance().c_instance()` with the
-  orchestrator. PluginBase converts your C++ class into the C ABI expected by
-  the host and catches C++ exceptions before they cross the ABI boundary.
+A minimal plugin that counts one work unit per call can be written as follows:
 
-- PluginProgress:
-  A thread-safe progress counter owned by PluginBase. Use it when one plugin is
-  executed multiple times in parallel, usually once per print object. The host
-  only displays the progress value it receives; this helper lets the plugin
-  estimate its own total work during setup_run_impl() and report progress from
-  run_impl().
-
-Typical plugin structure:
-
-    class MyPlugin : public slic3r_api::PluginBase
+    class MyPlugin final : public slic3r_api::PluginBase
     {
+    public:
+        explicit MyPlugin(orchestrator_handle *host) : PluginBase(host) {}
+
     private:
         const char *id_impl() const noexcept override { return "my_plugin"; }
         slicing_step_t step_impl() const noexcept override { return STEP_POST_SLICING; }
-        const char *const *dependencies_impl() const noexcept override { return k_deps; }
+        const char *const *dependencies_impl() const noexcept override { return nullptr; }
         int32_t priority_impl() const noexcept override { return 0; }
 
         const char *progress_message_format_impl() const noexcept override
@@ -54,61 +52,70 @@ Typical plugin structure:
             return "My plugin: %u / %u";
         }
 
-        void setup_run_impl(const plugin_run_context *ctx) const override
+        void setup_run_impl(const plugin_run_context *) const override
         {
-            // Called once per future run, before any run_impl() starts.
-            // Add the amount of work this run will do.
-            progress().add_max(max_count_for_this_context);
+            progress().add_max(1);
         }
 
-        void run_impl(const plugin_run_context *ctx) const override
+        void run_impl(const plugin_run_context *context) const override
         {
-            for (...) {
-                slic3r_api::throw_if_cancelled(ctx);
-                // do one unit of work
-                progress().increment();
-            }
+            slic3r_api::throw_if_cancelled(context);
+            // Perform the work for this call before counting it as complete.
+            progress().increment();
         }
     };
 
-Execution order guaranteed by the host for a given step/plugin pair:
+Register a long-lived instance with the same host passed to its constructor:
 
-    setup_impl(run_count)        // once, resets PluginProgress
-    setup_run_impl(ctx) x N      // may be parallel, but all finish before run
-    run_impl(ctx) x N            // may be parallel
+    static MyPlugin plugin(host);
+    orchestrator_register_plugin(host, plugin.c_instance());
 
-Only run_impl() should modify the slicer data tree. setup_run_impl() is meant
-for preparation and work estimation.
+The returned plugin_instance contains a borrowed pointer to the C++ object and
+a function table with its size in bytes. Registration does not transfer ownership
+of the object or its code: both must outlive every host callback. The context of
+an individual callback, plugin_run_context, is borrowed only for that call and
+must not be saved for a later run.
 
-Plugin lifetime and callback context:
+Some plugins are alternatives for one job, an exclusive group. Its selector is
+the setting that chooses a member. After registering the plugin, initialize a
+raw_exclusive_group_def with raw_exclusive_group_def_init(), fill its description,
+then call register_exclusive_group(step, definition). The helper supplies this
+plugin's id and throws if the host rejects the description. Execution priority
+controls call order within a step; exclusive_group_priority_impl() separately
+ranks alternatives for the default choice.
 
-    construct the derived plugin with its orchestrator
+The host guarantees this order for one step/plugin pair:
+
+    construct the plugin with its host
         |
-    create c_instance() and register it with the orchestrator
+    c_instance() -> orchestrator_register_plugin()
         |
-    initialize_bridge() once at plugin startup
+    initialize_bridge() -> initialize_safe() -> inilialize_impl()
+        |   [the interface spelling is inilialize_impl]
         |
-    setup_bridge(run_count)
-        |-- reset PluginProgress
-        `-- call setup_impl()
+    setup_bridge() -> setup_safe()
+        |-- reset progress
+        `-- setup_impl(context, run_count) once
         |
-    setup_run_bridge(ctx) once for each future run context
-        `-- call setup_run_impl(ctx), possibly in parallel
+    setup_run_bridge() -> setup_run_safe() -> setup_run_impl(context) for each call
+        |   [these preparations may run in parallel; all finish before execution]
         |
-    run_bridge(ctx) once for each run context
-        `-- call run_impl(ctx), possibly in parallel
+    run_bridge() -> run_safe() -> run_impl(context) for each call
+            [these executions may also run in parallel]
 
-The C ABI instance returned by c_instance() is a non-owning pointer to the C++
-plugin object. The derived object must therefore outlive registration and every
-callback made by the host. `plugin_run_context` is also borrowed: use it only
-inside the current setup or run callback and do not store it for another run.
+setup_run_impl() prepares work and estimates its size. Only run_impl() should
+change the slicer data tree, within the capabilities of its step payload. Keep
+shared plugin state protected or atomic when calls run concurrently. Each
+preparation can add its expected units with progress().add_max(); execution uses
+increment() or increment_by(). progress_message_format_impl() supplies the
+displayed format, and setup_safe() resets the counters before setup_impl().
 
-The safe bridge methods prevent C++ exceptions from crossing the ABI. A
-`PluginCancelled` exception means cooperative cancellation and is absorbed
-without an error message. A standard or unknown exception is reported through
-the current context as a plugin error. The progress helper is reset before
-`setup_impl()` and may then be updated by parallel setup/run calls through its
-thread-safe counters.
+Initialization returns PLUGIN_ERROR_OK on success or a message id obtained from
+orchestrator_set_error_message() on failure; it does not let exceptions cross C.
+The setup and run wrappers treat PluginCancelled as cooperative cancellation and
+add no error message. Standard and unknown exceptions instead become plugin
+errors through the current callback context. The host observes the stop/error
+state after the callback returns.
 */
 
 namespace slic3r_api {
@@ -382,6 +389,17 @@ class PluginBase
 public:
     virtual ~PluginBase() = default;
 
+    // Start definition with raw_exclusive_group_def_init(); this member supplies its own id. Return true when added or false when already present.
+    // Throw std::invalid_argument when the application rejects the description with a negative C result.
+    bool register_exclusive_group(slicing_step_t step, raw_exclusive_group_def definition) const
+    {
+        definition.declaring_plugin_id = id_impl();
+        const int32_t result = orchestrator_register_exclusive_group(m_orchestrator, step, &definition);
+        if (result < 0)
+            throw std::invalid_argument("Cannot register exclusive group definition");
+        return result == 1;
+    }
+
     // Return the C ABI instance registered with orchestrator_register_plugin().
     // Built-in plugins usually expose this through a register_*_plugin()
     // function; external plugin DLLs usually call it from register_plugin().
@@ -426,12 +444,6 @@ protected:
     // target the old plugin without modifying the old implementation.
     virtual const char *exclusive_group_impl() const noexcept { return id_impl(); }
 
-    // Optional user-facing text for the selector created for an exclusive
-    // group. The first active plugin in the group that returns non-empty text
-    // provides the label/tooltip for the whole group.
-    virtual const char *exclusive_group_label_impl() const noexcept { return ""; }
-    virtual const char *exclusive_group_tooltip_impl() const noexcept { return ""; }
-
     // Pipeline step where the plugin runs, for example STEP_POST_SLICING.
     virtual slicing_step_t step_impl() const noexcept = 0;
 
@@ -441,6 +453,8 @@ protected:
 
     // Lower priority runs first inside a step.
     virtual int32_t priority_impl() const noexcept = 0;
+    // Return this member's preference rank among alternatives.
+    virtual int32_t exclusive_group_priority_impl() const noexcept { return 100; }
 
     // Configuration options read or defined by this plugin. The default is
     // empty; every key returned by defined_config_keys() must also be present.
@@ -502,12 +516,15 @@ private:
     // The *_safe() wrappers are the C++/C ABI safety belt: exceptions are
     // converted to plugin errors instead of crossing function pointers.
 
-    void initialize_safe(storage_handle *storage) const noexcept {
+    // Initialize with application-owned storage and return success or a stored error id. Exceptions cannot cross C.
+    int32_t initialize_safe(storage_handle *storage) const noexcept {
         try {
             inilialize_impl(storage);
+            return PLUGIN_ERROR_OK;
+        } catch (const std::exception &error) {
+            return orchestrator_set_error_message(m_orchestrator, error.what());
         } catch (...) {
-            assert(false);
-            return;
+            return orchestrator_set_error_message(m_orchestrator, "Unknown C++ exception in plugin initialization");
         }
     }
 
@@ -598,16 +615,6 @@ private:
         return static_cast<PluginBase *>(plugin_ctx)->exclusive_group_impl();
     }
 
-    static const char *get_exclusive_group_label_bridge(void *plugin_ctx)
-    {
-        return static_cast<PluginBase *>(plugin_ctx)->exclusive_group_label_impl();
-    }
-
-    static const char *get_exclusive_group_tooltip_bridge(void *plugin_ctx)
-    {
-        return static_cast<PluginBase *>(plugin_ctx)->exclusive_group_tooltip_impl();
-    }
-
     static slicing_step_t get_step_bridge(void *plugin_ctx)
     {
         return static_cast<PluginBase *>(plugin_ctx)->step_impl();
@@ -641,9 +648,10 @@ private:
         return static_cast<PluginBase *>(plugin_ctx)->defined_config_keys(keys);
     }
 
-    static void initialize_bridge(void *plugin_ctx, storage_handle *storage)
+    // Borrow the plugin and storage to initialize it, returning a diagnostic id without allowing exceptions through C.
+    static int32_t initialize_bridge(void *plugin_ctx, storage_handle *storage)
     {
-        static_cast<PluginBase *>(plugin_ctx)->initialize_safe(storage);
+        return static_cast<PluginBase *>(plugin_ctx)->initialize_safe(storage);
     }
 
     static void setup_bridge(void *plugin_ctx, const plugin_run_context *run_ctx, uint32_t run_count)
@@ -668,15 +676,21 @@ private:
         return static_cast<PluginBase *>(plugin_ctx)->clear_safe(print, storage);
     }
 
+    // Read the borrowed plugin's preference rank without changing its state.
+    static int32_t get_exclusive_group_priority_bridge(void *plugin_ctx)
+    {
+        return static_cast<PluginBase *>(plugin_ctx)->exclusive_group_priority_impl();
+    }
+
+    // Borrow the complete function table, including cleanup and alternative-preference functions.
     static const plugin_vtable &vtable()
     {
         static const plugin_vtable vt = {
+            sizeof(plugin_vtable),
             &PluginBase::get_id_bridge,
             &PluginBase::get_name_bridge,
             &PluginBase::get_description_bridge,
             &PluginBase::get_exclusive_group_bridge,
-            &PluginBase::get_exclusive_group_label_bridge,
-            &PluginBase::get_exclusive_group_tooltip_bridge,
             &PluginBase::get_step_bridge,
             &PluginBase::get_dependencies_bridge,
             &PluginBase::get_priority_bridge,
@@ -686,7 +700,8 @@ private:
             &PluginBase::setup_bridge,
             &PluginBase::setup_run_bridge,
             &PluginBase::run_bridge,
-            &PluginBase::clear_bridge
+            &PluginBase::clear_bridge,
+            &PluginBase::get_exclusive_group_priority_bridge
         };
         return vt;
     }

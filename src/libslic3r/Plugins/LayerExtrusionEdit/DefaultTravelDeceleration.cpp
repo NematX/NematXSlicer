@@ -46,6 +46,10 @@ Real-object output must retain its source regions.
 #include "libslic3r/Api/plugin/cpp/RegionSettingsViews.hpp"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace DefaultTravelDecelerationPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_travel_deceleration_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 using namespace ProcessParameterHelpers;
@@ -266,8 +270,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -787,16 +789,6 @@ const char *DefaultTravelDeceleration::exclusive_group_impl() const noexcept
     return "layer_extrusion_edit.travel_deceleration";
 }
 
-const char *DefaultTravelDeceleration::exclusive_group_label_impl() const noexcept
-{
-    return "Travel deceleration";
-}
-
-const char *DefaultTravelDeceleration::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how travel movements approach the speed of their following extrusion.";
-}
-
 slicing_step_t DefaultTravelDeceleration::step_impl() const noexcept
 {
     return STEP_LAYER_EXTRUSION_EDIT;
@@ -892,6 +884,12 @@ void register_default_travel_deceleration_plugin(orchestrator_handle *orchestrat
 {
     orchestrator_register_plugin(
         orchestrator, DefaultTravelDeceleration::instance(orchestrator).c_instance());
+    const plugin_instance member = DefaultTravelDeceleration::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Travel deceleration";
+    definition.tooltip = "Selects how travel movements approach the speed of their following extrusion.";
+    DefaultTravelDeceleration::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::DefaultTravelDecelerationPlugin

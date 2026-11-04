@@ -59,6 +59,10 @@ producing final machine G-code.
 */
 
 namespace slic3r_api { namespace SkirtBrim { namespace DefaultBrimSkirtTrimPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_brim_skirt_trim_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 const char *const k_no_dependencies[] = { nullptr };
@@ -338,11 +342,6 @@ private:
         return "Post-processes brim after the final skirt geometry is known.";
     }
     const char *exclusive_group_impl() const noexcept override { return k_group_id; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Brim/skirt trim"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects the plugin that resolves interactions between generated brim and skirt geometry.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_SKIRT_BRIM; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 200; }
@@ -404,6 +403,12 @@ private:
 void register_default_brim_skirt_trim_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(orchestrator, DefaultBrimSkirtTrim::instance(orchestrator).c_instance());
+    const plugin_instance member = DefaultBrimSkirtTrim::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Brim/skirt trim";
+    definition.tooltip = "Selects the plugin that resolves interactions between generated brim and skirt geometry.";
+    DefaultBrimSkirtTrim::instance(orchestrator).register_exclusive_group(STEP_SKIRT_BRIM, definition);
 }
 
 }}} // namespace slic3r_api::SkirtBrim::DefaultBrimSkirtTrimPlugin

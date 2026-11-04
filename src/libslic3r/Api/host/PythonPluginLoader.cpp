@@ -3,13 +3,40 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-// PythonPluginLoader is the native bridge between Python plugin objects and
-// the public C plugin ABI. It loads scripts bundled with the bridge and scans
-// sibling installed packages that contain description.ini, version.ini and a
-// Python entry point but no native plugin library. External scripts are loaded
-// by absolute path under unique module names, then registered with their own
-// package root so relative resources and diagnostics belong to the package
-// which supplied them.
+/* This library loads Python plugins and exposes their objects to the slicer.
+   The host is the slicer application. This native library lets it call Python
+   objects as plugins through a C ABI, the binary calling interface shared with C.
+
+   The exported register_plugin() calls load_python_plugins(). It loads bundled
+   scripts and scans neighboring installed package directories for description.ini,
+   a compatible version.ini and a Python entry file, without a native plugin library.
+   PythonPackageLoadScope identifies the package directory while
+   load_python_plugin_from_path() loads its script under a unique module name.
+
+   A script's register_plugin(api) returns Python objects. register_python_plugin_object()
+   creates a PythonPlugin adapter holding its Python reference and C-callable
+   functions. s_python_plugins owns it before registration can expose its address,
+   including failure paths. Null or None entries in a returned sequence are skipped.
+   Activation later decides whether a registered object runs.
+
+   An exclusive group is a set of alternatives for one slicing stage. The adapter
+   registers explicit selector descriptions, settings choosing those alternatives,
+   through register_python_group_definitions() after introducing each object.
+   initialize_bridge() and execution functions acquire Python's interpreter lock.
+   Initialization and cleanup return stored diagnostic ids on failure.
+   send_python_log() uses orchestrator_send_log() after resolving application
+   functions. The function comments describe errors during loading and execution.
+
+   Call graph:
+     register_plugin
+       load_python_plugins
+         load_python_plugin_from_path
+           call_python_register
+             register_python_plugin_result
+               register_python_plugin_object
+                 register_python_group_definitions
+     initialize_bridge
+       call_python_void */
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -39,6 +66,8 @@
 #endif
 
 #include <cstdint>
+#include <cstdio>
+#include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <memory>
@@ -48,16 +77,20 @@
 #include <vector>
 
 #include <boost/filesystem.hpp>
-#include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
 
+#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin.h"
+#include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Plugins/PluginApiCompatibility.hpp"
 
 namespace {
 
 using OrchestratorRegisterPluginFn = void (*)(orchestrator_handle *, plugin_instance);
 using OrchestratorRegisterPluginFromPackageFn = void (*)(orchestrator_handle *, plugin_instance, const char *);
+using OrchestratorIsPluginRegisteredFn = int32_t (*)(orchestrator_handle *, const char *);
+using OrchestratorSendLogFn = void (*)(orchestrator_handle *, raw_plugin_log_level, const char *);
+using OrchestratorRegisterExclusiveGroupFn = int32_t (*)(orchestrator_handle *, slicing_step_t, const raw_exclusive_group_def *);
 using OrchestratorBeginPackageLoadFn = void (*)(orchestrator_handle *, const char *);
 using OrchestratorReportPackageErrorFn = void (*)(orchestrator_handle *, const char *,
                                                   raw_plugin_package_load_error_code, const char *);
@@ -69,6 +102,10 @@ struct OrchestratorFunctions
 {
     OrchestratorRegisterPluginFn register_plugin = nullptr;
     OrchestratorRegisterPluginFromPackageFn register_package_plugin = nullptr;
+    OrchestratorIsPluginRegisteredFn is_plugin_registered = nullptr;
+    OrchestratorSendLogFn send_log = nullptr;
+    // Python's group-description method calls this same application function.
+    OrchestratorRegisterExclusiveGroupFn register_exclusive_group = nullptr;
     OrchestratorBeginPackageLoadFn begin_package_load = nullptr;
     OrchestratorReportPackageErrorFn report_package_error = nullptr;
     OrchestratorFinishPackageLoadFn finish_package_load = nullptr;
@@ -76,11 +113,84 @@ struct OrchestratorFunctions
     OrchestratorSetErrorMessageFn set_error_message = nullptr;
 };
 
+OrchestratorSendLogFn s_send_log = nullptr;
+orchestrator_handle *s_log_orchestrator = nullptr;
+
+// Load bundled and compatible installed Python packages through borrowed application functions, keeping registered adapters alive.
+// Missing loader location logs and returns; runtime/API failures throw, while package failures become diagnostics.
+void load_python_plugins(orchestrator_handle *orchestrator);
+// Find application functions from the borrowed library path and keep loaded libraries alive; missing functions log and return false.
+// Slicing data is unchanged, and allocations may throw.
+bool resolve_registration_functions(const boost::filesystem::path &host_library_path, OrchestratorFunctions &functions);
+// Import a bundled module by its filename stem and register its returned objects; import failures become package diagnostics.
+// Inputs stay borrowed, and the temporary module reference is released after registration.
+void load_python_plugin(const boost::filesystem::path &plugin_path, PyObject *api,
+    const OrchestratorFunctions &functions, orchestrator_handle *orchestrator, const boost::filesystem::path &package_root);
+// Load an external package by absolute path under a unique module name so packages sharing plugin.py do not reuse cached modules.
+void load_python_plugin_from_path(const boost::filesystem::path &plugin_path, PyObject *api,
+    const OrchestratorFunctions &functions, orchestrator_handle *orchestrator, const boost::filesystem::path &package_root);
+// Append the borrowed path to Python's search list while holding its interpreter lock; log full errors without retaining caller data.
+void append_python_path(const boost::filesystem::path &path);
+// Call an optional Python method; missing attributes succeed, and invalid or failing methods return false.
+// Copy exception text to the optional borrowed failure output instead of logging it; release temporary references without taking ownership.
+bool call_python_void(PyObject *object, const char *method_name, PyObject *args, const std::string &plugin_id,
+    const char *fallback_method_name = nullptr, std::string *failure = nullptr);
+
+// Send borrowed UTF-8 text to application logging when available, otherwise stderr; message storage is not retained.
+// Package state is unchanged, and the C logging function contains logging failures.
+void send_python_log(raw_plugin_log_level severity, const std::string &message);
+
+void send_python_log(raw_plugin_log_level severity, const std::string &message)
+{
+    if (s_send_log != nullptr) s_send_log(s_log_orchestrator, severity, message.c_str());
+    else std::fprintf(stderr, "Python loader: %s\n", message.c_str());
+}
+
+class PythonPackageLoadScope
+{
+public:
+    // Own the package path and open its loading record through borrowed application functions.
+    PythonPackageLoadScope(const OrchestratorFunctions &functions, orchestrator_handle *host, std::string root)
+        : m_functions(functions), m_host(host), m_root(std::move(root))
+    {
+        m_functions.begin_package_load(m_host, m_root.c_str());
+    }
+    // Finish the package's loading record before releasing the path. The borrowed application functions must remain alive.
+    ~PythonPackageLoadScope()
+    {
+        m_functions.finish_package_load(m_host, m_root.c_str());
+    }
+    PythonPackageLoadScope(const PythonPackageLoadScope &) = delete;
+    PythonPackageLoadScope &operator=(const PythonPackageLoadScope &) = delete;
+private:
+    const OrchestratorFunctions &m_functions;
+    orchestrator_handle *m_host;
+    std::string m_root;
+};
+// Call a borrowed module's register_plugin(api) and register returned objects; missing, invalid or failed entry functions become diagnostics.
+// Inputs stay borrowed, and temporary Python references are released on the handled paths.
+void call_python_register(PyObject *module, PyObject *api, const OrchestratorFunctions &functions,
+    orchestrator_handle *orchestrator, const boost::filesystem::path &plugin_path, const boost::filesystem::path &package_root);
+// Register returned objects and group descriptions through the borrowed API and package directory; the loader keeps adapters alive.
+// Temporary sequence references are released on failure; errors reach package diagnostics without changing slicing data.
+void register_python_plugin_result(PyObject *result, const OrchestratorFunctions &functions,
+    orchestrator_handle *orchestrator, const boost::filesystem::path &package_root, PyObject *api);
+// Own an adapter for the borrowed Python object before registration exposes it, then publish its group descriptions.
+// Adapters survive failed attempts until shutdown; slicing data is unchanged, and registration errors propagate.
+void register_python_plugin_object(PyObject *plugin_object, const OrchestratorFunctions &functions,
+    orchestrator_handle *orchestrator, const boost::filesystem::path &package_root, PyObject *api);
+
 std::vector<std::unique_ptr<class PythonPlugin>> s_python_plugins;
 
 // Consume the active Python exception and format its complete traceback. The
 // returned string is safe to retain after the GIL is released.
 std::string take_python_error();
+// Read a signed 32-bit group priority, using 100 when absent; invalid values throw an error naming the plugin.
+// The caller retains the object and holds Python's interpreter lock; temporary references are released.
+int32_t group_priority_attribute(PyObject *object, const std::string &plugin_id);
+// Publish description dictionaries through the Python API's generated C structure after registering their object, with the interpreter lock held.
+// Inputs remain caller-owned; temporary references are released, and Python failures become C++ errors.
+void register_python_group_definitions(PyObject *api, PyObject *plugin, const char *id, slicing_step_t step);
 
 // Register one failure message through the host hook and return its id,
 // or PLUGIN_ERROR_GENERAL when no hook is available.
@@ -325,15 +435,15 @@ void append_python_path(const boost::filesystem::path &path)
 
     PyObject *py_path = python_path_from_boost(path);
     if (py_path == nullptr) {
-        PyErr_Print();
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot encode Python search path: " + take_python_error());
         return;
     }
 
     const int contains = PySequence_Contains(sys_path, py_path);
     if (contains == 0 && PyList_Append(sys_path, py_path) != 0)
-        PyErr_Print();
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot append Python search path: " + take_python_error());
     else if (contains < 0)
-        PyErr_Clear();
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot inspect Python search path: " + take_python_error());
 
     Py_DECREF(py_path);
 }
@@ -366,6 +476,24 @@ std::string string_attribute(PyObject *object, const char *name, const char *fal
     std::string out = py_object_to_string(attr);
     Py_DECREF(attr);
     return out.empty() && fallback != nullptr ? fallback : out;
+}
+
+int32_t group_priority_attribute(PyObject *object, const std::string &plugin_id)
+{
+    PyObject *attribute = PyObject_GetAttrString(object, "exclusive_group_priority");
+    if (attribute == nullptr) {
+        if (PyErr_ExceptionMatches(PyExc_AttributeError)) { PyErr_Clear(); return 100; }
+        throw std::runtime_error("Cannot read group preference for Python plugin '" + plugin_id + "': " + take_python_error());
+    }
+    const bool integer = PyLong_Check(attribute) != 0;
+    const long long value = integer ? PyLong_AsLongLong(attribute) : 0;
+    const bool failed = PyErr_Occurred() != nullptr;
+    Py_DECREF(attribute);
+    if (!integer || failed || value < (std::numeric_limits<int32_t>::min)() || value > (std::numeric_limits<int32_t>::max)()) {
+        PyErr_Clear();
+        throw std::invalid_argument("Python plugin '" + plugin_id + "' exclusive_group_priority must be a signed 32-bit integer.");
+    }
+    return static_cast<int32_t>(value);
 }
 
 int int_attribute(PyObject *object, const char *name, int fallback)
@@ -527,13 +655,8 @@ PyObject *pointer_to_python_uint(const void *ptr)
     return PyLong_FromUnsignedLongLong(static_cast<unsigned long long>(reinterpret_cast<uintptr_t>(ptr)));
 }
 
-/*
-Call one optional Python method. A missing attribute is a successful no-op, so
-plugins may implement only the hooks they need; an attribute that exists but
-cannot run returns false.
-*/
 bool call_python_void(PyObject *object, const char *method_name, PyObject *args, const std::string &plugin_id,
-                      const char *fallback_method_name = nullptr)
+                      const char *fallback_method_name, std::string *failure)
 {
     PyObject *method = PyObject_GetAttrString(object, method_name);
     if (method == nullptr && fallback_method_name != nullptr) {
@@ -548,16 +671,16 @@ bool call_python_void(PyObject *object, const char *method_name, PyObject *args,
     }
 
     if (!PyCallable_Check(method)) {
-        BOOST_LOG_TRIVIAL(warning) << "Python plugin '" << plugin_id << "' attribute "
-                                   << method_name << " is not callable.";
+        if (failure != nullptr) *failure = std::string(method_name) + " attribute is not callable";
+        send_python_log(RAW_PLUGIN_LOG_WARNING, "Python plugin '" + plugin_id + "' attribute " + method_name + " is not callable.");
         Py_DECREF(method);
         return false;
     }
 
     PyObject *result = PyObject_CallObject(method, args);
     if (result == nullptr) {
-        PyErr_Print();
-        BOOST_LOG_TRIVIAL(error) << "Python plugin '" << plugin_id << "' failed in " << method_name << "().";
+        if (failure != nullptr) *failure = take_python_error();
+        else send_python_log(RAW_PLUGIN_LOG_ERROR, "Python plugin '" + plugin_id + "' failed in " + method_name + "(): " + take_python_error());
         Py_DECREF(method);
         return false;
     }
@@ -590,6 +713,8 @@ bool python_plugin_has_clear(PyObject *plugin, const std::string &plugin_id)
 class PythonPlugin
 {
 public:
+    // Copy descriptions while Python's interpreter lock is held, retaining the object after successful construction.
+    // Slicing data is unchanged. Invalid attributes and allocation failures throw before registration exposes the object.
     PythonPlugin(PyObject *plugin,
                  const OrchestratorSetErrorMessageFn set_error_message,
                  orchestrator_handle *orchestrator)
@@ -600,16 +725,14 @@ public:
         , m_name(string_attribute(plugin, "name", m_id.c_str()))
         , m_description(string_attribute(plugin, "description", ""))
         , m_exclusive_group(string_attribute(plugin, "exclusive_group", ""))
-        , m_exclusive_group_label(string_attribute(plugin, "exclusive_group_label", ""))
-        , m_exclusive_group_tooltip(string_attribute(plugin, "exclusive_group_tooltip", ""))
         , m_step(slicing_step_t(int_attribute(plugin, "step", STEP_POST_SLICING)))
         , m_priority(int_attribute(plugin, "priority", 0))
+        , m_exclusive_group_priority(group_priority_attribute(plugin, m_id))
         , m_dependencies(string_list_attribute(plugin, "dependencies"))
         , m_used_config_keys(used_config_key_list_attribute(plugin, "used_config_keys"))
         , m_defined_config_keys(string_list_attribute(plugin, "defined_config_keys"))
         , m_has_clear(python_plugin_has_clear(plugin, m_id))
     {
-        Py_INCREF(m_plugin);
         for (const std::string &dependency : m_dependencies)
             m_dependency_ptrs.push_back(dependency.c_str());
         for (const PythonUsedConfigKey &key : m_used_config_keys) {
@@ -622,6 +745,7 @@ public:
         }
         for (const std::string &key : m_defined_config_keys)
             m_defined_config_key_ptrs.push_back(key.c_str());
+        Py_INCREF(m_plugin);
     }
 
     ~PythonPlugin()
@@ -663,16 +787,6 @@ private:
         return static_cast<PythonPlugin *>(plugin_ctx)->m_exclusive_group.c_str();
     }
 
-    static const char *get_exclusive_group_label_bridge(void *plugin_ctx)
-    {
-        return static_cast<PythonPlugin *>(plugin_ctx)->m_exclusive_group_label.c_str();
-    }
-
-    static const char *get_exclusive_group_tooltip_bridge(void *plugin_ctx)
-    {
-        return static_cast<PythonPlugin *>(plugin_ctx)->m_exclusive_group_tooltip.c_str();
-    }
-
     static slicing_step_t get_step_bridge(void *plugin_ctx)
     {
         return static_cast<PythonPlugin *>(plugin_ctx)->m_step;
@@ -712,22 +826,31 @@ private:
         return int32_t(plugin->m_defined_config_key_ptrs.size());
     }
 
-    static void initialize_bridge(void *plugin_ctx, storage_handle *storage)
+    // Initialize under Python's interpreter lock using borrowed storage. Return success or an error id without exceptions crossing C.
+    static int32_t initialize_bridge(void *plugin_ctx, storage_handle *storage)
     {
         PythonPlugin *plugin = static_cast<PythonPlugin *>(plugin_ctx);
         PyGILState_STATE gil_state = PyGILState_Ensure();
-        PyObject *arg = pointer_to_python_uint(storage);
-        PyObject *args = arg != nullptr ? PyTuple_Pack(1, arg) : nullptr;
+        PyObject *arg = nullptr;
+        PyObject *args = nullptr;
+        int32_t result = PLUGIN_ERROR_GENERAL;
+        try {
+            arg = pointer_to_python_uint(storage);
+            args = arg != nullptr ? PyTuple_Pack(1, arg) : nullptr;
+            std::string failure;
+            const bool initialized = args != nullptr &&
+                call_python_void(plugin->m_plugin, "initialize", args, plugin->m_id, nullptr, &failure);
+            if (args == nullptr) failure = take_python_error();
+            result = initialized ? PLUGIN_ERROR_OK :
+                plugin->m_set_error_message(plugin->m_orchestrator, failure.c_str());
+        } catch (...) { PyErr_Clear(); }
+        Py_XDECREF(args);
         Py_XDECREF(arg);
-        if (args != nullptr) {
-            call_python_void(plugin->m_plugin, "initialize", args, plugin->m_id);
-            Py_DECREF(args);
-        } else {
-            PyErr_Print();
-        }
         PyGILState_Release(gil_state);
+        return result;
     }
 
+    // Borrow plugin/context to call Python setup under its interpreter lock; release arguments and log complete Python failures.
     static void setup_bridge(void *plugin_ctx, const plugin_run_context *run_ctx, uint32_t run_count)
     {
         PythonPlugin *plugin = static_cast<PythonPlugin *>(plugin_ctx);
@@ -743,11 +866,12 @@ private:
             call_python_void(plugin->m_plugin, "_slic3r_setup", args, plugin->m_id, "setup");
             Py_DECREF(args);
         } else {
-            PyErr_Print();
+            send_python_log(RAW_PLUGIN_LOG_ERROR, "Python plugin '" + plugin->m_id + "' cannot prepare setup arguments: " + take_python_error());
         }
         PyGILState_Release(gil_state);
     }
 
+    // Borrow plugin/context to call Python setup_run under its interpreter lock; release arguments and log complete Python failures.
     static void setup_run_bridge(void *plugin_ctx, const plugin_run_context *run_ctx)
     {
         PythonPlugin *plugin = static_cast<PythonPlugin *>(plugin_ctx);
@@ -759,11 +883,12 @@ private:
             call_python_void(plugin->m_plugin, "_slic3r_setup_run", args, plugin->m_id, "setup_run");
             Py_DECREF(args);
         } else {
-            PyErr_Print();
+            send_python_log(RAW_PLUGIN_LOG_ERROR, "Python plugin '" + plugin->m_id + "' cannot prepare setup_run arguments: " + take_python_error());
         }
         PyGILState_Release(gil_state);
     }
 
+    // Borrow plugin/context to call Python run under its interpreter lock; release arguments and log complete Python failures.
     static void run_bridge(void *plugin_ctx, const plugin_run_context *run_ctx)
     {
         PythonPlugin *plugin = static_cast<PythonPlugin *>(plugin_ctx);
@@ -775,7 +900,7 @@ private:
             call_python_void(plugin->m_plugin, "_slic3r_run", args, plugin->m_id, "run");
             Py_DECREF(args);
         } else {
-            PyErr_Print();
+            send_python_log(RAW_PLUGIN_LOG_ERROR, "Python plugin '" + plugin->m_id + "' cannot prepare run arguments: " + take_python_error());
         }
         PyGILState_Release(gil_state);
     }
@@ -839,15 +964,21 @@ private:
         }
     }
 
+    // Return the borrowed object's copied preference. No Python calls, state changes, allocations or failures occur.
+    static int32_t get_exclusive_group_priority_bridge(void *plugin_ctx)
+    {
+        return static_cast<PythonPlugin *>(plugin_ctx)->m_exclusive_group_priority;
+    }
+
+    // Borrow the function table, including preference and optional cleanup. No state changes or allocations occur.
     static const plugin_vtable &vtable()
     {
         static const plugin_vtable vt = {
+            sizeof(plugin_vtable),
             &PythonPlugin::get_id_bridge,
             &PythonPlugin::get_name_bridge,
             &PythonPlugin::get_description_bridge,
             &PythonPlugin::get_exclusive_group_bridge,
-            &PythonPlugin::get_exclusive_group_label_bridge,
-            &PythonPlugin::get_exclusive_group_tooltip_bridge,
             &PythonPlugin::get_step_bridge,
             &PythonPlugin::get_dependencies_bridge,
             &PythonPlugin::get_priority_bridge,
@@ -857,7 +988,8 @@ private:
             &PythonPlugin::setup_bridge,
             &PythonPlugin::setup_run_bridge,
             &PythonPlugin::run_bridge,
-            nullptr
+            nullptr,
+            &PythonPlugin::get_exclusive_group_priority_bridge
         };
         return vt;
     }
@@ -867,10 +999,9 @@ private:
     std::string m_name;
     std::string m_description;
     std::string m_exclusive_group;
-    std::string m_exclusive_group_label;
-    std::string m_exclusive_group_tooltip;
     slicing_step_t m_step;
     int32_t m_priority = 0;
+    int32_t m_exclusive_group_priority = 100;
     std::vector<std::string> m_dependencies;
     std::vector<const char *> m_dependency_ptrs;
     std::vector<PythonUsedConfigKey> m_used_config_keys;
@@ -892,32 +1023,33 @@ bool resolve_registration_functions(const boost::filesystem::path &host_library_
     static std::vector<HMODULE> loaded_modules;
     HMODULE module = LoadLibraryW(host_library_path.wstring().c_str());
     if (module == NULL) {
-        BOOST_LOG_TRIVIAL(error) << "Cannot open host library '" << host_library_path.string()
-                                 << "' for Python plugin registration: error " << GetLastError();
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot open host library '" + host_library_path.string() +
+                        "' for Python plugin registration: error " + std::to_string(GetLastError()));
         return false;
     }
     loaded_modules.push_back(module);
 
     FARPROC farproc = GetProcAddress(module, "orchestrator_register_plugin");
     if (farproc == NULL) {
-        BOOST_LOG_TRIVIAL(error) << "Host library '" << host_library_path.string()
-                                 << "' does not export orchestrator_register_plugin.";
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Host library '" + host_library_path.string() + "' does not export orchestrator_register_plugin.");
         return false;
     }
     FARPROC package_farproc = GetProcAddress(module, "orchestrator_register_plugin_from_package");
     if (package_farproc == NULL) {
-        BOOST_LOG_TRIVIAL(error) << "Host library '" << host_library_path.string()
-                                 << "' does not export orchestrator_register_plugin_from_package.";
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Host library '" + host_library_path.string() + "' does not export orchestrator_register_plugin_from_package.");
         return false;
     }
     FARPROC begin_farproc = GetProcAddress(module, "orchestrator_begin_plugin_package_load");
     FARPROC report_farproc = GetProcAddress(module, "orchestrator_report_plugin_package_load_error");
     FARPROC finish_farproc = GetProcAddress(module, "orchestrator_finish_plugin_package_load");
     FARPROC error_message_farproc = GetProcAddress(module, "orchestrator_set_error_message");
+    FARPROC group_farproc = GetProcAddress(module, "orchestrator_register_exclusive_group");
+    FARPROC find_farproc = GetProcAddress(module, "orchestrator_is_plugin_registered");
+    FARPROC log_farproc = GetProcAddress(module, "orchestrator_send_log");
+    s_send_log = reinterpret_cast<OrchestratorSendLogFn>(log_farproc);
     if (begin_farproc == NULL || report_farproc == NULL || finish_farproc == NULL ||
-        error_message_farproc == NULL) {
-        BOOST_LOG_TRIVIAL(error) << "Host library '" << host_library_path.string()
-                                 << "' does not export plugin package diagnostic functions.";
+        error_message_farproc == NULL || group_farproc == NULL || find_farproc == NULL || log_farproc == NULL) {
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Host library '" + host_library_path.string() + "' does not export plugin package diagnostic functions.");
         return false;
     }
     functions.register_plugin = reinterpret_cast<OrchestratorRegisterPluginFn>(farproc);
@@ -926,6 +1058,9 @@ bool resolve_registration_functions(const boost::filesystem::path &host_library_
     functions.report_package_error = reinterpret_cast<OrchestratorReportPackageErrorFn>(report_farproc);
     functions.finish_package_load = reinterpret_cast<OrchestratorFinishPackageLoadFn>(finish_farproc);
     functions.set_error_message = reinterpret_cast<OrchestratorSetErrorMessageFn>(error_message_farproc);
+    functions.register_exclusive_group = reinterpret_cast<OrchestratorRegisterExclusiveGroupFn>(group_farproc);
+    functions.is_plugin_registered = reinterpret_cast<OrchestratorIsPluginRegisteredFn>(find_farproc);
+    functions.send_log = reinterpret_cast<OrchestratorSendLogFn>(log_farproc);
 #else
     void *symbol = dlsym(RTLD_DEFAULT, "orchestrator_register_plugin");
     void *package_symbol = dlsym(RTLD_DEFAULT, "orchestrator_register_plugin_from_package");
@@ -933,44 +1068,52 @@ bool resolve_registration_functions(const boost::filesystem::path &host_library_
     void *report_symbol = dlsym(RTLD_DEFAULT, "orchestrator_report_plugin_package_load_error");
     void *finish_symbol = dlsym(RTLD_DEFAULT, "orchestrator_finish_plugin_package_load");
     void *error_message_symbol = dlsym(RTLD_DEFAULT, "orchestrator_set_error_message");
+    void *group_symbol = dlsym(RTLD_DEFAULT, "orchestrator_register_exclusive_group");
+    void *find_symbol = dlsym(RTLD_DEFAULT, "orchestrator_is_plugin_registered");
+    void *log_symbol = dlsym(RTLD_DEFAULT, "orchestrator_send_log");
+    s_send_log = reinterpret_cast<OrchestratorSendLogFn>(log_symbol);
     if (symbol != nullptr && package_symbol != nullptr && begin_symbol != nullptr &&
-        report_symbol != nullptr && finish_symbol != nullptr && error_message_symbol != nullptr) {
+        report_symbol != nullptr && finish_symbol != nullptr && error_message_symbol != nullptr &&
+        group_symbol != nullptr && find_symbol != nullptr && log_symbol != nullptr) {
         functions.register_plugin = reinterpret_cast<OrchestratorRegisterPluginFn>(symbol);
         functions.register_package_plugin = reinterpret_cast<OrchestratorRegisterPluginFromPackageFn>(package_symbol);
         functions.begin_package_load = reinterpret_cast<OrchestratorBeginPackageLoadFn>(begin_symbol);
         functions.report_package_error = reinterpret_cast<OrchestratorReportPackageErrorFn>(report_symbol);
         functions.finish_package_load = reinterpret_cast<OrchestratorFinishPackageLoadFn>(finish_symbol);
         functions.set_error_message = reinterpret_cast<OrchestratorSetErrorMessageFn>(error_message_symbol);
+        functions.register_exclusive_group = reinterpret_cast<OrchestratorRegisterExclusiveGroupFn>(group_symbol);
+        functions.is_plugin_registered = reinterpret_cast<OrchestratorIsPluginRegisteredFn>(find_symbol);
+        functions.send_log = reinterpret_cast<OrchestratorSendLogFn>(log_symbol);
         return true;
     }
 
     void *module = dlopen(host_library_path.string().c_str(), RTLD_NOW | RTLD_GLOBAL);
     if (module == nullptr) {
-        BOOST_LOG_TRIVIAL(error) << "Cannot open host library '" << host_library_path.string()
-                                 << "' for Python plugin registration: " << dlerror();
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot open host library '" + host_library_path.string() + "' for Python plugin registration: " + dlerror());
         return false;
     }
 
     symbol = dlsym(module, "orchestrator_register_plugin");
     if (symbol == nullptr) {
-        BOOST_LOG_TRIVIAL(error) << "Host library '" << host_library_path.string()
-                                 << "' does not export orchestrator_register_plugin: " << dlerror();
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Host library '" + host_library_path.string() + "' does not export orchestrator_register_plugin: " + dlerror());
         return false;
     }
     package_symbol = dlsym(module, "orchestrator_register_plugin_from_package");
     if (package_symbol == nullptr) {
-        BOOST_LOG_TRIVIAL(error) << "Host library '" << host_library_path.string()
-                                 << "' does not export orchestrator_register_plugin_from_package: " << dlerror();
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Host library '" + host_library_path.string() + "' does not export orchestrator_register_plugin_from_package: " + dlerror());
         return false;
     }
     begin_symbol = dlsym(module, "orchestrator_begin_plugin_package_load");
     report_symbol = dlsym(module, "orchestrator_report_plugin_package_load_error");
     finish_symbol = dlsym(module, "orchestrator_finish_plugin_package_load");
     error_message_symbol = dlsym(module, "orchestrator_set_error_message");
+    group_symbol = dlsym(module, "orchestrator_register_exclusive_group");
+    find_symbol = dlsym(module, "orchestrator_is_plugin_registered");
+    log_symbol = dlsym(module, "orchestrator_send_log");
+    s_send_log = reinterpret_cast<OrchestratorSendLogFn>(log_symbol);
     if (begin_symbol == nullptr || report_symbol == nullptr || finish_symbol == nullptr ||
-        error_message_symbol == nullptr) {
-        BOOST_LOG_TRIVIAL(error) << "Host library '" << host_library_path.string()
-                                 << "' does not export plugin package diagnostic functions.";
+        error_message_symbol == nullptr || group_symbol == nullptr || find_symbol == nullptr || log_symbol == nullptr) {
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Host library '" + host_library_path.string() + "' does not export plugin package diagnostic functions.");
         return false;
     }
     functions.register_plugin = reinterpret_cast<OrchestratorRegisterPluginFn>(symbol);
@@ -979,33 +1122,64 @@ bool resolve_registration_functions(const boost::filesystem::path &host_library_
     functions.report_package_error = reinterpret_cast<OrchestratorReportPackageErrorFn>(report_symbol);
     functions.finish_package_load = reinterpret_cast<OrchestratorFinishPackageLoadFn>(finish_symbol);
     functions.set_error_message = reinterpret_cast<OrchestratorSetErrorMessageFn>(error_message_symbol);
+    functions.register_exclusive_group = reinterpret_cast<OrchestratorRegisterExclusiveGroupFn>(group_symbol);
+    functions.is_plugin_registered = reinterpret_cast<OrchestratorIsPluginRegisteredFn>(find_symbol);
+    functions.send_log = reinterpret_cast<OrchestratorSendLogFn>(log_symbol);
 #endif
     return true;
+}
+
+void register_python_group_definitions(PyObject *api, PyObject *plugin, const char *id, slicing_step_t step)
+{
+    PyObject *module = PyImport_ImportModule("slic3r_api");
+    if (module == nullptr) throw std::runtime_error(take_python_error());
+    PyObject *helper = PyObject_GetAttrString(module, "_register_exclusive_group_definitions");
+    Py_DECREF(module);
+    if (helper == nullptr) throw std::runtime_error(take_python_error());
+    PyObject *result = PyObject_CallFunction(helper, "OOsi", api, plugin, id, int(step));
+    Py_DECREF(helper);
+    if (result == nullptr) throw std::runtime_error("Cannot register Python exclusive group definition: " + take_python_error());
+    Py_DECREF(result);
 }
 
 void register_python_plugin_object(PyObject *plugin_object,
                                    const OrchestratorFunctions &functions,
                                    orchestrator_handle *orchestrator,
-                                   const boost::filesystem::path &package_root)
+                                   const boost::filesystem::path &package_root, PyObject *api)
 {
     if (plugin_object == nullptr || plugin_object == Py_None)
         return;
 
-    std::unique_ptr<PythonPlugin> plugin(new PythonPlugin(
-        plugin_object, functions.set_error_message, orchestrator));
+    const std::string package_id = package_root.empty() ? current_module_path().parent_path().filename().string() : package_root.filename().string();
+    std::unique_ptr<PythonPlugin> plugin(new PythonPlugin(plugin_object, functions.set_error_message, orchestrator));
     plugin_instance instance = plugin->c_instance();
+    const char *id = instance.vt->get_id(instance.ctx);
+    const slicing_step_t step = instance.vt->get_step(instance.ctx);
+    if (functions.is_plugin_registered(orchestrator, id) != 0)
+        throw std::runtime_error("Python plugin '" + std::string(id) + "' is already registered.");
+    s_python_plugins.reserve(s_python_plugins.size() + 1);
+    s_python_plugins.emplace_back(std::move(plugin));
     if (package_root.empty())
         functions.register_plugin(orchestrator, instance);
     else
         functions.register_package_plugin(orchestrator, instance, package_root.string().c_str());
-    BOOST_LOG_TRIVIAL(info) << "Registered Python plugin '" << plugin->c_instance().vt->get_id(plugin.get()) << "'.";
-    s_python_plugins.emplace_back(std::move(plugin));
+    if (functions.is_plugin_registered(orchestrator, id) == 0)
+        throw std::runtime_error("Cannot register Python plugin '" + std::string(id) + "'.");
+    for (const char *attribute : {"exclusive_group_label", "exclusive_group_tooltip"}) {
+        if (PyObject_HasAttrString(plugin_object, attribute)) {
+            const std::string message = "Python package '" + package_id + "', plugin '" + id +
+                "': obsolete attribute '" + attribute + "'; declare the exclusive group explicitly.";
+            functions.send_log(orchestrator, RAW_PLUGIN_LOG_WARNING, message.c_str());
+        }
+    }
+    register_python_group_definitions(api, plugin_object, id, step);
+    send_python_log(RAW_PLUGIN_LOG_INFO, "Registered Python plugin '" + std::string(id) + "'.");
 }
 
 void register_python_plugin_result(PyObject *result,
                                    const OrchestratorFunctions &functions,
                                    orchestrator_handle *orchestrator,
-                                   const boost::filesystem::path &package_root)
+                                   const boost::filesystem::path &package_root, PyObject *api)
 {
     if (result == nullptr || result == Py_None)
         return;
@@ -1014,13 +1188,15 @@ void register_python_plugin_result(PyObject *result,
         const Py_ssize_t count = PySequence_Size(result);
         for (Py_ssize_t idx = 0; idx < count; ++idx) {
             PyObject *item = PySequence_GetItem(result, idx);
-            register_python_plugin_object(item, functions, orchestrator, package_root);
+            if (item == nullptr) throw std::runtime_error(take_python_error());
+            try { register_python_plugin_object(item, functions, orchestrator, package_root, api); }
+            catch (...) { Py_XDECREF(item); throw; }
             Py_XDECREF(item);
         }
         return;
     }
 
-    register_python_plugin_object(result, functions, orchestrator, package_root);
+    register_python_plugin_object(result, functions, orchestrator, package_root, api);
 }
 
 PyObject *create_python_api(orchestrator_handle *orchestrator, const boost::filesystem::path &host_library_path)
@@ -1058,7 +1234,7 @@ void call_python_register(PyObject *module,
         PyErr_Clear();
         const std::string detail = "Python plugin '" + plugin_path.string() +
                                    "' does not define register_plugin(api).";
-        BOOST_LOG_TRIVIAL(warning) << detail;
+        send_python_log(RAW_PLUGIN_LOG_WARNING, detail);
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_REGISTRATION_FAILED, detail);
         return;
@@ -1067,7 +1243,7 @@ void call_python_register(PyObject *module,
     if (!PyCallable_Check(register_fn)) {
         const std::string detail = "Python plugin '" + plugin_path.string() +
                                    "' has a non-callable register_plugin attribute.";
-        BOOST_LOG_TRIVIAL(warning) << detail;
+        send_python_log(RAW_PLUGIN_LOG_WARNING, detail);
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_REGISTRATION_FAILED, detail);
         Py_DECREF(register_fn);
@@ -1079,22 +1255,21 @@ void call_python_register(PyObject *module,
 
     if (result == nullptr) {
         const std::string detail = take_python_error();
-        BOOST_LOG_TRIVIAL(error) << "Python plugin '" << plugin_path.string()
-                                 << "' failed during registration: " << detail;
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Python plugin '" + plugin_path.string() + "' failed during registration: " + detail);
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_REGISTRATION_FAILED, detail);
         return;
     }
 
     try {
-        register_python_plugin_result(result, functions, orchestrator, package_root);
+        register_python_plugin_result(result, functions, orchestrator, package_root, api);
     } catch (const std::exception &error) {
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_REGISTRATION_FAILED,
                                     error.what());
     }
     Py_DECREF(result);
-    BOOST_LOG_TRIVIAL(info) << "Loaded Python plugin module '" << plugin_path.string() << "'.";
+    send_python_log(RAW_PLUGIN_LOG_INFO, "Loaded Python plugin module '" + plugin_path.string() + "'.");
 }
 
 void load_python_plugin(const boost::filesystem::path &plugin_path,
@@ -1107,7 +1282,7 @@ void load_python_plugin(const boost::filesystem::path &plugin_path,
     PyObject *module = PyImport_ImportModule(module_name.c_str());
     if (module == nullptr) {
         const std::string detail = take_python_error();
-        BOOST_LOG_TRIVIAL(error) << "Cannot import Python plugin '" << plugin_path.string() << "': " << detail;
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot import Python plugin '" + plugin_path.string() + "': " + detail);
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_IMPORT_FAILED, detail);
         return;
@@ -1117,9 +1292,6 @@ void load_python_plugin(const boost::filesystem::path &plugin_path,
     Py_DECREF(module);
 }
 
-// External packages are loaded by absolute path under a unique module name.
-// Two packages may both use plugin.py, so importing by stem would otherwise
-// return the first package from Python's module cache.
 void load_python_plugin_from_path(const boost::filesystem::path &plugin_path,
                                   PyObject *api,
                                   const OrchestratorFunctions &functions,
@@ -1129,7 +1301,7 @@ void load_python_plugin_from_path(const boost::filesystem::path &plugin_path,
     boost::nowide::ifstream stream(plugin_path.string(), std::ios::in | std::ios::binary);
     if (!stream) {
         const std::string detail = "Cannot read Python plugin '" + plugin_path.string() + "'.";
-        BOOST_LOG_TRIVIAL(error) << detail;
+        send_python_log(RAW_PLUGIN_LOG_ERROR, detail);
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_READ_FAILED, detail);
         return;
@@ -1140,7 +1312,7 @@ void load_python_plugin_from_path(const boost::filesystem::path &plugin_path,
     PyObject *code = Py_CompileString(source.c_str(), plugin_path.string().c_str(), Py_file_input);
     if (code == nullptr) {
         const std::string detail = take_python_error();
-        BOOST_LOG_TRIVIAL(error) << "Cannot compile Python plugin '" << plugin_path.string() << "': " << detail;
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot compile Python plugin '" + plugin_path.string() + "': " + detail);
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_COMPILE_FAILED, detail);
         return;
@@ -1150,7 +1322,7 @@ void load_python_plugin_from_path(const boost::filesystem::path &plugin_path,
     Py_DECREF(code);
     if (module == nullptr) {
         const std::string detail = take_python_error();
-        BOOST_LOG_TRIVIAL(error) << "Cannot load Python plugin '" << plugin_path.string() << "': " << detail;
+        send_python_log(RAW_PLUGIN_LOG_ERROR, "Cannot load Python plugin '" + plugin_path.string() + "': " + detail);
         report_python_package_error(functions, orchestrator, package_root,
                                     RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_IMPORT_FAILED, detail);
         return;
@@ -1194,9 +1366,10 @@ boost::filesystem::path external_python_entry(const boost::filesystem::path &pac
 
 void load_python_plugins(orchestrator_handle *orchestrator)
 {
+    s_log_orchestrator = orchestrator;
     const boost::filesystem::path loader_path = current_module_path();
     if (loader_path.empty()) {
-        BOOST_LOG_TRIVIAL(warning) << "Cannot locate python_plugin_loader module.";
+        send_python_log(RAW_PLUGIN_LOG_WARNING, "Cannot locate python_plugin_loader module.");
         return;
     }
 
@@ -1242,7 +1415,7 @@ void load_python_plugins(orchestrator_handle *orchestrator)
             const boost::filesystem::path plugin_path = external_python_entry(package_root);
             if (plugin_path.empty())
                 continue;
-            functions.begin_package_load(orchestrator, package_root.string().c_str());
+            const PythonPackageLoadScope package_load(functions, orchestrator, package_root.string());
             try {
                 Slic3r::PluginPackageMetadata metadata;
                 std::string error;
@@ -1264,7 +1437,6 @@ void load_python_plugins(orchestrator_handle *orchestrator)
                                             RAW_PLUGIN_PACKAGE_LOAD_ERROR_PYTHON_REGISTRATION_FAILED,
                                             "The Python package loader threw an unknown exception.");
             }
-            functions.finish_package_load(orchestrator, package_root.string().c_str());
         }
         Py_DECREF(api);
     } else {

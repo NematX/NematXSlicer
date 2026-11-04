@@ -590,14 +590,12 @@ private:
         return "Fixes sortable extrusion trees and publishes their exact entry and exit points.";
     }
     const char *exclusive_group_impl() const noexcept override { return k_group_extrusions; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Extrusion-tree ordering"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects how STEP_ORDERING fixes the order inside each PrintingExtrusion tree.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_ORDERING; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
-    int32_t priority_impl() const noexcept override { return 1100; }
+    // Return the common extrusion-ordering priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 1050; }
+    // Return the default algorithm's preference. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 20; }
     const char *progress_message_format_impl() const noexcept override
     {
         return "Ordering extrusion trees: %u / %u roots";

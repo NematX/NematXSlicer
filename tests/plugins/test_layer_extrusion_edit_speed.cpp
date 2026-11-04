@@ -69,6 +69,11 @@ using slic3r_api::PluginPropertyKey;
 using slic3r_api::PrintingLayerTimeProperty;
 using slic3r_api::printing_layer_time_property_key;
 
+// Borrow the complete function table with its byte count; optional cleanup/preference functions are null, and no changes or failures occur.
+const plugin_vtable *recording_vtable();
+// Ignore borrowed initialization arguments and return success without state changes or failure.
+int32_t recording_initialize(void *, storage_handle *);
+
 constexpr const char *DEFAULT_SPEED_PLUGIN = "layer_extrusion_edit.speed.default";
 constexpr const char *DEFAULT_ACCELERATION_PLUGIN = "layer_extrusion_edit.acceleration.default";
 constexpr const char *DEFAULT_FAN_PLUGIN = "layer_extrusion_edit.fan.default";
@@ -538,14 +543,12 @@ const char *recording_id(void *ctx) { return static_cast<RecordingEditorState *>
 const char *recording_name(void *ctx) { return static_cast<RecordingEditorState *>(ctx)->id; }
 const char *recording_description(void *) { return "Records layer editor scheduling."; }
 const char *recording_group(void *) { return ""; }
-const char *recording_group_label(void *) { return ""; }
-const char *recording_group_tooltip(void *) { return ""; }
 slicing_step_t recording_step(void *) { return STEP_LAYER_EXTRUSION_EDIT; }
 int32_t recording_priority(void *ctx) { return static_cast<RecordingEditorState *>(ctx)->priority; }
 const_strings_t recording_dependencies(void *) { return {}; }
 int32_t recording_used_keys(void *, raw_used_config_key *) { return 0; }
 int32_t recording_defined_keys(void *, const char **) { return 0; }
-void recording_initialize(void *, storage_handle *) {}
+int32_t recording_initialize(void *, storage_handle *) { return PLUGIN_ERROR_OK; }
 
 // Validate the setup payload and count the single setup call for one plugin.
 void recording_setup(void *ctx, const plugin_run_context *run_ctx, uint32_t run_count)
@@ -596,12 +599,11 @@ void recording_run(void *ctx, const plugin_run_context *run_ctx)
 const plugin_vtable *recording_vtable()
 {
     static const plugin_vtable table = {
+        sizeof(plugin_vtable),
         &recording_id,
         &recording_name,
         &recording_description,
         &recording_group,
-        &recording_group_label,
-        &recording_group_tooltip,
         &recording_step,
         &recording_dependencies,
         &recording_priority,

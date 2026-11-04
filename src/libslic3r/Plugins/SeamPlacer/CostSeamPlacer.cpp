@@ -136,11 +136,12 @@ private:
     const char *name_impl() const noexcept override { return "Cost-based"; }
     const char *description_impl() const noexcept override { return "Balances seam visibility, corner shape, overhang quality and travel."; }
     const char *exclusive_group_impl() const noexcept override { return k_group_id; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Seam placement"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override { return "Selects the service used to choose the starting point of closed extrusion loops."; }
     slicing_step_t step_impl() const noexcept override { return SEAM_PLACER; }
     const char *const *dependencies_impl() const noexcept override { return k_dependencies; }
+    // Return the common seam execution priority. Nothing is changed or transferred, and the call cannot fail.
     int32_t priority_impl() const noexcept override { return 600; }
+    // Return this seam algorithm's preference. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     int32_t defined_config_keys(const char **keys) const noexcept override;
     void inilialize_impl(storage_handle *) const override;

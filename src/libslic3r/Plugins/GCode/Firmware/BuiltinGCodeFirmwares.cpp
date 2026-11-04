@@ -66,7 +66,7 @@ struct FirmwareDefinition
     const char *id;
     const char *name;
     const char *description;
-    int32_t priority;
+    int32_t exclusive_group_priority;
     const char *reader_state_name;
     FirmwareSessionFactory factory;
     const raw_used_config_key *extra_used_config_keys;
@@ -227,14 +227,12 @@ private:
     const char *name_impl() const noexcept override { return m_definition.name; }
     const char *description_impl() const noexcept override { return m_definition.description; }
     const char *exclusive_group_impl() const noexcept override { return "gcode_firmware_plugin"; }
-    const char *exclusive_group_label_impl() const noexcept override { return "G-code firmware"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects the firmware session used by PrintingPlan output writers.";
-    }
     slicing_step_t step_impl() const noexcept override { return GCODE_FIRMWARE; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
-    int32_t priority_impl() const noexcept override { return m_definition.priority; }
+    // Return the common firmware execution priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Return this firmware's preference number. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return m_definition.exclusive_group_priority; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     void inilialize_impl(storage_handle *storage) const override;
     void run_impl(const plugin_run_context *run_ctx) const override;

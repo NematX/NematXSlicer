@@ -43,6 +43,10 @@ assigning the new leaf geometry.
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace CreateRetractionWipePlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_create_retraction_wipe_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
@@ -123,8 +127,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -945,16 +947,6 @@ const char *CreateRetractionWipe::exclusive_group_impl() const noexcept
     return "layer_extrusion_edit.wipe";
 }
 
-const char *CreateRetractionWipe::exclusive_group_label_impl() const noexcept
-{
-    return "Retraction wipe";
-}
-
-const char *CreateRetractionWipe::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how retraction is distributed over movement on printed material.";
-}
-
 slicing_step_t CreateRetractionWipe::step_impl() const noexcept
 {
     return STEP_LAYER_EXTRUSION_EDIT;
@@ -1041,6 +1033,12 @@ void register_create_retraction_wipe_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(
         orchestrator, CreateRetractionWipe::instance(orchestrator).c_instance());
+    const plugin_instance member = CreateRetractionWipe::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Retraction wipe";
+    definition.tooltip = "Selects how retraction is distributed over movement on printed material.";
+    CreateRetractionWipe::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::CreateRetractionWipePlugin

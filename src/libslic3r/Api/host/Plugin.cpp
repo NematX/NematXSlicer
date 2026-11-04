@@ -7,8 +7,32 @@
 #include "Orchestrator.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
+#include <cstddef>
+#include <cstring>
 #include <stdexcept>
 #include <string>
+
+/* This file wraps a plugin's functions and copies its descriptions for the application.
+   A plugin supplies functions to the host, the slicer application, through a C
+   ABI (binary calling interface). A callback is one such function; its context
+   pointer identifies the plugin object without transferring ownership.
+
+   Construct Plugin from plugin_instance, which pairs that context with
+   plugin_vtable, a function table with an explicit byte count. The constructor validates required
+   functions, copies available functions and descriptive strings, and reads no
+   optional field beyond the supplied size.
+
+   Read identity and group membership with get_id() and get_exclusive_group().
+   get_priority() controls execution ordering; get_exclusive_group_priority()
+   ranks alternatives for the same job. After registration, initialize() returns
+   a diagnostic id; setup(), setup_run() and run() prepare and execute jobs.
+   All calls still borrow plugin-owned context and code, which must remain alive.
+
+   Call graph:
+     Plugin constructor
+       validate_plugin_instance
+     initialize / setup / setup_run / run
+       copied plugin functions */
 
 namespace Slic3r {
 
@@ -16,15 +40,19 @@ namespace {
 
 const int32_t MAX_PLUGIN_CONFIG_KEYS = 1024;
 
+// Check the borrowed table's size and required functions without calling the plugin or reading optional fields.
+// Missing functions throw without changing plugin state.
+void validate_plugin_instance(const plugin_instance &c_api);
+
 void validate_plugin_instance(const plugin_instance &c_api)
 {
     if (c_api.vt == nullptr)
         throw std::runtime_error("Plugin instance has no vtable.");
+    if (c_api.vt->struct_size < offsetof(plugin_vtable, run) + sizeof(c_api.vt->run))
+        throw std::runtime_error("Plugin vtable has an incomplete required prefix.");
     if (c_api.vt->get_id == nullptr || c_api.vt->get_name == nullptr ||
         c_api.vt->get_description == nullptr ||
         c_api.vt->get_exclusive_group == nullptr ||
-        c_api.vt->get_exclusive_group_label == nullptr ||
-        c_api.vt->get_exclusive_group_tooltip == nullptr ||
         c_api.vt->get_step == nullptr ||
         c_api.vt->get_dependencies == nullptr || c_api.vt->get_priority == nullptr ||
         c_api.vt->used_config_keys == nullptr || c_api.vt->defined_config_keys == nullptr ||
@@ -123,13 +151,19 @@ Plugin::Plugin(plugin_instance c_api,
     , m_package_root(std::move(package_root))
 {
     validate_plugin_instance(c_api);
+    std::memcpy(&m_validated_vtable, c_api.vt, offsetof(plugin_vtable, run) + sizeof(c_api.vt->run));
+    if (c_api.vt->struct_size >= offsetof(plugin_vtable, clear) + sizeof(c_api.vt->clear))
+        m_validated_vtable.clear = c_api.vt->clear;
+    if (c_api.vt->struct_size >= offsetof(plugin_vtable, get_exclusive_group_priority) + sizeof(c_api.vt->get_exclusive_group_priority))
+        m_validated_vtable.get_exclusive_group_priority = c_api.vt->get_exclusive_group_priority;
+    m_validated_vtable.struct_size = sizeof(plugin_vtable);
+    m_c_api.vt = &m_validated_vtable;
+    c_api.vt = &m_validated_vtable;
 
     const char *plugin_id = c_api.vt->get_id(c_api.ctx);
     const char *plugin_name = c_api.vt->get_name(c_api.ctx);
     const char *plugin_description = c_api.vt->get_description(c_api.ctx);
     const char *plugin_exclusive_group = c_api.vt->get_exclusive_group(c_api.ctx);
-    const char *plugin_exclusive_group_label = c_api.vt->get_exclusive_group_label(c_api.ctx);
-    const char *plugin_exclusive_group_tooltip = c_api.vt->get_exclusive_group_tooltip(c_api.ctx);
     this->m_id = plugin_id != nullptr ? plugin_id : "";
     this->m_translation_domain = std::move(default_translation_domain);
     if (this->m_translation_domain.empty())
@@ -141,8 +175,6 @@ Plugin::Plugin(plugin_instance c_api,
     // instead of reading a generated configuration selector.
     this->m_exclusive_group = plugin_exclusive_group != nullptr ?
         plugin_exclusive_group : this->m_id;
-    this->m_exclusive_group_label = plugin_exclusive_group_label != nullptr ? plugin_exclusive_group_label : "";
-    this->m_exclusive_group_tooltip = plugin_exclusive_group_tooltip != nullptr ? plugin_exclusive_group_tooltip : "";
     this->m_step = c_api.vt->get_step(c_api.ctx);
     // Service kinds have no checkpoint-owned execution lifetime to pair with a clear callback.
     if (c_api.vt->clear != nullptr &&
@@ -151,6 +183,8 @@ Plugin::Plugin(plugin_instance c_api,
             "Plugin '" + this->m_id +
             "' declares a clear callback without a supported pipeline cleanup boundary.");
     this->m_priority = c_api.vt->get_priority(c_api.ctx);
+    if (c_api.vt->get_exclusive_group_priority != nullptr)
+        m_exclusive_group_priority = c_api.vt->get_exclusive_group_priority(c_api.ctx);
     const_strings_t cstrings = c_api.vt->get_dependencies(c_api.ctx);
     if (cstrings.items) {
         for (size_t i = 0; i < cstrings.size; ++i) {

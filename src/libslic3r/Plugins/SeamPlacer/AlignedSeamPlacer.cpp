@@ -133,11 +133,12 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
+    // Return the fixed execution priority for seam-placement jobs.
     int32_t priority_impl() const noexcept override;
+    // Return the fixed rank among seam-placement alternatives.
+    int32_t exclusive_group_priority_impl() const noexcept override;
     void run_impl(const plugin_run_context *run_context) const override;
 };
 
@@ -467,14 +468,10 @@ const char *AlignedSeamPlacer::description_impl() const noexcept
     return "Aligns locally suitable seam positions across connected layers.";
 }
 const char *AlignedSeamPlacer::exclusive_group_impl() const noexcept { return kGroupId; }
-const char *AlignedSeamPlacer::exclusive_group_label_impl() const noexcept { return "Seam placement"; }
-const char *AlignedSeamPlacer::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects the service used to choose the starting point of closed extrusion loops.";
-}
 slicing_step_t AlignedSeamPlacer::step_impl() const noexcept { return SEAM_PLACER; }
 const char *const *AlignedSeamPlacer::dependencies_impl() const noexcept { return kDependencies; }
-int32_t AlignedSeamPlacer::priority_impl() const noexcept { return 700; }
+int32_t AlignedSeamPlacer::priority_impl() const noexcept { return 600; }
+int32_t AlignedSeamPlacer::exclusive_group_priority_impl() const noexcept { return 10; }
 
 void AlignedSeamPlacer::run_impl(const plugin_run_context *run_context) const
 {

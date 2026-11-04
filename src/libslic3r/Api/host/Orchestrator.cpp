@@ -2,8 +2,40 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* The orchestrator owns plugin registration and run contexts, and resolves service invalidation to executable producers.
-   Step modules copy host selector declarations into a protected registry before plugins can register. */
+/* This file registers plugins, creates their selection settings and runs their jobs.
+   The host is the slicer application that loads plugins. Orchestrator is its
+   process-wide manager; a plugin is a component that performs a slicing job.
+
+   Use instance(), then plugin_registration_scope() to identify an installed
+   package directory while register_plugin() introduces its instances.
+   PluginRegistrationScope ends that directory association when destroyed.
+   PluginPackageLoadReport stores load errors and non-fatal internal warnings.
+
+   An exclusive group contains alternative plugins for one processing step.
+   Its selector is a setting naming the member to use. ExclusiveGroupDefinition
+   stores text, source package and StepSelectorTraits, its placement and selection
+   rules. Register built-in or member descriptions, enable members, then call
+   elect_exclusive_group_definitions(), create_selector_print_config() and
+   finalize_selector_option() to retain descriptions, create settings and filter
+   unavailable choices. The retained description also controls text translation.
+
+   initialize_plugins() interprets each initialization return code, disables
+   failures and preserves an already-recorded rejection. execute_plugin() runs
+   a service, a directly callable job, with borrowed data valid for that call.
+   Per-call preparations and executions may run in parallel.
+   Invalidation means recomputing affected results; service steps resolve to
+   the processing stages that produce those results.
+
+   Startup calls from load_plugins() in Plugins/PluginLoader.cpp:
+     load_plugins
+       register_plugin
+       elect_exclusive_group_definitions
+       create_selector_print_config
+         create_print_config_impl
+       initialize_plugins
+         Plugin::initialize
+         record_plugin_initialization_failure
+       finalize_plugin_option_defs */
 #include "Orchestrator.hpp"
 #include "GCodeReaderService.hpp"
 #include "GCodeThumbnailRenderer.hpp"
@@ -56,6 +88,13 @@ namespace Slic3r {
 
 // Compare every owned selector field without reading providers or configuration and without mutation.
 static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelectorTraits &rhs);
+// Compare copied text, package identity and setting rules without calling plugins or changing stored data; comparison cannot fail.
+static bool same_group_definition(const Orchestrator::ExclusiveGroupDefinition &lhs,
+                                  const Orchestrator::ExclusiveGroupDefinition &rhs);
+// Check stage, key, window placement and recomputation rules without reserving a key; invalid descriptions return false.
+static bool valid_selector_traits(const Orchestrator &host, slicing_step_t step, const StepSelectorTraits &traits);
+// Compare the kind, stage and group named by two selector settings without changing them; comparison cannot fail.
+static bool same_selector_identity(const Orchestrator::SelectorIdentity &lhs, const Orchestrator::SelectorIdentity &rhs);
 
 // Compare normalized definitions and report the first differing field.
 static bool config_option_def_compatible(const ConfigOptionDef &existing, const ConfigOptionDef &candidate, std::string *reason);
@@ -803,6 +842,39 @@ static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelect
                     rhs.value_when_absent, rhs.provider_settings_rules, rhs.auto_value);
 }
 
+static bool same_group_definition(const Orchestrator::ExclusiveGroupDefinition &lhs,
+                                  const Orchestrator::ExclusiveGroupDefinition &rhs)
+{
+    return same_selector_traits(lhs.traits, rhs.traits) &&
+        std::tie(lhs.label, lhs.tooltip, lhs.translation_domain, lhs.plugin_id, lhs.package_id, lhs.package_root, lhs.line_label) ==
+        std::tie(rhs.label, rhs.tooltip, rhs.translation_domain, rhs.plugin_id, rhs.package_id, rhs.package_root, rhs.line_label);
+}
+
+static bool valid_selector_traits(const Orchestrator &host, slicing_step_t step, const StepSelectorTraits &traits)
+{
+    if (!Steps::selector_step_is_registered(host, step)) return false;
+    if (traits.container_type != RAW_CONTAINER_TYPE_PROJECT && traits.container_type != RAW_CONTAINER_TYPE_OBJECT &&
+        traits.container_type != RAW_CONTAINER_TYPE_REGION) return false;
+    if (traits.category < RAW_OPTION_CATEGORY_PERIMETER || traits.category > RAW_OPTION_CATEGORY_MILLING) return false;
+    if (traits.option_preset_type == RAW_PRESET_TYPE_NONE || traits.option_preset_type >= RAW_PRESET_TYPE_COUNT) return false;
+    const std::vector<std::string> &files = Orchestrator::ui_layout_files();
+    if (std::find(files.begin(), files.end(), traits.ui_target_file) == files.end()) return false;
+    if (traits.ui_page.empty() != traits.ui_group.empty()) return false;
+    if (!traits.option_key.empty() && traits.exclusive_group.empty()) return false;
+    for (size_t i = 0; i < traits.option_key.size(); ++i) {
+        const char ch = traits.option_key[i];
+        if (!(ch == '_' || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+              (i != 0 && ch >= '0' && ch <= '9'))) return false;
+    }
+    return !traits.invalidates_step || *traits.invalidates_step == STEP_NONE ||
+        Steps::execution_index(*traits.invalidates_step) != Steps::execution_order().size();
+}
+
+static bool same_selector_identity(const Orchestrator::SelectorIdentity &lhs, const Orchestrator::SelectorIdentity &rhs)
+{
+    return lhs.kind == rhs.kind && lhs.step == rhs.step && lhs.group == rhs.group;
+}
+
 // Return immutable process-owned layout names without reading configuration or transferring ownership.
 // First-use allocation failures propagate; no host registry or print data is changed.
 const std::vector<std::string> &Orchestrator::ui_layout_files()
@@ -811,27 +883,9 @@ const std::vector<std::string> &Orchestrator::ui_layout_files()
     return files;
 }
 
-// Validate and move owned traits into the host registry, leaving existing declarations intact on rejection.
-// Status is 1 added, 0 identical, -1 invalid or -2 conflict; no configuration/print data changes and allocations may throw.
 int32_t Orchestrator::register_builtin_step_selector(slicing_step_t step, StepSelectorTraits traits)
 {
-    if (step == STEP_NONE || step == STEP_ANY) return -1;
-    if (traits.container_type != RAW_CONTAINER_TYPE_PROJECT && traits.container_type != RAW_CONTAINER_TYPE_OBJECT &&
-        traits.container_type != RAW_CONTAINER_TYPE_REGION) return -1;
-    if (traits.category < RAW_OPTION_CATEGORY_PERIMETER || traits.category > RAW_OPTION_CATEGORY_MILLING) return -1;
-    if (traits.option_preset_type == RAW_PRESET_TYPE_NONE || traits.option_preset_type >= RAW_PRESET_TYPE_COUNT) return -1;
-    if (std::find(ui_layout_files().begin(), ui_layout_files().end(), traits.ui_target_file) == ui_layout_files().end()) return -1;
-    if (traits.ui_page.empty() != traits.ui_group.empty()) return -1;
-    if (!traits.option_key.empty()) {
-        if (traits.exclusive_group.empty()) return -1;
-        for (size_t i = 0; i < traits.option_key.size(); ++i) {
-            const char ch = traits.option_key[i];
-            if (!(ch == '_' || (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
-                  (i != 0 && ch >= '0' && ch <= '9'))) return -1;
-        }
-    }
-    if (traits.invalidates_step && *traits.invalidates_step != STEP_NONE &&
-        Steps::execution_index(*traits.invalidates_step) == Steps::execution_order().size()) return -1;
+    if (!valid_selector_traits(*this, step, traits)) return -1;
     const std::pair<slicing_step_t, std::string> key {step, traits.exclusive_group};
     const std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits>::const_iterator found = m_step_selectors.find(key);
     if (found != m_step_selectors.end()) {
@@ -839,18 +893,256 @@ int32_t Orchestrator::register_builtin_step_selector(slicing_step_t step, StepSe
         BOOST_LOG_TRIVIAL(warning) << "Selector traits already declared; keeping the first declaration.";
         return -2;
     }
-    m_step_selectors.emplace(key, std::move(traits));
+    m_step_selectors.emplace(key, traits);
+    try {
+        const int32_t reserved = reserve_selector_key(step, traits, false);
+        if (reserved < 0) { m_step_selectors.erase(key); return reserved; }
+    } catch (...) { m_step_selectors.erase(key); throw; }
     return 1;
 }
 
-// Borrow the exact host entry or its whole-step fallback, returning null for undeclared steps.
-// Registry-owned pointers remain valid until host destruction; lookup changes no state and temporary-key allocation may throw.
 const StepSelectorTraits *Orchestrator::step_selector(slicing_step_t step, const std::string &exclusive_group) const
 {
+    if (!exclusive_group.empty()) {
+        const ExclusiveGroupDefinition *definition = exclusive_group_definition(step, exclusive_group);
+        if (definition != nullptr) return &definition->traits;
+    }
     std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits>::const_iterator found =
         m_step_selectors.find({step, exclusive_group});
     if (found == m_step_selectors.end() && !exclusive_group.empty()) found = m_step_selectors.find({step, std::string()});
     return found == m_step_selectors.end() ? nullptr : &found->second;
+}
+
+int32_t Orchestrator::reserve_selector_key(slicing_step_t step, const StepSelectorTraits &traits, bool public_declaration)
+{
+    if (traits.exclusive_group.empty()) return 0;
+    SelectorIdentity identity {SelectorIdentityKind::PluginGroup, step, traits.exclusive_group};
+    const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &whole = Steps::get_exclusive_steps();
+    const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator whole_it = whole.find(step);
+    if (whole_it != whole.end()) identity = {SelectorIdentityKind::WholeStep, step, {}};
+    const std::string key = whole_it != whole.end() ? whole_it->second.key :
+        !traits.option_key.empty() ? traits.option_key :
+        Steps::generated_plugin_exclusive_group_option_key(*this, step, traits.exclusive_group);
+    const std::map<std::string, SelectorIdentity>::const_iterator existing = m_selector_key_owners.find(key);
+    if (existing != m_selector_key_owners.end() && !same_selector_identity(existing->second, identity)) return -2;
+    if (public_declaration && PrintConfigDef::instance().get(key) != nullptr && existing == m_selector_key_owners.end()) return -2;
+    // Registered groups without declarations also own their neutral generated identities.
+    if (public_declaration) {
+        for (const Plugin *plugin : registered_plugins()) {
+            if (whole.find(plugin->get_step()) != whole.end() || plugin->get_exclusive_group().empty()) continue;
+            const SelectorIdentity other {SelectorIdentityKind::PluginGroup, plugin->get_step(), plugin->get_exclusive_group()};
+            if (!same_selector_identity(identity, other) && key ==
+                Steps::generated_plugin_exclusive_group_option_key(*this, other.step, other.group)) return -2;
+        }
+    }
+    if (existing == m_selector_key_owners.end()) m_selector_key_owners.emplace(key, std::move(identity));
+    return 1;
+}
+
+int32_t Orchestrator::register_builtin_exclusive_group(slicing_step_t step, ExclusiveGroupDefinition definition)
+{
+    if (definition.traits.exclusive_group.empty() || !definition.plugin_id.empty() ||
+        definition.translation_domain != "Slic3r" || !valid_selector_traits(*this, step, definition.traits)) return -1;
+    const std::pair<slicing_step_t, std::string> key {step, definition.traits.exclusive_group};
+    const std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition>::const_iterator found = m_host_groups.find(key);
+    if (found != m_host_groups.end()) return same_group_definition(found->second, definition) ? 0 : -2;
+    const std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits>::const_iterator traits = m_step_selectors.find(key);
+    if (traits != m_step_selectors.end() && !same_selector_traits(traits->second, definition.traits)) return -2;
+    std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits> staged_traits = m_step_selectors;
+    std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition> staged_groups = m_host_groups;
+    staged_traits.emplace(key, definition.traits);
+    staged_groups.emplace(key, definition);
+    const int32_t reserved = reserve_selector_key(step, definition.traits, false);
+    if (reserved < 0) return reserved;
+    m_step_selectors.swap(staged_traits);
+    m_host_groups.swap(staged_groups);
+    return 1;
+}
+
+int32_t Orchestrator::record_exclusive_group_declaration(slicing_step_t step, ExclusiveGroupDefinition definition)
+{
+    const Plugin *owner = get_plugin(definition.plugin_id);
+    const std::map<std::string, PluginRegistrationSource>::const_iterator registered_source = m_plugin_sources.find(definition.plugin_id);
+    const std::string &group = definition.traits.exclusive_group;
+    const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &whole = Steps::get_exclusive_steps();
+    const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator whole_it = whole.find(step);
+    const std::string effective_group = owner == nullptr ? std::string() :
+        whole_it != whole.end() ? whole_it->second.key : owner->get_exclusive_group();
+    const char *rejection = nullptr;
+    if (definition.plugin_id.empty()) rejection = "missing declaring plugin id";
+    else if (group.empty()) rejection = "missing exclusive group";
+    else if (owner == nullptr) rejection = "unknown declaring plugin";
+    else if (owner->get_step() != step) rejection = "declaring plugin belongs to a different step";
+    else if (group != effective_group) rejection = "declaring plugin is not a member of this group";
+    else if (m_plugin_registration_sources.empty() || registered_source == m_plugin_sources.end())
+        rejection = "missing authenticated registration provenance";
+    else if (registered_source->second.package_root != m_plugin_registration_sources.back().package_root ||
+             registered_source->second.package_id != m_plugin_registration_sources.back().package_id ||
+             registered_source->second.external_plugin != m_plugin_registration_sources.back().external_plugin)
+        rejection = "declaring plugin belongs to a different package";
+    if (rejection != nullptr) {
+        BOOST_LOG_TRIVIAL(error) << "Cannot declare exclusive group '" << group << "' on step " << int(step)
+            << " for plugin '" << definition.plugin_id << "': " << rejection << ".";
+        return -1;
+    }
+    if (!valid_selector_traits(*this, step, definition.traits)) return -1;
+    definition.translation_domain = owner->get_translation_domain();
+    definition.package_root = registered_source->second.package_root;
+    definition.package_id = registered_source->second.package_id;
+    const std::pair<slicing_step_t, std::string> key {step, group};
+    const std::map<std::pair<slicing_step_t, std::string>, std::map<std::string, ExclusiveGroupDefinition>>::const_iterator members =
+        m_group_declarations.find(key);
+    if (members != m_group_declarations.end()) {
+        const std::map<std::string, ExclusiveGroupDefinition>::const_iterator previous = members->second.find(definition.plugin_id);
+        if (previous != members->second.end()) return same_group_definition(previous->second, definition) ? 0 : -2;
+    }
+    std::map<std::pair<slicing_step_t, std::string>, std::map<std::string, ExclusiveGroupDefinition>> staged = m_group_declarations;
+    staged[key].emplace(definition.plugin_id, definition);
+    // A member's description cannot reserve another key for an application-supplied group.
+    if (m_host_groups.find(key) == m_host_groups.end()) {
+        const int32_t reserved = reserve_selector_key(step, definition.traits, true);
+        if (reserved < 0) return reserved;
+    }
+    m_group_declarations.swap(staged);
+    return 1;
+}
+
+const Orchestrator::ExclusiveGroupDefinition *Orchestrator::exclusive_group_definition(slicing_step_t step, const std::string &group) const
+{
+    const std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition>::const_iterator host = m_host_groups.find({step, group});
+    if (host != m_host_groups.end()) return &host->second;
+    const std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition>::const_iterator elected =
+        m_elected_group_definitions.find({step, group});
+    return elected == m_elected_group_definitions.end() ? nullptr : &elected->second;
+}
+
+Orchestrator::ExclusiveGroupDefinition Orchestrator::exclusive_group_definition_or_default(slicing_step_t step, const std::string &group) const
+{
+    ExclusiveGroupDefinition result;
+    const ExclusiveGroupDefinition *retained = exclusive_group_definition(step, group);
+    if (retained != nullptr) result = *retained;
+    else {
+        const StepSelectorTraits *traits = step_selector(step, group);
+        if (traits != nullptr) result.traits = *traits;
+        result.traits.exclusive_group = group;
+        result.translation_domain = "Slic3r";
+    }
+    if (result.label.empty()) result.label = group;
+    return result;
+}
+
+void Orchestrator::elect_exclusive_group_definitions()
+{
+    std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition> elected;
+    for (const std::pair<const std::pair<slicing_step_t, std::string>, std::map<std::string, ExclusiveGroupDefinition>> &group : m_group_declarations) {
+        const ExclusiveGroupDefinition *definition = active_member_group_definition(group.first.first, group.first.second);
+        if (definition != nullptr) {
+            ExclusiveGroupDefinition copy = *definition;
+            copy.untranslated = !is_translation_domain_available(copy.translation_domain, copy.package_root);
+            elected.emplace(group.first, std::move(copy));
+        }
+    }
+    m_elected_group_definitions.swap(elected);
+}
+
+void Orchestrator::elect_exclusive_group_definition(slicing_step_t step, const std::string &group)
+{
+    std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition> elected = m_elected_group_definitions;
+    const std::pair<slicing_step_t, std::string> key {step, group};
+    elected.erase(key);
+    const ExclusiveGroupDefinition *definition = active_member_group_definition(step, group);
+    if (definition != nullptr) {
+        ExclusiveGroupDefinition copy = *definition;
+        copy.untranslated = !is_translation_domain_available(copy.translation_domain, copy.package_root);
+        elected.emplace(key, std::move(copy));
+    }
+    m_elected_group_definitions.swap(elected);
+}
+
+const Orchestrator::ExclusiveGroupDefinition *Orchestrator::active_member_group_definition(slicing_step_t step, const std::string &group) const
+{
+    const std::pair<slicing_step_t, std::string> key {step, group};
+    if (m_step_selectors.find(key) != m_step_selectors.end()) return nullptr;
+    const std::map<std::pair<slicing_step_t, std::string>, std::map<std::string, ExclusiveGroupDefinition>>::const_iterator definitions =
+        m_group_declarations.find(key);
+    if (definitions == m_group_declarations.end()) return nullptr;
+    std::vector<Plugin *> candidates;
+    for (Plugin *plugin : get_active_plugins_for_step(step))
+        if (plugin->get_exclusive_group() == group && definitions->second.find(plugin->get_id()) != definitions->second.end())
+            candidates.push_back(plugin);
+    if (candidates.empty())
+        for (Plugin *plugin : registered_plugins())
+            if (plugin->get_step() == step && plugin->get_exclusive_group() == group &&
+                definitions->second.find(plugin->get_id()) != definitions->second.end())
+                candidates.push_back(plugin);
+    const Plugin *best = Steps::default_provider_from_group(candidates);
+    return best != nullptr ? &definitions->second.find(best->get_id())->second : nullptr;
+}
+
+void Orchestrator::register_selector_option(const std::string &key, const SelectorIdentity &identity, bool auto_enabled)
+{
+    if (key.empty() || identity.step == STEP_NONE || identity.step == STEP_ANY ||
+        (identity.kind == SelectorIdentityKind::WholeStep && !identity.group.empty()) ||
+        (identity.kind == SelectorIdentityKind::PluginGroup && identity.group.empty()) ||
+        (identity.kind != SelectorIdentityKind::WholeStep && identity.kind != SelectorIdentityKind::PluginGroup))
+        throw std::invalid_argument("Invalid selector identity");
+    const std::map<std::string, SelectorIdentity>::const_iterator found = m_selector_key_owners.find(key);
+    if (found != m_selector_key_owners.end() && !same_selector_identity(found->second, identity))
+        throw std::invalid_argument("Selector key belongs to another identity");
+    const bool added = found == m_selector_key_owners.end();
+    if (added) m_selector_key_owners.emplace(key, identity);
+    try {
+        if (auto_enabled) m_auto_selector_keys.insert(key);
+        else m_auto_selector_keys.erase(key);
+    } catch (...) { if (added) m_selector_key_owners.erase(key); throw; }
+}
+
+bool Orchestrator::selector_auto_enabled(const std::string &key) const
+{
+    return m_auto_selector_keys.find(key) != m_auto_selector_keys.end();
+}
+
+void Orchestrator::record_plugin_initialization_failure(const char *reason) noexcept
+{
+    if (m_initializing_plugin == nullptr || m_initializing_plugin_failed) return;
+    m_initializing_plugin_failed = true;
+    try {
+        if (m_initializing_plugin_failure.empty())
+            m_initializing_plugin_failure = reason != nullptr && *reason ? reason : "Plugin initialization failed";
+        add_plugin_message(PluginMessageLevel::Error, m_initializing_plugin, m_initializing_plugin->get_step(),
+                           m_initializing_plugin_failure.c_str());
+    } catch (...) {
+        try { BOOST_LOG_TRIVIAL(error) << "Cannot allocate plugin initialization diagnostic."; } catch (...) {}
+    }
+}
+
+int32_t Orchestrator::register_selector_auto_choice(SelectorAutoChoice choice)
+{
+    if (choice.step == STEP_NONE || choice.step == STEP_ANY || choice.exclusive_group.empty() ||
+        choice.condition_key.empty() || choice.condition_value.empty() || choice.provider_id.empty()) {
+        const std::string reason = "Invalid automatic selector preference: step " + std::to_string(int(choice.step)) +
+            ", group '" + choice.exclusive_group + "', condition '" + choice.condition_key + "=" + choice.condition_value +
+            "', provider '" + choice.provider_id + "'";
+        record_plugin_initialization_failure(reason.c_str());
+        return -1;
+    }
+    for (const SelectorAutoChoice &existing : m_selector_auto_choices) {
+        if (std::tie(existing.step, existing.exclusive_group, existing.condition_key, existing.condition_value) !=
+            std::tie(choice.step, choice.exclusive_group, choice.condition_key, choice.condition_value)) continue;
+        if (existing.provider_id == choice.provider_id) return 0;
+        const std::string reason = "Conflicting automatic selector preference: step " + std::to_string(int(choice.step)) +
+            ", group '" + choice.exclusive_group + "', condition '" + choice.condition_key + "=" + choice.condition_value +
+            "', provider '" + choice.provider_id + "'";
+        record_plugin_initialization_failure(reason.c_str());
+        return -2;
+    }
+    m_selector_auto_choices.push_back(std::move(choice));
+    return 1;
+}
+
+const std::vector<SelectorAutoChoice> &Orchestrator::selector_auto_choices() const
+{
+    return m_selector_auto_choices;
 }
 
 // Check exact membership in the host-only registry; a whole-step fallback does not declare a named group.
@@ -872,8 +1164,6 @@ Orchestrator &Orchestrator::instance() {
     return s_instance;
 }
 
-// Validate the instance, create host-owned storage, and publish its metadata.
-// Registration failure does not publish a partially constructed plugin.
 bool Orchestrator::register_plugin(plugin_instance plugin) {
     const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     std::unique_ptr<Plugin> new_plugin;
@@ -910,7 +1200,31 @@ bool Orchestrator::register_plugin(plugin_instance plugin) {
         }
         return false;
     }
-    m_registered_plugins.emplace_back(std::move(new_plugin));
+    const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &whole = Steps::get_exclusive_steps();
+    const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator whole_it = whole.find(new_plugin->get_step());
+    const std::string effective_group = whole_it != whole.end() ? whole_it->second.key : new_plugin->get_exclusive_group();
+    for (const std::unique_ptr<Plugin> &member : m_registered_plugins) {
+        if (member->get_step() != new_plugin->get_step() || effective_group.empty()) continue;
+        const std::string member_group = whole_it != whole.end() ? whole_it->second.key : member->get_exclusive_group();
+        if (member_group == effective_group && member->get_priority() != new_plugin->get_priority()) {
+            const std::string reason = "Exclusive group '" + effective_group + "' has incompatible execution priorities: '" +
+                member->get_id() + "'=" + std::to_string(member->get_priority()) + ", '" + new_id + "'=" +
+                std::to_string(new_plugin->get_priority());
+            BOOST_LOG_TRIVIAL(error) << reason;
+            if (!m_plugin_registration_sources.empty() && m_plugin_registration_sources.back().external_plugin) {
+                PluginPackageLoadIssue issue;
+                issue.code = PluginPackageLoadErrorCode::RegistrationFailed;
+                issue.plugin_id = new_id;
+                issue.detail = reason;
+                report_plugin_package_load_issue(m_plugin_registration_sources.back().package_id, std::move(issue));
+            }
+            return false;
+        }
+    }
+    const bool has_source = !m_plugin_registration_sources.empty();
+    if (has_source) m_plugin_sources.emplace(new_id, m_plugin_registration_sources.back());
+    try { m_registered_plugins.emplace_back(std::move(new_plugin)); }
+    catch (...) { if (has_source) m_plugin_sources.erase(new_id); throw; }
     if (!m_plugin_registration_sources.empty() &&
         m_plugin_registration_sources.back().external_plugin) {
         PluginPackageLoadReport &report = m_plugin_package_load_reports[
@@ -947,6 +1261,23 @@ void Orchestrator::report_plugin_package_load_issue(const std::string &package_i
     report.package_id = package_id;
     report.issues.push_back(std::move(issue));
     update_plugin_package_load_state(report);
+}
+
+void Orchestrator::report_internal_plugin_warning(const std::string &plugin_id, const std::string &message)
+{
+    const Plugin *plugin = get_plugin(plugin_id);
+    if (plugin == nullptr || message.empty()) return;
+    const std::map<std::string, PluginRegistrationSource>::const_iterator source = m_plugin_sources.find(plugin_id);
+    if (source != m_plugin_sources.end() && !source->second.package_id.empty()) {
+        PluginPackageLoadReport &report = m_plugin_package_load_reports[source->second.package_id];
+        if (std::find(report.warnings.begin(), report.warnings.end(), message) != report.warnings.end()) return;
+        report.package_id = source->second.package_id;
+        report.package_path = source->second.package_root;
+        report.warnings.push_back(message);
+        update_plugin_package_load_state(report);
+    }
+    add_plugin_message(PluginMessageLevel::Warning, plugin, plugin->get_step(), message.c_str());
+    BOOST_LOG_TRIVIAL(warning) << message;
 }
 
 // Complete a report and synthesize the no-plugin error when the package is not allowed to be empty.
@@ -1803,8 +2134,48 @@ bool Orchestrator::validate_plugin_activation(const std::vector<std::string> &pl
     return true;
 }
 
-// Validate a non-null borrowed definition before copying it into the global catalogue; reject invalid metadata or incompatible ownership with an error code and diagnose conflicting definitions, while allocation failures propagate.
 option_def_error_code Orchestrator::create_new_print_config(const raw_config_option_def *def) {
+    if (def == nullptr || def->opt_key == nullptr) return OPTION_DEF_ERROR_INVALID_ARGUMENT;
+    if (m_initializing_plugin != nullptr && m_selector_key_owners.find(def->opt_key) != m_selector_key_owners.end()) {
+        const SelectorIdentity &identity = m_selector_key_owners.find(def->opt_key)->second;
+        const std::string reason = "Option '" + std::string(def->opt_key) + "' belongs to selector step " +
+            std::to_string(int(identity.step)) + ", group '" + identity.group + "'";
+        record_plugin_initialization_failure(reason.c_str());
+        return OPTION_DEF_ERROR_ALREADY_EXISTS;
+    }
+    return create_print_config_impl(def, m_initializing_plugin != nullptr ? m_initializing_plugin->get_package_root() : std::string());
+}
+
+option_def_error_code Orchestrator::create_selector_print_config(const raw_config_option_def &def,
+    const SelectorIdentity &identity, bool auto_enabled)
+{
+    if (def.opt_key == nullptr || !*def.opt_key) return OPTION_DEF_ERROR_INVALID_ARGUMENT;
+    if (m_selector_key_owners.find(def.opt_key) == m_selector_key_owners.end() && PrintConfigDef::instance().get(def.opt_key) != nullptr)
+        return OPTION_DEF_ERROR_ALREADY_EXISTS;
+    const std::string group = identity.kind == SelectorIdentityKind::WholeStep ? def.opt_key : identity.group;
+    const ExclusiveGroupDefinition *retained = exclusive_group_definition(identity.step, group);
+    const std::string root = retained != nullptr ? retained->package_root : std::string();
+    std::string domain = retained != nullptr ? retained->translation_domain : "Slic3r";
+    if (retained != nullptr && !retained->plugin_id.empty() && retained->untranslated) {
+        report_internal_plugin_warning(retained->plugin_id,
+            "Package '" + retained->package_id + "', plugin '" + retained->plugin_id + "', group '" + group +
+            "': translation domain '" + domain + "' has no catalogue for this package; selector texts remain untranslated.");
+        domain.clear();
+    }
+    raw_config_option_def resolved = def;
+    resolved.translation_domain = domain.c_str();
+    std::map<std::string, SelectorIdentity> saved_owners = m_selector_key_owners;
+    std::set<std::string> saved_auto = m_auto_selector_keys;
+    register_selector_option(def.opt_key, identity, auto_enabled);
+    try {
+        const option_def_error_code result = create_print_config_impl(&resolved, root, true,
+            retained != nullptr && retained->untranslated);
+        if (result != OPTION_DEF_ERROR_OK) { m_selector_key_owners.swap(saved_owners); m_auto_selector_keys.swap(saved_auto); }
+        return result;
+    } catch (...) { m_selector_key_owners.swap(saved_owners); m_auto_selector_keys.swap(saved_auto); throw; }
+}
+
+option_def_error_code Orchestrator::create_print_config_impl(const raw_config_option_def *def, const std::string &package_root, bool explicit_domain, bool untranslated) {
     // VOLATILE contains all four withdrawal bits, so this bound rejects exactly the unknown bits.
     if (def->nature > RAW_CONFIG_NATURE_VOLATILE)
         return OPTION_DEF_ERROR_INVALID_ARGUMENT;
@@ -1815,11 +2186,12 @@ option_def_error_code Orchestrator::create_new_print_config(const raw_config_opt
 
     const bool has_explicit_translation_domain =
         def->translation_domain != nullptr && def->translation_domain[0] != '\0';
-    const std::string translation_domain = this->resolved_translation_domain(def->translation_domain);
+    const std::string translation_domain = explicit_domain ?
+        (def->translation_domain != nullptr ? def->translation_domain : "") : this->resolved_translation_domain(def->translation_domain);
     if (has_explicit_translation_domain &&
         !this->is_translation_domain_available(
             translation_domain,
-            m_initializing_plugin != nullptr ? m_initializing_plugin->get_package_root() : std::string()))
+            package_root))
         return OPTION_DEF_ERROR_INVALID_ARGUMENT;
 
     //PrintOptionPresetType preset_type = static_cast<PrintOptionPresetType>(def->option_preset_type);
@@ -1840,6 +2212,7 @@ option_def_error_code Orchestrator::create_new_print_config(const raw_config_opt
     if (const ConfigOptionDef *existing = PrintConfigDef::instance().get(def->opt_key)) {
         ConfigOptionDef candidate;
         populate_config_option_def_from_raw(candidate, def, translation_domain);
+        candidate.untranslated = untranslated;
 
         std::string reason;
         if (config_option_def_compatible(*existing, candidate, &reason)) {
@@ -1892,6 +2265,7 @@ option_def_error_code Orchestrator::create_new_print_config(const raw_config_opt
 
     ConfigOptionDef &out = *PrintConfigDef::instance_mutable().add(def->opt_key, type);
     populate_config_option_def_from_raw(out, def, translation_domain);
+    out.untranslated = untranslated;
 
     // GUI activation rules may have been registered before this definition.
     // Attach the queued rules now that the setting exists.
@@ -1969,6 +2343,34 @@ PluginEnumValues option_def_enum_values(const ConfigOptionDef &def)
 
 } // namespace
 
+void Orchestrator::finalize_selector_option(ConfigOptionDef &definition, const SelectorIdentity &identity, bool auto_enabled) const
+{
+    if (identity.step == STEP_NONE || identity.step == STEP_ANY ||
+        (identity.kind == SelectorIdentityKind::WholeStep && !identity.group.empty()) ||
+        (identity.kind == SelectorIdentityKind::PluginGroup && identity.group.empty()) ||
+        (identity.kind != SelectorIdentityKind::WholeStep && identity.kind != SelectorIdentityKind::PluginGroup))
+        throw std::invalid_argument("Invalid selector identity");
+    PluginEnumValues values = option_def_enum_values(definition);
+    values.erase(std::remove_if(values.begin(), values.end(),
+        [this, auto_enabled](const std::pair<std::string, std::string> &entry) {
+            if (entry.first == SLIC3R_SELECTOR_AUTO_VALUE && auto_enabled) return false;
+            const Plugin *plugin = get_plugin(entry.first);
+            return plugin == nullptr || !is_plugin_active(plugin);
+        }), values.end());
+    std::vector<Plugin *> candidates;
+    for (Plugin *plugin : get_active_plugins_for_step(identity.step)) {
+        if (identity.kind == SelectorIdentityKind::PluginGroup && plugin->get_exclusive_group() != identity.group) continue;
+        if (plugin_enum_has_value(values, plugin->get_id())) candidates.push_back(plugin);
+    }
+    const Plugin *preferred = Steps::default_provider_from_group(candidates);
+    const std::string desired = auto_enabled ? SLIC3R_SELECTOR_AUTO_VALUE : preferred != nullptr ? preferred->get_id() : std::string();
+    definition.set_enum_as_closed_for_scripted_enum(values);
+    std::unique_ptr<ConfigOption> value(definition.create_empty_option());
+    if (!desired.empty() && !value->deserialize(desired))
+        throw std::invalid_argument("Selector default is absent from its enum");
+    definition.set_default_value(value.release());
+}
+
 // Record one deferred option definition patch. Nothing is applied until
 // finalize_plugin_option_defs() runs, so patches stay valid when a target key is
 // created by a later plugin.
@@ -2024,9 +2426,6 @@ option_def_error_code Orchestrator::modify_print_config(const raw_option_def_pat
     return OPTION_DEF_ERROR_OK;
 }
 
-// Tighten the invalidation of settings read by active plugins, then apply every
-// recorded patch in dependency order, prune plugin-id lists and rebuild the
-// scripted enum maps. Missing target keys are ignored.
 void Orchestrator::finalize_plugin_option_defs()
 {
     ConfigDef &definition = PrintConfigDef::instance_mutable();
@@ -2157,7 +2556,8 @@ void Orchestrator::finalize_plugin_option_defs()
             if (contains_plugin_id) {
                 effect.erase(
                     std::remove_if(effect.begin(), effect.end(),
-                                   [this](const std::pair<std::string, std::string> &entry) {
+                                   [this, &key](const std::pair<std::string, std::string> &entry) {
+                                       if (entry.first == SLIC3R_SELECTOR_AUTO_VALUE && selector_auto_enabled(key)) return false;
                                        const Plugin *plugin = this->get_plugin(entry.first);
                                        return plugin == nullptr || !this->is_plugin_active(plugin);
                                    }),
@@ -2184,21 +2584,26 @@ void Orchestrator::finalize_plugin_option_defs()
                     if (!desired.empty() && desired.front() == '!')
                         desired.erase(desired.begin());
 
+                    const std::map<std::string, SelectorIdentity>::const_iterator owner = m_selector_key_owners.find(key);
                     def->set_enum_as_closed_for_scripted_enum(effect);
 
-                    if (!plugin_enum_has_value(effect, desired))
-                        desired = effect.empty() ? std::string() : effect.front().first;
-
-                    if (!desired.empty()) {
-                        ConfigOption *default_option = def->create_empty_option();
-                        if (default_option->deserialize(desired))
-                            def->set_default_value(default_option);
-                        else
-                            delete default_option;
+                    if (owner != m_selector_key_owners.end()) {
+                        finalize_selector_option(*def, owner->second, selector_auto_enabled(key));
                     } else {
-                        // The rebuilt list is empty: replace the default too so
-                        // it does not keep borrowing the released map.
-                        def->set_default_value(def->create_empty_option());
+                        if (!plugin_enum_has_value(effect, desired))
+                            desired = effect.empty() ? std::string() : effect.front().first;
+
+                        if (!desired.empty()) {
+                            ConfigOption *default_option = def->create_empty_option();
+                            if (default_option->deserialize(desired))
+                                def->set_default_value(default_option);
+                            else
+                                delete default_option;
+                        } else {
+                            // The rebuilt list is empty: replace the default too so
+                            // it does not keep borrowing the released map.
+                            def->set_default_value(def->create_empty_option());
+                        }
                     }
                 } else {
                     BOOST_LOG_TRIVIAL(warning)
@@ -2613,7 +3018,6 @@ std::string Orchestrator::export_gcode(Print &print,
     return path;
 }
 
-// Initialize active plugins and then validate their read-side configuration contracts.
 void Orchestrator::initialize_plugins() {
     for (const std::unique_ptr<Plugin> &plugin_ptr : m_registered_plugins) {
         if (this->is_plugin_active(plugin_ptr.get())) {
@@ -2626,7 +3030,11 @@ void Orchestrator::initialize_plugins() {
             m_initializing_plugin = plugin_ptr.get();
             m_initializing_plugin_failed = false;
             m_initializing_plugin_failure.clear();
-            plugin_ptr->initialize(reinterpret_cast<storage_handle *>(&m_plugin_storage[plugin_ptr.get()]));
+            const int32_t result = plugin_ptr->initialize(reinterpret_cast<storage_handle *>(&m_plugin_storage[plugin_ptr.get()]));
+            if (result != PLUGIN_ERROR_OK && !m_initializing_plugin_failed) {
+                const std::string message = error_message(result);
+                record_plugin_initialization_failure(message.c_str());
+            }
             if (m_initializing_plugin_failed) {
                 this->set_plugin_active(plugin_ptr.get(), false);
                 BOOST_LOG_TRIVIAL(error) << "Disabled plugin '" << plugin_ptr->get_id()

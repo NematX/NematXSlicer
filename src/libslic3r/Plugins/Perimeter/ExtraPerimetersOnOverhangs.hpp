@@ -42,6 +42,8 @@ private:
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
+    // Prefer this algorithm among alternatives for extra overhang perimeters.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     int32_t defined_config_keys(const char **keys) const noexcept override;
     void inilialize_impl(storage_handle *) const override;

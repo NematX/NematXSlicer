@@ -172,10 +172,11 @@ private:
     const char *name_impl() const noexcept override { return "Random"; }
     const char *description_impl() const noexcept override { return "Reproducible random seams respecting painted and volume constraints, with optional inner seam alignment."; }
     const char *exclusive_group_impl() const noexcept override { return "seam_placer_plugin"; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Seam placement"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override { return "Selects the service used to choose the starting point of closed extrusion loops."; }
     slicing_step_t step_impl() const noexcept override { return SEAM_PLACER; }
-    int32_t priority_impl() const noexcept override { return 1000; }
+    // Return the common seam execution priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 600; }
+    // Return this seam algorithm's preference. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 40; }
     const char *const *dependencies_impl() const noexcept override { static const char *const dependencies[]={nullptr}; return dependencies; }
     /* Register both visible booleans and the object-only seed definition. */
     void inilialize_impl(storage_handle *) const override;

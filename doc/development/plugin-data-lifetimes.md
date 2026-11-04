@@ -857,8 +857,9 @@ Sources: `src/libslic3r/Api/host/GCodeScriptProcessor.cpp:181`, `src/libslic3r/A
 
 | Storage | Copy or borrow | Lifetime / editing |
 |---|---|---|
-| `Plugin::{m_id,m_name,m_description,m_exclusive_group,m_exclusive_group_label,m_exclusive_group_tooltip,m_dependencies,m_used_config_keys,m_defined_config_keys}` | Owned copies of the provider's responses | Plugin catalog, not a checkpoint output |
-| `Plugin::m_c_api::{ctx,vt}` | Retained provider pointers | Must outlive the calls; no implicit owner of provider memory |
+| `Plugin::{m_id,m_name,m_description,m_exclusive_group,m_exclusive_group_priority,m_dependencies,m_used_config_keys,m_defined_config_keys}` | Owned copies of the provider's responses | Plugin catalog, not a checkpoint output |
+| `Orchestrator::m_elected_group_definitions` | Owned complete group text, traits, declaring-member domain, untranslated marker and authenticated package id/root | Retained for the selector generation; later activation changes do not re-elect its definition. A missing package catalogue marks both retained text and generated options for verbatim display, bypassing default/foreign catalogues, and records a package warning |
+| `Plugin::m_c_api::{ctx,vt}` | Borrowed provider context and pointer to the host-owned normalized callback table | Context and callback code must outlive calls; the host does not own provider memory |
 | ABI structures `struct_size`, enums, flags, IDs, callbacks | Copied values or function pointers depending on the field | No slicing freeze of their own; respect the lifetime of the designated table/session |
 | `c_medial_axis_extrusion_params` | Owned scalar parameters; `extension_area` is a borrow | The operation produces an extrusion in the requested storage; does not extend the lifetime of the borrowed area |
 

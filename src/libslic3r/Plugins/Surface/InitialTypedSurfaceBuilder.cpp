@@ -50,6 +50,10 @@ infill generator consumes them to create extrusions.
 */
 
 namespace slic3r_api { namespace SurfaceGeneration { namespace InitialTypedSurfaceBuilderPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_initial_typed_surface_builder_plugin(orchestrator_handle *orch);
+
 namespace {
 
 const char *k_initial_typed_surface_builder_id = "surface.initial_typed_surface_builder";
@@ -317,16 +321,6 @@ const char *InitialTypedSurfaceBuilder::exclusive_group_impl() const noexcept
     return k_surface_generation_group;
 }
 
-const char *InitialTypedSurfaceBuilder::exclusive_group_label_impl() const noexcept
-{
-    return "Surface generation plugin";
-}
-
-const char *InitialTypedSurfaceBuilder::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Choose which active plugin converts perimeter fill areas into infill surfaces.";
-}
-
 slicing_step_t InitialTypedSurfaceBuilder::step_impl() const noexcept
 {
     return STEP_SURFACE_GENERATION;
@@ -380,6 +374,12 @@ void InitialTypedSurfaceBuilder::run_impl(const plugin_run_context *run_ctx) con
 void register_initial_typed_surface_builder_plugin(orchestrator_handle *orch)
 {
     orchestrator_register_plugin(orch, InitialTypedSurfaceBuilder::instance(orch).c_instance());
+    const plugin_instance member = InitialTypedSurfaceBuilder::instance(orch).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Surface generation plugin";
+    definition.tooltip = "Choose which active plugin converts perimeter fill areas into infill surfaces.";
+    InitialTypedSurfaceBuilder::instance(orch).register_exclusive_group(STEP_SURFACE_GENERATION, definition);
 }
 
 }}} // namespace slic3r_api::SurfaceGeneration::InitialTypedSurfaceBuilderPlugin

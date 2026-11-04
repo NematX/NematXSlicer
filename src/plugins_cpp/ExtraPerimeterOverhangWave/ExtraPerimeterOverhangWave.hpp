@@ -3,6 +3,20 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
+/* This header exposes the plugin that grows extra overhang perimeters as waves.
+   A perimeter is a part-boundary extrusion. An overhang extends beyond the
+   layer below; this plugin grows extra paths connected to supported material.
+
+   The host is the slicer application. Use ExtraPerimeterOverhangWave::instance()
+   with its manager reference, then register the inherited c_instance().
+   exclusive_group_ui_fragment() describes settings-window placement. The
+   selector setting chooses this or the shrink-based alternative for the same job.
+
+   PluginBase adapts the C++ object to application-callable functions. Its
+   inilialize_impl(), setup_run_impl() and run_impl() overrides install window layout,
+   prepare work and execute it in that order. priority_impl() orders execution
+   relative to other jobs; exclusive_group_priority_impl() separately ranks
+   alternatives. */
 #ifndef plugins_cpp_extraperimeteroverhangwave_hpp_
 #define plugins_cpp_extraperimeteroverhangwave_hpp_
 
@@ -28,11 +42,12 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
+    // Return the priority shared by overhang algorithms before other post-perimeter jobs; no state or ownership changes, and no failures occur.
     int32_t priority_impl() const noexcept override;
+    // Prefer the shrink-based alternative when both overhang algorithms are enabled.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 10; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     const char *progress_message_format_impl() const noexcept override;
     void inilialize_impl(storage_handle *storage) const override;

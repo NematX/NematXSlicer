@@ -35,6 +35,8 @@ public:
 
 private:
     void build();
+    // Copy borrowed plugin descriptions and retained group text into dialog-owned entries, preserving text marked verbatim.
+    // Application data is unchanged, and allocation failures propagate.
     void build_catalog();
     // Build navigation entries for built-in producer and service steps.
     void build_navigation();

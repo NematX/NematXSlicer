@@ -5,8 +5,27 @@
 #ifndef slic3r_Orchestrator_hpp_
 #define slic3r_Orchestrator_hpp_
 
-/* The host owns plugin registrations and copied selector declarations. Step modules install host
-   traits during construction; lookups borrow an exact group or whole-step entry without touching print data. */
+/* This header exposes plugin registration, selection settings and job execution.
+   The host is the slicer application. Orchestrator is its process-wide manager
+   of plugins, components that perform jobs at processing stages called steps.
+
+   Use instance(), plugin_registration_scope() and register_plugin() to introduce
+   instances under an installed package directory. PluginRegistrationScope ends
+   that association when destroyed. Registration does not enable an instance.
+
+   An exclusive group holds alternative plugins for one step. Its selector is
+   a setting naming a member. ExclusiveGroupDefinition combines text and package
+   identity with StepSelectorTraits, its placement and selection rules. Register
+   descriptions, enable members, then elect_exclusive_group_definitions() and
+   create_selector_print_config() retain descriptions and create settings.
+   finalize_selector_option() filters choices without replacing their text.
+   exclusive_group_definition_or_default() reads the retained description;
+   its untranslated flag requires verbatim display without catalogue lookup.
+
+   initialize_plugins() reads initialization result codes before execute_plugin()
+   prepares and runs callable jobs. Contexts passed to plugin functions borrow
+   application data for those calls only. Package reports and execution diagnostics
+   distinguish non-fatal warnings from failures. */
 
 #include <atomic>
 #include <cassert>
@@ -39,6 +58,7 @@
 namespace Slic3r {
 
 class Orchestrator;
+class ConfigOptionDef;
 class Print;
 struct GCodeProcessorResult;
 class MultiPoint;
@@ -168,6 +188,8 @@ struct PluginPackageLoadReport
     bool allows_no_plugins = false;
     std::vector<std::string> registered_plugin_ids;
     std::vector<PluginPackageLoadIssue> issues;
+    // Non-fatal package diagnostics; warnings do not change compatibility or the load result.
+    std::vector<std::string> warnings;
 };
 
 class Orchestrator
@@ -371,6 +393,8 @@ public:
 
     // Validate and copy a plugin definition; compatible duplicates are unrestricted outside plugin initialization.
     // During initialization, duplicates require the same plugin owner or the same non-empty exclusive group.
+    // Copy under the initializer's package identity; reserved selector keys are rejected and initialization failure is recorded.
+    // Inputs remain caller-owned, print data is unchanged, and allocations may throw.
     option_def_error_code create_new_print_config(const raw_config_option_def *def);
 
     // Record a deferred option definition patch. Nothing is applied until
@@ -384,9 +408,11 @@ public:
     // scripted enum maps. Missing target keys are ignored. A plugin-id list
     // that becomes empty reports a non-fatal plugin error and stays empty.
     // Runs once, after initialize_plugins() and before PrintConfigDef::finalize().
+    // Recompute selector defaults without choosing new descriptions; rebuilt storage is application-owned and allocations may throw.
     void finalize_plugin_option_defs();
 
-    // Register a plugin instance and transfer its lifetime to the orchestrator.
+    // Check table size and equal execution priority among alternatives, then register a borrowed plugin with copied package identity.
+    // Rejection leaves it unregistered; print data is unchanged, and allocations may throw.
     bool register_plugin(plugin_instance plugin);
 
     // Register and query plugin-defined service steps. Runtime ids are scoped
@@ -399,13 +425,67 @@ public:
     const DynamicStepInfo *step_info(const char *namespaced_name) const;
 
     // Copy host selector traits; return 1 added, 0 identical, -1 invalid, or -2 conflicting declaration.
+    // Existing declarations and print data are unchanged on rejection; allocations may throw.
     int32_t register_builtin_step_selector(slicing_step_t step, StepSelectorTraits traits);
-    // Borrow exact host group traits, then whole-step traits, or null when neither is declared.
+    // Borrow retained rules for a named group, then stage-wide rules, or null when neither exists.
+    // Any election or register_builtin_exclusive_group() call may invalidate the borrowed pointer; temporary-key allocation may throw.
     const StepSelectorTraits *step_selector(slicing_step_t step, const std::string &exclusive_group) const;
     // Check whether this exact step/group has a protected host declaration, without whole-step fallback.
     bool step_selector_is_builtin(slicing_step_t step, const std::string &exclusive_group) const;
     // Borrow the layout filenames accepted by selector declarations and searched for fragments.
     static const std::vector<std::string> &ui_layout_files();
+
+    enum class SelectorIdentityKind { WholeStep, PluginGroup };
+    struct SelectorIdentity {
+        SelectorIdentityKind kind = SelectorIdentityKind::PluginGroup;
+        slicing_step_t step = STEP_NONE;
+        std::string group;
+    };
+    struct ExclusiveGroupDefinition {
+        StepSelectorTraits traits;
+        bool untranslated = false;
+        std::string label, tooltip, translation_domain, plugin_id, package_id, package_root;
+        // Optional host layout line text; empty preserves the caller's whole-step identity line.
+        std::string line_label;
+    };
+    // Copy an application-supplied group description and reserve its key together; return added, identical or rejected status.
+    // Plugins and print data are unchanged; allocation failures preserve existing descriptions.
+    int32_t register_builtin_exclusive_group(slicing_step_t step, ExclusiveGroupDefinition definition);
+    // Check the named member's loading package and copy its group description.
+    // The application owns copied text, package identity and key; invalid input changes nothing, and allocations may throw.
+    int32_t record_exclusive_group_declaration(slicing_step_t step, ExclusiveGroupDefinition definition);
+    // Borrow the retained group description without choosing another member's text.
+    // Any election or register_builtin_exclusive_group() call may invalidate the pointer; activation is not checked again, and key allocation may throw.
+    const ExclusiveGroupDefinition *exclusive_group_definition(slicing_step_t step, const std::string &group) const;
+    // Copy a retained description, or default group text and setting rules when none exists.
+    // No member is chosen again; group ids supply missing labels, returned strings are owned, and allocations may throw.
+    ExclusiveGroupDefinition exclusive_group_definition_or_default(slicing_step_t step, const std::string &group) const;
+    // Retain group descriptions, preferring enabled members that supplied them before considering disabled members.
+    // Text without a package catalogue stays verbatim; swap completed copies so allocation failure preserves previous descriptions.
+    void elect_exclusive_group_definitions();
+    // Retain one group's preferred description without changing other groups.
+    // Use the complete build's ordering and translation policy; allocation failures preserve its previous description.
+    void elect_exclusive_group_definition(slicing_step_t step, const std::string &group);
+    // Record which stage and group own a selector key and whether it permits automatic selection.
+    // Copy strings without taking plugin ownership; invalid identities throw, and allocation failure removes an incomplete insertion.
+    void register_selector_option(const std::string &key, const SelectorIdentity &identity, bool auto_enabled);
+    // Remove unavailable selector choices and update the default without changing the retained description.
+    // Preserve choice order in the caller-owned description; text and application records are unchanged, and allocations may throw.
+    void finalize_selector_option(ConfigOptionDef &definition, const SelectorIdentity &identity, bool auto_enabled) const;
+    // Check whether a registered selector permits automatic selection without changing the borrowed key or stored data.
+    bool selector_auto_enabled(const std::string &key) const;
+    // Copy a setting key/value condition and preferred member in registration order.
+    // Return added, identical or rejected status; rejection records initializer failure, earlier choices survive, and allocations may throw.
+    int32_t register_selector_auto_choice(SelectorAutoChoice choice);
+    // Borrow stored automatic-selection choices in registration order without mutation or failure; insertion may invalidate iterators.
+    const std::vector<SelectorAutoChoice> &selector_auto_choices() const;
+    // Copy the current initializer's first failure and queue its explanation once; calls outside initialization do nothing.
+    // Caller ownership and plugin ownership are unchanged, and allocation failures cannot escape.
+    void record_plugin_initialization_failure(const char *reason) noexcept;
+    // Create a selector using its retained description, package identity and translation policy.
+    // Missing catalogues keep text verbatim and queue a warning; failure removes new selector records but preserves key reservations.
+    option_def_error_code create_selector_print_config(const raw_config_option_def &def,
+        const SelectorIdentity &identity, bool auto_enabled);
 
     // Execute the normal setup/setup_run/run lifecycle for one plugin. The
     // payload array remains owned by the caller for the duration of this call.
@@ -544,7 +624,8 @@ public:
     // Clear cancellation and the recorded cause before starting an independent operation.
     // Called between runs, never while plugin workers are running.
     void reset_plugin_cancel();
-    // Initialize active plugins after registration and activation are finalized.
+    // Initialize enabled plugins with borrowed storage, resolve diagnostic ids and disable failures without repeating recorded rejections.
+    // Then validate required settings; plugin ownership is unchanged, and allocation failures may propagate.
     void initialize_plugins();
     // Register a custom property descriptor and return its runtime type ID.
     slic3r_property_type register_property(const char *namespaced_name,
@@ -597,6 +678,9 @@ private:
     void end_plugin_registration_scope();
     // Resolve an optional plugin domain to the host domain.
     std::string resolved_translation_domain(const char *requested_domain) const;
+    // Copy and log a warning under the member's recorded package without a live loading scope, ignoring duplicate text.
+    // The plugin stays borrowed and load errors are unchanged; allocations may throw.
+    void report_internal_plugin_warning(const std::string &plugin_id, const std::string &message);
     // Check whether a domain is available from the given package root.
     bool is_translation_domain_available(const std::string &domain, const std::string &package_root) const;
     // Reserve a host-defined runtime ID and reject conflicting mappings.
@@ -617,12 +701,28 @@ private:
     std::map<std::string, std::vector<OptionDefPatch>> m_option_def_patches;
     std::vector<TranslationCatalog> m_translation_catalogs;
     std::vector<PluginRegistrationSource> m_plugin_registration_sources;
+    std::map<std::string, PluginRegistrationSource> m_plugin_sources;
     std::map<std::string, PluginPackageLoadReport> m_plugin_package_load_reports;
     std::vector<PropertyInfo> m_custom_property_infos;
     slic3r_property_type m_next_custom_property_type { SLIC3R_PROPERTY_TYPE_CUSTOM_BEGIN };
     std::map<slicing_step_t, DynamicStepInfo> m_dynamic_step_infos;
     // This registry contains only copied host declarations; membership records host provenance.
     std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits> m_step_selectors;
+    std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition> m_host_groups;
+    std::map<std::pair<slicing_step_t, std::string>, std::map<std::string, ExclusiveGroupDefinition>> m_group_declarations;
+    std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition> m_elected_group_definitions;
+    std::map<std::string, SelectorIdentity> m_selector_key_owners;
+    std::set<std::string> m_auto_selector_keys;
+    std::vector<SelectorAutoChoice> m_selector_auto_choices;
+    // Borrow the preferred enabled member's description, or a registered member's description if none is enabled.
+    // Application descriptions take precedence; stored data is unchanged, and temporary allocations may throw.
+    const ExclusiveGroupDefinition *active_member_group_definition(slicing_step_t step, const std::string &group) const;
+    // Check a description and reserve its explicit or generated key without creating a setting.
+    // Stage-wide settings reserve no empty-group key; conflicts return errors, and allocation failures preserve existing reservations.
+    int32_t reserve_selector_key(slicing_step_t step, const StepSelectorTraits &traits, bool public_declaration);
+    // Copy a checked setting description using its package identity and requested translation policy.
+    // explicit_domain keeps the catalogue name and untranslated forbids lookup; conflicts return errors without replacement, and allocations may throw.
+    option_def_error_code create_print_config_impl(const raw_config_option_def *def, const std::string &package_root, bool explicit_domain = false, bool untranslated = false);
     uint32_t m_next_dynamic_step { uint32_t(SLICING_STEP_CUSTOM_BEGIN) };
     std::map<std::string, RuntimeIdRegistry> m_runtime_id_registries;
     std::vector<GenericFacetsAnnotationDefinition> m_generic_facets_annotations;

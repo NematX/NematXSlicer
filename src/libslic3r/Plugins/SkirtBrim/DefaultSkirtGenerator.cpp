@@ -62,6 +62,10 @@ ordering.
 */
 
 namespace slic3r_api { namespace SkirtBrim { namespace DefaultSkirtGeneratorPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_skirt_generator_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 const char *const k_no_dependencies[] = { nullptr };
@@ -855,11 +859,6 @@ private:
         return "Generates the classic skirt and first-layer skirt-brim loops using only the plugin API.";
     }
     const char *exclusive_group_impl() const noexcept override { return k_group_id; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Skirt generator"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects which plugin generates skirt extrusion around the first-layer envelope.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_SKIRT_BRIM; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 100; }
@@ -899,6 +898,12 @@ private:
 void register_default_skirt_generator_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(orchestrator, DefaultSkirtGenerator::instance(orchestrator).c_instance());
+    const plugin_instance member = DefaultSkirtGenerator::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Skirt generator";
+    definition.tooltip = "Selects which plugin generates skirt extrusion around the first-layer envelope.";
+    DefaultSkirtGenerator::instance(orchestrator).register_exclusive_group(STEP_SKIRT_BRIM, definition);
 }
 
 }}} // namespace slic3r_api::SkirtBrim::DefaultSkirtGeneratorPlugin

@@ -3,75 +3,114 @@
 #/|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #/|/
 
-"""
-Small Python helper layer for SuperSlicer plugins.
+"""This module lets Python plugins register jobs and settings and access slicing geometry.
 
-Python plugins are loaded by python_plugin_loader.dll. The loader imports both
-the scripts bundled in plugins/python/python/plugins and Python-only sibling
-packages installed in plugins/<package-id>. Every script is called through:
+The host is the slicer application. Its Python loader calls register_plugin(api)
+in each script with a Slic3rAPI object. A package is an installed directory of
+code and resources. Import PluginBase from this shared runtime module, construct
+your objects and return one object, a list/tuple or None. For example:
+    return PluginBase("example.noop", STEP_POST_SLICING)
 
-    register_plugin(api: Slic3rAPI)
+PluginBase stores identity, dependencies (other required plugin ids) and methods.
+Override initialize(), setup(), setup_run() and run() as needed. The application
+initializes enabled objects, prepares an execution with setup(), prepares each
+individual call with setup_run(), waits for all preparations, then invokes run().
+Individual preparations and runs may be parallel. run_context(address) reads
+borrowed application data for that call only. PluginProgress estimates work.
+Initialization exceptions become returned diagnostic ids through the loader;
+store_error_message() stores explanations for other status-returning callbacks.
 
-The function may return one PluginBase instance, a list/tuple of PluginBase
-instances, or None if the script only registers settings/UI fragments.
+An exclusive group holds alternatives for the same processing stage. Its selector
+is a setting naming one member. Construct PluginBase with exclusive_group and
+exclusive_group_priority (alternative preference, separate from execution priority),
+then call declare_exclusive_group() to describe selector text and behavior.
+The loader introduces the object before publishing its description.
+register_translation_catalog() names a translation catalogue under the package.
 
-The C ABI vtable is built by the loader DLL, not by Python. This avoids fragile
-callback signatures while keeping Python plugin code simple. Slic3rAPI binds the
-public host C functions with ctypes; raw functions are available as
-api.host.function_name(...), and a smaller set of Python-friendly helpers is
-provided for common tasks. Low-level handles and run contexts remain available
-as integer addresses, while data-tree, geometry, extrusion, and printing-plan
-views make their ownership and mutation rules explicit.
+Slic3rAPI also provides settings and application-function access. Its host member
+contains functions bound by ctypes, Python's C-calling library; orchestrator_view()
+provides plugin lookup and execution. slic3r_api_generated.py supplies structures
+from the C ABI, the application's binary calling interface; use the matching
+runtime copy rather than definitions from another build.
 
-Plugins should import this module from the Python runtime directory prepared by
-the loader:
+Geometry helpers expose borrowed shapes or create shapes owned by application
+storage. A handle is an application reference, not memory Python may free.
+api.polygon(handle) reads a polygon; api.new_polyline(storage) creates a path,
+then push_back(make_point(x, y)) fills it. api.extrusion(handle) reads a
+material-depositing movement; api.new_extrusion(storage) creates one.
 
-    from slic3r_api import PluginBase, STEP_POST_SLICING
+api.clipper(storage) performs polygon operations with storage-owned temporary
+results: wrap shapes, call diff() to subtract an area, then write_expolygons_to()
+to copy polygons with holes. RegionSettings groups a connected layer area by
+setting values: construct it with requested keys, call segregate(), then get_areas().
+Borrowed geometry never outlives its application owner.
 
-Geometry helpers are re-exported from slic3r_geometry_views.py. They wrap raw
-handles in Python objects while leaving the raw C ABI available:
+Using the shared runtime
+------------------------
+
+The native Python loader imports bundled scripts from its python/plugins
+directory and Python-only sibling packages installed in plugins/<package-id>. It
+builds the C ABI function table; Python code does not construct C callbacks.
+The loader adds the shared runtime directory and the current package root to
+sys.path before importing scripts. Import the common helpers from that runtime:
+
+    from slic3r_api import PluginBase, STEP_POST_SLICING, make_point, RegionSettings
+
+Do not copy this module or slic3r_api_generated.py into each plugin. Return None
+from register_plugin(api) when a script only registers settings or UI fragments.
+Raw application functions remain available as api.host.function_name(...), and
+low-level handles and run contexts are integer addresses.
+
+Geometry, extrusion and regional settings examples
+--------------------------------------------------
+
+The geometry helpers re-exported from slic3r_geometry_views.py wrap borrowed
+handles or allocate objects in the supplied application storage. The following
+examples use handles and storage supplied by the current callback; the storage
+must outlive its allocated objects, and borrowed views must not outlive their
+application owner. Coordinates use the integer units of the geometry API.
 
     polygon = api.polygon(polygon_handle)
     owned_polyline = api.new_polyline(storage_handle)
     owned_polyline.push_back(make_point(0, 0))
 
-Extrusion helpers follow the same pattern:
+Extrusion helpers use the same ownership pattern. A medial-axis builder can
+create a thin-wall extrusion from an area, a flow and permitted widths:
 
     entity = api.extrusion(entity_handle)
     owned_entity = api.new_extrusion(storage_handle)
     owned_entity.set_points([make_point(0, 0), make_point(1000000, 0)])
-    thin_wall = api.medial_axis_thin_wall(flow).medial_widths(min_w, max_w).build(storage_handle, expolygon)
+    thin_wall = (api.medial_axis_thin_wall(flow)
+                 .medial_widths(min_w, max_w).build(storage_handle, expolygon))
 
-Clipper helpers wrap temporary Clipper operands bound to a storage_handle:
+Clipper operands and temporary results are tied to the same storage. Subtract
+mask areas from subject areas, then copy the result into an output collection:
 
     clip = api.clipper(storage_handle)
     result = clip.diff(clip(subject_polygons), clip(mask_expolygons))
     result.write_expolygons_to(output_expolygons)
 
-RegionSettings helpers let a plugin process a whole LayerIsland while still
-splitting work where region/modifier settings differ:
+RegionSettings separates a whole LayerIsland where regional or modifier settings
+differ. Build the map before asking for the areas belonging to one setting value:
 
     settings = RegionSettings(api, storage_handle, island, [["fuzzy_skin"]])
     settings.segregate(island.slice())
     for value, area_clip in settings.get_areas("fuzzy_skin"):
         selected = area_clip.intersections(candidate_areas)
 
-Do not copy this file, or slic3r_api_generated.py, into each plugin. The loader
-adds the shared Python runtime and the current package root to sys.path before
-loading plugin scripts, so common helpers and package-local modules are both
-available.
+Generating the matching definitions for development
+----------------------------------------------------
 
-slic3r_api_generated.py is generated from Api/plugin/c headers by
-generate_slic3r_api.py. It is copied next to this file in the Python runtime
-root prepared by the loader. In a development build, build python_plugin_loader
-to regenerate and copy the current definitions into that runtime directory:
+generate_slic3r_api.py generates slic3r_api_generated.py from Api/plugin/c headers.
+The build copies it beside this module in the loader's Python runtime directory.
+Regenerate and copy the matching definitions with:
 
     cmake --build build --config Debug --target python_plugin_loader -- /m:8
 
-For a quick Python-only import test during development, use the generated
-runtime directory:
+To check imports without running the slicer, use that generated runtime directory.
+It is the python directory beside the loader library; in a default Debug build:
 
-    python -c "import sys; sys.path.insert(0, r'build/src/Debug/plugins/python'); import slic3r_api"
+    python -c "import sys; sys.path.insert(0, r'build/src/plugins_python/Debug/python'); import slic3r_api"
 """
 
 from __future__ import annotations
@@ -270,6 +309,9 @@ def used_config_key(
     return (key, int(type), int(container_type), int(option_preset_type))
 
 
+_UNSET = object()
+
+
 @abi_requires_headers("slic3r_plugin_types.h")
 class PluginBase:
     """
@@ -315,25 +357,41 @@ class PluginBase:
         name: Optional[str] = None,
         description: str = "",
         priority: int = 0,
-        dependencies: Iterable[str] = (),
-        used_config_keys: Iterable[object] = (),
-        defined_config_keys: Iterable[str] = (),
+        dependencies: Optional[Iterable[str]] = (),
+        used_config_keys: Optional[Iterable[object]] = (),
+        defined_config_keys: Optional[Iterable[str]] = (),
         exclusive_group: Optional[str] = None,
-        exclusive_group_label: str = "",
-        exclusive_group_tooltip: str = "",
+        exclusive_group_label=_UNSET,
+        exclusive_group_tooltip=_UNSET,
+        *,
+        exclusive_group_priority: int = 100,
     ) -> None:
+        """Copy optional lists and group descriptions, treating None as empty and retaining supplied obsolete text for warnings."""
         self.plugin_id = plugin_id
         self.name = name or plugin_id
         self.description = description
         self.exclusive_group = plugin_id if exclusive_group is None else exclusive_group
-        self.exclusive_group_label = exclusive_group_label
-        self.exclusive_group_tooltip = exclusive_group_tooltip
+        if exclusive_group_label is not _UNSET:
+            self.exclusive_group_label = exclusive_group_label
+        if exclusive_group_tooltip is not _UNSET:
+            self.exclusive_group_tooltip = exclusive_group_tooltip
+        self.exclusive_group_priority = int(exclusive_group_priority)
+        self.exclusive_group_definitions = []
         self.step = int(step)
         self.priority = int(priority)
-        self.dependencies = list(dependencies)
-        self.used_config_keys = list(used_config_keys)
-        self.defined_config_keys = list(defined_config_keys)
+        self.dependencies = list(() if dependencies is None else dependencies)
+        self.used_config_keys = list(() if used_config_keys is None else used_config_keys)
+        self.defined_config_keys = list(() if defined_config_keys is None else defined_config_keys)
         self.progress = PluginProgress()
+
+    @abi_requires_headers("slic3r_config_def.h")
+    def declare_exclusive_group(self, **definition_fields):
+        """Copy a group-description dictionary under this object's id and return the object."""
+        definition = dict(definition_fields)
+        definition.setdefault("exclusive_group", self.exclusive_group)
+        definition["declaring_plugin_id"] = self.plugin_id
+        self.exclusive_group_definitions.append(definition)
+        return self
 
     def initialize(self, storage_address: int) -> None:
         pass
@@ -390,6 +448,23 @@ class PluginBase:
                     context.host_context,
                     _as_bytes(f"Python plugin {method_name} failed: {exc}"),
                 )
+
+
+@abi_requires_headers("slic3r_config_def.h")
+def _register_exclusive_group_definitions(api, plugin, plugin_id, step):
+    """Register pending group descriptions after the object is registered, using its registered id."""
+    definitions = getattr(plugin, "exclusive_group_definitions", ())
+    if not isinstance(definitions, (list, tuple)):
+        raise TypeError("exclusive_group_definitions must be a list or tuple")
+    if not definitions:
+        return
+    view = OrchestratorView(api)
+    for fields in definitions:
+        if not isinstance(fields, dict):
+            raise TypeError("each exclusive group definition must be a dictionary")
+        definition = dict(fields)
+        definition["declaring_plugin_id"] = plugin_id
+        view.register_exclusive_group(step, **definition)
 
 
 class Slic3rAPI:

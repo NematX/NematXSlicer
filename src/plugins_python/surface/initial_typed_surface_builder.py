@@ -155,16 +155,18 @@ def _free_surface_groups(groups) -> None:
 
 class PythonInitialTypedSurfaceBuilderPlugin(PluginBase):
     def __init__(self, api):
+        """Retain the borrowed application API and copy a group description for registration after this object."""
         super().__init__(
             PLUGIN_ID,
             STEP_SURFACE_GENERATION,
             name="Python initial typed surface builder",
             description="Python example that creates initial bottom, internal, and top infill surfaces.",
-            priority=10,
+            priority=0,
+            exclusive_group_priority=10,
             exclusive_group=SURFACE_GENERATION_GROUP,
-            exclusive_group_label="Surface generation plugin",
-            exclusive_group_tooltip="Choose which active plugin converts perimeter fill areas into infill surfaces.",
         )
+        self.declare_exclusive_group(label="Surface generation plugin",
+                                     tooltip="Choose which active plugin converts perimeter fill areas into infill surfaces.")
         self.api = api
 
     def run(self, run_ctx_address: int) -> None:

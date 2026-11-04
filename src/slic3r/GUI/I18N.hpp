@@ -42,12 +42,15 @@ namespace Slic3r { namespace GUI {
 namespace I18N {
 	// Plugin-provided text carries its gettext domain with the owning
 	// definition. Keeping the lookup here confines wxWidgets to the GUI layer.
-	inline wxString translate_in_domain(const char *s, const std::string &domain) {
+	// Return marked text verbatim; an empty catalogue name otherwise uses the default catalogue.
+	inline wxString translate_in_domain(const char *s, const std::string &domain, bool untranslated = false) {
+		if (untranslated) return wxString(s, wxConvUTF8);
 		return domain.empty() ? wxGetTranslation(wxString(s, wxConvUTF8)) :
 			wxGetTranslation(wxString(s, wxConvUTF8), wxString(domain.c_str(), wxConvUTF8));
 	}
-	inline wxString translate_in_domain(const std::string &s, const std::string &domain) {
-		return translate_in_domain(s.c_str(), domain);
+	// Translate borrowed UTF-8 text unless its setting requires verbatim display.
+	inline wxString translate_in_domain(const std::string &s, const std::string &domain, bool untranslated = false) {
+		return translate_in_domain(s.c_str(), domain, untranslated);
 	}
 	inline wxString translate_in_domain(const char *s, const char *plural, unsigned int n, const std::string &domain) {
 		return domain.empty() ? wxGetTranslation(wxString(s, wxConvUTF8), wxString(plural, wxConvUTF8), n) :
@@ -78,8 +81,9 @@ namespace I18N {
 	inline std::string translate_utf8_in_domain(const char *s, const std::string &domain) {
 		return translate_in_domain(s, domain).ToUTF8().data();
 	}
-	inline std::string translate_utf8_in_domain(const std::string &s, const std::string &domain) {
-		return translate_in_domain(s, domain).ToUTF8().data();
+	// Return owned UTF-8 display text without catalogue lookup when marked verbatim.
+	inline std::string translate_utf8_in_domain(const std::string &s, const std::string &domain, bool untranslated = false) {
+		return translate_in_domain(s, domain, untranslated).ToUTF8().data();
 	}
 	inline std::string translate_utf8_in_domain(const char *s, const char *plural, unsigned int n, const std::string &domain) {
 		return translate_in_domain(s, plural, n, domain).ToUTF8().data();

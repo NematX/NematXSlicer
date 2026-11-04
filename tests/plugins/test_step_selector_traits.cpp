@@ -9,6 +9,7 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeThumbnailViews.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Model.hpp"
@@ -73,8 +74,10 @@ class SingletonSelectorProbe final : public slic3r_api::PluginBase
 {
 public:
     // Borrow a host and permanent identity strings for a no-op provider on the supplied dynamic step.
-    SingletonSelectorProbe(orchestrator_handle *host, slicing_step_t step, const char *id, const char *group)
-        : PluginBase(host), m_step(step), m_id(id), m_group(group) {}
+    SingletonSelectorProbe(orchestrator_handle *host, slicing_step_t step, const char *id, const char *group,
+                           int32_t group_priority = 100, int32_t execution_priority = 0)
+        : PluginBase(host), m_step(step), m_id(id), m_group(group), m_group_priority(group_priority),
+          m_execution_priority(execution_priority) {}
     // Return the borrowed permanent provider id without effects or failures.
     const char *id() const noexcept { return m_id; }
 private:
@@ -86,13 +89,17 @@ private:
     const char *exclusive_group_impl() const noexcept override { return m_group; }
     // Report no dependencies without effects or failures.
     const char *const *dependencies_impl() const noexcept override { return nullptr; }
-    // Return a constant execution priority without effects or failures.
-    int32_t priority_impl() const noexcept override { return 0; }
+    // Return the stored execution priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return m_execution_priority; }
+    // Return the immutable group preference without changing execution priority or provider state.
+    int32_t exclusive_group_priority_impl() const noexcept override { return m_group_priority; }
     // Ignore the borrowed context without producing output, changing state or failing.
     void run_impl(const plugin_run_context *) const override {}
     slicing_step_t m_step;
     const char *m_id;
     const char *m_group;
+    int32_t m_group_priority;
+    int32_t m_execution_priority;
 };
 
 class SelectorTraitsProbe final : public slic3r_api::PluginBase
@@ -135,6 +142,449 @@ void check_selection(Orchestrator &host, slicing_step_t step, const char *group,
     } else CHECK(selected.empty());
 }
 } // namespace
+
+// Register permanent no-op plugins as application-supplied descriptions and build only test-owned selectors.
+// Temporary activation is restored on failure. The application owns copied descriptions, but no application setting is inserted.
+TEST_CASE("Exclusive group definitions prefer active declarants then registered declarants",
+          "[plugins][step-pipeline][selector-traits][selector-group-priority]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const slicing_step_t step = host.register_step("slic3r.test.definition_fallback", STEP_INFILL);
+    REQUIRE(step != STEP_NONE);
+    static SingletonSelectorProbe preferred(handle, step, "slic3r.test.definition_fallback.a", "fallback.Mixed-id", 0);
+    static SingletonSelectorProbe other(handle, step, "slic3r.test.definition_fallback.b", "fallback.Mixed-id", 20);
+    static SingletonSelectorProbe undeclared(handle, step, "slic3r.test.definition_fallback.undeclared", "fallback.Mixed-id", -10);
+    {
+        Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+        for (SingletonSelectorProbe *probe : {&other, &preferred, &undeclared}) {
+            if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+            REQUIRE(host.set_plugin_active(probe->id(), false));
+        }
+        for (SingletonSelectorProbe *probe : {&preferred, &other}) {
+            std::string label = probe == &preferred ? "Preferred label" : "Other label";
+            std::string tooltip = probe == &preferred ? "Preferred tooltip" : "Other tooltip";
+            std::string owner = probe->id();
+            raw_exclusive_group_def declaration = raw_exclusive_group_def_init();
+            declaration.exclusive_group = "fallback.Mixed-id";
+            declaration.declaring_plugin_id = owner.c_str();
+            declaration.label = label.c_str();
+            declaration.tooltip = tooltip.c_str();
+            declaration.container_type = probe == &preferred ? RAW_CONTAINER_TYPE_REGION : RAW_CONTAINER_TYPE_OBJECT;
+            CHECK(orchestrator_register_exclusive_group(handle, step, &declaration) >= 0);
+            label.assign("overwritten");
+            tooltip.assign("overwritten");
+            owner.assign("overwritten");
+        }
+    }
+    ThumbnailActivationGuard guard(host, step);
+    REQUIRE(host.set_plugin_active(undeclared.id(), true));
+    host.elect_exclusive_group_definition(step, "fallback.Mixed-id");
+    const Orchestrator::ExclusiveGroupDefinition inactive = host.exclusive_group_definition_or_default(step, "fallback.Mixed-id");
+    CHECK(inactive.plugin_id == preferred.id());
+    CHECK(inactive.label == "Preferred label");
+    CHECK(inactive.tooltip == "Preferred tooltip");
+    CHECK(inactive.traits.container_type == RAW_CONTAINER_TYPE_REGION);
+    CHECK(Steps::selected_active_plugin_from_group(host, step, "fallback.Mixed-id", nullptr) == host.get_plugin(undeclared.id()));
+
+    REQUIRE(host.set_plugin_active(other.id(), true));
+    CHECK(host.exclusive_group_definition_or_default(step, "fallback.Mixed-id").plugin_id == preferred.id());
+    host.elect_exclusive_group_definition(step, "fallback.Mixed-id");
+    const Orchestrator::ExclusiveGroupDefinition active = host.exclusive_group_definition_or_default(step, "fallback.Mixed-id");
+    CHECK(active.plugin_id == other.id());
+    CHECK(active.label == "Other label");
+    CHECK(active.tooltip == "Other tooltip");
+    CHECK(active.traits.container_type == RAW_CONTAINER_TYPE_OBJECT);
+    Steps::StepExclusiveGroup local = Steps::plugin_exclusive_group_definition(host, step, "fallback.Mixed-id", *host.get_plugin(other.id()));
+    local.refresh_storage_pointers();
+    CHECK(std::string(local.option_def.label) == "Other label");
+    CHECK(std::string(local.option_def.tooltip) == "Other tooltip");
+    CHECK(local.ui_fragment.find("line:\nsetting:") != std::string::npos);
+    REQUIRE(host.set_plugin_active(preferred.id(), true));
+    CHECK(host.exclusive_group_definition_or_default(step, "fallback.Mixed-id").plugin_id == other.id());
+    host.elect_exclusive_group_definition(step, "fallback.Mixed-id");
+    CHECK(host.exclusive_group_definition_or_default(step, "fallback.Mixed-id").plugin_id == preferred.id());
+}
+
+// Check complete descriptions through C before retaining descriptions or key reservations, using permanent no-op plugins.
+// Rejection preserves accepted data. Test-owned builders never insert settings after application finalization.
+TEST_CASE("Plugin steps declare the selector of their exclusive groups",
+          "[plugins][orchestrator][service-step][selector-traits]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const slicing_step_t step = host.register_step("slic3r.test.complete_descriptor", STEP_INFILL);
+    static SingletonSelectorProbe a(handle, step, "slic3r.test.complete_descriptor.a", "descriptor.a");
+    static SingletonSelectorProbe b(handle, step, "slic3r.test.complete_descriptor.b", "descriptor.b");
+    const slicing_step_t other_step = host.register_step("slic3r.test.complete_descriptor.other", STEP_INFILL);
+    static SingletonSelectorProbe elsewhere(handle, other_step, "slic3r.test.complete_descriptor.elsewhere", "descriptor.a");
+    {
+        Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+        for (SingletonSelectorProbe *probe : {&a, &b, &elsewhere}) {
+            if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+            REQUIRE(host.set_plugin_active(probe->id(), false));
+        }
+    }
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = "descriptor.a";
+    definition.declaring_plugin_id = a.id();
+    CHECK(orchestrator_register_exclusive_group(handle, step, &definition) == -1);
+    Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+    CHECK(orchestrator_register_exclusive_group(handle, step, nullptr) == -1);
+    CHECK(orchestrator_register_exclusive_group(nullptr, step, &definition) == -1);
+    raw_exclusive_group_def invalid = definition;
+    invalid.struct_size = sizeof(definition) - 1;
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    CHECK(orchestrator_register_exclusive_group(handle, STEP_NONE, &definition) == -1);
+    CHECK(orchestrator_register_exclusive_group(handle, STEP_ANY, &definition) == -1);
+    for (const char *owner : {"", "not.registered", b.id(), elsewhere.id()}) {
+        invalid = definition;
+        invalid.declaring_plugin_id = owner;
+        CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    }
+    invalid = definition;
+    invalid.declaring_plugin_id = nullptr;
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    {
+        Orchestrator::PluginRegistrationScope foreign = host.plugin_registration_scope("plugins/descriptor-foreign", true);
+        invalid = definition;
+        invalid.option_key = "slic3r_test_descriptor_unclaimed";
+        CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    }
+    for (const char *key : {"1invalid", "invalid key", "invalid.key"}) {
+        invalid = definition;
+        invalid.option_key = key;
+        CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    }
+    invalid = definition;
+    invalid.option_key = "layer_height";
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -2);
+    invalid = definition;
+    invalid.ui_target_file = "nope.ui";
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    invalid = definition;
+    invalid.ui_page = "Unpaired";
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    for (slicing_step_t target : {STEP_ANY, GCODE_THUMBNAIL, slicing_step_t(5000)}) {
+        invalid = definition;
+        invalid.has_invalidates_step = 1;
+        invalid.invalidates_step = target;
+        CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    }
+    invalid = definition;
+    invalid.has_value_when_absent = 1;
+    invalid.value_when_absent = nullptr;
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -1);
+    definition.label = "Complete descriptor";
+    definition.tooltip = "Complete tooltip";
+    definition.option_key = "slic3r_test_complete_descriptor";
+    definition.has_invalidates_step = 1;
+    definition.invalidates_step = STEP_NONE;
+    definition.has_value_when_absent = 1;
+    definition.value_when_absent = a.id();
+    definition.read_with_one_provider = 1;
+    definition.show_with_one_provider = 1;
+    definition.strict_selection = 1;
+    definition.provider_settings_rules = 0;
+    definition.ui_target_file = nullptr;
+    CHECK(orchestrator_register_exclusive_group(handle, step, &definition) >= 0);
+    definition.ui_target_file = "";
+    CHECK(orchestrator_register_exclusive_group(handle, step, &definition) == 0);
+    invalid = definition;
+    invalid.label = "Conflicting owner";
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -2);
+    invalid = definition;
+    invalid.exclusive_group = "descriptor.b";
+    invalid.declaring_plugin_id = b.id();
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) == -2);
+    invalid.option_key = "slic3r_test_descriptor_unclaimed";
+    CHECK(orchestrator_register_exclusive_group(handle, step, &invalid) >= 0);
+    struct FutureDescriptor { raw_exclusive_group_def definition; uint64_t unknown; } future {definition, 42};
+    future.definition.struct_size = sizeof(future);
+    CHECK(orchestrator_register_exclusive_group(handle, step, &future.definition) == 0);
+    definition.declaring_plugin_id = b.id();
+    CHECK_FALSE(a.register_exclusive_group(step, definition));
+    CHECK(definition.declaring_plugin_id == b.id());
+    slic3r_api::OrchestratorView view(handle);
+    CHECK_THROWS_AS(view.register_exclusive_group(step, definition), std::invalid_argument);
+    definition.declaring_plugin_id = a.id();
+    CHECK_FALSE(view.register_exclusive_group(step, definition));
+    host.elect_exclusive_group_definition(step, "descriptor.a");
+    const Orchestrator::ExclusiveGroupDefinition retained = host.exclusive_group_definition_or_default(step, "descriptor.a");
+    CHECK(retained.label == "Complete descriptor");
+    CHECK(retained.tooltip == "Complete tooltip");
+    CHECK(retained.traits.ui_target_file == "print.ui");
+    CHECK(retained.traits.read_with_one_provider);
+    CHECK(retained.traits.show_with_one_provider);
+    CHECK_FALSE(retained.traits.provider_settings_rules);
+    REQUIRE(retained.traits.value_when_absent.has_value());
+    CHECK(*retained.traits.value_when_absent == a.id());
+    Steps::StepExclusiveGroup local = Steps::plugin_exclusive_group_definition(host, step, "descriptor.a", *host.get_plugin(a.id()));
+    CHECK(local.option_key_storage == "slic3r_test_complete_descriptor");
+    CHECK(local.option_def.invalidates_step == STEP_NONE);
+}
+
+// Read default group text and application-supplied descriptions through the same accessor and test-owned builders.
+// A member description retains copied strings but cannot replace application text or rules. No application setting is inserted.
+TEST_CASE("Undeclared group text is exact and protected host group text wins",
+          "[plugins][step-pipeline][selector-traits]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const Orchestrator::ExclusiveGroupDefinition absent = host.exclusive_group_definition_or_default(STEP_POST_INFILL, "Exact.Mixed-id_42");
+    CHECK(absent.label == "Exact.Mixed-id_42");
+    CHECK(absent.tooltip.empty());
+    CHECK(absent.plugin_id.empty());
+    CHECK(absent.traits.category == RAW_OPTION_CATEGORY_INFILL);
+    static SingletonSelectorProbe member(handle, STEP_ORDERING, "slic3r.test.protected_group.member", "ordering.extrusion_tree", -100, 1050);
+    const Orchestrator::ExclusiveGroupDefinition before = host.exclusive_group_definition_or_default(STEP_ORDERING, "ordering.extrusion_tree");
+    {
+        Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+        if (host.get_plugin(member.id()) == nullptr) REQUIRE(host.register_plugin(member.c_instance()));
+        REQUIRE(host.set_plugin_active(member.id(), false));
+        raw_exclusive_group_def declaration = raw_exclusive_group_def_init();
+        declaration.exclusive_group = "ordering.extrusion_tree";
+        declaration.declaring_plugin_id = member.id();
+        declaration.label = "Member label";
+        declaration.tooltip = "Member tooltip";
+        declaration.container_type = RAW_CONTAINER_TYPE_REGION;
+        CHECK(orchestrator_register_exclusive_group(handle, STEP_ORDERING, &declaration) >= 0);
+    }
+    ThumbnailActivationGuard guard(host, STEP_ORDERING);
+    REQUIRE(host.set_plugin_active(member.id(), true));
+    host.elect_exclusive_group_definition(STEP_ORDERING, "ordering.extrusion_tree");
+    const Orchestrator::ExclusiveGroupDefinition after = host.exclusive_group_definition_or_default(STEP_ORDERING, "ordering.extrusion_tree");
+    CHECK(after.label == before.label);
+    CHECK(after.tooltip == before.tooltip);
+    CHECK(after.translation_domain == before.translation_domain);
+    CHECK(after.traits.container_type == before.traits.container_type);
+    CHECK(after.traits.category == before.traits.category);
+    CHECK(after.plugin_id.empty());
+    const Orchestrator::ExclusiveGroupDefinition whole = host.exclusive_group_definition_or_default(STEP_PERIMETER, "step_perimeter_plugin");
+    CHECK(whole.label == "Perimeter plugin");
+    CHECK_FALSE(whole.tooltip.empty());
+}
+
+// Register permanent no-op alternatives with equal execution priority and different preference numbers.
+// The test owns choice lists and restores activation afterward. Wrappers stay borrowed, and no application setting is inserted.
+TEST_CASE("Exclusive group priority chooses the active selector default independently of execution",
+          "[plugins][step-pipeline][selector-group-priority]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const slicing_step_t step = host.register_step("slic3r.test.priority_defaults", STEP_INFILL);
+    static SingletonSelectorProbe high(handle, step, "slic3r.test.priority_defaults.high", "priority", 25);
+    static SingletonSelectorProbe low(handle, step, "slic3r.test.priority_defaults.low", "priority", 0);
+    for (SingletonSelectorProbe *probe : {&high, &low}) {
+        if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+        REQUIRE(host.set_plugin_active(probe->id(), false));
+    }
+    ThumbnailActivationGuard guard(host, step);
+    REQUIRE(host.set_plugin_active(high.id(), true));
+    REQUIRE(host.set_plugin_active(low.id(), true));
+    Plugin *preferred = host.get_plugin(low.id());
+    std::vector<Plugin *> candidates {host.get_plugin(high.id()), preferred};
+    CHECK(Steps::default_provider_from_group(candidates) == preferred);
+    Steps::StepExclusiveGroup local = Steps::plugin_exclusive_group_definition(host, step, "priority", *preferred);
+    local.set_enum_plugins(host, {{high.id(), "High"}, {low.id(), "Low"}}, low.id());
+    CHECK((local.enum_values == std::vector<std::string>{low.id(), high.id()}));
+    local.refresh_storage_pointers();
+    CHECK(std::string(local.option_def.default_serialized_value) == low.id());
+    DynamicPrintConfig config;
+    check_selection(host, step, "priority", &config, preferred);
+    config.set_key_value(local.option_key_storage, new ConfigOptionString("missing"));
+    check_selection(host, step, "priority", &config, preferred);
+    config.set_key_value(local.option_key_storage, new ConfigOptionString(high.id()));
+    check_selection(host, step, "priority", &config, host.get_plugin(high.id()));
+    REQUIRE(host.set_plugin_active(low.id(), false));
+    check_selection(host, step, "priority", nullptr, host.get_plugin(high.id()));
+    REQUIRE(host.set_plugin_active(low.id(), true));
+    check_selection(host, step, "priority", nullptr, preferred);
+    CHECK(host.get_plugin(high.id())->get_priority() == preferred->get_priority());
+}
+
+// Register automatic choices through C using test-owned settings and choice lists, without inserting application settings.
+// The application copies arguments before they expire. Invalid choices return errors, and temporary activation is restored on failure.
+TEST_CASE("The auto selector value picks the declared choice, else the group default",
+          "[plugins][orchestrator][service-step][selector-auto]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const slicing_step_t step = host.register_step("slic3r.test.auto_generic", STEP_INFILL);
+    static SingletonSelectorProbe low(handle, step, "slic3r.test.auto_generic.low", "auto_generic", -10);
+    static SingletonSelectorProbe high(handle, step, "slic3r.test.auto_generic.high", "auto_generic", 25);
+    {
+        Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+        for (SingletonSelectorProbe *probe : {&low, &high}) {
+            if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+            REQUIRE(host.set_plugin_active(probe->id(), false));
+        }
+        raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+        definition.exclusive_group = "auto_generic";
+        definition.declaring_plugin_id = low.id();
+        definition.auto_value = 1;
+        CHECK(orchestrator_register_exclusive_group(handle, step, &definition) >= 0);
+    }
+    ThumbnailActivationGuard guard(host, step);
+    REQUIRE(host.set_plugin_active(low.id(), true));
+    REQUIRE(host.set_plugin_active(high.id(), true));
+    host.elect_exclusive_group_definition(step, "auto_generic");
+    CHECK(orchestrator_register_selector_auto_choice(handle, step, "auto_generic", "style", "organic", high.id()) >= 0);
+    CHECK(orchestrator_register_selector_auto_choice(handle, step, "auto_generic", "style", "organic", high.id()) == 0);
+    CHECK(orchestrator_register_selector_auto_choice(handle, step, "auto_generic", "style", "organic", low.id()) == -2);
+    CHECK(orchestrator_register_selector_auto_choice(handle, step, "auto_generic", "", "organic", high.id()) == -1);
+    CHECK(orchestrator_register_selector_auto_choice(handle, step, "auto_generic", "style", "missing", "not.registered") >= 0);
+    Steps::StepExclusiveGroup local = Steps::plugin_exclusive_group_definition(host, step, "auto_generic", *host.get_plugin(low.id()));
+    local.set_enum_plugins(host, {{low.id(), "Low"}, {high.id(), "High"}}, low.id());
+    local.refresh_storage_pointers();
+    REQUIRE(local.enum_values.size() == 3);
+    CHECK(local.enum_values.front() == SLIC3R_SELECTOR_AUTO_VALUE);
+    CHECK(std::string(local.option_def.default_serialized_value) == SLIC3R_SELECTOR_AUTO_VALUE);
+    DynamicPrintConfig config;
+    config.set_key_value("style", new ConfigOptionString("organic"));
+    check_selection(host, step, "auto_generic", &config, host.get_plugin(high.id()));
+    config.set_key_value(local.option_key_storage, new ConfigOptionString(SLIC3R_SELECTOR_AUTO_VALUE));
+    check_selection(host, step, "auto_generic", &config, host.get_plugin(high.id()));
+    config.set_key_value("style", new ConfigOptionString("!organic"));
+    check_selection(host, step, "auto_generic", &config, host.get_plugin(high.id()));
+    config.set_key_value("style", new ConfigOptionString("grid"));
+    check_selection(host, step, "auto_generic", &config, host.get_plugin(low.id()));
+    config.set_key_value("style", new ConfigOptionString("missing"));
+    check_selection(host, step, "auto_generic", &config, host.get_plugin(low.id()));
+    config.set_key_value("style", new ConfigOptionString("organic"));
+    config.set_key_value(local.option_key_storage, new ConfigOptionString(low.id()));
+    check_selection(host, step, "auto_generic", &config, host.get_plugin(low.id()));
+    config.set_key_value(local.option_key_storage, new ConfigOptionString(SLIC3R_SELECTOR_AUTO_VALUE));
+    REQUIRE(host.set_plugin_active(high.id(), false));
+    check_selection(host, step, "auto_generic", &config, host.get_plugin(low.id()));
+    REQUIRE(host.set_plugin_active(low.id(), false));
+    check_selection(host, step, "auto_generic", &config, nullptr);
+}
+
+// Compare the two overhang strategies at equal execution priority and restore post-perimeter activation afterward.
+// Selection borrows registered plugins without changing settings, retained descriptions, geometry or plugin ownership.
+TEST_CASE("Native overhang alternatives share execution priority and retain the shrink strategy default",
+          "[plugins][step-pipeline][selector-group-priority]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    ThumbnailActivationGuard guard(host, STEP_POST_PERIMETER);
+    const char *group = "perimeter.post_process.extra_perimeters_on_overhangs";
+    Plugin *shrink = host.get_plugin(group);
+    Plugin *wave = host.get_plugin("perimeter.post_process.extra_perimeter_overhang_wave");
+    REQUIRE(shrink != nullptr);
+    REQUIRE(wave != nullptr);
+    CHECK(shrink->get_priority() == -20);
+    CHECK(wave->get_priority() == -20);
+    CHECK(shrink->get_exclusive_group_priority() == 0);
+    CHECK(wave->get_exclusive_group_priority() == 10);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == STEP_POST_PERIMETER) REQUIRE(host.set_plugin_active(plugin, false));
+    REQUIRE(host.set_plugin_active(shrink, true));
+    REQUIRE(host.set_plugin_active(wave, true));
+    check_selection(host, STEP_POST_PERIMETER, group, nullptr, shrink);
+    REQUIRE(host.set_plugin_active(shrink, false));
+    check_selection(host, STEP_POST_PERIMETER, group, nullptr, wave);
+}
+
+// Check application-supplied preferences using the original registered members, then restore every stage's activation.
+// Selection borrows the application and test-owned empty settings. Choice lists, retained descriptions and application settings are unchanged.
+TEST_CASE("Native ordering and thumbnail defaults follow successive active preferences",
+          "[plugins][step-pipeline][selector-group-priority][thumbnail]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    ThumbnailActivationGuard ordering_guard(host, STEP_ORDERING);
+    ThumbnailActivationGuard thumbnail_guard(host, GCODE_THUMBNAIL);
+    const char *const ordering[] = {"ordering.extrusion_tree.advanced", "ordering.extrusion_tree.xy_serpentine", "ordering.extrusion_tree.default"};
+    const char *const encoders[] = {"PNG", "JPG", "QOI", "BIQU"};
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == STEP_ORDERING || plugin->get_step() == GCODE_THUMBNAIL)
+            REQUIRE(host.set_plugin_active(plugin, false));
+    for (const char *id : ordering) {
+        REQUIRE(host.get_plugin(id) != nullptr);
+        CHECK(host.get_plugin(id)->get_priority() == 1050);
+        REQUIRE(host.set_plugin_active(id, true));
+    }
+    for (const char *id : ordering) {
+        CHECK(Steps::selected_active_plugin_from_group(host, STEP_ORDERING, "ordering.extrusion_tree", nullptr) == host.get_plugin(id));
+        REQUIRE(host.set_plugin_active(id, false));
+    }
+    CHECK(Steps::selected_active_plugin_from_group(host, STEP_ORDERING, "ordering.extrusion_tree", nullptr) == nullptr);
+    for (const char *id : encoders) {
+        REQUIRE(host.get_plugin(id) != nullptr);
+        CHECK(host.get_plugin(id)->get_priority() == 0);
+        REQUIRE(host.set_plugin_active(id, true));
+    }
+    DynamicPrintConfig absent;
+    check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &absent, host.get_plugin("PNG"));
+    for (const char *id : encoders) {
+        check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", nullptr, host.get_plugin(id));
+        REQUIRE(host.set_plugin_active(id, false));
+    }
+    check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", nullptr, nullptr);
+}
+
+// Inspect startup choices after normal finalization without registering the key as a selector.
+// The application description remains borrowed and unchanged. Neither a failed initializer nor the reserved automatic value may remain as member ids.
+TEST_CASE("Non-selector provider enums do not preserve the reserved auto value",
+          "[plugins][step-pipeline][selector-auto]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &host = Orchestrator::instance();
+    const char *key = "test.selector.nonselector_auto";
+    CHECK_FALSE(host.selector_auto_enabled(key));
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+    REQUIRE(definition != nullptr);
+    REQUIRE(definition->enum_def.get() != nullptr);
+    CHECK(definition->enum_def->values() == std::vector<std::string>{"slic3r.test.exclusive_pruning.valid"});
+    REQUIRE(definition->default_value.get() != nullptr);
+    CHECK(definition->default_value->serialize() == "slic3r.test.exclusive_pruning.valid");
+}
+
+// Compare equally preferred members in both orders using test-owned wrappers without registration or setting changes.
+// Candidate objects remain borrowed and empty lists return null. Description and allocation errors reach the test runner.
+TEST_CASE("Equal exclusive group priorities choose the smallest provider id",
+          "[plugins][step-pipeline][selector-group-priority]")
+{
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    SingletonSelectorProbe z(handle, STEP_POST_INFILL, "z.equal", "equal", 7);
+    SingletonSelectorProbe a(handle, STEP_POST_INFILL, "a.equal", "equal", 7);
+    Plugin last(z.c_instance(), "Slic3r", "");
+    Plugin first(a.c_instance(), "Slic3r", "");
+    CHECK(Steps::default_provider_from_group({&last, &first}) == &first);
+    CHECK(Steps::default_provider_from_group({&first, &last}) == &first);
+    CHECK(Steps::default_provider_from_group({}) == nullptr);
+}
+
+// Require equal execution priority among alternatives before registration while allowing independent groups to differ.
+// Permanent test objects remain disabled and caller-owned. The application retains accepted wrappers without creating settings.
+TEST_CASE("Exclusive group alternatives require equal execution priorities",
+          "[plugins][orchestrator][selector-group-priority]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const slicing_step_t step = host.register_step("slic3r.test.execution_equality", STEP_INFILL);
+    static SingletonSelectorProbe first(handle, step, "slic3r.test.execution_equality.first", "same", 0, 10);
+    static SingletonSelectorProbe rejected(handle, step, "slic3r.test.execution_equality.rejected", "same", -1, 20);
+    static SingletonSelectorProbe different(handle, step, "slic3r.test.execution_equality.different", "different", 0, 20);
+    if (host.get_plugin(first.id()) == nullptr) REQUIRE(host.register_plugin(first.c_instance()));
+    REQUIRE(host.set_plugin_active(first.id(), false));
+    CHECK_FALSE(host.register_plugin(rejected.c_instance()));
+    CHECK(host.get_plugin(rejected.id()) == nullptr);
+    if (host.get_plugin(different.id()) == nullptr) REQUIRE(host.register_plugin(different.c_instance()));
+    REQUIRE(host.set_plugin_active(different.id(), false));
+    static SingletonSelectorProbe whole(handle, STEP_PERIMETER, "slic3r.test.execution_equality.whole", "distinct", 0, 42);
+    CHECK_FALSE(host.register_plugin(whole.c_instance()));
+    CHECK(host.get_plugin(whole.id()) == nullptr);
+}
 
 // Register permanent no-op providers after shared startup and scope their activations; owned string configs test all paths.
 // Registrations remain host-owned and inactive afterward; assertion/allocation failures unwind the activation guard.
@@ -389,6 +839,52 @@ TEST_CASE("Selector traits record effective seam and service metadata", "[plugin
     }
 }
 
+// Build test-owned choice lists from reversed member ids and check separate keys and labels for a group and an entire stage.
+// Shared startup owns plugins and writer activation is restored. Application settings and expected snapshot data are unchanged.
+TEST_CASE("Selector dropdown preferences preserve native ordering and historical group layout identities",
+          "[plugins][step-pipeline][selector-group-priority][selector-traits]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const std::vector<std::string> seam_ids {"seam_placer.cost", "seam_placer.aligned", "seam_placer.contiguous", "seam_placer.fixed", "seam_placer.random"};
+    const std::vector<std::string> perimeter_ids {"perimeter.generator.simple", "perimeter.generator.classic", "perimeter.generator.arachne"};
+    for (const std::pair<slicing_step_t, std::vector<std::string>> &entry :
+         std::vector<std::pair<slicing_step_t, std::vector<std::string>>>{{SEAM_PLACER, seam_ids}, {STEP_PERIMETER, perimeter_ids}}) {
+        std::vector<std::pair<std::string, std::string>> reversed;
+        for (std::vector<std::string>::const_reverse_iterator id = entry.second.rbegin(); id != entry.second.rend(); ++id) {
+            REQUIRE(host.get_plugin(*id) != nullptr);
+            reversed.emplace_back(*id, *id);
+        }
+        Steps::StepExclusiveGroup local = Steps::plugin_exclusive_group_definition(host, entry.first,
+            entry.first == SEAM_PLACER ? "seam_placer_plugin" : "step_perimeter_plugin", *host.get_plugin(entry.second.front()));
+        local.set_enum_plugins(host, reversed, entry.second.front());
+        CHECK(local.enum_values == entry.second);
+        CHECK(std::string(local.option_def.default_serialized_value) == entry.second.front());
+    }
+    REQUIRE(host.get_plugin("gcode.firmware.marlin2") != nullptr);
+    const Steps::StepExclusiveGroup firmware_group = Steps::plugin_exclusive_group_definition(host, GCODE_FIRMWARE,
+        "gcode_firmware_plugin", *host.get_plugin("gcode.firmware.marlin2"));
+    CHECK(firmware_group.option_key_storage == "exclusive_group_10300_gcode_firmware_plugin_plugin");
+    CHECK(firmware_group.ui_fragment.find("setting:exclusive_group_10300_gcode_firmware_plugin_plugin\n") != std::string::npos);
+    const Steps::StepExclusiveGroup firmware_whole = Steps::make_exclusive_step_group(host, GCODE_FIRMWARE,
+        Steps::get_exclusive_steps().at(GCODE_FIRMWARE));
+    CHECK(firmware_whole.option_key_storage == "gcode_firmware_plugin");
+    CHECK(firmware_group.traits.option_key == firmware_whole.traits.option_key);
+    CHECK(firmware_group.traits.invalidates_step == firmware_whole.traits.invalidates_step);
+    ThumbnailActivationGuard writer_guard(host, STEP_GCODE);
+    REQUIRE(host.set_plugin_active("gcode.printing_plan_file_writer", true));
+    bool found_writer = false;
+    for (const Steps::StepExclusivePluginGroup &entry : Steps::active_exclusive_plugin_groups(host))
+        if (entry.group.step == STEP_GCODE) {
+            found_writer = true;
+            CHECK(entry.group.ui_fragment.find("line:G-code plugin\n") != std::string::npos);
+        }
+    CHECK(found_writer);
+    const Steps::StepExclusiveGroup writer_table = Steps::make_exclusive_step_group(host, STEP_GCODE,
+        Steps::get_exclusive_steps().at(STEP_GCODE));
+    CHECK(writer_table.ui_fragment.find("line:G-code step plugin\n") != std::string::npos);
+}
+
 // Build all ten whole-step definitions through their owner traits, keeping the registered options and layout untouched.
 // Expected metadata is checked locally; complete table/definition/UI row equality is checked by the unchanged selector snapshot.
 TEST_CASE("Whole-step selector traits come from their owner module",
@@ -525,7 +1021,7 @@ TEST_CASE("Thumbnail selector traits are declared by the G-code module",
     CHECK_FALSE(group.traits.provider_settings_rules);
     CHECK(group.ui_fragment == "page:Notes\ngroup:Exclusive step plugins\nline:" + group.label_storage +
                               "\nsetting:thumbnails_format\nend_line\n");
-    group.set_enum_plugins({{"JPG", "JPEG"}, {"PNG", "PNG"}});
+    group.set_enum_plugins(host, {{"JPG", "JPEG"}, {"PNG", "PNG"}}, "PNG");
     REQUIRE(group.option_def.default_serialized_value != nullptr);
     CHECK(std::string(group.option_def.default_serialized_value) == "PNG");
     const Steps::StepExclusiveGroup other = Steps::plugin_exclusive_group_definition(
@@ -570,7 +1066,8 @@ TEST_CASE("Thumbnail selector traits keep encoder settings independent and read 
             REQUIRE(host.set_plugin_active(plugin, std::find(ids.begin(), ids.end(), plugin->get_id()) != ids.end()));
     const std::vector<Plugin *> members = host.get_active_plugins_for_step(GCODE_THUMBNAIL);
     REQUIRE(members.size() == ids.size());
-    Plugin *first = members.front();
+    Plugin *first = Steps::default_provider_from_group(members);
+    REQUIRE(first != nullptr);
     Plugin *alternate = members.back();
     REQUIRE(first != alternate);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -657,7 +1154,8 @@ TEST_CASE("Regional seam selection preserves strict multi-provider and unread si
             REQUIRE(host.set_plugin_active(plugin, std::find(ids.begin(), ids.end(), plugin->get_id()) != ids.end()));
     const std::vector<Plugin *> members = host.get_active_plugins_for_step(SEAM_PLACER);
     REQUIRE(members.size() == ids.size());
-    Plugin *first = members.front();
+    Plugin *first = Steps::default_provider_from_group(members);
+    REQUIRE(first != nullptr);
     Plugin *alternate = members.back();
     REQUIRE(first != alternate);
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
@@ -671,13 +1169,15 @@ TEST_CASE("Regional seam selection preserves strict multi-provider and unread si
     REQUIRE(config.option(key)->serialize().empty());
     check_seam_selection(host, &config, nullptr);
 
-    // Provider callbacks supply display text; generic fragment construction applies the declared regional placement.
-    REQUIRE(!first->get_exclusive_group_label().empty());
-    REQUIRE(!first->get_exclusive_group_tooltip().empty());
+    // Retained application text is independent of enabled members; the setting rules determine regional placement.
+    const Orchestrator::ExclusiveGroupDefinition *seam_definition = host.exclusive_group_definition(SEAM_PLACER, "seam_placer_plugin");
+    REQUIRE(seam_definition != nullptr);
+    REQUIRE(!seam_definition->label.empty());
+    REQUIRE(!seam_definition->tooltip.empty());
     const Steps::StepExclusiveGroup direct = Steps::plugin_exclusive_group_definition(
         host, SEAM_PLACER, "seam_placer_plugin", *first);
-    CHECK(direct.label_storage == first->get_exclusive_group_label());
-    CHECK(direct.tooltip_storage == first->get_exclusive_group_tooltip());
+    CHECK(direct.label_storage == seam_definition->label);
+    CHECK(direct.tooltip_storage == seam_definition->tooltip);
     bool generated_seam = false;
     for (const Steps::StepExclusivePluginGroup &entry : Steps::active_exclusive_plugin_groups(host)) {
         if (entry.group.step != SEAM_PLACER || entry.group.group_id != "seam_placer_plugin") continue;

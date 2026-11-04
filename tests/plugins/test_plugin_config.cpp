@@ -879,6 +879,30 @@ TEST_CASE("Configuration definitions reject an invalid nature before finalizatio
     CHECK(Slic3r::PrintConfigDef::instance().get("test_config_nature_valid_unnamed") != nullptr);
 }
 
+// Capture application logging for borrowed UTF-8 input and null arguments without changing package reports or settings.
+// Remove the test-owned output collector before assertions. No plugin-library logger participates.
+TEST_CASE("Plugin logging uses the application's configured log core", "[plugins][logging]")
+{
+    typedef boost::log::sinks::synchronous_sink<boost::log::sinks::text_ostream_backend> LogSink;
+    const boost::shared_ptr<std::ostringstream> messages = boost::make_shared<std::ostringstream>();
+    const boost::shared_ptr<LogSink> sink = boost::make_shared<LogSink>();
+    sink->locked_backend()->add_stream(messages);
+    boost::log::core::get()->add_sink(sink);
+    orchestrator_send_log(nullptr, RAW_PLUGIN_LOG_ERROR, "Host log bridge UTF-8: \xc3\xa9");
+    orchestrator_send_log(nullptr, RAW_PLUGIN_LOG_ERROR, nullptr);
+    orchestrator_send_log(nullptr, static_cast<raw_plugin_log_level>(99), "Invalid severity must not log");
+    sink->flush();
+    boost::log::core::get()->remove_sink(sink);
+    CHECK(messages->str().find("Host log bridge UTF-8: \xc3\xa9") != std::string::npos);
+    CHECK(messages->str().find("Invalid severity must not log") == std::string::npos);
+    CHECK(RAW_PLUGIN_LOG_FATAL == 0);
+    CHECK(RAW_PLUGIN_LOG_ERROR == 1);
+    CHECK(RAW_PLUGIN_LOG_WARNING == 2);
+    CHECK(RAW_PLUGIN_LOG_INFO == 3);
+    CHECK(RAW_PLUGIN_LOG_DEBUG == 4);
+    CHECK(RAW_PLUGIN_LOG_TRACE == 5);
+}
+
 // Redeclare an existing borrowed snapshot with only nature changed, capture the host diagnostic, and assert rejection without replacing the owned definition.
 TEST_CASE("Configuration redefinitions reject a different nature",
           "[plugins][config][definition][nature]")
@@ -1720,7 +1744,10 @@ TEST_CASE("Active settings require support from the selected exclusive-group plu
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const Plugin *marlin = Orchestrator::instance().get_plugin("gcode.firmware.marlin2");
     REQUIRE(marlin != nullptr);
-    REQUIRE_FALSE(marlin->get_exclusive_group_label().empty());
+    const Orchestrator::ExclusiveGroupDefinition *firmware_definition = Orchestrator::instance().exclusive_group_definition(
+        GCODE_FIRMWARE, "gcode_firmware_plugin");
+    REQUIRE(firmware_definition != nullptr);
+    REQUIRE_FALSE(firmware_definition->label.empty());
     PluginWithoutSettingSupport unsupported(*marlin);
     ConfigDef definitions;
     ConfigOptionDef *definition = definitions.add("single_extruder_multi_material", coBool);
@@ -1740,37 +1767,37 @@ TEST_CASE("Active settings require support from the selected exclusive-group plu
 
     SECTION("a default value is inactive") {
         config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(false));
-        CHECK_FALSE(Steps::unsupported_active_setting(definitions, config, resolver));
+        CHECK_FALSE(Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, resolver));
         CHECK(resolutions == 0);
     }
     SECTION("an absent value is skipped") {
         config.clear();
-        CHECK_FALSE(Steps::unsupported_active_setting(definitions, config, resolver));
+        CHECK_FALSE(Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, resolver));
         CHECK(resolutions == 0);
     }
     SECTION("an empty requirement is skipped") {
         definition->required_plugin_group.clear();
-        CHECK_FALSE(Steps::unsupported_active_setting(definitions, config, resolver));
+        CHECK_FALSE(Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, resolver));
         CHECK(resolutions == 0);
     }
     SECTION("the selected provider declares the key") {
-        CHECK_FALSE(Steps::unsupported_active_setting(definitions, config, resolver));
+        CHECK_FALSE(Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, resolver));
         CHECK(resolutions == 1);
     }
     SECTION("the selected provider lacks the key") {
         selected = &unsupported;
-        const std::optional<std::string> error = Steps::unsupported_active_setting(definitions, config, resolver);
+        const std::optional<std::string> error = Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, resolver);
         REQUIRE(error);
         CHECK(error->find("single_extruder_multi_material") != std::string::npos);
         CHECK(error->find("Material multiplexing") != std::string::npos);
-        CHECK(error->find(marlin->get_exclusive_group_label()) != std::string::npos);
+        CHECK(error->find(firmware_definition->label) != std::string::npos);
         CHECK(error->find(marlin->get_name()) != std::string::npos);
         CHECK(error->find(marlin->get_id()) != std::string::npos);
         CHECK(resolutions == 1);
     }
     SECTION("no provider is selected") {
         selected = nullptr;
-        const std::optional<std::string> error = Steps::unsupported_active_setting(definitions, config, resolver);
+        const std::optional<std::string> error = Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, resolver);
         REQUIRE(error);
         CHECK(error->find("single_extruder_multi_material") != std::string::npos);
         CHECK(error->find("Material multiplexing") != std::string::npos);
@@ -1782,7 +1809,7 @@ TEST_CASE("Active settings require support from the selected exclusive-group plu
         definition->set_default_value(new ConfigOptionBool(true));
         config.set_key_value("single_extruder_multi_material", new ConfigOptionBool(false));
         selected = &unsupported;
-        CHECK(Steps::unsupported_active_setting(definitions, config, resolver));
+        CHECK(Steps::unsupported_active_setting(Orchestrator::instance(), definitions, config, resolver));
         CHECK(resolutions == 1);
     }
 }

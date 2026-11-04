@@ -45,6 +45,8 @@ public:
     };
 
 protected:
+    // The copied function table borrows plugin state; unavailable optional functions remain null.
+    plugin_vtable m_validated_vtable = {};
     plugin_instance m_c_api;
     std::string m_id;
     std::string m_translation_domain;
@@ -54,15 +56,16 @@ protected:
     std::string m_name;
     std::string m_description;
     std::string m_exclusive_group;
-    std::string m_exclusive_group_label;
-    std::string m_exclusive_group_tooltip;
     slicing_step_t m_step;
     std::vector<std::string> m_dependencies;
     std::vector<UsedConfigKey> m_used_config_keys;
     std::vector<DefinedConfigKey> m_defined_config_keys;
     int m_priority;
+    int32_t m_exclusive_group_priority = 100;
 
 public:
+    // Check and copy the function table and descriptions while borrowing the plugin object.
+    // Slicing data is unchanged; invalid descriptions or allocation failures throw before registration.
     Plugin(plugin_instance c_api,
            std::string default_translation_domain,
            std::string package_root);
@@ -73,17 +76,18 @@ public:
     const std::string& get_name() const noexcept { return m_name; }
     const std::string& get_description() const noexcept { return m_description; }
     const std::string& get_exclusive_group() const noexcept { return m_exclusive_group; }
-    const std::string& get_exclusive_group_label() const noexcept { return m_exclusive_group_label; }
-    const std::string& get_exclusive_group_tooltip() const noexcept { return m_exclusive_group_tooltip; }
     slicing_step_t get_step() const noexcept { return m_step; }
     const std::vector<std::string>& get_dependencies() const noexcept { return m_dependencies; }
     const std::vector<UsedConfigKey>& get_used_config_keys() const noexcept { return m_used_config_keys; }
     const std::vector<DefinedConfigKey>& get_defined_config_keys() const noexcept { return m_defined_config_keys; }
     int get_priority() const noexcept { return m_priority; }
+    // Return the copied rank among alternative plugins.
+    int32_t get_exclusive_group_priority() const noexcept { return m_exclusive_group_priority; }
     // True when the plugin opted into per-Print cleanup through clear().
     bool has_clear() const noexcept { return m_c_api.vt->clear != nullptr; }
-    void initialize(storage_handle *storage) const {
-        m_c_api.vt->initialize(m_c_api.ctx, storage);
+    // Initialize with borrowed storage and return the plugin's diagnostic id.
+    int32_t initialize(storage_handle *storage) const {
+        return m_c_api.vt->initialize(m_c_api.ctx, storage);
     }
     void setup(const plugin_run_context &context, uint32_t run_count) const {
         // Register first so caches created by a partially failed setup are still cleaned up.

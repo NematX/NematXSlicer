@@ -76,6 +76,26 @@ public:
         assert(m_orchestrator != nullptr);
     }
 
+    // Copy a member's group description. Return false for a duplicate and throw on rejection.
+    bool register_exclusive_group(slicing_step_t step, const raw_exclusive_group_def &definition) const
+    {
+        const int32_t result = orchestrator_register_exclusive_group(m_orchestrator, step, &definition);
+        if (result < 0)
+            throw std::invalid_argument("Cannot register step selector traits");
+        return result == 1;
+    }
+
+    // Copy an automatic-selection condition and preferred member. Return false for a duplicate and throw on rejection.
+    bool register_selector_auto_choice(slicing_step_t step, const std::string &group, const std::string &key,
+                                      const std::string &value, const std::string &provider) const
+    {
+        const int32_t result = orchestrator_register_selector_auto_choice(m_orchestrator, step, group.c_str(),
+            key.c_str(), value.c_str(), provider.c_str());
+        if (result < 0)
+            throw std::invalid_argument("Cannot register selector automatic choice");
+        return result == 1;
+    }
+
     // Accumulate a solidarity declaration without changing execution order.
     // Registration copies all strings; member plugins may be registered later.
     void register_activation_group(const std::string &id, const std::vector<std::string> &members) const

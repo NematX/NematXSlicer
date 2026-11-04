@@ -617,6 +617,7 @@ public:
     ~GraphButton() {}
 
     GraphBitmapButton*    window{ nullptr };
+    // Build graph controls owned by the window and preserve titles/descriptions marked verbatim; allocation failures propagate.
     void            BUILD()  override;
 
     void            set_internal_any_value(const boost::any &value, bool change_event = false) override;

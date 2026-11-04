@@ -158,16 +158,26 @@ rules; provider-specific fragments take precedence across the supported layouts.
 namespace Slic3r {
 namespace {
 
+// Retain group descriptions before creating settings, copy choices in group-priority/id order and record their stage/group identity.
+// The application owns descriptions/rules; slicing data is unchanged, and failed creation rolls back new records and propagates errors.
+void register_exclusive_step_group_options_impl(Orchestrator &orchestrator);
+
 // Check a borrowed fragment id across the host's supported layout files without registering UI content.
 bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fragment_id);
 
 // Register module-owned built-ins with a non-null borrowed host; registrations and diagnostics are retained by the host.
 void register_builtin_plugins(orchestrator_handle *orchestrator);
 
-// Register selector-conditioned GUI rules for provider settings when enabled by the group's traits.
+// When enabled by group rules, register STRING_EQUALS reasons activating settings read by each active nonnull provider, including automatic selection.
+// Other selections keep settings visible, and other rules may activate them; the group key must be populated, and configuration values are unchanged.
+// Borrow group/plugins/strings; GuiRuleRegistry copies or queues clauses, logs invalid registrations, and propagates allocation failures.
 void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
                                           const Steps::StepExclusiveGroup &group,
                                           const std::vector<Plugin *> &plugins);
+// Build a STRING_EQUALS rule enabling a setting when its selector names the member or automatic selection.
+// GuiRuleRegistry copies or queues the borrowed strings; setting values are unchanged, and allocations may throw.
+void add_selector_rule(Orchestrator &orchestrator, const Steps::StepExclusiveGroup &group,
+                       const std::string &setting, const char *selection, const std::string &owner);
 // Register copied fallback fragments in trait-selected layouts unless a provider already placed the group.
 void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator);
 
@@ -837,17 +847,6 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
 }
 
 
-/*
-When group traits enable provider-setting rules, add a STRING_EQUALS activation reason for each
-setting read by a provider. That reason enables the setting when its provider ID is selected.
-The setting remains visible in the profile for other selections without presenting that provider's controls as active;
-other rules may independently activate the same setting. This registers rule metadata without
-changing configuration values. The ordered plugin list contains active non-null providers, and the
-group option key is populated. The group, plugins, and key strings are borrowed; GuiRuleRegistry
-copies clause strings during add() or queues them until a target definition exists. Groups with
-provider_settings_rules disabled add no selector-conditioned activation reasons. Invalid registrations
-are logged by the registry and ignored here; allocation failures propagate.
-*/
 void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
                                            const Steps::StepExclusiveGroup &group,
                                            const std::vector<Plugin *> &plugins)
@@ -856,25 +855,30 @@ void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
         return;
     for (const Plugin *plugin : plugins) {
         for (const Plugin::UsedConfigKey &setting : plugin->get_used_config_keys()) {
-            raw_gui_rule_clause clause = raw_gui_rule_clause_init();
-            // Compare the stored provider ID, not its changeable enum-table rank.
-            clause.condition = RAW_GUI_RULE_CONDITION_STRING_EQUALS;
-            clause.condition_key = group.option_def.opt_key;
-            clause.condition_string_value = plugin->get_id().c_str();
-
-            raw_gui_rule rule = raw_gui_rule_init();
-            rule.target_key = setting.key.c_str();
-            rule.clauses = &clause;
-            rule.clause_count = 1;
-            // Attribute the ownership reason to the plugin that uses the
-            // setting, not to the host generating the rule.
-            orchestrator.gui_rules().add(&rule, plugin->get_id().c_str());
+            add_selector_rule(orchestrator, group, setting.key, plugin->get_id().c_str(), plugin->get_id());
+            if (group.traits.auto_value)
+                add_selector_rule(orchestrator, group, setting.key, SLIC3R_SELECTOR_AUTO_VALUE, plugin->get_id());
         }
     }
 }
 
+void add_selector_rule(Orchestrator &orchestrator, const Steps::StepExclusiveGroup &group,
+                       const std::string &setting, const char *selection, const std::string &owner)
+{
+    raw_gui_rule_clause clause = raw_gui_rule_clause_init();
+    clause.condition = RAW_GUI_RULE_CONDITION_STRING_EQUALS;
+    clause.condition_key = group.option_def.opt_key;
+    clause.condition_string_value = selection;
+    raw_gui_rule rule = raw_gui_rule_init();
+    rule.target_key = setting.c_str();
+    rule.clauses = &clause;
+    rule.clause_count = 1;
+    orchestrator.gui_rules().add(&rule, owner.c_str());
+}
+
 void register_exclusive_step_group_options_impl(Orchestrator &orchestrator)
 {
+    orchestrator.elect_exclusive_group_definitions();
     for (Steps::StepExclusivePluginGroup plugin_group : Steps::active_exclusive_plugin_groups(orchestrator)) {
         // The selector must use the stable plugin id as the stored enum value,
         // while showing the user-facing plugin name in the GUI. This lets a
@@ -885,8 +889,13 @@ void register_exclusive_step_group_options_impl(Orchestrator &orchestrator)
             plugin_ids_and_labels.emplace_back(plugin->get_id(), plugin->get_name());
 
         Steps::StepExclusiveGroup &group = plugin_group.group;
-        group.set_enum_plugins(plugin_ids_and_labels);
-        orchestrator.create_new_print_config(&group.option_def);
+        const Plugin *preferred = Steps::default_provider_from_group(plugin_group.plugins);
+        group.set_enum_plugins(orchestrator, plugin_ids_and_labels, preferred != nullptr ? preferred->get_id() : std::string());
+        const Orchestrator::SelectorIdentity identity {
+            plugin_group.whole_step ? Orchestrator::SelectorIdentityKind::WholeStep : Orchestrator::SelectorIdentityKind::PluginGroup,
+            group.step, plugin_group.whole_step ? std::string() : group.group_id};
+        if (orchestrator.create_selector_print_config(group.option_def, identity, group.traits.auto_value) != OPTION_DEF_ERROR_OK)
+            throw std::runtime_error("Cannot create selector option '" + group.option_key_storage + "'");
         add_exclusive_step_used_setting_rules(orchestrator, group, plugin_group.plugins);
         for (const raw_gui_rule &rule : group.gui_activation_rules)
             orchestrator.gui_rules().add(&rule);

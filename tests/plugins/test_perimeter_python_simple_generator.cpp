@@ -41,8 +41,6 @@ private:
     const char *name_impl() const noexcept override { return "Cancel before remove gap fill"; }
     const char *description_impl() const noexcept override { return "Requests cancellation from module_after()."; }
     const char *exclusive_group_impl() const noexcept override { return ""; }
-    const char *exclusive_group_label_impl() const noexcept override { return ""; }
-    const char *exclusive_group_tooltip_impl() const noexcept override { return ""; }
     slicing_step_t step_impl() const noexcept override { return PERIMETER_GENERATION_MODULE; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 0; }
@@ -124,8 +122,6 @@ private:
     const char *name_impl() const noexcept override { return "Perimeter boundary exception module"; }
     const char *description_impl() const noexcept override { return "Throws from perimeter module hooks."; }
     const char *exclusive_group_impl() const noexcept override { return ""; }
-    const char *exclusive_group_label_impl() const noexcept override { return ""; }
-    const char *exclusive_group_tooltip_impl() const noexcept override { return ""; }
     slicing_step_t step_impl() const noexcept override { return PERIMETER_GENERATION_MODULE; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 0; }
@@ -311,8 +307,6 @@ private:
     const char *name_impl() const noexcept override { return "Failing native perimeter module"; }
     const char *description_impl() const noexcept override { return "Fails in the chosen phase."; }
     const char *exclusive_group_impl() const noexcept override { return ""; }
-    const char *exclusive_group_label_impl() const noexcept override { return ""; }
-    const char *exclusive_group_tooltip_impl() const noexcept override { return ""; }
     slicing_step_t step_impl() const noexcept override { return PERIMETER_GENERATION_MODULE; }
     const char *const *dependencies_impl() const noexcept override { return k_failing_module_dependencies; }
     int32_t priority_impl() const noexcept override { return 0; }

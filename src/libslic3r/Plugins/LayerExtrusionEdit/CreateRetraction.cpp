@@ -38,6 +38,10 @@ small scalar cache so parallel workers never inspect or mutate another layer.
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace CreateRetractionPlugin {
+// Register the permanent borrowed plugins and copy their alternative-selection setting descriptions into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_create_retraction_plugins(orchestrator_handle *orchestrator);
+
 namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
@@ -255,8 +259,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -298,8 +300,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -751,16 +751,6 @@ const char *CreateRetraction::exclusive_group_impl() const noexcept
     return "layer_extrusion_edit.retraction";
 }
 
-const char *CreateRetraction::exclusive_group_label_impl() const noexcept
-{
-    return "Retraction planning";
-}
-
-const char *CreateRetraction::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how semantic retractions are placed around ordered travels.";
-}
-
 slicing_step_t CreateRetraction::step_impl() const noexcept
 {
     return STEP_LAYER_EXTRUSION_EDIT;
@@ -1045,16 +1035,6 @@ const char *CreateTerminalRetraction::exclusive_group_impl() const noexcept
     return "extrusion_edit.terminal_retraction";
 }
 
-const char *CreateTerminalRetraction::exclusive_group_label_impl() const noexcept
-{
-    return "Terminal retraction";
-}
-
-const char *CreateTerminalRetraction::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how the final printable scope leaves filament retracted.";
-}
-
 slicing_step_t CreateTerminalRetraction::step_impl() const noexcept
 {
     return STEP_EXTRUSION_EDIT;
@@ -1135,8 +1115,20 @@ void register_create_retraction_plugins(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(
         orchestrator, CreateRetraction::instance(orchestrator).c_instance());
+    const plugin_instance member = CreateRetraction::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Retraction planning";
+    definition.tooltip = "Selects how semantic retractions are placed around ordered travels.";
+    CreateRetraction::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
     orchestrator_register_plugin(
         orchestrator, CreateTerminalRetraction::instance(orchestrator).c_instance());
+    const plugin_instance terminal_member = CreateTerminalRetraction::instance(orchestrator).c_instance();
+    raw_exclusive_group_def terminal_definition = raw_exclusive_group_def_init();
+    terminal_definition.exclusive_group = terminal_member.vt->get_exclusive_group(terminal_member.ctx);
+    terminal_definition.label = "Terminal retraction";
+    terminal_definition.tooltip = "Selects how the final printable scope leaves filament retracted.";
+    CreateTerminalRetraction::instance(orchestrator).register_exclusive_group(STEP_EXTRUSION_EDIT, terminal_definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::CreateRetractionPlugin

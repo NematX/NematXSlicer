@@ -38,6 +38,15 @@ namespace {
 
 using namespace Slic3r;
 
+// Borrow the complete function table with its byte count; optional cleanup/preference functions are null, and no changes or failures occur.
+const plugin_vtable *duplicate_option_plugin_vtable();
+// Return the alternative's execution priority without state or ownership changes; the call cannot fail.
+int32_t duplicate_plugin_priority(void *);
+// Borrow test state and register its optional description; return success while the application retains any registration rejection.
+int32_t duplicate_plugin_initialize(void *plugin_ctx, storage_handle *);
+// Return a regional Polyholes setting description by value using literal text and slicing invalidation; no registration occurs.
+raw_config_option_def duplicate_polyhole_option_def();
+
 struct PolyholeOptionKeys
 {
     const char *label;
@@ -421,11 +430,6 @@ const char *duplicate_plugin_exclusive_group(void *plugin_ctx)
     return static_cast<DuplicateOptionPluginState *>(plugin_ctx)->exclusive_group;
 }
 
-const char *duplicate_plugin_exclusive_group_text(void *)
-{
-    return "";
-}
-
 slicing_step_t duplicate_plugin_step(void *)
 {
     return STEP_POST_SLICING;
@@ -441,7 +445,7 @@ const_strings_t duplicate_plugin_dependencies(void *)
 
 int32_t duplicate_plugin_priority(void *)
 {
-    return 1000;
+    return 0;
 }
 
 int32_t duplicate_plugin_used_keys(void *plugin_ctx, raw_used_config_key *keys)
@@ -494,14 +498,15 @@ raw_config_option_def duplicate_polyhole_option_def()
     return def;
 }
 
-void duplicate_plugin_initialize(void *plugin_ctx, storage_handle *)
+int32_t duplicate_plugin_initialize(void *plugin_ctx, storage_handle *)
 {
     const DuplicateOptionPluginState &state = *static_cast<DuplicateOptionPluginState *>(plugin_ctx);
     if (!state.create_polyhole_option)
-        return;
+        return PLUGIN_ERROR_OK;
 
     raw_config_option_def def = duplicate_polyhole_option_def();
     orchestrator_create_option_def(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()), &def);
+    return PLUGIN_ERROR_OK;
 }
 
 void duplicate_plugin_setup(void *, const plugin_run_context *, uint32_t) {}
@@ -511,12 +516,11 @@ void duplicate_plugin_run(void *, const plugin_run_context *) {}
 const plugin_vtable *duplicate_option_plugin_vtable()
 {
     static const plugin_vtable vt = {
+        sizeof(plugin_vtable),
         &duplicate_plugin_id,
         &duplicate_plugin_name,
         &duplicate_plugin_description,
         &duplicate_plugin_exclusive_group,
-        &duplicate_plugin_exclusive_group_text,
-        &duplicate_plugin_exclusive_group_text,
         &duplicate_plugin_step,
         &duplicate_plugin_dependencies,
         &duplicate_plugin_priority,

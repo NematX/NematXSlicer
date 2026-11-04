@@ -1,13 +1,30 @@
-/*
-STEP_ORDERING preflight and plugin execution
-=============================================
+/* This file validates source extrusions and runs plugins that order their output movements.
+   An extrusion is a planned movement that deposits material. A perimeter is
+   an object's boundary extrusion; a seam is the starting point of a closed loop.
 
-The source LayerRegionIsland perimeter trees are cloned into PrintingPlan by
-the ordering step. The preflight below checks the loop metadata on those
-source trees before any plugin can consume or reorder the clones.
-Seam placement chooses the start of closed extrusion loops from regional settings.
-Its selector belongs to this module because a changed placement replays ordering.
-*/
+   The host is the slicer application. Its Orchestrator manages plugins,
+   components that perform jobs. register_selector_traits() installs protected
+   descriptions for seam selection and extrusion-tree ordering. A selector is
+   a setting naming an alternative plugin. Changing seam placement recomputes
+   ordering, the processing stage identified by STEP_ORDERING.
+
+   LayerRegionIsland groups source geometry for one material region within a
+   layer. Its perimeter trees organize nested extrusion entities. prepare()
+   prepares ordering data; validate_pre() checks source-loop information before
+   plugins clone or reorder it into PrintingPlan, the output movement plan.
+   run_step() invokes enabled ordering plugins sequentially, validate_post() checks their result,
+   and clear() releases this step's results before recomputation.
+
+   Call graph:
+     prepare
+       CustomGCode::make_print_record
+     run_step
+       validate_pre
+         validate_layer_perimeters
+           validate_perimeter_entity
+       selected_or_active_plugins_for_step
+       Plugin::setup / setup_run / run
+       validate_post */
 #include "StepExtrusionOrdering.hpp"
 
 #include <algorithm>
@@ -32,12 +49,10 @@ Its selector belongs to this module because a changed placement replays ordering
 
 namespace Slic3r::Steps::StepExtrusionOrdering {
 
-// Install extrusion-ordering traits and the exact regional seam selector declaration on the supplied host.
+// Copy application text, catalogue names and output/regional seam selection rules into the borrowed host without changing print data.
+// Seam selection recomputes ordering and ignores stored singleton ids; conflicts assert, and allocation errors propagate.
 void register_selector_traits(Orchestrator &orchestrator);
 
-// Copy output traits and exact regional seam traits into the borrowed host, which owns the strings.
-// Seam selection invalidates ordering and keeps stored-id reading disabled for a singleton; no print/configuration data changes.
-// Duplicate/conflicting installation asserts and allocation errors propagate without transferring provider ownership.
 void register_selector_traits(Orchestrator &orchestrator)
 {
     StepSelectorTraits traits;
@@ -57,9 +72,24 @@ void register_selector_traits(Orchestrator &orchestrator)
     seam.ui_group = "Seam";
     seam.strict_selection = true;
     seam.read_with_one_provider = false;
-    const int32_t seam_registered = orchestrator.register_builtin_step_selector(SEAM_PLACER, std::move(seam));
+    Orchestrator::ExclusiveGroupDefinition seam_definition;
+    seam_definition.traits = std::move(seam);
+    seam_definition.label = "Seam placement";
+    seam_definition.tooltip = "Selects the service used to choose the starting point of closed extrusion loops.";
+    seam_definition.translation_domain = "Slic3r";
+    const int32_t seam_registered = orchestrator.register_builtin_exclusive_group(SEAM_PLACER, std::move(seam_definition));
     assert(seam_registered == 1);
     (void)seam_registered;
+    Orchestrator::ExclusiveGroupDefinition ordering;
+    ordering.traits.exclusive_group = "ordering.extrusion_tree";
+    ordering.traits.category = RAW_OPTION_CATEGORY_OUTPUT;
+    ordering.traits.invalidates_step = STEP_ORDERING;
+    ordering.label = "Extrusion-tree ordering";
+    ordering.tooltip = "Selects how STEP_ORDERING fixes the order inside each PrintingExtrusion tree.";
+    ordering.translation_domain = "Slic3r";
+    const int32_t ordering_registered = orchestrator.register_builtin_exclusive_group(STEP_ORDERING, std::move(ordering));
+    assert(ordering_registered == 1);
+    (void)ordering_registered;
 }
 
 namespace {

@@ -4,6 +4,7 @@
 ///|/
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <cmath>
 #include <string>
 #include <utility>
@@ -13,6 +14,7 @@
 #include <boost/filesystem/path.hpp>
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
 #include "libslic3r/Api/host/ApiHostUtils.hpp"
@@ -24,7 +26,70 @@
 #include "Orchestrator.hpp"
 #include "Plugin.hpp"
 
+/* This file implements the C functions that register plugins, describe settings and run jobs.
+   The host is the slicer application. An orchestrator_handle is a borrowed
+   reference to its Orchestrator manager, not memory the caller may delete.
+
+   Call orchestrator_register_plugin() to introduce an instance. Package loaders
+   use orchestrator_begin_plugin_package_load(), register instances and resources,
+   then orchestrator_finish_plugin_package_load(). This interval records the
+   current installed package directory for resource ownership and load diagnostics.
+
+   An exclusive group contains alternatives for one processing stage; a selector
+   is its member-choice setting. orchestrator_register_exclusive_group() copies
+   descriptions into the manager. orchestrator_register_selector_auto_choice()
+   copies conditions used for automatic selection.
+
+   orchestrator_find_plugin() finds enabled instances for execution;
+   orchestrator_is_plugin_registered() also recognizes disabled instances.
+   Execution functions forward borrowed data to the manager. Error-reporting
+   functions copy explanations and contain exceptions at the C calling boundary.
+   orchestrator_send_log() writes text through the application's logger without
+   attributing a package failure. Initialization callbacks return stored error
+   identifiers rather than invoking a separate failure-reporting function.
+
+   Call graph:
+     orchestrator_register_plugin
+       Orchestrator::register_plugin
+     orchestrator_register_exclusive_group
+       Orchestrator::record_exclusive_group_declaration
+     orchestrator_execute_plugin
+       Orchestrator::execute_plugin
+     orchestrator_send_log
+       application Boost.Log */
+
+extern "C" {
+// Check registered ids, including disabled plugins, without changing ownership or activation; invalid input or failure returns zero.
+// The application is borrowed, and exceptions cannot cross C.
+int32_t orchestrator_is_plugin_registered(orchestrator_handle *orch, const char *plugin_id);
+// Log borrowed UTF-8 text at the requested severity; a null manager is allowed because logging is process-wide.
+// Invalid inputs are ignored, and exceptions cannot cross C.
+void orchestrator_send_log(orchestrator_handle *orch, raw_plugin_log_level severity, const char *message);
+// Check and copy a group description for the borrowed application; return -1 for invalid input or -2 for other failures.
+// Plugin ownership is unchanged, strings/package identity are retained only after checks, and exceptions cannot cross C.
+int32_t orchestrator_register_exclusive_group(orchestrator_handle *orch, slicing_step_t step, const raw_exclusive_group_def *def);
+// Copy an automatic-selection condition; rejection records failure of the current initializer without changing existing choices or geometry.
+// The application and caller memory stay borrowed; exceptions return -2.
+int32_t orchestrator_register_selector_auto_choice(orchestrator_handle *orch, slicing_step_t step,
+    const char *group, const char *key, const char *value, const char *provider);
+// Open a package loading record and retain its current-directory record until the matching finish call on this thread.
+// Application/path are borrowed; copied records are owned here, slicing data is unchanged, and allocation failures are contained.
+void orchestrator_begin_plugin_package_load(orchestrator_handle *orch, const char *package_root);
+// Finish loading and remove the matching current-directory record even if reporting fails; inputs remain borrowed.
+// Slicing data and plugin ownership are unchanged, and exceptions cannot cross C.
+void orchestrator_finish_plugin_package_load(orchestrator_handle *orch, const char *package_root);
+}
+
 namespace {
+
+// Keep each package's current-directory record on its loading thread until the matching finish call.
+struct PackageRegistrationScope
+{
+    Slic3r::Orchestrator *host;
+    std::string root;
+    Slic3r::Orchestrator::PluginRegistrationScope scope;
+};
+thread_local std::vector<PackageRegistrationScope> package_registration_scopes;
 
 struct GenericPropertyInfo
 {
@@ -167,6 +232,30 @@ int32_t orchestrator_get_version_info(raw_slic3r_version_info *info)
     return 1;
 }
 
+int32_t orchestrator_is_plugin_registered(orchestrator_handle *orch, const char *plugin_id)
+{
+    if (orch == nullptr || plugin_id == nullptr || *plugin_id == '\0') return 0;
+    try { return to_orchestrator(orch)->get_plugin(plugin_id) != nullptr ? 1 : 0; }
+    catch (...) { return 0; }
+}
+
+void orchestrator_send_log(orchestrator_handle *orch, raw_plugin_log_level severity, const char *message)
+{
+    (void)orch;
+    if (message == nullptr) return;
+    try {
+        switch (severity) {
+        case RAW_PLUGIN_LOG_FATAL: BOOST_LOG_TRIVIAL(fatal) << message; break;
+        case RAW_PLUGIN_LOG_ERROR: BOOST_LOG_TRIVIAL(error) << message; break;
+        case RAW_PLUGIN_LOG_WARNING: BOOST_LOG_TRIVIAL(warning) << message; break;
+        case RAW_PLUGIN_LOG_INFO: BOOST_LOG_TRIVIAL(info) << message; break;
+        case RAW_PLUGIN_LOG_DEBUG: BOOST_LOG_TRIVIAL(debug) << message; break;
+        case RAW_PLUGIN_LOG_TRACE: BOOST_LOG_TRIVIAL(trace) << message; break;
+        default: break;
+        }
+    } catch (...) {}
+}
+
 void orchestrator_register_plugin(orchestrator_handle *orch, plugin_instance plugin) {
     Slic3r::Orchestrator *orchestrator = orch == nullptr ? &Slic3r::Orchestrator::instance() :
                                                            reinterpret_cast<Slic3r::Orchestrator *>(orch);
@@ -216,6 +305,61 @@ int32_t orchestrator_register_activation_group(orchestrator_handle *orch,
         BOOST_LOG_TRIVIAL(error) << "Unexpected activation group registration failure.";
     }
     return 0;
+}
+
+int32_t orchestrator_register_exclusive_group(orchestrator_handle *orch, slicing_step_t step,
+                                             const raw_exclusive_group_def *def)
+{
+    if (orch == nullptr || def == nullptr ||
+        def->struct_size < offsetof(raw_exclusive_group_def, value_when_absent) + sizeof(def->value_when_absent)) return -1;
+    try {
+        if (def->has_value_when_absent && def->value_when_absent == nullptr) return -1;
+        Slic3r::Orchestrator::ExclusiveGroupDefinition owned;
+        owned.plugin_id = def->declaring_plugin_id != nullptr ? def->declaring_plugin_id : "";
+        owned.label = def->label != nullptr ? def->label : "";
+        owned.tooltip = def->tooltip != nullptr ? def->tooltip : "";
+        Slic3r::StepSelectorTraits &traits = owned.traits;
+        traits.exclusive_group = def->exclusive_group != nullptr ? def->exclusive_group : "";
+        traits.container_type = def->container_type;
+        traits.category = def->category;
+        traits.option_preset_type = def->option_preset_type;
+        traits.ui_target_file = def->ui_target_file != nullptr && *def->ui_target_file ? def->ui_target_file : "print.ui";
+        traits.ui_page = def->ui_page != nullptr ? def->ui_page : "";
+        traits.ui_group = def->ui_group != nullptr ? def->ui_group : "";
+        traits.option_key = def->option_key != nullptr ? def->option_key : "";
+        if (def->has_invalidates_step) traits.invalidates_step = def->invalidates_step;
+        traits.strict_selection = def->strict_selection != 0;
+        traits.read_with_one_provider = def->read_with_one_provider != 0;
+        traits.show_with_one_provider = def->show_with_one_provider != 0;
+        traits.provider_settings_rules = def->provider_settings_rules != 0;
+        traits.auto_value = def->auto_value != 0;
+        if (def->has_value_when_absent) traits.value_when_absent = def->value_when_absent;
+        return to_orchestrator(orch)->record_exclusive_group_declaration(step, std::move(owned));
+    } catch (...) { return -2; }
+}
+
+int32_t orchestrator_register_selector_auto_choice(orchestrator_handle *orch, slicing_step_t step,
+    const char *group, const char *key, const char *value, const char *provider)
+{
+    if (orch == nullptr) return -1;
+    Slic3r::Orchestrator &host = *to_orchestrator(orch);
+    try {
+        Slic3r::SelectorAutoChoice choice;
+        choice.step = step;
+        choice.exclusive_group = group != nullptr ? group : "";
+        choice.condition_key = key != nullptr ? key : "";
+        choice.condition_value = value != nullptr ? value : "";
+        choice.provider_id = provider != nullptr ? provider : "";
+        return host.register_selector_auto_choice(std::move(choice));
+    } catch (...) {
+        char reason[512];
+        std::snprintf(reason, sizeof(reason),
+            "Cannot copy or register automatic selector preference: step %d, group '%s', condition '%s=%s', provider '%s'",
+            int(step), group != nullptr ? group : "<null>", key != nullptr ? key : "<null>",
+            value != nullptr ? value : "<null>", provider != nullptr ? provider : "<null>");
+        host.record_plugin_initialization_failure(reason);
+        return -2;
+    }
 }
 
 slicing_step_t orchestrator_register_step(orchestrator_handle *orch,
@@ -336,11 +480,13 @@ raw_plugin_execution_status orchestrator_execute_plugin(
 
 void orchestrator_begin_plugin_package_load(orchestrator_handle *orch, const char *package_root)
 {
-    if (package_root == nullptr || package_root[0] == '\0')
+    if (orch == nullptr || package_root == nullptr || package_root[0] == '\0')
         return;
     try {
         const boost::filesystem::path root(package_root);
-        to_orchestrator(orch)->begin_plugin_package_load(root.filename().string(), root.string());
+        Slic3r::Orchestrator *host = to_orchestrator(orch);
+        host->begin_plugin_package_load(root.filename().string(), root.string());
+        package_registration_scopes.push_back({host, package_root, host->plugin_registration_scope(root.string(), true)});
     } catch (...) {
     }
 }
@@ -365,13 +511,16 @@ void orchestrator_report_plugin_package_load_error(orchestrator_handle *orch,
 
 void orchestrator_finish_plugin_package_load(orchestrator_handle *orch, const char *package_root)
 {
-    if (package_root == nullptr || package_root[0] == '\0')
+    if (orch == nullptr || package_root == nullptr || package_root[0] == '\0')
         return;
     try {
         const boost::filesystem::path root(package_root);
         to_orchestrator(orch)->finish_plugin_package_load(root.filename().string());
     } catch (...) {
     }
+    if (!package_registration_scopes.empty() && package_registration_scopes.back().host == to_orchestrator(orch) &&
+        package_registration_scopes.back().root == package_root)
+        package_registration_scopes.pop_back();
 }
 
 int32_t orchestrator_register_translation_catalog(orchestrator_handle *orch,

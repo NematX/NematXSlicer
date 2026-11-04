@@ -52,11 +52,13 @@
 
 namespace Slic3r :: GUI {
 
-// ConfigOptionDef stores gettext source text. Its domain identifies whether
-// the text came from the application catalog or from a plugin package.
+// Return owned display text from borrowed setting data, using its application/plugin catalogue unless marked verbatim.
+// Allocation failures propagate without changing setting data.
+static wxString translate_option_text(const ConfigOptionDef &option, const std::string &text);
+
 static wxString translate_option_text(const ConfigOptionDef &option, const std::string &text)
 {
-    return I18N::translate_in_domain(text, option.translation_domain);
+    return I18N::translate_in_domain(text, option.translation_domain, option.untranslated);
 }
 
 wxString double_to_string(double const value, const int max_precision /*= 6*/)
@@ -2136,8 +2138,8 @@ void GraphButton::BUILD()
             settings = *m_opt.graph_settings;
         } else {
             settings.title       = I18N::translate_utf8_in_domain(
-                m_opt.full_label.empty() ? m_opt.label : m_opt.full_label, m_opt.translation_domain);
-            settings.description = I18N::translate_utf8_in_domain(m_opt.tooltip, m_opt.translation_domain);
+                m_opt.full_label.empty() ? m_opt.label : m_opt.full_label, m_opt.translation_domain, m_opt.untranslated);
+            settings.description = I18N::translate_utf8_in_domain(m_opt.tooltip, m_opt.translation_domain, m_opt.untranslated);
             settings.x_label     = "";
             settings.y_label     = "";
             settings.null_label  = L("No values");

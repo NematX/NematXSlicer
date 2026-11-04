@@ -2,12 +2,36 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* Configuration definitions carry metadata and defaults across the C ABI. */
+/* This header lets plugins describe settings and the choices between alternative plugins.
+   The host is the slicer application. The C ABI is the binary calling interface
+   through which plugins provide data and functions to that application.
+
+   A setting definition describes a key, value type, displayed text, default and
+   settings-window placement. Start with raw_config_option_def_init(), fill the
+   raw_config_option_def, then call orchestrator_create_option_def() before the
+   application finalizes definitions for use. orchestrator_get_option_keys() and
+   orchestrator_get_option_def() inspect definitions; orchestrator_modify_option_def()
+   records changes applied during finalization. Input strings are copied.
+
+   An exclusive group contains alternative plugins for one processing stage.
+   Its selector is a setting choosing the member to run. After registering a
+   member, initialize raw_exclusive_group_def with raw_exclusive_group_def_init(),
+   name that member and call orchestrator_register_exclusive_group() while its
+   installed package directory is current during loading. The application keeps
+   one complete description, preferring enabled describing members by their
+   group priority, a number each plugin reports (smallest preferred; 100 when
+   absent), then by id. Descriptions supplied
+   by the slicer itself cannot be replaced by member descriptions.
+   Member text uses its named translation catalogue; without a catalogue owned
+   by that package it is displayed verbatim and a non-fatal warning is recorded.
+   orchestrator_register_selector_auto_choice() records setting key/value
+   conditions for automatic member choice. Detailed selection and missing-value
+   rules are documented beside the description fields and registration functions. */
 #ifndef slic3r_config_def_h_
 #define slic3r_config_def_h_
 
 #define SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 4u
+#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 5u
 
 #include "slic3r_config_option.h"
 #include "slic3r_config_types.h"
@@ -395,7 +419,9 @@ typedef struct raw_config_option_def {
     Such a list may only contain ids of registered plugins. When plugin option
     definitions are finalized, the host removes values whose plugin is missing
     or inactive and reports a non-fatal error when the remaining list is empty.
-    No host-only value may be mixed into a plugin-id list.
+    The only host value allowed in such a list is SLIC3R_SELECTOR_AUTO_VALUE,
+    which the host adds to selectors whose traits enable it and preserves during
+    provider filtering. Other plugin-id lists do not retain that reserved value.
 
     This flag and nature occupy the first reserved 64-bit slot. The remaining
     reserved_u64 entries keep the structure size and following offsets unchanged.
@@ -572,6 +598,143 @@ Returns OPTION_DEF_ERROR_OK when the patch was recorded.
 SLIC3R_HOST_API option_def_error_code orchestrator_modify_option_def(
     orchestrator_handle *orch,
     const raw_option_def_patch *patch);
+
+/* ========================= STEP SELECTORS ========================= */
+
+/*
+Describe the text, window placement and selection rules of one exclusive group.
+The selector lists enabled member ids. Without a description, its project setting
+uses the slicing category, the print preset and Notes / Exclusive step plugins.
+Its key is exclusive_group_<step name or builtin number>_<group>_plugin.
+
+exclusive_group and declaring_plugin_id must be nonempty. The named member must
+already belong to that stage/group and to the package directory currently loading.
+Other registrations may occur between registering the member and this description.
+Strings are copied. The caller may release them after registration returns.
+A translation domain names a catalogue. The member's nonempty default domain,
+otherwise its id, selects that catalogue. The package directory proves ownership.
+Without a catalogue registered for that directory/domain pair, text stays exactly
+as written, all translation lookup is bypassed and a package warning is recorded.
+Ordinary plugin-created settings still reject unavailable catalogues.
+
+Application-supplied descriptions take precedence. Otherwise choose an enabled
+member that supplied a description, ordered by group preference then id. If none
+is enabled, use that order among all registered members that supplied descriptions.
+Keep the complete result until settings are explicitly built again. Undescribed
+groups show their exact id and no tooltip. A selector for an entire stage keeps
+the application's text. Members without descriptions remain valid run choices.
+
+container_type is PROJECT, OBJECT or REGION. category and option_preset_type name
+the settings category and preset. ui_target_file defaults to print.ui; NULL or
+empty also means print.ui. Allowed files are print.ui, printer_fff.ui, filament.ui
+and printer_sla.ui. ui_page/ui_group are both empty or both nonempty. Registered
+window-layout text with the group id overrides this placement.
+
+option_key may be empty for a generated key. Otherwise it must match
+[A-Za-z_][A-Za-z0-9_]* and not belong to another setting or selector. Invalid
+syntax returns -1; a collision returns -2 without reserving the key.
+
+Invalidation means recomputing a processing stage after a value changes.
+has_invalidates_step selects invalidates_step, which must be executable or
+STEP_NONE for no recomputation. Service stages, STEP_ANY and unknown stages are
+invalid targets. Otherwise use the dynamic stage's registered target, the
+built-in stage itself, or STEP_ANY when neither identifies an executable stage.
+
+strict_selection returns no member for an unknown or disabled stored id rather
+than choosing the default. read_with_one_provider reads stored ids even with one
+enabled member. show_with_one_provider shows that member's selector.
+provider_settings_rules adds selector-based activation rules to settings read by members.
+auto_value lists the reserved automatic value first and makes it the default.
+has_value_when_absent enables the copied value_when_absent, including an empty
+string, and requires a nonnull pointer. Without it, missing values choose
+automatically when enabled, otherwise the default member. Stored values win.
+
+struct_size must include every field through value_when_absent. Short structures
+are rejected before later fields are read; extra bytes are ignored. No plugin or
+configuration ownership transfers to the caller.
+*/
+typedef struct raw_exclusive_group_def {
+    uint32_t struct_size;
+    const char *exclusive_group;
+    const char *declaring_plugin_id;
+    const char *label;
+    const char *tooltip;
+    raw_container_type container_type;
+    raw_option_category category;
+    raw_option_preset_type option_preset_type;
+    const char *ui_target_file;
+    const char *ui_page;
+    const char *ui_group;
+    const char *option_key;
+    int32_t has_invalidates_step;
+    slicing_step_t invalidates_step;
+    int32_t strict_selection;
+    int32_t read_with_one_provider;
+    int32_t show_with_one_provider;
+    int32_t provider_settings_rules;
+    int32_t auto_value;
+    int32_t has_value_when_absent;
+    const char *value_when_absent;
+} raw_exclusive_group_def;
+
+/* Return project-scoped defaults with the structure size set. No strings are allocated and application state is unchanged. */
+static inline raw_exclusive_group_def raw_exclusive_group_def_init()
+{
+    raw_exclusive_group_def def = {0};
+    def.struct_size = (uint32_t)sizeof(raw_exclusive_group_def);
+    def.container_type = RAW_CONTAINER_TYPE_PROJECT;
+    def.category = RAW_OPTION_CATEGORY_SLICING;
+    def.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    def.ui_target_file = "print.ui";
+    def.provider_settings_rules = 1;
+    return def;
+}
+
+/*
+Copy one registered member's group description before selector settings are built.
+The stage must exist. The member must belong to that stage/group and to the
+package directory currently loading. Invalid membership reports the member,
+stage and group without replacing application-supplied descriptions.
+
+Return 1 when added, 0 for an identical declaration by the same owner, -1 for
+invalid arguments, incomplete structures, missing package identity or invalid membership,
+and -2 for a key collision, conflicting redefinition by that owner or internal
+failure. Different definitions from different members are retained, not conflicts.
+Strings are copied without taking ownership of caller memory. Rejection preserves
+stored descriptions and key reservations. Exceptions cannot cross this C boundary.
+*/
+SLIC3R_HOST_API int32_t orchestrator_register_exclusive_group(
+    orchestrator_handle *orchestrator,
+    slicing_step_t step,
+    const raw_exclusive_group_def *def);
+
+/* Reserved first/default value of auto-enabled selectors, preserved during
+   provider filtering only for those selectors. It is not a provider id. */
+#define SLIC3R_SELECTOR_AUTO_VALUE "auto"
+
+/*
+Copy a conditional automatic provider preference, in registration order.
+When condition_key in the selector's effective configuration serializes to
+condition_value, ignoring one leading disabled marker '!', select provider_id
+if it is active in this step/group. Otherwise try later choices, then the active
+default provider by group priority and id. An explicit stored provider wins.
+An absent auto-enabled selector uses automatic selection unless its declaration
+supplies value_when_absent. Call during registration or initialize, before slicing.
+
+Return 1 when added, 0 when identical, -1 for STEP_NONE/STEP_ANY or null/empty
+strings, and -2 for conflicting providers for the same step/group/condition or
+internal failure. Preserve earlier choices. During initialize any rejection is
+recorded as a failure attributed to the current plugin, with a copied diagnostic.
+All strings are copied; caller/provider ownership is unchanged and exceptions
+do not escape this C boundary.
+*/
+SLIC3R_HOST_API int32_t orchestrator_register_selector_auto_choice(
+    orchestrator_handle *orchestrator,
+    slicing_step_t step,
+    const char *exclusive_group,
+    const char *condition_key,
+    const char *condition_value,
+    const char *provider_id);
 
 #ifdef __cplusplus
 } // extern "C"

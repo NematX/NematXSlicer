@@ -163,15 +163,15 @@ def _replace_matching_hole(
 
 class PythonPolyholesPlugin(PluginBase):
     def __init__(self, api):
+        """Retain the borrowed application API and copy a group description for registration after this object."""
         super().__init__(
             "python.polyholes",
             STEP_POST_SLICING,
             name="Python polyholes",
             description="Low-level Python version of the polyholes post-slicing plugin.",
-            priority=10,
+            priority=0,
+            exclusive_group_priority=10,
             exclusive_group=POLYHOLES_EXCLUSIVE_GROUP,
-            exclusive_group_label="Polyholes plugin",
-            exclusive_group_tooltip="Choose which active plugin converts round vertical holes to polyholes.",
             used_config_keys=[
                 used_config_key(POLYHOLES_KEY, RAW_CO_BOOL, RAW_CONTAINER_TYPE_REGION, RAW_PRESET_TYPE_FFF_PRINT),
                 used_config_key(POLYHOLES_THRESHOLD_KEY, RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_REGION, RAW_PRESET_TYPE_FFF_PRINT),
@@ -185,6 +185,8 @@ class PythonPolyholesPlugin(PluginBase):
                 POLYHOLES_ANGLE_START_KEY,
             ],
         )
+        self.declare_exclusive_group(label="Polyholes plugin",
+                                     tooltip="Choose which active plugin converts round vertical holes to polyholes.")
         self.api = api
 
     def initialize(self, storage_address: int) -> None:

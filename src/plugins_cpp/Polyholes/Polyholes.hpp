@@ -28,11 +28,11 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
+    // Prefer this algorithm among enabled alternatives for polygonal holes.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     int32_t defined_config_keys(const char **keys) const noexcept override;
     const char *progress_message_format_impl() const noexcept override;

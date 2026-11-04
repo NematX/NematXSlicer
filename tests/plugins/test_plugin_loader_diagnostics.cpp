@@ -10,17 +10,152 @@
 #include <catch2/catch.hpp>
 
 #include <string>
+#include <limits>
 #include <utility>
+#include <vector>
 
 #include <boost/filesystem.hpp>
 #include <boost/nowide/fstream.hpp>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Plugins/PluginLoader.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/Utils.hpp"
 #include "plugin_test_helpers.hpp"
 
+namespace {
+// Write package identity/version files using ABI major 4 under the borrowed test-owned directory; directory errors propagate.
+void write_package_metadata(const boost::filesystem::path &package_root, const std::string &package_id);
+}
+
 #ifdef SLIC3R_TEST_PYTHON_PLUGINS
+// Enable a Python object only after both C queries confirm registration without activation, then initialize and execute it.
+// The loader owns the retained object. The test restores previous activation after checking its counters.
+TEST_CASE("Python providers registered while inactive survive later activation and initialization",
+          "[plugins][python][loader][initialization]")
+{
+    REQUIRE(Slic3r::Test::Plugins::python_plugin_test_runtime_available());
+    Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    const char *id = "python.test.registration_lifetime";
+    const Slic3r::Test::Plugins::PluginTestStartupSets &startup = Slic3r::Test::Plugins::plugin_test_startup_sets();
+    REQUIRE(startup.provider_ids.count(id) == 1);
+    REQUIRE(startup.active_provider_ids.count(id) == 0);
+    Slic3r::Plugin *plugin = host.get_plugin(id);
+    REQUIRE(plugin != nullptr);
+    std::vector<Slic3r::Plugin *> previous(host.active_plugins().begin(), host.active_plugins().end());
+    const Slic3r::ScopeGuard restore([&]() {
+        host.clear_active_plugins();
+        for (Slic3r::Plugin *saved : previous) host.set_plugin_active(saved, true);
+        host.reset_plugin_cancel();
+    });
+    host.clear_active_plugins();
+    CHECK(orchestrator_is_plugin_registered(handle, id) == 1);
+    CHECK(orchestrator_find_plugin(handle, id) == nullptr);
+    REQUIRE(host.set_plugin_active(plugin, true));
+    host.initialize_plugins();
+    REQUIRE(host.is_plugin_active(plugin));
+    CHECK(orchestrator_find_plugin(handle, id) == reinterpret_cast<const orchestrator_plugin_handle *>(plugin));
+    host.reset_plugin_cancel();
+    uint32_t counts[2] = {0, 0};
+    raw_plugin_run_payload payload = {counts};
+    Slic3r::Print print;
+    CHECK(host.execute_plugin(*plugin, &print, &payload, 1, true) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(counts[0] == 1);
+    CHECK(counts[1] == 1);
+}
+
+// Initialize only the Python plugin that raises and require one application-owned explanation with the plugin disabled.
+// Application storage remains borrowed, and the test restores previous activation.
+TEST_CASE("Python initializer exceptions disable providers with attributed diagnostics", "[plugins][python][initialization]")
+{
+    REQUIRE(Slic3r::Test::Plugins::python_plugin_test_runtime_available());
+    Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
+    const char *id = "python.test.initialize.failure";
+    REQUIRE(host.get_plugin(id) != nullptr);
+    std::vector<Slic3r::Plugin *> previous(host.active_plugins().begin(), host.active_plugins().end());
+    const Slic3r::ScopeGuard restore([&]() {
+        host.clear_active_plugins();
+        for (Slic3r::Plugin *saved : previous) host.set_plugin_active(saved, true);
+        host.reset_plugin_cancel();
+    });
+    host.clear_active_plugins();
+    REQUIRE(host.set_plugin_active(id, true));
+    host.consume_plugin_messages();
+    CHECK_NOTHROW(host.initialize_plugins());
+    CHECK_FALSE(host.is_plugin_active(id));
+    size_t attributed = 0;
+    for (const Slic3r::Orchestrator::PluginMessage &message : host.consume_plugin_messages())
+        if (message.plugin_id == id) {
+            ++attributed;
+            CHECK(message.level == Slic3r::Orchestrator::PluginMessageLevel::Error);
+            CHECK(message.step == STEP_POST_SLICING);
+            CHECK(message.message.find("Python initializer deliberate failure") != std::string::npos);
+        }
+    CHECK(attributed == 1);
+}
+
+// Inspect saved reports and copied preferences from the embedded Python loader without registering more objects.
+// Activation and settings are unchanged. Both invalid packages must fail before exposing a plugin.
+TEST_CASE("Python loader bounds group preferences and defaults missing attributes",
+          "[plugins][python][loader][abi][selector-group-priority]")
+{
+    REQUIRE(Slic3r::Test::Plugins::python_plugin_test_runtime_available());
+    Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
+    const std::pair<const char *, int32_t> cases[] = {
+        {"python.test.metadata.absent", 100},
+        {"python.test.metadata.minimum", (std::numeric_limits<int32_t>::min)()},
+        {"python.test.metadata.maximum", (std::numeric_limits<int32_t>::max)()}
+    };
+    for (const std::pair<const char *, int32_t> &entry : cases) {
+        const Slic3r::Plugin *plugin = host.get_plugin(entry.first);
+        REQUIRE(plugin != nullptr);
+        CHECK(plugin->get_exclusive_group_priority() == entry.second);
+    }
+    for (bool upper : {false, true}) {
+        const Slic3r::PluginPackageLoadReport &report = Slic3r::Test::Plugins::python_priority_package_report(upper);
+        CHECK(report.state == Slic3r::PluginPackageLoadState::Failed);
+        CHECK(report.registered_plugin_ids.empty());
+        REQUIRE(report.issues.size() == 1);
+        CHECK(report.issues.front().code == Slic3r::PluginPackageLoadErrorCode::PythonRegistrationFailed);
+        const std::string id = upper ? "python.test.priority.high" : "python.test.priority.low";
+        CHECK(report.issues.front().detail.find(id) != std::string::npos);
+        CHECK(report.issues.front().detail.find("signed 32-bit integer") != std::string::npos);
+        CHECK(host.get_plugin(id) == nullptr);
+    }
+}
+
+// Inspect saved application-log text for one warning per supplied obsolete attribute and none for omitted attributes.
+// Saved text survives report clearing. The registered objects must remain loadable without implicit group descriptions.
+TEST_CASE("Python loader warns once for supplied obsolete group text slots",
+          "[plugins][python][loader][diagnostics][selector-traits]")
+{
+    REQUIRE(Slic3r::Test::Plugins::python_plugin_test_runtime_available());
+    const std::string &warnings = Slic3r::Test::Plugins::python_metadata_warnings();
+    Slic3r::Orchestrator &host = Slic3r::Orchestrator::instance();
+    for (const char *case_name : {"label", "tooltip", "positional", "positional_label", "keyword", "absent"}) {
+        const std::string id = std::string("python.test.metadata.") + case_name;
+        const Slic3r::Plugin *plugin = host.get_plugin(id);
+        REQUIRE(plugin != nullptr);
+        CHECK(plugin->get_exclusive_group().empty());
+        for (const char *attribute : {"exclusive_group_label", "exclusive_group_tooltip"}) {
+            const std::string diagnostic = "Python package 'python.external.package_root', plugin '" + id +
+                "': obsolete attribute '" + attribute + "'";
+            const bool expected = std::string(case_name) == "positional" || std::string(case_name) == "keyword" ||
+                (std::string(case_name) == "positional_label" && std::string(attribute) == "exclusive_group_label") ||
+                (std::string(case_name) == "label" && std::string(attribute) == "exclusive_group_label") ||
+                (std::string(case_name) == "tooltip" && std::string(attribute) == "exclusive_group_tooltip");
+            const size_t found = warnings.find(diagnostic);
+            CHECK((found != std::string::npos) == expected);
+            if (expected && found != std::string::npos)
+                CHECK(warnings.find(diagnostic, found + diagnostic.size()) == std::string::npos);
+        }
+    }
+}
+
 TEST_CASE("Python loader rejects an initially noncallable clear hook without losing valid plugins",
           "[plugins][python][clear][loader][diagnostics]")
 {
@@ -66,7 +201,7 @@ void write_package_metadata(const boost::filesystem::path &package_root,
     {
         boost::nowide::ofstream stream((package_root / "version.ini").string());
         stream << "[plugin]\npackage_version = 1.0.0\nslicer_version = 2.7.63.0\n"
-                   "[abi]\nslic3r_plugin_types.h = 3.0\n";
+                   "[abi]\nslic3r_plugin_types.h = 4.0\n";
     }
 }
 
@@ -142,6 +277,19 @@ TEST_CASE("Plugin loader rejects an incompatible API header major version before
     const Slic3r::PluginPackageLoadReport &report = load_fixture(
         boost::filesystem::path(SLIC3R_TEST_PLUGIN_BAD_API_MAJOR_DLL),
         "diagnostic.bad_api_major");
+    REQUIRE(report.issues.size() == 1);
+    CHECK(report.issues.front().code == Slic3r::PluginPackageLoadErrorCode::ApiHeaderVersionMismatch);
+    CHECK(report.issues.front().detail.find("slic3r_plugin_types.h") != std::string::npos);
+    CHECK(report.issues.front().detail.find("Registration fixture failure") == std::string::npos);
+}
+
+// Load a package requiring interface major 3 and require version rejection before its throwing registration function runs.
+// The package helper owns cleanup and reports. No incompatible function table enters application execution.
+TEST_CASE("Packages built without the group-priority vtable entry are rejected before registration",
+          "[plugins][plugin-loader][abi][selector-group-priority]")
+{
+    const Slic3r::PluginPackageLoadReport &report = load_fixture(
+        boost::filesystem::path(SLIC3R_TEST_PLUGIN_ABI3_DLL), "diagnostic.abi3");
     REQUIRE(report.issues.size() == 1);
     CHECK(report.issues.front().code == Slic3r::PluginPackageLoadErrorCode::ApiHeaderVersionMismatch);
     CHECK(report.issues.front().detail.find("slic3r_plugin_types.h") != std::string::npos);

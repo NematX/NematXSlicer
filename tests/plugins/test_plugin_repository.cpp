@@ -74,6 +74,7 @@ public:
 bool write_zip(const boost::filesystem::path &archive_path, const std::vector<ZipEntry> &entries);
 std::string description_contents(const std::string &package_name,
                                  const std::string &name = std::string());
+// Return owned package/slicer version text requiring ABI major 4 without filesystem changes; allocation failures propagate.
 std::string version_contents(const std::string &package_version,
                              const std::string &slicer_version);
 void write_description(const boost::filesystem::path &package_root,
@@ -170,7 +171,7 @@ std::string version_contents(const std::string &package_version,
     return "[plugin]\n"
            "package_version = " + package_version + "\n"
            "slicer_version = " + slicer_version + "\n"
-           "[abi]\nslic3r_plugin_types.h = 3.0\n";
+           "[abi]\nslic3r_plugin_types.h = 4.0\n";
 }
 
 void write_description(const boost::filesystem::path &package_root,

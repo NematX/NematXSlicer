@@ -151,6 +151,7 @@ public:
     void check_and_update(  PrinterTechnology pt_in, 
                             ConfigOptionMode tags_in, 
                             std::vector<InputInfo> input_values);
+    // Append owned search text from borrowed script-setting data, preserving verbatim text; allocation failures propagate.
     void append_script_option(const ConfigOptionDef &opt, Preset::Type preset_type, int32_t idx);
     bool search();
     bool search(const std::string& search, bool force = false);

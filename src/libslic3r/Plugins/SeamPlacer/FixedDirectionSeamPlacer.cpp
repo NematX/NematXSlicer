@@ -161,11 +161,12 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
+    // Return the fixed execution priority for seam-placement jobs.
     int32_t priority_impl() const noexcept override;
+    // Return the fixed rank among seam-placement alternatives.
+    int32_t exclusive_group_priority_impl() const noexcept override;
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     int32_t defined_config_keys(const char **keys) const noexcept override;
     void inilialize_impl(storage_handle *storage) const override;
@@ -316,16 +317,10 @@ const char *FixedDirectionSeamPlacer::description_impl() const noexcept
 }
 
 const char *FixedDirectionSeamPlacer::exclusive_group_impl() const noexcept { return k_group_id; }
-const char *FixedDirectionSeamPlacer::exclusive_group_label_impl() const noexcept { return "Seam placement"; }
-
-const char *FixedDirectionSeamPlacer::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects the service used to choose the starting point of closed extrusion loops.";
-}
-
 slicing_step_t FixedDirectionSeamPlacer::step_impl() const noexcept { return SEAM_PLACER; }
 const char *const *FixedDirectionSeamPlacer::dependencies_impl() const noexcept { return k_no_dependencies; }
-int32_t FixedDirectionSeamPlacer::priority_impl() const noexcept { return 900; }
+int32_t FixedDirectionSeamPlacer::priority_impl() const noexcept { return 600; }
+int32_t FixedDirectionSeamPlacer::exclusive_group_priority_impl() const noexcept { return 30; }
 
 int32_t FixedDirectionSeamPlacer::used_config_keys(raw_used_config_key *keys) const noexcept
 {

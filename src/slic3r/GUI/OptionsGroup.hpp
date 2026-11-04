@@ -77,6 +77,7 @@ struct Option
 
     bool operator==(const Option &rhs) const { return (rhs.opt_key == this->opt_key && rhs.opt_idx == this->opt_idx); }
 
+    // Copy the borrowed setting description and prepare its display tooltip, preserving verbatim text; allocations may throw.
     Option(const ConfigOptionDef &_opt, int32_t idx = -1);
 };
 using t_option = std::unique_ptr<Option>;	//!
@@ -109,8 +110,12 @@ public:
 	void append_widget(const widget_t widget) {
 		m_extra_widgets.push_back(widget);
     }
-	Line(wxString label, wxString tooltip) :
-		label(_(label)), label_tooltip(_(tooltip)) {}
+	// Distinguish already-translated display text from source text with a typed flag.
+	enum class TextState { Source, Resolved };
+	// Store display text unchanged, or translate source text through the default catalogue.
+	Line(wxString label, wxString tooltip, TextState text_state = TextState::Source) :
+		label(text_state == TextState::Resolved ? label : _(label)),
+		label_tooltip(text_state == TextState::Resolved ? tooltip : _(tooltip)) {}
 	Line() : m_is_separator(true) {}
 
 	Line(const std::string& opt_key, const wxString& label, const wxString& tooltip) :
@@ -178,8 +183,9 @@ public:
 
     wxWindow*   ctrl_parent() const;
 
+	// Copy the borrowed window-layout line and prepare its tooltip using each setting's translation policy; allocations may throw.
 	void		append_line(const Line& line);
-	// create controls for the option group
+	// Create group-owned controls for the supplied line, preserving verbatim labels; allocation failures propagate.
 	void		activate_line(Line& line);
 
 	// create all controls for the option group from the m_lines
@@ -190,6 +196,7 @@ public:
 	// ask for each script option to recompute their value. If init is true, it will ask for get/set even if the Field isn't created.
 	void		update_script_presets(bool init = false);
 
+    // Return an owned window-layout line from borrowed setting data, preserving verbatim labels/tooltips; allocations may throw.
     Line		create_single_option_line(const Option& option, const std::string& path = std::string()) const;
     void		append_single_option_line(const Option& option, const std::string& path = std::string()) { append_line(create_single_option_line(option, path)); }
 	void		append_separator();

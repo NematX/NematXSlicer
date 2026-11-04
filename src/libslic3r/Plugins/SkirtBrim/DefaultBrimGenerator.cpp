@@ -63,6 +63,10 @@ guard below restores the original instances even if a brim helper throws.
 */
 
 namespace slic3r_api { namespace SkirtBrim { namespace DefaultBrimGeneratorPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_default_brim_generator_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 using namespace Slic3r;
@@ -804,11 +808,6 @@ private:
         return "Generates the classic first-layer brim geometry.";
     }
     const char *exclusive_group_impl() const noexcept override { return k_group_id; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Brim generator"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects which plugin generates brim extrusion around first-layer objects.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_SKIRT_BRIM; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 0; }
@@ -856,6 +855,12 @@ private:
 void register_default_brim_generator_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(orchestrator, DefaultBrimGenerator::instance(orchestrator).c_instance());
+    const plugin_instance member = DefaultBrimGenerator::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Brim generator";
+    definition.tooltip = "Selects which plugin generates brim extrusion around first-layer objects.";
+    DefaultBrimGenerator::instance(orchestrator).register_exclusive_group(STEP_SKIRT_BRIM, definition);
 }
 
 }}} // namespace slic3r_api::SkirtBrim::DefaultBrimGeneratorPlugin

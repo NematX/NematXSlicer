@@ -222,7 +222,7 @@ size_t ConfigDef::update_translations(const std::function<std::string(const std:
         // Store the translation only when it differs from the raw text, so the
         // raw fields stay authoritative and untranslated options keep no copy.
         const auto fill = [&translate, &def, &changed](const std::string &raw, std::string &translated) {
-            std::string result = raw.empty() ? std::string() : translate(raw, def.translation_domain);
+            std::string result = raw.empty() || def.untranslated ? std::string() : translate(raw, def.translation_domain);
             if (result.empty() || result == raw)
                 result.clear();
             if (translated != result) {
@@ -235,15 +235,15 @@ size_t ConfigDef::update_translations(const std::function<std::string(const std:
         fill(def.tooltip, def.tooltip_translated);
 
         if (def.enum_def) {
-            // Only closed enums own display labels; labels() would otherwise
-            // return the serialized values, which must never be translated.
+            // Only enums with explicit labels own display labels. Without labels,
+            // labels() returns serialized values for both closed and open enums.
             std::vector<std::string> translated_labels;
             bool any_translated = false;
             if (def.enum_def->has_labels()) {
                 const std::vector<std::string> &raw_labels = def.enum_def->labels();
                 translated_labels.reserve(raw_labels.size());
                 for (const std::string &raw : raw_labels) {
-                    std::string result = raw.empty() ? std::string() : translate(raw, def.translation_domain);
+                    std::string result = raw.empty() || def.untranslated ? std::string() : translate(raw, def.translation_domain);
                     if (result.empty() || result == raw) {
                         // Keep the raw label at this index; translated_labels()
                         // still falls back per entry.
@@ -489,6 +489,7 @@ bool ConfigOptionEnumDef::is_valid_open_enum() const
 
 void ConfigOptionEnumDef::clear()
 {
+    m_labels_translated.clear();
     m_values_ordinary = false;
     m_enum_names      = nullptr;
     m_enum_keys_map   = nullptr;
@@ -499,11 +500,13 @@ void ConfigOptionEnumDef::clear()
 
 void ConfigOptionEnumDef::set_values(const std::vector<std::string> &v)
 {
+    m_labels_translated.clear();
     m_values = v;
     assert(m_labels.empty() || m_labels.size() == m_values.size());
 }
 void ConfigOptionEnumDef::set_values(const std::initializer_list<std::string_view> il)
 {
+    m_labels_translated.clear();
     m_values.clear();
     m_values.reserve(il.size());
     for (const std::string_view &p : il)
@@ -512,6 +515,7 @@ void ConfigOptionEnumDef::set_values(const std::initializer_list<std::string_vie
 }
 void ConfigOptionEnumDef::set_values(const std::initializer_list<std::pair<std::string_view, std::string_view>> il)
 {
+    m_labels_translated.clear();
     m_values.clear();
     m_values.reserve(il.size());
     m_labels.clear();
@@ -523,6 +527,7 @@ void ConfigOptionEnumDef::set_values(const std::initializer_list<std::pair<std::
 }
 void ConfigOptionEnumDef::set_values(const std::vector<std::pair<std::string, std::string>> il)
 {
+    m_labels_translated.clear();
     m_values.clear();
     m_values.reserve(il.size());
     m_labels.clear();
@@ -534,6 +539,7 @@ void ConfigOptionEnumDef::set_values(const std::vector<std::pair<std::string, st
 }
 void ConfigOptionEnumDef::set_labels(const std::initializer_list<std::string_view> il)
 {
+    m_labels_translated.clear();
     m_labels.clear();
     m_labels.reserve(il.size());
     for (const std::string_view &p : il)

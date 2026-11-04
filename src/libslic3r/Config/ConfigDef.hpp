@@ -178,9 +178,11 @@ public:
     // Translated counterpart of labels(), filled by ConfigDef::update_translations()
     // after the GUI loaded a language. Falls back to the raw labels when nothing
     // was translated. Never use it for value parsing, only for display.
+    // Borrow stored translations only when their count matches the current labels.
     const std::vector<std::string>& translated_labels() const {
-        return this->m_labels_translated.empty() ? this->labels() : this->m_labels_translated;
+        return this->m_labels_translated.empty() || this->m_labels_translated.size() != this->labels().size() ? this->labels() : this->m_labels_translated;
     }
+    // Borrow a label at a valid current index, using source text when stored translations have another count.
     const std::string&              translated_label(int idx) const { return this->translated_labels()[idx]; }
 
     // Look up a closed enum value of this combo box based on an index of the combo box value / label.
@@ -208,6 +210,7 @@ public:
     bool is_valid_open_enum() const;
 #endif // NDEBUG
 
+    // Clear owned choices, labels and translations, release the script mapping and reset borrowed mappings; no failures escape.
     void                    clear();
 
     ConfigOptionEnumDef *clone() const;
@@ -220,10 +223,15 @@ private:
     ConfigOptionEnumDef() = default;
     ConfigOptionEnumDef(const ConfigOptionEnumDef &other);
 
+    // Copy borrowed values and clear stored translations; existing labels must match the count, and allocation failures propagate.
     void set_values(const std::vector<std::string> &v);
+    // Copy borrowed string views and clear stored translations; existing labels must match the count, and allocation failures propagate.
     void set_values(const std::initializer_list<std::string_view> il);
+    // Copy borrowed value/label views into owned arrays and clear stored translations; allocation failures propagate without retaining views.
     void set_values(const std::initializer_list<std::pair<std::string_view, std::string_view>> il);
+    // Copy value/label pairs into owned arrays and clear stored translations; allocation failures propagate without taking caller memory.
     void set_values(const std::vector<std::pair<std::string, std::string>> il);
+    // Copy borrowed labels and clear stored translations; existing values must match the count, and allocation failures propagate.
     void set_labels(const std::initializer_list<std::string_view> il);
     void finalize_closed_enum();
 
@@ -395,6 +403,8 @@ public:
     // Gettext catalog of all user-facing text owned by this definition. An
     // empty value keeps the historic application catalog lookup.
     std::string                         translation_domain;
+    // Display source text without translation, even when another catalogue contains it.
+    bool                                untranslated = false;
     std::string                         get_full_label() const { return !full_label.empty() ? full_label : label; }
     // Translated counterparts of label / full_label / tooltip, filled by
     // ConfigDef::update_translations() once the GUI loaded a language. They are
@@ -403,13 +413,16 @@ public:
     std::string                         label_translated;
     std::string                         full_label_translated;
     std::string                         tooltip_translated;
-    const std::string&                  translated_label() const { return !label_translated.empty() ? label_translated : label; }
+    // Borrow the display label, ignoring stored translation when text must remain verbatim.
+    const std::string&                  translated_label() const { return !untranslated && !label_translated.empty() ? label_translated : label; }
+    // Borrow the display full label, or the short label when absent, preserving verbatim text.
     const std::string&                  translated_full_label() const {
-        if (!full_label_translated.empty())
+        if (!untranslated && !full_label_translated.empty())
             return full_label_translated;
         return !full_label.empty() ? full_label : label;
     }
-    const std::string&                  translated_tooltip() const { return !tooltip_translated.empty() ? tooltip_translated : tooltip; }
+    // Borrow the display tooltip, ignoring stored translation when text must remain verbatim.
+    const std::string&                  translated_tooltip() const { return !untranslated && !tooltip_translated.empty() ? tooltip_translated : tooltip; }
     // With which printer technology is this configuration valid?
     PrinterTechnology                   printer_technology = ptUnknown;
     // Where plugin-created static options shall store their actual value.
@@ -618,13 +631,8 @@ public:
 
     // public for orchestrator
     ConfigOptionDef*        add(const t_config_option_key &opt_key, ConfigOptionType type, PrinterTechnology pt = ptUnknown);
-    // Fill the translated label / full_label / tooltip and enum labels of every
-    // definition from the raw fields. translate(text, translation_domain)
-    // returns the text unchanged when no translation exists; an empty result or
-    // a result identical to the original clears the translated field so the raw
-    // value stays authoritative. Everything is recomputed from the originals,
-    // so calling it again after a language change is safe. Returns the number
-    // of definitions that changed.
+    // Recompute owned translated labels/tooltips and enum labels from originals via borrowed translate, preserving verbatim text; return the changed-definition count.
+    // Empty or identical translations clear stored fields so originals remain authoritative; callback/allocation failures propagate.
     size_t                  update_translations(const std::function<std::string(const std::string &text, const std::string &domain)> &translate);
     // Finalize open / close enums, validate everything.
     void                    finalize();

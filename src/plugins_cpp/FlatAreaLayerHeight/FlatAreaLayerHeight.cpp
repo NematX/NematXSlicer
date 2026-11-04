@@ -654,7 +654,7 @@ const char *const *FlatAreaLayerHeight::dependencies_impl() const noexcept
 
 int32_t FlatAreaLayerHeight::priority_impl() const noexcept
 {
-    return 10;
+    return 0;
 }
 
 int32_t FlatAreaLayerHeight::used_config_keys(raw_used_config_key *keys) const noexcept

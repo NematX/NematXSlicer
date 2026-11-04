@@ -130,7 +130,67 @@ class FreezeCapabilityPlugin(PluginBase):
         self.counter[0] += 1
 
 
+class RegistrationLifetimeProbe(PluginBase):
+    """Expose initialization and execution counts while remaining disabled at registration."""
+
+    def __init__(self):
+        """Create a counter without enabling the object or registering settings."""
+        super().__init__("python.test.registration_lifetime", STEP_POST_SLICING, exclusive_group="")
+        self.initializations = 0
+
+    def initialize(self, storage_address):
+        """Count initialization without retaining or changing application storage."""
+        self.initializations += 1
+
+    def run(self, run_ctx_address):
+        """Write initialization and execution counts into the caller's two-uint32 array without retaining its address."""
+        context = run_context(run_ctx_address)
+        counts = ctypes.cast(context.data, ctypes.POINTER(ctypes.c_uint32))
+        counts[0] = self.initializations
+        counts[1] += 1
+
+
+class InitializationFailureProbe(PluginBase):
+    """Provide a disabled plugin whose initializer raises an error with a known explanation."""
+
+    def __init__(self):
+        """Create a plugin without a selection group or default activation."""
+        super().__init__("python.test.initialize.failure", STEP_POST_SLICING, exclusive_group="")
+
+    def initialize(self, storage_address):
+        """Raise the known initialization error without retaining or changing borrowed storage."""
+        raise RuntimeError("Python initializer deliberate failure")
+
+
+class MetadataProbe(PluginBase):
+    """Expose plugin-description cases without a selection group or enabled execution."""
+
+    def __init__(self, case):
+        """Copy plugin descriptions and supply obsolete attributes only in the cases named for them."""
+        plugin_id = "python.test.metadata." + case
+        if case == "keyword":
+            super().__init__(plugin_id, STEP_POST_SLICING, exclusive_group="",
+                             exclusive_group_label="", exclusive_group_tooltip="Old tooltip")
+        elif case == "positional_label":
+            super().__init__(plugin_id, STEP_POST_SLICING, "Metadata", "", 0, None, None, None, "", "Old label")
+        elif case == "positional":
+            super().__init__(plugin_id, STEP_POST_SLICING, "Metadata", "", 0, None, None, None, "", "Old label", "Old tooltip")
+        else:
+            super().__init__(plugin_id, STEP_POST_SLICING, exclusive_group="")
+        if case == "absent":
+            del self.exclusive_group_priority
+        elif case == "minimum":
+            self.exclusive_group_priority = -(2**31)
+        elif case == "maximum":
+            self.exclusive_group_priority = 2**31 - 1
+        elif case == "label":
+            self.exclusive_group_label = "Old label"
+        elif case == "tooltip":
+            self.exclusive_group_tooltip = ""
+
+
 def register_plugin(api):
+    """Return disabled plugins for execution and description checks through the normal loader."""
     # The runtime only activates named production fixtures; these probes stay inactive.
     cases = (
         "success", "none", "error", "general", "unknown_id", "long_utf8",
@@ -138,4 +198,5 @@ def register_plugin(api):
         "bytes", "list", "tuple", "negative", "overflow",
     )
     return [ExternalPackageRootPlugin(), *(ClearResultPlugin(case) for case in cases),
-            NoncallableClearPlugin(), FreezeCapabilityPlugin(api)]
+            NoncallableClearPlugin(), FreezeCapabilityPlugin(api), RegistrationLifetimeProbe(), InitializationFailureProbe(),
+            *(MetadataProbe(case) for case in ("absent", "minimum", "maximum", "label", "tooltip", "positional", "positional_label", "keyword"))]

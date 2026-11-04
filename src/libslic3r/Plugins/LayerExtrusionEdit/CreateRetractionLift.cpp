@@ -54,6 +54,10 @@ structural flags.
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace CreateRetractionLiftPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_create_retraction_lift_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 using ScopeEntity = PrintingEntity<PrintingExtrusionScopeProperty>;
@@ -153,8 +157,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -934,16 +936,6 @@ const char *CreateRetractionLift::exclusive_group_impl() const noexcept
     return "layer_extrusion_edit.lift";
 }
 
-const char *CreateRetractionLift::exclusive_group_label_impl() const noexcept
-{
-    return "Retraction lift";
-}
-
-const char *CreateRetractionLift::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how Z lift is applied to retracted travels.";
-}
-
 slicing_step_t CreateRetractionLift::step_impl() const noexcept
 {
     return STEP_LAYER_EXTRUSION_EDIT;
@@ -1175,6 +1167,12 @@ void register_create_retraction_lift_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(
         orchestrator, CreateRetractionLift::instance(orchestrator).c_instance());
+    const plugin_instance member = CreateRetractionLift::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Retraction lift";
+    definition.tooltip = "Selects how Z lift is applied to retracted travels.";
+    CreateRetractionLift::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::CreateRetractionLiftPlugin

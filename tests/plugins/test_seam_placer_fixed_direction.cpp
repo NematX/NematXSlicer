@@ -52,6 +52,11 @@ region lookup. The loops remain small so every projection and tie-break is
 visible in the expected point.
 */
 
+namespace Slic3r::Test::Plugins {
+// Register a process-owned regional seam probe through the borrowed application unless already present; rejection throws.
+void register_regional_seam_test_provider(orchestrator_handle *orchestrator);
+}
+
 namespace {
 
 using namespace Slic3r;
@@ -126,7 +131,10 @@ private:
         static const char *dependencies[] = { nullptr };
         return dependencies;
     }
-    int32_t priority_impl() const noexcept override { return 2000; }
+    // Return the priority shared by seam-placement jobs. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 600; }
+    // Keep this routing probe behind native defaults without effects or failures.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 2000; }
 
     void run_impl(const plugin_run_context *run_context) const override
     {
@@ -545,6 +553,7 @@ void register_regional_seam_test_provider(orchestrator_handle *orchestrator)
 
 } // namespace Slic3r::Test::Plugins
 
+// Read fixed-direction descriptions without mutation and check execution priority separately from alternative preference.
 TEST_CASE("Fixed-direction seam placer registers its regional contract",
           "[plugins][seam-placer][fixed][config]")
 {
@@ -554,7 +563,8 @@ TEST_CASE("Fixed-direction seam placer registers its regional contract",
     REQUIRE(plugin != nullptr);
     CHECK(plugin->get_name() == "Fixed direction");
     CHECK(plugin->get_step() == SEAM_PLACER);
-    CHECK(plugin->get_priority() == 900);
+    CHECK(plugin->get_priority() == 600);
+    CHECK(plugin->get_exclusive_group_priority() == 30);
     CHECK(plugin->get_exclusive_group() == k_seam_group);
 
     const std::vector<Plugin::UsedConfigKey> used = plugin->get_used_config_keys();

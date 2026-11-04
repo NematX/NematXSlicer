@@ -24,6 +24,10 @@
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_printing_extrusion_pre_sort_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 /*
@@ -309,14 +313,6 @@ private:
         return "Coarsely orders each tool visit and publishes estimated extrusion entry points.";
     }
     const char *exclusive_group_impl() const noexcept override { return k_exclusive_group; }
-    const char *exclusive_group_label_impl() const noexcept override
-    {
-        return "Printing extrusion pre-sort";
-    }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects how complete PrintingExtrusion objects are coarsely ordered.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_ORDERING; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t priority_impl() const noexcept override { return 1000; }
@@ -365,6 +361,13 @@ void register_printing_extrusion_pre_sort_plugin(orchestrator_handle *orchestrat
 {
     orchestrator_register_plugin(
         orchestrator, PrintingExtrusionPreSort::instance(orchestrator).c_instance());
+    const plugin_instance member = PrintingExtrusionPreSort::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.category = RAW_OPTION_CATEGORY_OUTPUT;
+    definition.label = "Printing extrusion pre-sort";
+    definition.tooltip = "Selects how complete PrintingExtrusion objects are coarsely ordered.";
+    PrintingExtrusionPreSort::instance(orchestrator).register_exclusive_group(STEP_ORDERING, definition);
 }
 
 }}} // namespace slic3r_api::Ordering::DefaultOrderingPlugin

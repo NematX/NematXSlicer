@@ -197,14 +197,13 @@ const bridge_detector_vtable native_bridge_detector_vtable = {
 };
 
 plugin_vtable default_plugin_vtable = {
+    sizeof(plugin_vtable),
     // Plugin registration vtable. This plugin is a service provider: run()
     // creates a detector instance instead of editing print data directly.
     &BridgeDetector::get_id_bridge,
     &BridgeDetector::get_name_bridge,
     &BridgeDetector::get_description_bridge,
     &BridgeDetector::get_exclusive_group_bridge,
-    &BridgeDetector::get_exclusive_group_label_bridge,
-    &BridgeDetector::get_exclusive_group_tooltip_bridge,
     &BridgeDetector::get_step_bridge,
     &BridgeDetector::get_dependencies_bridge,
     &BridgeDetector::get_priority_bridge,
@@ -300,16 +299,6 @@ const char *BridgeDetector::exclusive_group() const noexcept
     return "";
 }
 
-const char *BridgeDetector::exclusive_group_label() const noexcept
-{
-    return "";
-}
-
-const char *BridgeDetector::exclusive_group_tooltip() const noexcept
-{
-    return "";
-}
-
 slicing_step_t BridgeDetector::step() const noexcept
 {
     return BRIDGE_DETECTOR;
@@ -345,16 +334,6 @@ const char *BridgeDetector::get_exclusive_group_bridge(void *plugin_ctx)
     return static_cast<BridgeDetector *>(plugin_ctx)->exclusive_group();
 }
 
-const char *BridgeDetector::get_exclusive_group_label_bridge(void *plugin_ctx)
-{
-    return static_cast<BridgeDetector *>(plugin_ctx)->exclusive_group_label();
-}
-
-const char *BridgeDetector::get_exclusive_group_tooltip_bridge(void *plugin_ctx)
-{
-    return static_cast<BridgeDetector *>(plugin_ctx)->exclusive_group_tooltip();
-}
-
 slicing_step_t BridgeDetector::get_step_bridge(void *plugin_ctx)
 {
     return static_cast<BridgeDetector *>(plugin_ctx)->step();
@@ -387,9 +366,12 @@ int32_t BridgeDetector::defined_config_keys_bridge(void *, const char **)
     return 0;
 }
 
-void BridgeDetector::initialize_bridge(void *plugin_ctx, storage_handle *storage)
+int32_t BridgeDetector::initialize_bridge(void *plugin_ctx, storage_handle *storage)
 {
-    static_cast<BridgeDetector *>(plugin_ctx)->initialize(storage);
+    try {
+        static_cast<BridgeDetector *>(plugin_ctx)->initialize(storage);
+        return PLUGIN_ERROR_OK;
+    } catch (...) { return PLUGIN_ERROR_GENERAL; }
 }
 
 void BridgeDetector::setup_bridge(void *plugin_ctx, const plugin_run_context *run_ctx, uint32_t run_count)

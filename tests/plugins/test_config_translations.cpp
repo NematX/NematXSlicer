@@ -89,3 +89,55 @@ TEST_CASE("Config definitions store translated labels", "[config]")
     CHECK(missing->label_translated.empty());
     CHECK(missing->translated_label() == "Untranslated");
 }
+
+// Fill stored translations, rebuild choices through public setters, then read current labels without translating again.
+// Test-local descriptions own all data. Rebuilding or clearing must discard translations of previous labels.
+TEST_CASE("Rebuilt enum definitions discard translated labels", "[config][translation]")
+{
+    ConfigDef definitions;
+    ConfigOptionDef *option = definitions.add("rebuilt_enum", coEnum);
+    option->set_enum_as_closed_for_scripted_enum({{"a", "Label A"}, {"b", "Label B"}});
+    REQUIRE(definitions.update_translations([](const std::string &text, const std::string &) {
+        return "Translated " + text;
+    }) == 1);
+    REQUIRE(option->enum_def->translated_label(0) == "Translated Label A");
+    SECTION("Growing a scripted enum") {
+        option->set_enum_as_closed_for_scripted_enum({{"x", "New X"}, {"y", "New Y"}, {"z", "New Z"}});
+    }
+    SECTION("Shrinking a scripted enum") {
+        option->set_enum_as_closed_for_scripted_enum({{"x", "New X"}});
+    }
+    SECTION("Replacing with unlabelled values") {
+        option->set_enum_values(ConfigOptionDef::GUIType::select_close, std::vector<std::string>{"x", "y", "z"});
+    }
+    SECTION("Replacing with explicit labels only") {
+        option->set_enum_labels(ConfigOptionDef::GUIType::select_close, {"New X", "New Y", "New Z"});
+    }
+    SECTION("Clearing enum metadata") {
+        option->enum_def->clear();
+        CHECK(option->enum_def->translated_labels().empty());
+    }
+    CHECK(option->enum_def->translated_labels() == option->enum_def->labels());
+    for (size_t i = 0; i < option->enum_def->labels().size(); ++i)
+        CHECK(option->enum_def->translated_label(int(i)) == option->enum_def->label(int(i)));
+}
+
+// Refresh a test-local choice list without explicit labels using a function that would translate every input.
+// Stored values must remain unchanged; window code performs display-only lookup for values not marked verbatim.
+TEST_CASE("Enums without explicit labels keep serialized values outside the translation cache", "[config][translation]")
+{
+    ConfigDef definitions;
+    ConfigOptionDef *option = definitions.add("unlabelled_enum", coEnum);
+    option->set_enum_values(ConfigOptionDef::GUIType::select_close, std::vector<std::string>{"filament", "tool"});
+    SECTION("Host enum") { option->untranslated = false; }
+    SECTION("Verbatim enum") { option->untranslated = true; }
+    size_t calls = 0;
+    CHECK(definitions.update_translations([&calls](const std::string &text, const std::string &) {
+        ++calls;
+        return "Translated " + text;
+    }) == 0);
+    CHECK(calls == 0);
+    CHECK_FALSE(option->enum_def->has_labels());
+    CHECK(option->enum_def->translated_labels() == option->enum_def->values());
+    CHECK(option->enum_def->translated_label(0) == "filament");
+}

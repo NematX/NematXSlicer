@@ -1031,10 +1031,6 @@ coord_t Print::get_min_first_layer_height() const
 // Matches "G92 E0" with various forms of writing the zero and with an optional comment.
 boost::regex regex_g92e0 { "^[ \\t]*[gG]92[ \\t]*[eE](0(\\.0*)?|\\.0+)[ \\t]*(;.*)?$" };
 
-// After apply(), inspect print placement/settings and selected providers, returning
-// an owned error/message pair or success. Append advisories to borrowed warnings
-// when supplied and refresh cached clearance contours; no ownership is retained.
-// Geometry, plugin-resolution or config-comparison failures may propagate.
 std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vector<std::string>* warnings) const
 {
     std::set<extruder_index_t> extruders = this->extruders();
@@ -1060,7 +1056,7 @@ std::pair<PrintBase::PrintValidationError, std::string> Print::validate(std::vec
     // config, not object/region overrides, using the runtime group selector.
     const DynamicPrintConfig &full_config = full_print_config();
     const std::optional<std::string> unsupported_setting = Steps::unsupported_active_setting(
-        PrintConfigDef::instance(), full_config,
+        Orchestrator::instance(), PrintConfigDef::instance(), full_config,
         [&full_config](const std::string &group_id) -> const Plugin * {
             Orchestrator &orchestrator = Orchestrator::instance();
             for (Plugin *plugin : orchestrator.registered_plugins())

@@ -45,6 +45,10 @@ namespace Slic3r {
 
 namespace GUI {
 
+// Return owned display text for a borrowed setting value using stored choice labels or its translation policy.
+// Ownership is unchanged; unsupported values use the existing placeholder, and allocations may throw.
+static wxString get_string_value(const OptionKeyIdx &opt_key_id, const DynamicPrintConfig& config);
+
 wxDEFINE_EVENT(EVT_DIFF_DIALOG_TRANSFER,        SimpleEvent);
 wxDEFINE_EVENT(EVT_DIFF_DIALOG_UPDATE_PRESETS,  SimpleEvent);
 
@@ -1225,9 +1229,13 @@ static wxString get_string_value(const OptionKeyIdx &opt_key_id, const DynamicPr
         break;
     }
     case coEnum: {
-        auto optional_str = config.option_def(opt_key)->enum_def->enum_to_label(config.option(opt_key)->get_int());
+        const ConfigOptionDef &definition = *config.option_def(opt_key);
+        const ConfigOptionEnumDef &enum_definition = *definition.enum_def;
+        const std::optional<int> index = enum_definition.enum_to_index(config.option(opt_key)->get_int());
         serialized_str = (option->is_enabled() ? "" : "Disabled:");
-        serialized_str += optional_str.has_value() ? _(from_u8(*optional_str)) : _L("Undef");
+        serialized_str += index.has_value() ?
+            (enum_definition.has_labels() ? from_u8(enum_definition.translated_label(*index)) :
+             I18N::translate_in_domain(enum_definition.label(*index), definition.translation_domain, definition.untranslated)) : _L("Undef");
         break;
     }
     case coPoint: {

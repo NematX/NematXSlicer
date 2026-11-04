@@ -32,7 +32,10 @@ private:
     const char *description_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
+    // Return the common layer-height execution priority without changing state or transferring ownership; the call cannot fail.
     int32_t priority_impl() const noexcept override;
+    // Return this algorithm's rank among layer-height alternatives.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 10; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override;
     int32_t defined_config_keys(const char **keys) const noexcept override;
     const char *progress_message_format_impl() const noexcept override;

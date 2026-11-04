@@ -655,20 +655,15 @@ private:
     {
         return k_exclusive_group;
     }
-    const char *exclusive_group_label_impl() const noexcept override
-    {
-        return "Extrusion-tree ordering";
-    }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    {
-        return "Selects how STEP_ORDERING fixes the order inside each PrintingExtrusion tree.";
-    }
     slicing_step_t step_impl() const noexcept override { return STEP_ORDERING; }
     const char *const *dependencies_impl() const noexcept override
     {
         return k_no_dependencies;
     }
-    int32_t priority_impl() const noexcept override { return 1075; }
+    // Return the common extrusion-ordering priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 1050; }
+    // Return the XY algorithm's preference. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 10; }
     const char *progress_message_format_impl() const noexcept override
     {
         return "Ordering extrusion trees in an XY serpentine: %u / %u roots";

@@ -225,9 +225,6 @@ protected:
     virtual Slic3r::GCodeThumbnailsFormat format() const noexcept = 0;
 private:
     const char *exclusive_group_impl() const noexcept override { return "thumbnail_encoder_plugin"; }
-    const char *exclusive_group_label_impl() const noexcept override { return "Thumbnail encoding"; }
-    const char *exclusive_group_tooltip_impl() const noexcept override
-    { return "Selects the encoding used for thumbnails embedded in G-code files."; }
     slicing_step_t step_impl() const noexcept override { return GCODE_THUMBNAIL; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
     int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
@@ -272,7 +269,10 @@ private:
     const char *id_impl() const noexcept override { return "PNG"; }
     const char *name_impl() const noexcept override { return "PNG"; }
     const char *description_impl() const noexcept override { return "Encodes standard PNG G-code thumbnail blocks."; }
+    // Return the common encoder execution priority. Nothing is changed or transferred, and the call cannot fail.
     int32_t priority_impl() const noexcept override { return 0; }
+    // Return PNG's preference number. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
     Slic3r::GCodeThumbnailsFormat format() const noexcept override { return Slic3r::GCodeThumbnailsFormat::PNG; }
 };
 
@@ -285,7 +285,10 @@ private:
     const char *id_impl() const noexcept override { return "JPG"; }
     const char *name_impl() const noexcept override { return "JPEG"; }
     const char *description_impl() const noexcept override { return "Encodes compact JPEG G-code thumbnail blocks."; }
-    int32_t priority_impl() const noexcept override { return 10; }
+    // Return the common encoder execution priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Return JPEG's preference number. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 10; }
     Slic3r::GCodeThumbnailsFormat format() const noexcept override { return Slic3r::GCodeThumbnailsFormat::JPG; }
 };
 
@@ -298,7 +301,10 @@ private:
     const char *id_impl() const noexcept override { return "QOI"; }
     const char *name_impl() const noexcept override { return "QOI"; }
     const char *description_impl() const noexcept override { return "Encodes low-memory QOI G-code thumbnail blocks."; }
-    int32_t priority_impl() const noexcept override { return 20; }
+    // Return the common encoder execution priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Return QOI's preference number. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 20; }
     Slic3r::GCodeThumbnailsFormat format() const noexcept override { return Slic3r::GCodeThumbnailsFormat::QOI; }
 };
 
@@ -311,7 +317,10 @@ private:
     const char *id_impl() const noexcept override { return "BIQU"; }
     const char *name_impl() const noexcept override { return "BIQU"; }
     const char *description_impl() const noexcept override { return "Encodes BIQU RGB565 hexadecimal G-code thumbnail blocks."; }
-    int32_t priority_impl() const noexcept override { return 30; }
+    // Return the common encoder execution priority. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Return BIQU's preference number. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 30; }
     Slic3r::GCodeThumbnailsFormat format() const noexcept override { return Slic3r::GCodeThumbnailsFormat::BIQU; }
 };
 

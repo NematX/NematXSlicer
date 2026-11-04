@@ -49,6 +49,11 @@ using namespace Slic3r;
 using namespace Slic3r::Printing;
 using slic3r_api::PluginPropertyKey;
 
+// Borrow the complete function table with its byte count; optional cleanup/preference functions are null, and no changes or failures occur.
+const plugin_vtable *plan_event_editor_vtable();
+// Ignore borrowed initialization arguments and return success without state changes or failure.
+int32_t plan_event_editor_initialize(void *, storage_handle *);
+
 static_assert(sizeof(extruder_index_t) == sizeof(int16_t));
 static_assert(std::is_signed<extruder_index_t>::value);
 static_assert(EXTRUDER_ID_UNKNOWN == extruder_index_t(-1));
@@ -299,14 +304,12 @@ const char *plan_event_editor_id(void *ctx) { return static_cast<PlanEventEditor
 const char *plan_event_editor_name(void *ctx) { return static_cast<PlanEventEditorState *>(ctx)->id; }
 const char *plan_event_editor_description(void *) { return "Records global plan event scheduling."; }
 const char *plan_event_editor_group(void *) { return ""; }
-const char *plan_event_editor_group_label(void *) { return ""; }
-const char *plan_event_editor_group_tooltip(void *) { return ""; }
 slicing_step_t plan_event_editor_step(void *) { return STEP_EXTRUSION_EDIT; }
 int32_t plan_event_editor_priority(void *ctx) { return static_cast<PlanEventEditorState *>(ctx)->priority; }
 const_strings_t plan_event_editor_dependencies(void *) { return {}; }
 int32_t plan_event_editor_used_keys(void *, raw_used_config_key *) { return 0; }
 int32_t plan_event_editor_defined_keys(void *, const char **) { return 0; }
-void plan_event_editor_initialize(void *, storage_handle *) {}
+int32_t plan_event_editor_initialize(void *, storage_handle *) { return PLUGIN_ERROR_OK; }
 
 void plan_event_editor_setup(void *ctx, const plugin_run_context *run_ctx, uint32_t run_count)
 {
@@ -352,12 +355,11 @@ void plan_event_editor_run(void *ctx, const plugin_run_context *run_ctx)
 const plugin_vtable *plan_event_editor_vtable()
 {
     static const plugin_vtable table = {
+        sizeof(plugin_vtable),
         &plan_event_editor_id,
         &plan_event_editor_name,
         &plan_event_editor_description,
         &plan_event_editor_group,
-        &plan_event_editor_group_label,
-        &plan_event_editor_group_tooltip,
         &plan_event_editor_step,
         &plan_event_editor_dependencies,
         &plan_event_editor_priority,

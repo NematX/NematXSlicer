@@ -3,13 +3,36 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/*
-Plugin activation is intentionally separate from package installation and from
-the per-print selection of one implementation inside an exclusive group. This
-dialog builds a stable catalog when it opens, then projects that catalog through
-navigation, search and filters. Toggle state therefore survives every rebuild
-of the visible list and is written to activated.ini only when the user saves.
-*/
+/* This file displays available plugins and saves which ones the application will enable.
+   A plugin is a component that performs a slicing job. A package is its installed
+   directory of code and resources; installing a package does not enable all its
+   plugins. Activation means enabling a plugin for use after application restart.
+
+   Construct PluginConfigDialog and call ShowModal(). build_catalog() first copies
+   registered plugins and unavailable configured ids into dialog-owned entries.
+   build_navigation() and refresh_plugin_list() display them without losing
+   checkbox state during search or filtering.
+
+   An exclusive group contains alternatives for one processing stage. A selector
+   is the per-print setting choosing one enabled member. Orchestrator, the
+   application's plugin manager, retains the group's complete description before
+   this dialog opens. build_catalog() reads that description. A translation
+   domain names its text catalogue; untranslated instead requires verbatim display.
+
+   write_active_plugins() validates checked ids and writes plugins/activated.ini
+   only when the user saves. save_and_restart() also requests application restart.
+   This changes future availability, not the current print's selector values,
+   and does not install or remove package files.
+
+   Call graph:
+     PluginConfigDialog
+       build_catalog
+       build
+         build_navigation
+     refresh_plugin_list
+       refresh_details
+     save_and_restart
+       write_active_plugins */
 
 #include "PluginConfigDialog.hpp"
 
@@ -1079,11 +1102,14 @@ void PluginConfigDialog::build_catalog()
         entry.step_label = step_name(entry.step);
         entry.priority = plugin->get_priority();
         entry.registration_index = plugin_idx;
-        entry.exclusive_group = plugin->get_exclusive_group();
-        entry.exclusive_group_label =
-            I18N::translate_in_domain(plugin->get_exclusive_group_label(), plugin->get_translation_domain());
-        entry.exclusive_group_tooltip =
-            I18N::translate_in_domain(plugin->get_exclusive_group_tooltip(), plugin->get_translation_domain());
+        const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator whole = Steps::get_exclusive_steps().find(entry.step);
+        entry.exclusive_group = whole != Steps::get_exclusive_steps().end() ? whole->second.key : plugin->get_exclusive_group();
+        if (!entry.exclusive_group.empty()) {
+            const Orchestrator::ExclusiveGroupDefinition definition =
+                Orchestrator::instance().exclusive_group_definition_or_default(entry.step, entry.exclusive_group);
+            entry.exclusive_group_label = I18N::translate_in_domain(definition.label, definition.translation_domain, definition.untranslated);
+            entry.exclusive_group_tooltip = I18N::translate_in_domain(definition.tooltip, definition.translation_domain, definition.untranslated);
+        }
         entry.dependencies = plugin->get_dependencies();
         std::set<std::string> defined_setting_keys;
         for (const Plugin::DefinedConfigKey &defined_key : plugin->get_defined_config_keys()) {

@@ -169,7 +169,10 @@ private:
     const char *exclusive_group_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
+    // Return common seam execution priority without changing state or transferring ownership; the call cannot fail.
     int32_t priority_impl() const noexcept override;
+    // Prefer the service probe when it is active alongside native alternatives.
+    int32_t exclusive_group_priority_impl() const noexcept override { return -1; }
     void run_impl(const plugin_run_context *run_context) const override;
 };
 
@@ -198,7 +201,7 @@ const char *const *TestSeamPlugin::dependencies_impl() const noexcept
 
 int32_t TestSeamPlugin::priority_impl() const noexcept
 {
-    return 0;
+    return 600;
 }
 
 void TestSeamPlugin::run_impl(const plugin_run_context *run_context) const

@@ -48,12 +48,23 @@ TEST_CASE("Package ABI uses literal header names and ignores the build version",
         PluginPackageMetadata metadata;
         std::string error;
         REQUIRE(parse_plugin_package_metadata("[plugin]\npackage_version=1.0.0\nslicer_version=" + slicer +
-            "\n[abi]\nslic3r_plugin_types.h=3.0\nsteps/slic3r_step_post_perimeter.h=1.0\nfuture.h=0.0\n", metadata, error));
+            "\n[abi]\nslic3r_plugin_types.h=4.0\nsteps/slic3r_step_post_perimeter.h=1.0\nfuture.h=0.0\n", metadata, error));
         CHECK(metadata.compatibility.compatible());
         REQUIRE(metadata.abi.size() == 3);
         CHECK(metadata.abi[1].header == "steps/slic3r_step_post_perimeter.h");
         CHECK(metadata.slicer_version == slicer);
     }
+}
+
+// Parse test-owned package descriptions against the compiled header-version table without loading plugin code.
+TEST_CASE("Orchestrator package requirements accept 3.5 and reject newer minors", "[plugins][abi][repository]")
+{
+    const std::string version = GENERATE(std::string("3.4"), std::string("3.5"), std::string("3.6"));
+    PluginPackageMetadata metadata;
+    std::string error;
+    REQUIRE(parse_plugin_package_metadata("[plugin]\npackage_version=1.0.0\nslicer_version=2.7.63.0\n"
+        "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_orchestrator.h=" + version + "\n", metadata, error));
+    CHECK(metadata.compatibility.compatible() == (version != "3.6"));
 }
 
 TEST_CASE("Package ABI rejects missing invalid and conflicting requirements", "[plugins][abi][repository]")
@@ -62,10 +73,11 @@ TEST_CASE("Package ABI rejects missing invalid and conflicting requirements", "[
         std::string("[abi]\nslic3r_plugin_types.h=0.0\n"),
         std::string("[abi]\nslic3r_plugin_types.h=2.0\n"),
         std::string("[abi]\nslic3r_plugin_types.h=2.4\n"),
-        std::string("[abi]\nslic3r_plugin_types.h=4.0\n"),
-        std::string("[abi]\nslic3r_plugin_types.h=3.65535\n"),
-        std::string("[abi]\nslic3r_plugin_types.h=3.0\nfuture.h=1.0\n"),
-        std::string("[abi]\nslic3r_plugin_types.h=3.0\nslic3r_plugin_types.h=3.0\n"),
+        std::string("[abi]\nslic3r_plugin_types.h=3.0\n"),
+        std::string("[abi]\nslic3r_plugin_types.h=5.0\n"),
+        std::string("[abi]\nslic3r_plugin_types.h=4.65535\n"),
+        std::string("[abi]\nslic3r_plugin_types.h=4.0\nfuture.h=1.0\n"),
+        std::string("[abi]\nslic3r_plugin_types.h=4.0\nslic3r_plugin_types.h=4.0\n"),
         std::string("[abi]\nslic3r_plugin_types.h=1.0.0\n"),
         std::string("[abi]\nslic3r_plugin_types.h=-1.0\n"),
         std::string("[abi]\nslic3r_plugin_types.h=65536.0\n"));
@@ -90,7 +102,7 @@ TEST_CASE("Package requiring slic3r_clipper.h 1.x is rejected by the 2.0 host", 
         PluginPackageMetadata metadata;
         std::string error;
         parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
-            "[abi]\nslic3r_plugin_types.h=3.0\nslic3r_clipper.h=") + version + "\n", metadata, error);
+            "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_clipper.h=") + version + "\n", metadata, error);
         CHECK(metadata.compatibility.status == PluginApiCompatibilityStatus::Incompatible);
         CHECK(metadata.compatibility.message().find("slic3r_clipper.h") != std::string::npos);
     }
@@ -98,7 +110,7 @@ TEST_CASE("Package requiring slic3r_clipper.h 1.x is rejected by the 2.0 host", 
     PluginPackageMetadata current;
     std::string error;
     REQUIRE(parse_plugin_package_metadata("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
-        "[abi]\nslic3r_plugin_types.h=3.0\nslic3r_clipper.h=2.0\n", current, error));
+        "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_clipper.h=2.0\n", current, error));
     CHECK(current.compatibility.compatible());
 }
 
@@ -116,7 +128,7 @@ TEST_CASE("Package requiring slic3r_volume.h 1.x is rejected by the 2.0 host", "
         PluginPackageMetadata metadata;
         std::string error;
         parse_plugin_package_metadata(std::string("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
-            "[abi]\nslic3r_plugin_types.h=3.0\nslic3r_volume.h=") + version + "\n", metadata, error);
+            "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_volume.h=") + version + "\n", metadata, error);
         CHECK(metadata.compatibility.status == PluginApiCompatibilityStatus::Incompatible);
         CHECK(metadata.compatibility.message().find("slic3r_volume.h") != std::string::npos);
     }
@@ -124,7 +136,7 @@ TEST_CASE("Package requiring slic3r_volume.h 1.x is rejected by the 2.0 host", "
     PluginPackageMetadata current;
     std::string error;
     REQUIRE(parse_plugin_package_metadata("[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n"
-        "[abi]\nslic3r_plugin_types.h=3.0\nslic3r_volume.h=2.0\n", current, error));
+        "[abi]\nslic3r_plugin_types.h=4.0\nslic3r_volume.h=2.0\n", current, error));
     CHECK(current.compatibility.compatible());
 }
 
@@ -144,13 +156,15 @@ TEST_CASE("DLL and package validators share the same contract registry", "[plugi
     CHECK_FALSE(validate_plugin_api_table(table).compatible());
     table.assign(1, {0, 0});
     CHECK_FALSE(validate_plugin_api_table(table).compatible());
-    table.assign(1, {3, 0});
+    table.assign(1, {4, 0});
     CHECK(validate_plugin_api_table(table).compatible());
+    table.assign(1, {3, 0});
+    CHECK_FALSE(validate_plugin_api_table(table).compatible());
     table.assign(1, {2, 0});
     CHECK_FALSE(validate_plugin_api_table(table).compatible());
     table.assign(1, {2, 4});
     CHECK_FALSE(validate_plugin_api_table(table).compatible());
-    table.assign(1, {4, 0});
+    table.assign(1, {5, 0});
     CHECK_FALSE(validate_plugin_api_table(table).compatible());
     CHECK(PluginPackageMetadata{}.compatibility.status == PluginApiCompatibilityStatus::NotChecked);
 }

@@ -225,7 +225,7 @@ target_compile_definitions(${_TEST_NAME}_tests PRIVATE
     SLIC3R_TEST_PLUGIN_THROW_REGISTER_DLL=R"\($<TARGET_FILE:plugin_loader_throw_register_fixture>\)")
 
 # Malformed protocol fixtures must fail before their throwing registration runs.
-foreach(_variant IN ITEMS legacy_abi unknown_api zero_api_table missing_vtable invalid_api_size changing_api_size)
+foreach(_variant IN ITEMS abi3 legacy_abi unknown_api zero_api_table missing_vtable invalid_api_size changing_api_size)
     string(TOUPPER "${_variant}" _variant_upper)
     add_library(plugin_loader_${_variant}_fixture SHARED plugin_loader_fixture.cpp)
     target_compile_definitions(plugin_loader_${_variant}_fixture PRIVATE
@@ -344,6 +344,16 @@ if (TARGET python_plugin_loader)
             "${CMAKE_CURRENT_SOURCE_DIR}/pure_python_package"
             "${_python_test_runtime_directory}/plugins/python.external.package_root"
         ${_python_plugin_copy_commands}
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${_python_test_runtime_directory}/plugins/python.test.priority.low"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/python_priority_low_package"
+            "${_python_test_runtime_directory}/plugins/python.test.priority.low"
+        COMMAND "${CMAKE_COMMAND}" -E remove_directory
+            "${_python_test_runtime_directory}/plugins/python.test.priority.high"
+        COMMAND "${CMAKE_COMMAND}" -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/python_priority_high_package"
+            "${_python_test_runtime_directory}/plugins/python.test.priority.high"
         COMMAND "${CMAKE_COMMAND}" -E remove_directory
             "${_python_test_runtime_directory}/plugins/python.test.clear.invalid_registration"
         COMMAND "${CMAKE_COMMAND}" -E copy_directory

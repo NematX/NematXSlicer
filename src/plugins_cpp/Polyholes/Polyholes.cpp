@@ -22,6 +22,10 @@
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
 
 namespace slic3r_api { namespace PolyholesPlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_polyholes_plugin(orchestrator_handle *orch);
+
 
 namespace {
 
@@ -415,16 +419,6 @@ const char *Polyholes::exclusive_group_impl() const noexcept
     return k_polyholes_exclusive_group;
 }
 
-const char *Polyholes::exclusive_group_label_impl() const noexcept
-{
-    return "Polyholes plugin";
-}
-
-const char *Polyholes::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Choose which active plugin converts round vertical holes to polyholes.";
-}
-
 slicing_step_t Polyholes::step_impl() const noexcept
 {
     return STEP_POST_SLICING;
@@ -580,6 +574,12 @@ void Polyholes::setup_run_impl(const plugin_run_context *run_ctx) const
 void register_polyholes_plugin(orchestrator_handle *orch)
 {
     orchestrator_register_plugin(orch, Polyholes::instance(orch).c_instance());
+    const plugin_instance member = Polyholes::instance(orch).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Polyholes plugin";
+    definition.tooltip = "Choose which active plugin converts round vertical holes to polyholes.";
+    Polyholes::instance(orch).register_exclusive_group(STEP_POST_SLICING, definition);
 }
 
 }} // namespace slic3r_api::PolyholesPlugin

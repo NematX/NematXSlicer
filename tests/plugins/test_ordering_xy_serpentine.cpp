@@ -29,6 +29,26 @@
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 
+/* This file tests XY-serpentine extrusion ordering, seam positions and failures.
+   Extrusions are material-depositing movements. Serpentine ordering visits
+   geometry in alternating spatial directions; a seam is a closed loop's start.
+
+   SerpentineSeamPlugin supplies a controlled seam service, a directly callable
+   plugin job. SerpentineSeamSession returns a chosen position for one use.
+   Orchestrator, the application's plugin manager, temporarily enables these
+   alternatives. Group preference ranks them separately from execution order.
+
+   TEST_CASE declarations, executed by the test runner, build source extrusion
+   trees, call run_serpentine(), then examine PrintingPlan, the output movement
+   plan, and reported errors. Cases cover geometry ordering and seam-service
+   failures without permanently changing application plugin selection.
+
+   Call graph:
+     TEST_CASE
+       run_serpentine
+         OrchestratorView::execute
+           Orchestrator::execute_plugin */
+
 /*
 XY-serpentine ordering tests
 ============================
@@ -40,6 +60,9 @@ policy while test-only identity remains beside the stable extrusion root.
 */
 
 namespace {
+// Execute the serpentine provider on the borrowed print's mutable plan using prepared source regions; return the execution status.
+// Missing providers fail REQUIRE, and the plan remains print-owned.
+raw_plugin_execution_status run_serpentine(Slic3r::Print &print);
 
 using namespace Slic3r;
 using namespace Slic3r::Printing;
@@ -148,7 +171,10 @@ private:
         static const char *dependencies[] = { nullptr };
         return dependencies;
     }
-    int32_t priority_impl() const noexcept override { return 0; }
+    // Return the priority shared by seam-placement jobs. Nothing is changed or transferred, and the call cannot fail.
+    int32_t priority_impl() const noexcept override { return 600; }
+    // Return -1 to prefer this test service over application alternatives. Nothing is changed or transferred, and the call cannot fail.
+    int32_t exclusive_group_priority_impl() const noexcept override { return -1; }
 
     void run_impl(const plugin_run_context *run_ctx) const override
     {
@@ -390,6 +416,7 @@ raw_plugin_execution_status run_serpentine(Print &print)
 
 } // namespace
 
+// Read registered ordering descriptions without mutation and check execution priority separately from the XY algorithm's preference.
 TEST_CASE("XY-serpentine ordering is an inactive alternative provider",
           "[plugins][ordering][xy-serpentine]")
 {
@@ -398,7 +425,8 @@ TEST_CASE("XY-serpentine ordering is an inactive alternative provider",
     Plugin *provider = orchestrator.get_plugin(k_serpentine_plugin);
     REQUIRE(provider != nullptr);
     CHECK(provider->get_step() == STEP_ORDERING);
-    CHECK(provider->get_priority() == 1075);
+    CHECK(provider->get_priority() == 1050);
+    CHECK(provider->get_exclusive_group_priority() == 10);
     CHECK(provider->get_exclusive_group() == "ordering.extrusion_tree");
 
     std::ifstream stream(

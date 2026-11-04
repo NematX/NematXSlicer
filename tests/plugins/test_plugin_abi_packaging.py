@@ -86,6 +86,8 @@ class AbiPackagingTests(unittest.TestCase):
         self.assertNotIn("PLUGIN_CLEAR", catalog["python_symbols"])
 
     def test_error_id_contract(self):
+        """Check diagnostic constants, initialization return type and the headers that define generated manager functions."""
+        import ctypes
         namespace = {}
         exec(self.generator.generate(), namespace)
         self.assertEqual(namespace["PLUGIN_ERROR_OK"], 0)
@@ -93,7 +95,16 @@ class AbiPackagingTests(unittest.TestCase):
         catalog = json.loads(self.generator.generate_abi_catalog())
         for symbol in ("PLUGIN_ERROR_OK", "PLUGIN_ERROR_GENERAL"):
             self.assertEqual(catalog["python_symbols"][symbol], ["slic3r_plugin_types.h"])
-        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [3, 0])
+        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [4, 0])
+        self.assertEqual(catalog["headers"]["slic3r_config_def.h"]["version"], [1, 5])
+        self.assertEqual(catalog["headers"]["slic3r_orchestrator.h"]["version"], [3, 5])
+        self.assertEqual(namespace["PLUGIN_INITIALIZE"]._restype_, ctypes.c_int32)
+        self.assertEqual(self.generator.ctype_expr("raw_plugin_log_level", set(), {}), "ctypes.c_int")
+        self.assertIn("RawExclusiveGroupDef", namespace)
+        for name in ("orchestrator_is_plugin_registered", "orchestrator_send_log"):
+            self.assertIn("slic3r_orchestrator.h", catalog["c_functions"][name])
+        for name in ("orchestrator_report_plugin_initialization_failure", "orchestrator_report_plugin_registration_warning"):
+            self.assertNotIn(name, catalog["c_functions"])
 
     def test_union_and_failed_generation_never_publish_partial_output(self):
         with tempfile.TemporaryDirectory() as directory:

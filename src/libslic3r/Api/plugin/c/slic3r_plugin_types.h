@@ -2,10 +2,24 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+/* This header defines how the application calls plugin objects and reads their results.
+   The host is the slicer application. A C ABI is the binary calling interface
+   used to invoke plugin functions independently of their implementation language.
+
+   A plugin_instance pairs borrowed object data with plugin_vtable, a table of
+   function pointers. Fill struct_size with the table's byte size, provide the
+   required functions, then register the instance through the manager API.
+   The object and its code must outlive all application calls; optional functions
+   are available only when their complete fields fit the reported size.
+
+   The application calls initialize, then setup, setup_run and run for jobs.
+   Initialization and clear (cleanup) return diagnostic numbers. Use
+   orchestrator_set_error_message() to store an explanation and obtain its number.
+   The function-type comments describe result codes and argument lifetimes. */
 #ifndef slic3r_plugin_types_h_
 #define slic3r_plugin_types_h_
 
-#define SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR 3u
+#define SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR 4u
 #define SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR 0u
 
 #include <stddef.h>
@@ -26,7 +40,11 @@ typedef struct orchestrator_handle orchestrator_handle;
 
 /* ========================= PLUGIN CALLBACKS ========================= */
 
-typedef void (*plugin_initialize_fn)(void *plugin_ctx, storage_handle *storage);
+/* Borrow the plugin context and application storage for initialization. Return 0
+   on success, PLUGIN_ERROR_GENERAL or an orchestrator_set_error_message() id on
+   failure. No exception may escape; the application disables failed instances
+   and preserves a rejection it already recorded instead of duplicating it. */
+typedef int32_t (*plugin_initialize_fn)(void *plugin_ctx, storage_handle *storage);
 
 /* This plugin_run_context is destroyed after each of these function return, so don't keep it, copy the data you want instead. */
 typedef void (*plugin_setup_fn)(void *plugin_ctx, const plugin_run_context *run_ctx, uint32_t run_count);
@@ -191,6 +209,13 @@ typedef struct slic3r_major_minor_version {
 
 typedef struct plugin_vtable {
 
+    /* Required prefix ends after run; every callback in that prefix must be nonnull.
+       The host reads this size before any callback.
+       Optional members are read only when offsetof(member) + sizeof(member) fits.
+       Unknown trailing bytes are ignored. Packages with an incompatible major are
+       rejected before registration; their vtables cannot be read as this layout. */
+    uint32_t struct_size;
+
     /*
     Stable machine-readable id.
 
@@ -233,36 +258,20 @@ typedef struct plugin_vtable {
     */
     const char* (*get_exclusive_group)(void *plugin_ctx);
 
-    /*
-    User-facing label for the exclusive group selector.
-
-    If several active plugins declare the same group, the host uses the first
-    non-empty label it sees in plugin execution order. Return an empty string to
-    let the host use its default label.
-    */
-    const char* (*get_exclusive_group_label)(void *plugin_ctx);
-
-    /*
-    User-facing tooltip/description for the exclusive group selector.
-
-    As with get_exclusive_group_label(), the first non-empty tooltip found for a
-    group wins. Return an empty string to use the host default.
-    */
-    const char* (*get_exclusive_group_tooltip)(void *plugin_ctx);
-
     slicing_step_t (*get_step)(void *plugin_ctx);
 
     const_strings_t (*get_dependencies)(void *plugin_ctx);
 
+    /* Execution priority must be equal among alternatives of one effective group. */
     int32_t (*get_priority)(void *plugin_ctx);
 
     plugin_used_config_keys_fn used_config_keys;
 
     plugin_defined_config_keys_fn defined_config_keys;
 
-    /**
-     * Called once at startup, to be able to setup settings, via orchestrator_create_option_def
-    */
+    /* Initialize settings before slicing. Return success or a diagnostic id;
+       the application disables a failed instance without duplicating a rejection
+       already recorded while this callback was running. */
     plugin_initialize_fn initialize;
 
     /*
@@ -287,8 +296,22 @@ typedef struct plugin_vtable {
     /*
     Optional notification that the host invalidated this plugin's state for one
     Print. The callback must release only plugin-owned state for that Print.
+    Missing bytes or NULL mean no cleanup notification. A partially covered
+    pointer is absent and must not be read.
     */
     plugin_clear_fn clear;
+
+    /*
+    Exclusive-group preference, independent from execution priority get_priority().
+    Among active alternatives, the smallest value is the default; equal values
+    use the smallest provider id, independent of registration order. Execution
+    ordering does not use this preference. The callback borrows plugin_ctx and
+    returns a stable int32_t during registration, with no ownership transfer.
+    This optional tail member defaults to 100 when absent or NULL. The host reads
+    it only when offsetof(plugin_vtable, get_exclusive_group_priority) plus its
+    full member size fits struct_size; an incomplete pointer is never read.
+    */
+    int32_t (*get_exclusive_group_priority)(void *plugin_ctx);
 
 } plugin_vtable;
 

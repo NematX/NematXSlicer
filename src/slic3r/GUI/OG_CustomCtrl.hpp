@@ -66,6 +66,7 @@ class OG_CustomCtrl :public wxPanel
 
         void render_separator(wxDC& dc, wxCoord v_pos);
 
+        // Draw this line into the borrowed drawing context at v_pos, preserving verbatim labels/tooltips without transferring ownership.
         void    render(wxDC& dc, wxCoord v_pos);
         wxCoord draw_mode_bmp(wxDC& dc, wxCoord v_pos);
         wxCoord draw_text      (wxDC& dc, wxPoint pos, const wxString& text, const wxString& tooltip, const wxColour* color, int width, bool is_url = false, bool align_right = false,
@@ -120,6 +121,7 @@ public:
     void    msw_rescale();
     void    sys_color_changed();
 
+    // Measure a borrowed line and optional field with display labels, preserving verbatim text; return its position, and propagate allocations.
     wxPoint get_pos(const Line& line, Field* field = nullptr);
     int     get_height(const Line& line);
 

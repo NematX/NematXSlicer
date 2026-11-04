@@ -450,7 +450,7 @@ const char *const *ArachnePerimeterGenerator::dependencies_impl() const noexcept
 
 int32_t ArachnePerimeterGenerator::priority_impl() const noexcept
 {
-    return 10;
+    return 0;
 }
 
 int32_t ArachnePerimeterGenerator::used_config_keys(raw_used_config_key *keys) const noexcept

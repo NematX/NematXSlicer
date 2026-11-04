@@ -55,6 +55,10 @@ CreateRetraction uses those flags only to choose tool-change E settings.
 */
 
 namespace slic3r_api { namespace LayerExtrusionEdit { namespace CreateToolChangePlugin {
+// Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
+// Print data is unchanged; allocation failures or rejected descriptions throw.
+void register_create_tool_change_plugin(orchestrator_handle *orchestrator);
+
 namespace {
 
 const char *const k_no_dependencies[] = {nullptr};
@@ -142,8 +146,6 @@ private:
     const char *name_impl() const noexcept override;
     const char *description_impl() const noexcept override;
     const char *exclusive_group_impl() const noexcept override;
-    const char *exclusive_group_label_impl() const noexcept override;
-    const char *exclusive_group_tooltip_impl() const noexcept override;
     slicing_step_t step_impl() const noexcept override;
     const char *const *dependencies_impl() const noexcept override;
     int32_t priority_impl() const noexcept override;
@@ -273,16 +275,6 @@ const char *CreateToolChange::description_impl() const noexcept
 const char *CreateToolChange::exclusive_group_impl() const noexcept
 {
     return "layer_extrusion_edit.toolchange";
-}
-
-const char *CreateToolChange::exclusive_group_label_impl() const noexcept
-{
-    return "Tool changes";
-}
-
-const char *CreateToolChange::exclusive_group_tooltip_impl() const noexcept
-{
-    return "Selects how ordered tool visits materialize physical tool selection.";
 }
 
 slicing_step_t CreateToolChange::step_impl() const noexcept
@@ -441,6 +433,12 @@ void register_create_tool_change_plugin(orchestrator_handle *orchestrator)
 {
     orchestrator_register_plugin(
         orchestrator, CreateToolChange::instance(orchestrator).c_instance());
+    const plugin_instance member = CreateToolChange::instance(orchestrator).c_instance();
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = member.vt->get_exclusive_group(member.ctx);
+    definition.label = "Tool changes";
+    definition.tooltip = "Selects how ordered tool visits materialize physical tool selection.";
+    CreateToolChange::instance(orchestrator).register_exclusive_group(STEP_LAYER_EXTRUSION_EDIT, definition);
 }
 
 }}} // namespace slic3r_api::LayerExtrusionEdit::CreateToolChangePlugin

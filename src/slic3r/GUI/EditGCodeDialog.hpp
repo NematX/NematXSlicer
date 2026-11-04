@@ -62,6 +62,8 @@ protected:
     void on_dpi_changed(const wxRect& suggested_rect) override;
     void on_sys_color_changed() override;
 
+    // Display the borrowed event's selected setting description, preferring global read-only definitions over preset/script definitions.
+    // Preserve verbatim text and leave the tooltip unchanged for missing rows; no setting ownership is transferred.
     void selection_changed(wxDataViewEvent& evt);
 };
 

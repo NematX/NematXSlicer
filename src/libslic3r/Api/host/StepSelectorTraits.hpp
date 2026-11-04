@@ -45,5 +45,15 @@ struct StepSelectorTraits
     bool auto_value = false;
 };
 
+// A setting key/value condition names the member preferred during automatic selection.
+struct SelectorAutoChoice
+{
+    slicing_step_t step = STEP_NONE;
+    std::string exclusive_group;
+    std::string condition_key;
+    std::string condition_value;
+    std::string provider_id;
+};
+
 } // namespace Slic3r
 #endif // slic3r_StepSelectorTraits_hpp_
