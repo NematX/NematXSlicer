@@ -51,7 +51,15 @@
            |-- children -> ExtrusionEntity::empty() [skip geometric absences]
            `-- first_point() / last_point() [compare exact stored XY joins]
        is_collection() -> is_continuous() [classify child content]
-       is_loop() -> is_continuous() [require nonempty XY closure]
+        is_loop() -> is_continuous() [require nonempty XY closure]
+
+   Canonical copies duplicate each node's content and owned properties once,
+   without calling legacy views or polymorphic clones. Positioned Nop commands
+   retain their separate position and role; other copied nodes use the base type.
+
+       clone_canonical()
+           |-- copy a local ArcPolyline, or recursively copy owned children
+           `-- construct a base node or positioned Nop with copied properties
 */
 
 namespace Slic3r {
@@ -229,6 +237,44 @@ bool simplify_extrusion_tree_recursive(ExtrusionEntity &root,
 Point ExtrusionNop::NOT_A_POINT = Point((std::numeric_limits<coord_t>::max)(), (std::numeric_limits<coord_t>::max)());
 
 Point ExtrusionEntity::NOT_A_POINT = Point((std::numeric_limits<coord_t>::max)(), (std::numeric_limits<coord_t>::max)());
+
+ExtrusionEntityUPtr ExtrusionEntity::clone_canonical() const
+{
+    Content content;
+    if (const ArcPolyline *polyline = std::get_if<ArcPolyline>(&m_content)) {
+        content = *polyline;
+    } else if (const Children *children = std::get_if<Children>(&m_content)) {
+        Children copied;
+        copied.reserve(children->size());
+        for (const ExtrusionEntityUPtr &child : *children) {
+            assert(child);
+            copied.emplace_back(child ? child->clone_canonical() : nullptr);
+        }
+        content = std::move(copied);
+    }
+
+    // Nop stores a command position and role outside the base content variant.
+    if (const ExtrusionNop *nop = dynamic_cast<const ExtrusionNop *>(this))
+        return ExtrusionEntityUPtr(new ExtrusionNop(*nop, std::move(content)));
+    return ExtrusionEntityUPtr(new ExtrusionEntity(*this, std::move(content)));
+}
+
+ExtrusionEntity::ExtrusionEntity(const ExtrusionEntity &source, Content &&content)
+    : ExtrusionPropertyContainer(source)
+    , m_id(source.m_id)
+    , m_can_reverse(source.m_can_reverse)
+    , m_content(std::move(content))
+    , m_can_sort(source.m_can_sort)
+    , m_can_rotate(source.m_can_rotate)
+{
+}
+
+ExtrusionNop::ExtrusionNop(const ExtrusionNop &source, Content &&content)
+    : ExtrusionEntity(source, std::move(content))
+    , m_role(source.m_role)
+    , position(source.position)
+{
+}
 
 ExtrusionEntity::Content ExtrusionEntity::clone_content(const Content &content)
 {

@@ -46,6 +46,12 @@
    legacy path or loop has acquired generic children. Continuity uses exact XY
    joins and ignores empty geometry, not event ordering semantics. Borrowed
    endpoint references remain valid only until the owning content changes.
+
+   clone_canonical() returns an independent owned tree of base nodes, retaining
+   positioned ExtrusionNop commands as the only type with extra position state.
+   It copies permissions, identities and properties without entering legacy views:
+       ExtrusionEntityUPtr independent = source.clone_canonical();
+   The source is unchanged, and allocation failures publish no partial result.
 */
 
 namespace Slic3r {
@@ -150,6 +156,8 @@ public:
     }
 
 protected:
+    // Copy identity, raw permissions and owned properties into already independent content.
+    ExtrusionEntity(const ExtrusionEntity &source, Content &&content);
     static Content clone_content(const Content &content);
     // Materialize children while carrying local geometry's rotation permission into its preserved child.
     Children& ensure_children();
@@ -218,6 +226,9 @@ public:
     void set_can_rotate(bool enabled) { m_can_rotate = enabled; }
     void set_can_sort_reverse(bool can_sort, bool can_reverse);
     virtual ExtrusionEntity* clone() const { return new ExtrusionEntity(*this); }
+    // Deep-copy stored content into exact base nodes, except exact Nop nodes retaining role and position.
+    // The source is unchanged; allocation failures propagate before any copy is published.
+    ExtrusionEntityUPtr clone_canonical() const;
     // Create a new object, initialize it with this object using the move semantics.
     virtual ExtrusionEntity* clone_move() { return new ExtrusionEntity(std::move(*this)); }
     virtual ~ExtrusionEntity() = default;
@@ -270,6 +281,9 @@ bool simplify_extrusion_tree(ExtrusionEntity &root);
 // only cary an ExtrusionProperty
 class ExtrusionNop : public ExtrusionEntity
 {
+    friend class ExtrusionEntity;
+    // Retain the positioned command state while adopting independently copied base content.
+    ExtrusionNop(const ExtrusionNop &source, Content &&content);
     ExtrusionRole m_role = ExtrusionRole::None;
 public:
     static Point NOT_A_POINT;
