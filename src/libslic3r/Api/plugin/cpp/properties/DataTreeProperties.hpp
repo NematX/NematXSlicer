@@ -18,13 +18,65 @@ The layer helpers are templates because they only require a view exposing
 properties(). Their definitions therefore remain independent of DataTreeViews
 and are instantiated only after the caller's concrete layer view is complete.
 
+LayerInstanceProperty marks object-local auxiliary geometry for one physical
+instance; without it, the geometry is a common pattern for every instance.
+The global auxiliary object already uses plate coordinates and does not use
+this marker. Producers initialize reserved to zero before publishing a layer:
+
+    LayerInstanceProperty &owner = layer.mutable_properties().get_or_add(LayerInstanceProperty::key);
+    owner.object_instance_idx = instance_index;
+    owner.reserved = 0;
+
+Consumers call layer_instance_owner() for the optional index, or
+layer_instance_projections(object, layer) for a caller-owned vector of indices
+and scaled shifts. The projection helper rejects an out-of-range owner rather
+than silently dropping geometry. Neither helper changes a layer or its owner.
+
 Developer guide: [Using Plugin Properties](/doc/plugins/properties.md)
 */
+
+#include <optional>
+#include <stdexcept>
+#include <utility>
+#include <vector>
 
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
 #include "libslic3r/Api/plugin/cpp/PluginPropertyKey.hpp"
 
 namespace slic3r_api {
+
+/* Object-local auxiliary geometry owned by one physical instance. */
+struct LayerInstanceProperty :
+    BuiltInPluginPropertyPayload<LayerInstanceProperty,
+                                 c_layer_instance_property,
+                                 PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE>
+{
+};
+
+// Return the stored owner index, or no owner for an auxiliary pattern shared by all instances.
+template<class LayerView>
+std::optional<uint32_t> layer_instance_owner(const LayerView &layer)
+{
+    const LayerInstanceProperty *owner = layer.properties().get(LayerInstanceProperty::key);
+    return owner == nullptr ? std::nullopt : std::optional<uint32_t>(owner->object_instance_idx);
+}
+
+// Return a caller-owned vector of (index, scaled shift): the marked owner or every instance for an unmarked local pattern; reject an invalid owner index.
+template<class ObjectView, class LayerView>
+std::vector<std::pair<uint32_t, c_point>> layer_instance_projections(const ObjectView &object, const LayerView &layer)
+{
+    std::vector<std::pair<uint32_t, c_point>> result;
+    const std::optional<uint32_t> owner = layer_instance_owner(layer);
+    if (owner) {
+        if (*owner >= object.instance_count())
+            throw std::out_of_range("Auxiliary layer owner instance index is outside the Object.");
+        result.emplace_back(*owner, object.instance_shift(*owner));
+    } else {
+        for (uint32_t index = 0; index < object.instance_count(); ++index)
+            result.emplace_back(index, object.instance_shift(index));
+    }
+    return result;
+}
 
 /* Identifies an auxiliary layer containing generated support geometry. */
 struct LayerSupportProperty :

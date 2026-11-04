@@ -6,12 +6,18 @@
 #define slic3r_def_h_
 
 #define SLIC3R_PLUGIN_API_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_DEF_MINOR 2u
+#define SLIC3R_PLUGIN_API_DEF_MINOR 3u
 
 #include <assert.h>
 #include <stdint.h>
 
 /*
+Common C types and constants used by the plugin headers live here. Geometry
+uses integer coordinates scaled from millimeters; scale_i(), scale_d() and
+unscaled() perform the conversions. A numeric property id names a payload on
+an object; an extruder index instead identifies a tool. They are different
+identities even when their integer values happen to match.
+
 Generic property ids shared by every host-side property container.
 
 The numeric id is the fast runtime key stored on objects. Built-in ids are
@@ -38,6 +44,7 @@ typedef uint32_t slic3r_property_type;
 #define SLIC3R_PROPERTY_TYPE_LAYER_ADHESION            ((slic3r_property_type)13u)
 #define SLIC3R_PROPERTY_TYPE_EXTRUSION_AXIS             ((slic3r_property_type)14u)
 #define SLIC3R_PROPERTY_TYPE_EXTRUSION_HEATER           ((slic3r_property_type)15u)
+#define SLIC3R_PROPERTY_TYPE_LAYER_INSTANCE             ((slic3r_property_type)16u)
 
 #ifdef __cplusplus
 #define SLIC3R_CONSTEXPR_INLINE constexpr inline

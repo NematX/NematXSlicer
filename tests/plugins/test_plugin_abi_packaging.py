@@ -1,4 +1,21 @@
-"""Offline ABI packaging checks, independent of the platform DLL loader."""
+"""Check the plugin package ABI description without loading a native library.
+
+Fixtures assemble package files and version requirements, then compare them
+with the public header identities and supported versions. This catches a wrong
+table, missing requirement or incompatible version independently of platform
+library loading. Temporary package contents belong to each fixture; these
+checks do not establish that an external DLL can be loaded or executed.
+
+Representative direct calls (branches are not a timeline):
+
+    test_python_plugin_analysis_combines_raw_symbols_wrappers_and_local_imports()
+        |-- tempfile.TemporaryDirectory()
+        |-- Path()
+        |-- runtime.mkdir()
+        |-- self._write_catalog()
+        |-- runtime.joinpath('slic3r_api.py').write_text()
+        `-- runtime.joinpath()
+"""
 import importlib.util
 import json
 from pathlib import Path
@@ -481,7 +498,7 @@ class AbiPackagingTests(unittest.TestCase):
         """The auxiliary mutator (data tree 4.1), the object flows (4.2) and their millimeter variants (4.3) declare the data-tree header."""
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
-            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 0])
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [5, 1])
             self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
             for function in ("object_get_support_flow", "object_get_region_flow",
                              "object_get_support_flow_mm", "object_get_region_flow_mm"):

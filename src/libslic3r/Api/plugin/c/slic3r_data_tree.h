@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 5u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 0u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 1u
 
 /*
 Data-tree access for a sliced Print.
@@ -73,6 +73,17 @@ typedef uint32_t print_record_id;
 #define PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT ((plugin_property_type)SLIC3R_PROPERTY_TYPE_LAYER_SUPPORT)
 #define PLUGIN_PROPERTY_TYPE_LAYER_BRIM ((plugin_property_type)SLIC3R_PROPERTY_TYPE_LAYER_BRIM)
 #define PLUGIN_PROPERTY_TYPE_LAYER_ADHESION ((plugin_property_type)SLIC3R_PROPERTY_TYPE_LAYER_ADHESION)
+#define PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE ((plugin_property_type)SLIC3R_PROPERTY_TYPE_LAYER_INSTANCE)
+
+/* An auxiliary layer of a real Object may belong to one instance only.
+   Geometry remains object-local; object_instance_idx indexes Object instances
+   exactly as object_get_instance_shift. Absent means a pattern shared by all
+   instances. This property has no placement effect on the global auxiliary
+   Object. Producers set reserved to zero. */
+typedef struct c_layer_instance_property {
+    uint32_t object_instance_idx;
+    uint32_t reserved;
+} c_layer_instance_property;
 
 /*
 Built-in payload stored on auxiliary Layers that represent generated support.

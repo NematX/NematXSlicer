@@ -1,4 +1,21 @@
-"""Behavior tests for the small public Python data-tree accessors."""
+"""Check the Python wrappers for borrowed data-tree handles.
+
+A controlled fake C library supplies object, layer and instance answers. Tests
+call the public Python views and check the arguments, optional values and copied
+results, including projections of instance-owned auxiliary layers. No native
+Print or slicing job is created; the fixture owns the fake handles and restores
+the API binding after use.
+
+Representative direct calls (branches are not a timeline):
+
+    test_layer_region_flows_and_region_island_iteration()
+        |-- self.make_api()
+        |-- self.views.LayerRegion()
+        |-- layer_region.flow()
+        |-- layer_region.bridging_flow()
+        |-- self.views.LayerRegionIsland()
+        `-- region_island.region_count()
+"""
 
 import copy
 import ctypes
@@ -121,6 +138,19 @@ class PythonDataTreeViewTests(unittest.TestCase):
 
     def make_api(self):
         return type("Api", (), {"host": DataTreeHost(self.generated)})()
+
+    def test_layer_instance_payload_is_typed_and_exported(self):
+        """Verify the public instance marker preserves its zero-index ABI payload."""
+        payload = self.views.LayerInstanceProperty()
+        payload.object_instance_idx = 0
+        payload.reserved = 0
+        self.assertEqual(payload.property_type, 16)
+        self.assertEqual(ctypes.sizeof(payload), 8)
+        self.assertEqual(ctypes.alignment(payload), ctypes.alignment(ctypes.c_uint32))
+        self.assertEqual(payload.object_instance_idx, 0)
+        self.assertEqual(payload.reserved, 0)
+        self.assertIn("LayerInstanceProperty", self.views.__all__)
+        self.assertEqual(payload.key, self.views.LayerInstanceProperty.key)
 
     def test_region_registration_and_immutable_public_surface(self):
         api = self.make_api()

@@ -15,9 +15,28 @@
 #include "Api/plugin/c/slic3r_data_tree.h"
 #include "PropertyStorage.hpp"
 
+/*
+Attach typed plugin metadata to native slicing objects. The C API defines each
+payload's layout; the native wrappers below supply its fixed property key and
+convenient tests. PluginPropertyContainer keeps the payload bytes with their
+owning object rather than in a separate table keyed by temporary addresses.
+
+Read a known property to interpret an auxiliary layer or generated surface.
+Create or change a payload only when the current processing step may edit that
+object. A pointer into the container is borrowed: reacquire it after replacing,
+clearing or structurally changing the stored properties.
+*/
+
 namespace Slic3r {
 
 class Layer;
+
+/* Object-local auxiliary output restricted to one physical instance. Without
+   this payload an object auxiliary layer is a reusable pattern for all copies. */
+struct LayerInstanceProperty : c_layer_instance_property
+{
+    static constexpr plugin_property_type property_type = PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE;
+};
 
 /*
 Built-in support marker for auxiliary layers.

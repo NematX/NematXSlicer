@@ -10,12 +10,27 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_ordering.h"
 #include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
+
+/*
+Representative direct calls (branches are not a timeline):
+
+    build_plan_by_layer()
+        |-- append_layer_instance_extrusions()
+        |-- append_print_auxiliary_layers_to_group()
+        `-- sort_layer_groups_by_print_z()
+
+    build_plan_by_object()
+        |-- append_print_auxiliary_group()
+        |-- ordered_source_instances_for_object_plan()
+        `-- append_layer_instance_extrusions()
+*/
 
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
 // Register the permanent borrowed plugin and copy its alternative-selection setting description into the application.
@@ -39,6 +54,14 @@ The plan built here has this shape:
   - inside a group, PrintingLayerGroups are keyed by scaled print_z;
   - inside a layer group, PrintingToolGroups are keyed by extruder id;
   - each stored PrintingExtrusion owns one cloned role bucket.
+
+Object-local auxiliary layers marked with LayerInstanceProperty are cloned
+only for their owner. Unmarked layers remain common patterns for every copy;
+the separate global auxiliary object already stores plate-space geometry.
+
+    build_plan_by_layer() -> merge Z buckets, then place each local auxiliary
+        layer_instance_projections() -> validate the owner and choose its shifts
+    build_plan_by_object() -> form one group per instance and skip other owners
 
 When adding new source buckets, keep the bucket list below in sync with
 LayerRegionIsland::has_extrusion(). Do not call native PrintingPlan builders
@@ -76,6 +99,8 @@ const raw_extrusion_role k_region_island_roles[] = {
 /*
 Build the normal by-layer plan: one PrintingGroup for the whole print, with all
 objects contributing to the same Z buckets.
+Clone borrowed geometry through validated auxiliary owner placements. The plan
+owns new roots; cancellation, invalid-owner and allocation failures propagate.
 */
 void build_plan_by_layer(
     const Print &print,
@@ -86,6 +111,9 @@ void build_plan_by_layer(
 Build the complete-object style plan: one PrintingGroup per object instance.
 The group order is chosen from complete_objects_sort when the plugin can express
 that choice from public data.
+Clone borrowed local sources once in each instance group, excluding auxiliaries
+owned by another copy. The plan owns roots; invalid-owner, cancellation and
+allocation failures propagate.
 */
 void build_plan_by_object(
     const Print &print,
@@ -722,10 +750,9 @@ void build_plan_by_layer(
         }
 
         /*
-        Object-level auxiliary layers use the same local coordinate system as
-        normal object layers. Merge them by print Z and clone them once per
-        physical instance so downstream plan editors also see adhesion and
-        other plugin-owned object output.
+        Real-object auxiliary layers are local. Merge them by print Z and clone
+        a marked layer only for its owner, or a common layer for every copy.
+        The separate global auxiliary object already stores plateau geometry.
         */
         for (uint32_t layer_idx = 0; layer_idx < object.auxiliary_layer_count(); ++layer_idx) {
             throw_if_cancelled(run_ctx);
@@ -734,13 +761,13 @@ void build_plan_by_layer(
                 layer_group_for_print_z(
                     group, layer_index_by_print_z, layer.print_z(), run_ctx);
             append_layer_once(layer_group, layer, run_ctx);
-            for (uint32_t object_instance_idx = 0; object_instance_idx < object.instance_count(); ++object_instance_idx) {
+            for (const std::pair<uint32_t, c_point> &projection : layer_instance_projections(object, layer)) {
                 throw_if_cancelled(run_ctx);
                 const uint32_t printing_catalog_id =
-                    plan.find_or_add_object_instance(object, object_instance_idx);
+                    plan.find_or_add_object_instance(object, projection.first);
                 append_layer_instance_extrusions(plan, layer_group,
                                                  layer,
-                                                 object.instance_shift(object_instance_idx),
+                                                 projection.second,
                                                  printing_catalog_id,
                                                  run_ctx);
             }
@@ -803,13 +830,18 @@ void build_plan_by_object(
         }
 
         /*
-        Complete-object groups own one physical instance, so auxiliary object
-        layers are cloned exactly once with the same instance shift as normal
-        layers. Print-level auxiliary layers remain in their leading group.
+        Complete-object groups own one physical instance. Common local layers
+        apply to each group; marked local layers apply only to their owner.
+        Global plateau layers remain in their separate leading group.
         */
         for (uint32_t layer_idx = 0; layer_idx < source.object.auxiliary_layer_count(); ++layer_idx) {
             throw_if_cancelled(run_ctx);
             const Layer layer = source.object.auxiliary_layer(layer_idx);
+            const std::optional<uint32_t> owner = layer_instance_owner(layer);
+            if (owner && *owner >= source.object.instance_count())
+                throw std::out_of_range("Auxiliary layer owner instance index is outside the Object.");
+            if (owner && *owner != source.object_instance_idx)
+                continue;
             PrintingLayerGroup layer_group =
                 layer_group_for_print_z(
                     group, layer_index_by_print_z, layer.print_z(), run_ctx);

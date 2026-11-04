@@ -22,6 +22,7 @@ publish that geometry by creating auxiliary layers on either the print auxiliary
 object or on a real object. Tag those layers with c_layer_adhesion_property so
 later plugins and compatibility readers can classify them without knowing which
 generator created them.
+Object-owned output is local: c_layer_instance_property restricts it to its indexed instance; without that property it is a common pattern for every instance.
 
 The payload stays deliberately small: it gives the plugin a mutable Print
 handle, and the generic data-tree API provides the actual layer/extrusion

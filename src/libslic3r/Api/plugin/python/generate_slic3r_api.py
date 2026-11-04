@@ -3,6 +3,29 @@
 #/|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #/|/
 
+"""Generate the low-level Python ctypes bindings from the public C headers.
+
+The generator reads HEADER_ORDER under HEADER_ROOT, parses declarations and
+constants, and writes the requested Python output. TYPE_ALIASES supplies the
+C integer representations that a simple declaration parser cannot infer.
+The generated module describes the binary interface; the hand-written view
+modules provide the higher-level Python API used by plugins.
+
+Run this file as a command-line tool, using its --help output for the available
+paths. Generation reads header text only: it neither loads a plugin library
+nor runs slicing. Keep its header list in the same dependency order as the C API.
+
+Representative direct calls (branches are not a timeline):
+
+    generate()
+        |-- '\n'.join()
+        |-- path.read_text()
+        |-- header_paths()
+        |-- path.exists()
+        |-- join_continuations()
+        `-- strip_comments()
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -168,6 +191,7 @@ CLASS_NAME_OVERRIDES = {
     "c_layer_support_property": "CLayerSupportProperty",
     "c_layer_brim_property": "CLayerBrimProperty",
     "c_layer_adhesion_property": "CLayerAdhesionProperty",
+    "c_layer_instance_property": "CLayerInstanceProperty",
     "c_surface": "CSurface",
     "c_flow": "CFlow",
     "c_medial_axis_extrusion_params": "CMedialAxisExtrusionParams",

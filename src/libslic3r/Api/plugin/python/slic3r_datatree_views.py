@@ -3,8 +3,7 @@
 #/|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #/|/
 
-"""
-Python views over the SuperSlicer print data tree.
+"""Python views over the SuperSlicer print data tree.
 
 The data tree is the host-owned hierarchy a plugin usually receives through a
 step payload:
@@ -41,6 +40,11 @@ Inspect region-island extrusions:
 Property guide: [Using Plugin Properties](/doc/plugins/properties.md)
 
 Extrusion guide: [Using Unified Extrusion Entities](/doc/plugins/extrusions.md)
+
+These wrappers do not keep the host objects alive. A view remains usable only
+while its owner exists and its containing collection has not been rebuilt,
+cleared or replaced. Reacquire child views after such a change; copying a
+Python wrapper does not copy the geometry behind its handle.
 """
 
 from __future__ import annotations
@@ -51,6 +55,7 @@ from typing import Iterable, Iterator, NamedTuple, Sequence
 
 from slic3r_api_generated import (
     CLayerAdhesionProperty,
+    CLayerInstanceProperty,
     CLayerBrimProperty,
     CLayerSupportProperty,
     CCurledLine,
@@ -66,6 +71,7 @@ from slic3r_api_generated import (
     CVec2d,
     EXTRUDER_ID_UNKNOWN,
     PLUGIN_PROPERTY_TYPE_LAYER_ADHESION,
+    PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE,
     PLUGIN_PROPERTY_TYPE_LAYER_BRIM,
     PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT,
     RAW_FACET_PAINTING_FDM_SUPPORT,
@@ -210,6 +216,16 @@ def unscaled(value: int | float) -> float:
 CLayerSupportProperty.property_type = PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT
 CLayerBrimProperty.property_type = PLUGIN_PROPERTY_TYPE_LAYER_BRIM
 CLayerAdhesionProperty.property_type = PLUGIN_PROPERTY_TYPE_LAYER_ADHESION
+CLayerInstanceProperty.property_type = PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE
+
+
+@abi_requires_headers("slic3r_data_tree.h")
+class LayerInstanceProperty(CLayerInstanceProperty):
+    """Object-local auxiliary geometry restricted to one instance index."""
+
+
+LayerInstanceProperty.property_type = PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE
+LayerInstanceProperty.key = PluginPropertyKey.built_in(LayerInstanceProperty)
 
 
 @abi_requires_headers("slic3r_data_tree.h")
@@ -2439,6 +2455,7 @@ __all__ = [
     "GraphData",
     "Layer",
     "LayerAdhesionProperty",
+    "LayerInstanceProperty",
     "LayerBrimProperty",
     "LayerIsland",
     "LayerRegion",

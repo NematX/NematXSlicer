@@ -26,37 +26,44 @@
 #include "Orchestrator.hpp"
 #include "Plugin.hpp"
 
-/* This file implements the C functions that register plugins, describe settings and run jobs.
-   The host is the slicer application. An orchestrator_handle is a borrowed
-   reference to its Orchestrator manager, not memory the caller may delete.
+/*
+This file implements the C functions that register plugins, describe settings and run jobs.
+The host is the slicer application. An orchestrator_handle is a borrowed
+reference to its Orchestrator manager, not memory the caller may delete.
 
-   Call orchestrator_register_plugin() to introduce an instance. Package loaders
-   use orchestrator_begin_plugin_package_load(), register instances and resources,
-   then orchestrator_finish_plugin_package_load(). This interval records the
-   current installed package directory for resource ownership and load diagnostics.
+Call orchestrator_register_plugin() to introduce an instance. Package loaders
+use orchestrator_begin_plugin_package_load(), register instances and resources,
+then orchestrator_finish_plugin_package_load(). This interval records the
+current installed package directory for resource ownership and load diagnostics.
 
-   An exclusive group contains alternatives for one processing stage; a selector
-   is its member-choice setting. orchestrator_register_exclusive_group() copies
-   descriptions into the manager. orchestrator_register_selector_auto_choice()
-   copies conditions used for automatic selection.
+An exclusive group contains alternatives for one processing stage; a selector
+is its member-choice setting. orchestrator_register_exclusive_group() copies
+descriptions into the manager. orchestrator_register_selector_auto_choice()
+copies conditions used for automatic selection.
 
-   orchestrator_find_plugin() finds enabled instances for execution;
-   orchestrator_is_plugin_registered() also recognizes disabled instances.
-   Execution functions forward borrowed data to the manager. Error-reporting
-   functions copy explanations and contain exceptions at the C calling boundary.
-   orchestrator_send_log() writes text through the application's logger without
-   attributing a package failure. Initialization callbacks return stored error
-   identifiers rather than invoking a separate failure-reporting function.
+orchestrator_find_plugin() finds enabled instances for execution;
+orchestrator_is_plugin_registered() also recognizes disabled instances.
+Execution functions forward borrowed data to the manager. Error-reporting
+functions copy explanations and contain exceptions at the C calling boundary.
+orchestrator_send_log() writes text through the application's logger without
+attributing a package failure. Initialization callbacks return stored error
+identifiers rather than invoking a separate failure-reporting function.
 
-   Call graph:
-     orchestrator_register_plugin
-       Orchestrator::register_plugin
-     orchestrator_register_exclusive_group
-       Orchestrator::record_exclusive_group_declaration
-     orchestrator_execute_plugin
-       Orchestrator::execute_plugin
-     orchestrator_send_log
-       application Boost.Log */
+Operation notes:
+- orchestrator_register_exclusive_group
+- Orchestrator::record_exclusive_group_declaration
+
+Representative direct calls (branches are not a timeline):
+
+    orchestrator_register_plugin()
+        |-- Slic3r::Orchestrator::instance()
+        `-- orchestrator->register_plugin()
+
+    orchestrator_execute_plugin()
+        |-- to_orchestrator()
+        |-- host_orchestrator->owns_plugin()
+        `-- host_orchestrator->execute_plugin()
+*/
 
 extern "C" {
 // Check registered ids, including disabled plugins, without changing ownership or activation; invalid input or failure returns zero.
@@ -99,7 +106,7 @@ struct GenericPropertyInfo
     uint32_t alignment;
 };
 
-// Return the process-wide immutable table of built-in payload names, sizes and alignments used by orchestrator registration.
+// Initialize and lend the process-owned immutable payload metadata table without arguments; the caller must not free it and static vector allocation failures propagate.
 const std::vector<GenericPropertyInfo> &builtin_property_infos()
 {
     static const std::vector<GenericPropertyInfo> infos = {
@@ -117,6 +124,7 @@ const std::vector<GenericPropertyInfo> &builtin_property_infos()
         { SLIC3R_PROPERTY_TYPE_LAYER_SUPPORT,             "slic3r.layer.support",             sizeof(c_layer_support_property),             alignof(c_layer_support_property) },
         { SLIC3R_PROPERTY_TYPE_LAYER_BRIM,                "slic3r.layer.brim",                sizeof(c_layer_brim_property),                alignof(c_layer_brim_property) },
         { SLIC3R_PROPERTY_TYPE_LAYER_ADHESION,            "slic3r.layer.adhesion",            sizeof(c_layer_adhesion_property),            alignof(c_layer_adhesion_property) },
+        { SLIC3R_PROPERTY_TYPE_LAYER_INSTANCE,            "slic3r.layer.instance",            sizeof(c_layer_instance_property),            alignof(c_layer_instance_property) },
     };
     return infos;
 }

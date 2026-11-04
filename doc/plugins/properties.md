@@ -296,3 +296,16 @@ Before publishing a property contract, verify that:
 - parallel writers cannot reach the same owner unsynchronized;
 - variable data uses the appropriate auxiliary storage instead of an in-payload
   pointer.
+
+## Instance-owned auxiliary layers
+
+`c_layer_instance_property` (built-in id 16, `slic3r.layer.instance`) stores
+`uint32_t object_instance_idx` and `uint32_t reserved` (zero). On a real object's
+auxiliary layer it restricts object-local geometry to that instance, indexed as
+`Object::instance_shift(i)`. Without the property the layer is a common local
+pattern for all instances. The global auxiliary object stays in plateau space
+and does not use this placement marker. SDK views expose raw local geometry.
+`LayerInstanceProperty` is available in native C++, SDK C++ and Python;
+`layer_instance_projections(object, layer)` validates the owner and returns the
+scaled instance placements in SDK C++. Invalid owner indices throw rather than
+silently dropping geometry. This addition requires DEF 1.3 / DATA_TREE 5.1.
