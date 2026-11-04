@@ -17,6 +17,19 @@
 #include "libslic3r/PrintRegion.hpp"
 #include "libslic3r/SurfaceCollection.hpp"
 
+/*
+Perimeter fixtures return owned snapshots for geometry and process assertions.
+Choose a generator and a small source polygon, then inspect the captured tree:
+
+    const auto capture = run_perimeter_case(distinct_perimeter_width_config(3),
+        {CLASSIC_PERIMETER_GENERATOR}, rectangle_with_hole_expolygon(), 1);
+    require_loop_role_and_flow_per_shell(capture);
+
+Use a layer after the first to compare distinct external/internal widths. Run
+helpers restore plugin activation before returning and retain no borrowed paths
+in their captures. Geometry utilities preserve multiplicity unless named union.
+*/
+
 namespace Slic3r::Test::PerimeterPluginTests {
 
 extern const char *const SIMPLE_PERIMETER_GENERATOR;
@@ -50,10 +63,13 @@ struct PerimeterRunCapture
     SurfaceCollection fill_surfaces;
     SurfaceCollection fill_no_overlap_surfaces;
     coord_t external_perimeter_width = 0;
-    coord_t external_perimeter_spacing = 0;
     double external_perimeter_mm3_per_mm = 0.;
     float external_perimeter_width_mm = 0.f;
     float external_perimeter_height_mm = 0.f;
+    coord_t internal_perimeter_spacing = 0;
+    double internal_perimeter_mm3_per_mm = 0.;
+    float internal_perimeter_width_mm = 0.f;
+    float internal_perimeter_height_mm = 0.f;
 };
 
 struct PerimeterMultiIslandRunCapture
@@ -182,6 +198,29 @@ PerimeterMultiIslandRunCapture run_perimeter_multi_island_case(
     std::initializer_list<const char *> active_plugins,
     const ExPolygons &areas,
     size_t layer_idx);
+
+/* Role and flow of one published perimeter loop (the path carried by its loop wrapper). */
+struct PerimeterLoopPayload
+{
+    int16_t perimeter_idx = 0;
+    ExtrusionRole role;
+    float width = 0.f;
+    float height = 0.f;
+    double mm3_per_mm = 0.;
+};
+
+/* One payload per loop of the tree: the perimeter_idx of a node carrying the loop role and the attributes
+   of its first direct child path. Loops deeper inside that node are not visited; the tree is not changed. */
+std::vector<PerimeterLoopPayload> perimeter_loop_payloads(const ExtrusionEntity &root);
+
+/* A config whose external and internal perimeter widths are explicitly different, so a loop that takes
+   the flow of the wrong role is told from a right one. Meant for a layer other than the first, where
+   first_layer_extrusion_width gives every role the same width. */
+DynamicPrintConfig distinct_perimeter_width_config(size_t perimeters);
+
+/* Require the external and internal flows of the capture to differ, then that shell 0 loops have the
+   external role and flow and the deeper loops the internal ones; at least two internal loops are expected. */
+void require_loop_role_and_flow_per_shell(const PerimeterRunCapture &capture);
 
 size_t external_perimeter_count(const PerimeterRunCapture &capture);
 const ExtrusionEntityCollection &external_perimeters(const PerimeterRunCapture &capture);

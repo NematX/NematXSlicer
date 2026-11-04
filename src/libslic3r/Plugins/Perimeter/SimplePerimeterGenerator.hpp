@@ -10,9 +10,12 @@
 
 namespace slic3r_api { namespace Perimeter { namespace SimplePerimeterGeneratorPlugin {
 
-// Temporary STEP_PERIMETER plugin used while the new perimeter pipeline is
-// being wired. It intentionally generates a single external-perimeter pass for
-// the whole layer island and publishes the matching fill areas.
+// Fixed-width STEP_PERIMETER plugin. For each perimeter node it offsets the
+// node area into concentric closed loops, one shell per node: shell 0 is the
+// external perimeter (external role and flow), the following shells are
+// internal perimeters (internal role and flow, spaced at the internal
+// spacing). It publishes, for each node, the area left inside the loops and the
+// slightly larger fill/anchor area that the later steps use.
 class SimplePerimeterGenerator : public PluginBase
 {
 public:

@@ -4,11 +4,25 @@
 #include "plugin_test_helpers.hpp"
 
 #include <atomic>
+#include <functional>
 #include <stdexcept>
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_perimeter.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+
+/*
+These tests run the packaged Python simple provider through the native host.
+They compare shell roles and flows with the native provider and exercise module
+cancellation and exception reporting. Each fixture owns copied output trees.
+
+    TEST_CASE
+    |-- run_perimeter_case(): invoke the Python provider through its public bridge
+    `-- require_loop_role_and_flow_per_shell(): compare physical shell attributes
+
+Test-only modules request cancellation or raise errors inside the host's normal
+perimeter-module lifecycle; none replaces the production error reporting path.
+*/
 
 #ifdef SLIC3R_TEST_PYTHON_PLUGINS
 
@@ -212,6 +226,49 @@ TEST_CASE("Python SimplePerimeterGenerator publishes perimeter and fill output",
     REQUIRE_FALSE(generated.fill_surfaces.empty());
     REQUIRE_FALSE(generated.fill_no_overlap_surfaces.empty());
     require_simple_generator_first_child_area_partition(generated, surface);
+}
+
+TEST_CASE("Python SimplePerimeterGenerator gives the internal loops the internal role and flow",
+          "[plugins][perimeter][python]")
+{
+    // Same contract as the native simple generator, on layer 1 with explicitly
+    // different widths (the first layer gives every role the same flow).
+    REQUIRE(Slic3r::Test::Plugins::python_plugin_test_runtime_available());
+
+    const DynamicPrintConfig config = distinct_perimeter_width_config(3);
+    for (const ExPolygon &surface : {rectangle_expolygon(-10., -10., 10., 10.), rectangle_with_hole_expolygon()}) {
+        const PerimeterRunCapture generated =
+            run_perimeter_case(config, {PYTHON_SIMPLE_PERIMETER_GENERATOR}, surface, 1);
+        require_loop_role_and_flow_per_shell(generated);
+        size_t holes = 0;
+        // The public payload stores perimeter_flags, not a Python-only loop_role attribute.
+        std::function<void(const ExtrusionEntity &)> check = [&](const ExtrusionEntity &entity) {
+            if (const ExtrusionPropertyLoopRole *flags = entity.get_property<ExtrusionPropertyLoopRole>()) {
+                CAPTURE(entity.child_count(), entity.can_sort(), entity.is_continuous(), entity.length());
+                if (!entity.empty()) {
+                    CAPTURE(entity.first_point().x(), entity.first_point().y(), entity.last_point().x(), entity.last_point().y());
+                    if (entity.child_count() > 0) {
+                        CAPTURE(entity.child(0).can_sort(), entity.child(0).is_continuous());
+                    }
+                    CHECK(entity.first_point() == entity.last_point());
+                }
+                CHECK((flags->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0);
+                CHECK_FALSE(entity.can_sort());
+                CHECK(entity.is_loop());
+                if ((flags->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_HOLE) != 0)
+                    ++holes;
+            }
+            for (size_t idx = 0; idx < entity.child_count(); ++idx)
+                check(entity.child(idx));
+        };
+        check(generated.external_perimeters);
+        CHECK(holes == (surface.holes.empty() ? 0 : 3));
+
+        // The area left after the external loop starts at the internal spacing.
+        const PerimeterRunCapture first_child =
+            run_perimeter_case(distinct_perimeter_width_config(1), {PYTHON_SIMPLE_PERIMETER_GENERATOR}, surface, 1);
+        require_simple_generator_first_child_area_partition(first_child, surface);
+    }
 }
 
 TEST_CASE("Python perimeter generation contains native module cancellation at the ctypes boundary",

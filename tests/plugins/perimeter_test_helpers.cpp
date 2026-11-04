@@ -26,10 +26,33 @@
 #include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <functional>
 #include <memory>
 #include <utility>
 
+/*
+These helpers drive perimeter providers on small explicit layer polygons. The
+fixture owns its Print, source geometry and plugin activation scope; captures
+copy the generated trees and areas so assertions outlive the run safely.
+
+    run_perimeter_case() / run_perimeter_and_post_case_with_lower_area()
+    |-- create source layers and run the selected generator/modules
+    `-- capture_perimeter_outputs(): copy trees, areas and external/internal flows
+    require_loop_role_and_flow_per_shell()
+    `-- perimeter_loop_payloads(): inspect each loop wrapper once, without mutation
+
+Role checks use distinct external and internal widths to expose accidental flow
+inheritance. Geometry comparisons retain area, union and shell-domain checks.
+*/
+
 namespace Slic3r::Test::PerimeterPluginTests {
+// Copy one path payload per loop wrapper without descending into that wrapper twice.
+std::vector<PerimeterLoopPayload> perimeter_loop_payloads(const ExtrusionEntity &root);
+// Return distinct external/internal widths for tests on layers after the first.
+DynamicPrintConfig distinct_perimeter_width_config(size_t perimeters);
+// Require distinct flows, the expected role and flow at each depth, and two internal loops.
+void require_loop_role_and_flow_per_shell(const PerimeterRunCapture &capture);
+
 namespace {
 
 struct Box
@@ -219,10 +242,14 @@ PerimeterRunCapture capture_perimeter_outputs(const LayerSliceIsland &island)
     const LayerRegion &first_region = **island.regions().begin();
     const Flow external_flow = first_region.flow(frExternalPerimeter);
     capture.external_perimeter_width = external_flow.scaled_width();
-    capture.external_perimeter_spacing = external_flow.scaled_spacing();
     capture.external_perimeter_mm3_per_mm = external_flow.mm3_per_mm();
     capture.external_perimeter_width_mm = external_flow.width();
     capture.external_perimeter_height_mm = external_flow.height();
+    const Flow internal_flow = first_region.flow(frPerimeter);
+    capture.internal_perimeter_spacing = internal_flow.scaled_spacing();
+    capture.internal_perimeter_mm3_per_mm = internal_flow.mm3_per_mm();
+    capture.internal_perimeter_width_mm = internal_flow.width();
+    capture.internal_perimeter_height_mm = internal_flow.height();
 
     bool has_external_perimeters = false;
     for (const LayerRegionIsland &region_island : island.regions_islands())
@@ -924,6 +951,60 @@ VerticalSplitCounts vertical_split_counts(const ExtrusionEntity &entity, coord_t
     return out;
 }
 
+std::vector<PerimeterLoopPayload> perimeter_loop_payloads(const ExtrusionEntity &root)
+{
+    std::vector<PerimeterLoopPayload> out;
+    std::function<void(const ExtrusionEntity &)> visit = [&](const ExtrusionEntity &entity) {
+        if (const ExtrusionPropertyLoopRole *loop = entity.get_property<ExtrusionPropertyLoopRole>()) {
+            for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
+                const ExtrusionEntity &child = entity.child(child_idx);
+                const ExtrusionAttributes *attributes = child.get_property<ExtrusionAttributes>();
+                if (child.has_polyline() && attributes != nullptr) {
+                    out.push_back({loop->perimeter_idx, attributes->extrusion_role(), attributes->width,
+                                   attributes->height, attributes->mm3_per_mm});
+                    break;
+                }
+            }
+            return;
+        }
+        for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
+            visit(entity.child(child_idx));
+    };
+    visit(root);
+    return out;
+}
+
+DynamicPrintConfig distinct_perimeter_width_config(const size_t perimeters)
+{
+    return perimeter_config({
+        {"perimeters", std::to_string(perimeters)},
+        {"external_perimeter_extrusion_width", "0.5"},
+        {"perimeter_extrusion_width", "0.4"}
+    });
+}
+
+void require_loop_role_and_flow_per_shell(const PerimeterRunCapture &capture)
+{
+    REQUIRE(std::abs(capture.external_perimeter_width_mm - capture.internal_perimeter_width_mm) > 0.05f);
+    REQUIRE(std::abs(capture.external_perimeter_mm3_per_mm - capture.internal_perimeter_mm3_per_mm) > 1e-3);
+
+    const std::vector<PerimeterLoopPayload> loops = perimeter_loop_payloads(capture.external_perimeters);
+    REQUIRE_FALSE(loops.empty());
+    size_t internal_loops = 0;
+    for (const PerimeterLoopPayload &loop : loops) {
+        INFO("perimeter_idx " << loop.perimeter_idx);
+        const bool external = loop.perimeter_idx == 0;
+        CHECK(loop.role.is_perimeter());
+        CHECK(loop.role.is_external_perimeter() == external);
+        CHECK(loop.width == Approx(external ? capture.external_perimeter_width_mm : capture.internal_perimeter_width_mm));
+        CHECK(loop.height == Approx(external ? capture.external_perimeter_height_mm : capture.internal_perimeter_height_mm));
+        CHECK(loop.mm3_per_mm == Approx(external ? capture.external_perimeter_mm3_per_mm : capture.internal_perimeter_mm3_per_mm));
+        if (!external)
+            ++internal_loops;
+    }
+    CHECK(internal_loops >= 2);
+}
+
 void require_leaf_fill_area_consistency(const PerimeterRunCapture &capture)
 {
     const ExPolygons leaf_areas = surface_expolygons(capture.fill_no_overlap_surfaces);
@@ -966,15 +1047,15 @@ void require_simple_generator_first_child_area_partition(const PerimeterRunCaptu
 
     // For the simple generator after the first external perimeter, children are
     // created from the parent area shrunk past the external wall and half the
-    // next perimeter spacing. Modules may split those children, but their union
-    // must still be exactly the generated child domain.
+    // next (internal) perimeter spacing. Modules may split those children, but
+    // their union must still be exactly the generated child domain.
     const double leaf_delta =
-        -0.5 * double(capture.external_perimeter_width + capture.external_perimeter_spacing);
+        -0.5 * double(capture.external_perimeter_width + capture.internal_perimeter_spacing);
     require_same_union(leaf_areas, offset_ex(parent_area, leaf_delta));
 
-    // The fill/anchor domain follows the same split, but is 25% of perimeter
-    // spacing larger than the strict child area.
-    const double fill_delta = leaf_delta + 0.25 * double(capture.external_perimeter_spacing);
+    // The fill/anchor domain follows the same split, but is 25% of internal
+    // perimeter spacing larger than the strict child area.
+    const double fill_delta = leaf_delta + 0.25 * double(capture.internal_perimeter_spacing);
     require_same_union(leaf_fill_areas, offset_ex(parent_area, fill_delta));
 }
 

@@ -4,6 +4,17 @@
 
 #include <vector>
 
+/*
+These tests inspect the native simple provider's loop wrappers, shell indices,
+role-specific flow and remaining fill areas on contours and holes. Captures own
+the generated paths; SimpleLoopInfo only borrows them for the current assertion.
+
+    TEST_CASE
+    |-- run_perimeter_case(): generate a tree for an explicit layer polygon
+    |-- simple_loops(): borrow each loop wrapper and its path
+    `-- require_loop_payloads_match_role_flow(): check shell roles and physical flow
+*/
+
 namespace {
 using namespace Slic3r;
 using namespace Slic3r::Test::PerimeterPluginTests;
@@ -102,8 +113,8 @@ size_t loop_count_with_shell(const std::vector<SimpleLoopInfo> &loops, const int
     return count;
 }
 
-void require_loop_payloads_match_external_flow(const PerimeterRunCapture &capture,
-                                               const std::vector<SimpleLoopInfo> &loops)
+void require_loop_payloads_match_role_flow(const PerimeterRunCapture &capture,
+                                           const std::vector<SimpleLoopInfo> &loops)
 {
     REQUIRE_FALSE(loops.empty());
     for (const SimpleLoopInfo &loop : loops) {
@@ -120,11 +131,19 @@ void require_loop_payloads_match_external_flow(const PerimeterRunCapture &captur
 
         CHECK(loop.path->has_polyline());
         CHECK(loop.path->is_leaf());
-        CHECK(loop.path->role().is_external_perimeter());
-        CHECK(loop.attributes->extrusion_role().is_external_perimeter());
-        CHECK(loop.attributes->mm3_per_mm == Approx(capture.external_perimeter_mm3_per_mm));
-        CHECK(loop.attributes->width == Approx(capture.external_perimeter_width_mm));
-        CHECK(loop.attributes->height == Approx(capture.external_perimeter_height_mm));
+        // Shell 0 is the external perimeter; deeper shells are internal
+        // perimeters with their own role and flow.
+        const bool external = loop.perimeter->perimeter_idx == 0;
+        INFO("perimeter_idx " << loop.perimeter->perimeter_idx);
+        CHECK(loop.path->role().is_external_perimeter() == external);
+        CHECK(loop.path->role().is_perimeter());
+        CHECK(loop.attributes->extrusion_role().is_external_perimeter() == external);
+        CHECK(loop.attributes->mm3_per_mm ==
+              Approx(external ? capture.external_perimeter_mm3_per_mm : capture.internal_perimeter_mm3_per_mm));
+        CHECK(loop.attributes->width ==
+              Approx(external ? capture.external_perimeter_width_mm : capture.internal_perimeter_width_mm));
+        CHECK(loop.attributes->height ==
+              Approx(external ? capture.external_perimeter_height_mm : capture.internal_perimeter_height_mm));
         CHECK(loop.attributes->no_seam == 0);
     }
 }
@@ -293,12 +312,13 @@ TEST_CASE("SimplePerimeterGenerator processes two layer islands independently", 
 
 TEST_CASE("SimplePerimeterGenerator writes loop and path properties", "[plugins][perimeter][simple-generator]")
 {
-    SECTION("contour-only island has external flow and shell indices on every loop")
+    SECTION("contour-only island has role, flow and shell index per loop")
     {
         // A plain rectangle produces one contour loop at each perimeter depth.
         // Each loop should be tagged as a perimeter loop, each child path should
-        // carry external-perimeter flow, and shell_count should identify the
-        // depth that generated it.
+        // carry the external (shell 0) or internal (deeper shells) perimeter
+        // role and flow, and shell_count should identify the depth that
+        // generated it.
         const DynamicPrintConfig config = perimeter_config({{"perimeters", "3"}});
         const ExPolygon surface = rectangle_expolygon(-10., -10., 10., 10.);
         const PerimeterRunCapture generated = run_perimeter_case(config, {SIMPLE_PERIMETER_GENERATOR}, surface, 0);
@@ -308,14 +328,14 @@ TEST_CASE("SimplePerimeterGenerator writes loop and path properties", "[plugins]
         CHECK(loop_count_with_role(loops, elrDefault) == 3);
         CHECK(loop_count_with_role(loops, elrHole) == 0);
         require_shell_indices(loops, 3, 1);
-        require_loop_payloads_match_external_flow(generated, loops);
+        require_loop_payloads_match_role_flow(generated, loops);
     }
 
     SECTION("separate central hole gets contour and hole loop properties")
     {
         // A rectangle with a centered hole that has enough spacing should emit
         // one contour loop and one hole loop at each perimeter depth. Both
-        // classes still use the same external-perimeter path flow.
+        // classes use the same role and flow per shell.
         const DynamicPrintConfig config = perimeter_config({{"perimeters", "3"}});
         const ExPolygon surface = rectangle_with_hole(-3., -3., 3., 3.);
         const PerimeterRunCapture generated = run_perimeter_case(config, {SIMPLE_PERIMETER_GENERATOR}, surface, 0);
@@ -325,7 +345,7 @@ TEST_CASE("SimplePerimeterGenerator writes loop and path properties", "[plugins]
         CHECK(loop_count_with_role(loops, elrDefault) == 3);
         CHECK(loop_count_with_role(loops, elrHole) == 3);
         require_shell_indices(loops, 3, 2);
-        require_loop_payloads_match_external_flow(generated, loops);
+        require_loop_payloads_match_role_flow(generated, loops);
     }
 
     SECTION("near-edge hole stops being a hole when offsets fuse")
@@ -347,7 +367,7 @@ TEST_CASE("SimplePerimeterGenerator writes loop and path properties", "[plugins]
         CHECK(loops.size() == hole_count + contour_count);
         CHECK(loop_count_with_shell(loops, 0) >= 2);
         CHECK(loop_count_with_shell(loops, 1) >= 1);
-        require_loop_payloads_match_external_flow(generated, loops);
+        require_loop_payloads_match_role_flow(generated, loops);
     }
 
     SECTION("zero requested perimeters creates no extrusion loops")
@@ -363,6 +383,24 @@ TEST_CASE("SimplePerimeterGenerator writes loop and path properties", "[plugins]
         REQUIRE_FALSE(generated.fill_surfaces.empty());
         REQUIRE_FALSE(generated.fill_no_overlap_surfaces.empty());
         require_leaf_fill_area_consistency(generated);
+    }
+}
+
+TEST_CASE("SimplePerimeterGenerator gives the internal loops the internal role and flow",
+          "[plugins][perimeter][simple-generator]")
+{
+    // Layer 1 with explicitly different widths: on the first layer
+    // first_layer_extrusion_width gives every role the same flow, so a loop that
+    // took the external flow would not be noticed there.
+    const DynamicPrintConfig config = distinct_perimeter_width_config(3);
+    for (const ExPolygon &surface : {rectangle_expolygon(-10., -10., 10., 10.), rectangle_with_hole(-3., -3., 3., 3.)}) {
+        const PerimeterRunCapture generated = run_perimeter_case(config, {SIMPLE_PERIMETER_GENERATOR}, surface, 1);
+        require_loop_role_and_flow_per_shell(generated);
+
+        // The area left after the external loop starts at the internal spacing.
+        const PerimeterRunCapture first_child =
+            run_perimeter_case(distinct_perimeter_width_config(1), {SIMPLE_PERIMETER_GENERATOR}, surface, 1);
+        require_simple_generator_first_child_area_partition(first_child, surface);
     }
 }
 

@@ -10,6 +10,7 @@
 #include "libslic3r/ExtrusionProperty.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 
 // These tests generate perimeter trees from explicit layer polygons, run overhang
@@ -238,6 +239,44 @@ TEST_CASE("Detect overhang keeps split perimeter loops closed", "[plugins][perim
     count_flagged_loops(capture.external_perimeters, flagged, broken);
     REQUIRE(flagged > 0);
     CHECK(broken == 0);
+}
+
+TEST_CASE("Detect overhang leaves the classic loop flag on the loop wrapper only", "[plugins][perimeter][detect-overhang][classic-generator]")
+{
+    // The classic generator wraps each loop path in a loop entity that carries the
+    // perimeter LOOP flag. Overhang detection clones the properties of the path it
+    // splits onto every fragment, and a fragment is an open path: the flag on the
+    // path itself would make the STEP_ORDERING pre-validation reject the print.
+    const DynamicPrintConfig config = detect_overhang_config({
+        {"overhangs_width", "0.2"},
+        {"overhangs_width_speed", "0.2"}
+    });
+    const PerimeterRunCapture capture = run_perimeter_and_post_case_with_lower_area(
+        config, {CLASSIC_PERIMETER_GENERATOR}, {DETECT_OVERHANG},
+        detected_overhang_target(), half_width_lower_support(), 1);
+    REQUIRE(detected_overhang_stats(capture).overhang_properties > 0);
+
+    size_t flagged = 0;
+    size_t broken = 0;
+    count_flagged_loops(capture.external_perimeters, flagged, broken);
+    CHECK(flagged > 0);
+    CHECK(broken == 0);
+
+    size_t flagged_leaves = 0;
+    size_t leaves = 0;
+    std::function<void(const ExtrusionEntity &)> visit = [&](const ExtrusionEntity &entity) {
+        if (entity.is_leaf() && entity.has_polyline()) {
+            ++leaves;
+            const ExtrusionPropertyLoopRole *loop_role = entity.get_property<ExtrusionPropertyLoopRole>();
+            if (loop_role != nullptr && (loop_role->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_LOOP) != 0)
+                ++flagged_leaves;
+        }
+        for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
+            visit(entity.child(child_idx));
+    };
+    visit(capture.external_perimeters);
+    CHECK(leaves > flagged);   // the loop was split into several fragments
+    CHECK(flagged_leaves == 0); // the wrapper carries the flag, not a fragment
 }
 
 TEST_CASE("Detect overhang merges tiny supported crossings into the loop", "[plugins][perimeter][detect-overhang]")

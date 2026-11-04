@@ -6,9 +6,21 @@
 """
 Simple STEP_PERIMETER generator written with the high-level Python helpers.
 
-This mirrors the temporary native SimplePerimeterGenerator: for each perimeter
-node it offsets the current area to create one closed perimeter loop, then
-returns the inner area used by the host to create the next node.
+This mirrors the native SimplePerimeterGenerator: for each perimeter node it
+offsets the current area to create one closed perimeter loop, then returns the
+inner area used by the host to create the next node. The first loop is the
+external perimeter (external role and flow); the following loops are internal
+perimeters (internal role and flow, offsets at the internal spacing).
+
+    run()
+    |-- read both role flows and the requested count from the source region
+    `-- _generate_node(): select shell flow, publish loops and remaining areas
+        `-- _make_perimeter_extrusion(): offset a borrowed area in caller storage
+            `-- _append_perimeter_loop(): keep LOOP/HOLE flags on the wrapper
+
+Geometry views stay borrowed during the callback. Owned temporary collections
+are freed after moving their output into host nodes; exceptions are reported by
+the plugin bridge. No mutable state is shared between runs.
 """
 
 from __future__ import annotations
@@ -23,6 +35,7 @@ from slic3r_api import (
     PluginBase,
     RAW_EXTRUSION_FLAG_REVERSIBLE,
     RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER,
+    RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER,
     STEP_PERIMETER,
     StoredExtrusionEntity,
     throw_if_cancelled,
@@ -32,12 +45,13 @@ from slic3r_api import (
 
 PLUGIN_ID = "python.perimeter.generator.simple"
 LOOP_ROLE_DEFAULT = 1 << 0
-LOOP_ROLE_HOLE = 1 << 3
+LOOP_ROLE_HOLE = LOOP_ROLE_DEFAULT | (1 << 3)
 
 
 @dataclass
 class SimpleGeneratorState:
-    flow: CFlow
+    flow: CFlow  # external perimeter flow, used by the first loop
+    internal_flow: CFlow  # used by the following loops
     perimeter_count: int
     run_ctx_address: int
 
@@ -47,7 +61,8 @@ def _offset_area(api, storage: int, area, delta: float):
     return clip.offset(clip(area), delta).to_expolygon_collection()
 
 
-def _append_perimeter_loop(dst: StoredExtrusionEntity, polygon, flow: CFlow, perimeter_idx: int, loop_role: int) -> None:
+def _append_perimeter_loop(dst: StoredExtrusionEntity, polygon, flow: CFlow, role: int, perimeter_idx: int, loop_role: int) -> None:
+    """Copy the closed ring with shell flags on a wrapper and role/flow on its path."""
     if not polygon.valid_polygon() or polygon.empty():
         return
 
@@ -58,17 +73,19 @@ def _append_perimeter_loop(dst: StoredExtrusionEntity, polygon, flow: CFlow, per
 
     path = StoredExtrusionEntity(dst.api, dst.storage(), points)
     attributes = path.property(EPropertyAttributes)
-    attributes.role = RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER
+    attributes.role = role
     attributes.mm3_per_mm = flow.mm3_per_mm
     attributes.width = float(unscaled(flow.width))
     attributes.height = float(unscaled(flow.height))
 
     loop = StoredExtrusionEntity(dst.api, dst.storage())
-    loop.set_flags(RAW_EXTRUSION_FLAG_REVERSIBLE)
     perimeter = loop.property(EPropertyPerimeter)
     perimeter.perimeter_idx = int(min(max(perimeter_idx, 0), 0xFFFF))
-    perimeter.loop_role = int(loop_role)
+    perimeter.perimeter_flags = int(loop_role)
     loop.add_child_move(path)
+    # The first child turns an empty entity into a sortable collection.
+    # Apply continuity flags after that conversion, as the native provider does.
+    loop.set_flags(RAW_EXTRUSION_FLAG_REVERSIBLE)
     dst.add_child_move(loop)
 
 
@@ -77,10 +94,12 @@ def _make_perimeter_extrusion(
     storage: int,
     area,
     flow: CFlow,
+    role: int,
     perimeter_idx: int,
     line_offset: float,
     run_ctx_address: int,
 ) -> StoredExtrusionEntity:
+    """Return owned offset loops using the selected shell's role and flow."""
     throw_if_cancelled(run_ctx_address)
     extrusion = StoredExtrusionEntity(api, storage)
     extrusion.disable_reverse().disable_sort()
@@ -90,11 +109,11 @@ def _make_perimeter_extrusion(
         for loop_idx, loop in enumerate(loops):
             if loop_idx % 64 == 0:
                 throw_if_cancelled(run_ctx_address)
-            _append_perimeter_loop(extrusion, loop.contour(), flow, perimeter_idx, LOOP_ROLE_DEFAULT)
+            _append_perimeter_loop(extrusion, loop.contour(), flow, role, perimeter_idx, LOOP_ROLE_DEFAULT)
             for hole_idx, hole in enumerate(loop.holes()):
                 if hole_idx % 64 == 0:
                     throw_if_cancelled(run_ctx_address)
-                _append_perimeter_loop(extrusion, hole, flow, perimeter_idx, LOOP_ROLE_HOLE)
+                _append_perimeter_loop(extrusion, hole, flow, role, perimeter_idx, LOOP_ROLE_HOLE)
     finally:
         loops.free_from_storage()
     return extrusion
@@ -128,6 +147,7 @@ class PythonSimplePerimeterGeneratorPlugin(PluginBase):
         perimeter_count = max(0, region_config.int("perimeters"))
         state = SimpleGeneratorState(
             regions[0].flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER),
+            regions[0].flow(RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER),
             perimeter_count,
             run_ctx_address,
         )
@@ -136,7 +156,6 @@ class PythonSimplePerimeterGeneratorPlugin(PluginBase):
     def _generate_node(self, state: SimpleGeneratorState, generation, node, inner_areas, inner_fill_areas) -> bool:
         throw_if_cancelled(state.run_ctx_address)
         storage = generation.perimeter_generation_plugin_storage()
-        flow = state.flow
 
         if state.perimeter_count > 0:
             node.set_perimeter_needed(max(node.perimeter_needed(), state.perimeter_count))
@@ -159,12 +178,15 @@ class PythonSimplePerimeterGeneratorPlugin(PluginBase):
 
         first_perimeter = node.perimeter_idx() == 0
         perimeter_idx = node.perimeter_idx()
+        flow = state.flow if first_perimeter else state.internal_flow
+        role = RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER if first_perimeter else RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER
         line_offset = -0.5 * float(flow.width if first_perimeter else flow.spacing)
         extrusion = _make_perimeter_extrusion(
             self.api,
             storage,
             node.area(),
             flow,
+            role,
             perimeter_idx,
             line_offset,
             state.run_ctx_address,
@@ -174,7 +196,8 @@ class PythonSimplePerimeterGeneratorPlugin(PluginBase):
         finally:
             extrusion.free_from_storage()
 
-        inner_offset = -0.5 * float(flow.width + flow.spacing) if first_perimeter else -float(flow.spacing)
+        inner_offset = (-0.5 * float(state.flow.width + state.internal_flow.spacing) if first_perimeter else
+                        -float(state.internal_flow.spacing))
         inner = _offset_area(self.api, storage, node.area(), inner_offset)
         try:
             self.api.host.expolygons_move(inner_areas.mutable_c_handle(), inner.mutable_c_handle())
@@ -183,7 +206,7 @@ class PythonSimplePerimeterGeneratorPlugin(PluginBase):
 
         # Keep the fill/anchor area slightly larger than the next perimeter
         # area, matching the native simple generator.
-        fill_offset = inner_offset + 0.25 * float(flow.spacing)
+        fill_offset = inner_offset + 0.25 * float(state.internal_flow.spacing)
         inner_fill = _offset_area(self.api, storage, node.area(), fill_offset)
         try:
             self.api.host.expolygons_move(inner_fill_areas.mutable_c_handle(), inner_fill.mutable_c_handle())

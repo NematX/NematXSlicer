@@ -66,6 +66,11 @@ for subsequent rings. Overhang areas are computed for the current region group
 so their spacing can affect the generated ring without mixing incompatible
 region settings.
 
+Each closed perimeter has a wrapper carrying its shell index and LOOP/HOLE
+flags. Its child path owns the role and flow: shell zero is external, deeper
+shells are internal. Later overhang splitting can copy path properties without
+marking every open fragment as a closed loop.
+
 A single perimeter tree is never shared by regions whose perimeter count,
 flows, overhang, thin-wall, gap-fill, or corner settings differ. The resulting
 roots and child nodes remain owned by the host tree, and later perimeter
@@ -76,6 +81,11 @@ not order the tree or generate infill.
 namespace slic3r_api { namespace Perimeter { namespace ClassicPerimeterGeneratorPlugin {
 
 namespace {
+
+// Append a storage-owned loop wrapper around a copied path. The wrapper owns
+// shell flags while the path receives the supplied role and flow; input stays borrowed.
+void append_classic_loop(StoredExtrusionEntity &dst, const Polygon &polygon, const c_flow &flow,
+                         raw_extrusion_role role, uint16_t perimeter_idx, uint16_t perimeter_flags);
 
 const char *k_classic_perimeter_generator_id = "perimeter.generator.classic";
 const char *k_no_dependencies[] = { nullptr };
@@ -571,18 +581,19 @@ void append_classic_loop(StoredExtrusionEntity &dst,
         .width(float(unscaled(flow.width)))
         .height(float(unscaled(flow.height)));
 
-    // TODO: we'll try with a loop with no children, as it's not useful right now to create a collection with 1 child.
-    // It will make things a bit more difficult for algorithms taht want to split it, but we just need to add good helper function.
-    //StoredExtrusionEntity loop(dst.storage());
-    //loop.get_or_add(EPropertyPerimeter::key).shell_count(perimeter_idx).perimeter_role(loop_role);
-    //loop.append_child_move(path.mutable_view());
-    //loop.set_flags(RAW_EXTRUSION_FLAG_REVERSIBLE);
+    // Each loop path is wrapped in a loop entity that owns the perimeter
+    // properties (shell index, LOOP/HOLE flags), while the path owns the role and
+    // flow. Algorithms that split the path (overhang detection) clone its
+    // properties on every open fragment, and an open fragment must not carry the
+    // LOOP flag: the STEP_ORDERING pre-validation rejects a LOOP flag on an entity
+    // that is not a closed loop. The wrapper keeps the flag on the loop as a whole,
+    // like the simple generator does.
+    StoredExtrusionEntity loop(dst.storage());
+    loop.get_or_add(EPropertyPerimeter::key).shell_count(perimeter_idx).perimeter_flags(perimeter_flags);
+    loop.append_child_move(path.mutable_view());
+    loop.set_flags(RAW_EXTRUSION_FLAG_REVERSIBLE);
 
-    path.set_flags(RAW_EXTRUSION_FLAG_REVERSIBLE);
-
-    path.get_or_add(EPropertyPerimeter::key).shell_count(perimeter_idx).perimeter_flags(perimeter_flags);
-
-    dst.append_child_move(path.mutable_view());
+    dst.append_child_move(loop.mutable_view());
 }
 
 bool scaled_values_differ(coord_t lhs, coord_t rhs)
@@ -1277,11 +1288,11 @@ void generate_internal_perimeter(const PerimeterGenerationContextView &params,
     StoredExPolygonCollection perimeter_centerlines = next_onion.to_expolygon_collection();
     for(ExPolygon area : perimeter_centerlines){
         append_classic_loop(perimeter_extrusion_root, area.contour(), internal_flow,
-                            RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, node.perimeter_idx(),
+                            RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER, node.perimeter_idx(),
                             static_cast<uint16_t>(C_EXTRUSION_PERIMETER_FLAG_LOOP |
                                                   C_EXTRUSION_PERIMETER_FLAG_INTERNAL));
         for (Polygon hole : area.holes())
-            append_classic_loop(perimeter_extrusion_root, hole, internal_flow, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER,
+            append_classic_loop(perimeter_extrusion_root, hole, internal_flow, RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER,
                                 node.perimeter_idx(),
                                 static_cast<uint16_t>(C_EXTRUSION_PERIMETER_FLAG_LOOP |
                                                       C_EXTRUSION_PERIMETER_FLAG_INTERNAL |

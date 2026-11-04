@@ -86,6 +86,46 @@ ExPolygons consumed_free_fill_expolygons(const PerimeterRunCapture &baseline,
     return diff_ex(free_fill_expolygons(baseline), free_fill_expolygons(post));
 }
 
+// Copy every leaf path without unioning repeated passes; the borrowed tree is unchanged.
+void append_leaf_polylines(const ExtrusionEntity &entity, Polylines &out);
+// Return the printed slot footprint restricted to the baseline's free-fill domain.
+double footprint_in_free_fill(const ExtrusionEntity &wrapper, const PerimeterRunCapture &baseline, coord_t spacing);
+// Count all printed length in that domain, including repeated passes through the same area.
+double path_length_in_free_fill(const ExtrusionEntity &wrapper, const PerimeterRunCapture &baseline);
+
+void append_leaf_polylines(const ExtrusionEntity &entity, Polylines &out)
+{
+    if (entity.is_nop())
+        return;
+    if (entity.is_leaf() && entity.has_polyline()) {
+        out.push_back(entity.as_polyline().to_polyline());
+        return;
+    }
+    for (size_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
+        append_leaf_polylines(entity.child(child_idx), out);
+}
+
+double footprint_in_free_fill(const ExtrusionEntity &wrapper,
+                              const PerimeterRunCapture &baseline, const coord_t spacing)
+{
+    Polylines lines;
+    append_leaf_polylines(wrapper, lines);
+    ExPolygons footprint;
+    for (const Polyline &line : lines)
+        append(footprint, offset_ex(line, 0.5 * double(spacing), ClipperLib::jtSquare, 0., ClipperLib::etOpenSquare));
+    return area_sum(intersection_ex(union_ex(footprint), free_fill_expolygons(baseline)));
+}
+
+double path_length_in_free_fill(const ExtrusionEntity &wrapper, const PerimeterRunCapture &baseline)
+{
+    Polylines lines;
+    append_leaf_polylines(wrapper, lines);
+    double length = 0.;
+    for (const Polyline &line : intersection_pl(lines, free_fill_expolygons(baseline)))
+        length += line.length();
+    return length;
+}
+
 const ExtrusionEntity *first_generated_wrapper(const ExtrusionEntity &root);
 
 void require_wave_consumes_only_printed_volume(const DynamicPrintConfig &config,
@@ -118,7 +158,13 @@ void require_wave_consumes_only_printed_volume(const DynamicPrintConfig &config,
     const double consumed_area = area_sum(wave_consumed);
     const double nominal_path_area = extrusion_length(*wrapper) * double(wave_spacing);
     const double tolerance = double(scale_i(0.04)) * double(scale_i(0.04));
-    CHECK(nominal_path_area <= consumed_area * 1.05 + tolerance);
+    // Shell overlap is already outside the free-fill domain being consumed.
+    // Check both its covered area and its full path budget, so repeated passes
+    // cannot disappear into a union. Keep the same geometric tolerances.
+    const double printed_free_fill_area = footprint_in_free_fill(*wrapper, baseline, wave_spacing);
+    CHECK(printed_free_fill_area <= consumed_area * 1.05 + tolerance);
+    const double printed_free_fill_budget = path_length_in_free_fill(*wrapper, baseline) * double(wave_spacing);
+    CHECK(printed_free_fill_budget <= consumed_area * 1.05 + tolerance);
     CHECK(consumed_area <= nominal_path_area * 1.15 + tolerance);
 
     require_leaf_fill_area_consistency(wave);

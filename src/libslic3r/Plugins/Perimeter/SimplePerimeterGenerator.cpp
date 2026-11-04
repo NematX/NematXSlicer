@@ -24,8 +24,9 @@ Simple perimeter generation
 This plugin provides the fixed-width implementation of STEP_PERIMETER. The
 host invokes it for one LayerIsland and supplies a callback that traverses the
 region group and calls generate_node() for each perimeter node. The plugin
-uses the first region's external-perimeter flow and requested perimeter count
-as the shared generation parameters for that island.
+uses the first region's external- and internal-perimeter flows and requested
+perimeter count as the shared generation parameters for that island. The first
+loop gets the external role and flow, the following loops the internal ones.
 
 generate_node() first applies the requested perimeter count to the node. If no
 additional perimeter is needed, it publishes the node area and fill area
@@ -46,6 +47,7 @@ The normal call flow is:
     SimplePerimeterGenerator::run_impl()
     `-- validate the perimeter context and collect island regions
         |-- external_perimeter_flow(island)
+        |-- internal_perimeter_flow(island)
         |-- perimeter_count(island)
         `-- run_region_group(..., &generate_node)
             `-- generate_node() for each perimeter node
@@ -69,6 +71,22 @@ responsibility of the perimeter step context.
 namespace slic3r_api { namespace Perimeter { namespace SimplePerimeterGeneratorPlugin {
 
 namespace {
+
+// Copy a closed polygon into a storage-owned loop with shell flags on its wrapper
+// and the selected external/internal role and flow on its child path.
+void append_perimeter_loop(StoredExtrusionEntity &dst, const Polygon &polygon, const c_flow &flow,
+                           raw_extrusion_role role, uint16_t perimeter_idx, uint16_t perimeter_flags);
+// Offset one node and return its owned contour/hole loops. Cancellation and
+// allocation errors propagate; the borrowed area is not changed.
+StoredExtrusionEntity make_perimeter_extrusion(storage_handle *storage, const ExPolygon &area,
+    const c_flow &flow, raw_extrusion_role role, uint16_t perimeter_idx, double line_offset,
+    const plugin_run_context *run_ctx);
+// Return the first region's internal flow, or an empty flow for a regionless island.
+c_flow internal_perimeter_flow(const LayerIsland &island);
+// Publish one shell using external flow at depth zero and internal flow below it.
+// Return zero for an incomplete context; geometry failures reach the plugin runner.
+int32_t generate_node(void *generator_context, perimeter_generation_context *context, perimeter_node *node,
+                     expolygon_collection_handle *inner_areas_out, expolygon_collection_handle *inner_fill_areas_out);
 
 const char *k_simple_perimeter_generator_id = "perimeter.generator.simple";
 const char *k_no_dependencies[] = { nullptr };
@@ -102,6 +120,7 @@ StoredExPolygonCollection offset_area(storage_handle *storage,
 void append_perimeter_loop(StoredExtrusionEntity &dst,
                            const Polygon &polygon,
                            const c_flow &flow,
+                           raw_extrusion_role role,
                            uint16_t perimeter_idx,
                            uint16_t perimeter_flags)
 {
@@ -115,7 +134,7 @@ void append_perimeter_loop(StoredExtrusionEntity &dst,
 
     StoredExtrusionEntity path(dst.storage(), points);
     EPropertyAttributes &attributes = path.get_or_add(EPropertyAttributes::key);
-    attributes.extrusion_role(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER)
+    attributes.extrusion_role(role)
         .mm3_per_mm(flow.mm3_per_mm)
         .width(float(unscaled(flow.width)))
         .height(float(unscaled(flow.height)));
@@ -130,6 +149,7 @@ void append_perimeter_loop(StoredExtrusionEntity &dst,
 StoredExtrusionEntity make_perimeter_extrusion(storage_handle *storage,
                                                const ExPolygon &area,
                                                const c_flow &flow,
+                                               raw_extrusion_role role,
                                                uint16_t perimeter_idx,
                                                double line_offset,
                                                const plugin_run_context *run_ctx)
@@ -140,16 +160,17 @@ StoredExtrusionEntity make_perimeter_extrusion(storage_handle *storage,
     StoredExPolygonCollection loops = offset_area(storage, area, line_offset, run_ctx);
     throw_if_cancelled(run_ctx);
     for (ExPolygon loop : loops) {
-        append_perimeter_loop(extrusion, loop.contour(), flow, perimeter_idx, k_perimeter_flags_loop);
+        append_perimeter_loop(extrusion, loop.contour(), flow, role, perimeter_idx, k_perimeter_flags_loop);
         for (Polygon hole : loop.holes())
-            append_perimeter_loop(extrusion, hole, flow, perimeter_idx, k_perimeter_flags_hole);
+            append_perimeter_loop(extrusion, hole, flow, role, perimeter_idx, k_perimeter_flags_hole);
     }
     return extrusion;
 }
 
 struct SimpleGeneratorState
 {
-    c_flow flow = {};
+    c_flow flow = {};          // external perimeter flow, used by the first loop
+    c_flow internal_flow = {}; // used by the following loops
     uint32_t perimeter_count = 1;
 };
 
@@ -184,16 +205,20 @@ int32_t generate_node(void *generator_context,
     }
 
     const bool first_perimeter = node_view.perimeter_idx() == 0;
+    // The first loop is the external perimeter; the following ones are internal perimeters.
+    const c_flow &loop_flow = first_perimeter ? state.flow : state.internal_flow;
+    const raw_extrusion_role loop_role = first_perimeter ? RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER :
+                                                           RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER;
     const double line_offset = first_perimeter ? -0.5 * double(state.flow.width) :
-                                                 -0.5 * double(state.flow.spacing);
+                                                 -0.5 * double(state.internal_flow.spacing);
     const uint16_t perimeter_idx = uint16_t(std::min<uint32_t>(node_view.perimeter_idx(), UINT16_MAX));
     StoredExtrusionEntity extrusion = make_perimeter_extrusion(
-        storage, node_view.area(), state.flow, perimeter_idx, line_offset, context->run_ctx);
+        storage, node_view.area(), loop_flow, loop_role, perimeter_idx, line_offset, context->run_ctx);
     throw_if_cancelled(context->run_ctx);
     extrusion_move_from(node->extrusions, extrusion.mutable_handle());
 
-    const double inner_offset = first_perimeter ? -0.5 * double(state.flow.width + state.flow.spacing) :
-                                                  -double(state.flow.spacing);
+    const double inner_offset = first_perimeter ? -0.5 * double(state.flow.width + state.internal_flow.spacing) :
+                                                  -double(state.internal_flow.spacing);
     StoredExPolygonCollection inner_areas =
         offset_area(storage, node_view.area(), inner_offset, context->run_ctx);
     throw_if_cancelled(context->run_ctx);
@@ -201,7 +226,7 @@ int32_t generate_node(void *generator_context,
 
     // The fill/anchor area is slightly larger than the next perimeter area,
     // matching the old "perimeter spacing minus 25%" anchoring convention.
-    const double fill_offset = inner_offset + 0.25 * double(state.flow.spacing);
+    const double fill_offset = inner_offset + 0.25 * double(state.internal_flow.spacing);
     StoredExPolygonCollection inner_fill_areas =
         offset_area(storage, node_view.area(), fill_offset, context->run_ctx);
     throw_if_cancelled(context->run_ctx);
@@ -213,6 +238,11 @@ int32_t generate_node(void *generator_context,
 c_flow external_perimeter_flow(const LayerIsland &island)
 {
     return island.region_count() > 0 ? island.region(0).flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER) : c_flow{};
+}
+
+c_flow internal_perimeter_flow(const LayerIsland &island)
+{
+    return island.region_count() > 0 ? island.region(0).flow(RAW_EXTRUSION_ROLE_INTERNAL_PERIMETER) : c_flow{};
 }
 
 uint32_t perimeter_count(const LayerIsland &island)
@@ -293,6 +323,7 @@ void SimplePerimeterGenerator::run_impl(const plugin_run_context *run_ctx) const
 
     SimpleGeneratorState state;
     state.flow = external_perimeter_flow(island);
+    state.internal_flow = internal_perimeter_flow(island);
     state.perimeter_count = perimeter_count(island);
     throw_if_cancelled(run_ctx);
     ctx->run_region_group(ctx,
