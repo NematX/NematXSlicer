@@ -455,6 +455,60 @@ class PythonGCodeFirmwareTests(unittest.TestCase):
         self.assertIsNone(reference())
         self.assertEqual(destroyed, [1])
 
+    def test_inactive_stored_encoder_is_named(self):
+        """Check that a rejected configured choice names the stored encoder without executing it."""
+        calls = []
+        config = types.SimpleNamespace(get=lambda key: types.SimpleNamespace(serialize=lambda: "JPG"))
+        print_view = types.SimpleNamespace(config=lambda: config)
+
+        class Orchestrator:
+            def select_plugin(self, received_config, step, group):
+                calls.append((received_config, step, group))
+                return types.SimpleNamespace(valid=lambda: False)
+
+            def execute_one(self, *args, **kwargs):
+                raise AssertionError("Rejected selections must not execute")
+
+        with self.assertRaisesRegex(ValueError, "^GCODE_THUMBNAIL provider 'JPG' is not active$"):
+            self.thumbnail.GCodeThumbnailEncoder(Orchestrator(), print_view, None)
+        self.assertEqual(calls, [(config, self.generated.GCODE_THUMBNAIL, "thumbnail_encoder_plugin")])
+
+    def test_empty_stored_encoder_selection_is_invalid(self):
+        """Check that an empty stored choice is rejected before an encoder executes."""
+        calls = []
+        config = types.SimpleNamespace(get=lambda key: types.SimpleNamespace(serialize=lambda: ""))
+        print_view = types.SimpleNamespace(config=lambda: config)
+
+        class Orchestrator:
+            def select_plugin(self, received_config, step, group):
+                calls.append((received_config, step, group))
+                return types.SimpleNamespace(valid=lambda: False)
+
+            def execute_one(self, *args, **kwargs):
+                raise AssertionError("Rejected selections must not execute")
+
+        with self.assertRaises(ValueError) as raised:
+            self.thumbnail.GCodeThumbnailEncoder(Orchestrator(), print_view, None)
+        self.assertEqual(str(raised.exception), "Invalid GCODE_THUMBNAIL provider selection")
+        self.assertEqual(calls, [(config, self.generated.GCODE_THUMBNAIL, "thumbnail_encoder_plugin")])
+
+    def test_explicit_unknown_encoder_is_named(self):
+        """Explicit lookup neither reads print configuration nor executes an unknown provider."""
+        calls = []
+
+        class Orchestrator:
+            def find_plugin(self, identifier):
+                calls.append(identifier)
+                return types.SimpleNamespace(valid=lambda: False)
+
+            def execute_one(self, *args, **kwargs):
+                raise AssertionError("Rejected selections must not execute")
+
+        with self.assertRaises(ValueError) as raised:
+            self.thumbnail.GCodeThumbnailEncoder(Orchestrator(), object(), None, "missing.encoder")
+        self.assertEqual(str(raised.exception), "Unknown GCODE_THUMBNAIL provider: missing.encoder")
+        self.assertEqual(calls, ["missing.encoder"])
+
     def test_owned_encoder_uses_orchestrator_and_cleans_failed_publication(self):
         import copy
         destroyed = []
@@ -478,7 +532,8 @@ class PythonGCodeFirmwareTests(unittest.TestCase):
                 return self.status
 
         orch = Orchestrator()
-        print_view = types.SimpleNamespace(c_handle=lambda: ctypes.c_void_p(1), config=lambda: None)
+        print_view = types.SimpleNamespace(c_handle=lambda: ctypes.c_void_p(1),
+                                          config=lambda: types.SimpleNamespace(get=lambda key: None))
         raw = generated.RawGcodeThumbnailRenderRequest()
         raw.struct_size = ctypes.sizeof(raw)
         raw.width = raw.height = 4

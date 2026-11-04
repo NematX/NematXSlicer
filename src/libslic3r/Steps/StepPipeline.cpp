@@ -691,14 +691,14 @@ Plugin *selected_plugin_from_group(const StepExclusiveGroup &group,
 }
 
 // Resolve borrowed active providers and settings using whole-step identities or named-group metadata.
-// Zero/one active provider returns directly; returned pointers remain host-owned, no settings/print data change,
-// and allocation failures propagate while multi-provider selectors resolve through their generated definitions.
+// Empty steps return directly; every exclusive group resolves through its generated definition, including singletons.
+// Returned pointers remain host-owned, no settings/print data change, and allocation failures propagate.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,
                                                           const ConfigBase *config)
 {
     std::vector<Plugin *> active_plugins = orchestrator.get_active_plugins_for_step(step);
-    if (active_plugins.size() <= 1)
+    if (active_plugins.empty())
         return active_plugins;
 
     const std::map<slicing_step_t, StepExclusiveIdentity> &exclusive_steps = get_exclusive_steps();

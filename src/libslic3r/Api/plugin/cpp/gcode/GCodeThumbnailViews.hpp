@@ -295,6 +295,7 @@ struct GCodeThumbnailRequest {
 // leave a borrowed view pointing at another owner's instance record.
 class GCodeThumbnailEncoder {
 public:
+    // Acquire a session from the explicit encoder id, or the print's setting if empty; reject invalid choices before execution.
     GCodeThumbnailEncoder(const OrchestratorView &, const Print &,
                           const raw_gcode_thumbnail_renderer *, const std::string &provider_id = {});
     ~GCodeThumbnailEncoder();
@@ -392,14 +393,25 @@ inline std::vector<GCodeThumbnailRequest> default_gcode_thumbnail_requests(const
 }
 
 
+// The plugin manager, print and renderer must outlive this session; rejected choices throw std::invalid_argument.
 inline GCodeThumbnailEncoder::GCodeThumbnailEncoder(const OrchestratorView &orchestrator,
     const Print &print, const raw_gcode_thumbnail_renderer *renderer, const std::string &provider_id)
 {
-    const PluginView plugin = provider_id.empty() ?
-        orchestrator.select_plugin(print.config().handle(), GCODE_THUMBNAIL, "thumbnail_encoder_plugin") :
-        orchestrator.find_plugin(provider_id);
+    std::string requested_id = provider_id;
+    PluginView plugin;
+    if (provider_id.empty()) {
+        const Config config = print.config();
+        if (config.has("thumbnails_format"))
+            requested_id = config.get("thumbnails_format").serialize();
+        plugin = orchestrator.select_plugin(config.handle(), GCODE_THUMBNAIL, "thumbnail_encoder_plugin");
+    } else {
+        plugin = orchestrator.find_plugin(provider_id);
+    }
+    if (provider_id.empty() && !plugin.valid() && !requested_id.empty())
+        throw std::invalid_argument("GCODE_THUMBNAIL provider '" + requested_id + "' is not active");
     if (!plugin.valid() || plugin.step() != GCODE_THUMBNAIL)
-        throw std::invalid_argument("Unknown GCODE_THUMBNAIL provider: " + provider_id);
+        throw std::invalid_argument(requested_id.empty() ? "Invalid GCODE_THUMBNAIL provider selection" :
+                                    "Unknown GCODE_THUMBNAIL provider: " + requested_id);
     run_ctx_gcode_thumbnail payload = {};
     payload.print = print.handle();
     payload.renderer = renderer;

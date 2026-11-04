@@ -9,13 +9,17 @@
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeThumbnailViews.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
 /* Step modules install host-owned selector declarations during host construction. A whole-step
    declaration supplies defaults to named groups, while an exact group replaces every field.
    Local metadata checks read the process host without registering provider options. Selection checks
-   initialize the shared runtime and restore scoped activation changes. The generated-selector snapshot
+   initialize the shared runtime and restore scoped activation changes. Dynamic no-op service providers
+   register after startup and remain inactive outside their selection checks. The generated-selector snapshot
    checks the serialized definitions and layout strings separately. */
 
 namespace {
@@ -23,6 +27,9 @@ using namespace Slic3r;
 
 // Compare both public seam selection paths against a borrowed expected provider without changing configuration or activation.
 void check_seam_selection(Orchestrator &host, const ConfigBase *config, const Plugin *expected);
+// Compare group, C API and step selection against the same borrowed expected provider.
+void check_selection(Orchestrator &host, slicing_step_t step, const char *group,
+                     const ConfigBase *config, const Plugin *expected);
 
 class SeamActivationGuard
 {
@@ -46,11 +53,11 @@ private:
 class ThumbnailActivationGuard
 {
 public:
-    // Borrow the host and copy all thumbnail-step flags before mutations; allocations may throw without changing activations.
-    explicit ThumbnailActivationGuard(Orchestrator &host) : m_host(host)
+    // Borrow the host and copy flags on the supplied step before mutations; allocations may throw without changing activations.
+    explicit ThumbnailActivationGuard(Orchestrator &host, slicing_step_t step = GCODE_THUMBNAIL) : m_host(host)
     {
         for (Plugin *plugin : host.registered_plugins())
-            if (plugin->get_step() == GCODE_THUMBNAIL) m_saved.emplace_back(plugin, host.is_plugin_active(plugin));
+            if (plugin->get_step() == step) m_saved.emplace_back(plugin, host.is_plugin_active(plugin));
     }
     // Restore the saved activation flags; the plugin manager and providers must outlive this guard.
     ~ThumbnailActivationGuard()
@@ -60,6 +67,32 @@ public:
 private:
     Orchestrator &m_host;
     std::vector<std::pair<Plugin *, bool>> m_saved;
+};
+
+class SingletonSelectorProbe final : public slic3r_api::PluginBase
+{
+public:
+    // Borrow a host and permanent identity strings for a no-op provider on the supplied dynamic step.
+    SingletonSelectorProbe(orchestrator_handle *host, slicing_step_t step, const char *id, const char *group)
+        : PluginBase(host), m_step(step), m_id(id), m_group(group) {}
+    // Return the borrowed permanent provider id without effects or failures.
+    const char *id() const noexcept { return m_id; }
+private:
+    // Return the borrowed permanent provider id without effects or failures.
+    const char *id_impl() const noexcept override { return m_id; }
+    // Return the dynamic step value without effects or failures.
+    slicing_step_t step_impl() const noexcept override { return m_step; }
+    // Return the borrowed permanent group id without effects or failures.
+    const char *exclusive_group_impl() const noexcept override { return m_group; }
+    // Report no dependencies without effects or failures.
+    const char *const *dependencies_impl() const noexcept override { return nullptr; }
+    // Return a constant execution priority without effects or failures.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Ignore the borrowed context without producing output, changing state or failing.
+    void run_impl(const plugin_run_context *) const override {}
+    slicing_step_t m_step;
+    const char *m_id;
+    const char *m_group;
 };
 
 class SelectorTraitsProbe final : public slic3r_api::PluginBase
@@ -84,14 +117,135 @@ private:
 // No host/configuration mutation or ownership transfer occurs; assertion and serialization/allocation failures propagate.
 void check_seam_selection(Orchestrator &host, const ConfigBase *config, const Plugin *expected)
 {
-    CHECK(Steps::selected_active_plugin_from_group(host, SEAM_PLACER, "seam_placer_plugin", config) == expected);
-    const std::vector<Plugin *> selected = Steps::selected_or_active_plugins_for_step(host, SEAM_PLACER, config);
+    check_selection(host, SEAM_PLACER, "seam_placer_plugin", config, expected);
+}
+
+// Resolve borrowed config through all three entry points without mutation; assertion/allocation failures propagate.
+void check_selection(Orchestrator &host, slicing_step_t step, const char *group,
+                     const ConfigBase *config, const Plugin *expected)
+{
+    CHECK(Steps::selected_active_plugin_from_group(host, step, group, config) == expected);
+    CHECK(orchestrator_select_plugin(reinterpret_cast<orchestrator_handle *>(&host),
+          reinterpret_cast<const config_handle *>(config), step, group) ==
+          reinterpret_cast<const orchestrator_plugin_handle *>(expected));
+    const std::vector<Plugin *> selected = Steps::selected_or_active_plugins_for_step(host, step, config);
     if (expected != nullptr) {
         REQUIRE(selected.size() == 1);
         CHECK(selected.front() == expected);
     } else CHECK(selected.empty());
 }
 } // namespace
+
+// Register permanent no-op providers after shared startup and scope their activations; owned string configs test all paths.
+// Registrations remain host-owned and inactive afterward; assertion/allocation failures unwind the activation guard.
+TEST_CASE("Strict singleton selectors reject a stale stored provider through every selection path",
+          "[plugins][step-pipeline][selector-traits]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const slicing_step_t step = host.register_step("slic3r.test.strict_singleton", STEP_INFILL);
+    REQUIRE(step != STEP_NONE);
+    static SingletonSelectorProbe strict(reinterpret_cast<orchestrator_handle *>(&host), step,
+        "slic3r.test.strict_singleton.provider", "strict_singleton");
+    static SingletonSelectorProbe neutral(reinterpret_cast<orchestrator_handle *>(&host), step,
+        "slic3r.test.neutral_singleton.provider", "neutral_singleton");
+    for (SingletonSelectorProbe *probe : {&strict, &neutral}) {
+        if (host.get_plugin(probe->id()) == nullptr) REQUIRE(host.register_plugin(probe->c_instance()));
+        REQUIRE(host.set_plugin_active(host.get_plugin(probe->id()), false));
+    }
+    StepSelectorTraits traits;
+    traits.exclusive_group = "strict_singleton";
+    traits.strict_selection = true;
+    traits.read_with_one_provider = true;
+    REQUIRE(host.register_builtin_step_selector(step, traits) >= 0);
+    ThumbnailActivationGuard guard(host, step);
+    for (SingletonSelectorProbe *probe : {&strict, &neutral}) {
+        Plugin *provider = host.get_plugin(probe->id());
+        REQUIRE(provider != nullptr);
+        REQUIRE(host.set_plugin_active(provider, true));
+        const char *group = probe == &strict ? "strict_singleton" : "neutral_singleton";
+        const std::string key = Steps::plugin_exclusive_group_option_key(host, step, group);
+        DynamicConfig config;
+        config.set_key_value(key, new ConfigOptionString("missing.provider"));
+        check_selection(host, step, group, &config, probe == &strict ? nullptr : provider);
+        config.set_key_value(key, new ConfigOptionString(probe->id()));
+        check_selection(host, step, group, &config, provider);
+        DynamicConfig absent;
+        check_selection(host, step, group, &absent, provider);
+        check_selection(host, step, group, nullptr, provider);
+        REQUIRE(host.set_plugin_active(provider, false));
+    }
+}
+
+// Scope built-in encoder activations and read serialized enum ids through every selection path.
+// Local configs/print own their data; no encoder executes on rejection and saved activations restore on failure.
+TEST_CASE("Singleton thumbnail selection rejects the inactive stored encoder through group and step paths",
+          "[plugins][step-pipeline][selector-traits][thumbnail]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    ThumbnailActivationGuard guard(host);
+    Plugin *png = host.get_plugin("PNG");
+    REQUIRE(png != nullptr);
+    REQUIRE(host.get_plugin("JPG") != nullptr);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == GCODE_THUMBNAIL) REQUIRE(host.set_plugin_active(plugin, plugin == png));
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("thumbnails_format", "JPG");
+    REQUIRE(config.option("thumbnails_format")->serialize() == "JPG");
+    check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &config, nullptr);
+    config.set_deserialize_strict("thumbnails_format", "PNG");
+    check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &config, png);
+    DynamicConfig absent;
+    check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", &absent, png);
+    check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", nullptr, png);
+}
+
+// Apply config with an empty model: rejected selections need no object or renderer and never acquire a session.
+// Local model/print own their data; assertions and apply failures propagate while scoped flags restore on failure.
+TEST_CASE("Thumbnail selection errors name the inactive stored encoder",
+          "[plugins][thumbnail][selector-traits]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    ThumbnailActivationGuard guard(host);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == GCODE_THUMBNAIL) REQUIRE(host.set_plugin_active(plugin, plugin->get_id() == "PNG"));
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("thumbnails_format", "JPG");
+    print.apply(model, config);
+    const slic3r_api::OrchestratorView view(reinterpret_cast<orchestrator_handle *>(&host));
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr),
+                      "GCODE_THUMBNAIL provider 'JPG' is not active");
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr, "missing.encoder"),
+                      "Unknown GCODE_THUMBNAIL provider: missing.encoder");
+    for (const Plugin *plugin : host.registered_plugins()) {
+        if (plugin->get_step() == GCODE_THUMBNAIL) continue;
+        CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr, plugin->get_id()),
+                          "Unknown GCODE_THUMBNAIL provider: " + plugin->get_id());
+        break;
+    }
+    config.optptr("thumbnails_format")->set_int(1000000);
+    REQUIRE(config.option("thumbnails_format")->serialize().empty());
+    print.apply(model, config);
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr),
+                      "Invalid GCODE_THUMBNAIL provider selection");
+}
+
+// Look up an explicit missing provider with an invalid Print view; accessing its config would assert in Debug.
+// Rejection precedes execution and leaves the borrowed host unchanged; only the exact lookup error is accepted.
+TEST_CASE("Explicit thumbnail lookup does not access Print configuration",
+          "[plugins][thumbnail][selector-traits]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const slic3r_api::OrchestratorView host(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    const slic3r_api::Print unavailable_print;
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(host, unavailable_print, nullptr, "missing.encoder"),
+                      "Unknown GCODE_THUMBNAIL provider: missing.encoder");
+}
 
 // Declare owned dynamic-step traits and construct local groups from borrowed provider metadata.
 // Assertions report rejected/mutated declarations; no options, providers or activations are registered by this test.

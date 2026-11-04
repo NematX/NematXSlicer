@@ -395,13 +395,22 @@ class GCodeThumbnailEncoder:
     serial. Explicit ids never fall back. Copies are forbidden; use with.
     """
     def __init__(self, orchestrator, print, renderer, provider_id=""):
+        """Acquire the explicit encoder, or use the print's setting if omitted; invalid choices raise ValueError before execution."""
         from slic3r_api_generated import RAW_PLUGIN_EXECUTION_SUCCESS
         self._instance = None
         self._keepalive = (orchestrator, print, renderer)
+        config = print.config() if not provider_id else None
+        requested_id = provider_id
+        if not provider_id:
+            option = config.get("thumbnails_format")
+            requested_id = option.serialize() if option is not None else ""
         plugin = (orchestrator.find_plugin(provider_id) if provider_id else
-                  orchestrator.select_plugin(print.config(), GCODE_THUMBNAIL, "thumbnail_encoder_plugin"))
+                  orchestrator.select_plugin(config, GCODE_THUMBNAIL, "thumbnail_encoder_plugin"))
+        if not provider_id and not plugin.valid() and requested_id:
+            raise ValueError("GCODE_THUMBNAIL provider '" + requested_id + "' is not active")
         if not plugin.valid() or plugin.step() != int(GCODE_THUMBNAIL):
-            raise ValueError("unknown GCODE_THUMBNAIL provider: " + provider_id)
+            raise ValueError("Unknown GCODE_THUMBNAIL provider: " + requested_id if requested_id else
+                             "Invalid GCODE_THUMBNAIL provider selection")
         payload = RunCtxGcodeThumbnail()
         payload.print = print.c_handle()
         payload.renderer = renderer._renderer if renderer else None

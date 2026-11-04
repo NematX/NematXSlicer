@@ -554,7 +554,7 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
     "select|thumbnail_unknown_null_group|PNG",
     "select|thumbnail_unknown_null_step|PNG",
     "select|thumbnail_unknown_single_group|none",
-    "select|thumbnail_unknown_single_step|PNG",
+    "select|thumbnail_unknown_single_step|none",
     "select|thumbnail_unknown_step|none",
     "select|thumbnail_unknown_valid_single_group|PNG",
     "select|thumbnail_unknown_valid_single_step|PNG",
