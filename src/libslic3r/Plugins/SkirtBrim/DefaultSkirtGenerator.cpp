@@ -38,20 +38,6 @@ skirt relative to the brim can use the brim geometry that was actually built.
 
 The normal execution flow is:
 
-    run_impl()
-    `-- generate_default_skirt()
-        |-- validate the STEP_SKIRT_BRIM context and read print settings
-        |-- return when no skirt, skirt-brim, or draft-shield work is requested
-        |-- choose per-object generation when complete-object mode requires it
-        |-- otherwise collect all print objects for one shared envelope
-        |-- make_skirt()
-        |   |-- collect object, support, and optional brim points
-        |   |-- build the convex-hull offset loops
-        |   |-- resolve first-layer flow and distribute loops across extruders
-        |   `-- keep normal and first-layer-only loops in print order
-        `-- publish_object_skirt() or publish_print_skirt()
-            `-- create tagged auxiliary layers through the common helper
-
 The hull is object-local for per-object skirts and print-level for shared
 skirts. Draft-shield settings can extend the considered layer range, while
 `min_skirt_length` may request additional loop length. The output roots are
@@ -59,6 +45,25 @@ explicitly non-sortable and non-reversible because their order is part of the
 skirt's behavior. This plugin creates extrusion trees and auxiliary layers,
 but does not generate final machine G-code or perform general extrusion
 ordering.
+
+Operation notes:
+- validate the STEP_SKIRT_BRIM context and read print settings
+- return when no skirt, skirt-brim, or draft-shield work is requested
+- choose per-object generation when complete-object mode requires it
+- otherwise collect all print objects for one shared envelope
+- collect object, support, and optional brim points
+- build the convex-hull offset loops
+- resolve first-layer flow and distribute loops across extruders
+- keep normal and first-layer-only loops in print order
+- publish_object_skirt() or publish_print_skirt()
+- create tagged auxiliary layers through the common helper
+
+Representative direct calls (branches are not a timeline):
+
+    generate_default_skirt()
+        |-- make_skirt()
+        |-- publish_object_skirt()
+        `-- publish_print_skirt()
 */
 
 namespace slic3r_api { namespace SkirtBrim { namespace DefaultSkirtGeneratorPlugin {
@@ -161,11 +166,9 @@ void append_points_from_polygon(std::vector<c_point> &points, const Polygon &pol
 // Add every point from an extrusion tree; empty optional trees are ignored.
 void append_points_from_extrusion(std::vector<c_point> &points, const ExtrusionEntity &entity);
 
-// Prefer structured object-brim auxiliary layers and return whether any brim points were found.
-bool append_points_from_object_brim_auxiliary_layers(std::vector<c_point> &points, const Object &object);
 bool append_points_from_print_brim_auxiliary_layers(std::vector<c_point> &points, const Print &print);
 
-// Collect object/support/brim points in object-local coordinates.
+// Collect borrowed local object/support contours without instance-specific brim, widening the common hull when configured; append owned points and propagate geometry/allocation failures.
 void collect_object_local_hull_points(std::vector<c_point> &object_points,
                                       storage_handle *storage,
                                       const SkirtBrimStep &step,
@@ -173,7 +176,7 @@ void collect_object_local_hull_points(std::vector<c_point> &object_points,
                                       const Object &object,
                                       coord_t skirt_height_z);
 
-// Collect all points that define the final print-level skirt hull.
+// Build a storage-owned skirt hull from borrowed common contours and separately validated brim placements; local mode keeps its origin pattern while plateau mode projects each owner once, propagating invalid-owner/geometry failures.
 StoredPolygon collect_print_hull(storage_handle *storage,
                                  const SkirtBrimStep &step,
                                  const Print &print,
@@ -362,24 +365,6 @@ void append_points_from_brim_layer(std::vector<c_point> &points, const Layer &la
     }
 }
 
-bool append_points_from_object_brim_auxiliary_layers(std::vector<c_point> &points, const Object &object)
-{
-    bool found = false;
-    for (uint32_t layer_idx = 0; layer_idx < object.auxiliary_layer_count(); ++layer_idx) {
-        const Layer layer = object.auxiliary_layer(layer_idx);
-        if (!layer_is_brim(layer))
-            continue;
-
-        /*
-        Brim is stored as normal perimeter-bucket extrusions inside auxiliary
-        layer region-islands. Reading that tree keeps the skirt hull tied to the
-        structured output that will be printed.
-        */
-        append_points_from_brim_layer(points, layer, found);
-    }
-    return found;
-}
-
 bool append_points_from_print_brim_auxiliary_layers(std::vector<c_point> &points, const Print &print)
 {
     bool found = false;
@@ -428,12 +413,10 @@ void collect_object_local_hull_points(std::vector<c_point> &object_points,
     }
 
     if (print.config().get("skirt_distance_from_brim").get_bool()) {
-        append_points_from_object_brim_auxiliary_layers(object_points, object);
-
         /*
-        In object-local mode, old brim patches are now represented by the brim
-        plugin's extrusion output. Using those points avoids a new volume API and
-        keeps skirt placement tied to the actual brim that will be printed.
+        The common object/support envelope keeps its configured brim-distance
+        allowance. Instance-owned generated brim is added separately by the
+        caller so one copy's local points never become another copy's geometry.
         */
         StoredPolygon object_polygon(storage);
         for (c_point point : object_points)
@@ -498,15 +481,31 @@ StoredPolygon collect_print_hull(storage_handle *storage,
                 point.y += shift.y;
                 points.push_back(point);
             }
+            if (print_config.get("draft_shield").get_int() == 0 || print_config.get("skirt_distance_from_brim").get_bool()) {
+                for (uint32_t layer_idx = 0; layer_idx < object.auxiliary_layer_count(); ++layer_idx) {
+                    const Layer brim_layer = object.auxiliary_layer(layer_idx);
+                    if (!layer_is_brim(brim_layer))
+                        continue;
+                    for (const std::pair<uint32_t, c_point> &projection : layer_instance_projections(object, brim_layer)) {
+                        if (projection.first != instance_idx)
+                            continue;
+                        std::vector<c_point> local;
+                        bool found = false;
+                        append_points_from_brim_layer(local, brim_layer, found);
+                        const c_point brim_shift = object_local ? c_point{} : projection.second;
+                        for (c_point point : local) {
+                            point.x += brim_shift.x;
+                            point.y += brim_shift.y;
+                            points.push_back(point);
+                        }
+                    }
+                }
+            }
         }
     }
 
     if (print_config.get("draft_shield").get_int() == 0 || print_config.get("skirt_distance_from_brim").get_bool()) {
         append_points_from_print_brim_auxiliary_layers(points, print);
-        for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
-            const Object object = print.object(object_idx);
-            append_points_from_object_brim_auxiliary_layers(points, object);
-        }
     }
 
     StoredPolygon point_cloud(storage);

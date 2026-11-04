@@ -2,10 +2,15 @@
 
 #include <initializer_list>
 #include <functional>
+#include <fstream>
+#include <sstream>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "plugin_test_helpers.hpp"
+#include "gcode_test_helpers.hpp"
 #include "test_data.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -13,9 +18,11 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/ExtrusionViews.hpp"
+#include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/Geometry/ConvexHull.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Model.hpp"
@@ -23,7 +30,10 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Utils.hpp"
+#include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepLayerHeightGeneration.hpp"
+#include "libslic3r/Steps/StepExtrusionOrdering.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepSlicing.hpp"
 #include "libslic3r/Steps/StepSkirtBrim.hpp"
@@ -32,16 +42,34 @@
 Default skirt/brim generator tests
 ==================================
 
-These tests exercise the new STEP_SKIRT_BRIM boundary, not the whole print
-pipeline. They slice a simple cube far enough to create first-layer slices, then
-run the built-in adhesion plugins. This keeps the test focused on three
-contracts:
+These tests exercise STEP_SKIRT_BRIM and final placement of adhesion paths.
+They slice a cube, run the adhesion plugins and inspect auxiliary layers.
 
 - STEP_SKIRT_BRIM is a non-exclusive chain, while brim and skirt sub-features
   are separate exclusive groups selected by plugin id.
 - The default brim/skirt plugins write global, per-object, and first-layer-only
   extrusion through tagged auxiliary layers.
 - The host rebuilds the first-layer convex hull from auxiliary adhesion output.
+
+The final-plan placement cases also run the slicing/ordering pipeline.
+They identify brim by its source auxiliary layer, measure deposited-width
+coverage in plateau coordinates and check each physical instance separately.
+
+The model and Print own the input and generated layers; cases inspect their paths and final plan.
+
+Operation notes:
+- Test::init_print :  Print::process :  StepPipeline::run_gcode
+- object_brim_auxiliary_layers :  collect_diagnostic_brim_coverage
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Slic3r::Test::init_print()
+        |-- prepared.print.apply()
+        |-- prepared.print.process()
+        |-- Steps::StepPipeline::run_gcode()
+        |-- merge()
+        `-- collect_diagnostic_brim_coverage()
 */
 
 namespace {
@@ -248,6 +276,24 @@ struct PreparedBrimPrint
     Print print;
 };
 
+// Isolate standalone diagnostic cases from the process-wide orchestrator stop cause and diagnostics.
+class ScopedBrimTestState
+{
+public:
+    // Borrow the singleton, discard prior diagnostic state and clear cancellation before this independent case; no source data is owned and host failures propagate.
+    ScopedBrimTestState()
+    {
+        Orchestrator::instance().consume_plugin_messages();
+        Orchestrator::instance().reset_plugin_cancel();
+    }
+    // Clear the independent case's stop cause and messages on every exit, including Catch assertion unwinding; no Print/model lifetime is extended.
+    ~ScopedBrimTestState()
+    {
+        Orchestrator::instance().consume_plugin_messages();
+        Orchestrator::instance().reset_plugin_cancel();
+    }
+};
+
 void run_prepared_print_until_skirt_brim(PreparedBrimPrint &prepared,
                                          bool include_trim = true);
 
@@ -324,7 +370,600 @@ std::vector<const Layer *> object_brim_auxiliary_layers(const PrintObject &objec
     return out;
 }
 
+// Collect width coverage from final-plan leaves without assuming that decorated loop children are native ExtrusionPath objects.
+void collect_diagnostic_brim_coverage(const ExtrusionEntity &entity, Polygons &coverage);
+
+// Recursively borrow final-plan children, append each geometric leaf's width coverage to caller-owned polygons and skip command leaves; no tree changes or ownership transfers occur and geometry/allocation failures propagate.
+void collect_diagnostic_brim_coverage(const ExtrusionEntity &entity, Polygons &coverage)
+{
+    if (entity.polyline_or_null() != nullptr) {
+        entity.ExtrusionEntity::polygons_covered_by_width(coverage, float(SCALED_EPSILON));
+        return;
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        if (child)
+            collect_diagnostic_brim_coverage(*child, coverage);
+}
+
 } // namespace
+
+// Slice owned cube models in three placement modes, inspect borrowed final-plan BRIM sources and their width coverage, and assert one correctly placed brim per instance; processing/allocation failures propagate and all Print/model data dies at case exit.
+TEST_CASE("Final plan places each generated brim around its source instance", "[plugins][brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    for (const std::string &mode : {std::string("per-object"), std::string("sequential"), std::string("parallel"), std::string("global"), std::string("ears")}) {
+        for (const size_t copies : {size_t(1), size_t(2)}) {
+            CAPTURE(mode, copies);
+            DynamicPrintConfig config = brim_test_config(true, mode != "global");
+            config.set_deserialize_strict({
+                {"complete_objects", mode == "sequential" ? "1" : "0"},
+                {"parallel_objects_step", mode == "parallel" ? "1" : "0"}, {"xy_size_compensation", "0"},
+                {"xy_inner_size_compensation", "0"}, {"hole_size_compensation", "0"},
+                {"first_layer_size_compensation", "0"}, {"brim_separation", "0"}});
+            if (mode == "ears")
+                config.set_deserialize_strict({{"brim_ears", "1"}, {"brim_ears_pattern", "concentric"}});
+            PreparedBrimPrint prepared;
+            Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
+            ModelObject &model_object = prepared.model.objects().front();
+            model_object.instances.front()->set_offset(Vec3d(40., 50., 0.));
+            if (copies == 2)
+                model_object.add_instance(*model_object.instances.front())->set_offset(Vec3d(100., 50., 0.));
+            prepared.print.apply(prepared.model, config);
+            prepared.print.process();
+            const boost::filesystem::path reference = Test::GCode::temporary_gcode_path();
+            const ScopeGuard remove_reference([&reference]() { Test::GCode::remove_output_pair(reference); });
+            Steps::StepPipeline::run_gcode(Orchestrator::instance(), prepared.print, reference.string());
+            REQUIRE(prepared.print.objects().size() == 1);
+            const PrintObject &object = prepared.print.objects().front();
+            REQUIRE(object.instances().size() == copies);
+            REQUIRE(object.layer_count() > 0);
+            const Printing::PrintingPlan *plan = prepared.print.printing_plan();
+            REQUIRE(plan != nullptr);
+
+            std::map<const LayerRegionIsland *, const Layer *> brim_sources;
+            // Retain only source identities of first-layer BRIM, never skirt or normal object paths.
+            for (const PrintObject *owner : {&object, prepared.print.auxiliary_object()}) {
+                if (owner == nullptr)
+                    continue;
+                for (const Layer &layer : owner->auxiliary_layers()) {
+                    if (!LayerAdhesionProperty::layer_is_brim(layer) ||
+                        layer.scaled_print_z() != object.layer(0).scaled_print_z())
+                        continue;
+                    for (const LayerSliceIsland &island : layer.islands())
+                        for (const LayerRegionIsland &region : island.regions_islands())
+                            brim_sources.emplace(&region, &layer);
+                }
+            }
+            REQUIRE_FALSE(brim_sources.empty());
+            std::vector<BoundingBox> expected(copies);
+            for (size_t instance = 0; instance < copies; ++instance) {
+                for (const ExPolygon &slice : object.layer(0).lslices())
+                    expected[instance].merge(slice.contour.points);
+                expected[instance].translate(object.instances()[instance].shift);
+            }
+            std::vector<BoundingBox> actual(copies);
+            std::vector<std::set<const Layer *>> sources(copies);
+            size_t roots = 0;
+            std::vector<size_t> instance_roots(copies, 0);
+            for (const Printing::PrintingGroup &group : plan->groups)
+                for (const Printing::PrintingLayerGroup &layer : group.layers)
+                    for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                        for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                            const std::map<const LayerRegionIsland *, const Layer *>::const_iterator source =
+                                brim_sources.find(extrusion.region_island);
+                            if (source == brim_sources.end() || !extrusion.root)
+                                continue;
+                            ++roots;
+                            if (extrusion.printing_catalog_id < plan->object_instances.size())
+                                ++instance_roots.at(plan->object_instances[extrusion.printing_catalog_id].object_instance_idx);
+                            Polygons coverage;
+                            collect_diagnostic_brim_coverage(*extrusion.root, coverage);
+                            for (const Polygon &polygon : coverage) {
+                                BoundingBox box(polygon.points);
+                                size_t instance = copies;
+                                if (extrusion.printing_catalog_id < plan->object_instances.size()) {
+                                    const Printing::PrintingObjectInstance &entry = plan->object_instances[extrusion.printing_catalog_id];
+                                    REQUIRE(entry.object == &object);
+                                    instance = entry.object_instance_idx;
+                                } else {
+                                    // Global brim has no catalog id: spatially assign its disconnected coverage to the nearest cube.
+                                    double distance = 1e100;
+                                    for (size_t candidate = 0; candidate < copies; ++candidate) {
+                                        const double candidate_distance = (box.center() - expected[candidate].center()).cast<double>().squaredNorm();
+                                        if (candidate_distance < distance) {
+                                            distance = candidate_distance;
+                                            instance = candidate;
+                                        }
+                                    }
+                                }
+                                REQUIRE(instance < copies);
+                                actual[instance].merge(box);
+                                sources[instance].insert(source->second);
+                            }
+                        }
+            CHECK(roots == (mode == "global" ? 1 : copies));
+            // The emitted reference uses absolute XY/E. Associate only positive-extrusion brim segments with their firmware label.
+            std::ifstream gcode(reference.string());
+            REQUIRE(gcode.good());
+            std::vector<BoundingBox> gcode_boxes(copies);
+            std::string line;
+            std::string feature;
+            int label = -1;
+            double x = 0., y = 0., e = 0., z = 0.;
+            while (std::getline(gcode, line)) {
+                if (line.rfind(";TYPE:", 0) == 0)
+                    feature = line.substr(6);
+                if (line.rfind("; SLIC3R_OBJECT_INSTANCE_ID=", 0) == 0)
+                    label = std::stoi(line.substr(line.find('=') + 1));
+                if (line.rfind("G92 E", 0) == 0) {
+                    e = std::stod(line.substr(5));
+                    continue;
+                }
+                if (line.rfind("G0 ", 0) != 0 && line.rfind("G1 ", 0) != 0)
+                    continue;
+                double nx = x, ny = y, ne = e;
+                bool xy = false;
+                std::istringstream words(line.substr(3));
+                std::string word;
+                while (words >> word) {
+                    if (word[0] == ';') break;
+                    if (word[0] == 'X') { nx = std::stod(word.substr(1)); xy = true; }
+                    if (word[0] == 'Y') { ny = std::stod(word.substr(1)); xy = true; }
+                    if (word[0] == 'Z') z = std::stod(word.substr(1));
+                    if (word[0] == 'E') ne = std::stod(word.substr(1));
+                }
+                if (feature == "Skirt/Brim" && z < 0.201 && xy && ne > e) {
+                    size_t owner = copies;
+                    if (label >= 0 && size_t(label) < plan->object_instances.size())
+                        owner = plan->object_instances[size_t(label)].object_instance_idx;
+                    else {
+                        double distance = 1e100;
+                        for (size_t index = 0; index < copies; ++index) {
+                            const double d = (Point::new_scale(nx, ny) - expected[index].center()).cast<double>().squaredNorm();
+                            if (d < distance) { distance = d; owner = index; }
+                        }
+                    }
+                    REQUIRE(owner < copies);
+                    gcode_boxes[owner].merge(Point::new_scale(x, y));
+                    gcode_boxes[owner].merge(Point::new_scale(nx, ny));
+                }
+                x = nx; y = ny; e = ne;
+            }
+            for (size_t instance = 0; instance < copies; ++instance) {
+                CAPTURE(instance);
+                const BoundingBox wanted = expected[instance].inflated(scale_i(3.));
+                CHECK(sources[instance].size() == 1);
+                if (mode != "global")
+                    CHECK(instance_roots[instance] == 1);
+                CHECK(actual[instance].defined);
+                // Width quantization and rounded path caps may differ from nominal brim width by less than one nozzle width.
+                CHECK(std::abs(unscaled(actual[instance].min.x() - wanted.min.x())) < 0.6);
+                CHECK(std::abs(unscaled(actual[instance].min.y() - wanted.min.y())) < 0.6);
+                CHECK(std::abs(unscaled(actual[instance].max.x() - wanted.max.x())) < 0.6);
+                CHECK(std::abs(unscaled(actual[instance].max.y() - wanted.max.y())) < 0.6);
+                REQUIRE(gcode_boxes[instance].defined);
+                CHECK(std::abs(unscaled(gcode_boxes[instance].min.x() - wanted.min.x())) < 1.);
+                CHECK(std::abs(unscaled(gcode_boxes[instance].min.y() - wanted.min.y())) < 1.);
+                CHECK(std::abs(unscaled(gcode_boxes[instance].max.x() - wanted.max.x())) < 1.);
+                CHECK(std::abs(unscaled(gcode_boxes[instance].max.y() - wanted.max.y())) < 1.);
+            }
+        }
+    }
+}
+
+// Create owned native layers and borrow SDK views to verify typed owner storage, common/selected placements and invalid-index failure without generating output; property/allocation exceptions propagate.
+TEST_CASE("Auxiliary instance ownership has typed storage and validated projections", "[plugins][brim][properties]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedBrimPrint prepared;
+    DynamicPrintConfig config = brim_test_config(false, false);
+    Test::init_print({Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
+    prepared.model.objects().front().add_instance(*prepared.model.objects().front().instances.front())->set_offset(Vec3d(160., 50., 0.));
+    prepared.print.apply(prepared.model, config);
+    PrintObject &object = prepared.print.object(0);
+    Layer &layer = object.add_auxiliary_layer(0, scale_i(.2), scale_i(.2));
+    const slic3r_api::Object view(reinterpret_cast<const object_handle *>(&object));
+    const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+    CHECK(layer.get_property<LayerInstanceProperty>() == nullptr);
+    CHECK(layer_view.properties().get(slic3r_api::LayerInstanceProperty::key) == nullptr);
+    CHECK_FALSE(slic3r_api::layer_instance_owner(layer_view).has_value());
+    CHECK(slic3r_api::layer_instance_projections(view, layer_view).size() == 2);
+    LayerInstanceProperty &owner = layer.get_or_add_property<LayerInstanceProperty>();
+    owner.object_instance_idx = 0;
+    owner.reserved = 0;
+    CHECK(PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE == 16);
+    CHECK(orchestrator_property_byte_count(Orchestrator::instance().handle(), PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE) == sizeof(c_layer_instance_property));
+    CHECK(orchestrator_property_alignment(Orchestrator::instance().handle(), PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE) == alignof(c_layer_instance_property));
+    CHECK(std::string(orchestrator_property_name(Orchestrator::instance().handle(), PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE)) == "slic3r.layer.instance");
+    CHECK(plugin_property_data_size(layer_get_properties(layer_view.handle()), PLUGIN_PROPERTY_TYPE_LAYER_INSTANCE) == sizeof(c_layer_instance_property));
+    const slic3r_api::LayerInstanceProperty *sdk_owner = layer_view.properties().get(slic3r_api::LayerInstanceProperty::key);
+    REQUIRE(sdk_owner != nullptr);
+    CHECK(sdk_owner->object_instance_idx == 0);
+    CHECK(sdk_owner->reserved == 0);
+    CHECK(slic3r_api::layer_instance_owner(layer_view) == std::optional<uint32_t>(0));
+    CHECK(reinterpret_cast<uintptr_t>(sdk_owner) % alignof(c_layer_instance_property) == 0);
+    const std::vector<std::pair<uint32_t, c_point>> placements = slic3r_api::layer_instance_projections(view, layer_view);
+    REQUIRE(placements.size() == 1);
+    CHECK(placements.front().first == 0);
+    CHECK(placements.front().second.x == object.instances()[0].shift.x());
+    owner.object_instance_idx = 2;
+    CHECK_THROWS_WITH(slic3r_api::layer_instance_projections(view, layer_view), "Auxiliary layer owner instance index is outside the Object.");
+}
+
+// Generate true patch volumes on two translated copies, inspect local published slices and plateau cache order even after layer publication order is reversed; owns the model/Print and propagates generation failures.
+TEST_CASE("Global brim patches retain instance ownership and ordered preview geometry", "[plugins][brim][skirt-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedBrimPrint prepared;
+    DynamicPrintConfig config = brim_test_config(false, false);
+    Test::init_print({Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
+    ModelObject &model_object = prepared.model.objects().front();
+    model_object.instances.front()->set_offset(Vec3d(40., 50., 0.));
+    model_object.add_instance(*model_object.instances.front())->set_offset(Vec3d(100., 50., 0.));
+    TriangleMesh patch = Test::mesh(Test::TestMesh::cube_20x20x20);
+    patch.scale(Vec3f(.3f, .3f, .02f));
+    patch.translate(Vec3f(-4.f, 6.f, 0.f));
+    ModelVolume *volume = model_object.add_volume(patch);
+    volume->set_type(ModelVolumeType::BRIM_PATCH);
+    prepared.print.apply(prepared.model, config);
+    run_prepared_print_until_skirt_brim(prepared);
+    PrintObject &object = prepared.print.object(0);
+    const std::vector<const Layer *> layers = object_brim_auxiliary_layers(object);
+    REQUIRE(layers.size() == 2);
+    std::set<uint32_t> owners;
+    for (uint32_t index = 0; index < 2; ++index) {
+        const LayerInstanceProperty *owner = layers[index]->get_property<LayerInstanceProperty>();
+        REQUIRE(owner != nullptr);
+        owners.insert(owner->object_instance_idx);
+        BoundingBox box;
+        for (const ExPolygon &slice : layers[index]->lslices()) box.merge(slice.contour.points);
+        CHECK(box.max.x() < scale_i(5.));
+        CHECK(box.min.x() > scale_i(-20.));
+    }
+    CHECK((owners == std::set<uint32_t>{0, 1}));
+    std::sort(object.mutable_auxiliary_layers().begin(), object.mutable_auxiliary_layers().end(),
+        [](const LayerUPtr &left, const LayerUPtr &right) {
+            return left->get_property<LayerInstanceProperty>()->object_instance_idx >
+                right->get_property<LayerInstanceProperty>()->object_instance_idx;
+        });
+    const ExtrusionEntityCollection &cache = object.brim();
+    REQUIRE(cache.entities().size() == 2);
+    for (size_t index = 0; index < 2; ++index) {
+        Polygons coverage;
+        collect_diagnostic_brim_coverage(*cache.entities()[index], coverage);
+        BoundingBox box;
+        for (const Polygon &polygon : coverage) box.merge(polygon.points);
+        CHECK(unscaled(box.min.x()) > (index == 0 ? 30. : 90.));
+        CHECK(unscaled(box.max.x()) < (index == 0 ? 45. : 105.));
+    }
+    object.mutable_auxiliary_layers().front()->get_or_add_property<LayerInstanceProperty>().object_instance_idx = 2;
+    CHECK_THROWS(Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), prepared.print));
+    bool reported_owner_error = false;
+    for (const Orchestrator::PluginMessage &message : Orchestrator::instance().consume_plugin_messages())
+        reported_owner_error = reported_owner_error || message.message.find("Auxiliary layer owner instance index") != std::string::npos;
+    CHECK(reported_owner_error);
+    Orchestrator::instance().reset_plugin_cancel();
+}
+
+// Check that one shared local patch becomes one correctly placed brim per physical copy in the final plan.
+TEST_CASE("Sequential and parallel brim patches reach each instance once", "[plugins][brim][skirt-brim][brim-patch-placement]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    for (const bool sequential : {true, false}) {
+        CAPTURE(sequential);
+        DynamicPrintConfig config = brim_test_config(true, true);
+        // Disable ordinary brim and skirt so only the model patch can satisfy the placement checks.
+        config.set_deserialize_strict({{"complete_objects", sequential ? "1" : "0"},
+            {"parallel_objects_step", sequential ? "0" : "1"}, {"parallel_islands", "0"},
+            {"complete_objects_one_skirt", "0"}, {"skirts", "0"}, {"brim_width", "0"},
+            {"brim_width_interior", "0"}, {"brim_skirt_trim", "0"}, {"xy_size_compensation", "0"},
+            {"xy_inner_size_compensation", "0"}, {"first_layer_size_compensation", "0"}});
+        PreparedBrimPrint prepared;
+        Test::init_print({Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
+        ModelObject &model_object = prepared.model.objects().front();
+        model_object.instances.front()->set_offset(Vec3d(40., 50., 0.));
+        model_object.add_instance(*model_object.instances.front())->set_offset(Vec3d(100., 70., 0.));
+        TriangleMesh patch = Test::mesh(Test::TestMesh::cube_20x20x20);
+        patch.scale(Vec3f(.3f, .3f, .02f));
+        patch.translate(Vec3f(-8.f, 6.f, 0.f));
+        model_object.add_volume(patch)->set_type(ModelVolumeType::BRIM_PATCH);
+        prepared.print.apply(prepared.model, config);
+        prepared.print.process();
+        const boost::filesystem::path output = Test::GCode::temporary_gcode_path();
+        const ScopeGuard remove_output([&output]() { Test::GCode::remove_output_pair(output); });
+        Steps::StepPipeline::run_gcode(Orchestrator::instance(), prepared.print, output.string());
+        const PrintObject &object = prepared.print.object(0);
+        REQUIRE(object.instances().size() == 2);
+        const std::vector<const Layer *> layers = object_brim_auxiliary_layers(object);
+        REQUIRE(layers.size() == 1);
+        CHECK(layers.front()->get_property<LayerInstanceProperty>() == nullptr);
+        // Identify the patch by its source layer rather than counting unrelated object paths in the plan.
+        std::set<const LayerRegionIsland *> sources;
+        for (const LayerSliceIsland &island : layers.front()->islands())
+            for (const LayerRegionIsland &region : island.regions_islands()) sources.insert(&region);
+        REQUIRE_FALSE(sources.empty());
+        REQUIRE(prepared.print.printing_plan() != nullptr);
+        const Printing::PrintingPlan &plan = *prepared.print.printing_plan();
+        std::vector<BoundingBox> boxes(2);
+        std::vector<size_t> counts(2, 0);
+        for (const Printing::PrintingGroup &group : plan.groups)
+            for (const Printing::PrintingLayerGroup &layer : group.layers)
+                for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                    for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                        if (sources.count(extrusion.region_island) == 0) continue;
+                        REQUIRE(extrusion.printing_catalog_id < plan.object_instances.size());
+                        const size_t index = plan.object_instances[extrusion.printing_catalog_id].object_instance_idx;
+                        REQUIRE(index < 2);
+                        ++counts[index];
+                        Polygons coverage;
+                        collect_diagnostic_brim_coverage(*extrusion.root, coverage);
+                        for (const Polygon &polygon : coverage) boxes[index].merge(polygon.points);
+                    }
+        for (size_t index = 0; index < 2; ++index) {
+            CAPTURE(index);
+            CHECK(counts[index] == 1);
+            REQUIRE(boxes[index].defined);
+            const double x = index == 0 ? 40. : 100.;
+            const double y = index == 0 ? 50. : 70.;
+            CHECK(std::abs(unscaled(boxes[index].min.x()) - (x - 8.)) < .6);
+            CHECK(std::abs(unscaled(boxes[index].max.x()) - (x - 2.)) < .6);
+            CHECK(std::abs(unscaled(boxes[index].min.y()) - (y + 6.)) < .6);
+            CHECK(std::abs(unscaled(boxes[index].max.y()) - (y + 12.)) < .6);
+        }
+    }
+}
+
+// Generate interior adhesion on a real holed mesh with two physical copies; require local owner-specific auxiliary layers rather than a duplicated shared pattern, with model/layers owned by the case and generation failures propagated.
+TEST_CASE("Interior brim retains one local layer per physical copy", "[plugins][brim][skirt-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PreparedBrimPrint prepared;
+    DynamicPrintConfig config = brim_test_config(false, true);
+    config.set_deserialize_strict({{"brim_width_interior", "2"}, {"complete_objects", "0"}, {"parallel_objects_step", "0"}});
+    Test::init_print({Test::mesh(Test::TestMesh::cube_with_hole, Vec3d::Zero(), Vec3d(1., 1., .02))},
+        prepared.print, prepared.model, config);
+    ModelObject &model_object = prepared.model.objects().front();
+    model_object.instances.front()->set_offset(Vec3d(40., 50., 0.));
+    model_object.add_instance(*model_object.instances.front())->set_offset(Vec3d(140., 50., 0.));
+    prepared.print.apply(prepared.model, config);
+    run_prepared_print_until_skirt_brim(prepared);
+    const PrintObject &object = prepared.print.object(0);
+    const std::vector<const Layer *> layers = object_brim_auxiliary_layers(object);
+    REQUIRE(layers.size() == 2);
+    std::set<uint32_t> owners;
+    for (const Layer *layer : layers) {
+        const LayerInstanceProperty *owner = layer->get_property<LayerInstanceProperty>();
+        REQUIRE(owner != nullptr);
+        owners.insert(owner->object_instance_idx);
+        CHECK_FALSE(layer->lslices().empty());
+    }
+    CHECK((owners == std::set<uint32_t>{0, 1}));
+}
+
+// Generate neighbouring real objects so two copies have unequal brim shapes; compare projected slices, skirt reach and trimmed instance provenance using owned Prints, leaving generation failures visible.
+TEST_CASE("Asymmetric instance brims retain spatial provenance through hull skirt and trim", "[plugins][brim][skirt-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    double untrimmed_length = 0.;
+    std::map<uint32_t, double> untrimmed_instance_lengths;
+    for (const int scenario : {0, 1, 2}) {
+        const bool trim = scenario == 1;
+        const bool from_brim = scenario == 2;
+        CAPTURE(trim, from_brim);
+        PreparedBrimPrint prepared;
+        DynamicPrintConfig config = brim_test_config(true, true);
+        config.set_deserialize_strict({{"brim_width", "5"}, {"skirts", "1"}, {"skirt_distance", "1"},
+            {"skirt_height", "1"}, {"min_skirt_length", "0"}, {"draft_shield", "limited"},
+            {"skirt_distance_from_brim", from_brim ? "1" : "0"}, {"brim_skirt_trim", trim ? "1" : "0"},
+            {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"}, {"first_layer_size_compensation", "0"}});
+        Test::init_print({Test::mesh(Test::TestMesh::cube_20x20x20),
+            Test::mesh(Test::TestMesh::cube_20x20x20, Vec3d::Zero(), Vec3d(1., 2., 1.))}, prepared.print, prepared.model, config);
+        ModelObject &first = prepared.model.objects()[0];
+        first.instances.front()->set_offset(Vec3d(40., 50., 0.));
+        first.add_instance(*first.instances.front())->set_offset(Vec3d(100., 50., 0.));
+        ModelObject &neighbour = prepared.model.objects()[1];
+        neighbour.instances.front()->set_offset(Vec3d(62., 40., 0.));
+        neighbour.config.set_deserialize_strict("brim_width", "0");
+        prepared.print.apply(prepared.model, config);
+        run_prepared_print_until_skirt_brim(prepared);
+        PrintObject &object = prepared.print.object(0);
+        REQUIRE(object.instances().size() == 2);
+        const std::vector<const Layer *> layers = object_brim_auxiliary_layers(object);
+        REQUIRE(layers.size() == 2);
+        BoundingBox projected;
+        std::map<uint32_t, BoundingBox> local_boxes;
+        double length = 0.;
+        std::map<uint32_t, double> instance_lengths;
+        for (const Layer *layer : layers) {
+            const LayerInstanceProperty *owner = layer->get_property<LayerInstanceProperty>();
+            REQUIRE(owner != nullptr);
+            REQUIRE(owner->object_instance_idx < 2);
+            BoundingBox local;
+            for (const ExPolygon &slice : layer->lslices()) local.merge(slice.contour.points);
+            local_boxes.emplace(owner->object_instance_idx, local);
+            local.translate(object.instances()[owner->object_instance_idx].shift);
+            projected.merge(local);
+            for (const LayerSliceIsland &island : layer->islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    if (region.has_extrusion(LayerRegionIsland::PERIMETERS)) {
+                        const double contribution = extrusion_tree_length_mm(region.extrusion(LayerRegionIsland::PERIMETERS));
+                        length += contribution;
+                        instance_lengths[owner->object_instance_idx] += contribution;
+                    }
+        }
+        REQUIRE(local_boxes.size() == 2);
+        CHECK(local_boxes.at(0).max.x() < local_boxes.at(1).max.x() - scale_i(.5));
+        CHECK(unscaled(projected.min.x()) > 34.);
+        CHECK(unscaled(projected.max.x()) < 126.);
+        BoundingBox hull(prepared.print.first_layer_convex_hull().points);
+        CHECK(hull.contains(projected));
+        CHECK(unscaled(hull.min.x()) > (from_brim ? 30. : 34.));
+        CHECK(unscaled(hull.max.x()) < (from_brim ? 135. : 126.));
+        Polygons skirt_coverage;
+        collect_diagnostic_brim_coverage(prepared.print.skirt(), skirt_coverage);
+        REQUIRE_FALSE(skirt_coverage.empty());
+        BoundingBox skirt_box;
+        for (const Polygon &polygon : skirt_coverage) skirt_box.merge(polygon.points);
+        CHECK(unscaled(skirt_box.min.x()) > (from_brim ? 30. : 37.));
+        CHECK(unscaled(skirt_box.max.x()) < (from_brim ? 135. : 123.));
+        if (scenario == 0) {
+            untrimmed_length = length;
+            untrimmed_instance_lengths = instance_lengths;
+        }
+        if (trim) {
+            CHECK(length < untrimmed_length);
+            CHECK(instance_lengths.at(0) < untrimmed_instance_lengths.at(0));
+            CHECK(instance_lengths.at(1) < untrimmed_instance_lengths.at(1));
+        }
+    }
+}
+
+// Slice and write two physical copies in normal/sequential/parallel modes, then compare owned preview geometry with the final plan; common layers/cache remain local until trim marks their owners, and all output files/state are cleaned on failure.
+TEST_CASE("Plateau brim preview expands common patterns and trimmed owners exactly once", "[plugins][brim][skirt-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    for (const std::string &mode : {std::string("normal"), std::string("sequential"), std::string("parallel")}) {
+        for (const bool trim : {false, true}) {
+            CAPTURE(mode, trim);
+            DynamicPrintConfig config = brim_test_config(true, true);
+            config.set_deserialize_strict({{"complete_objects", mode == "sequential" ? "1" : "0"},
+                {"parallel_objects_step", mode == "parallel" ? "1" : "0"}, {"parallel_islands", "0"},
+                {"complete_objects_one_skirt", "0"}, {"skirts", trim ? "1" : "0"}, {"skirt_height", "1"},
+                {"skirt_distance", "1"}, {"min_skirt_length", "0"}, {"skirt_distance_from_brim", "0"},
+                {"draft_shield", trim ? "limited" : "disabled"}, {"brim_skirt_trim", trim ? "1" : "0"},
+                {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"}, {"first_layer_size_compensation", "0"}});
+            PreparedBrimPrint prepared;
+            Test::init_print({Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
+            ModelObject &model_object = prepared.model.objects().front();
+            model_object.instances.front()->set_offset(Vec3d(40., 50., 0.));
+            model_object.add_instance(*model_object.instances.front())->set_offset(Vec3d(100., 50., 0.));
+            prepared.print.apply(prepared.model, config);
+            prepared.print.process();
+            const boost::filesystem::path reference = Test::GCode::temporary_gcode_path();
+            const ScopeGuard remove_reference([&reference]() { Test::GCode::remove_output_pair(reference); });
+            Steps::StepPipeline::run_gcode(Orchestrator::instance(), prepared.print, reference.string());
+            const PrintObject &object = prepared.print.object(0);
+            REQUIRE(object.instances().size() == 2);
+            const bool marked = mode == "normal" || trim;
+            std::set<const LayerRegionIsland *> sources;
+            std::set<uint32_t> owners;
+            for (const Layer *layer : object_brim_auxiliary_layers(object)) {
+                const LayerInstanceProperty *owner = layer->get_property<LayerInstanceProperty>();
+                CHECK((owner != nullptr) == marked);
+                if (owner) owners.insert(owner->object_instance_idx);
+                for (const LayerSliceIsland &island : layer->islands())
+                    for (const LayerRegionIsland &region : island.regions_islands())
+                        sources.insert(&region);
+            }
+            if (marked) CHECK((owners == std::set<uint32_t>{0, 1}));
+            const ExtrusionEntityCollection preview = object.brim_in_plateau_coordinates();
+            REQUIRE(preview.entities().size() == 2);
+            std::vector<BoundingBox> expected(2), preview_boxes(2), plan_boxes(2);
+            std::vector<size_t> preview_counts(2, 0), plan_counts(2, 0);
+            for (size_t index = 0; index < 2; ++index) {
+                for (const ExPolygon &slice : object.layer(0).lslices()) expected[index].merge(slice.contour.points);
+                expected[index].translate(object.instances()[index].shift);
+                expected[index].offset(scale_i(3.));
+            }
+            for (const ExtrusionEntity *root : preview.entities()) {
+                Polygons coverage;
+                collect_diagnostic_brim_coverage(*root, coverage);
+                BoundingBox box;
+                for (const Polygon &polygon : coverage) box.merge(polygon.points);
+                REQUIRE(box.defined);
+                const size_t index = box.center().x() < scale_i(80.) ? 0 : 1;
+                ++preview_counts[index];
+                preview_boxes[index].merge(box);
+            }
+            REQUIRE(prepared.print.printing_plan() != nullptr);
+            const Printing::PrintingPlan &plan = *prepared.print.printing_plan();
+            for (const Printing::PrintingGroup &group : plan.groups)
+                for (const Printing::PrintingLayerGroup &layer : group.layers)
+                    for (const Printing::PrintingToolGroup &tool : layer.tool_groups)
+                        for (const Printing::PrintingExtrusion &extrusion : tool.extrusions) {
+                            if (sources.count(extrusion.region_island) == 0) continue;
+                            REQUIRE(extrusion.printing_catalog_id < plan.object_instances.size());
+                            const size_t index = plan.object_instances[extrusion.printing_catalog_id].object_instance_idx;
+                            REQUIRE(index < 2);
+                            ++plan_counts[index];
+                            Polygons coverage;
+                            collect_diagnostic_brim_coverage(*extrusion.root, coverage);
+                            for (const Polygon &polygon : coverage) plan_boxes[index].merge(polygon.points);
+                        }
+            for (size_t index = 0; index < 2; ++index) {
+                CAPTURE(index);
+                CHECK(preview_counts[index] == 1);
+                CHECK(plan_counts[index] == 1);
+                CHECK(preview_boxes[index] == plan_boxes[index]);
+                CHECK(std::abs(unscaled(preview_boxes[index].min.x() - expected[index].min.x())) < .6);
+                CHECK(std::abs(unscaled(preview_boxes[index].max.x() - expected[index].max.x())) < .6);
+                CHECK(std::abs(unscaled(preview_boxes[index].min.y() - expected[index].min.y())) < .6);
+                CHECK(std::abs(unscaled(preview_boxes[index].max.y() - expected[index].max.y())) < .6);
+            }
+            if (!marked) {
+                Polygons coverage;
+                collect_diagnostic_brim_coverage(object.brim(), coverage);
+                BoundingBox local;
+                for (const Polygon &polygon : coverage) local.merge(polygon.points);
+                CHECK(std::abs(unscaled(local.center().x())) < .01);
+                CHECK(std::abs(unscaled(local.center().y())) < .01);
+                CHECK(local.max.x() < scale_i(14.));
+            }
+        }
+    }
+}
+
+// Generate a common local brim and object-local skirt with distance-from-brim disabled, then prove the skirt hull still encloses the real brim; normal mode uses one plateau skirt root and no origin-space ghost.
+TEST_CASE("Object local skirt includes brim without draft shield or distance flag", "[plugins][brim][skirt-brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const ScopedBrimTestState state;
+    for (const bool sequential : {true, false}) {
+        CAPTURE(sequential);
+        DynamicPrintConfig config = brim_test_config(true, true);
+        config.set_deserialize_strict({{"complete_objects", sequential ? "1" : "0"}, {"complete_objects_one_skirt", "0"},
+            {"parallel_objects_step", "0"}, {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "1"},
+            {"min_skirt_length", "0"}, {"skirt_distance_from_brim", "0"}, {"draft_shield", "disabled"},
+            {"brim_skirt_trim", "0"}});
+        PreparedBrimPrint prepared;
+        Test::init_print({Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
+        ModelObject &model_object = prepared.model.objects().front();
+        model_object.instances.front()->set_offset(Vec3d(40., 50., 0.));
+        model_object.add_instance(*model_object.instances.front())->set_offset(Vec3d(100., 50., 0.));
+        prepared.print.apply(prepared.model, config);
+        run_prepared_print_until_skirt_brim(prepared);
+        const PrintObject &object = prepared.print.object(0);
+        Polygons brim_coverage, skirt_coverage;
+        collect_diagnostic_brim_coverage(sequential ? object.brim() : object.brim_in_plateau_coordinates(), brim_coverage);
+        collect_diagnostic_brim_coverage(sequential ? object.skirt() : prepared.print.skirt(), skirt_coverage);
+        REQUIRE_FALSE(brim_coverage.empty());
+        REQUIRE_FALSE(skirt_coverage.empty());
+        Points skirt_points;
+        for (const Polygon &polygon : skirt_coverage)
+            skirt_points.insert(skirt_points.end(), polygon.points.begin(), polygon.points.end());
+        const Polygon skirt_hull = Geometry::convex_hull(skirt_points);
+        for (const Polygon &polygon : brim_coverage)
+            for (const Point &point : polygon.points)
+                CHECK(skirt_hull.contains(point));
+        BoundingBox skirt_box(skirt_hull.points);
+        if (sequential) {
+            CHECK(std::abs(unscaled(skirt_box.center().x())) < .01);
+            CHECK(std::abs(unscaled(skirt_box.center().y())) < .01);
+        } else {
+            CHECK(unscaled(skirt_box.min.x()) > 35.);
+            CHECK(unscaled(skirt_box.max.x()) < 125.);
+            REQUIRE(prepared.print.auxiliary_object() != nullptr);
+            size_t skirts = 0;
+            for (const Layer &layer : prepared.print.auxiliary_object()->auxiliary_layers())
+                if (LayerAdhesionProperty::layer_is_normal_skirt(layer)) ++skirts;
+            CHECK(skirts == 1);
+        }
+    }
+}
 
 TEST_CASE("STEP_SKIRT_BRIM stops immediately when a plugin reports an error",
           "[plugins][steps][errors]")

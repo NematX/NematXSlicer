@@ -10,10 +10,42 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* Canvas scene rebuilding and interaction. Tower proxies have object_id INT_MAX;
-   volume_id 0 is global, while owner-object-index+1 and instance_id identify an
-   instance tower. Move events use Z=owner+1, XY=relative offset (global: Z=0,
-   XY=platter position). Tower geometry and placement come only from config. */
+/*
+GLCanvas3D displays and interacts with the platter and the G-code preview.
+Scene rebuilding creates renderable volumes from model or print results;
+rendering draws those volumes, while mouse and keyboard handlers update the
+selection or send editing requests to Plater. The canvas does not own the core
+model and slicing results merely because it displays them.
+
+Generated features need their own display identities so interaction can find
+their owner without treating them as ordinary model volumes. The tower rules
+below describe that mapping, not an extra source of printable geometry.
+
+Canvas scene rebuilding and interaction. Tower proxies have object_id INT_MAX;
+volume_id 0 is global, while owner-object-index+1 and instance_id identify an
+instance tower. Move events use Z=owner+1, XY=relative offset (global: Z=0,
+XY=platter position). Tower geometry and placement come only from config.
+
+Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
+
+Representative direct calls (branches are not a timeline):
+
+    GLCanvas3D::reload_scene()
+        |-- std::make_pair()
+        |-- std::sort()
+        |-- sort_remove_duplicates()
+        |-- m_volumes.load_object_volume()
+        |-- m_volumes.load_object_auxiliary()
+        `-- m_volumes.load_wipe_tower_preview()
+
+    GLCanvas3D::render()
+        |-- _picking_pass()
+        |-- _render_background()
+        |-- _render_bed()
+        |-- _render_objects()
+        |-- _render_gcode()
+        `-- _render_overlays()
+*/
 #include "GLCanvas3D.hpp"
 #include "libslic3r/WipeTowerFootprint.hpp"
 
@@ -71,7 +103,7 @@
 #include <wx/debug.h>
 #include <wx/fontutil.h>
 
-// Print now includes tbb, and tbb includes Windows. This breaks compilation of wxWidgets if included before wx.
+
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/PrintRegion.hpp"
@@ -7498,17 +7530,11 @@ void GLCanvas3D::_load_skirt_brim_preview_toolpaths(const BuildVolume &build_vol
             }
             //skirt & brim from objects
             for (const PrintObject& print_object : print->objects()) {
-                if (!print_object.brim().empty())
-                    for (const PrintInstance& inst : print_object.instances()) {
-                        if (!print_object.brim().empty()) volume = ensure_volume_is_ready(volume, init_data);
-                        _3DScene::extrusionentity_to_verts(print_object.brim(), print_zs_mm[i],
-                                                           (print->config().complete_objects ||
-                                                            (print->config().parallel_objects_step > 0 &&
-                                                             !print->config().parallel_islands)) ?
-                                                               inst.shift :
-                                                               Point(0, 0),
-                                                           init_data);
-                    }
+                const ExtrusionEntityCollection brim = print_object.brim_in_plateau_coordinates();
+                if (!brim.empty()) {
+                    volume = ensure_volume_is_ready(volume, init_data);
+                    _3DScene::extrusionentity_to_verts(brim, print_zs_mm[i], Point(0, 0), init_data);
+                }
                 if (print_object.skirt_first_layer())
                     for (const PrintInstance& inst : print_object.instances()) {
                         if (!print_object.skirt_first_layer()->empty()) volume = ensure_volume_is_ready(volume, init_data);

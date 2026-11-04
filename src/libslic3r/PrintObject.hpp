@@ -41,6 +41,17 @@
 #include "Config/FFFPrintConfig.hpp"
 #include "Surface.hpp"
 
+/*
+PrintObject is the FFF slicing representation owned by a Print. Its ordinary
+layers hold the sliced model; auxiliary layers hold generated features such as
+support and adhesion. Several physical instances can reuse that local geometry.
+
+Use the configuration and slicing-parameter accessors to prepare processing,
+then inspect the layers produced by the pipeline. The global auxiliary object
+uses the same layer interfaces without representing a source model object.
+Layer references are borrowed and become invalid when their collection is rebuilt.
+*/
+
 namespace Slic3r {
 
 class BoundingBox;
@@ -169,7 +180,10 @@ public:
     [[deprecated("brim/skirt are stored in auxiliary layers; this accessor materializes a compatibility cache.")]]
     const ExtrusionEntityCollection& skirt() const;
     [[deprecated("brim/skirt are stored in auxiliary layers; this accessor materializes a compatibility cache.")]]
+    // Rebuild the owned compatibility cache from borrowed brim layers. Common patterns stay local; instance-owned roots are grouped in instance order and projected once to plate coordinates. Invalid owners and allocation failures propagate.
     const ExtrusionEntityCollection& brim() const;
+    // Clone every validated brim placement into an owned plate-space collection, expanding common patterns to every copy. Sources and the compatibility cache stay unchanged; invalid owners and allocation failures propagate.
+    ExtrusionEntityCollection brim_in_plateau_coordinates() const;
 
     // for unique_ptr
     ~PrintObject() override;

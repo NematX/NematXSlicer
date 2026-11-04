@@ -1,8 +1,8 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-#ifndef slic3r_AdhesionLayerHelpers_hpp_
-#define slic3r_AdhesionLayerHelpers_hpp_
+#ifndef slic3r_NativeAdhesionLayerHelpers_hpp_
+#define slic3r_NativeAdhesionLayerHelpers_hpp_
 
 #include <algorithm>
 #include <type_traits>
@@ -12,27 +12,49 @@
 #include "Layer.hpp"
 #include "PluginProperty.hpp"
 #include "PrintObject.hpp"
+#include "Api/plugin/cpp/DataTreeViews.hpp"
 
 namespace Slic3r {
 
-/*
-Adhesion layer helpers
-======================
+// Translate every geometric leaf of an owned adhesion tree without changing metadata.
+inline void translate_adhesion_tree(ExtrusionEntity &entity, const Point &shift)
+{
+    if (ArcPolyline *polyline = entity.polyline_or_null()) {
+        polyline->translate(shift);
+        return;
+    }
+    for (const ExtrusionEntityUPtr &child : entity.children())
+        if (child)
+            translate_adhesion_tree(*child, shift);
+}
 
-Brim and skirt are now stored as ordinary auxiliary Layer objects. The layer
+/*
+Native adhesion layer helpers
+=============================
+
+Brim and skirt are stored as ordinary auxiliary Layer objects. The layer
 metadata says whether a layer is brim, normal skirt, or first-layer-only skirt;
 the extrusion tree still lives in the perimeter bucket of each
-LayerRegionIsland.
+LayerRegionIsland. Real-object layers are local, optionally restricted to one
+instance; global auxiliary-object layers are already in plateau coordinates.
 
-The helpers in this file do only mechanical traversal:
+The helpers classify, traverse and place adhesion geometry:
 - test an auxiliary layer with a small predicate;
 - copy matched extrusion roots into a legacy compatibility collection;
 - remove matched auxiliary layers;
 - visit matched extrusion roots for post-processing;
-- collect the physical layer slice points used by first-layer hull rebuilding.
+- project the physical layer slice points used by first-layer hull rebuilding.
 
-Feature-specific meaning stays in the predicates below. This keeps the same
-loops usable for brim, all skirt, normal skirt, and first-layer-only skirt.
+The predicates classify brim, normal skirt and first-layer-only skirt. Placement
+is separate: append_matching_auxiliary_layer_points applies LayerInstanceProperty
+through the shared projection helper, placing a marked layer only at its owner
+and an unmarked common pattern at every instance.
+
+For example, collect_auxiliary_layer_extrusions(object, layer_is_brim_adhesion,
+cache) collects local compatibility geometry into cache, while
+append_matching_auxiliary_layer_points(object, layer_is_any_adhesion, points)
+adds physically placed points to a plate-space hull. Returned copies own their
+trees; input layers are borrowed and are not retained by these helpers.
 */
 
 inline bool layer_is_brim_adhesion(const Layer &layer)
@@ -95,6 +117,8 @@ void visit_matching_auxiliary_layer_extrusions(PrintObject &object,
 
 void append_auxiliary_layer_points(const Layer &layer, Points &dst);
 
+// Append plateau-space slice points for selected auxiliary layers, projecting only their owner or every instance for a common pattern.
+// Append owned points without changing borrowed layers; invalid-owner and allocation errors propagate.
 template<class MatchesLayer>
 void append_matching_auxiliary_layer_points(const PrintObject &object,
                                             MatchesLayer matches_layer,
@@ -238,11 +262,19 @@ void append_matching_auxiliary_layer_points(const PrintObject &object,
                                             MatchesLayer matches_layer,
                                             Points &dst)
 {
-    for (const Layer &layer : object.auxiliary_layers())
-        if (matches_layer(layer))
-            append_auxiliary_layer_points(layer, dst);
+    for (const Layer &layer : object.auxiliary_layers()) {
+        if (!matches_layer(layer))
+            continue;
+        Points local;
+        append_auxiliary_layer_points(layer, local);
+        const slic3r_api::Object view(reinterpret_cast<const object_handle *>(&object));
+        const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+        for (const std::pair<uint32_t, c_point> &projection : slic3r_api::layer_instance_projections(view, layer_view))
+            for (const Point &point : local)
+                dst.push_back(point + Point(projection.second.x, projection.second.y));
+    }
 }
 
 } // namespace Slic3r
 
-#endif // slic3r_AdhesionLayerHelpers_hpp_
+#endif // slic3r_NativeAdhesionLayerHelpers_hpp_

@@ -5,6 +5,8 @@
 #ifndef slic3r_Plugins_SkirtBrim_AdhesionLayerHelpers_hpp_
 #define slic3r_Plugins_SkirtBrim_AdhesionLayerHelpers_hpp_
 
+#include <optional>
+
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 
 namespace slic3r_api { namespace SkirtBrim {
@@ -22,8 +24,15 @@ bucket, and retrieve or remove that output during later skirt/brim passes.
 Keeping these decisions beside their consumers prevents a future auxiliary
 feature from accidentally inheriting skirt/brim storage rules merely because it
 uses the same generic Layer construction primitive.
+
+Real-object geometry stays in object coordinates and may be restricted to one
+physical instance through owner_instance. Global auxiliary-object geometry is
+already in plate coordinates. For example, publish an instance-local brim with
+RAW_LAYER_ADHESION_KIND_BRIM, flags zero and that instance's original index;
+leave owner_instance unset for a local pattern shared by all copies.
 */
 
+// Borrow subject/root handles in real-object local or global-auxiliary plate coordinates, create the owner's layer and move its root with optional real-instance provenance; return false and remove incomplete output on failure, while allocation failures propagate.
 bool publish_adhesion_extrusion_to_auxiliary_layer(storage_handle *storage,
                                                    orchestrator_handle *orchestrator,
                                                    const Print &print,
@@ -34,7 +43,8 @@ bool publish_adhesion_extrusion_to_auxiliary_layer(storage_handle *storage,
                                                    coord_t slice_z,
                                                    raw_layer_adhesion_kind kind,
                                                    raw_layer_adhesion_flag flags,
-                                                   MutableExtrusionEntity extrusion);
+                                                   MutableExtrusionEntity extrusion,
+                                                   std::optional<uint32_t> owner_instance = std::nullopt);
 
 inline bool layer_is_brim_adhesion(const Layer &layer)
 {

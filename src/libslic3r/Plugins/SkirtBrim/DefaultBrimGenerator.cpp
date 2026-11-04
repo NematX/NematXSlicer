@@ -4,6 +4,7 @@
 ///|/
 
 #include "DefaultBrimGenerator.hpp"
+#include "libslic3r/NativeAdhesionLayerHelpers.hpp"
 #include "AdhesionLayerHelpers.hpp"
 
 #include <algorithm>
@@ -57,9 +58,43 @@ The brim algorithm needs to answer two questions:
    other already-planned brim areas. The `unbrimmable` ExPolygons argument is
    the running "occupied" geometry passed to Brim.hpp helpers.
 
+The object settings, first-layer slices and model patch volumes supply the
+geometry. Generated trees become owned by auxiliary layers. A per-copy brim
+is moved back to object coordinates and marked for that physical instance;
+sequential and parallel modes publish an unmarked shared local pattern.
+
 The plugin temporarily edits PrintObject::instances only for the legacy helper
 calls that generate a single-object or single-instance brim pattern. The RAII
 guard below restores the original instances even if a brim helper throws.
+
+Operation notes:
+- generate_per_object_brim() / generate_global_brim()
+- generate_brim_for_objects() :  classic brim geometry
+- make_brim_patch() :  model patch volumes
+- publish_object_brim() :  local geometry with its optional owner
+
+Representative direct calls (branches are not a timeline):
+
+    generate_default_brim()
+        |-- initial_unbrimmable_area()
+        |-- generate_per_object_brim()
+        `-- generate_global_brim()
+
+    generate_per_object_brim()
+        |-- object.config()
+        |-- brim_flow_for_object()
+        |-- print.config()
+        |-- generate_brim_for_objects()
+        |-- make_brim_patch()
+        `-- publish_object_brim()
+
+    generate_global_brim()
+        |-- union_ex()
+        |-- brim_flow_for_print()
+        |-- generate_brim_for_objects()
+        |-- publish_brim_to_auxiliary_layer()
+        |-- make_brim_patch()
+        `-- publish_object_brim()
 */
 
 namespace slic3r_api { namespace SkirtBrim { namespace DefaultBrimGeneratorPlugin {
@@ -195,22 +230,25 @@ void generate_brim_for_objects(const Slic3r::Print &print,
                                ExPolygons &unbrimmable_area,
                                ExtrusionEntityCollection &out);
 
-// Publish brim into an auxiliary layer tagged as adhesion.
+// Cover borrowed brim paths in real-object local or global-auxiliary plate coordinates before moving the root into its owner's layer; optional provenance restricts a real instance, empty output returns false and geometry/allocation failures propagate.
 bool publish_brim_to_auxiliary_layer(storage_handle *storage,
                                      orchestrator_handle *orchestrator,
                                      Slic3r::Print &print,
                                      const slic3r_api::Object &object,
                                      const Slic3r::Layer &reference_layer,
-                                     Slic3r::ExtrusionEntity &brim);
+                                     Slic3r::ExtrusionEntity &brim,
+                                     std::optional<uint32_t> owner_instance = std::nullopt);
 
-// Publish object-owned brim into the object's auxiliary layers.
+// Borrow already-local brim and its source object; publish one layer with optional original instance index, moving extrusion ownership and throwing if the first layer or publication is unavailable.
 void publish_object_brim(storage_handle *storage,
                          orchestrator_handle *orchestrator,
                          Slic3r::Print &print,
                          PrintObject &object,
-                         ExtrusionEntityCollection &brim);
+                         ExtrusionEntityCollection &brim,
+                         std::optional<uint32_t> owner_instance = std::nullopt);
 
-// Generate the object-owned branch used when brim_per_object is enabled.
+// Publish brim for each copy, or one shared local pattern in sequential/parallel mode.
+// Patch projection uses a real model instance; temporary instance changes are restored if generation throws.
 void generate_per_object_brim(storage_handle *storage,
                               orchestrator_handle *orchestrator,
                               Slic3r::Print &print,
@@ -218,6 +256,7 @@ void generate_per_object_brim(storage_handle *storage,
                               ExPolygons &unbrimmable_area);
 
 // Generate the print-owned branch used when compatible objects share one global brim.
+// Global geometry stays on the auxiliary object; each object patch is localized with its original owner index. Source instances stay unchanged and generation/publication failures propagate.
 void generate_global_brim(storage_handle *storage,
                           orchestrator_handle *orchestrator,
                           Slic3r::Print &print,
@@ -621,14 +660,15 @@ void publish_object_brim(storage_handle *storage,
                          orchestrator_handle *orchestrator,
                          Slic3r::Print &print,
                          PrintObject &object,
-                         ExtrusionEntityCollection &brim)
+                         ExtrusionEntityCollection &brim,
+                         std::optional<uint32_t> owner_instance)
 {
     if (brim.empty())
         return;
 
     const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(&object));
     if (object.layer_count() == 0 ||
-        !publish_brim_to_auxiliary_layer(storage, orchestrator, print, object_view, object.layer(0), brim))
+        !publish_brim_to_auxiliary_layer(storage, orchestrator, print, object_view, object.layer(0), brim, owner_instance))
         throw RuntimeError("Default brim generator could not publish object brim auxiliary layer.");
 }
 
@@ -637,7 +677,8 @@ bool publish_brim_to_auxiliary_layer(storage_handle *storage,
                                      Slic3r::Print &print,
                                      const slic3r_api::Object &object,
                                      const Slic3r::Layer &reference_layer,
-                                     Slic3r::ExtrusionEntity &brim)
+                                     Slic3r::ExtrusionEntity &brim,
+                                     std::optional<uint32_t> owner_instance)
 {
     if (storage == nullptr || brim.empty())
         return false;
@@ -661,7 +702,7 @@ bool publish_brim_to_auxiliary_layer(storage_handle *storage,
         scale_to_layer_coord(reference_layer.slice_z),
         RAW_LAYER_ADHESION_KIND_BRIM,
         0,
-        slic3r_api::MutableExtrusionEntity(reinterpret_cast<extrusion_entity_handle *>(&brim)));
+        slic3r_api::MutableExtrusionEntity(reinterpret_cast<extrusion_entity_handle *>(&brim)), owner_instance);
 }
 
 void generate_per_object_brim(storage_handle *storage,
@@ -674,6 +715,12 @@ void generate_per_object_brim(storage_handle *storage,
     const Flow flow = brim_flow_for_object(print, object);
 
     if (print.config().complete_objects || print.config().parallel_objects_step.value > 0) {
+        // PrintApply.cpp groups instances with identical transforms except for XY translation into one PrintObject.
+        // Project the first real instance, then subtract its shift to obtain the shared local patch.
+        const PrintInstance &first_instance = object.instances().front();
+        Polygons patches = object.get_brim_patch(ModelVolumeType::BRIM_PATCH, &first_instance);
+        for (Slic3r::Polygon &patch : patches)
+            patch.translate(-first_instance.shift.x(), -first_instance.shift.y());
         /*
         Complete-object mode prints one full object at a time. The brim stored
         on the object is therefore a reusable pattern around an origin instance;
@@ -684,8 +731,7 @@ void generate_per_object_brim(storage_handle *storage,
         TemporaryObjectInstances instances_guard(object);
         instances_guard.set_single_origin_instance();
         generate_brim_for_objects(print, flow, PrintObjectPtrs{ &object }, local_unbrimmable_area, object_brim);
-        make_brim_patch(
-            print, flow, object.get_brim_patch(ModelVolumeType::BRIM_PATCH), local_unbrimmable_area, object_brim);
+        make_brim_patch(print, flow, patches, local_unbrimmable_area, object_brim);
         publish_object_brim(storage, orchestrator, print, object, object_brim);
         return;
     }
@@ -697,15 +743,18 @@ void generate_per_object_brim(storage_handle *storage,
     /*
     In normal multi-object mode, every copy lives in bed coordinates and must
     avoid every other occupied area. Generate one temporary tree per copy, then
-    publish it as an object-owned auxiliary brim layer plus legacy mirror.
+    publish it as a local auxiliary brim layer restricted to that physical copy.
     */
-    for (const PrintInstance &instance : copies) {
+    for (uint32_t index = 0; index < copies.size(); ++index) {
+        const PrintInstance &instance = copies[index];
+        const Point shift = instance.shift;
         instances_guard.set_single_instance(instance);
         ExtrusionEntityCollection entity_brim;
         generate_brim_for_objects(print, flow, PrintObjectPtrs{ &object }, unbrimmable_area, entity_brim);
         make_brim_patch(
             print, flow, object.get_brim_patch(ModelVolumeType::BRIM_PATCH), unbrimmable_area, entity_brim);
-        publish_object_brim(storage, orchestrator, print, object, entity_brim);
+        Slic3r::translate_adhesion_tree(entity_brim, -shift);
+        publish_object_brim(storage, orchestrator, print, object, entity_brim, index);
     }
 }
 
@@ -749,11 +798,14 @@ void generate_global_brim(storage_handle *storage,
         assert(object != nullptr);
         if (object == nullptr)
             continue;
-        for (const PrintInstance &instance : object->instances()) {
+        for (uint32_t index = 0; index < object->instances().size(); ++index) {
+            const PrintInstance &instance = object->instances()[index];
+            const Point shift = instance.shift;
             ExtrusionEntityCollection patch_brim;
             make_brim_patch(
                 print, flow, object->get_brim_patch(ModelVolumeType::BRIM_PATCH, &instance), unbrimmable_area, patch_brim);
-            publish_object_brim(storage, orchestrator, print, *object, patch_brim);
+            Slic3r::translate_adhesion_tree(patch_brim, -shift);
+            publish_object_brim(storage, orchestrator, print, *object, patch_brim, index);
         }
     }
 }
