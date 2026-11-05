@@ -39,6 +39,7 @@ requiring the virtual behavior of legacy path and collection views.
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionEntityOrdering.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 
 namespace {
@@ -112,6 +113,68 @@ void check_canonical_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::E
 }
 
 } // namespace
+
+// Seam eligibility uses stored geometry and permission, never the legacy type's unconditional loop answer.
+TEST_CASE("Seam units use exact closure and an independent rotation permission",
+          "[plugins][extrusion][seam-unit-preparation]")
+{
+    using namespace Slic3r;
+    const Points closed{{0, 0}, {10000, 0}, {10000, 10000}, {0, 0}};
+    ExtrusionEntity generic(false, ArcPolyline(closed));
+    CHECK(is_seam_unit(generic));
+    generic.set_can_rotate(false);
+    CHECK_FALSE(is_seam_unit(generic));
+    CHECK(generic.ExtrusionEntity::is_loop());
+
+    ExtrusionPath path(ExtrusionAttributes{ExtrusionRole::Perimeter});
+    path.set_polyline(ArcPolyline(closed));
+    ExtrusionMultiPath sequence(path);
+    CHECK_FALSE(sequence.is_loop());
+    CHECK(sequence.ExtrusionEntity::is_loop());
+    CHECK_FALSE(is_seam_unit(sequence));
+    sequence.set_can_rotate(true);
+    CHECK(is_seam_unit(sequence));
+    CHECK_FALSE(sequence.is_loop());
+
+    ExtrusionLoop empty;
+    CHECK(empty.is_loop());
+    CHECK_FALSE(is_seam_unit(empty));
+    ExtrusionLoop almost_closed;
+    std::unique_ptr<ExtrusionPath> near = std::make_unique<ExtrusionPath>(path);
+    near->set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {1, 0}}));
+    almost_closed.append_child(std::move(near));
+    CHECK(almost_closed.is_loop());
+    CHECK_FALSE(is_seam_unit(almost_closed));
+    CHECK(almost_closed.child(0).polyline_ref().back() == Point(1, 0));
+    ExtrusionEntityUPtr canonical = almost_closed.clone_canonical();
+    CHECK_FALSE(is_seam_unit(*canonical));
+    CHECK(canonical->child(0).polyline_ref().back() == Point(1, 0));
+}
+
+// A fixed execution wrapper does not acquire a seam merely because its geometric child closes.
+TEST_CASE("Protected extrusion wrappers retain separate eligible contour children",
+          "[plugins][extrusion][seam-unit-preparation]")
+{
+    using namespace Slic3r;
+    ExtrusionPath path(ExtrusionAttributes{ExtrusionRole::Perimeter});
+    path.set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {0, 0}}));
+    ExtrusionLoop loop(std::move(path));
+    REQUIRE(is_seam_unit(loop));
+    ExtrusionEntity *before = loop.emplace_ordered_leaf(
+        OrderedLeafPosition::Before, ExistingPropertyPlacement::MoveWithExistingContent);
+    REQUIRE(before != nullptr);
+    const ExtrusionEntity &view = loop;
+    REQUIRE(view.child_count() == 2);
+    CHECK(loop.is_loop());
+    CHECK(loop.ExtrusionEntity::is_loop());
+    CHECK_FALSE(is_seam_unit(loop));
+    CHECK_FALSE(is_seam_unit(*before));
+    CHECK(is_seam_unit(view.child(1)));
+    ExtrusionEntityUPtr copy = loop.clone_canonical();
+    CHECK_FALSE(is_seam_unit(*copy));
+    CHECK(is_seam_unit(copy->child(1)));
+    CHECK(copy->child(1).first_point() == view.child(1).ExtrusionEntity::first_point());
+}
 
 // Copy mixed native and hybrid trees once without changing their source handles or legacy clone behavior.
 TEST_CASE("Canonical extrusion copies remove legacy views at every depth",
