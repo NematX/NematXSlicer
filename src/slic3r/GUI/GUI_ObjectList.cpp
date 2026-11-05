@@ -7,9 +7,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* The object list maps model objects, volumes and instances to sidebar rows.
-   Settings rows summarize per-object option categories; refreshing their digest
-   and any selected settings panel leaves the canvas selection unchanged. */
 #include "GUI_ObjectList.hpp"
 
 #include <boost/algorithm/string.hpp>
@@ -49,6 +46,31 @@
 #ifdef __WXMSW__
 #include "wx/uiaction.h"
 #endif /* __WXMSW__ */
+
+/*
+GUI_ObjectList presents the model hierarchy and editing commands in the sidebar.
+Rows refer to model objects, volumes, instances or settings summaries; they are
+not owners of the geometry. Selection and edit handlers coordinate the list,
+Plater and canvas, while model operations remain responsible for the actual data.
+
+Rebuilding a row or settings digest must preserve the intended scene selection.
+After a structural model edit, refresh the affected row identities before using
+them to dispatch another operation to an object or volume.
+
+The object list maps model objects, volumes and instances to sidebar rows.
+Settings rows summarize per-object option categories; refreshing their digest
+and any selected settings panel leaves the canvas selection unchanged.
+
+Representative direct calls (branches are not a timeline):
+
+    ObjectList::update_settings_item_and_selection()
+        |-- m_objects_model->GetSettingsItem()
+        |-- add_settings_item()
+        |-- m_objects_model->Delete()
+        |-- selections.Index()
+        |-- sidebar()
+        `-- panel.Freeze()
+*/
 
 namespace Slic3r
 {
@@ -2285,62 +2307,15 @@ void ObjectList::merge(bool to_multipart_object)
 
         get_object_idxs(obj_idxs, sels);
 
-        // resulted objects merge to the one
+        // The model helper copies each source's first instance. The GUI removes the selected sources afterwards.
         Model* model = m_model->objects()[0].get_model();
-        ModelObject* new_object = model->add_object();
-        new_object->name = _u8L("Merged");
-        ModelConfig &config = new_object->config;
-
+        ModelObjectPtrs sources;
+        sources.reserve(obj_idxs.size());
         for (int obj_idx : obj_idxs) {
-            ModelObject* object = &m_model->objects()[obj_idx];
-
-            if (object->id() == m_model->objects()[obj_idxs.front()].id()) {
-                new_object->add_instance();
-                new_object->instances[0]->printable = false;
-            }
-            new_object->instances[0]->printable |= object->instances[0]->printable;
-
-            const Transform3d new_inst_trafo = new_object->instances[0]->get_matrix().inverse() * object->instances[0]->get_matrix();
-
-            // merge volumes
-            for (const ModelVolume* volume : object->volumes) {
-                ModelVolume* new_volume = new_object->add_volume(*volume);
-                new_volume->set_transformation(new_inst_trafo * new_volume->get_matrix());
-            }
-            new_object->sort_volumes(wxGetApp().app_config->get_bool("order_volumes"));
-
-            // merge settings
-            auto new_opt_keys = config.keys();
-            const ModelConfig& from_config = object->config;
-            auto opt_keys = from_config.keys();
-
-            for (auto& opt_key : opt_keys) {
-                if (find(new_opt_keys.begin(), new_opt_keys.end(), opt_key) == new_opt_keys.end()) {
-                    const ConfigOption* option = from_config.option(opt_key);
-                    if (!option) {
-                        // if current option doesn't exist in prints.get_edited_preset(),
-                        // get it from default config values
-                        option = DynamicPrintConfig::new_from_defaults_keys({ opt_key })->option(opt_key);
-                    }
-                    config.set_key_value(opt_key, option->clone());
-                }
-            }
-            // save extruder value if it was set
-            if (object->volumes.size() == 1 && find(opt_keys.begin(), opt_keys.end(), "extruder") != opt_keys.end()) {
-                ModelVolume* volume = new_object->volumes.back();
-                const ConfigOption* option = from_config.option("extruder");
-                if (option)
-                    volume->config.set_key_value("extruder", option->clone());
-            }
-
-            // merge layers
-            for (const auto& range : object->layer_config_ranges)
-                new_object->layer_config_ranges.emplace(range);
+            sources.emplace_back(&m_model->objects()[obj_idx]);
         }
-
-        new_object->center_around_origin();
-        new_object->translate_instances(-new_object->origin_translation);
-        new_object->origin_translation = Vec3d::Zero();
+        model->merge_objects_into_multipart(
+            sources, _u8L("Merged"), wxGetApp().app_config->get_bool("order_volumes"));
 
         // remove selected objects
         remove();
