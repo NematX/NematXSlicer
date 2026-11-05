@@ -42,7 +42,7 @@
    value at once, without a new message. */
 
 namespace Slic3r::Steps::StepSupportToolpath {
-// Copy object-scope selector metadata into the borrowed host without changing print data or provider ownership;
+// Copy object-scope automatic selector metadata into the borrowed host without changing print data or provider ownership;
 // registration conflicts assert and allocation failures propagate.
 void register_selector_traits(Orchestrator &orchestrator);
 
@@ -56,6 +56,7 @@ void register_selector_traits(Orchestrator &orchestrator)
     traits.ui_target_file = "print.ui";
     traits.ui_page = "Support material";
     traits.ui_group = "Support toolpaths";
+    traits.auto_value = true;
     const int32_t registered = orchestrator.register_builtin_step_selector(STEP_SUPPORT_TOOLPATH, std::move(traits));
     assert(registered == 1);
     (void)registered;

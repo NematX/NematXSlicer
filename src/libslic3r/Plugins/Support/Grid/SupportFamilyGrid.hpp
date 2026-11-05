@@ -14,6 +14,9 @@ public:
     // Return the process-lifetime built-in provider.
     static SupportFamilyGrid &instance(orchestrator_handle *orchestrator);
 private:
+    // Copy grid/snug role preferences into the host; borrowed storage is unused and geometry is unchanged.
+    // Rejection or allocation failure becomes PluginBase's nonzero initialization result and diagnostic.
+    void inilialize_impl(storage_handle *storage) const override;
     // Connect the provider to the host orchestrator.
     explicit SupportFamilyGrid(orchestrator_handle *orchestrator) : PluginBase(orchestrator) {}
     // Return the stable activation id.

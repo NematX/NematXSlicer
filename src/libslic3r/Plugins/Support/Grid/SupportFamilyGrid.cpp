@@ -5,12 +5,20 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 
 /* Grid and snug support family run. It keeps the grid and snug styles, skips an object without demand,
    generates the support slabs with generate_support() and hands them to the shared publication
-   (Common/SupportPublication.hpp), which creates the auxiliary layers. */
+    (Common/SupportPublication.hpp), which creates the auxiliary layers.
+    Initialization declares copied role preferences through Common::declare_toolpath_preferences before slicing. */
 
 namespace slic3r_api::Support::Grid {
+void SupportFamilyGrid::inilialize_impl(storage_handle *) const
+{
+    Common::declare_toolpath_preferences(m_orchestrator, {"grid", "snug"},
+                                         Common::legacy_toolpath_preferences(Common::k_legacy_sparse_id));
+}
+
 // Construct the provider once; the orchestrator retains its registration but does not own the static instance.
 SupportFamilyGrid &SupportFamilyGrid::instance(orchestrator_handle *orchestrator)
 {

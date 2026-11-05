@@ -4,6 +4,7 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 
 /* The host registers all three algorithms as ordinary built-in plugins.
    Their setting list is the shared support geometry list of the Common
@@ -40,10 +41,11 @@ void SupportToolpathLegacy::run_impl(const plugin_run_context *context) const
 
 void register_support_toolpath_sparse_plugin(orchestrator_handle *orchestrator)
 {
-    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Sparse, "support.toolpath.legacy_sparse", "support_toolpath_sparse", 0);
+    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Sparse, Common::k_legacy_sparse_id, Common::k_sparse_role, 0);
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
-    definition.exclusive_group = "support_toolpath_sparse";
+    definition.exclusive_group = Common::k_sparse_role;
+    definition.auto_value = 1;
     definition.label = definition.exclusive_group;
     definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
@@ -56,10 +58,11 @@ void register_support_toolpath_sparse_plugin(orchestrator_handle *orchestrator)
 }
 void register_support_toolpath_bottom_plugin(orchestrator_handle *orchestrator)
 {
-    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Bottom, "support.toolpath.legacy_bottom", "support_toolpath_bottom_interface", 100);
+    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Bottom, Common::k_legacy_bottom_id, Common::k_bottom_interface_role, 100);
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
-    definition.exclusive_group = "support_toolpath_bottom_interface";
+    definition.exclusive_group = Common::k_bottom_interface_role;
+    definition.auto_value = 1;
     definition.label = definition.exclusive_group;
     definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
@@ -72,10 +75,11 @@ void register_support_toolpath_bottom_plugin(orchestrator_handle *orchestrator)
 }
 void register_support_toolpath_top_plugin(orchestrator_handle *orchestrator)
 {
-    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Top, "support.toolpath.legacy_top", "support_toolpath_top_interface", 200);
+    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Top, Common::k_legacy_top_id, Common::k_top_interface_role, 200);
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
-    definition.exclusive_group = "support_toolpath_top_interface";
+    definition.exclusive_group = Common::k_top_interface_role;
+    definition.auto_value = 1;
     definition.label = definition.exclusive_group;
     definition.tooltip = "Choose which active plugin owns this exclusive plugin group.";
     definition.container_type = RAW_CONTAINER_TYPE_OBJECT;

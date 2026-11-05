@@ -509,6 +509,28 @@ TEST_CASE("FFF print GUI rules match independent activation logic on a seeded fu
 // Spell out the expected activation of each support setting group for every style, with support on and off.
 // The tree and organic styles share the support_tree_* settings; interfaces and the layer height are common to all
 // styles; the sparse base fill settings serve grid, snug and tree but not organic (its body is the branch sheath).
+// Evaluate all registered activation reasons with automatic sparse selection; organic branch controls stay editable.
+TEST_CASE("Auto support toolpath selectors keep every provider setting editable",
+          "[plugins][gui-rules][support-toolpath][support-toolpath-auto]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &orchestrator = Orchestrator::instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", "organic"},
+        {"exclusive_group_1350_support_toolpath_sparse_plugin", SLIC3R_SELECTOR_AUTO_VALUE}});
+    const char *const key = "support_tree_branch_diameter_double_wall";
+    REQUIRE(config.has(key));
+    bool found = false;
+    for (const Orchestrator::GuiRuleApplication &application :
+         orchestrator.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1)) {
+        if (application.target_key == key) {
+            found = true;
+            CHECK(application.enabled);
+        }
+    }
+    REQUIRE(found);
+}
+
 TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rules][fff-print][support]")
 {
     Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();

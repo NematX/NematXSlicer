@@ -49,7 +49,7 @@ inline TriangleMesh slab(bool platform = false)
     }
     return post;
 }
-// Configure small nozzles, explicit support tools and production toolpath selectors, excluding the registered test probes.
+// Configure small nozzles, explicit support tools, automatic sparse paths and explicit production interface/branch paths.
 inline DynamicPrintConfig config(const char *style = "grid", bool soluble = false, int interfaces = 3, bool same_tool = false)
 {
     Plugins::ensure_plugin_test_runtime_initialized();
@@ -66,7 +66,7 @@ inline DynamicPrintConfig config(const char *style = "grid", bool soluble = fals
         {"support_material_synchronize_layers", "0"}, {"dont_support_bridges", "0"},
         {"raft_first_layer_expansion", "0"}, {"brim_width", "0"}, {"skirts", "0"}});
     for (const std::pair<const char *, const char *> &provider : {
-        std::pair<const char *, const char *>{"support_toolpath_sparse", "support.toolpath.legacy_sparse"},
+        std::pair<const char *, const char *>{"support_toolpath_sparse", SLIC3R_SELECTOR_AUTO_VALUE},
         {"support_toolpath_branch", "support.toolpath.branch_sheath"},
         {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom"},
         {"support_toolpath_top_interface", "support.toolpath.legacy_top"}}) {

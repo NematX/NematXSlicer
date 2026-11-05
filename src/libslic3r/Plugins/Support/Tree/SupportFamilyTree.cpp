@@ -6,14 +6,24 @@
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Plugins/Support/Common/SupportPublication.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 #include "libslic3r/Plugins/Support/Tree/TreeSupportGenerator.hpp"
 
 /* Tree and organic support family run. It skips objects whose style is neither tree nor organic, or that have no demand,
    and generates the branch slabs with generate_tree_support(). Organic objects publish
    their slabs as branch surfaces; tree objects publish sparse base surfaces. The publication
-   (Common/SupportPublication.hpp) creates the auxiliary layers. */
+    (Common/SupportPublication.hpp) creates the auxiliary layers.
+    Initialization declares copied role preferences through Common::declare_toolpath_preferences before slicing. */
 
 namespace slic3r_api::Support::Tree {
+void SupportFamilyTree::inilialize_impl(storage_handle *) const
+{
+    Common::declare_toolpath_preferences(m_orchestrator, {"tree"},
+                                         Common::legacy_toolpath_preferences(Common::k_legacy_sparse_id));
+    Common::declare_toolpath_preferences(m_orchestrator, {"organic"},
+                                         Common::legacy_toolpath_preferences(Common::k_branch_sheath_id));
+}
+
 namespace {
 // Tree branch settings read by the routing and the slab placement, beyond the geometry keys of SupportParams. "resolution" is the
 // print slicing resolution that cleans the support blockers sliced by TreeVolumes.

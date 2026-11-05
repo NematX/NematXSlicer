@@ -13,6 +13,9 @@ public:
     // Return the process-lifetime built-in provider.
     static SupportFamilyTree &instance(orchestrator_handle *orchestrator);
 private:
+    // Copy tree's legacy sparse and organic's sheath preferences into the host; borrowed storage is unused.
+    // Geometry is unchanged; rejection or allocation failure becomes PluginBase's nonzero initialization diagnostic.
+    void inilialize_impl(storage_handle *storage) const override;
     // Connect the provider to the host orchestrator.
     explicit SupportFamilyTree(orchestrator_handle *orchestrator) : PluginBase(orchestrator) {}
     // Return the stable activation id.

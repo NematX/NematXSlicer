@@ -23,6 +23,8 @@
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
+#include "support_grid_test_helpers.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/Steps/StepSupportToolpath.hpp"
@@ -599,6 +601,30 @@ struct SupportedPrint {
         add_sparse_support_surface(print.object(0), storage, area);
     }
 };
+// A support family whose first preference conflicts, so later declarations must not run.
+class RejectedSupportFamily final : public slic3r_api::PluginBase {
+public:
+    // Borrow the host for the lifetime of this process-local provider.
+    explicit RejectedSupportFamily(orchestrator_handle *host) : PluginBase(host) {}
+private:
+    // Return the stable test family id.
+    const char *id_impl() const noexcept override { return "test.support.family.rejected"; }
+    // Use the default support execution priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Run as a support family.
+    slicing_step_t step_impl() const noexcept override { return STEP_SUPPORT; }
+    // Require no other providers.
+    const char *const *dependencies_impl() const noexcept override { return nullptr; }
+    // Declare copied preferences; a rejection stops the loop and becomes a nonzero initialization diagnostic.
+    void inilialize_impl(storage_handle *) const override
+    {
+        namespace Common = slic3r_api::Support::Common;
+        Common::declare_toolpath_preferences(m_orchestrator, {"test.rejected.family"},
+            Common::legacy_toolpath_preferences(Common::k_legacy_sparse_id));
+    }
+    // Leave the borrowed context and all geometry unchanged.
+    void run_impl(const plugin_run_context *) const override {}
+};
 } // namespace
 
 namespace Slic3r::Test::Plugins {
@@ -615,6 +641,121 @@ void register_support_toolpath_test_providers(orchestrator_handle *orchestrator)
 }
 } // namespace Slic3r::Test::Plugins
 
+// A conflicting support preference returns a diagnostic id and disables its family without an assertion.
+TEST_CASE("Rejected support family preferences fail initialization visibly",
+          "[plugins][support-toolpath][selector-auto]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&host);
+    static RejectedSupportFamily family(handle);
+    const char *id = "test.support.family.rejected";
+    if (host.get_plugin(id) == nullptr) REQUIRE(host.register_plugin(family.c_instance()));
+    REQUIRE(orchestrator_register_selector_auto_choice(handle, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role,
+        "support_material_style", "test.rejected.family", Common::k_branch_sheath_id) >= 0);
+    PluginStorage storage;
+    CHECK(host.get_plugin(id)->initialize(reinterpret_cast<storage_handle *>(&storage)) != PLUGIN_ERROR_OK);
+    struct RestoreActivation {
+        Orchestrator &host;
+        std::vector<Plugin *> saved;
+        // Restore borrowed providers after initialization checks, including failed assertions.
+        ~RestoreActivation() {
+            host.clear_active_plugins();
+            for (Plugin *plugin : saved) host.set_plugin_active(plugin, true);
+        }
+    } restore {host, std::vector<Plugin *>(host.active_plugins().begin(), host.active_plugins().end())};
+    host.clear_active_plugins();
+    REQUIRE(host.set_plugin_active(id, true));
+    host.consume_plugin_messages();
+    REQUIRE_NOTHROW(host.initialize_plugins());
+    CHECK_FALSE(host.is_plugin_active(id));
+    size_t errors = 0;
+    for (const Orchestrator::PluginMessage &message : host.consume_plugin_messages())
+        if (message.plugin_id == id && message.level == Orchestrator::PluginMessageLevel::Error) {
+            ++errors;
+            CHECK(message.message.find("Conflicting automatic selector preference") != std::string::npos);
+            CHECK(message.message.find(Common::k_sparse_role) != std::string::npos);
+            CHECK(message.message.find(Common::k_legacy_sparse_id) != std::string::npos);
+        }
+    CHECK(errors == 1);
+    CHECK(std::count_if(host.selector_auto_choices().begin(), host.selector_auto_choices().end(),
+        [](const SelectorAutoChoice &choice) {
+            return choice.condition_value == "test.rejected.family" && choice.exclusive_group != Common::k_sparse_role;
+        }) == 0);
+}
+
+// Styles declare automatic preferences; organic's sheath is outside the sparse group, so sparse uses legacy fallback.
+TEST_CASE("Support toolpath auto preferences are declared per style and organic sparse uses the legacy fallback",
+          "[plugins][support-toolpath][support-toolpath-auto]")
+{
+    namespace Common = slic3r_api::Support::Common;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const std::string key = Steps::plugin_exclusive_group_option_key(host, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role);
+    REQUIRE(PrintConfigDef::instance().get(key) != nullptr);
+    CHECK(PrintConfigDef::instance().get(key)->default_value->serialize() == SLIC3R_SELECTOR_AUTO_VALUE);
+    DynamicPrintConfig config = Test::SupportGrid::config();
+    config.erase(key);
+    config.erase(Steps::plugin_exclusive_group_option_key(host, STEP_SUPPORT_TOOLPATH, Common::k_bottom_interface_role));
+    config.erase(Steps::plugin_exclusive_group_option_key(host, STEP_SUPPORT_TOOLPATH, Common::k_top_interface_role));
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    model.objects()[0].config.set_deserialize_strict("support_material_style", "organic");
+    model.objects()[1].config.set_deserialize_strict("support_material_style", "grid");
+    print.apply(model, config);
+    const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(host, STEP_SUPPORT_TOOLPATH, print);
+    REQUIRE(selected.size() == 4);
+    for (size_t index = 0; index < selected.size(); ++index) {
+        CHECK(selected[index].object_indices == std::vector<size_t>{0, 1});
+        CHECK(selected[index].plugin->get_id() == std::vector<std::string>{Common::k_legacy_sparse_id,
+            Common::k_branch_sheath_id, Common::k_legacy_bottom_id, Common::k_legacy_top_id}[index]);
+    }
+    REQUIRE(host.set_plugin_active(probes()[0]->id(), true));
+    struct RestoreSparseProbe {
+        Orchestrator &host;
+        // Return the borrowed sparse probe to its inactive state after the explicit-choice check.
+        ~RestoreSparseProbe() { host.set_plugin_active(probes()[0]->id(), false); }
+    } restore_probe {host};
+    model.objects()[0].config.set_deserialize_strict(key, probes()[0]->id());
+    print.apply(model, config);
+    CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role,
+          &print.object(0).config())->get_id() == probes()[0]->id());
+    for (const char *style : {"grid", "snug", "tree", "organic"}) {
+        for (const Common::ToolpathPreference &preference : Common::legacy_toolpath_preferences(
+                 std::string_view(style) == "organic" ? Common::k_branch_sheath_id : Common::k_legacy_sparse_id)) {
+            CHECK(std::count_if(host.selector_auto_choices().begin(), host.selector_auto_choices().end(),
+                [style, &preference](const SelectorAutoChoice &choice) {
+                    return choice.step == STEP_SUPPORT_TOOLPATH && choice.exclusive_group == preference.role &&
+                        choice.condition_key == "support_material_style" && choice.condition_value == style &&
+                        choice.provider_id == preference.provider_id;
+                }) == 1);
+        }
+    }
+}
+
+// Full processing checks that planning and execution resolve the same automatic providers before support is published.
+TEST_CASE("Auto support toolpath selectors resolve before slicing and complete the progress plan",
+          "[plugins][support-toolpath][support-toolpath-auto]")
+{
+    DynamicPrintConfig config = Test::SupportGrid::config();
+    config.erase(Steps::plugin_exclusive_group_option_key(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH,
+        slic3r_api::Support::Common::k_sparse_role));
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    model.objects()[0].config.set_deserialize_strict("support_material_style", "organic");
+    print.apply(model, config);
+    const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(
+        Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, print);
+    REQUIRE(selected.size() == 4);
+    for (const Steps::ObjectStepPlugin &entry : selected)
+        CHECK(entry.object_indices == std::vector<size_t>{0, 1});
+    REQUIRE_NOTHROW(print.process());
+    REQUIRE_NOTHROW(print.pipeline_progress().verify_step_complete(STEP_SUPPORT_TOOLPATH));
+}
+
 TEST_CASE("Support toolpath roles run once per object in priority order", "[plugins][support-toolpath]")
 {
     const ScopedToolpathProbes activation;
@@ -627,7 +768,7 @@ TEST_CASE("Support toolpath roles run once per object in priority order", "[plug
     CHECK(*traits->invalidates_step == STEP_SUPPORT_TOOLPATH);
     CHECK(traits->ui_page == "Support material");
     CHECK(traits->ui_group == "Support toolpaths");
-    CHECK_FALSE(traits->auto_value);
+    CHECK(traits->auto_value);
     Print print;
     Model model;
     Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_2x20x10}, print, model);
