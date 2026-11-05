@@ -4,6 +4,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #ifndef slic3r_CutUtils_hpp_
 #define slic3r_CutUtils_hpp_
 
@@ -12,6 +13,14 @@
 #include "enum_bitmask.hpp"
 #include "Model.hpp"
 #include "Point.hpp"
+
+/* Cut provides plane, contour and groove cuts for scene editors.
+   Objects in a cut group share an ID and a consistency counter.
+
+   Call update_object_cut_id() on the source before constructing Cut.
+   Call the chosen perform_*() method, then copy its results into the scene.
+   Finish with synchronize_model_after_cut() to update the remaining group members.
+   The returned objects belong to Cut. Copy them before Cut is destroyed or reused. */
 
 namespace Slic3r {
 
@@ -67,6 +76,14 @@ public:
     const ModelObjectPtrs& perform_with_groove(const Groove& groove, const Transform3d& rotation_m, bool keep_as_parts = false);
 
 }; // namespace Cut
+
+// When both halves are kept, create the shared ID if needed, then advance its consistency counter.
+// Separate dowels also count. Partial cuts or InvalidateCutInfo leave this state unchanged.
+void update_object_cut_id(CutObjectBase &cut_id, ModelObjectCutAttributes attributes, int dowels_count);
+
+// Copy the updated ID and counter to cut objects with the same group ID.
+// Leave objects from other groups unchanged.
+void synchronize_model_after_cut(Model &model, const CutObjectBase &cut_id);
 
 } // namespace Slic3r
 

@@ -12,6 +12,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #ifndef slic3r_Model_hpp_
 #define slic3r_Model_hpp_
 
@@ -38,6 +39,18 @@
 #include "Slicing.hpp"
 #include "TextConfiguration.hpp"
 #include "TriangleMesh.hpp"
+
+/*
+Model owns the scene's objects; each object owns its volumes and instances.
+Load a model or add objects, then edit their geometry and local configuration.
+Editing helpers return model-owned objects; callers decide when to remove sources.
+
+A volume contains geometry and local settings within one ModelObject. An instance
+places that object in the scene; several instances can reuse its volumes. Loading
+or add_object() creates model-owned objects. Editing may create another object
+without removing its sources, so the caller decides when the scene should replace
+them and when any previously borrowed object pointers stop being usable.
+*/
 
 namespace cereal {
 	class BinaryInputArchive;
@@ -969,6 +982,10 @@ public:
     // with the model so a plugin annotation can still be recognized even if
     // plugin load order changes between application runs.
     bool has_facets_annotation(const std::string &key) const;
+    // Return the keys of non-empty painting entries in alphabetical order.
+    // This list excludes support painting.
+    // It also excludes multi-material painting.
+    std::vector<std::string> facets_annotation_keys() const;
     const FacetsAnnotation *facets_annotation(const std::string &key) const;
     FacetsAnnotation &facets_annotation_mutable(const std::string &key);
     void reset_facets_annotation(const std::string &key);
@@ -1360,6 +1377,14 @@ public:
     ModelObject* add_object(const char *name, const char *path, TriangleMesh &&mesh);
     ModelObject* add_object(const ModelObject &other);
     ModelObject* add_object(ModelObjectUPtr object);
+    // Copy each source's first instance into a new object owned by this model.
+    // Keep its placement on the platter and the copied volumes' IDs. Sources are not removed.
+    // Requires a non-empty source list. Each source must have an instance.
+    // The first source defining a setting wins. Identical height ranges also keep the first value.
+    // full_volume_sort sorts all volumes by type. Otherwise, only support blockers/enforcers
+    // are moved after the other volumes; the other volumes keep their relative order.
+    ModelObject* merge_objects_into_multipart(const ModelObjectPtrs &sources,
+        const std::string &name, bool full_volume_sort);
     void         delete_object(size_t idx);
     bool         delete_object(ObjectID id);
     bool         delete_object(ModelObject* object);

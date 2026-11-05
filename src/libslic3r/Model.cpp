@@ -15,6 +15,7 @@
 ///|/
 #include "Model.hpp"
 
+#include <algorithm>
 #include <cfloat>
 
 #include <boost/algorithm/string/predicate.hpp>
@@ -46,6 +47,39 @@
 #include "SVG.hpp"
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
+
+/*
+Model stores the scene for the GUI and callers without a GUI.
+Loading reads geometry and project data through the format loaders.
+Editing changes objects, their placement, local settings or painting data.
+Callers must prevent concurrent access while the model is being changed.
+
+Operation notes:
+- read_from_file / read_from_archive
+- Format loaders: read scene data into the model
+- merge_objects_into_multipart
+- add_object: create the result without removing the sources
+- Copy volumes and settings from each source's first instance
+- center_around_origin: recenter the result, then compensate its placement
+
+Representative direct calls (branches are not a timeline):
+
+    Model::read_from_file()
+        |-- load_stl()
+        |-- load_obj()
+        |-- load_step()
+        |-- load_amf()
+        |-- load_3mf()
+        `-- load_svg()
+
+    Model::merge_objects_into_multipart()
+        |-- this->add_object()
+        |-- merged->add_instance()
+        |-- merged->add_volume()
+        |-- merged->sort_volumes()
+        |-- merged->center_around_origin()
+        `-- merged->translate_instances()
+*/
 
 namespace Slic3r {
 
@@ -326,6 +360,65 @@ ModelObject* Model::add_object(ModelObjectUPtr object)
     ModelObject *out = object.get();
     this->m_objects.emplace_back(std::move(object));
     return out;
+}
+
+ModelObject* Model::merge_objects_into_multipart(const ModelObjectPtrs &sources,
+    const std::string &name, bool full_volume_sort)
+{
+    ModelObject *merged = this->add_object();
+    merged->name = name;
+    ModelConfig &config = merged->config;
+
+    for (ModelObject *object : sources) {
+        if (merged->instances.empty()) {
+            merged->add_instance();
+            merged->instances[0]->printable = false;
+        }
+        merged->instances[0]->printable |= object->instances[0]->printable;
+
+        // Express each source volume in the new instance's coordinates so its world geometry is unchanged.
+        const Transform3d trafo = merged->instances[0]->get_matrix().inverse() * object->instances[0]->get_matrix();
+        ModelVolume *single_source_volume = nullptr;
+        for (const ModelVolume *volume : object->volumes) {
+            ModelVolume *copied_volume = merged->add_volume(*volume);
+            copied_volume->set_transformation(trafo * copied_volume->get_matrix());
+            if (object->volumes.size() == 1)
+                single_source_volume = copied_volume;
+        }
+        merged->sort_volumes(full_volume_sort);
+
+        // The first source that defines an object setting wins; volumes retain their own overrides.
+        const std::vector<std::string> merged_keys = config.keys();
+        const ModelConfig &source_config = object->config;
+        const std::vector<std::string> source_keys = source_config.keys();
+        for (const std::string &key : source_keys) {
+            if (std::find(merged_keys.begin(), merged_keys.end(), key) == merged_keys.end()) {
+                const ConfigOption *option = source_config.option(key);
+                std::unique_ptr<DynamicPrintConfig> defaults;
+                if (option == nullptr) {
+                    defaults.reset(DynamicPrintConfig::new_from_defaults_keys({key}));
+                    option = defaults->option(key);
+                }
+                config.set_key_value(key, option->clone());
+            }
+        }
+        // Sorting can move the copied volume, so keep its pointer when assigning a single-part object's tool.
+        if (single_source_volume != nullptr &&
+            std::find(source_keys.begin(), source_keys.end(), "extruder") != source_keys.end()) {
+            const ConfigOption *option = source_config.option("extruder");
+            if (option != nullptr)
+                single_source_volume->config.set_key_value("extruder", option->clone());
+        }
+
+        for (const std::pair<const t_layer_height_range, ModelConfig> &range : object->layer_config_ranges)
+            merged->layer_config_ranges.emplace(range);
+    }
+
+    // Offset the instance by the centering shift so the copied volumes stay in place on the platter.
+    merged->center_around_origin();
+    merged->translate_instances(-merged->origin_translation);
+    merged->origin_translation = Vec3d::Zero();
+    return merged;
 }
 
 void Model::delete_object(size_t idx)
@@ -940,6 +1033,15 @@ bool ModelVolume::has_facets_annotation(const std::string &key) const
 {
     const FacetsAnnotation *annotation = this->facets_annotation(key);
     return annotation != nullptr && !annotation->empty();
+}
+
+std::vector<std::string> ModelVolume::facets_annotation_keys() const
+{
+    std::vector<std::string> keys;
+    for (const std::pair<const std::string, FacetsAnnotation> &entry : m_generic_facets_annotations)
+        if (!entry.second.empty())
+            keys.emplace_back(entry.first);
+    return keys;
 }
 
 const FacetsAnnotation *ModelVolume::facets_annotation(const std::string &key) const

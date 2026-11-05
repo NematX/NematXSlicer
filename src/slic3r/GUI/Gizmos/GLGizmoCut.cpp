@@ -27,6 +27,30 @@
 #include "slic3r/GUI/Plater.hpp"
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
+
+/*
+The cut tool previews cuts and connectors on the canvas.
+The GUI owns selection and undo state. CutUtils creates the cut geometry.
+It also updates cut groups. A group links objects through a shared cut ID
+plus a consistency counter.
+
+Operation notes:
+- update_object_cut_id: prepare the source group's state
+- Cut::perform_*: create the chosen cut results
+- Plater::apply_cut_object_to_model: copy the results into the scene
+- synchronize_model_after_cut: update the remaining group members
+
+Representative direct calls (branches are not a timeline):
+
+    GLGizmoCut3D::perform_cut()
+        |-- update_object_cut_id()
+        |-- cut.perform_by_contour()
+        |-- cut.perform_with_groove()
+        |-- cut.perform_with_plane()
+        |-- plater->apply_cut_object_to_model()
+        `-- synchronize_model_after_cut()
+*/
+
 namespace Slic3r {
 namespace GUI {
 
@@ -3242,27 +3266,6 @@ Transform3d GLGizmoCut3D::get_cut_matrix(const Selection& selection)
     return translation_transform(cut_center_offset) * m_rotation_m;
 }
 
-void update_object_cut_id(CutObjectBase& cut_id, ModelObjectCutAttributes attributes, const int dowels_count)
-{
-    // we don't save cut information, if result will not contains all parts of initial object
-    if (!attributes.has(ModelObjectCutAttribute::KeepUpper) ||
-        !attributes.has(ModelObjectCutAttribute::KeepLower) ||
-        attributes.has(ModelObjectCutAttribute::InvalidateCutInfo))
-        return;
-
-    if (cut_id.id().invalid())
-        cut_id.init();
-    // increase check sum, if it's needed
-    {
-        int cut_obj_cnt = -1;
-        if (attributes.has(ModelObjectCutAttribute::KeepUpper))    cut_obj_cnt++;
-        if (attributes.has(ModelObjectCutAttribute::KeepLower))    cut_obj_cnt++;
-        if (attributes.has(ModelObjectCutAttribute::CreateDowels)) cut_obj_cnt+= dowels_count;
-        if (cut_obj_cnt > 0)
-            cut_id.increase_check_sum(size_t(cut_obj_cnt));
-    }
-}
-
 static void check_objects_after_cut(const ModelObjectPtrs& objects)
 {
     std::vector<std::string> err_objects_names;
@@ -3361,13 +3364,6 @@ static void check_objects_after_cut(const ModelObjectPtrs& objects)
             InfoDialog(plater, _L("Repair operation finished"), msg).ShowModal();
         }
     }
-}
-
-void synchronize_model_after_cut(Model& model, const CutObjectBase& cut_id)
-{
-    for (ModelObject* obj : model.object_ptrs())
-        if (obj->is_cut() && obj->cut_id.has_same_id(cut_id) && !obj->cut_id.is_equal(cut_id))
-            obj->cut_id.copy(cut_id);
 }
 
 void GLGizmoCut3D::perform_cut(const Selection& selection)
