@@ -143,7 +143,7 @@ double tower_speed_cap(const PrintingPlan &plan, const PrintingToolGroup &tool_g
                        const PrintingExtrusion &tower_extrusion,
                        const Config &default_region_config, const Config &print_config);
 
-/* Rewrite one tower scope's tool-change unretraction when all conditions hold. */
+/* Rewrite a borrowed tower scope's tool-change unretraction wipe in place; invalid geometry may return or throw, cancellation propagates, and no scope ownership is transferred. */
 void edit_scope(const ScopeEntity &scope, const PrintingLayerGroup &layer,
                 const std::vector<bool> &return_flags, const Config &print_config,
                 const Config &default_region_config, const PrintingPlan &plan,
@@ -509,8 +509,7 @@ void edit_scope(const ScopeEntity &scope, const PrintingLayerGroup &layer,
         .speed(float(speed))
         .acceleration(-1.f)
         .pressure_advance(-1.f)
-        .fan_speed(-1.f)
-        .temperature(-1.f);
+        .fan_speed(-1.f);
     wipe.get_or_add(EPropertyExtrusionAxis::key).unretract(restart_extra, true);
 }
 

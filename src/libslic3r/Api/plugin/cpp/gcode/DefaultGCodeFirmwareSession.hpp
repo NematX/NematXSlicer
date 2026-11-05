@@ -28,8 +28,8 @@ Reusable standard PrintingPlan firmware session
 
 DefaultGCodeFirmwareSession turns ordered PrintingPlan extrusions into a
 modern Marlin-style command stream. The session owns all machine state for one
-export: position, E coordinates, selected tool, requested process values and
-the values already sent to the printer.
+export: position, E coordinates, selected tool, requested process values,
+persistent heater targets and the values already sent to the printer.
 Before each custom script, the standard firmware fills execution values such as
 object index, per-filament usage, current layer and z-hop; producer-frozen
 layer values remain authoritative.
@@ -291,6 +291,8 @@ private:
     // Emit static retraction or full/limited unretraction for the active tool.
     std::string write_extrusion_axis_event(const EPropertyExtrusionAxis &axis,
                                            const RequestedState &state);
+    // Apply one entry heater event immediately; its target persists and is not inherited or restored.
+    std::string write_heater_event(const EPropertyHeater &heater);
     // Update the semantic E state and emit at most one native retract command
     // while the selected tool remains retracted.
     std::string write_native_retract(double target);

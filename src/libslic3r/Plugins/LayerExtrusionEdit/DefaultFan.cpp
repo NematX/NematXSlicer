@@ -567,6 +567,7 @@ float dynamic_overhang_fan(const Config &config,
                            raw_extrusion_role role,
                            const EffectiveTreeState &state,
                            const LayerFanPolicy &policy);
+// Remove only this plugin's generated fan fields from the borrowed tree, preserving unrelated process values; cancellation or entity mutation failures propagate and all changes remain in the supplied tree.
 void remove_generated_fields(MutableExtrusionEntity entity,
                              const PluginPropertyKey<GeneratedFanMarker> &marker,
                              const plugin_run_context *run_ctx);
@@ -843,7 +844,7 @@ void remove_generated_fields(MutableExtrusionEntity entity,
         if (EPropertySpeed *process = entity.get_mutable(EPropertySpeed::key)) {
             process->fan_speed_percent = -1.f;
             const bool empty = process->speed_mm_per_s < 0.f && process->accel_mm_per_s2 < 0.f &&
-                process->pressure_adv < 0.f && process->fan_speed_percent < 0.f && process->temperature_C < 0.f;
+                process->pressure_adv < 0.f && process->fan_speed_percent < 0.f;
             if (empty) {
                 throw_if_cancelled(run_ctx);
                 entity.remove(EPropertySpeed::key);

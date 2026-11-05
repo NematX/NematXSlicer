@@ -1586,16 +1586,17 @@ TEST_CASE("Former skirt catch-all options resume at their verified first consume
         slicing_step_t consumer;
         Checkpoint checkpoint;
     };
-    // The wipe-tower tool-change plugin reads both temperatures, so their invalidation is tightened
-    // from the G-code step to the tower step, which still replays every later step.
+    // The wipe-tower plugin reads first_layer_temperature and temperature at STEP_WIPETOWER;
+    // the temperature plugins read idle_temperature and ooze_prevention at STEP_LAYER_EXTRUSION_EDIT,
+    // so each invalidation resumes at its first consumer and replays every later step.
     const Routing routing = GENERATE(
         Routing{"gcode_flavor", "klipper", STEP_ORDERING, Checkpoint::Print},
         Routing{"travel_speed", "187", STEP_LAYER_EXTRUSION_EDIT, Checkpoint::Ordering},
         Routing{"travel_speed_z", "13", STEP_GCODE, Checkpoint::Plan},
         Routing{"first_layer_temperature", "205", STEP_WIPETOWER, Checkpoint::Ordering},
         Routing{"temperature", "215", STEP_WIPETOWER, Checkpoint::Ordering},
-        Routing{"idle_temperature", "160", STEP_GCODE, Checkpoint::Plan},
-        Routing{"ooze_prevention", "1", STEP_GCODE, Checkpoint::Plan},
+        Routing{"idle_temperature", "160", STEP_LAYER_EXTRUSION_EDIT, Checkpoint::Ordering},
+        Routing{"ooze_prevention", "1", STEP_LAYER_EXTRUSION_EDIT, Checkpoint::Ordering},
         Routing{"z_offset", "0.05", STEP_GCODE, Checkpoint::Plan},
         Routing{"skirt_distance", "9", STEP_SKIRT_BRIM, Checkpoint::Slicing});
     CAPTURE(routing.key);

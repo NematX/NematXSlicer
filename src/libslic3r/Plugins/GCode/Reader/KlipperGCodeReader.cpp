@@ -23,8 +23,11 @@ Klipper command extensions
 
 Text commands are handled before the base attempts to parse a G/M number.
 ACTIVATE_EXTRUDER maps Klipper section names to the portable numeric tool. A
-slicing Print makes configured tool_name values authoritative; an external file
-without a Print accepts only the conventional extruder/extruderN spelling.
+slicing Print uses the same tool count and tool_name fallback as
+KlipperGCodeFirmwareSession::setup_firmware; an external file without a Print
+accepts only the conventional extruder/extruderN spelling.
+SET_HEATER_TEMPERATURE and TEMPERATURE_WAIT use the same tool-name resolution
+and publish portable tool or bed temperature events.
 
 EXCLUDE_OBJECT commands name objects with strings. The Reader assigns their
 portable numeric IDs in a per-run registry instead of storing parser bookkeeping
@@ -45,24 +48,42 @@ struct KlipperToolResolution
 };
 KlipperToolResolution klipper_tool_id(const run_ctx_gcode_reader &context,
                                       std::string_view name);
+// Parse one optional named numeric argument as a finite value with no trailing text.
+std::optional<double> parse_klipper_named_value(
+    const std::optional<std::string_view> &text);
 std::optional<std::string_view> klipper_object_name(
     const GCodeLineParser::GCodeLine &line);
 
+// Resolve one Klipper tool name using the firmware's Print-backed naming rule or the conventional external-file spelling; return Found only for one valid index, Ambiguous for duplicate configured names, and Unknown otherwise without changing Reader state.
 KlipperToolResolution klipper_tool_id(const run_ctx_gcode_reader &context,
                                       std::string_view name)
 {
     std::vector<extruder_index_t> matches;
     if (context.print != nullptr) {
         const Config config = Print(context.print).config();
-        if (config.has("tool_name")) {
-            const ConfigOption names = config.get("tool_name");
-            for (uint32_t index = 0; index < names.size(); ++index) {
-                if (names.is_enabled(index) && names.get_string(index) == name) {
-                    if (index > uint32_t((std::numeric_limits<extruder_index_t>::max)()))
-                        return {KlipperToolResolution::Status::Unknown, 0};
-                    matches.push_back(static_cast<extruder_index_t>(index));
-                }
-            }
+        // Keep this count and fallback identical to KlipperGCodeFirmwareSession::setup_firmware,
+        // whose vector_string_or_default("tool_name", index, "") reads only enabled in-range values.
+        const uint32_t extruder_count = std::max<uint32_t>({
+            1u,
+            config.has("nozzle_diameter") ?
+                static_cast<uint32_t>(config.get("nozzle_diameter").size()) : 0u,
+            config.has("filament_diameter") ?
+                static_cast<uint32_t>(config.get("filament_diameter").size()) : 0u,
+            config.has("extruder_offset") ?
+                static_cast<uint32_t>(config.get("extruder_offset").size()) : 0u,
+            config.has("extrusion_multiplier") ?
+                static_cast<uint32_t>(config.get("extrusion_multiplier").size()) : 0u
+        });
+        for (uint32_t index = 0; index < extruder_count; ++index) {
+            std::string expected = config.vector_string_or_default(
+                "tool_name", index, std::string());
+            if (expected.empty())
+                expected = index == 0 ? "extruder" : "extruder" + std::to_string(index);
+            if (expected != name)
+                continue;
+            if (index > uint32_t((std::numeric_limits<extruder_index_t>::max)()))
+                return {KlipperToolResolution::Status::Unknown, 0};
+            matches.push_back(static_cast<extruder_index_t>(index));
         }
         if (matches.size() == 1)
             return {KlipperToolResolution::Status::Found, matches.front()};
@@ -83,6 +104,21 @@ KlipperToolResolution klipper_tool_id(const run_ctx_gcode_reader &context,
     if (matches.size() == 1)
         return {KlipperToolResolution::Status::Found, matches.front()};
     return {KlipperToolResolution::Status::Unknown, 0};
+}
+
+// Parse an optional named argument with std::from_chars; empty, non-finite or partially consumed values return no result and do not throw.
+std::optional<double> parse_klipper_named_value(
+    const std::optional<std::string_view> &text)
+{
+    if (!text || text->empty())
+        return std::nullopt;
+    double value = 0.0;
+    const std::from_chars_result parsed = std::from_chars(
+        text->data(), text->data() + text->size(), value);
+    if (parsed.ec != std::errc() ||
+        parsed.ptr != text->data() + text->size() || !std::isfinite(value))
+        return std::nullopt;
+    return value;
 }
 
 std::optional<std::string_view> klipper_object_name(
@@ -189,6 +225,7 @@ uint32_t KlipperGCodeReader::probe_impl(std::string_view prefix) const
     return probe_marker(prefix, "klipper");
 }
 
+// Dispatch borrowed line/context/state data through common handlers first, then consume recognized Klipper text commands; handlers publish validated state or diagnostics and take no ownership of the inputs.
 bool KlipperGCodeReader::consume_text_command(
     const plugin_run_context &run_context,
     const run_ctx_gcode_reader &context,
@@ -205,6 +242,14 @@ bool KlipperGCodeReader::consume_text_command(
     }
     if (command == "SET_PRESSURE_ADVANCE") {
         process_SET_PRESSURE_ADVANCE(run_context, context, state, line);
+        return true;
+    }
+    if (command == "SET_HEATER_TEMPERATURE") {
+        process_SET_HEATER_TEMPERATURE(run_context, context, state, line);
+        return true;
+    }
+    if (command == "TEMPERATURE_WAIT") {
+        process_TEMPERATURE_WAIT(run_context, context, state, line);
         return true;
     }
     if (command == "PAUSE") {
@@ -271,25 +316,16 @@ void KlipperGCodeReader::process_ACTIVATE_EXTRUDER(
     }
 }
 
+// Parse SET_PRESSURE_ADVANCE's finite ADVANCE value with the shared named-value parser, validate an optional tool name, and publish either the tool diagnostic or the unsupported portable-state notice without changing pressure state.
 void KlipperGCodeReader::process_SET_PRESSURE_ADVANCE(
     const plugin_run_context &run_context,
     const run_ctx_gcode_reader &context,
     GCodeStateTracker &state,
     const GCodeLineParser::GCodeLine &line) const
 {
-    const std::optional<std::string_view> advance_text =
-        named_parameter(line.raw(), "ADVANCE");
-    double advance = 0.0;
-    if (!advance_text || advance_text->empty()) {
-        publish_unknown(run_context, context, state);
-        return;
-    }
-    const std::from_chars_result parsed = std::from_chars(
-        advance_text->data(), advance_text->data() + advance_text->size(),
-        advance);
-    if (parsed.ec != std::errc() ||
-        parsed.ptr != advance_text->data() + advance_text->size() ||
-        !std::isfinite(advance)) {
+    // The shared parser accepts exactly the same finite, fully consumed value
+    // rules used by heater TARGET and TEMPERATURE_WAIT parameters.
+    if (!parse_klipper_named_value(named_parameter(line.raw(), "ADVANCE"))) {
         publish_unknown(run_context, context, state);
         return;
     }
@@ -310,6 +346,92 @@ void KlipperGCodeReader::process_SET_PRESSURE_ADVANCE(
     publish_diagnostic(
         run_context, context, state,
         RAW_GCODE_READER_DIAGNOSTIC_UNSUPPORTED_STATE_EFFECT);
+}
+
+// Resolve one Klipper bed or tool name and publish its temperature item, a proven wait item, or a state-only update; SET passes a target, WAIT passes a threshold, and unresolved names publish the matching tool diagnostic while invalidating stale state.
+void KlipperGCodeReader::publish_named_heater_event(
+    const plugin_run_context &run_context,
+    const run_ctx_gcode_reader &context,
+    GCodeStateTracker &state,
+    std::string_view name,
+    raw_gcode_reader_event_kind kind,
+    double value,
+    bool minimum_wait) const
+{
+    uint32_t item_type = RAW_GCODE_READER_ITEM_BED_TEMPERATURE;
+    uint32_t item_target = 0;
+    std::optional<double> current_target;
+    if (name == "heater_bed") {
+        current_target = state.value(item_type, item_target);
+    } else {
+        const KlipperToolResolution tool = klipper_tool_id(context, name);
+        if (tool.status != KlipperToolResolution::Status::Found) {
+            publish_unknown(
+                run_context, context, state,
+                tool.status == KlipperToolResolution::Status::Ambiguous ?
+                    RAW_GCODE_READER_DIAGNOSTIC_AMBIGUOUS_TOOL :
+                    RAW_GCODE_READER_DIAGNOSTIC_UNKNOWN_TOOL);
+            return;
+        }
+        item_type = RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE;
+        item_target = static_cast<uint32_t>(tool.tool);
+        current_target = state.value(item_type, item_target);
+    }
+
+    if (kind == RAW_GCODE_READER_EVENT_WAIT_TEMPERATURE) {
+        if (!current_target || (minimum_wait ? value < *current_target : value > *current_target)) {
+            publish_state_update(run_context, context, state);
+            return;
+        }
+        value = *current_target;
+    }
+    publish_items(run_context, context, state, kind,
+                  {{item_type, item_target, value}});
+}
+
+// Parse SET_HEATER_TEMPERATURE's named heater and finite TARGET, then publish a non-waiting bed or tool temperature event; missing or malformed parameters publish INVALID_COMMAND_PARAMETERS and invalidate known state, while name resolution is delegated to the shared heater publisher.
+void KlipperGCodeReader::process_SET_HEATER_TEMPERATURE(
+    const plugin_run_context &run_context,
+    const run_ctx_gcode_reader &context,
+    GCodeStateTracker &state,
+    const GCodeLineParser::GCodeLine &line) const
+{
+    const std::optional<std::string_view> heater =
+        named_parameter(line.raw(), "HEATER");
+    const std::optional<double> target = parse_klipper_named_value(
+        named_parameter(line.raw(), "TARGET"));
+    if (!heater || heater->empty() || !target) {
+        publish_unknown(run_context, context, state);
+        return;
+    }
+    publish_named_heater_event(
+        run_context, context, state, *heater,
+        RAW_GCODE_READER_EVENT_SET_TEMPERATURE, *target, false);
+}
+
+// Parse TEMPERATURE_WAIT's sensor and finite threshold, then publish a wait only when the threshold proves the known target in its direction; otherwise preserve the target with a state update, while malformed parameters invalidate state and unresolved names publish a tool diagnostic.
+void KlipperGCodeReader::process_TEMPERATURE_WAIT(
+    const plugin_run_context &run_context,
+    const run_ctx_gcode_reader &context,
+    GCodeStateTracker &state,
+    const GCodeLineParser::GCodeLine &line) const
+{
+    const std::optional<std::string_view> sensor =
+        named_parameter(line.raw(), "SENSOR");
+    const std::optional<std::string_view> minimum =
+        named_parameter(line.raw(), "MINIMUM");
+    const std::optional<std::string_view> maximum =
+        named_parameter(line.raw(), "MAXIMUM");
+    const std::optional<double> threshold = parse_klipper_named_value(
+        minimum ? minimum : maximum);
+    if (!sensor || sensor->empty() || !threshold) {
+        publish_unknown(run_context, context, state);
+        return;
+    }
+    publish_named_heater_event(
+        run_context, context, state, *sensor,
+        RAW_GCODE_READER_EVENT_WAIT_TEMPERATURE, *threshold,
+        minimum.has_value());
 }
 
 void KlipperGCodeReader::process_PAUSE(

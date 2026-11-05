@@ -369,6 +369,8 @@ set(SLIC3R_SOURCES
 	Plugins/LayerExtrusionEdit/DefaultLayerEntryState.hpp
 	Plugins/LayerExtrusionEdit/DefaultSpeed.cpp
 	Plugins/LayerExtrusionEdit/DefaultSpeed.hpp
+	Plugins/LayerExtrusionEdit/DefaultTemperature.cpp
+	Plugins/LayerExtrusionEdit/DefaultTemperature.hpp
 	Plugins/LayerExtrusionEdit/DefaultTravel.cpp
 	Plugins/LayerExtrusionEdit/DefaultTravel.hpp
 	Plugins/LayerExtrusionEdit/DefaultTravelDeceleration.cpp

@@ -228,7 +228,6 @@ struct DefaultGCodeFirmwareSession::RequestedState
     std::optional<float> acceleration_mm_per_s2;
     std::optional<float> pressure_advance;
     std::optional<float> fan_speed_percent;
-    std::optional<float> temperature_c;
     std::optional<EPropertyAttributes> attributes;
     std::optional<EPropertyExtrusionAxis> extrusion_axis;
     coord_t z_offset = 0;
@@ -274,8 +273,6 @@ protected:
                 m_state.pressure_advance = speed->pressure_adv;
             if (speed->fan_speed_percent >= 0.f)
                 m_state.fan_speed_percent = speed->fan_speed_percent;
-            if (speed->temperature_C >= 0.f)
-                m_state.temperature_c = speed->temperature_C;
         }
         if (const EPropertyAttributes *attributes = entity.get(EPropertyAttributes::key))
             m_state.attributes = *attributes;
@@ -289,6 +286,8 @@ protected:
         // descendant leaf.
         m_session.apply_requested_state(m_state);
         m_output += m_session.enter_extrusion_node(entity);
+        if (const EPropertyHeater *heater = entity.get(EPropertyHeater::key))
+            m_output += m_session.write_heater_event(*heater);
         if (const EPropertyCustomGcode *custom_gcode = entity.get(EPropertyCustomGcode::key))
             m_output += m_session.write_custom_gcode(entity, *custom_gcode);
         if (const EPropertySpecialCommand *command = entity.get(EPropertySpecialCommand::key)) {
@@ -941,6 +940,7 @@ std::string DefaultGCodeFirmwareSession::transition_wipe_marker(const bool wipe)
     return output;
 }
 
+// Copy inherited speed, fan and pressure-advance requests into the current machine state; the input is borrowed, no G-code is emitted, and heater targets remain unchanged until an entry event or external G-code.
 void DefaultGCodeFirmwareSession::apply_requested_state(const RequestedState &state)
 {
     m_gantry.request_speed(state.speed_mm_per_s ?
@@ -949,13 +949,10 @@ void DefaultGCodeFirmwareSession::apply_requested_state(const RequestedState &st
     if (!m_current_extruder_idx)
         return;
 
-    // Tool properties are requested on the currently selected physical tool.
-    // A later tool change receives the same inherited state when the visitor
-    // calls this method again before processing the next event or leaf.
+    // Fan and pressure-advance properties are requested on the currently
+    // selected physical tool; heater targets are changed only by entry events
+    // or external G-code and therefore are not part of lexical state.
     DefaultExtruder &tool = current_extruder();
-    tool.heater().request_temperature(state.temperature_c ?
-        std::optional<int16_t>(int16_t(std::lround(*state.temperature_c))) :
-        std::optional<int16_t>());
     tool.fan().request_speed_percent(state.fan_speed_percent ?
         std::optional<double>(*state.fan_speed_percent) : std::optional<double>());
     tool.pressure_advance().request(state.pressure_advance ?
@@ -1354,6 +1351,54 @@ std::string DefaultGCodeFirmwareSession::write_extrusion_axis_event(
     return output;
 }
 
+// Validate one persistent heater entry event, update the addressed heater's requested target and emit its immediate command when the requested encoding has changed; negative targets, missing active tools, invalid tool ids, SEMM cross-tool requests and unknown heater kinds throw without taking ownership.
+std::string DefaultGCodeFirmwareSession::write_heater_event(const EPropertyHeater &heater)
+{
+    if (heater.temperature_C < 0)
+        throw std::invalid_argument("A heater event has a negative temperature.");
+
+    HeaterState *target_state = nullptr;
+    extruder_index_t tool_id = EXTRUDER_ID_UNKNOWN;
+    if (heater.heater == C_EXTRUSION_HEATER_TOOL) {
+        tool_id = heater.tool;
+        if (tool_id == EXTRUDER_ID_UNKNOWN) {
+            if (!m_current_extruder_idx)
+                throw std::invalid_argument("A heater event for the active tool has no active tool.");
+            tool_id = *m_current_extruder_idx;
+        }
+        DefaultExtruder &tool = extruder(tool_id);
+        if (single_extruder_multi_material() &&
+            (!m_current_extruder_idx || tool_id != *m_current_extruder_idx))
+            throw std::invalid_argument("A SEMM heater event cannot address a non-active tool.");
+        target_state = &tool.heater();
+    } else if (heater.heater == C_EXTRUSION_HEATER_BED) {
+        target_state = &m_printer.bed_heater();
+    } else if (heater.heater == C_EXTRUSION_HEATER_CHAMBER) {
+        target_state = &m_printer.chamber_heater();
+    } else {
+        throw std::invalid_argument("A heater event contains an unknown heater kind.");
+    }
+
+    HeaterState &target = *target_state;
+    target.request_temperature(heater.temperature_C);
+    const bool wait = heater.wait != 0;
+    if (wait ? !target.needs_wait_encoding() : !target.needs_encoding())
+        return {};
+    const int16_t effective_temperature = target.effective_temperature();
+    std::string output;
+    if (heater.heater == C_EXTRUSION_HEATER_TOOL)
+        output = encode_tool_temperature(tool_id, effective_temperature, wait);
+    else if (heater.heater == C_EXTRUSION_HEATER_BED)
+        output = encode_bed_temperature(effective_temperature, wait);
+    else
+        output = encode_chamber_temperature(effective_temperature, wait);
+    if (wait)
+        target.mark_encoded_with_wait();
+    else
+        target.mark_encoded();
+    return output;
+}
+
 // Borrow an entry command and inherited state, returning dialect output while
 // updating owned machine state; malformed values and DEPOSIT outside a point leaf throw.
 std::string DefaultGCodeFirmwareSession::write_special_command(
@@ -1491,10 +1536,12 @@ std::string DefaultGCodeFirmwareSession::write_custom_gcode(
     return output;
 }
 
-// Replay borrowed text with the selected Reader, adopt only proven machine values, and settle the per-tool usage interval after any reported tool change.
+// Replay borrowed text with the selected Reader, adopt only proven machine values, including requested and encoded heater targets, and settle the per-tool usage interval after any reported tool change.
 // The retraction state is not adopted: the reader cannot prove it, and only the
 // explicit retraction operations and script declarations change it.
-// Unknown values invalidate caches; Reader or state validation errors propagate.
+// Unknown values invalidate caches; the Reader reports only final values, so an
+// intermediate target changed and then restored by one script is not observable.
+// Reader or state validation errors propagate.
 void DefaultGCodeFirmwareSession::synchronize_after_custom_gcode(const std::string &text)
 {
     // Generated G-code and custom G-code share one physical printer. Before
@@ -1606,7 +1653,7 @@ void DefaultGCodeFirmwareSession::synchronize_after_custom_gcode(const std::stri
         if (temperature) {
             const bool waited = tracked.known(
                 RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE_REACHED, tool.id());
-            tool.heater().synchronize_encoded_after_external_gcode(
+            tool.heater().synchronize_after_external_gcode(
                 reader_temperature(*temperature), waited);
         } else {
             tool.heater().clear_encoded();
@@ -1644,7 +1691,7 @@ void DefaultGCodeFirmwareSession::synchronize_after_custom_gcode(const std::stri
     const std::optional<double> bed_temperature = tracked.value(RAW_GCODE_READER_ITEM_BED_TEMPERATURE);
     if (bed_temperature) {
         const bool waited = tracked.known(RAW_GCODE_READER_ITEM_BED_TEMPERATURE_REACHED);
-        m_printer.bed_heater().synchronize_encoded_after_external_gcode(
+        m_printer.bed_heater().synchronize_after_external_gcode(
             reader_temperature(*bed_temperature), waited);
     } else {
         m_printer.bed_heater().clear_encoded();
@@ -1654,7 +1701,7 @@ void DefaultGCodeFirmwareSession::synchronize_after_custom_gcode(const std::stri
         RAW_GCODE_READER_ITEM_CHAMBER_TEMPERATURE);
     if (chamber_temperature) {
         const bool waited = tracked.known(RAW_GCODE_READER_ITEM_CHAMBER_TEMPERATURE_REACHED);
-        m_printer.chamber_heater().synchronize_encoded_after_external_gcode(
+        m_printer.chamber_heater().synchronize_after_external_gcode(
             reader_temperature(*chamber_temperature), waited);
     } else {
         m_printer.chamber_heater().clear_encoded();

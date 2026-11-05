@@ -87,7 +87,7 @@ struct TowerSpeeds
     std::vector<double> maintenance;
     std::vector<double> filament;
 };
-// Count the temperature requests of a borrowed tree, on collections and leaves alike.
+// Count heater entry events of a borrowed tree, on collections and leaves alike.
 size_t temperature_request_count(const ExtrusionEntity &entity);
 // Collect the leaf speeds of a borrowed tree into caller-owned buckets, in tree order.
 void collect_tower_speeds(const ExtrusionEntity &entity, TowerSpeeds &speeds);
@@ -115,13 +115,12 @@ void require_movement_speeds(const ExtrusionEntity &entity, float inherited_spee
     }
 }
 
-// Count the temperature requests of a borrowed tree, on collections and leaves alike.
+// Count heater entry events of a borrowed tree, on collections and leaves alike.
 size_t temperature_request_count(const ExtrusionEntity &entity)
 {
     size_t count = 0;
-    if (const ExtrusionPropertySpeed *speed = entity.get_property<ExtrusionPropertySpeed>())
-        if (speed->temperature_C >= 0.f)
-            ++count;
+    if (entity.get_property<ExtrusionPropertyHeater>() != nullptr)
+        ++count;
     for (size_t index = 0; index < entity.child_count(); ++index)
         count += temperature_request_count(entity.child(index));
     return count;
@@ -803,6 +802,8 @@ TEST_CASE("Tool-change exported tower scales only its purge speed", "[plugins][w
 // temperature is waited for before the pulls (normal mode) or after the cooling moves (fast
 // skinnydip), with the toolchange part fan, and nothing requests a temperature after the tool change.
 // The final unload requests none, and a multi-nozzle tower requests none at all.
+// The no-request check is limited to the layer of the first change because later layers legitimately
+// receive root-temperature requests from the layer plugin.
 TEST_CASE("SEMM tool change temperatures follow the swap phases",
           "[plugins][wipe-tower][toolchange][semm]")
 {
@@ -888,6 +889,7 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
     size_t first_pulls = 0, first_geometric = 0;
     size_t tower_changes = 0, layer_changes = 0;
     int first_change_tool = -1;
+    size_t first_change_layer_changes = 0;
     reader.parse_buffer(gcode, [&](GCodeReader &state, const GCodeReader::GCodeLine &line) {
         if (line.comment() == "TYPE:Wipe tower") {
             tower = true;
@@ -903,6 +905,7 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
                     first_change_tool = line.cmd_is("T0") ? 0 : 1;
                     first_pulls = pulls;
                     first_geometric = geometric;
+                    first_change_layer_changes = layer_changes;
                 }
                 ++tower_changes;
             }
@@ -1053,10 +1056,12 @@ TEST_CASE("SEMM tool change temperatures follow the swap phases",
             else
                 CHECK((event.value == 200 || event.value == 240));
         }
-    // Nothing requests a temperature between the change and the load; the final unload, which runs
-    // after the last change, requests no incoming temperature either.
+    // On the first-change layer nothing requests a temperature between the change and the load; later
+    // layers may legitimately receive root-temperature requests from the layer plugin. The final
+    // unload, which runs after the last change, requests no incoming temperature either.
     for (const Event &event : events) {
-        const bool after_change = event.tower && event.phase == 4 && event.tower_changes == 1;
+        const bool after_change = event.tower && event.phase == 4 && event.tower_changes == 1 &&
+            event.layer_changes == first_change_layer_changes;
         const bool incoming_after_last_change = event.tower && event.tower_changes == tower_changes &&
             (event.value == 200 || event.value == 210 || event.value == 240 || event.value == 250);
         CHECK_FALSE(after_change);
@@ -1216,13 +1221,14 @@ TEST_CASE("Tool change roots request pressure advance", "[plugins][wipe-tower][t
     const slic3r_api::ExtrusionEntity out(outgoing_root.handle());
     const slic3r_api::ExtrusionEntity in(incoming_root.handle());
     const slic3r_api::EPropertySpeed *out_speed = out.get(slic3r_api::EPropertySpeed::key);
+    const slic3r_api::EPropertyHeater *out_heater = out.get(slic3r_api::EPropertyHeater::key);
     const slic3r_api::EPropertySpeed *in_speed = in.get(slic3r_api::EPropertySpeed::key);
     if (enabled_outgoing) {
         REQUIRE(out_speed != nullptr);
         CHECK(out_speed->pressure_adv == 0.f);
         // Only pressure advance is overridden; the other requested values stay unset.
         CHECK(out_speed->speed_mm_per_s < 0.f);
-        CHECK(out_speed->temperature_C < 0.f);
+        CHECK(out_heater == nullptr);
     } else {
         CHECK(out_speed == nullptr);
     }

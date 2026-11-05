@@ -48,7 +48,8 @@ The **67 initial definitions** of `src/libslic3r/Config/FFFPrintConfig.cpp` give
 |---|---|---|---|
 | Ordered catalog (1) | `gcode_flavor` | `STEP_ORDERING` / `Print` | Name sanitization, [ObjectInstanceCatalog.cpp:54–60](../../src/libslic3r/Plugins/Ordering/ObjectInstanceCatalog.cpp#L54), `used_config_keys` declaration at `:154–166` |
 | Plan editing (1) | `travel_speed` | `STEP_LAYER_EXTRUSION_EDIT` / `Ordering` | [DefaultSpeed.cpp:958–962](../../src/libslic3r/Plugins/LayerExtrusionEdit/DefaultSpeed.cpp#L958), declaration at `:76`; [DefaultFan.cpp:1027](../../src/libslic3r/Plugins/LayerExtrusionEdit/DefaultFan.cpp#L1027) calls the time estimator, `Api/plugin/cpp/PrintingPlanTimeEstimator.cpp:150` |
-| Export (6) | `first_layer_temperature`, `temperature`, `idle_temperature`, `ooze_prevention`, `travel_speed_z`, `z_offset` | `STEP_GCODE` / `Plan` | [GCode.cpp:304–353](../../src/libslic3r/GCode.cpp#L304), `:1878–1992,8028–8031`; [GCodeWriter.cpp:717–723](../../src/libslic3r/GCode/GCodeWriter.cpp#L717), `:799–807`; [GCodePreamble.cpp:342](../../src/libslic3r/Api/plugin/cpp/gcode/GCodePreamble.cpp#L342), `Gantry.cpp:22`, `Api/host/GCodeReaderResultBuilder.cpp:277` |
+| Export (4) | `first_layer_temperature`, `temperature`, `travel_speed_z`, `z_offset` | `STEP_GCODE` / `Plan` | [GCode.cpp:304–353](../../src/libslic3r/GCode.cpp#L304), `:1878–1992,8028–8031`; [GCodeWriter.cpp:717–723](../../src/libslic3r/GCode/GCodeWriter.cpp#L717), `:799–807`; `Gantry.cpp:22`, `Api/host/GCodeReaderResultBuilder.cpp:277` |
+| Layer temperature editing (2) | `idle_temperature`, `ooze_prevention` | `STEP_LAYER_EXTRUSION_EDIT` / `Ordering` | [DefaultTemperature.cpp:339–355](../../src/libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.cpp#L339), setup reads `ooze_prevention` at `:772` and calls `standby_target` at `:858–863`; startup fallback at [DefaultTemperature.cpp:435–438](../../src/libslic3r/Plugins/LayerExtrusionEdit/DefaultTemperature.cpp#L435) |
 
 The temperature and travel readers of the old `GCode/WipeTower.cpp` are not treated as an active prefix: [Print.cpp:1733–1815](../../src/libslic3r/Print.cpp#L1733) uses `WipeTower2`, where these reads are absent/commented out (`GCode/WipeTower2.cpp:1207–1213,1340`). The events produced by [SettingsGCodeScripts.cpp:220–255](../../src/libslic3r/Plugins/GCode/SettingsGCodeScripts.cpp#L220) copy their structural arguments, not these Print values.
 
@@ -492,7 +493,7 @@ All follow the window of the node carrying them. Field lists group values having
 | C payload | Members |
 |---|---|
 | `c_extrusion_property_attributes` | `mm3_per_mm`, `width`, `height`, `role`, `no_seam` |
-| `c_extrusion_property_speed` | `speed_mm_per_s`, `accel_mm_per_s2`, `pressure_adv`, `fan_speed_percent`, `temperature_C` |
+| `c_extrusion_property_speed` | `speed_mm_per_s`, `accel_mm_per_s2`, `pressure_adv`, `fan_speed_percent` |
 | `c_extrusion_property_modifier` | `enforce_travel`, `enforce_retraction`, `enforce_unlift`, `disable_retraction`, `disable_lift`, `toolchange_retraction` |
 | `c_extrusion_property_custom_gcode` | `kind`, `script_type`, `processing_extruder_id`; `text_id`, `config_id` reference buffers local to the entity, not live Config handles |
 | `c_extrusion_property_special_command` | `code`, `extra_data` |
@@ -501,6 +502,7 @@ All follow the window of the node carrying them. Field lists group values having
 | `c_extrusion_property_perimeter` | `perimeter_idx`, `reserved`, `perimeter_flags` |
 | `c_extrusion_property_infill` | `source_surface_id`, numeric reference without ownership of the Surface |
 | `c_extrusion_property_extrusion_axis` | `operation`, `value`, `restart_extra`, `toolchange` |
+| `c_extrusion_property_heater` | `heater`, `tool`, `temperature_C`, `wait`; entry event, not inherited |
 
 Plugin-registered payloads are open: copying them preserves all bytes, not only the known built-in fields. Examples used in the plan: time (`duration_seconds`, `origin`), input (`x`, `y`, `z`, `state`, and tool payload `extruder_id`), endpoints (`entry`, `exit`), scope marker (`flags`). They follow the plan's freeze; they are not new geometry owners.
 

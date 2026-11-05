@@ -90,7 +90,6 @@ struct ExtrusionSpec
     float existing_acceleration = -1.f;
     float pressure_advance = -1.f;
     float fan_speed = -1.f;
-    float temperature = -1.f;
     bool force_e_per_mm = false;
 };
 
@@ -186,12 +185,11 @@ std::unique_ptr<ExtrusionPath> make_path(const ExtrusionSpec &spec, const size_t
     path->polyline().append(Point(scale_i(11.), y));
     path->polyline().append(Point(scale_i(29.), y));
     if (spec.existing_speed > 0.f || spec.existing_acceleration > 0.f ||
-        spec.pressure_advance > 0.f || spec.fan_speed > 0.f || spec.temperature > 0.f) {
+        spec.pressure_advance > 0.f || spec.fan_speed > 0.f) {
         path->add_property(ExtrusionPropertySpeed(spec.existing_speed,
                                                   spec.existing_acceleration,
                                                   spec.pressure_advance,
-                                                  spec.fan_speed,
-                                                  spec.temperature));
+                                                  spec.fan_speed));
     }
     return path;
 }
@@ -798,7 +796,6 @@ TEST_CASE("Layer speed follows final values across region boundaries",
         spec.existing_acceleration = 321.f;
         spec.pressure_advance = 0.05f;
         spec.fan_speed = 42.f;
-        spec.temperature = 210.f;
         prepare_regional_process_plan(
             prepared, config, {{"perimeter_speed", "30"}}, "perimeter_speed", {spec});
 
@@ -814,7 +811,6 @@ TEST_CASE("Layer speed follows final values across region boundaries",
             CHECK(leaf.acceleration == 321.f);
             CHECK(leaf.direct_process->pressure_adv == 0.05f);
             CHECK(leaf.direct_process->fan_speed_percent == 42.f);
-            CHECK(leaf.direct_process->temperature_C == 210.f);
         }
 
         ExtrusionEntity &root = single_plan_root(prepared.print);
@@ -1221,7 +1217,6 @@ TEST_CASE("Layer acceleration follows final values across region boundaries",
         spec.existing_speed = 37.f;
         spec.pressure_advance = 0.05f;
         spec.fan_speed = 42.f;
-        spec.temperature = 210.f;
         prepare_regional_acceleration_plan(
             prepared, config, {{"default_acceleration", "400"}}, spec);
 
@@ -1237,7 +1232,6 @@ TEST_CASE("Layer acceleration follows final values across region boundaries",
             CHECK(leaf.speed == 37.f);
             CHECK(leaf.direct_process->pressure_adv == 0.05f);
             CHECK(leaf.direct_process->fan_speed_percent == 42.f);
-            CHECK(leaf.direct_process->temperature_C == 210.f);
         }
 
         ExtrusionEntity &root = single_plan_root(prepared.print);
@@ -1385,7 +1379,6 @@ TEST_CASE("Layer extrusion editor mutates plan clones and hoists uniform fields"
     CHECK(root_process->accel_mm_per_s2 == 1000.f);
     CHECK(root_process->pressure_adv == -1.f);
     CHECK(root_process->fan_speed_percent == -1.f);
-    CHECK(root_process->temperature_C == -1.f);
     REQUIRE(root.child_count() == 2);
     CHECK(root.child(0).get_property<ExtrusionPropertySpeed>() == nullptr);
     CHECK(root.child(1).get_property<ExtrusionPropertySpeed>() == nullptr);
@@ -1648,7 +1641,6 @@ TEST_CASE("Layer extrusion editor preserves overrides and applies first-layer ca
     spec.existing_speed = 18.f;
     spec.pressure_advance = 0.07f;
     spec.fan_speed = 35.f;
-    spec.temperature = 212.f;
     ExtrusionSpec acceleration_override{ExtrusionRole::Perimeter, 0.2};
     acceleration_override.existing_acceleration = 321.f;
     prepare_ordered_plan(prepared, config, {{
@@ -1671,7 +1663,6 @@ TEST_CASE("Layer extrusion editor preserves overrides and applies first-layer ca
             CHECK(leaf.speed == 18.f);
             CHECK(leaf.acceleration == 500.f);
             CHECK(leaf.direct_process->fan_speed_percent == 35.f);
-            CHECK(leaf.direct_process->temperature_C == 212.f);
         } else if (leaf.acceleration == 321.f) {
             found_existing_acceleration = true;
             CHECK(leaf.speed == 25.f);
@@ -2114,7 +2105,6 @@ TEST_CASE("Layer fan rerun preserves unrelated process fields",
     preserved.existing_speed = 27.f;
     preserved.existing_acceleration = 321.f;
     preserved.pressure_advance = 0.047f;
-    preserved.temperature = 211.f;
     ExtrusionSpec external{ExtrusionRole::ExternalPerimeter, 0.2};
     external.existing_speed = 29.f;
     prepare_ordered_plan(prepared, config, {{
@@ -2134,7 +2124,6 @@ TEST_CASE("Layer fan rerun preserves unrelated process fields",
     CHECK(perimeter.direct_process->speed_mm_per_s == Approx(27.f));
     CHECK(perimeter.direct_process->accel_mm_per_s2 == Approx(321.f));
     CHECK(perimeter.direct_process->pressure_adv == Approx(0.047f));
-    CHECK(perimeter.direct_process->temperature_C == Approx(211.f));
     CHECK(perimeter.direct_process->fan_speed_percent == Approx(35.f));
 }
 

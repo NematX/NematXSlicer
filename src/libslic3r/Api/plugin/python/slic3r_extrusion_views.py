@@ -65,6 +65,7 @@ from slic3r_api_generated import (
     CExtrusionPropertyAttributes,
     CExtrusionPropertyCustomGcode,
     CExtrusionPropertyExtrusionAxis,
+    CExtrusionPropertyHeater,
     CExtrusionPropertyInfill,
     CExtrusionPropertyModifier,
     CExtrusionPropertyOverhang,
@@ -85,6 +86,7 @@ from slic3r_api_generated import (
     EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE,
     EXTRUSION_PROPERTY_TYPE_INFILL,
     EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS,
+    EXTRUSION_PROPERTY_TYPE_HEATER,
     EXTRUSION_PROPERTY_TYPE_INVALID,
     EXTRUSION_PROPERTY_TYPE_MODIFIER,
     EXTRUSION_PROPERTY_TYPE_OVERHANG,
@@ -139,6 +141,7 @@ CExtrusionPropertyZOffset.property_type = EXTRUSION_PROPERTY_TYPE_Z_OFFSET
 CExtrusionPropertyPerimeter.property_type = EXTRUSION_PROPERTY_TYPE_PERIMETER
 CExtrusionPropertyInfill.property_type = EXTRUSION_PROPERTY_TYPE_INFILL
 CExtrusionPropertyExtrusionAxis.property_type = EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS
+CExtrusionPropertyHeater.property_type = EXTRUSION_PROPERTY_TYPE_HEATER
 
 EPropertyAttributes = CExtrusionPropertyAttributes
 EPropertySpeed = CExtrusionPropertySpeed
@@ -146,6 +149,7 @@ EPropertyModifier = CExtrusionPropertyModifier
 EPropertyCustomGcode = CExtrusionPropertyCustomGcode
 EPropertySpecialCommand = CExtrusionPropertySpecialCommand
 EPropertyExtrusionAxis = CExtrusionPropertyExtrusionAxis
+EPropertyHeater = CExtrusionPropertyHeater
 EPropertyOverhang = CExtrusionPropertyOverhang
 EPropertyZOffset = CExtrusionPropertyZOffset
 EPropertyPerimeter = CExtrusionPropertyPerimeter
@@ -158,6 +162,7 @@ for _property_payload in (
     EPropertyCustomGcode,
     EPropertySpecialCommand,
     EPropertyExtrusionAxis,
+    EPropertyHeater,
     EPropertyOverhang,
     EPropertyZOffset,
     EPropertyPerimeter,
@@ -1282,6 +1287,7 @@ __all__ = [
     "CExtrusionPropertyAttributes",
     "CExtrusionPropertyCustomGcode",
     "CExtrusionPropertyExtrusionAxis",
+    "CExtrusionPropertyHeater",
     "CExtrusionPropertyInfill",
     "CExtrusionPropertyModifier",
     "CExtrusionPropertyOverhang",
@@ -1295,6 +1301,7 @@ __all__ = [
     "EPropertyAttributes",
     "EPropertyCustomGcode",
     "EPropertyExtrusionAxis",
+    "EPropertyHeater",
     "EPropertyInfill",
     "EPropertyModifier",
     "EPropertyOverhang",
@@ -1307,6 +1314,7 @@ __all__ = [
     "EXTRUSION_PROPERTY_TYPE_ATTRIBUTES",
     "EXTRUSION_PROPERTY_TYPE_CUSTOM_GCODE",
     "EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS",
+    "EXTRUSION_PROPERTY_TYPE_HEATER",
     "EXTRUSION_PROPERTY_TYPE_INFILL",
     "EXTRUSION_PROPERTY_TYPE_INVALID",
     "EXTRUSION_PROPERTY_TYPE_MODIFIER",

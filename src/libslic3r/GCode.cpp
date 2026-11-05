@@ -4943,6 +4943,7 @@ LayerResult GCodeGenerator::process_layer(
             //setup
             assert(m_current_entity.empty());
             assert(m_speed_override.empty());
+            assert(m_heater_override.empty());
             assert(m_modifier_override.empty());
             assert(!visitor_in_use);
             this->visitor_root_state = "wp";
@@ -4957,6 +4958,7 @@ LayerResult GCodeGenerator::process_layer(
             this->visitor_in_use = false;
             assert(m_current_entity.empty());
             assert(m_speed_override.empty());
+            assert(m_heater_override.empty());
             assert(m_modifier_override.empty());
             this->set_origin(old_origin);
             gcode += this->visitor_gcode;
@@ -7235,10 +7237,12 @@ std::string GCodeGenerator::extrude_multi_path(const ExtrusionMultiPath &multipa
     return gcode;
 }
 
+// Traverse the borrowed entity while collecting generated G-code and restoring visitor state; description and optional speed guide output, no source ownership transfers, and traversal or encoding failures propagate.
 std::string GCodeGenerator::extrude_entity(const ExtrusionEntityReference &entity, const std::string_view description, double speed)
 {
     assert(m_current_entity.empty());
     assert(m_speed_override.empty());
+    assert(m_heater_override.empty());
     assert(m_modifier_override.empty());
     assert(!visitor_in_use);
     this->visitor_in_use = true;
@@ -7251,6 +7255,7 @@ std::string GCodeGenerator::extrude_entity(const ExtrusionEntityReference &entit
     this->visitor_in_use = false;
     assert(m_current_entity.empty());
     assert(m_speed_override.empty());
+    assert(m_heater_override.empty());
     assert(m_modifier_override.empty());
     return this->visitor_gcode;
 }
@@ -7490,15 +7495,15 @@ void GCodeGenerator::start_using_extrusion(const ExtrusionEntity &entity) {
     m_current_entity.push_back(&entity);
 }
 
-// remove last overrides from properties if needed
+// Restore active-tool heater and inherited movement overrides owned by the current entity, append the restoration G-code, then pop its lexical scope; the entity must be the active stack entry and invalid nesting is asserted.
 void GCodeGenerator::end_using_extrusion(const ExtrusionEntity &entity) {
     assert(visitor_in_use);
+    if (!m_heater_override.empty() && m_heater_override.back().first == &entity) {
+        visitor_gcode += m_writer.set_temperature(m_saved_temp.back(), false);
+        m_saved_temp.pop_back();
+        m_heater_override.pop_back();
+    }
     if (!m_speed_override.empty() && m_speed_override.back().first == &entity) {
-        // reset temp to previous value
-        if (m_speed_override.back().second->temperature_C >= 0) {
-            visitor_gcode += m_writer.set_temperature(m_saved_temp.back(), false);
-            m_saved_temp.pop_back();
-        }
         m_speed_override.pop_back();
     }
     if (!m_modifier_override.empty() && m_modifier_override.back().first == &entity) {
@@ -7517,6 +7522,7 @@ void GCodeGenerator::end_using_extrusion(const ExtrusionEntity &entity) {
     visitor_comment = ""sv;
 }
 
+// Apply each recognized direct property once in its fixed output order for a borrowed entity; state stacks and generated commands are updated in place, invalid visitor nesting asserts, and no entity ownership transfers.
 void GCodeGenerator::apply_properties(const ExtrusionEntity &entity)
 {
     if (!entity.has_properties())
@@ -7524,6 +7530,8 @@ void GCodeGenerator::apply_properties(const ExtrusionEntity &entity)
 
     if (const ExtrusionPropertySpeed *speed_override = entity.get_property<ExtrusionPropertySpeed>())
         apply_property(*speed_override);
+    if (const ExtrusionPropertyHeater *heater_event = entity.get_property<ExtrusionPropertyHeater>())
+        apply_property(*heater_event);
     if (const ExtrusionPropertyModifier *modifier_override = entity.get_property<ExtrusionPropertyModifier>())
         apply_property(*modifier_override);
     if (const ExtrusionPropertyZOffset *zmove = entity.get_property<ExtrusionPropertyZOffset>())
@@ -7534,14 +7542,29 @@ void GCodeGenerator::apply_properties(const ExtrusionEntity &entity)
         apply_property(*command);
 }
 
+// Record the borrowed inherited speed payload for the current entity without emitting G-code or changing heater targets; visitor use and current-entity nesting are required and violations assert.
 void GCodeGenerator::apply_property(const ExtrusionPropertySpeed& speed_override) {
     assert(visitor_in_use);
     assert(!m_current_entity.empty() && (m_speed_override.empty() || m_speed_override.back().first != m_current_entity.back()));
     m_speed_override.push_back(std::pair<const ExtrusionEntity*, const ExtrusionPropertySpeed*>(m_current_entity.back(), &speed_override));
-    if (m_speed_override.back().second->temperature_C >= 0) {
-        m_saved_temp.push_back(m_writer.get_temperature());
-        visitor_gcode += m_writer.set_temperature(m_speed_override.back().second->temperature_C, false);
+}
+
+// Apply an active-tool heater event immediately and save the legacy writer target for restoration at entity exit; unsupported heater kinds or non-active tools assert and produce no output.
+void GCodeGenerator::apply_property(const ExtrusionPropertyHeater& heater_event) {
+    assert(visitor_in_use);
+    assert(!m_current_entity.empty() &&
+           (m_heater_override.empty() || m_heater_override.back().first != m_current_entity.back()));
+    const bool active_tool = heater_event.heater == C_EXTRUSION_HEATER_TOOL &&
+        (heater_event.tool == EXTRUDER_ID_UNKNOWN ||
+         (m_writer.tool() != nullptr && heater_event.tool == extruder_index_t(m_writer.tool()->id())));
+    if (!active_tool || heater_event.temperature_C < 0) {
+        assert(false);
+        return;
     }
+    m_heater_override.push_back(std::pair<const ExtrusionEntity*, const ExtrusionPropertyHeater*>(
+        m_current_entity.back(), &heater_event));
+    m_saved_temp.push_back(m_writer.get_temperature());
+    visitor_gcode += m_writer.set_temperature(heater_event.temperature_C, heater_event.wait != 0);
 }
 
 void GCodeGenerator::apply_property(const ExtrusionPropertyModifier& modifier_override) {
@@ -7665,8 +7688,8 @@ void GCodeGenerator::apply_property(const ExtrusionPropertySpecialCommand& comma
         }
         visitor_gcode += "\n";
         break;
-        // SET_TEMP: // for extra_data °C should be done via ExtrusionPropertySpeed.temperature
-    case ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP: // wait for current temperature: given by ExtrusionPropertySpeed
+        // Heater targets are set by heater entry events or external G-code.
+    case ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP: // wait for the active heater target
         visitor_gcode += m_writer.set_temperature(m_writer.get_temperature(), true);
         break;
     case ExtrusionPropertySpecialCommand::Code::DISABLE_PREVIEW:

@@ -45,11 +45,11 @@
    ramming stays, and an outgoing-only final unload gets no terminal
    retraction.
 
-   During a SEMM swap the unload also requests the incoming filament
-   temperature (first_layer_temperature on the first layer of the plan,
-   temperature above it) without waiting, because nothing requests a normal
-   temperature afterwards and the shared SEMM heater keeps it in effect after
-   the tool change.
+   During a SEMM swap the unload also adds an entry heater event for the
+   incoming filament temperature (first_layer_temperature on the first layer
+   of the plan, temperature above it) without waiting, because nothing adds a
+   normal heater event afterwards and the shared SEMM heater keeps it in
+   effect after the tool change.
 
    Pressure advance is a request carried by the two roots. The outgoing root
    asks for zero while it rams and unloads, because those moves push or pull
@@ -212,9 +212,10 @@ std::vector<RammingStep> ramming_steps(const Slic3r::PrintConfig &config, extrud
 double ramming_volume(const std::vector<RammingStep> &steps);
 // Return true when the band prints at the Z of the first layer of the plan.
 bool is_first_plan_layer(const ConstPrintingPlan &plan, double print_z);
-// Request the toolchange temperature of one filament, and its part fan when enabled, on a collection.
-void request_toolchange_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config, size_t idx);
-// Request the incoming filament temperature without waiting on a collection.
+// Add a toolchange heater entry event, and its part fan when enabled, to a collection.
+void request_toolchange_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
+                                    size_t idx, bool wait);
+// Add an incoming-filament heater entry event without waiting to a collection.
 void request_incoming_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
                                   extruder_index_t tool, bool first_layer);
 // Fill the band of one request: ramming and unload in the outgoing root, load and purge in the incoming root.
@@ -850,22 +851,22 @@ void append_x_move(storage_handle *storage, extrusion_entity_handle *root, c_vec
     position = end;
 }
 
-// Request the toolchange temperature of one filament on a collection, with the toolchange part fan when it is
-// enabled for that filament. Reads borrowed configuration only.
-void request_toolchange_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config, const size_t idx)
+// Add one heater entry event with the requested target and optional wait, then add the configured part-fan request; idx must select configured filament data, configuration is borrowed, and no entity ownership is transferred.
+void request_toolchange_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
+                                    const size_t idx, const bool wait)
 {
-    EPropertySpeed &temperature = entity.get_or_add(EPropertySpeed::key);
-    temperature.temperature(float(config.filament_toolchange_temp.get_at(idx)));
+    entity.get_or_add(EPropertyHeater::key).set_tool(
+        int16_t(config.filament_toolchange_temp.get_at(idx)), EXTRUDER_ID_UNKNOWN, wait);
     if (config.filament_enable_toolchange_part_fan.get_at(idx))
-        temperature.fan_speed(float(std::clamp(config.filament_toolchange_part_fan_speed.get_at(idx), 0, 100)));
+        entity.get_or_add(EPropertySpeed::key).fan_speed(
+            float(std::clamp(config.filament_toolchange_part_fan_speed.get_at(idx), 0, 100)));
 }
 
-// Request the incoming filament temperature on a collection without waiting: the first layer of the plan uses
-// first_layer_temperature and every later layer temperature. Reads borrowed configuration only.
+// Add an incoming-filament heater entry event without waiting; tool must select configured filament data, the first plan layer uses first_layer_temperature and later layers use temperature, and no entity ownership is transferred.
 void request_incoming_temperature(StoredExtrusionEntity &entity, const Slic3r::PrintConfig &config,
                                   const extruder_index_t tool, const bool first_layer)
 {
-    entity.get_or_add(EPropertySpeed::key).temperature(float(first_layer ?
+    entity.get_or_add(EPropertyHeater::key).set_tool(int16_t(first_layer ?
         config.first_layer_temperature.get_at(size_t(tool)) : config.temperature.get_at(size_t(tool))));
 }
 
@@ -878,13 +879,17 @@ void request_incoming_temperature(StoredExtrusionEntity &entity, const Slic3r::P
 //  - optional skinnydip: dip of filament_skinnydip_distance, melt-zone pause, extraction, cooling-zone pause (ms);
 //  - filament_toolchange_delay (s), then the move to the parking position, so the total pull equals
 //    parking_pos_retraction (the sign error of WipeTower2 on this last move is not reproduced).
-// The unload is split into successive sub-collections so each part carries its own temperature. With
-// filament_enable_toolchange_temp, the pulls wait for filament_toolchange_temp (normal mode) or the cooling moves
-// run while it is requested and the wait comes after them (fast skinnydip), with the toolchange part fan when
-// enabled; the rest of the unload runs at the incoming filament temperature, requested without waiting. Nothing
-// requests a normal temperature afterwards, and in SEMM every tool shares one heater, so the incoming temperature
-// stays in effect after the tool change without being emitted again; a future plugin that requests the outgoing
-// filament normal temperature would have to revisit this. Children are appended to the root, and the caller's
+// Append borrowed configuration's SEMM unload phases to caller-owned storage
+// and update the caller's borrowed position. Valid band geometry is required,
+// generated children become storage-owned, and geometry/configuration failures
+// propagate. The unload is split into successive sub-collections so each part
+// carries its own heater event. With filament_enable_toolchange_temp, the pulls
+// wait for filament_toolchange_temp (normal mode) or the cooling moves run while
+// it is requested and the wait comes after them (fast skinnydip), with the
+// toolchange part fan when enabled; the rest of the unload runs at the incoming
+// filament temperature, added without waiting. A heater event remains in
+// effect until another event or external G-code changes it, so the incoming
+// target persists after the tool change in SEMM. Children are appended to the root, and the caller's
 // position follows the cooling moves on the work line so the load continues from there.
 // The unload collection disables retraction, because the unload is itself the retraction of the swap: CreateRetraction
 // then adds no retract/unretract pair inside it or at the tool-change boundary.
@@ -911,8 +916,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
     pulls.disable_sort().disable_reverse();
     extrusion_entity_handle *pulls_handle = pulls.mutable_handle();
     if (toolchange_temp && !fast_skinnydip) {
-        request_toolchange_temperature(pulls, config, idx);
-        append_command(storage, pulls_handle, C_EXTRUSION_SPECIAL_COMMAND_WAIT_FOR_TEMP, 0.);
+        request_toolchange_temperature(pulls, config, idx, true);
     }
     if (tube_retraction != 0. || tube_length != 0.) {
         const double total = tube_retraction + tube_length / 2. - 15.;
@@ -931,7 +935,7 @@ void append_unload(storage_handle *storage, extrusion_entity_handle *root, const
     swap.disable_sort().disable_reverse();
     extrusion_entity_handle *swap_handle = swap.mutable_handle();
     if (toolchange_temp && fast_skinnydip)
-        request_toolchange_temperature(swap, config, idx);
+        request_toolchange_temperature(swap, config, idx, false);
     else if (incoming_known)
         request_incoming_temperature(swap, config, incoming, first_layer);
     const int moves = config.filament_cooling_moves.get_at(idx);

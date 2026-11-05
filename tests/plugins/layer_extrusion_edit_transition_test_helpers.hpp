@@ -59,6 +59,7 @@ constexpr const char *SETTINGS_SCRIPTS_PLUGIN = "gcode.settings_scripts";
 class ScopedActivePlugins
 {
 public:
+    // Capture the current active plugin handles, clear them, and activate only the requested plugin IDs.
     explicit ScopedActivePlugins(std::initializer_list<const char *> plugin_ids) :
         m_orchestrator(Orchestrator::instance())
     {
@@ -69,6 +70,7 @@ public:
             REQUIRE(m_orchestrator.set_plugin_active(plugin_id, true));
     }
 
+    // Restore the captured active plugin handles after the focused run ends.
     ~ScopedActivePlugins()
     {
         m_orchestrator.clear_active_plugins();

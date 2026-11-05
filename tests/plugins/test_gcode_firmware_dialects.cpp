@@ -423,7 +423,9 @@ TEST_CASE("Built-in firmware dialects encode their process commands",
             special_command_entity(ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP));
         std::unique_ptr<ExtrusionEntity> root(
             new ExtrusionEntity(std::move(children), false, true, true));
-        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f, 50.f, 200.f));
+        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, 0.04f, 50.f));
+        root->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, 200, false));
         append_path_extrusion(tool_group, std::move(root));
 
         const std::string output = export_with_firmware(print, expectation.id);
@@ -520,7 +522,9 @@ TEST_CASE("Built-in firmware dialects address one physical extruder in SEMM",
             20.f, 500.f, pressure, fan, temperature));
         children.push_back(special_command_entity(ExtrusionPropertySpecialCommand::Code::WAIT_FOR_TEMP));
         std::unique_ptr<ExtrusionEntity> root(new ExtrusionEntity(std::move(children), false, true, true));
-        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, pressure, fan, temperature));
+        root->add_property(ExtrusionPropertySpeed(20.f, 500.f, pressure, fan));
+        root->add_property(ExtrusionPropertyHeater(
+            C_EXTRUSION_HEATER_TOOL, EXTRUDER_ID_UNKNOWN, int16_t(temperature), false));
         append_path_extrusion(group, std::move(root));
     }
     const std::string output = export_with_firmware(print, firmware_id);
