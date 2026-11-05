@@ -16,30 +16,42 @@
 #include "StepPipeline.hpp"
 #include "StepRunner.hpp"
 
-/* Each object selects one algorithm per exclusive role group through its own
-   configuration. The dispatcher runs the selected algorithms by priority, each
-   on the objects that selected it. Each callback processes one object's support
-   surfaces and adds extrusions through the data tree. The dispatcher does not
-   store geometry or plugin output. register_selector_traits installs the object scope
-   and Support material / Support toolpaths placement before providers register.
+/*
+This step creates toolpaths on support surfaces.
+Each role group contains alternative algorithms for one support task.
+Each object's configuration selects one algorithm per group.
+The dispatcher runs algorithms by priority on the objects that selected them.
+Callbacks add extrusion through the data tree; the dispatcher stores no geometry.
+register_selector_traits registers per-object selection and the Support material /
+Support toolpaths GUI placement before plugins register.
 
-   Algorithms may fill surfaces with INFILL_PATTERN plugins through the payload
-   callbacks. One InfillPatternService is built before the first algorithm runs
-   and shared by every object run, which may be concurrent: the service is
-   read-only after construction (see InfillPatternService.hpp).
+Algorithms may fill surfaces with INFILL_PATTERN plugins through the payload
+callbacks. One InfillPatternService is built before the first algorithm runs
+and shared by every object run, which may be concurrent: the service is
+read-only after construction (see InfillPatternService.hpp).
 
-   Errors: the callbacks are called through the C ABI, also by Python
-   algorithms through ctypes, which cannot catch a C++ exception, so they catch
-   everything. An ordinary refusal (unknown runtime id, pattern needing the
-   STEP_INFILL initialization pass) is a message from the service and the step
-   goes on. A failure (a pattern reports an error, or any other exception)
-   empties the output, returns the failure value and requests the plugin
-   cancellation (a PluginStopped adds no message, any other exception adds an
-   error message), so that the runner stops the step when the
-   algorithm returns (contain_pattern_callback_failure). A cancellation of the
-   print is not recorded: the runner rethrows it. Once the plugin cancellation
-   is requested or the print is cancelled, the callbacks return the failure
-   value at once, without a new message. */
+Errors: the callbacks are called through the C ABI, also by Python
+algorithms through ctypes, which cannot catch a C++ exception, so they catch
+everything. An ordinary refusal (unknown runtime id, pattern needing the
+STEP_INFILL initialization pass) is a message from the service and the step
+goes on. A failure (a pattern reports an error, or any other exception)
+empties the output, returns the failure value and requests the plugin
+cancellation (a PluginStopped adds no message, any other exception adds an
+error message), so that the runner stops the step when the
+algorithm returns (contain_pattern_callback_failure). A cancellation of the
+print is not recorded: the runner rethrows it. Stop checks select the supplied
+Print's execution. Once that execution stops or the Print is cancelled,
+callbacks return failure at once, without adding another message.
+
+Representative direct calls (branches are not a timeline):
+
+    run_step()
+        |-- Detail::validate_or_report()
+        |-- orchestrator.get_active_plugins_for_step()
+        |-- selected_plugins_per_object()
+        |-- Detail::run_object_step_plugin()
+        `-- complete_plugin()
+*/
 
 namespace Slic3r::Steps::StepSupportToolpath {
 // Copy object-scope automatic selector metadata into the borrowed host without changing print data or provider ownership;
@@ -77,11 +89,12 @@ struct HostContext
     InfillPatternService &get() const noexcept { return *service; }
     // Returns the borrowed orchestrator used for containment, without mutation or failure.
     Orchestrator &orchestrator() const noexcept { return owner; }
-    // Reads plugin and optional payload-print stop flags without mutation or failure; a null print checks only the plugin flag.
+    // Read cancellation and execution-stop state for the supplied Print.
+    // With a null Print, read only the thread's execution stop state, or the shared stop state.
     bool stop_requested(const print_handle *handle) const noexcept
     {
         const Print *print = reinterpret_cast<const Print *>(handle);
-        return owner.is_plugin_cancelled() || (print != nullptr && print->canceled());
+        return owner.is_plugin_cancelled(print) || (print != nullptr && print->canceled());
     }
 };
 

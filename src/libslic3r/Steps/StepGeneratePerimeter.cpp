@@ -35,6 +35,33 @@
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/SurfaceCollection.hpp"
 
+/*
+This module runs perimeter plugins and publishes their extrusion trees and remaining infill areas.
+Orchestrator is the plugin manager; StepSelectorTraits.hpp defines the selector metadata registered here.
+Plugins read sliced islands and region settings. The host stores perimeter extrusion
+trees and remaining infill areas on those islands. Islands run in sequence.
+No callback exception escapes through C. Stop requests pass the owning Print
+to Orchestrator. A registered execution uses its own stop flag; an unregistered
+Print uses the shared flag.
+
+Operation notes:
+- Orchestrator::register_builtin_step_selector
+- run_generator_for_island
+
+Representative direct calls (branches are not a timeline):
+
+    run_step()
+        |-- count_layer_islands()
+        |-- plugin->setup()
+        `-- run_generator_for_island()
+
+    run_generator_for_island()
+        |-- orchestrator.prepare_plugin_run_context()
+        |-- plugin.setup_run()
+        |-- plugin.run()
+        `-- assign_island_outputs()
+*/
+
 namespace Slic3r::Steps::StepGeneratePerimeter {
 
 // Install the perimeter-generation selector declaration on the supplied host.
@@ -246,15 +273,15 @@ void defer_current_perimeter_exception(PerimeterRunContext &run,
         throw;
     } catch (const slic3r_api::PluginCancelled &) {
         if (run.orchestrator != nullptr)
-            run.orchestrator->request_plugin_cancel();
+            run.orchestrator->request_plugin_cancel(run.print);
     } catch (const CanceledException &) {
         if (run.orchestrator != nullptr)
-            run.orchestrator->request_plugin_cancel();
+            run.orchestrator->request_plugin_cancel(run.print);
     } catch (const Steps::Detail::PluginStopped &) {
-        // A PluginStopped adds no diagnostic: a known cause already has its own message, and an Unknown
-        // cause has none (the final step error says a stop was requested). Only keep the stop requested.
+        // Keep this Print's execution stopped without adding a diagnostic.
+        // A known failure already has a message. A plain stop request needs no new error message.
         if (run.orchestrator != nullptr)
-            run.orchestrator->request_plugin_cancel();
+            run.orchestrator->request_plugin_cancel(run.print);
     } catch (const std::exception &error) {
         try {
             slic3r_api::report_error(report_context, error.what());

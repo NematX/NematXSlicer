@@ -24,6 +24,36 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Thread.hpp"
 
+/*
+These helpers run pipeline plugins and handle failures from host callbacks.
+setup() prepares the plugin. setup_run() prepares each job. All preparation
+calls finish before run() starts those jobs. Each phase checks the owning
+Print's stop state before continuing.
+
+Operation notes:
+- run_object_step_plugin
+- Plugin::setup: prepare one execution
+- Plugin::setup_run: prepare all object jobs, then wait for them
+- Plugin::run: execute those jobs, then wait for them
+- throw_if_plugin_stopped: check cancellation after each phase
+- contain_callback_failure: handle an active exception without letting it cross C
+
+Representative direct calls (branches are not a timeline):
+
+    run_object_step_plugin()
+        |-- prepare_guarded_plugin_host_context()
+        |-- orchestrator.prepare_plugin_run_context()
+        |-- plugin.setup()
+        |-- throw_if_plugin_stopped()
+        `-- parallel_for()
+
+    parallel_for worker callback [not a direct call of the enclosing function]
+        `-- plugin.setup_run()
+
+    parallel_for worker callback [not a direct call of the enclosing function]
+        `-- plugin.run()
+*/
+
 namespace Slic3r {
 class ConfigBase;
 }
@@ -86,34 +116,27 @@ inline std::string step_name_for_diagnostic(Orchestrator &orchestrator, slicing_
     return "step " + std::to_string(int(step));
 }
 
-// Thrown by throw_if_plugin_stopped when a plugin run is stopped because a plugin reported an error or
-// because a stop was requested. Its text names the cause when one is known, and a known cause already has
-// its own message (the failing plugin's error, or the host message that requested the stop). Containing code
-// recognizes this type and adds no further message: a second one would not name a better cause, even when the
-// cause is unknown (a plain cancellation, which has no message to repeat). Lives here because both the step runner and the perimeter / infill pattern
-// callbacks, which include this header, need to recognize it.
+// Stop a plugin phase after an error or stop request. The text names the cause when known.
+// Callback handlers recognize this type and add no new diagnostic: a known cause
+// already has its message; a plain stop request does not need a new error message.
 class PluginStopped : public RuntimeError
 {
 public:
     using RuntimeError::RuntimeError;
 };
 
-// Contain the exception being handled by the calling catch block at a host callback boundary.
-// Host callbacks are called through the C ABI, so no C++ exception may escape them. The callback
-// catches everything and calls this function from its catch block: `throw;` rethrows the active
-// exception into the local handlers, which sort it. A PluginStopped only requests the stop again and adds no
-// message (see PluginStopped). A CanceledException is dropped (the runner rethrows
-// the cancellation at the next phase boundary, see throw_if_plugin_stopped); every other exception is
-// logged, added as an error message of the step with its what() text (or an unknown-exception text), and
-// the plugin cancellation is requested (as a host failure) so that the runner stops the step. Nothing
-// escapes: building the text is itself guarded, and the plugin cancellation is requested in the worst case.
-// Must only be called from an active catch block.
-inline void contain_callback_failure(Orchestrator &orchestrator, slicing_step_t step) noexcept
+// Handle the current exception inside a host callback. Call only from an active catch block.
+// No C++ exception escapes to the C caller. A supplied Print selects its execution on any thread.
+// PluginStopped keeps the stop requested without adding a message.
+// CanceledException is left for the runner to rethrow at the next phase boundary.
+// Other exceptions request a host-failure stop, then try to log and queue an error message.
+// Failure to build or record that message must not undo the stop request.
+inline void contain_callback_failure(Orchestrator &orchestrator, slicing_step_t step, const Print *print = nullptr) noexcept
 {
     // Request the cancellation first (the request functions are noexcept); logging and message creation
     // allocate, so their failure is swallowed: it must neither escape nor undo the cancellation request.
-    const auto record = [&orchestrator, step](const char *message) noexcept {
-        orchestrator.request_plugin_cancel_after_host_failure();
+    const auto record = [&orchestrator, step, print](const char *message) noexcept {
+        orchestrator.request_plugin_cancel_after_host_failure(print);
         try {
             const char *step_name = builtin_step_name(step);
             BOOST_LOG_TRIVIAL(error) << (step_name != nullptr ? step_name : "step") << " host callback error: " << message;
@@ -124,7 +147,7 @@ inline void contain_callback_failure(Orchestrator &orchestrator, slicing_step_t 
     try {
         throw;
     } catch (const PluginStopped &) {
-        orchestrator.request_plugin_cancel();
+        orchestrator.request_plugin_cancel(print);
     } catch (const CanceledException &) {
     } catch (const std::exception &error) {
         record(error.what());
@@ -136,7 +159,7 @@ inline void contain_callback_failure(Orchestrator &orchestrator, slicing_step_t 
             record(message.c_str());
         } catch (...) {
             // Building the text failed: still stop the step.
-            orchestrator.request_plugin_cancel_after_host_failure();
+            orchestrator.request_plugin_cancel_after_host_failure(print);
         }
     }
 }
@@ -152,15 +175,17 @@ inline plugin_host_context prepare_guarded_plugin_host_context(Orchestrator &orc
     return host_context;
 }
 
-// Phase-boundary check of a plugin run, called after setup, setup_run and run. First restores the public
-// print cancellation (print.throw_if_canceled()), because PluginCancelled is absorbed by the C++ ABI bridge.
-// Then, if the plugin reported an error (execution_error) or a stop was requested, throws PluginStopped:
+// Check after setup(), setup_run() or run(). First rethrow user cancellation from Print.
+// The C++ plugin wrapper absorbs PluginCancelled, so the host must check Print again.
+// A plugin error or execution stop then throws PluginStopped. Its text identifies
+// this plugin's error, another failing plugin, a host failure or an unknown stop cause.
+// A known cause already has a queued diagnostic; this error points to it instead of repeating it.
+// Diagnostic forms:
 //  - own error:    <STEP> stopped after plugin 'Y' reported an error during <phase>.
 //  - else, by the recorded stop cause of the orchestrator:
 //    plugin Z:  <STEP> stopped during <phase> of plugin 'Y' after plugin 'Z' reported an error.
 //    host:      <STEP> stopped during <phase> of plugin 'Y' after a host failure.
 //    unknown:   <STEP> stopped during <phase> of plugin 'Y' after a stop was requested.
-// The message of a known cause is already in the plugin message queue, so the step error only points to it.
 inline void throw_if_plugin_stopped(Orchestrator &orchestrator,
                                     const Print &print,
                                     slicing_step_t step,
@@ -174,7 +199,7 @@ inline void throw_if_plugin_stopped(Orchestrator &orchestrator,
     print.throw_if_canceled();
 
     const bool has_error = execution_error.load(std::memory_order_relaxed);
-    if (!has_error && !orchestrator.is_plugin_cancelled())
+    if (!has_error && !orchestrator.is_plugin_cancelled(&print))
         return;
 
     const std::string step_name = step_name_for_diagnostic(orchestrator, step);
@@ -184,7 +209,7 @@ inline void throw_if_plugin_stopped(Orchestrator &orchestrator,
 
     // This plugin is healthy: name what stopped it, so the step error points to the real cause.
     const std::string prefix = step_name + " stopped during " + phase + " of plugin '" + plugin.get_id() + "' after ";
-    const Orchestrator::PluginStopCause cause = orchestrator.plugin_stop_cause();
+    const Orchestrator::PluginStopCause cause = orchestrator.plugin_stop_cause(&print);
     switch (cause.kind) {
     case Orchestrator::PluginStopCause::Kind::Plugin:
         throw PluginStopped(prefix + "plugin '" + cause.plugin->get_id() + "' reported an error.");

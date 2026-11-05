@@ -11,12 +11,47 @@
 
 #include "Orchestrator.hpp"
 
-/* tbb */
-// The callbacks of the two loops below must not let an exception out (see slic3r_utils.h). The loops are extern "C", so the
-// compiler may assume they never throw and skip the cleanup of the frames an exception unwinds through (the TBB context of the loop
-// stays registered), which crashes later. An exception that reaches the loop anyway (a plugin that breaks the contract, or a host
-// allocation failure) therefore ends the process in a defined way: the failure is logged without throwing, then std::terminate() runs.
-// This safety net is verified by inspection only: terminating the process cannot be tested without a subprocess, and no test starts one.
+/*
+These C helpers run plugin work on the TBB thread pool and manage plugin storage.
+The parallel loops use the calling thread's execution context on each worker.
+They return after their workers finish. The caller keeps user_data and the
+execution context alive until that return.
+slic3r_parallel_for_storage gives each item its own temporary allocation storage.
+Results that must outlive the item must be moved or copied to longer-lived storage.
+
+storage_*: manage allocations in the supplied storage, independently of loop lifetime
+
+A C caller cannot recover by catching an exception from these loops.
+Unwinding through their C entry points can skip compiler-generated cleanup
+and leave a TBB context registered, breaking later work. The failure handler
+therefore logs without throwing and calls std::terminate().
+
+Callbacks must not let C++ exceptions escape through this C interface (see slic3r_utils.h).
+If a callback or host operation throws out of a parallel loop, log the failure and terminate.
+Continuing after unwinding through the loop's C calling boundary is not supported.
+
+Operation notes:
+- slic3r_parallel_for / slic3r_parallel_for_storage
+- Capture the calling execution
+- parallel_for: install it while calling each item
+- Wait for all items before returning
+
+Representative direct calls (branches are not a timeline):
+
+    slic3r_parallel_for()
+        |-- Slic3r::Orchestrator::instance()
+        |-- orchestrator.prepare_plugin_host_context()
+        |-- Slic3r::parallel_for()
+        `-- terminate_on_callback_exception()
+
+    slic3r_parallel_for_storage()
+        |-- Slic3r::Orchestrator::instance()
+        |-- orchestrator.prepare_plugin_host_context()
+        |-- Slic3r::parallel_for()
+        `-- terminate_on_callback_exception()
+*/
+
+
 namespace {
 [[noreturn]] void terminate_on_callback_exception(const char *function) noexcept
 {
@@ -36,7 +71,12 @@ void slic3r_parallel_for(uint32_t begin, uint32_t end, void *user_data, void (*f
         return;
 
     try {
-        Slic3r::parallel_for(begin, end, [&](size_t i) { fn(uint32_t(i), user_data); });
+        Slic3r::Orchestrator &orchestrator = Slic3r::Orchestrator::instance();
+        const plugin_host_context inherited = orchestrator.prepare_plugin_host_context(STEP_NONE, nullptr);
+        Slic3r::parallel_for(begin, end, [&](size_t i) {
+            Slic3r::Orchestrator::RunScope scope = orchestrator.bind_run(&inherited);
+            fn(uint32_t(i), user_data);
+        });
     } catch (...) {
         terminate_on_callback_exception("slic3r_parallel_for");
     }
@@ -54,7 +94,10 @@ void slic3r_parallel_for_storage(uint32_t begin,
         return;
 
     try {
+        Slic3r::Orchestrator &orchestrator = Slic3r::Orchestrator::instance();
+        const plugin_host_context inherited = orchestrator.prepare_plugin_host_context(STEP_NONE, nullptr);
         Slic3r::parallel_for(begin, end, [&](size_t i) {
+            Slic3r::Orchestrator::RunScope scope = orchestrator.bind_run(&inherited);
             // A fresh scratch storage per item gives plugin code a simple lifetime:
             // every temporary handle created from scratch_storage dies when this
             // callback returns. Long-lived results must be copied or moved through

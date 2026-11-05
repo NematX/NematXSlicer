@@ -2,6 +2,7 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #ifndef slic3r_Plugin_hpp_
 #define slic3r_Plugin_hpp_
 
@@ -10,6 +11,14 @@
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
+
+// Plugin copies a validated C function table for the slicer application.
+// The plugin object and its executable code remain owned by the plugin.
+// Call initialize(), then setup(), setup_run() and run().
+// These phases prepare the plugin before executing its jobs.
+// These calls associate the host's execution state with their calling thread.
+// clear() releases a Print's cached data at a saved pipeline boundary or during Print destruction.
+// It receives the Print identity and the same persistent storage used during setup().
 
 namespace Slic3r {
 
@@ -89,13 +98,13 @@ public:
     int32_t initialize(storage_handle *storage) const {
         return m_c_api.vt->initialize(m_c_api.ctx, storage);
     }
-    void setup(const plugin_run_context &context, uint32_t run_count) const {
-        // Register first so caches created by a partially failed setup are still cleaned up.
-        note_plugin_setup(context.host_context, *this, context.step);
-        m_c_api.vt->setup(m_c_api.ctx, &context, run_count);
-    }
-    void setup_run(const plugin_run_context &context) const { m_c_api.vt->setup_run(m_c_api.ctx, &context); }
-    void run(const plugin_run_context &context) const { m_c_api.vt->run(m_c_api.ctx, &context); }
+    // Select the execution on this thread, register Print cleanup, then call the plugin's setup().
+    void setup(const plugin_run_context &context, uint32_t run_count) const;
+    // Select the supplied execution on this thread while the plugin prepares one job.
+    void setup_run(const plugin_run_context &context) const;
+    // Select the supplied execution on this thread while the plugin runs one job.
+    // Count every run() call, whatever its outcome.
+    void run(const plugin_run_context &context) const;
     // An absent callback succeeds without touching the plugin's storage.
     // Returns PLUGIN_ERROR_OK, or a diagnostic id the host resolves through
     // Orchestrator::error_message().

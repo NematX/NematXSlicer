@@ -674,14 +674,13 @@ int orchestrator_plugin_is_cancelled(plugin_host_context *host_context)
     if (host_context == nullptr)
         return 0;
 
-    // User cancellation belongs to the Print, while plugin failures use the
-    // orchestrator stop flag. Plugins see both through one polling callback so
-    // they do not need to know which host subsystem requested the stop.
+    // Poll user cancellation on the Print and plugin cancellation on the supplied execution.
+    // If none is supplied, Orchestrator uses this thread's execution or the shared stop flag.
     const bool print_cancelled =
         host_context->print != nullptr && host_context->print->canceled();
-    const bool plugin_cancelled =
-        host_context->orchestrator != nullptr &&
-        host_context->orchestrator->is_plugin_cancelled();
+    const bool plugin_cancelled = host_context->run_context != nullptr ?
+        static_cast<Slic3r::Orchestrator::RunContext *>(host_context->run_context)->plugin_cancel_requested() :
+        (host_context->orchestrator != nullptr && host_context->orchestrator->is_plugin_cancelled());
     return print_cancelled || plugin_cancelled ? 1 : 0;
 }
 
@@ -712,11 +711,13 @@ void orchestrator_plugin_report_error(plugin_host_context *host_context, const c
     if (host_context != nullptr && host_context->execution_error != nullptr)
         host_context->execution_error->store(true, std::memory_order_relaxed);
     if (host_context != nullptr && host_context->orchestrator != nullptr && host_context->cancel_on_error) {
-        // The failing plugin becomes the recorded cause of the stop, so other plugins stopped by it can name it.
-        if (host_context->plugin != nullptr)
-            host_context->orchestrator->request_plugin_cancel(*host_context->plugin);
+        // Record the failing plugin only if no cause is known yet, so later errors keep the first cause.
+        if (host_context->run_context != nullptr)
+            static_cast<Slic3r::Orchestrator::RunContext *>(host_context->run_context)->request_plugin_cancel(host_context->plugin);
+        else if (host_context->plugin != nullptr)
+            host_context->orchestrator->request_plugin_cancel(*host_context->plugin, host_context->print);
         else
-            host_context->orchestrator->request_plugin_cancel();
+            host_context->orchestrator->request_plugin_cancel(host_context->print);
     }
 
     try {

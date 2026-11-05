@@ -29,7 +29,7 @@ C ABI, the binary calling interface used by the host. It builds the function
 table and contains exceptions at its callbacks, so a plugin need not write that
 table or the C-to-C++ wrappers itself.
 
-PluginProgress is the thread-safe work counter owned by PluginBase. A plugin
+PluginProgress is a thread-safe work counter selected by PluginBase for each callback. A plugin
 estimates its work during preparation, then reports completed units during
 execution. The host displays the progress it receives; it does not infer how
 much work a plugin will perform.
@@ -84,24 +84,9 @@ plugin's id and throws if the host rejects the description. Execution priority
 controls call order within a step; exclusive_group_priority_impl() separately
 ranks alternatives for the default choice.
 
-The host guarantees this order for one step/plugin pair:
-
-    construct the plugin with its host
-        |
-    c_instance() -> orchestrator_register_plugin()
-        |
-    initialize_bridge() -> initialize_safe() -> inilialize_impl()
-        |   [the interface spelling is inilialize_impl]
-        |
-    setup_bridge() -> setup_safe()
-        |-- reset progress
-        `-- setup_impl(context, run_count) once
-        |
-    setup_run_bridge() -> setup_run_safe() -> setup_run_impl(context) for each call
-        |   [these preparations may run in parallel; all finish before execution]
-        |
-    run_bridge() -> run_safe() -> run_impl(context) for each call
-            [these executions may also run in parallel]
+For one step/plugin pair, register the instance and initialize it before
+preparing the execution. Prepare every job before running any of them;
+all preparation workers finish before execution workers start.
 
 setup_run_impl() prepares work and estimates its size. Only run_impl() should
 change the slicer data tree, within the capabilities of its step payload. Keep
@@ -116,6 +101,40 @@ The setup and run wrappers treat PluginCancelled as cooperative cancellation and
 add no error message. Standard and unknown exceptions instead become plugin
 errors through the current callback context. The host observes the stop/error
 state after the callback returns.
+
+The host may supply separate counters for each execution.
+ProgressScope selects them for the current callback, then restores the previous selection.
+Without host counters, PluginBase uses the plugin's own counters.
+On the callback thread, obtain PluginProgress &counters = progress().
+Pass that reference to any threads started by the callback. Finish those threads
+before returning. Do not call progress() from an unassociated thread.
+
+Operation notes:
+- construct the plugin with its host
+- c_instance() :  orchestrator_register_plugin()
+- initialize_bridge() :  initialize_safe() :  inilialize_impl()
+- [the interface spelling is inilialize_impl]
+- setup_bridge() :  setup_safe()
+- setup_impl(context, run_count) once
+- setup_run_bridge() :  setup_run_safe() :  setup_run_impl(context) for each call
+- [these preparations may run in parallel; all finish before execution]
+- run_bridge() :  run_safe() :  run_impl(context) for each call
+- [these executions may also run in parallel]
+
+Representative direct calls (branches are not a timeline):
+
+    setup_bridge()
+        `-- setup_safe()
+            |-- progress()
+            `-- setup_impl()
+
+    setup_run_bridge()
+        `-- setup_run_safe()
+            `-- setup_run_impl()
+
+    run_bridge()
+        `-- run_safe()
+            `-- run_impl()
 */
 
 namespace slic3r_api {
@@ -420,11 +439,13 @@ protected:
         assert(m_orchestrator);
     }
 
-    // Shared progress helper owned by this plugin instance.
-    //
-    // It is mutable internally so run_impl() can stay const while still
-    // reporting progress from multiple worker threads.
-    PluginProgress &progress() const { return m_progress; }
+    // Borrow this callback's counters. Obtain the reference here before starting other threads.
+    // Those threads must finish using it before the callback returns.
+    PluginProgress &progress() const
+    {
+        assert(s_active_progress != nullptr);
+        return s_active_progress != nullptr ? *s_active_progress : m_progress;
+    }
 
     // Stable plugin identifier. It must be unique among registered plugins.
     virtual const char *id_impl() const noexcept = 0;
@@ -513,6 +534,23 @@ protected:
     virtual void run_impl(const plugin_run_context *run_ctx) const = 0;
 
 private:
+    // Select one callback's counters on this thread. Restore the previous selection when the scope ends.
+    class ProgressScope
+    {
+    public:
+        // Use the host's execution counters when supplied. Otherwise use this plugin's own counters.
+        ProgressScope(const PluginBase &plugin, const plugin_run_context *run_ctx)
+            : previous_(s_active_progress)
+        {
+            s_active_progress = run_ctx != nullptr && run_ctx->progress_context != nullptr ?
+                static_cast<PluginProgress *>(run_ctx->progress_context) : &plugin.m_progress;
+        }
+        // Restore progress selection when nested callbacks return, including exceptional exits.
+        ~ProgressScope() { s_active_progress = previous_; }
+    private:
+        PluginProgress *previous_;
+    };
+
     // The *_safe() wrappers are the C++/C ABI safety belt: exceptions are
     // converted to plugin errors instead of crossing function pointers.
 
@@ -531,8 +569,9 @@ private:
 
     void setup_safe(const plugin_run_context *run_ctx, uint32_t run_count) const noexcept
     {
+        ProgressScope progress_scope(*this, run_ctx);
         try {
-            m_progress.reset(run_ctx, run_count, progress_message_format_impl());
+            progress().reset(run_ctx, run_count, progress_message_format_impl());
             setup_impl(run_ctx, run_count);
         } catch (const PluginCancelled &) {
             return;
@@ -547,6 +586,7 @@ private:
 
     void setup_run_safe(const plugin_run_context *run_ctx) const noexcept
     {
+        ProgressScope progress_scope(*this, run_ctx);
         try {
             setup_run_impl(run_ctx);
         } catch (const PluginCancelled &) {
@@ -562,6 +602,7 @@ private:
 
     void run_safe(const plugin_run_context *run_ctx) const noexcept
     {
+        ProgressScope progress_scope(*this, run_ctx);
         try {
             run_impl(run_ctx);
         } catch (const PluginCancelled &) {
@@ -710,6 +751,7 @@ private:
     // plugin does not modify the table every other instance points to.
     mutable plugin_vtable m_instance_vtable = {};
     mutable PluginProgress m_progress;
+    inline static thread_local PluginProgress *s_active_progress = nullptr;
 
 protected:
     orchestrator_handle *m_orchestrator;

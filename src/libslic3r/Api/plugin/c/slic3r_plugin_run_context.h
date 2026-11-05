@@ -2,16 +2,24 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #ifndef slic3r_plugin_run_context_h_
 #define slic3r_plugin_run_context_h_
 
 #define SLIC3R_PLUGIN_API_PLUGIN_RUN_CONTEXT_MAJOR 2u
-#define SLIC3R_PLUGIN_API_PLUGIN_RUN_CONTEXT_MINOR 0u
+#define SLIC3R_PLUGIN_API_PLUGIN_RUN_CONTEXT_MINOR 1u
 
 #include <stddef.h>
 
 #include "slic3r_slicing_step.h"
 #include "slic3r_utils.h"
+
+/* This header supplies call data for plugin setup, preparation or execution.
+   It also defines host callbacks for cancellation, diagnostics and progress.
+   Use is_cancelled(), report_warning(), report_error() or report_progress() with host_context.
+   The context and step data are borrowed for the call. Do not retain their addresses.
+   plugin_storage is persistent allocation storage shared by the plugin's calls.
+   The optional progress_context is separate: PluginBase uses it for C++ progress counters. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -46,12 +54,12 @@ UTF-8 text and may be NULL to let the host use a default step/plugin message.
 typedef void (*plugin_report_progress_fn)(plugin_host_context *host_context, double progress, const char *message);
 
 /*
-Common context passed to setup_run() and run().
-
-step tells which slicing step is currently executed. data points to the
-step-specific payload documented in Api/plugin/c/steps/slic3r_step_*.h.
-Use the plugin_ctx_as_* helper from the corresponding step header to cast data
-safely.
+Context passed to setup(), setup_run() and run().
+step identifies the slicing stage. data points to that stage's call data,
+documented in Api/plugin/c/steps/slic3r_step_*.h. Use its plugin_ctx_as_* helper
+to access data with the correct type.
+The context and data are valid for the call only. Progress counters belong
+to the execution. Allocations in plugin_storage keep their separate lifetime.
 */
 typedef struct plugin_run_context {
     slicing_step_t step;
@@ -76,6 +84,9 @@ typedef struct plugin_run_context {
     plugin_report_fn report_warning;
     plugin_report_fn report_error;
     plugin_report_progress_fn report_progress;
+    /* Opaque host-owned counters used by C++ PluginBase during execution.
+       Borrowed until the execution ends. Do not free or cast it in C plugins. NULL selects the plugin's own counters. */
+    void *progress_context;
 } plugin_run_context;
 
 #ifdef __cplusplus

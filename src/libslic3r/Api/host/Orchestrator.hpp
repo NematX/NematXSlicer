@@ -5,28 +5,6 @@
 #ifndef slic3r_Orchestrator_hpp_
 #define slic3r_Orchestrator_hpp_
 
-/* This header exposes plugin registration, selection settings and job execution.
-   The host is the slicer application. Orchestrator is its process-wide manager
-   of plugins, components that perform jobs at processing stages called steps.
-
-   Use instance(), plugin_registration_scope() and register_plugin() to introduce
-   instances under an installed package directory. PluginRegistrationScope ends
-   that association when destroyed. Registration does not enable an instance.
-
-   An exclusive group holds alternative plugins for one step. Its selector is
-   a setting naming a member. ExclusiveGroupDefinition combines text and package
-   identity with StepSelectorTraits, its placement and selection rules. Register
-   descriptions, enable members, then elect_exclusive_group_definitions() and
-   create_selector_print_config() retain descriptions and create settings.
-   finalize_selector_option() filters choices without replacing their text.
-   exclusive_group_definition_or_default() reads the retained description;
-   its untranslated flag requires verbatim display without catalogue lookup.
-
-   initialize_plugins() reads initialization result codes before execute_plugin()
-   prepares and runs callable jobs. Contexts passed to plugin functions borrow
-   application data for those calls only. Package reports and execution diagnostics
-   distinguish non-fatal warnings from failures. */
-
 #include <atomic>
 #include <cassert>
 #include <map>
@@ -54,6 +32,36 @@
 
 #include "Plugin.hpp"
 #include "StepSelectorTraits.hpp"
+
+/* This header exposes plugin registration, selection settings and job execution.
+   The host is the slicer application. Orchestrator is its process-wide manager
+   of plugins, components that perform jobs at processing stages called steps.
+
+   Use instance(), plugin_registration_scope() and register_plugin() to introduce
+   instances under an installed package directory. PluginRegistrationScope ends
+   that association when destroyed. Registration does not enable an instance.
+
+   An exclusive group holds alternative plugins for one step. Its selector is
+   a setting naming a member. ExclusiveGroupDefinition combines text and package
+   identity with StepSelectorTraits, its placement and selection rules. Register
+   descriptions, enable members, then elect_exclusive_group_definitions() and
+   create_selector_print_config() retain descriptions and create settings.
+   finalize_selector_option() filters choices without replacing their text.
+   exclusive_group_definition_or_default() reads the retained description;
+   its untranslated flag requires verbatim display without catalogue lookup.
+
+   initialize_plugins() reads initialization result codes before execute_plugin()
+   prepares and runs callable jobs. Contexts passed to plugin functions borrow
+   application data for those calls only. Package reports and execution diagnostics
+   distinguish non-fatal warnings from failures.
+
+   For concurrent prints, create one RunContext per execution. It owns the progress
+   counters and stop state. Hold the RunScope returned by enter_run(context, &print)
+   until the execution's worker threads have finished. Destroying the scope restores
+   the previous thread association. It does not free plugin allocations.
+
+   PluginStorage remains shared. Print asks clear(print, storage) to release its
+   cached data when replaying from a saved pipeline boundary or during destruction. */
 
 namespace Slic3r {
 
@@ -98,6 +106,9 @@ struct plugin_host_context
     // probes set this false so one malformed candidate cannot suppress the
     // remaining candidates.
     bool cancel_on_error = true;
+    // Borrow the Print's RunContext, or the thread's context when no Print is supplied.
+    // Copies keep the same pointer. Its owner must keep it alive until all callbacks return.
+    void *run_context = nullptr;
 };
 
 namespace Slic3r {
@@ -195,6 +206,64 @@ struct PluginPackageLoadReport
 class Orchestrator
 {
 public:
+    // First known cause of a plugin stop; registered Plugin pointers remain valid for the process lifetime.
+    struct PluginStopCause
+    {
+        enum class Kind { Unknown, Plugin, Host };
+        Kind kind = Kind::Unknown;
+        const Plugin *plugin = nullptr;
+    };
+
+    // Own the progress counters, stop flag and first known stop cause for one execution.
+    // Keep this object alive until all RunScopes and callbacks using it have finished.
+    class RunContext
+    {
+    public:
+        // Create an initially healthy execution with no progress counters allocated.
+        RunContext();
+        // Release progress counters after every callback using them has returned.
+        ~RunContext();
+        RunContext(const RunContext &) = delete;
+        RunContext &operator=(const RunContext &) = delete;
+
+        // Stop this execution, retaining the first known cause; a null plugin adds no cause.
+        void request_plugin_cancel(const Plugin *failed_plugin = nullptr) noexcept;
+        // Stop this execution because the host failed, unless a cause is already recorded.
+        void request_plugin_cancel_after_host_failure() noexcept;
+        // Read the stop flag without taking the diagnostic mutex.
+        bool plugin_cancel_requested() const noexcept;
+        // Copy the first known cause under the diagnostic mutex.
+        PluginStopCause plugin_stop_cause() const;
+        // Clear the flag and cause between phases, never while workers are running.
+        void reset_plugin_cancel();
+
+    private:
+        struct State;
+        std::unique_ptr<State> state_;
+        friend class Orchestrator;
+    };
+
+    // Associate a RunContext with this thread and optionally with a Print.
+    // Destruction restores the previous thread association. Plugin allocations stay alive.
+    class RunScope
+    {
+    public:
+        RunScope(const RunScope &) = delete;
+        RunScope &operator=(const RunScope &) = delete;
+        // Restore the previous thread association when this scope ends.
+        ~RunScope();
+
+    private:
+        friend class Orchestrator;
+        // Borrow context for this thread. A non-null print also registers that Print with the context.
+        RunScope(Orchestrator &orchestrator, RunContext *context, Print *print);
+        Orchestrator *orchestrator_;
+        RunContext *context_;
+        RunContext *previous_context_;
+        Print *print_;
+        bool owns_registration_ = false;
+    };
+
     struct TranslationCatalog
     {
         std::string domain;
@@ -564,6 +633,12 @@ public:
     Orchestrator(Orchestrator&&) = delete;
     Orchestrator& operator=(Orchestrator&&) = delete;
 
+    // Associate context with this thread and the optional Print.
+    // Keep the returned scope alive until all execution workers have finished.
+    RunScope enter_run(RunContext &context, Print *print = nullptr);
+    // Use host_context's execution on this thread until the returned scope ends.
+    // This does not register a Print or take ownership of the context.
+    RunScope bind_run(const plugin_host_context *host_context);
     // Access storage owned by registered plugins; clearing it invalidates exported handles.
     std::map<Plugin *, PluginStorage> &plugin_storage() { return m_plugin_storage; }
     // Read-only access to plugin-owned storage.
@@ -600,30 +675,23 @@ public:
     // for dynamic ids, generic text for anything unknown. Never fails and never
     // borrows registry storage.
     std::string error_message(int32_t id) const;
-    // Return whether cancellation was requested by the host.
-    bool is_plugin_cancelled() const;
-    // First known cause of a plugin stop, used to explain why a healthy plugin was stopped.
-    struct PluginStopCause
-    {
-        enum class Kind { Unknown, Plugin, Host };
-        Kind kind = Kind::Unknown;
-        // Set when kind is Plugin. Plugins are never unregistered, so the pointer stays valid.
-        const Plugin *plugin = nullptr;
-    };
-    // The three request functions never throw: if the mutex cannot be locked, the flag is still set and
-    // the cause stays as it was (possibly Unknown).
-    // Request cancellation whose cause is unknown or is not an error (user cancel, silent stop).
-    // It records no cause, and it keeps a cause that was already recorded.
-    void request_plugin_cancel() noexcept;
-    // Request cancellation because `failed_plugin` reported an error. Records the cause when none is recorded yet.
-    void request_plugin_cancel(const Plugin &failed_plugin) noexcept;
-    // Request cancellation because the host itself failed. Records the cause when none is recorded yet.
-    void request_plugin_cancel_after_host_failure() noexcept;
+    // Read the stop flag. The stop functions below use the same context selection:
+    // a non-null Print selects its registered execution; no Print selects this thread's execution.
+    // If that lookup finds no context, use the host's shared stop state.
+    bool is_plugin_cancelled(const Print *print = nullptr) const;
+    // The three request functions never throw. A locking failure still requests a stop,
+    // but may leave its cause unknown. An already recorded cause is preserved.
+    // Request a stop without adding an error cause, for example a user cancellation.
+    void request_plugin_cancel(const Print *print = nullptr) noexcept;
+    // Request a stop after failed_plugin reports an error. Keep the first known cause.
+    void request_plugin_cancel(const Plugin &failed_plugin, const Print *print = nullptr) noexcept;
+    // Request a stop after a host failure. Keep the first known cause.
+    void request_plugin_cancel_after_host_failure(const Print *print = nullptr) noexcept;
     // Return the first known cause recorded since the last reset (Unknown when none).
-    PluginStopCause plugin_stop_cause() const;
-    // Clear cancellation and the recorded cause before starting an independent operation.
-    // Called between runs, never while plugin workers are running.
-    void reset_plugin_cancel();
+    PluginStopCause plugin_stop_cause(const Print *print = nullptr) const;
+    // Clear the selected stop flag and recorded cause before the next phase or run.
+    // Call only after the previous workers have finished.
+    void reset_plugin_cancel(const Print *print = nullptr);
     // Initialize enabled plugins with borrowed storage, resolve diagnostic ids and disable failures without repeating recorded rejections.
     // Then validate required settings; plugin ownership is unchanged, and allocation failures may propagate.
     void initialize_plugins();
@@ -655,6 +723,14 @@ public:
     const std::vector<GenericFacetsAnnotationDefinition> &generic_facets_annotations() const { return m_generic_facets_annotations; }
 
 private:
+    // Return the supplied Print's context, or this thread's context when print is null.
+    // The pointer is borrowed. Return null when the selected association is absent.
+    RunContext *find_run_context(const Print *print) const;
+    mutable std::mutex m_run_contexts_mutex;
+    std::map<const Print *, RunContext *> m_run_contexts;
+    // Protect access to the map of plugin storages during execution. Startup is serialized separately.
+    // Each PluginStorage protects its allocations after this map lock is released.
+    std::mutex m_plugin_storage_map_mutex;
     // One bidirectional intern table per semantic id type. Keeping this host
     // detail private prevents callers from bypassing static reservations or
     // assigning their own numeric values.

@@ -4,9 +4,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-// PrintBase prepares model placeholders and output paths shared by print implementations.
-// Output names preserve late variables (brace-delimited names resolved from print statistics)
-// while filtering the surrounding text before the extension is appended.
+
 #include "PrintBase.hpp"
 
 #include <regex>
@@ -17,6 +15,36 @@
 #include "Exception.hpp"
 #include "I18N.hpp"
 
+/*
+PrintBase prepares model variables and output paths for print implementations.
+Some output-name variables are resolved from print statistics later. Their
+brace-delimited names survive filtering until the extension has been appended.
+
+PrintStateBase supplies transition numbers shared by independent prints.
+These numbers identify step changes. They do not protect the print's data.
+
+Operation notes:
+- update_object_placeholders: collect variables from the model
+- output_filename: expand known variables and prepare the output name
+- PrintStateBase::next_timestamp: allocate the next shared transition number
+
+Representative direct calls (branches are not a timeline):
+
+    PrintBase::update_object_placeholders()
+        |-- m_model.objects()
+        |-- model_instance->is_printable()
+        |-- config.set_key_value()
+        |-- boost::filesystem::path()
+        |-- filename()
+        `-- input_filename.substr()
+
+    PrintBase::output_filename()
+        |-- PlaceholderParser::update_timestamp()
+        |-- this->update_object_placeholders()
+        |-- process()
+        `-- filepath.replace_extension()
+*/
+
 namespace Slic3r
 {
 
@@ -25,7 +53,7 @@ void PrintTryCancel::operator()() const
     m_print->throw_if_canceled();
 }
 
-size_t PrintStateBase::g_last_timestamp = 0;
+std::atomic<size_t> PrintStateBase::g_last_timestamp { 0 };
 
 // Update "scale", "input_filename", "input_filename_base" placeholders from the current m_objects.
 void PrintBase::update_object_placeholders(DynamicConfig &config, const std::string & /* default_output_ext */) const

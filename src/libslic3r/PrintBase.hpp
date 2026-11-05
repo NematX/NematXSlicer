@@ -4,6 +4,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #ifndef slic3r_PrintBase_hpp_
 #define slic3r_PrintBase_hpp_
 
@@ -28,6 +29,22 @@
 #include "PlaceholderParser.hpp"
 #include "PrintStatus.hpp"
 #include "Config/PrintConfig.hpp"
+
+/*
+PrintBase supplies common model variables, output-name handling, warnings and
+cancellation to the concrete print implementations. PrintStateBase and the
+step-state templates track whether each processing result is fresh, running,
+complete, cancelled or invalidated.
+
+Start and finish a step through its state interface while holding the owning
+print's mutex. Invalidate a completed result when an input changes; clean its
+dependent data before treating it as fresh again. A transition number identifies
+a state change, not elapsed time and not permission to access another print.
+
+Common print state, warnings and cancellation for FFF/SLA implementations.
+Protect step transitions with the owning print's mutex.
+A timestamp is a transition number. One atomic counter supplies these numbers for all prints.
+*/
 
 namespace Slic3r {
 
@@ -88,7 +105,7 @@ public:
             bool invalidated = this->state == State::Started || this->state == State::Done;
             if (invalidated) {
                 this->state = this->state == State::Started ? State::Canceled : State::Invalidated;
-                this->timestamp = ++ g_last_timestamp;
+                this->timestamp = next_timestamp();
             }
             return invalidated;
         }
@@ -118,11 +135,10 @@ public:
 
 protected:
     friend class Print;
-    static TimeStamp next_timestamp() { return ++g_last_timestamp; }
-    //FIXME last timestamp is shared between Print & SLAPrint,
-    // and if multiple Print or SLAPrint instances are executed in parallel, modification of g_last_timestamp
-    // is not synchronized!
-    static size_t g_last_timestamp;
+    // Return the next shared transition number. The relaxed atomic operation only allocates a number.
+    // It does not publish step results or replace the owning print's state mutex.
+    static TimeStamp next_timestamp() { return g_last_timestamp.fetch_add(1, std::memory_order_relaxed) + 1; }
+    static std::atomic<size_t> g_last_timestamp;
 };
 
 // SLA and background-process state use their own step enums.
@@ -204,7 +220,7 @@ public:
         if (! state.enabled || state.state == State::Done)
             return false;
         state.state = State::Started;
-        state.timestamp = ++ g_last_timestamp;
+        state.timestamp = next_timestamp();
         state.mark_warnings_non_current();
         m_step_active = step;
         m_has_active_step = true;
@@ -225,7 +241,7 @@ public:
         assert(m_has_active_step && m_step_active == step);
         PrintStateBase::StateWithWarnings &state = this->state_for(step);
         state.state = State::Done;
-        state.timestamp = ++ g_last_timestamp;
+        state.timestamp = next_timestamp();
         m_has_active_step = false;
         // Remove all non-current warnings.
     	auto it = std::remove_if(state.warnings.begin(), state.warnings.end(), [](const auto &w) { return ! w.current; });

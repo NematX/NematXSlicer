@@ -12,27 +12,46 @@
 #include <stdexcept>
 #include <string>
 
-/* This file wraps a plugin's functions and copies its descriptions for the application.
-   A plugin supplies functions to the host, the slicer application, through a C
-   ABI (binary calling interface). A callback is one such function; its context
-   pointer identifies the plugin object without transferring ownership.
+/*
+This file wraps a plugin's functions and copies its descriptions for the application.
+A plugin supplies functions to the host, the slicer application, through a C
+ABI (binary calling interface). A callback is one such function; its context
+pointer identifies the plugin object without transferring ownership.
 
-   Construct Plugin from plugin_instance, which pairs that context with
-   plugin_vtable, a function table with an explicit byte count. The constructor validates required
-   functions, copies available functions and descriptive strings, and reads no
-   optional field beyond the supplied size.
+Construct Plugin from plugin_instance, which pairs that context with
+plugin_vtable, a function table with an explicit byte count. The constructor validates required
+functions, copies available functions and descriptive strings, and reads no
+optional field beyond the supplied size.
 
-   Read identity and group membership with get_id() and get_exclusive_group().
-   get_priority() controls execution ordering; get_exclusive_group_priority()
-   ranks alternatives for the same job. After registration, initialize() returns
-   a diagnostic id; setup(), setup_run() and run() prepare and execute jobs.
-   All calls still borrow plugin-owned context and code, which must remain alive.
+Read identity and group membership with get_id() and get_exclusive_group().
+get_priority() controls execution ordering; get_exclusive_group_priority()
+ranks alternatives for the same job. After registration, initialize() returns
+a diagnostic id; setup(), setup_run() and run() prepare and execute jobs.
+All calls still borrow plugin-owned context and code, which must remain alive.
+The host context links a callback to one execution's progress and stop state.
+setup(), setup_run() and run() install this link on their calling thread.
+Nested calls to host services then observe that execution's stop state.
 
-   Call graph:
-     Plugin constructor
-       validate_plugin_instance
-     initialize / setup / setup_run / run
-       copied plugin functions */
+Operation notes:
+- initialize / setup / setup_run / run
+
+Representative direct calls (branches are not a timeline):
+
+    Plugin::Plugin()
+        |-- validate_plugin_instance()
+        |-- std::memcpy()
+        |-- read_plugin_used_config_keys()
+        `-- read_plugin_defined_config_keys()
+
+    Plugin::setup()
+        |-- bind_run()
+        |-- note_plugin_setup()
+        `-- m_c_api.vt->setup()
+
+    Plugin::run()
+        |-- bind_run()
+        `-- m_c_api.vt->run()
+*/
 
 namespace Slic3r {
 
@@ -195,6 +214,26 @@ Plugin::Plugin(plugin_instance c_api,
     read_plugin_used_config_keys(c_api, c_api.vt->used_config_keys, m_used_config_keys);
     read_plugin_defined_config_keys(
         c_api, c_api.vt->defined_config_keys, m_used_config_keys, m_defined_config_keys);
+}
+
+void Plugin::setup(const plugin_run_context &context, uint32_t run_count) const
+{
+    Orchestrator::RunScope run_scope = Orchestrator::instance().bind_run(context.host_context);
+    // Track before calling setup so partially created caches also receive checkpoint cleanup.
+    note_plugin_setup(context.host_context, *this, context.step);
+    m_c_api.vt->setup(m_c_api.ctx, &context, run_count);
+}
+
+void Plugin::setup_run(const plugin_run_context &context) const
+{
+    Orchestrator::RunScope run_scope = Orchestrator::instance().bind_run(context.host_context);
+    m_c_api.vt->setup_run(m_c_api.ctx, &context);
+}
+
+void Plugin::run(const plugin_run_context &context) const
+{
+    Orchestrator::RunScope run_scope = Orchestrator::instance().bind_run(context.host_context);
+    m_c_api.vt->run(m_c_api.ctx, &context);
 }
 
 void note_plugin_setup(plugin_host_context *host_context,
