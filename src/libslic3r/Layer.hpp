@@ -71,6 +71,11 @@ protected:
     BoundingBoxes               m_infill_areas_bboxes;
     // to get the boundary in avoid_crossing_perimeters. Filled by make_perimeters()
     ExPolygons                  m_perimeter_slices;
+    // Areas of this island that ask for support. Written by STEP_SUPPORT_DEMAND
+    // and refined by later plugins (bridge removal after the perimeters) up to
+    // STEP_SUPPORT, which reads it. Emptied by the STEP_SUPPORT_DEMAND cleanup so
+    // a replay starts from no demand.
+    ExPolygons                  m_support_demand;
 
 public:
 
@@ -108,6 +113,9 @@ public:
     //// Unspecified fill polygons, used for intersecting when we don't want the infill/perimeter overlap
     //// note: if empty, that means there is no overlap, so you don't need to intersect with it.
     [[nodiscard]] const ExPolygons&                 infill_free_areas() const { return m_infill_free_areas; }
+
+    // Areas of this island that ask for support (see m_support_demand).
+    [[nodiscard]] const ExPolygons&                 support_demand() const { return m_support_demand; }
 
     void make_perimeters(LayerRegionIsland &region_island);
 };
@@ -253,6 +261,9 @@ LayerSupportProperty stored in the Layer property container. Callers that need
 support metadata should read that property directly so auxiliary layers remain
 generic.
 */
+// Summarize the support buckets of one support layer: SupportMaterial for base
+// only, SupportMaterialInterface for interface only, Mixed for both, None for
+// neither.
 ExtrusionRole support_layer_role(const Layer &layer);
 void          simplify_support_extrusion_path(Layer &layer);
 

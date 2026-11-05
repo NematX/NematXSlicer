@@ -741,6 +741,13 @@ const expolygon_collection_handle *layer_island_get_infill_no_overlap_areas(cons
                                &Slic3r::to_layer_island(me)->infill_free_areas());
 }
 
+const expolygon_collection_handle *layer_island_get_support_demand(const layer_island_handle *me)
+{
+    return me == nullptr ? nullptr :
+                           reinterpret_cast<const expolygon_collection_handle *>(
+                               &Slic3r::to_layer_island(me)->support_demand());
+}
+
 const plugin_property_container_handle *layer_island_get_properties(const layer_island_handle *me)
 {
     return me == nullptr ? nullptr : Slic3r::to_property_handle(Slic3r::to_layer_island(me));

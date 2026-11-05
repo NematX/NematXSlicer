@@ -223,40 +223,134 @@ class PythonExecutionContextTests(unittest.TestCase):
         ))
         self.assertTrue(keepalive)
 
-    def test_support_demand_callbacks_preserve_move_and_borrow_semantics(self):
+    def test_support_demand_edit_goes_through_the_run_context(self):
         generated = self.generated
-        islands = (ctypes.c_void_p * 1)(ctypes.c_void_p(41))
-        state = {"polygons": 51, "cleared": False, "set": None}
-        entry_count = generated.SUPPORT_DEMAND_ENTRY_COUNT(lambda _demand: 1)
-        entry_island = generated.SUPPORT_DEMAND_ENTRY_ISLAND(lambda _demand, idx: islands[int(idx)])
-        get_cb = generated.SUPPORT_DEMAND_GET(lambda _demand, _island: state["polygons"])
+        calls = []
 
-        def set_value(_demand, island, polygons):
-            state["set"] = (int(island or 0), int(polygons or 0))
-            return 1
+        def get_mutable(run_ctx, island):
+            calls.append((int(run_ctx.value or 0), int(island.value or 0)))
+            return 51
 
-        set_cb = generated.SUPPORT_DEMAND_SET(set_value)
-        clear_cb = generated.SUPPORT_DEMAND_CLEAR(lambda _demand: state.__setitem__("cleared", True))
-        payload = generated.RunCtxSupportDemand(
-            ctypes.c_void_p(1), ctypes.c_void_p(2), ctypes.c_void_p(3),
-            entry_count, entry_island, get_cb, set_cb, clear_cb,
-        )
+        payload = generated.RunCtxSupportDemand(ctypes.c_void_p(1), ctypes.c_void_p(2))
         common, keepalive = self.make_common(generated.STEP_SUPPORT_DEMAND, payload)
-        keepalive.extend((islands, entry_count, entry_island, get_cb, set_cb, clear_cb))
-        api = types.SimpleNamespace(host=types.SimpleNamespace())
+        api = types.SimpleNamespace(host=types.SimpleNamespace(support_demand_get_island_mutable=get_mutable))
         context = self.execution.SupportDemandContext.from_support_demand_run_context(
             api, ctypes.addressof(common)
         )
 
-        self.assertEqual(context.support_demand_entry_count(), 1)
-        island = context.support_demand_entry_island(0)
-        self.assertEqual(island.address, 41)
-        self.assertEqual(context.support_demand_get(island).address, 51)
-        source = types.SimpleNamespace(c_handle=lambda: ctypes.c_void_p(61))
-        self.assertTrue(context.support_demand_set(island, source))
-        self.assertEqual(state["set"], (41, 61))
-        context.support_demand_clear()
-        self.assertTrue(state["cleared"])
+        island = types.SimpleNamespace(c_handle=lambda: ctypes.c_void_p(41))
+        demand = context.support_demand_get_island_mutable(island)
+        self.assertEqual(demand.address, 51)
+        self.assertEqual(calls, [(ctypes.addressof(common), 41)])
+        self.assertTrue(keepalive is not None)
+
+    def test_support_context_exposes_the_pattern_callbacks(self):
+        """The support context validates its pattern callbacks and passes missing handles as NULL."""
+        generated = self.generated
+        calls = []
+
+        def resolve(ctx, plugin_id):
+            calls.append(("resolve", ctypes.cast(ctx, ctypes.c_void_p).value, plugin_id))
+            return 9
+
+        def generate(ctx, pattern_id, layer, island, region_island, primary_region,
+                     surface, no_overlap_areas, params, output):
+            calls.append(("generate", ctypes.cast(ctx, ctypes.c_void_p).value, pattern_id, layer, island,
+                          region_island, primary_region, surface, no_overlap_areas,
+                          params.contents.density, output))
+            return 0
+
+        resolve_cb = generated.SUPPORT_RESOLVE_PATTERN_ID(resolve)
+        generate_cb = generated.SUPPORT_GENERATE_PATTERN(generate)
+        payload = generated.RunCtxGenerateSupport(
+            ctypes.c_void_p(31), ctypes.c_void_p(32), ctypes.c_void_p(33), resolve_cb, generate_cb
+        )
+        common, keepalive = self.make_common(generated.STEP_SUPPORT, payload)
+        keepalive.extend((resolve_cb, generate_cb))
+        api = types.SimpleNamespace(host=types.SimpleNamespace())
+        factory = self.execution.SupportContext.from_support_run_context
+        context = factory(api, ctypes.addressof(common))
+        self.assertIsNotNone(context)
+        self.assertEqual(context.support_print().address, 31)
+        self.assertEqual(context.support_object().address, 32)
+
+        # Both callbacks receive the payload itself as their context; a failed call reports False.
+        self.assertEqual(context.support_resolve_pattern_id("rectilinear"), 9)
+        params = generated.RawInfillPatternParams()
+        params.density = 0.5
+        self.assertFalse(context.support_generate_pattern(9, None, None, None, None, 46, None, params, 47))
+        self.assertEqual(calls, [
+            ("resolve", ctypes.addressof(payload), b"rectilinear"),
+            ("generate", ctypes.addressof(payload), 9, None, None, None, None, 46, None, 0.5, 47),
+        ])
+
+        payload.generate_pattern = generated.SUPPORT_GENERATE_PATTERN()
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        payload.generate_pattern = generate_cb
+        payload.resolve_pattern_id = generated.SUPPORT_RESOLVE_PATTERN_ID()
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        self.assertTrue(keepalive is not None)
+
+    def test_support_toolpath_context_borrows_and_validates_handles(self):
+        """The toolpath context rejects wrong steps, missing handles and missing pattern callbacks."""
+        generated = self.generated
+        calls = []
+
+        def resolve(ctx, plugin_id):
+            calls.append(("resolve", ctypes.cast(ctx, ctypes.c_void_p).value, plugin_id))
+            return 7
+
+        def generate(ctx, pattern_id, layer, island, region_island, primary_region,
+                     surface, no_overlap_areas, params, output):
+            calls.append(("generate", ctypes.cast(ctx, ctypes.c_void_p).value, pattern_id, layer, island,
+                          region_island, primary_region, surface, no_overlap_areas,
+                          params.contents.density, output))
+            return 1
+
+        resolve_cb = generated.SUPPORT_TOOLPATH_RESOLVE_PATTERN_ID(resolve)
+        generate_cb = generated.SUPPORT_TOOLPATH_GENERATE_PATTERN(generate)
+        payload = generated.RunCtxSupportToolpath(
+            ctypes.c_void_p(31), ctypes.c_void_p(32), ctypes.c_void_p(33), resolve_cb, generate_cb
+        )
+        common, keepalive = self.make_common(generated.STEP_SUPPORT_TOOLPATH, payload)
+        keepalive.extend((resolve_cb, generate_cb))
+        api = types.SimpleNamespace(host=types.SimpleNamespace())
+        factory = self.execution.SupportToolpathContext.from_support_toolpath_run_context
+        context = factory(api, ctypes.addressof(common))
+        self.assertIsNotNone(context)
+        self.assertEqual(context.support_toolpath_print().address, 31)
+        self.assertEqual(context.support_toolpath_object().address, 32)
+        self.assertIsInstance(self.api_module.Slic3rAPI.support_toolpath_context(api, ctypes.addressof(common)),
+                              self.execution.SupportToolpathContext)
+
+        # Both callbacks receive the payload itself as their context.
+        self.assertEqual(context.support_toolpath_resolve_pattern_id("supportbase"), 7)
+        params = generated.RawInfillPatternParams()
+        params.density = 0.5
+        self.assertTrue(context.support_toolpath_generate_pattern(7, 41, 42, 43, 44, 45, 46, params, 47))
+        self.assertEqual(calls, [
+            ("resolve", ctypes.addressof(payload), b"supportbase"),
+            ("generate", ctypes.addressof(payload), 7, 41, 42, 43, 44, 45, 46, 0.5, 47),
+        ])
+
+        common.step = generated.STEP_SUPPORT
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        common.step = generated.STEP_SUPPORT_TOOLPATH
+        payload.object = None
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        payload.object = ctypes.c_void_p(32)
+        payload.print = None
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        payload.print = ctypes.c_void_p(31)
+        payload.generate_pattern = generated.SUPPORT_TOOLPATH_GENERATE_PATTERN()
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        payload.generate_pattern = generate_cb
+        payload.resolve_pattern_id = generated.SUPPORT_TOOLPATH_RESOLVE_PATTERN_ID()
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        common.data = None
+        self.assertIsNone(factory(api, ctypes.addressof(common)))
+        self.assertIsNone(factory(api, 0))
+        self.assertTrue(keepalive)
 
     def test_progress_reports_visible_phase_and_finishes_after_all_runs(self):
         reports = []

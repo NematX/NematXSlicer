@@ -44,6 +44,7 @@ from slic3r_api_generated import (
     RunCtxPrepareInfill,
     RunCtxSkirtBrim,
     RunCtxSupportDemand,
+    RunCtxSupportToolpath,
     STEP_EXTRUSION_EDIT,
     STEP_EXTRUSION_SIMPLIFICATION,
     STEP_FINALIZE_SLICING,
@@ -59,6 +60,7 @@ from slic3r_api_generated import (
     STEP_SUPPORT,
     STEP_SUPPORT_DEMAND,
     STEP_SUPPORT_SPOT,
+    STEP_SUPPORT_TOOLPATH,
     STEP_WIPETOWER,
 )
 from slic3r_datatree_views import (
@@ -185,13 +187,83 @@ class SupportContext(_PrintObjectContext):
 
     @classmethod
     def from_support_run_context(cls, api, address: int):
-        return cls._from_run_context(api, address, STEP_SUPPORT, RunCtxGenerateSupport, ("print", "object"))
+        """Validate the step, handles and pattern callbacks, returning None on mismatch."""
+        fields = ("print", "object", "resolve_pattern_id", "generate_pattern")
+        return cls._from_run_context(api, address, STEP_SUPPORT, RunCtxGenerateSupport, fields)
 
     def support_print(self) -> Print:
         return self._print()
 
     def support_object(self) -> Object:
         return self._object()
+
+    def support_resolve_pattern_id(self, plugin_id: str) -> int:
+        """Runtime id of an INFILL_PATTERN plugin, valid only during this step run."""
+        return int(self.payload.resolve_pattern_id(self._payload_ptr, plugin_id.encode("utf-8")))
+
+    def support_generate_pattern(
+        self, pattern_id: int, layer, island, region_island, primary_region,
+        surface, no_overlap_areas, params, output: MutableExtrusionEntity,
+    ) -> bool:
+        """Fill ``surface`` into the caller-owned ``output``; the host never publishes it at this step.
+
+        The caller only reads ``output`` (for example to sample points).
+        ``layer``, ``island``, ``region_island``, ``primary_region`` and
+        ``no_overlap_areas`` may be None at this step. ``params`` is a complete
+        caller-built RawInfillPatternParams (see the C header for the fields to
+        set). False means nothing was generated: an unknown id, a pattern
+        refused by this step, or an error contained by the host (a pattern
+        setup() or run failure, or a cancellation). In the last case ``output``
+        is left as an empty collection, no exception is raised, and the step
+        stops with the standard "was cancelled" error once the family returns;
+        return from the family soon.
+        """
+        params_ptr = ctypes.byref(params) if isinstance(params, RawInfillPatternParams) else params
+        return bool(self.payload.generate_pattern(
+            self._payload_ptr, int(pattern_id), _void_p(layer), _void_p(island),
+            _void_p(region_island), _void_p(primary_region), _void_p(surface),
+            _void_p(no_overlap_areas), params_ptr, _void_p(output),
+        ))
+
+
+@abi_requires_headers("steps/slic3r_step_support_toolpath.h")
+class SupportToolpathContext(_PrintObjectContext):
+    """One object's support auxiliary surfaces, ready for toolpath algorithms."""
+
+    @classmethod
+    def from_support_toolpath_run_context(cls, api, address: int):
+        """Validate the step, handles and pattern callbacks, returning None on mismatch."""
+        fields = ("print", "object", "resolve_pattern_id", "generate_pattern")
+        return cls._from_run_context(api, address, STEP_SUPPORT_TOOLPATH, RunCtxSupportToolpath, fields)
+
+    def support_toolpath_print(self) -> Print:
+        """The print being processed; use it only during this callback."""
+        return self._print()
+
+    def support_toolpath_object(self) -> Object:
+        """The object whose support auxiliary layers the algorithm processes."""
+        return self._object()
+
+    def support_toolpath_resolve_pattern_id(self, plugin_id: str) -> int:
+        """Runtime id of an INFILL_PATTERN plugin, valid only during this step run."""
+        return int(self.payload.resolve_pattern_id(self._payload_ptr, plugin_id.encode("utf-8")))
+
+    def support_toolpath_generate_pattern(
+        self, pattern_id: int, layer, island, region_island, primary_region,
+        surface, no_overlap_areas, params, output: MutableExtrusionEntity,
+    ) -> bool:
+        """Fill ``surface`` into borrowed/plugin-owned ``output``; the caller publishes it.
+
+        ``params`` is a complete caller-built RawInfillPatternParams (see the C
+        header for the fields to set). False means nothing was generated
+        because of an unknown id or a pattern refused by this step.
+        """
+        params_ptr = ctypes.byref(params) if isinstance(params, RawInfillPatternParams) else params
+        return bool(self.payload.generate_pattern(
+            self._payload_ptr, int(pattern_id), _void_p(layer), _void_p(island),
+            _void_p(region_island), _void_p(primary_region), _void_p(surface),
+            _void_p(no_overlap_areas), params_ptr, _void_p(output),
+        ))
 
 
 @abi_requires_headers("steps/slic3r_step_support_spot.h")
@@ -607,11 +679,18 @@ class InfillSurfaceRecipeModifierContext(_InfillSurfaceContext):
 
 @abi_requires_headers("steps/slic3r_step_support_demand.h")
 class SupportDemandContext(_PrintObjectContext):
-    """Mutable island-to-ExPolygons working set used before support generation."""
+    """
+    STEP_SUPPORT_DEMAND payload: the print and the object whose islands get a
+    support demand.
+
+    Read an island's demand with LayerIsland.support_demand(); edit it in place
+    through support_demand_get_island_mutable(), available on every run context
+    from STEP_SUPPORT_DEMAND through STEP_SUPPORT.
+    """
 
     @classmethod
     def from_support_demand_run_context(cls, api, address: int):
-        fields = ("print", "object", "demand", "entry_count", "entry_island", "get", "set", "clear")
+        fields = ("print", "object")
         return cls._from_run_context(api, address, STEP_SUPPORT_DEMAND, RunCtxSupportDemand, fields)
 
     def support_demand_print(self) -> Print:
@@ -619,26 +698,6 @@ class SupportDemandContext(_PrintObjectContext):
 
     def support_demand_object(self) -> Object:
         return self._object()
-
-    def support_demand_entry_count(self) -> int:
-        return int(self.payload.entry_count(self.payload.demand))
-
-    def support_demand_entry_island(self, index: int) -> LayerIsland | None:
-        handle = self.payload.entry_island(self.payload.demand, int(index))
-        return None if not handle else LayerIsland(self.api, handle)
-
-    def support_demand_get(self, island: LayerIsland) -> MutableExPolygonCollection | None:
-        """Borrow mutable polygons invalidated by a later set() or clear()."""
-        handle = self.payload.get(self.payload.demand, _void_p(island))
-        return None if not handle else MutableExPolygonCollection(self.api, handle)
-
-    def support_demand_set(self, island: LayerIsland, polygons=None) -> bool:
-        """Move collection contents to the host; the source wrapper stays valid."""
-        return bool(self.payload.set(self.payload.demand, _void_p(island), _void_p(polygons)))
-
-    def support_demand_clear(self) -> None:
-        """Remove all entries and invalidate collections previously returned by get()."""
-        self.payload.clear(self.payload.demand)
 
 
 __all__ = [
@@ -659,5 +718,6 @@ __all__ = [
     "SupportContext",
     "SupportDemandContext",
     "SupportSpotContext",
+    "SupportToolpathContext",
     "WipeTowerContext",
 ]

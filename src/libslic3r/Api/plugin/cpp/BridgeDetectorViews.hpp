@@ -77,7 +77,9 @@ unsupported boundary segments instead, use a polyline collection:
 
 `coverage()` describes areas that can be covered by bridge extrusion, whereas
 `unsupported_edges()` describes unsupported boundary segments. Both methods
-return the number of generated output items.
+return the number of generated output items. Both replace the content of the
+collection they are given: to gather the results of several detectors, give
+each query its own collection and combine them afterwards.
 
 The wrapper is deliberately move-only:
 
@@ -134,13 +136,15 @@ public:
         return bridge_detector_detect_angle(&m_instance, bridge_direction_override) != 0;
     }
 
-    // Appends bridge-covered polygons to out_polygons and returns their count.
+    // Replaces the content of out_polygons with the bridge-covered polygons and
+    // returns their count; the previous content is discarded. Only the lines
+    // anchored at both ends are kept, so a cantilever has no coverage.
     uint32_t coverage(StoredPolygonCollection &out_polygons, double angle = -1.) {
         return bridge_detector_coverage(&m_instance, angle, out_polygons.mutable_handle());
     }
 
-    // Appends unsupported boundary polylines to out_polylines and returns their
-    // count.
+    // Replaces the content of out_polylines with the unsupported boundary
+    // polylines and returns their count; the previous content is discarded.
     uint32_t unsupported_edges(StoredPolylineCollection &out_polylines, double angle = -1.) {
         return bridge_detector_unsupported_edges(&m_instance, angle, out_polylines.mutable_handle());
     }

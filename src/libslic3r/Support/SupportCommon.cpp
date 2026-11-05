@@ -1640,7 +1640,8 @@ SupportGeneratorLayersPtr generate_support_layers(
         // Assign an average print_z to the set of layers with nearly equal print_z.
         coord_t min_layer_height = layers_sorted[i]->scaled_height();
         bool     empty = true;
-        // For snug supports, layers where the direction of the support interface shall change are accounted for.
+        // The interface id is counted for every style: it advances on each layer holding interface layers, except a layer
+        // holding top contacts only, which takes the id following the id of the layer that supports it.
         size_t   num_interfaces = 0;
         size_t   num_top_contacts = 0;
         coord_t   top_contact_bottom_z = 0;
@@ -1670,8 +1671,8 @@ SupportGeneratorLayersPtr generate_support_layers(
                 // Find a supporting layer for its interface ID.
                 for (auto it = object.auxiliary_layers().rbegin(); it != object.auxiliary_layers().rend(); ++ it)
                     if (const Layer &other_layer = *it; other_layer.scaled_print_z() == top_contact_bottom_z) {
-                        // other_layer supports this top contact layer. Assign a different support interface direction to this layer
-                        // from the layer that supports it.
+                        // other_layer supports this top contact layer. This layer takes the id following the id of the layer that
+                        // supports it; the orientation difference between them comes from the configured increment (none with a zero increment).
                         const LayerSupportProperty *support_property = other_layer.get_property<LayerSupportProperty>();
                         if (support_property != nullptr)
                             this_layer_id_interface = support_property->interface_id + 1;
@@ -2017,16 +2018,10 @@ void generate_support_toolpaths(
         {
             Layer &support_layer = *support_layers[support_layer_id];
             LayerCache   &layer_cache   = layer_caches[support_layer_id];
-            float         interface_angle_delta = 0;
-            //const float   support_interface_angle = config.support_material_style.value == smsGrid ?
-            //    support_params.interface_angle : support_params.raft_interface_angle(support_property->interface_id);
             const LayerSupportProperty *support_property = support_layer.get_property<LayerSupportProperty>();
             assert(support_property != nullptr);
-            if (support_params.interface_angle_incr == 0 && config.support_material_style.value == smsSnug) {
-                interface_angle_delta = support_params.raft_interface_angle(support_property->interface_id);
-            } else if (support_params.interface_angle_incr > 0) {
-                interface_angle_delta = support_params.interface_angle + support_property->interface_id * support_params.interface_angle_incr;
-            }
+            // Every style turns its interfaces by the configured increment from one interface id to the next.
+            const float   interface_angle_delta = support_property->interface_id * support_params.interface_angle_incr;
 
             // compute if the support has to switch its angle
             float suppport_angle = support_params.base_angle;
@@ -2185,17 +2180,6 @@ void generate_support_toolpaths(
                         filler->link_max_length = scale_i(filler_spacing * link_max_length_factor / supp_density);
                     }
                 
-                    //filler->angle = interface_as_base ?
-                    //        // If zero interface layers are configured, use the same angle as for the base layers.
-                    //        angles[support_layer_id % angles.size()] :
-                    //        // Use interface angle for the interface layers.
-                    //        raft_contact ? 
-                    //            support_params.raft_interface_angle(support_property->interface_id) :
-                    //            support_interface_angle;
-                    //double density = raft_contact ? support_params.raft_interface_density : interface_as_base ? support_params.support_density : support_params.interface_density;
-                    //filler->spacing = raft_contact ? support_params.raft_interface_flow.spacing() :
-                    //    interface_as_base ? support_params.support_material_flow.spacing() : support_params.support_material_interface_flow.spacing();
-                    //filler->link_max_length = coord_t(scale_(filler->spacing * link_max_length_factor / density));
                     ExPolygons fused_layer_polys = union_safety_offset_ex(layer_ex.polygons_to_extrude());
                     ensure_valid(fused_layer_polys, support_params.resolution);
                     assert_valid(fused_layer_polys);

@@ -118,7 +118,8 @@ public:
     void set_scaled_print_z(coord_t print_z) { m_print_z = print_z;
         assert(scale_to_layer_coord(unscaled(print_z)) == print_z); }
     coord_t scaled_bottom_z() const { return m_bottom_z; }
-    double  unscaled_bottom_z() const { return m_bottom_z; }
+    // Return the contact's geometric bottom Z in millimetres.
+    double  unscaled_bottom_z() const { return unscaled(m_bottom_z); }
     void set_scaled_bottom_z(coord_t bottom_z) { m_bottom_z = bottom_z;
         assert(scale_to_layer_coord(unscaled(bottom_z)) == bottom_z); }
     coord_t scaled_height() const { return m_height; }

@@ -110,6 +110,7 @@ enum SupportMaterialStyle {
     smsSnug,
     smsTree,
     smsOrganic,
+    smsFilled,
 };
 
 //from prusa, not used in superslicer as InfillPattern is enough.
@@ -349,6 +350,7 @@ PRINT_CONFIG_CLASS_DEFINE_WITH_SCOPE(
     ((ConfigOptionFloat,                support_tree_branch_diameter_double_wall))
     ((ConfigOptionPercent,              support_tree_top_rate))
     ((ConfigOptionFloat,                support_tree_branch_distance))
+    ((ConfigOptionFloatOrPercent,       support_tree_max_overhang))
     ((ConfigOptionFloat,                support_tree_tip_diameter))
     // The rest
     ((ConfigOptionBool,                 wipe_into_objects))

@@ -519,7 +519,7 @@ TEST_CASE("PluginBase initializer exceptions disable the provider and preserve p
 TEST_CASE("Group preference defaults to 100 when the optional ABI callback is omitted",
           "[plugins][orchestrator][abi][selector-group-priority]")
 {
-    static_assert(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR == 4u && SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR == 0u,
+    static_assert(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR == 4u && SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR == 1u,
                   "Sized provider metadata requires plugin_types 4.0.");
     static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 5u,
                   "Complete group declarations require config_def 1.5.");

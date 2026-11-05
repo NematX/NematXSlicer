@@ -150,6 +150,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/c/steps/slic3r_step_support.h
 	Api/plugin/c/steps/slic3r_step_support_demand.h
 	Api/plugin/c/steps/slic3r_step_support_spot.h
+	Api/plugin/c/steps/slic3r_step_support_toolpath.h
 	Api/plugin/c/steps/slic3r_step_surface_generation.h
 	Api/plugin/c/steps/slic3r_step_skirt_brim.h
 	Api/plugin/c/steps/slic3r_step_wipe_tower_wipe.h
@@ -495,14 +496,83 @@ set(SLIC3R_SOURCES
 	Plugins/Surface/SolidShells.hpp
 	Plugins/Surface/TopSurfaceExpansion.cpp
 	Plugins/Surface/TopSurfaceExpansion.hpp
+	Plugins/Support/Common/ClipperResults.cpp
+	Plugins/Support/Common/ClipperResults.hpp
+	Plugins/Support/Common/ExtrusionLines.hpp
+	Plugins/Support/Common/PatternService.hpp
+	Plugins/Support/Common/PerimeterFill.cpp
+	Plugins/Support/Common/PerimeterFill.hpp
+	Plugins/Support/Common/SupportBridgeStrokes.cpp
+	Plugins/Support/Common/SupportBridgeStrokes.hpp
+	Plugins/Support/Common/SupportCloseZ.hpp
+	Plugins/Support/Common/SupportCounters.cpp
+	Plugins/Support/Common/SupportCounters.hpp
+	Plugins/Support/Common/SupportDemand.cpp
+	Plugins/Support/Common/SupportDemand.hpp
+	Plugins/Support/Common/SupportInterfaces.cpp
+	Plugins/Support/Common/SupportInterfaces.hpp
+	Plugins/Support/Common/SupportLayers.hpp
+	Plugins/Support/Common/SupportParams.cpp
+	Plugins/Support/Common/SupportParams.hpp
+	Plugins/Support/Common/SupportPaths.cpp
+	Plugins/Support/Common/SupportPaths.hpp
+	Plugins/Support/Common/SupportPublication.cpp
+	Plugins/Support/Common/SupportPublication.hpp
+	Plugins/Support/Common/SupportSettings.cpp
+	Plugins/Support/Common/SupportSettings.hpp
+	Plugins/Support/Common/SupportToolpathRoles.cpp
+	Plugins/Support/Common/SupportToolpathRoles.hpp
+	Plugins/Support/Common/SupportZPlacement.cpp
+	Plugins/Support/Common/SupportZPlacement.hpp
+	Plugins/Support/Filled/FilledSupportGenerator.cpp
+	Plugins/Support/Filled/FilledSupportGenerator.hpp
+	Plugins/Support/Filled/SupportFamilyFilled.cpp
+	Plugins/Support/Filled/SupportFamilyFilled.hpp
+	Plugins/Support/Grid/GridSupportGenerator.cpp
+	Plugins/Support/Grid/GridSupportGenerator.hpp
+	Plugins/Support/Grid/SupportFamilyGrid.cpp
+	Plugins/Support/Grid/SupportFamilyGrid.hpp
 	Plugins/Support/SupportDemandBridgeRemoval.cpp
 	Plugins/Support/SupportDemandBridgeRemoval.hpp
+	Plugins/Support/SupportDemandBridgeInfillRemoval.cpp
+	Plugins/Support/SupportDemandBridgeInfillRemoval.hpp
+	Plugins/Support/SupportDemandBuildplateOnly.cpp
+	Plugins/Support/SupportDemandBuildplateOnly.hpp
 	Plugins/Support/SupportDemandModifiers.cpp
 	Plugins/Support/SupportDemandModifiers.hpp
 	Plugins/Support/SupportDemandOverhangs.cpp
 	Plugins/Support/SupportDemandOverhangs.hpp
 	Plugins/Support/SupportDemandPainting.cpp
 	Plugins/Support/SupportDemandPainting.hpp
+	Plugins/Support/Toolpath/BranchIslandClass.cpp
+	Plugins/Support/Toolpath/BranchIslandClass.hpp
+	Plugins/Support/Toolpath/BranchSheathPaths.cpp
+	Plugins/Support/Toolpath/BranchSheathPaths.hpp
+	Plugins/Support/Toolpath/LegacySupportPaths.cpp
+	Plugins/Support/Toolpath/LegacySupportPaths.hpp
+	Plugins/Support/Toolpath/SupportToolpathBranch.cpp
+	Plugins/Support/Toolpath/SupportToolpathBranch.hpp
+	Plugins/Support/Toolpath/SupportToolpathLegacy.cpp
+	Plugins/Support/Toolpath/SupportToolpathLegacy.hpp
+	Plugins/Support/Tree/SupportFamilyTree.cpp
+	Plugins/Support/Tree/SupportFamilyTree.hpp
+	Plugins/Support/Tree/TreeBranchMesh.cpp
+	Plugins/Support/Tree/TreeBranchMesh.hpp
+	Plugins/Support/Tree/TreeElements.hpp
+	Plugins/Support/Tree/TreeGeometry.cpp
+	Plugins/Support/Tree/TreeGeometry.hpp
+	Plugins/Support/Tree/TreeRouting.cpp
+	Plugins/Support/Tree/TreeRouting.hpp
+	Plugins/Support/Tree/TreeSettings.cpp
+	Plugins/Support/Tree/TreeSettings.hpp
+	Plugins/Support/Tree/TreeSmoothing.cpp
+	Plugins/Support/Tree/TreeSmoothing.hpp
+	Plugins/Support/Tree/TreeSupportGenerator.cpp
+	Plugins/Support/Tree/TreeSupportGenerator.hpp
+	Plugins/Support/Tree/TreeVolumes.cpp
+	Plugins/Support/Tree/TreeVolumes.hpp
+	Plugins/Support/Tree/TreeZPlanner.cpp
+	Plugins/Support/Tree/TreeZPlanner.hpp
 	Plugins/WipeTower/ToolChangeUnretract.cpp
 	Plugins/WipeTower/ToolChangeUnretract.hpp
 	Plugins/WipeTower/ToolChangeWipe.cpp
@@ -566,8 +636,11 @@ set(SLIC3R_SOURCES
 	Steps/StepRunner.hpp
 	Steps/StepSupportDemand.cpp
 	Steps/StepSupportDemand.hpp
+	Steps/StepSupportToolpath.cpp
+	Steps/StepSupportToolpath.hpp
 	Steps/StepSurfaceGeneration.cpp
 	Steps/StepSurfaceGeneration.hpp
+	Steps/SupportPatternCallbacks.hpp
 	Updater/Http.cpp
 	Updater/Http.hpp
 	Updater/PluginUpdater.cpp

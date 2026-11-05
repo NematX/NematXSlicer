@@ -221,7 +221,9 @@ VoronoiUtils::compute_segment_cell_range(const VD::cell_type &cell, const Segmen
     bool                 ending_edge_is_set_before_start = false;
     const VD::edge_type *edge                            = cell.incident_edge();
     do {
-        if (edge->is_infinite())
+        // An edge with a non-finite vertex has no integer position: it is skipped like an infinite edge, and the range stays incomplete (invalid)
+        // when that edge is the one that bounds the cell.
+        if (edge->is_infinite() || !is_finite(*edge->vertex0()) || !is_finite(*edge->vertex1()))
             continue;
 
         Vec2i64 v0 = Geometry::VoronoiUtils::to_point(edge->vertex0());

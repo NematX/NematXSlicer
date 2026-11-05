@@ -46,7 +46,7 @@ enum class Checkpoint : uint8_t
     // Nothing is reusable: slice everything from STEP_LAYER_HEIGHT.
     None,
     // Layer heights and slices (STEP_LAYER_HEIGHT to STEP_POST_SLICING) are
-    // kept and frozen; the pipeline resumes at STEP_PRE_PERIMETER.
+    // kept and frozen; the pipeline resumes at STEP_SUPPORT_DEMAND.
     Slicing,
     // The whole Print data tree (objects, layers, regions, islands) is kept
     // and frozen after STEP_FINALIZE_SLICING; resumes at STEP_ORDERING.
@@ -141,6 +141,18 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator,
                                                           slicing_step_t step,
                                                           const ConfigBase *config);
+
+// A provider of a per-object step with the indices of the objects it runs on.
+struct ObjectStepPlugin
+{
+    Plugin *plugin = nullptr;
+    std::vector<size_t> object_indices;
+};
+// Providers of a per-object step, in priority order. Each object selects its own providers from its
+// configuration, so a provider appears once, with every object that selected it.
+std::vector<ObjectStepPlugin> selected_plugins_per_object(Orchestrator &orchestrator,
+                                                          slicing_step_t step,
+                                                          const Print &print);
 Plugin *selected_or_active_plugin_for_step(Orchestrator &orchestrator,
                                            slicing_step_t step,
                                            const ConfigBase *config);

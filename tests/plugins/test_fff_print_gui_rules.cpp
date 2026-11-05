@@ -96,6 +96,8 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     const SupportMaterialStyle style = config.opt_enum<SupportMaterialStyle>("support_material_style");
     const bool organic = style == SupportMaterialStyle::smsOrganic &&
         (supp || i("support_material_enforce_layers") > 0);
+    const bool tree_family = (style == SupportMaterialStyle::smsTree || style == SupportMaterialStyle::smsOrganic) &&
+        (supp || i("support_material_enforce_layers") > 0);
     const bool default_accel = fl("default_acceleration") > 0;
     const bool pp_ironing = has_top && b("ironing");
     const bool ext_not_loop = ext && !loop_seam;
@@ -272,13 +274,14 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     set("support_material_contact_distance", have_support && !soluble);
     set("support_material_closing_radius", have_support && style == SupportMaterialStyle::smsSnug);
 
-    const char *const organic_keys[] = {
+    const char *const tree_family_keys[] = {
         "support_tree_angle", "support_tree_angle_slow", "support_tree_branch_diameter",
         "support_tree_branch_diameter_angle", "support_tree_branch_diameter_double_wall",
-        "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate"
+        "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate",
+        "support_tree_max_overhang"
     };
-    for (const char *key : organic_keys)
-        set(key, organic);
+    for (const char *key : tree_family_keys)
+        set(key, tree_family);
 
     const char *const iface_keys[] = {
         "support_material_interface_spacing", "support_material_interface_extruder",
@@ -287,21 +290,27 @@ EnabledMap reference_enabled(const DynamicPrintConfig &config)
     };
     for (const char *key : iface_keys)
         set(key, have_iface);
-    set("support_material_interface_layer_height", have_iface && !organic);
-    set("support_material_interface_angle", have_iface && !organic);
-    set("support_material_bottom_interface_pattern", have_iface && !organic);
-    set("support_material_interface_contact_loops", have_iface && !organic);
+    set("support_material_interface_layer_height", have_iface);
+    set("support_material_interface_angle", have_iface);
+    set("support_material_bottom_interface_pattern", have_iface);
+    set("support_material_interface_contact_loops", have_iface);
     set("support_material_with_sheath", have_support && !organic);
     set("support_material_pattern", have_support && !organic);
     set("support_material_spacing", have_support && !organic);
     set("support_material_angle", have_support && !organic);
     set("support_material_angle_height", have_support && !organic);
-    set("support_material_layer_height", have_support && !organic);
+    set("support_material_layer_height", have_support);
 
-    set("support_material_synchronize_layers", soluble);
+    // Contact gaps do not disable synchronization of intermediate support layers; only grid and snug use it.
+    set("support_material_synchronize_layers", have_support &&
+        (style == SupportMaterialStyle::smsGrid || style == SupportMaterialStyle::smsSnug));
 
     const bool raft_soluble = config.opt_enum<SupportZDistanceType>("raft_contact_distance_type") == zdNone;
     set("raft_contact_distance", raft && !raft_soluble);
+    // The first layer foot and density apply to every support: the option, a raft or enforced layers.
+    const bool support_foot = supp || raft || i("support_material_enforce_layers") > 0;
+    set("raft_first_layer_density", support_foot);
+    set("raft_first_layer_expansion", support_foot);
     set("raft_expansion", raft);
     set("first_layer_acceleration_over_raft", raft);
     set("first_layer_speed_over_raft", raft);
@@ -427,7 +436,7 @@ void randomize(DynamicPrintConfig &config, std::mt19937 &rng)
     // ConfigOptionEnumGeneric, so write through the virtual int accessor.
     const auto set_enum = [&config](const char *key, int value) { config.option(key)->set_int(value); };
     set_enum("perimeter_generator", coin(rng) ? int(PerimeterGeneratorType::Arachne) : int(PerimeterGeneratorType::Classic));
-    set_enum("support_material_style", small(rng) % 4);
+    set_enum("support_material_style", small(rng) % 5);
     set_enum("fuzzy_skin", coin(rng) ? int(FuzzySkinType::External) : int(FuzzySkinType::None));
     set_enum("seam_slope_type", coin(rng) ? int(SeamScarfType::External) : int(SeamScarfType::None));
     set_enum("infill_connection", coin(rng) ? int(InfillConnection::icNotConnected) : int(InfillConnection::icConnected));
@@ -494,6 +503,117 @@ TEST_CASE("FFF print GUI rules match independent activation logic on a seeded fu
             INFO("iteration " << iteration << " key " << entry.first);
             REQUIRE(found->second == entry.second);
         }
+    }
+}
+
+// Spell out the expected activation of each support setting group for every style, with support on and off.
+// The tree and organic styles share the support_tree_* settings; interfaces and the layer height are common to all
+// styles; the sparse base fill settings serve grid, snug, tree and filled but not organic (its body is the branch sheath).
+// Evaluate all registered activation reasons with automatic sparse selection; organic branch controls stay editable.
+TEST_CASE("Auto support toolpath selectors keep every provider setting editable",
+          "[plugins][gui-rules][support-toolpath][support-toolpath-auto]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &orchestrator = Orchestrator::instance();
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"support_material", "1"}, {"support_material_style", "organic"},
+        {"exclusive_group_1350_support_toolpath_sparse_plugin", SLIC3R_SELECTOR_AUTO_VALUE}});
+    const char *const key = "support_tree_branch_diameter_double_wall";
+    REQUIRE(config.has(key));
+    bool owned_auto_rule = false;
+    for (const Orchestrator::PluginGuiRule &rule : orchestrator.gui_rules().rules())
+        if (rule.target_key == key && rule.owner == "support.toolpath.branch_sheath")
+            for (const Orchestrator::PluginGuiRuleClause &clause : rule.clauses)
+                if (clause.condition == RAW_GUI_RULE_CONDITION_STRING_EQUALS &&
+                    clause.condition_key == "exclusive_group_1350_support_toolpath_sparse_plugin" &&
+                    clause.condition_string_value == SLIC3R_SELECTOR_AUTO_VALUE)
+                    owned_auto_rule = true;
+    REQUIRE(owned_auto_rule);
+    bool found = false;
+    for (const Orchestrator::GuiRuleApplication &application :
+         orchestrator.gui_rules().evaluate(config, RAW_PRESET_TYPE_FFF_PRINT, -1)) {
+        if (application.target_key == key) {
+            found = true;
+            CHECK(application.enabled);
+        }
+    }
+    REQUIRE(found);
+}
+
+TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rules][fff-print][support]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const Orchestrator &orchestrator = Orchestrator::instance();
+
+    const char *const tree_keys[] = { "support_tree_angle", "support_tree_branch_diameter", "support_tree_top_rate",
+                                      "support_tree_max_overhang" };
+    const char *const interface_keys[] = { "support_material_interface_layer_height", "support_material_interface_angle",
+                                           "support_material_bottom_interface_pattern",
+                                           "support_material_interface_contact_loops" };
+    const char *const base_fill_keys[] = { "support_material_with_sheath", "support_material_pattern",
+                                           "support_material_spacing", "support_material_angle",
+                                           "support_material_angle_height" };
+
+    struct StyleCase { SupportMaterialStyle style; bool tree_settings; bool base_fill; bool synchronization; };
+    const StyleCase cases[] = {
+        { SupportMaterialStyle::smsGrid,    false, true,  true  },
+        { SupportMaterialStyle::smsSnug,    false, true,  true  },
+        { SupportMaterialStyle::smsTree,    true,  true,  false },
+        { SupportMaterialStyle::smsOrganic, true,  false, false },
+        { SupportMaterialStyle::smsFilled,  false, true,  false },
+    };
+    for (const StyleCase &style_case : cases) {
+        for (const bool support_on : { true, false }) {
+            DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+            config.option<ConfigOptionBool>("support_material")->value = support_on;
+            config.option<ConfigOptionInt>("raft_layers")->value = 0;
+            config.option<ConfigOptionInt>("support_material_enforce_layers")->value = 0;
+            config.option<ConfigOptionInt>("support_material_interface_layers")->value = 2;
+            config.option("support_material_style")->set_int(int(style_case.style));
+            const EnabledMap enabled = rule_enabled(orchestrator, config);
+
+            INFO("style " << int(style_case.style) << " support " << support_on);
+            for (const char *key : tree_keys)
+                CHECK(enabled.at(key) == (support_on && style_case.tree_settings));
+            for (const char *key : interface_keys)
+                CHECK(enabled.at(key) == support_on);
+            for (const char *key : base_fill_keys)
+                CHECK(enabled.at(key) == (support_on && style_case.base_fill));
+            CHECK(enabled.at("support_material_layer_height") == support_on);
+            CHECK(enabled.at("support_material_synchronize_layers") == (support_on && style_case.synchronization));
+        }
+    }
+
+    // Organic style with a raft only: the raft counts as support for the common settings, but no organic branch
+    // is built (support off, no enforced layers), so the tree settings stay inactive and the base fill settings
+    // stay active.
+    DynamicPrintConfig raft_config = DynamicPrintConfig::full_print_config();
+    raft_config.option<ConfigOptionBool>("support_material")->value = false;
+    raft_config.option<ConfigOptionInt>("raft_layers")->value = 1;
+    raft_config.option<ConfigOptionInt>("support_material_enforce_layers")->value = 0;
+    raft_config.option<ConfigOptionInt>("support_material_interface_layers")->value = 2;
+    raft_config.option("support_material_style")->set_int(int(SupportMaterialStyle::smsOrganic));
+    const EnabledMap raft_enabled = rule_enabled(orchestrator, raft_config);
+    for (const char *key : tree_keys)
+        CHECK_FALSE(raft_enabled.at(key));
+    for (const char *key : interface_keys)
+        CHECK(raft_enabled.at(key));
+    for (const char *key : base_fill_keys)
+        CHECK(raft_enabled.at(key));
+    CHECK(raft_enabled.at("support_material_layer_height"));
+
+    // The first layer settings apply when support, a raft or enforced layers exist, and only then.
+    struct FootCase { bool support; int raft; int enforce; bool expected; };
+    for (const FootCase &foot_case : { FootCase{ false, 0, 0, false }, FootCase{ true, 0, 0, true }, FootCase{ false, 1, 0, true },
+                                       FootCase{ false, 0, 3, true } }) {
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.option<ConfigOptionBool>("support_material")->value = foot_case.support;
+        config.option<ConfigOptionInt>("raft_layers")->value = foot_case.raft;
+        config.option<ConfigOptionInt>("support_material_enforce_layers")->value = foot_case.enforce;
+        const EnabledMap enabled = rule_enabled(orchestrator, config);
+        INFO("support " << foot_case.support << " raft " << foot_case.raft << " enforce " << foot_case.enforce);
+        CHECK(enabled.at("raft_first_layer_expansion") == foot_case.expected);
+        CHECK(enabled.at("raft_first_layer_density") == foot_case.expected);
     }
 }
 

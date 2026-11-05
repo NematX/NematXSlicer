@@ -74,6 +74,7 @@
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/Steps/StepSkirtBrim.hpp"
 #include "libslic3r/Steps/StepSupportDemand.hpp"
+#include "libslic3r/Steps/StepSupportToolpath.hpp"
 #include "libslic3r/Steps/StepSurfaceGeneration.hpp"
 #include "libslic3r/SurfaceCollection.hpp"
 #include "libslic3r/Thread.hpp"
@@ -100,6 +101,9 @@ std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrato
 // Resolve borrowed active providers/settings through whole-step identities or named-group descriptions, including singleton groups.
 // Returned pointers stay host-owned, settings/print data are unchanged, and allocation failures propagate.
 std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestrator, slicing_step_t step, const ConfigBase *config);
+// Resolve each borrowed object's effective settings, then group valid object indices by active provider in execution order.
+// Return owned index vectors with host-owned provider pointers; print/configuration are unchanged and allocation failures propagate.
+std::vector<ObjectStepPlugin> selected_plugins_per_object(Orchestrator &orchestrator, slicing_step_t step, const Print &print);
 // Resolve only active members of the requested group; absent groups return null and a sole member is returned directly.
 // With several members, read the stored choice from the whole-step selector when present, otherwise the group's own option.
 // Providers stay host-owned, settings are unchanged, and allocation failures propagate.
@@ -130,6 +134,7 @@ const std::vector<slicing_step_t> &execution_order()
         STEP_LAYER_HEIGHT,
         STEP_SLICING,
         STEP_POST_SLICING,
+        STEP_SUPPORT_DEMAND,
         STEP_PRE_PERIMETER,
         STEP_PERIMETER,
         STEP_POST_PERIMETER,
@@ -138,8 +143,8 @@ const std::vector<slicing_step_t> &execution_order()
         STEP_INFILL_GROUP,
         STEP_INFILL,
         STEP_POST_INFILL,
-        STEP_SUPPORT_DEMAND,
         STEP_SUPPORT,
+        STEP_SUPPORT_TOOLPATH,
         STEP_SKIRT_BRIM,
         STEP_FINALIZE_SLICING,
         STEP_ORDERING,
@@ -211,7 +216,7 @@ slicing_step_t checkpoint_resume_step(const Checkpoint checkpoint)
 {
     switch (checkpoint) {
     case Checkpoint::None:     return STEP_LAYER_HEIGHT;
-    case Checkpoint::Slicing:  return STEP_PRE_PERIMETER;
+    case Checkpoint::Slicing:  return STEP_SUPPORT_DEMAND;
     case Checkpoint::Print:    return STEP_ORDERING;
     case Checkpoint::Ordering: return STEP_WIPETOWER;
     case Checkpoint::Plan:     return STEP_GCODE;
@@ -221,12 +226,14 @@ slicing_step_t checkpoint_resume_step(const Checkpoint checkpoint)
     return STEP_LAYER_HEIGHT;
 }
 
+// For each step, the steps that consume its outputs directly.
 const std::map<slicing_step_t, std::vector<slicing_step_t>> &step_dependents()
 {
     static const std::map<slicing_step_t, std::vector<slicing_step_t>> dependents {
         {STEP_LAYER_HEIGHT, {STEP_SLICING}},
         {STEP_SLICING, {STEP_POST_SLICING}},
-        {STEP_POST_SLICING, {STEP_PRE_PERIMETER}},
+        {STEP_POST_SLICING, {STEP_SUPPORT_DEMAND}},
+        {STEP_SUPPORT_DEMAND, {STEP_PRE_PERIMETER}},
         {STEP_PRE_PERIMETER, {STEP_PERIMETER}},
         {STEP_PERIMETER, {STEP_POST_PERIMETER}},
         {STEP_POST_PERIMETER, {STEP_SURFACE_GENERATION}},
@@ -234,9 +241,9 @@ const std::map<slicing_step_t, std::vector<slicing_step_t>> &step_dependents()
         {STEP_PRE_INFILL, {STEP_INFILL_GROUP}},
         {STEP_INFILL_GROUP, {STEP_INFILL}},
         {STEP_INFILL, {STEP_POST_INFILL}},
-        {STEP_POST_INFILL, {STEP_SUPPORT_DEMAND}},
-        {STEP_SUPPORT_DEMAND, {STEP_SUPPORT}},
-        {STEP_SUPPORT, {STEP_SKIRT_BRIM}},
+        {STEP_POST_INFILL, {STEP_SUPPORT}},
+        {STEP_SUPPORT, {STEP_SUPPORT_TOOLPATH}},
+        {STEP_SUPPORT_TOOLPATH, {STEP_SKIRT_BRIM}},
         {STEP_SKIRT_BRIM, {STEP_FINALIZE_SLICING}},
         {STEP_FINALIZE_SLICING, {STEP_ORDERING}},
         {STEP_ORDERING, {STEP_WIPETOWER}},
@@ -398,6 +405,7 @@ bool is_known_builtin_step(slicing_step_t step)
     case STEP_POST_INFILL:
     case STEP_SUPPORT_DEMAND:
     case STEP_SUPPORT:
+    case STEP_SUPPORT_TOOLPATH:
     case STEP_FINALIZE_SLICING:
     case STEP_CHECK_CONFLICT:
     case STEP_ORDERING:
@@ -548,6 +556,7 @@ void register_builtin_step_selectors(Orchestrator &orchestrator)
     StepPostInfillGeneration::register_selector_traits(orchestrator);
     StepSupportDemand::register_selector_traits(orchestrator);
     StepGenerateSupport::register_selector_traits(orchestrator);
+    StepSupportToolpath::register_selector_traits(orchestrator);
     StepDetectSupportSpots::register_selector_traits(orchestrator);
     StepExtrusionOrdering::register_selector_traits(orchestrator);
     StepGenerateWipeTower::register_selector_traits(orchestrator);
@@ -674,7 +683,6 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
         {STEP_PERIMETER,      {"step_perimeter_plugin",      "Perimeter plugin",       "Perimeter step plugin"}},
         {STEP_INFILL_GROUP,   {"step_infill_group_plugin",   "Infill grouping plugin", "Infill grouping step plugin"}},
         {STEP_INFILL,         {"step_infill_plugin",         "Infill plugin",          "Infill step plugin"}},
-        {STEP_SUPPORT,        {"step_support_plugin",        "Support plugin",         "Support step plugin"}},
         {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
         {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
         {STEP_GCODE,          {"step_gcode_plugin",          "G-code plugin",          "G-code step plugin"}},
@@ -824,7 +832,35 @@ std::vector<Plugin *> selected_or_active_plugins_for_step(Orchestrator &orchestr
             selected_plugins.push_back(selected);
     }
 
+    // Selected providers run by priority, not by each group's first candidate.
+    // Stable sorting preserves their discovery order when priorities are equal.
+    std::stable_sort(selected_plugins.begin(), selected_plugins.end(), [](const Plugin *lhs, const Plugin *rhs) {
+        return lhs->get_priority() < rhs->get_priority();
+    });
     return selected_plugins;
+}
+
+std::vector<ObjectStepPlugin> selected_plugins_per_object(Orchestrator &orchestrator,
+                                                          slicing_step_t step,
+                                                          const Print &print)
+{
+    std::vector<std::vector<Plugin *>> selected_by_object;
+    selected_by_object.reserve(print.objects().size());
+    for (const PrintObject &object : print.objects())
+        selected_by_object.push_back(selected_or_active_plugins_for_step(orchestrator, step, &object.config()));
+
+    std::vector<ObjectStepPlugin> plugins;
+    for (Plugin *plugin : orchestrator.get_active_plugins_for_step(step)) {
+        ObjectStepPlugin entry {plugin, {}};
+        for (size_t object_idx = 0; object_idx < selected_by_object.size(); ++object_idx) {
+            const std::vector<Plugin *> &selected = selected_by_object[object_idx];
+            if (std::find(selected.begin(), selected.end(), plugin) != selected.end())
+                entry.object_indices.push_back(object_idx);
+        }
+        if (!entry.object_indices.empty())
+            plugins.push_back(std::move(entry));
+    }
+    return plugins;
 }
 
 Plugin *selected_or_active_plugin_for_step(Orchestrator &orchestrator,
@@ -915,12 +951,18 @@ void initialize_pipeline_progress(Orchestrator &orchestrator,
         if (!print.should_execute_step(step))
             continue;
 
-        const std::vector<Plugin *> plugins = selected_or_active_plugins_for_step(
-            orchestrator, step, &print.full_print_config());
         std::vector<std::string> &unit_ids = units_by_step[step];
-        for (const Plugin *plugin : plugins)
-            if (plugin != nullptr)
-                unit_ids.push_back(plugin->get_id());
+        // Support toolpath selectors are per object, so the plan lists every provider that any object selects.
+        if (step == STEP_SUPPORT_TOOLPATH) {
+            for (const ObjectStepPlugin &entry : selected_plugins_per_object(orchestrator, step, print))
+                unit_ids.push_back(entry.plugin->get_id());
+        } else {
+            const std::vector<Plugin *> plugins = selected_or_active_plugins_for_step(
+                orchestrator, step, &print.full_print_config());
+            for (const Plugin *plugin : plugins)
+                if (plugin != nullptr)
+                    unit_ids.push_back(plugin->get_id());
+        }
         if (unit_ids.empty())
             unit_ids.emplace_back();
     }
@@ -1022,7 +1064,12 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
     // This helper is shared by slice preparation and export. Print::process()
     // stops it at STEP_FINALIZE_SLICING, while Orchestrator::export_gcode() calls it
     // again with only the export-side steps marked for execution.
-    StepSupportDemand::State support_demand;
+    run_step_if_requested(print, STEP_SUPPORT_DEMAND, [&] {
+        begin_step(print, STEP_SUPPORT_DEMAND, L("Detecting support demand"));
+        StepSupportDemand::prepare(print);
+        StepSupportDemand::run_step(orchestrator, print);
+    });
+    if (stop_after(STEP_SUPPORT_DEMAND, until)) return;
 
     run_step_if_requested(print, STEP_PRE_PERIMETER, [&] {
         begin_step(print, STEP_PRE_PERIMETER, L("Preparing perimeters"));
@@ -1086,19 +1133,19 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
     });
     if (stop_after(STEP_POST_INFILL, until)) return;
 
-    run_step_if_requested(print, STEP_SUPPORT_DEMAND, [&] {
-        begin_step(print, STEP_SUPPORT_DEMAND, L("Detecting support demand"));
-        StepSupportDemand::prepare(print);
-        StepSupportDemand::run_step(orchestrator, print, support_demand);
-    });
-    if (stop_after(STEP_SUPPORT_DEMAND, until)) return;
-
     run_step_if_requested(print, STEP_SUPPORT, [&] {
         begin_step(print, STEP_SUPPORT, L("Generating support material"));
         StepGenerateSupport::prepare(print);
-        StepGenerateSupport::run_step(orchestrator, print, support_demand);
+        StepGenerateSupport::run_step(orchestrator, print);
     });
     if (stop_after(STEP_SUPPORT, until)) return;
+
+    run_step_if_requested(print, STEP_SUPPORT_TOOLPATH, [&] {
+        begin_step(print, STEP_SUPPORT_TOOLPATH, L("Generating support toolpaths"));
+        StepSupportToolpath::prepare(print);
+        StepSupportToolpath::run_step(orchestrator, print);
+    });
+    if (stop_after(STEP_SUPPORT_TOOLPATH, until)) return;
 
     run_step_if_requested(print, STEP_SKIRT_BRIM, [&] {
         begin_step(print, STEP_SKIRT_BRIM, L("Generating skirt and brim"));
@@ -1234,9 +1281,11 @@ void StepPipeline::clear_checkpoint_outputs(Print &print, const Checkpoint check
     // The edited plan is stale; the resume clones a new one from the kept Ordering copy.
     if (checkpoint == Checkpoint::Ordering)
         print.release_live_printing_plan();
-    // At None the layers themselves will be deleted, so visiting their region-islands would duplicate work.
-    if (checkpoint == Checkpoint::Slicing)
+    // At None the layers themselves will be deleted, so visiting their islands would duplicate work.
+    if (checkpoint == Checkpoint::Slicing) {
         StepGeneratePerimeter::clear(print);
+        StepSupportDemand::clear(print);
+    }
     // Auxiliary layers may borrow main-layer data and must disappear before those main layers.
     if (checkpoint <= Checkpoint::Slicing)
         StepPrepareForPeriemters::clear(print);
@@ -1291,7 +1340,7 @@ std::string StepPipeline::run_gcode(Orchestrator &orchestrator, Print &print,
     // Resume from the latest valid checkpoint, restoring the ordered plan copy
     // when plan editors are the first steps to replay.
     print.prepare_checkpoint_resume();
-    initialize_pipeline_progress(orchestrator, print, STEP_PRE_PERIMETER);
+    initialize_pipeline_progress(orchestrator, print, checkpoint_resume_step(Checkpoint::Slicing));
     std::string reader_plugin_id;
     run_remaining_steps(orchestrator, print, path, STEP_GCODE, thumbnail_renderer,
                         &reader_plugin_id, result);

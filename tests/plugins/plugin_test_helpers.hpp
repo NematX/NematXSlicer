@@ -48,6 +48,12 @@ void register_gcode_reader_test_providers(orchestrator_handle *orchestrator);
 void register_plugin_storage_test_provider(orchestrator_handle *orchestrator);
 // Register external-package selector cases before shared startup finalizes settings.
 void register_external_selector_catalog_providers(orchestrator_handle *orchestrator);
+// Register support toolpath role providers before generated selector options are finalized.
+void register_support_toolpath_test_providers(orchestrator_handle *orchestrator);
+// Register recording support families before generated selector options are finalized.
+void register_support_step_test_providers(orchestrator_handle *orchestrator);
+// Register the STEP_SUPPORT family that calls infill patterns before generated selector options are finalized.
+void register_support_pattern_service_test_provider(orchestrator_handle *orchestrator);
 // Register and initialize the shared plugin runtime and FFF/SLA print config caches once; call before constructing Slic3r::Print or DynamicPrintConfig::full_print_config(). Missing expected plugins log an error and call assert(false), not a return value.
 void ensure_plugin_test_runtime_initialized();
 bool python_plugin_test_runtime_available();

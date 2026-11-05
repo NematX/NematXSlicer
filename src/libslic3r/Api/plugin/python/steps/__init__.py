@@ -55,6 +55,7 @@ from .execution import (
     SupportContext,
     SupportDemandContext,
     SupportSpotContext,
+    SupportToolpathContext,
     WipeTowerContext,
 )
 
@@ -111,5 +112,6 @@ __all__ = [
     "SupportContext",
     "SupportDemandContext",
     "SupportSpotContext",
+    "SupportToolpathContext",
     "WipeTowerContext",
 ]

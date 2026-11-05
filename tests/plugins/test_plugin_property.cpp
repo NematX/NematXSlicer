@@ -6,6 +6,7 @@
 #include "test_data.hpp"
 
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Api/plugin/cpp/DataTreeViews.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
@@ -538,13 +539,26 @@ TEST_CASE("Surface properties require a scratch editing capability regardless of
 TEST_CASE("Property freeze rejects the previous data-tree ABI major",
           "[plugins][properties][abi]")
 {
-    static_assert(SLIC3R_PLUGIN_API_DATA_TREE_MAJOR == 4u);
+    static_assert(SLIC3R_PLUGIN_API_DATA_TREE_MAJOR == 5u);
     std::vector<PluginApiRequirement> requirements = {
         {"slic3r_plugin_types.h", {SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR, SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR}},
-        {"slic3r_data_tree.h", {3, 0}}
+        {"slic3r_data_tree.h", {4, 7}}
     };
     CHECK_FALSE(validate_plugin_api_requirements(requirements).compatible());
     requirements.back().version = {SLIC3R_PLUGIN_API_DATA_TREE_MAJOR, SLIC3R_PLUGIN_API_DATA_TREE_MINOR};
+    CHECK(validate_plugin_api_requirements(requirements).compatible());
+}
+
+// Sparse support algorithms require the role layout without a separate branch selector.
+TEST_CASE("Support toolpath rejects the previous role ABI major", "[plugins][abi][support-toolpath]")
+{
+    static_assert(SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MAJOR == 2u);
+    std::vector<PluginApiRequirement> requirements = {
+        {"slic3r_plugin_types.h", {SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR, SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR}},
+        {"steps/slic3r_step_support_toolpath.h", {1, 3}}
+    };
+    CHECK_FALSE(validate_plugin_api_requirements(requirements).compatible());
+    requirements.back().version = {SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MAJOR, SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH_MINOR};
     CHECK(validate_plugin_api_requirements(requirements).compatible());
 }
 

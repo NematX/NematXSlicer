@@ -32,7 +32,9 @@ from slic3r_api_generated import (
     RAW_SURFACE_TYPE_DENS_SPARSE,
     RAW_SURFACE_TYPE_DENS_VOID,
     RAW_SURFACE_TYPE_MOD_BRIDGE,
+    RAW_SURFACE_TYPE_MOD_CONTACT,
     RAW_SURFACE_TYPE_MOD_OVERBRIDGE,
+    RAW_SURFACE_TYPE_MOD_SUPPORT,
     RAW_SURFACE_TYPE_NONE,
     RAW_SURFACE_TYPE_POS_BOTTOM,
     RAW_SURFACE_TYPE_POS_INTERNAL,
@@ -73,7 +75,7 @@ def _require_handle(handle, name: str = "handle") -> int:
 
 
 # Small builder for raw_surface_type. It mirrors the intended order:
-# position -> density -> optional modifiers.
+# position -> density -> optional bridge, overbridge, support, branch and contact modifiers.
 class SurfaceTypeBuilder:
     def __init__(self, value: int = RAW_SURFACE_TYPE_NONE) -> None:
         self.value = int(value)
@@ -105,6 +107,14 @@ class SurfaceTypeBuilder:
     def overbridge(self) -> "SurfaceTypeBuilder":
         return SurfaceTypeBuilder(self.value | RAW_SURFACE_TYPE_MOD_OVERBRIDGE)
 
+    def support(self) -> "SurfaceTypeBuilder":
+        """Add support auxiliary-layer membership, preserving position and density."""
+        return SurfaceTypeBuilder(self.value | RAW_SURFACE_TYPE_MOD_SUPPORT)
+
+    def contact(self) -> "SurfaceTypeBuilder":
+        """Mark a support surface as an area of a support contact layer."""
+        return SurfaceTypeBuilder(self.value | RAW_SURFACE_TYPE_MOD_CONTACT)
+
     def raw(self) -> int:
         return self.value
 
@@ -114,6 +124,16 @@ class SurfaceTypeBuilder:
 
 def srf_type() -> SurfaceTypeBuilder:
     return SurfaceTypeBuilder()
+
+
+def surface_type_is_support(surface_type: int) -> bool:
+    """Test whether a type marks a surface in support auxiliary geometry."""
+    return (int(surface_type) & RAW_SURFACE_TYPE_MOD_SUPPORT) != 0
+
+
+def surface_type_is_contact(surface_type: int) -> bool:
+    """Test whether a type marks an area of a support contact layer."""
+    return (int(surface_type) & RAW_SURFACE_TYPE_MOD_CONTACT) != 0
 
 
 # Borrowed Surface view over either a native handle or a c_surface snapshot.
@@ -468,4 +488,6 @@ __all__ = [
     "SurfaceCollection",
     "SurfaceTypeBuilder",
     "srf_type",
+    "surface_type_is_contact",
+    "surface_type_is_support",
 ]

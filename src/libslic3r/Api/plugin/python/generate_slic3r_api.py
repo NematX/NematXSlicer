@@ -147,7 +147,6 @@ OPAQUE_TYPES = {
     "volume_handle",
     "triangle_mesh_handle",
     "bridge_detector_vtable",
-    "support_demand_handle",
     "slicing_layer_range_handle",
     "slicing_volume_region_handle",
 }

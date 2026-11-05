@@ -10,11 +10,14 @@
 
 namespace slic3r_api { namespace Support { namespace SupportDemandBridgeRemovalPlugin {
 
-// STEP_SUPPORT_DEMAND refinement plugin.
+// STEP_POST_PERIMETER refinement of the support demand.
 //
-// It runs after overhangs, support painting and support modifier volumes. When
-// dont_support_bridges is enabled, it removes support demand under straight
-// extrusion spans whose ends are both supported by the lower layer.
+// The demand is written by STEP_SUPPORT_DEMAND (overhangs, painting, modifier
+// volumes). When dont_support_bridges is enabled, this plugin removes the demand
+// under straight perimeter and gap-fill spans whose ends are both supported by
+// the lower layer. The demand under the bridge infill lines is removed by
+// support.demand.bridge_infill_removal, at STEP_POST_INFILL. The demand of the
+// enforcers is not kept (known limit of this version).
 class SupportDemandBridgeRemoval : public PluginBase
 {
 public:
@@ -34,6 +37,7 @@ private:
     int32_t defined_config_keys(const char **keys) const noexcept override;
     const char *progress_message_format_impl() const noexcept override;
     void inilialize_impl(storage_handle *storage) const override;
+    // Reserves one progress unit per island above the first layer when bridge removal is enabled.
     void setup_run_impl(const plugin_run_context *run_ctx) const override;
     void run_impl(const plugin_run_context *run_ctx) const override;
 };

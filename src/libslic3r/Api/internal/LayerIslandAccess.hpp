@@ -22,6 +22,7 @@ struct LayerIslandAccess
     static void set_infill_areas(LayerSliceIsland &island, ExPolygons &&infill_areas);
     static ExPolygons &infill_free_areas_mutable(LayerSliceIsland &island);
     static ExPolygons &perimeter_slices_mutable(LayerSliceIsland &island);
+    static ExPolygons &support_demand_mutable(LayerSliceIsland &island);
 };
 
 } // namespace ApiInternal
