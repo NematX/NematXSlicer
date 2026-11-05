@@ -721,6 +721,7 @@ StoredExtrusionEntity maintenance_root(storage_handle *storage, const Slic3r::Pr
             speed = std::max(speed, minimum->value);
     }
     StoredExtrusionEntity root(storage);
+    root.set_can_rotate(false);
     const Slic3r::Polygon rectangle({Slic3r::Point::new_scale(0., 0.), Slic3r::Point::new_scale(tower.footprint.width, 0.),
         Slic3r::Point::new_scale(tower.footprint.width, layer.depth), Slic3r::Point::new_scale(0., layer.depth)});
     Slic3r::Polygon envelope = rectangle;

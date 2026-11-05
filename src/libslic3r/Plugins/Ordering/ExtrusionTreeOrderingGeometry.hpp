@@ -39,17 +39,18 @@ void reverse_tree(
     MutableExtrusionEntity entity,
     const plugin_run_context *run_ctx = nullptr);
 
-/* Rotate a fixed closed loop so its first and last point equal seam, or the end of the
-   child path that the seam is within SCALED_EPSILON / 2 of: a seam that close to the end
-   of a child is moved onto it instead of splitting off a one-point closing leaf. */
+/* Compatibility entry point for guarded legal rotation. The actual entry can be
+   the current start behind a barrier, a direct composite's existing entry, or a
+   snapped leaf boundary; it need not equal the provider's requested point. */
 void rotate_loop_to_seam(storage_handle *scratch_storage,
                          MutableExtrusionEntity loop,
                          c_point seam,
                          const plugin_run_context *run_ctx = nullptr);
 
-/* Validate the original provider point, then return a materializable cyclic
-   entry. Ancestor permission is explicit and never inferred from legacy types.
-   Borrow the tree read-only; reject off-contour and forbidden requests by throwing. */
+/* Borrow loop, validate the original provider point, then return a legal entry
+   without mutation or consumption. No scratch storage is retained. Invalid
+   handles, permissions or off-contour requests throw; cancellation propagates.
+   Ancestor permission is explicit and never inferred from legacy types. */
 c_point legal_seam_point(const ExtrusionEntity &loop,
                          c_point requested,
                          bool ancestors_allow_seams,
@@ -66,7 +67,18 @@ void rotate_loop_to_legal_seam(storage_handle *scratch_storage,
                               bool ancestors_allow_seams,
                               const plugin_run_context *run_ctx = nullptr);
 
-/* Remove sorting and reversal permissions from an entity and all descendants. */
+/* Borrow direct parent/child views and read the shared continuity rule. Carry
+   the result through nested wrappers for provider binding and route creation. */
+bool can_choose_child_seam(const ExtrusionEntity &parent,
+                           const ExtrusionEntity &child,
+                           bool ancestors_allow_seams);
+
+/* Consume only rotation on a borrowed finalized subtree without allocation or
+   geometry edits. Cancellation may stop consumption between nodes. */
+void disable_rotation_recursively(MutableExtrusionEntity entity,
+                                  const plugin_run_context *run_ctx = nullptr);
+
+/* Remove sorting, reversal and rotation permissions from finalized descendants. */
 void disable_ordering_flags_recursively(
     MutableExtrusionEntity entity,
     const plugin_run_context *run_ctx = nullptr);

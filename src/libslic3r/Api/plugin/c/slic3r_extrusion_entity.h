@@ -186,7 +186,7 @@ The parent becomes non-rotatable in both insertion paths; wrapped old content
 retains its previous rotation permission, as do all existing child objects.
 
 KEEP_ON_PARENT leaves direct properties on entity. It inserts directly when
-entity is already a fixed collection, so the new leaf inherits those
+entity is already a fixed collection (sorting, reversal and rotation all disabled), so the new leaf inherits those
 properties. MOVE_WITH_CONTENT always creates a wrapper for the old content and
 moves entity's direct properties and associated data into that wrapper.
 

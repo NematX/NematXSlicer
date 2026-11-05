@@ -8,7 +8,10 @@
 #include <vector>
 
 #include "perimeter_test_helpers.hpp"
+#include "gcode_test_helpers.hpp"
+#include "plugin_e2e_test_helpers.hpp"
 #include "plugin_test_helpers.hpp"
+#include "test_data.hpp"
 
 #include "libslic3r/Api/internal/LayerAccess.hpp"
 #include "libslic3r/Api/internal/LayerRegionAccess.hpp"
@@ -17,6 +20,7 @@
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionSeamPlanning.hpp"
+#include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
@@ -25,6 +29,7 @@
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 #include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
 
 /*
 Fallback extrusion-tree ordering tests
@@ -34,6 +39,9 @@ The provider runs after the coarse PrintingExtrusion pre-sort. These tests
 prebuild the relevant PrintingPlan fragments so they can verify how the first
 estimate starts the sequential pass and how exact exits then propagate through
 the remaining plan.
+The linear STL export catalogue also exercises real ordering providers and random
+seam settings through the complete pipeline, checking closed geometry and emitted
+extrusions rather than treating the availability of a seam API as activation.
 */
 
 namespace {
@@ -185,12 +193,14 @@ void require_precondition_failure(const Print &print,
 class ScopedActivePlugins
 {
 public:
-    explicit ScopedActivePlugins(std::initializer_list<const char *> plugin_ids) :
+    // Capture activation, optionally retain the full pipeline, then enable the requested alternatives.
+    explicit ScopedActivePlugins(std::initializer_list<const char *> plugin_ids, bool keep_existing = false) :
         m_orchestrator(Orchestrator::instance())
     {
         for (Plugin *plugin : m_orchestrator.active_plugins())
             m_previous.push_back(plugin);
-        m_orchestrator.clear_active_plugins();
+        if (!keep_existing)
+            m_orchestrator.clear_active_plugins();
         for (const char *plugin_id : plugin_ids)
             REQUIRE(m_orchestrator.set_plugin_active(plugin_id, true));
     }
@@ -629,6 +639,84 @@ TEST_CASE("Rotating a composed loop to a seam next to a fragment end keeps its f
         c_point seam = point(10, 10);
         seam.y -= SCALED_EPSILON / 4;
         rotate_square_loop(seam, point(10, 10));
+    }
+}
+
+// Exercise the declared random-seam settings and all tree-ordering alternatives
+// independently. Every run owns a fresh STL-derived plan and final output file.
+TEST_CASE("Seam consumers pass a declared linear STL export catalogue",
+          "[plugins][plugin-e2e][seam-consumer-e2e]")
+{
+    namespace E2E = Slic3r::Test::PluginE2E;
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedActivePlugins active({"ordering.extrusion_tree.default",
+        "ordering.extrusion_tree.advanced", "ordering.extrusion_tree.xy_serpentine", "seam_placer.random"}, true);
+    Orchestrator &host = Orchestrator::instance();
+    DynamicPrintConfig baseline = DynamicPrintConfig::full_print_config();
+    const std::string seam_key = Steps::plugin_exclusive_group_option_key(host, SEAM_PLACER, "seam_placer_plugin");
+    REQUIRE_FALSE(seam_key.empty());
+    baseline.set_deserialize_strict(seam_key, "seam_placer.random");
+    baseline.set_deserialize_strict({{"layer_height", "0.2"}, {"first_layer_height", "0.2"}, {"skirts", "1"},
+        {"seam_random_seed", "42"}, {"seam_random_vertices_only", "1"}, {"seam_random_align_inner_seams", "1"},
+        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"}});
+    const std::vector<E2E::Domain> domains = {
+        {{"seam_random_vertices_only"}, {{"projected-random", {{"seam_random_vertices_only", "0"}}}}},
+        {{"seam_random_align_inner_seams"}, {{"independent-inner", {{"seam_random_align_inner_seams", "0"}}}}},
+        {{"seam_random_seed"}, {{"fresh-entropy", {{"seam_random_seed", "0"}}},
+            {"seed-one", {{"seam_random_seed", "1"}}}, {"seed-large", {{"seam_random_seed", "2147483647"}}}}}
+    };
+    const TriangleMesh mesh = E2E::stl_fixture(false);
+    std::vector<E2E::Case> cases = E2E::linear_cases(host, {"ordering.extrusion_tree.default",
+        "ordering.extrusion_tree.advanced", "ordering.extrusion_tree.xy_serpentine", "seam_placer.random"}, baseline, domains);
+    // Startup exposes no tree selector when only the fallback was active while
+    // definitions were finalized. Vary activation without changing that schema.
+    cases.push_back({"fallback", {}});
+    cases.push_back({"serpentine", {}});
+    for (const E2E::Case &test : cases) {
+        INFO(test.name);
+        ScopedActivePlugins restore_activation({}, true);
+        const std::string selected = test.name == "fallback" ? "ordering.extrusion_tree.default" :
+            test.name == "serpentine" ? "ordering.extrusion_tree.xy_serpentine" : "ordering.extrusion_tree.advanced";
+        for (const char *id : {"ordering.extrusion_tree.default", "ordering.extrusion_tree.advanced",
+                              "ordering.extrusion_tree.xy_serpentine"})
+            REQUIRE(host.set_plugin_active(id, selected == id));
+        REQUIRE(host.is_plugin_active(host.get_plugin(selected)));
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, E2E::apply_case(baseline, test));
+        print.process();
+        const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+        std::string code;
+        try {
+            code = Test::GCode::read_text_file(host.export_gcode_cli(print, path.string()));
+            Test::GCode::remove_output_pair(path);
+        } catch (...) {
+            Test::GCode::remove_output_pair(path);
+            throw;
+        }
+        REQUIRE(print.printing_plan() != nullptr);
+        size_t closed = 0;
+        // Inspect all owned descendants without calling legacy path views.
+        const auto inspect = [&closed](auto &&self, const ExtrusionEntity &entity) -> void {
+            if (entity.ExtrusionEntity::is_loop()) ++closed;
+            if (entity.has_polyline()) CHECK(entity.polyline_ref().is_valid());
+            for (const ExtrusionEntityUPtr &child : entity.children()) self(self, *child);
+        };
+        for (const PrintingGroup &group : print.printing_plan()->groups)
+            for (const PrintingLayerGroup &layer : group.layers)
+                for (const PrintingToolGroup &tool : layer.tool_groups)
+                    for (const PrintingExtrusion &extrusion : tool.extrusions)
+                        if (extrusion.root) inspect(inspect, *extrusion.root);
+        CHECK(closed > 0);
+        CHECK(code.find(";SEAM:") != std::string::npos);
+        CHECK(code.find(";TYPE:Skirt") != std::string::npos);
+        size_t deposited_moves = 0;
+        GCodeReader reader;
+        reader.parse_buffer(code, [&deposited_moves](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+            if (line.extruding(state) && line.dist_XY(state) > 0.) ++deposited_moves;
+        });
+        CHECK(deposited_moves > 0);
     }
 }
 

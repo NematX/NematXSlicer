@@ -17,6 +17,8 @@
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/PrintingPlanViews.hpp"
 #include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
+#include "ExtrusionTreeOrderingGeometry.hpp"
+#include "libslic3r/ExtrusionSeamPlanning.hpp"
 
 namespace slic3r_api { namespace Ordering { namespace DefaultOrderingPlugin {
 namespace {
@@ -42,8 +44,8 @@ stored vertex.
 Only existing vertices are used as loop entry candidates. This avoids creating
 new segments and preserves the additional geometry stored by the extrusion
 representation, such as arcs and per-point Z offsets. Once a sortable node has
-been converted into a concrete sequence, its sortable and reversible flags are
-disabled so downstream code cannot silently change the selected order. The
+been converted into a concrete sequence, its sorting, reversal and rotation flags
+are disabled so downstream code cannot silently change the selected order. The
 exact front and back of every processed root are published through
 EntryPointProperty for the next root and for later pipeline stages.
 
@@ -58,7 +60,7 @@ The normal call flow is:
         |   |   `-- open path: compare front() and back() when reversible
         |   |-- move the selected child into the fixed prefix
         |   `-- prepare_child_for_entry()
-        |       |-- rotate_loop_to_point() for loops
+        |       |-- rotate_loop_to_legal_seam() for loops
         |       |-- reverse() for a selected reverse candidate
         |       `-- recurse into sortable children
         `-- publish EntryPointProperty{root.front(), root.back()}
@@ -66,6 +68,10 @@ The normal call flow is:
 This is a deterministic nearest-entry heuristic, not a global optimizer. Its
 result depends on the current start position and on the order of equal-cost
 children.
+Seam candidates must satisfy exact stored closure and independent rotation
+permission. Shared legal-entry planning rejects vertices inside an atomic open
+composite or across an event barrier. Finalizing a seam consumes rotation only;
+no borrowed tree view or scratch path survives the callback.
 */
 
 const char *k_no_dependencies[] = { nullptr };
@@ -109,13 +115,6 @@ ExtrusionEntryCandidate best_entry_candidate(
     c_point current_point,
     const plugin_run_context *run_ctx);
 
-/* Rotate a loop-like subtree so the selected existing vertex becomes its front. */
-void rotate_loop_to_point(
-    storage_handle *storage,
-    MutableExtrusionEntity entity,
-    c_point entry_point,
-    const plugin_run_context *run_ctx);
-
 /*
 Collect loop entry candidates from the stored vertices of a loop tree.
 
@@ -127,27 +126,6 @@ void collect_loop_entry_points(
     const ExtrusionEntity &entity,
     std::vector<c_point> &points,
     const plugin_run_context *run_ctx);
-
-/* Return true when entity contains point as an exact stored vertex. */
-bool entity_contains_point(
-    const ExtrusionEntity &entity,
-    c_point point,
-    const plugin_run_context *run_ctx);
-
-/* Rotate a closed local polyline so point_idx becomes the first point. */
-void rotate_local_loop_to_index(
-    MutableExtrusionEntity entity,
-    uint32_t point_idx,
-    const plugin_run_context *run_ctx);
-
-/* Return the exact local point index, or EXTRUSION_INDEX_INVALID. */
-uint32_t local_point_index(
-    const ExtrusionEntity &entity,
-    c_point point,
-    const plugin_run_context *run_ctx);
-
-/* Return true when this tree currently behaves as one closed printable loop. */
-bool entity_is_loop(const ExtrusionEntity &entity);
 
 /* Squared distance is enough for nearest-candidate comparison and avoids sqrt. */
 double distance_to_square(c_point lhs, c_point rhs);
@@ -210,11 +188,12 @@ void order_sortable_extrusion_children(storage_handle *storage,
 
     /*
     This node now contains a concrete printing sequence. Disable later automatic
-    sorting/reversing so downstream code observes the order selected here.
+    sorting, reversal and rotation so downstream code observes the order selected here.
     */
     throw_if_cancelled(run_ctx);
     entity.disable_sort();
     entity.disable_reverse();
+    entity.set_can_rotate(false);
 }
 
 void prepare_child_for_entry(storage_handle *storage,
@@ -240,8 +219,9 @@ void prepare_child_for_entry(storage_handle *storage,
     their entry point without changing their internal ordering: rotate a loop or
     reverse an explicitly reversible open path.
     */
-    if (entity_is_loop(child.readonly())) {
-        rotate_loop_to_point(storage, child, candidate.point, run_ctx);
+    if (child.readonly().is_seam_unit()) {
+        TreeOrderingGeometry::rotate_loop_to_legal_seam(storage, child, candidate.point, true, run_ctx);
+        TreeOrderingGeometry::disable_rotation_recursively(child, run_ctx);
     } else if (candidate.reverse_before_printing) {
         throw_if_cancelled(run_ctx);
         child.reverse();
@@ -276,7 +256,7 @@ ExtrusionEntryCandidate best_entry_candidate(
         return best;
     }
 
-    if (entity_is_loop(entity)) {
+    if (entity.is_seam_unit()) {
         std::vector<c_point> candidates;
         collect_loop_entry_points(entity, candidates, run_ctx);
         if (candidates.empty())
@@ -284,11 +264,14 @@ ExtrusionEntryCandidate best_entry_candidate(
 
         /*
         Loop entry is chosen from existing vertices only. This keeps the
-        operation cheap and avoids creating new arc/z-offset split points that
-        the current ABI cannot fully describe.
+        operation cheap and retains the policy's exact stored-vertex scores,
+        rather than substituting a projected point for a different candidate.
         */
         for (c_point point : candidates) {
             throw_if_cancelled(run_ctx);
+            const Slic3r::ExtrusionEntity *core = reinterpret_cast<const Slic3r::ExtrusionEntity *>(entity.handle());
+            if (!Slic3r::is_directly_legal_seam(*core, Slic3r::Point(point.x, point.y), true))
+                continue;
             ExtrusionEntryCandidate candidate;
             candidate.point = point;
             candidate.score = distance_to_square(point, current_point);
@@ -322,117 +305,6 @@ ExtrusionEntryCandidate best_entry_candidate(
     return best;
 }
 
-void rotate_loop_to_point(
-    storage_handle *storage,
-    MutableExtrusionEntity entity,
-    c_point entry_point,
-    const plugin_run_context *run_ctx)
-{
-    throw_if_cancelled(run_ctx);
-    if (entity.point_count() > 0) {
-        /*
-        Leaf loop: the selected entry point is a local vertex, so rotating the
-        local segment array is enough. No child order changes are needed.
-        */
-        const uint32_t point_idx = local_point_index(
-            entity.readonly(), entry_point, run_ctx);
-        if (point_idx != EXTRUSION_INDEX_INVALID)
-            rotate_local_loop_to_index(entity, point_idx, run_ctx);
-        return;
-    }
-
-    if (entity.child_count() == 0)
-        return;
-
-    uint32_t containing_idx = EXTRUSION_INDEX_INVALID;
-    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
-        throw_if_cancelled(run_ctx);
-        if (entity_contains_point(entity.child(child_idx), entry_point, run_ctx)) {
-            containing_idx = child_idx;
-            break;
-        }
-    }
-
-    if (containing_idx == EXTRUSION_INDEX_INVALID)
-        return;
-
-    /*
-    Composed loop: find the child that owns the chosen vertex. The parent loop
-    will be rotated by moving children before that child to the end.
-    */
-    uint32_t start_idx = containing_idx;
-    std::unique_ptr<StoredExtrusionEntity> closing_piece;
-    MutableExtrusionEntity child = entity.child_mutable(containing_idx);
-
-    if (child.point_count() > 0) {
-        const uint32_t point_idx = local_point_index(
-            child.readonly(), entry_point, run_ctx);
-        if (point_idx == EXTRUSION_INDEX_INVALID) {
-            assert(false);
-        } else if (point_idx == 0) {
-            start_idx = containing_idx;
-        } else if (point_idx == child.point_count() - 1) {
-            /*
-            The end of this child is also the beginning of the next child in a
-            continuous loop. Starting at the next child avoids creating a
-            zero-length closing fragment.
-            */
-            start_idx = (containing_idx + 1) % entity.child_count();
-        } else {
-            /*
-            The selected vertex lies in the middle of one child path. Split that
-            child, print the tail first, and append the head as a closing piece
-            after the rest of the loop has been printed.
-            */
-            StoredExtrusionEntity before_entry(storage, child.readonly());
-            StoredExtrusionEntity after_entry(storage, child.readonly());
-            const int32_t split_ok = extrusion_polyline_split_at_index(
-                child.handle(), point_idx, before_entry.mutable_handle(), after_entry.mutable_handle());
-            assert(split_ok != 0);
-            if (split_ok != 0) {
-                throw_if_cancelled(run_ctx);
-                const int32_t move_ok = extrusion_move_from(child.mutable_handle(), after_entry.mutable_handle());
-                assert(move_ok != 0);
-                (void) move_ok;
-                closing_piece = std::make_unique<StoredExtrusionEntity>(std::move(before_entry));
-            }
-            start_idx = containing_idx;
-        }
-    } else {
-        /*
-        The chosen vertex is inside a child collection. Rotate that collection
-        first so it starts at the right point, then rotate this parent around
-        the now-prepared child.
-        */
-        rotate_loop_to_point(storage, child, entry_point, run_ctx);
-        start_idx = containing_idx;
-    }
-
-    /*
-    Move the prefix before start_idx to the end. Because we always move child 0
-    to the current end, the next original prefix child becomes child 0 and the
-    loop rotates without needing random-access extraction.
-    */
-    for (uint32_t move_idx = 0; move_idx < start_idx; ++move_idx) {
-        throw_if_cancelled(run_ctx);
-        const uint32_t moved_idx = entity.move_child_from(entity.child_count(), entity, 0);
-        assert(moved_idx != EXTRUSION_INDEX_INVALID);
-        (void) moved_idx;
-    }
-
-    if (closing_piece) {
-        /*
-        A mid-child split created a head fragment that must close the loop after
-        all rotated children have printed. Move that stored fragment into the
-        parent as the final child.
-        */
-        throw_if_cancelled(run_ctx);
-        const uint32_t appended_idx = entity.append_child_move(closing_piece->mutable_view());
-        assert(appended_idx != EXTRUSION_INDEX_INVALID);
-        (void) appended_idx;
-    }
-}
-
 void collect_loop_entry_points(
     const ExtrusionEntity &entity,
     std::vector<c_point> &points,
@@ -460,81 +332,6 @@ void collect_loop_entry_points(
         throw_if_cancelled(run_ctx);
         collect_loop_entry_points(entity.child(child_idx), points, run_ctx);
     }
-}
-
-bool entity_contains_point(
-    const ExtrusionEntity &entity,
-    c_point point,
-    const plugin_run_context *run_ctx)
-{
-    throw_if_cancelled(run_ctx);
-    if (entity.point_count() > 0)
-        return local_point_index(entity, point, run_ctx) != EXTRUSION_INDEX_INVALID;
-
-    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
-        throw_if_cancelled(run_ctx);
-        if (entity_contains_point(entity.child(child_idx), point, run_ctx))
-            return true;
-    }
-    return false;
-}
-
-void rotate_local_loop_to_index(
-    MutableExtrusionEntity entity,
-    const uint32_t point_idx,
-    const plugin_run_context *run_ctx)
-{
-    throw_if_cancelled(run_ctx);
-    if (point_idx == 0 || point_idx >= entity.point_count())
-        return;
-    if (points_equal(entity.local_front(), entity.local_back()) && point_idx == entity.point_count() - 1)
-        return;
-
-    const uint32_t segment_count = entity.segment_count();
-    if (point_idx >= segment_count)
-        return;
-
-    /*
-    Rebuilding from segments preserves arc radius/orientation and per-point
-    Z-offsets. Rebuilding from points would silently flatten that extra geometry.
-    */
-    std::vector<c_extrusion_segment> rotated_segments;
-    rotated_segments.reserve(segment_count);
-    /*
-    The segment array is rotated exactly like a ring buffer: tail first, head
-    second. The resulting local front point is the selected entry point.
-    */
-    for (uint32_t segment_idx = point_idx; segment_idx < segment_count; ++segment_idx) {
-        throw_if_cancelled(run_ctx);
-        rotated_segments.push_back(entity.segment(segment_idx));
-    }
-    for (uint32_t segment_idx = 0; segment_idx < point_idx; ++segment_idx) {
-        throw_if_cancelled(run_ctx);
-        rotated_segments.push_back(entity.segment(segment_idx));
-    }
-
-    throw_if_cancelled(run_ctx);
-    const bool ok = entity.set_segments(rotated_segments);
-    assert(ok);
-    (void) ok;
-}
-
-uint32_t local_point_index(
-    const ExtrusionEntity &entity,
-    c_point point,
-    const plugin_run_context *run_ctx)
-{
-    for (uint32_t point_idx = 0; point_idx < entity.point_count(); ++point_idx) {
-        throw_if_cancelled(run_ctx);
-        if (points_equal(entity.point(point_idx), point))
-            return point_idx;
-    }
-    return EXTRUSION_INDEX_INVALID;
-}
-
-bool entity_is_loop(const ExtrusionEntity &entity)
-{
-    return !entity.empty() && !entity.sortable() && entity.continuous() && entity.is_closed();
 }
 
 double distance_to_square(c_point lhs, c_point rhs)

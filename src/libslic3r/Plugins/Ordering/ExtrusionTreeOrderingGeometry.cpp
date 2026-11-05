@@ -52,9 +52,7 @@ Representative direct calls:
         `-- reverse_tree() [recursive child paths before reversing child order]
 
     rotate_loop_to_seam()
-        |-- projected_point_on_entity() [find the nearest line/arc position]
-        |-- rotate_local_loop_to_seam() [rotate a single stored polyline]
-        `-- compare child endpoints with split_at's epsilon before splitting
+        `-- rotate_loop_to_legal_seam() [use the same guarded geometry path]
 
     legal_seam_point() / rotate_loop_to_legal_seam()
         |-- legal_seam_entry() [validate the request and preview exact split output]
@@ -64,13 +62,6 @@ Representative direct calls:
 Scratch storage owns temporary paths; input trees remain borrowed during each
 call. Cancellation and invalid loop geometry propagate to the ordering provider.
 */
-
-/* Find the nearest point on any local line or arc in one entity subtree. */
-bool projected_point_on_entity(const ExtrusionEntity &entity,
-                               c_point requested,
-                               c_point &projected,
-                               double &distance_squared,
-                               const plugin_run_context *run_ctx);
 
 /* Rotate a loop stored as one local polyline by splitting at its seam. */
 void rotate_local_loop_to_seam(storage_handle *scratch_storage,
@@ -91,52 +82,6 @@ bool entity_intersects_region(storage_handle *scratch_storage,
                               const ExtrusionEntity &entity,
                               const LayerRegion &region,
                               c_point shift);
-
-bool projected_point_on_entity(const ExtrusionEntity &entity,
-                               const c_point requested,
-                               c_point &projected,
-                               double &distance_squared_out,
-                               const plugin_run_context *run_ctx)
-{
-    throw_if_cancelled(run_ctx);
-    bool found_projection = false;
-    double best_distance = (std::numeric_limits<double>::max)();
-    c_point best_point = {};
-
-    if (entity.point_count() > 0) {
-        /* ArcWelder performs the same projection for straight and curved segments. */
-        const Slic3r::ExtrusionEntity *core_entity =
-            reinterpret_cast<const Slic3r::ExtrusionEntity *>(entity.handle());
-        const Slic3r::ArcPolyline path = core_entity->as_polyline();
-        const Slic3r::Geometry::ArcWelder::PathSegmentProjection projection =
-            Slic3r::Geometry::ArcWelder::point_to_path_projection(
-                path.get_arc(), Slic3r::Point(requested.x, requested.y));
-        if (projection.valid()) {
-            best_point = c_point{projection.point.x(), projection.point.y()};
-            best_distance = projection.distance2;
-            found_projection = true;
-        }
-    }
-
-    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx) {
-        throw_if_cancelled(run_ctx);
-        c_point child_point = {};
-        double child_distance = (std::numeric_limits<double>::max)();
-        if (projected_point_on_entity(
-                entity.child(child_idx), requested, child_point, child_distance, run_ctx) &&
-            (!found_projection || child_distance < best_distance)) {
-            best_point = child_point;
-            best_distance = child_distance;
-            found_projection = true;
-        }
-    }
-
-    if (found_projection) {
-        projected = best_point;
-        distance_squared_out = best_distance;
-    }
-    return found_projection;
-}
 
 void rotate_local_loop_to_seam(storage_handle *scratch_storage,
                                MutableExtrusionEntity loop,
@@ -313,6 +258,24 @@ void rotate_loop_to_legal_seam(storage_handle *scratch_storage,
         throw std::runtime_error("The extrusion loop entry differs from its legal seam plan.");
 }
 
+bool can_choose_child_seam(const ExtrusionEntity &parent,
+                           const ExtrusionEntity &child,
+                           const bool ancestors_allow_seams)
+{
+    const Slic3r::ExtrusionEntity *core_parent = reinterpret_cast<const Slic3r::ExtrusionEntity *>(parent.handle());
+    const Slic3r::ExtrusionEntity *core_child = reinterpret_cast<const Slic3r::ExtrusionEntity *>(child.handle());
+    return core_parent && core_child &&
+        Slic3r::can_choose_child_seam(*core_parent, *core_child, ancestors_allow_seams);
+}
+
+void disable_rotation_recursively(MutableExtrusionEntity entity, const plugin_run_context *run_ctx)
+{
+    throw_if_cancelled(run_ctx);
+    for (uint32_t index = 0; index < entity.child_count(); ++index)
+        disable_rotation_recursively(entity.child_mutable(index), run_ctx);
+    entity.set_can_rotate(false);
+}
+
 void reverse_tree(MutableExtrusionEntity entity, const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
@@ -367,109 +330,8 @@ void rotate_loop_to_seam(storage_handle *scratch_storage,
                          const c_point seam,
                          const plugin_run_context *run_ctx)
 {
-    throw_if_cancelled(run_ctx);
-    if (loop.point_count() > 0) {
-        rotate_local_loop_to_seam(scratch_storage, loop, seam, run_ctx);
-        return;
-    }
-    if (loop.child_count() == 0)
-        throw std::runtime_error("A seam cannot be materialized on an empty loop.");
-
-    /*
-    Structural wrappers may place property-only events beside one geometric
-    child. When that child is already a complete loop, rotate its local or
-    nested geometry directly. Splitting it at the wrapper level would retain
-    every provisional seam as another persistent child after the final pass.
-
-    A parent with more than one non-empty child remains a genuinely composed
-    loop. Its child boundaries may carry different properties, so the generic
-    reordering and closing-fragment algorithm below must preserve them.
-    */
-    MutableExtrusionEntity nested_loop;
-    bool has_other_geometry = false;
-    for (uint32_t child_idx = 0; child_idx < loop.child_count(); ++child_idx) {
-        throw_if_cancelled(run_ctx);
-        MutableExtrusionEntity child = loop.child_mutable(child_idx);
-        if (child.empty())
-            continue;
-        if (nested_loop.valid() || !child.readonly().is_loop()) {
-            has_other_geometry = true;
-            break;
-        }
-        nested_loop = child;
-    }
-    if (nested_loop.valid() && !has_other_geometry) {
-        rotate_loop_to_seam(scratch_storage, nested_loop, seam, run_ctx);
-        return;
-    }
-
-    /* Select the direct child nearest to the seam; child order breaks ties. */
-    uint32_t containing_idx = EXTRUSION_INDEX_INVALID;
-    c_point projected = {};
-    double best_distance = (std::numeric_limits<double>::max)();
-    for (uint32_t child_idx = 0; child_idx < loop.child_count(); ++child_idx) {
-        throw_if_cancelled(run_ctx);
-        c_point child_projection = {};
-        double child_distance = (std::numeric_limits<double>::max)();
-        if (projected_point_on_entity(
-                loop.child(child_idx), seam, child_projection, child_distance, run_ctx) &&
-            child_distance < best_distance) {
-            containing_idx = child_idx;
-            projected = child_projection;
-            best_distance = child_distance;
-        }
-    }
-    const double tolerance_squared =
-        double(SCALED_EPSILON) * double(SCALED_EPSILON);
-    if (containing_idx == EXTRUSION_INDEX_INVALID ||
-        best_distance > tolerance_squared)
-        throw std::runtime_error(
-            "The seam placer returned a point outside the extrusion loop.");
-
-    uint32_t start_idx = containing_idx;
-    std::unique_ptr<StoredExtrusionEntity> closing_piece;
-    MutableExtrusionEntity child = loop.child_mutable(containing_idx);
-    if (child.point_count() > 0) {
-        // ArcPolyline::split_at() returns a one-point piece when the seam is within
-        // SCALED_EPSILON / 2 of an end of the path, and that piece would become a
-        // degenerate closing leaf. Such a seam is already at the child boundary.
-        const Slic3r::Point projected_point(projected.x, projected.y);
-        if (projected_point.coincides_with_epsilon(
-                Slic3r::Point(child.local_front().x, child.local_front().y))) {
-            start_idx = containing_idx;
-        } else if (projected_point.coincides_with_epsilon(
-                       Slic3r::Point(child.local_back().x, child.local_back().y))) {
-            start_idx = (containing_idx + 1) % loop.child_count();
-        } else {
-            /* Keep the source handle for the suffix and append a cloned prefix. */
-            StoredExtrusionEntity before(scratch_storage, child.readonly());
-            StoredExtrusionEntity after(scratch_storage, child.readonly());
-            if (extrusion_polyline_split_at_point(
-                    child.handle(), projected,
-                    before.mutable_handle(), after.mutable_handle()) == 0 ||
-                extrusion_move_from(child.mutable_handle(), after.mutable_handle()) == 0)
-                throw std::runtime_error(
-                    "The extrusion loop could not be split at its seam.");
-            closing_piece.reset(new StoredExtrusionEntity(std::move(before)));
-            start_idx = containing_idx;
-        }
-    } else {
-        rotate_loop_to_seam(scratch_storage, child, projected, run_ctx);
-    }
-
-    /* Move the original prefix behind the selected child without cloning it. */
-    for (uint32_t moved_count = 0; moved_count < start_idx; ++moved_count) {
-        throw_if_cancelled(run_ctx);
-        const uint32_t moved_idx = loop.move_child_from(loop.child_count(), loop, 0);
-        if (moved_idx == EXTRUSION_INDEX_INVALID)
-            throw std::runtime_error(
-                "The extrusion loop rejected its seam rotation.");
-    }
-    throw_if_cancelled(run_ctx);
-    if (closing_piece != nullptr &&
-        loop.append_child_move(closing_piece->mutable_view()) == EXTRUSION_INDEX_INVALID)
-        throw std::runtime_error(
-            "The extrusion loop rejected its closing seam fragment.");
+    // Keep the internal compatibility entry point, not a second unguarded algorithm.
+    rotate_loop_to_legal_seam(scratch_storage, loop, seam, true, run_ctx);
 }
 
 void disable_ordering_flags_recursively(
@@ -484,6 +346,7 @@ void disable_ordering_flags_recursively(
     throw_if_cancelled(run_ctx);
     entity.disable_sort();
     entity.disable_reverse();
+    entity.set_can_rotate(false);
 }
 
 LayerRegion resolve_source_layer_region(storage_handle *scratch_storage,

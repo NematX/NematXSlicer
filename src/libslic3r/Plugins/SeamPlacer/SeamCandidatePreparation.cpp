@@ -30,6 +30,7 @@ extrusion trees.
 #include "libslic3r/Api/plugin/cpp/LineDistancer.hpp"
 #include "libslic3r/Api/plugin/cpp/SeamPlacerViews.hpp"
 #include "libslic3r/Api/plugin/cpp/properties/ExtrusionProperties.hpp"
+#include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
 #include "SeamCostModel.hpp"
 #include "SeamPlacementConstraints.hpp"
 #include "SeamInitializationCancellation.hpp"
@@ -62,7 +63,8 @@ TreeSummary collect_tree(const ExtrusionEntity &entity,
                          raw_extrusion_role role, double width,
                          bool perimeter,
                          std::vector<CollectedLoop> &loops,
-                         const plugin_run_context *run_context);
+                         const plugin_run_context *run_context,
+                         bool ancestors_allow_seams = true);
 
 /* Find the LayerIsland containing a source LayerRegionIsland. */
 LayerIsland parent_island(const Layer &layer,
@@ -158,7 +160,8 @@ TreeSummary collect_tree(const ExtrusionEntity &entity,
                          raw_extrusion_role role, double width,
                          bool perimeter,
                          std::vector<CollectedLoop> &loops,
-                         const plugin_run_context *run_context)
+                         const plugin_run_context *run_context,
+                         const bool ancestors_allow_seams)
 {
     InitializationCancellation::check(run_context);
     update_attributes(entity, role, width);
@@ -177,9 +180,12 @@ TreeSummary collect_tree(const ExtrusionEntity &entity,
         summary.external.width = width;
     }
     const size_t first_nested_loop = loops.size();
+    const bool seam_unit = ancestors_allow_seams && entity.is_seam_unit();
     for (uint32_t index = 0; index < entity.child_count(); ++index) {
         const TreeSummary child = collect_tree(
-            entity.child(index), role, width, perimeter, loops, run_context);
+            entity.child(index), role, width, perimeter, loops, run_context,
+            !seam_unit && Ordering::TreeOrderingGeometry::can_choose_child_seam(
+                entity, entity.child(index), ancestors_allow_seams));
         summary.has_perimeter_marker =
             summary.has_perimeter_marker || child.has_perimeter_marker;
         summary.has_perimeter_role =
@@ -191,7 +197,7 @@ TreeSummary collect_tree(const ExtrusionEntity &entity,
     /* Ordering and seam placement operate on the continuous closed parent, even
        when Arachne stores perimeter properties on its open child paths. Keep one
        binding for that atomic identity and suppress records nested inside it. */
-    if (entity.is_loop() && !entity.empty() &&
+    if (seam_unit &&
         summary.has_perimeter_marker) {
         const bool skirt_marker = perimeter_marker != nullptr &&
             (perimeter_marker->perimeter_flags & C_EXTRUSION_PERIMETER_FLAG_SKIRT) != 0;

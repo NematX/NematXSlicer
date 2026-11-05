@@ -315,7 +315,7 @@ TEST_CASE("Continuity reads the stored exit of a preceding hybrid Loop",
 }
 
 // Compare identical owned content and raw permissions under legacy and generic roots; classification
-// is geometric while the C Loop head remains virtual, and SDK flag rewrites retain the read REVERSIBLE bit.
+// is geometric through the C head too; SDK flag rewrites retain the read REVERSIBLE bit.
 TEST_CASE("Sortable legacy Loop follows generic classification and flag rewrites",
           "[plugins][extrusion][extrusion-hybrid][hybrid-loop-flags]")
 {
@@ -330,7 +330,9 @@ TEST_CASE("Sortable legacy Loop follows generic classification and flag rewrites
         // The legacy Loop formerly read 0 here; generic content already read both bits.
         CHECK(extrusion_flags(hybrid_handle(*entity)) == 3);
     }
-    CHECK(extrusion_is_loop(hybrid_handle(*loop)) == 1);
+    CHECK(loop->is_loop()); // The legacy C++ override remains unchanged, but no longer governs the C API.
+    CHECK(extrusion_is_loop(hybrid_handle(*loop)) == 0);
+    CHECK(extrusion_is_loop(hybrid_handle(generic)) == 0);
     CHECK(loop->can_sort());
     CHECK(extrusion_is_continuous(hybrid_handle(*loop)) == 0);
     for (ExtrusionEntity *entity : {static_cast<ExtrusionEntity *>(loop.get()), &generic}) {
@@ -339,6 +341,7 @@ TEST_CASE("Sortable legacy Loop follows generic classification and flag rewrites
         CHECK(entity->is_continuous());
         CHECK_FALSE(entity->is_collection());
         CHECK(extrusion_flags(hybrid_handle(*entity)) == RAW_EXTRUSION_FLAG_REVERSIBLE);
+        CHECK(extrusion_is_loop(hybrid_handle(*entity)) == 1);
     }
 }
 
@@ -354,7 +357,9 @@ TEST_CASE("Cleared and discontinuous legacy Loops use structural collection clas
         REQUIRE(extrusion_insert_child_copy(hybrid_handle(*loop), 0, hybrid_handle(path)) == 0);
         CHECK(loop->is_collection());
         CHECK(extrusion_flags(hybrid_handle(*loop)) == 3);
-        CHECK(extrusion_is_loop(hybrid_handle(*loop)) == 1);
+        CHECK(loop->is_loop());
+        CHECK_FALSE(loop->ExtrusionEntity::is_loop());
+        CHECK(extrusion_is_loop(hybrid_handle(*loop)) == 0);
     }
     SECTION("gap between paths") {
         auto loop = hybrid_square();
@@ -362,7 +367,9 @@ TEST_CASE("Cleared and discontinuous legacy Loops use structural collection clas
         CHECK_FALSE(loop->is_continuous());
         CHECK(loop->is_collection());
         CHECK(extrusion_flags(hybrid_handle(*loop)) == 0);
-        CHECK(extrusion_is_loop(hybrid_handle(*loop)) == 1);
+        CHECK(loop->is_loop());
+        CHECK_FALSE(loop->ExtrusionEntity::is_loop());
+        CHECK(extrusion_is_loop(hybrid_handle(*loop)) == 0);
     }
 }
 
@@ -459,7 +466,9 @@ TEST_CASE("Content queries preserve stationary points arcs Z travel and legacy h
         open_paths.push_back(path_between(Point(1000, 1000), Point(11000, 1000)));
         ExtrusionMultiPath open(std::move(open_paths));
         CHECK(extrusion_is_loop(hybrid_handle(*loop)) == 1);
-        CHECK(extrusion_is_loop(hybrid_handle(closed)) == 0);
+        CHECK_FALSE(closed.is_loop());
+        CHECK(extrusion_is_loop(hybrid_handle(closed)) == 1);
+        CHECK(extrusion_can_rotate(hybrid_handle(closed)) == 0);
         CHECK(extrusion_is_loop(hybrid_handle(open)) == 0);
         CHECK(closed.ExtrusionEntity::is_loop());
         CHECK_FALSE(open.ExtrusionEntity::is_loop());
@@ -483,7 +492,9 @@ TEST_CASE("Thin variable width output keeps exact XY closure semantics",
     REQUIRE(parent.child_count() == 1);
     const ExtrusionEntity &view = parent;
     REQUIRE(dynamic_cast<const ExtrusionLoop *>(&view.child(0)) != nullptr);
-    CHECK(extrusion_is_loop(hybrid_handle(*raw.front())) == 1);
+    CHECK(raw.front()->is_loop());
+    CHECK_FALSE(raw.front()->ExtrusionEntity::is_loop());
+    CHECK(extrusion_is_loop(hybrid_handle(*raw.front())) == 0);
     std::vector<ArcPolyline> geometry;
     hybrid_geometry(view, geometry);
     REQUIRE_FALSE(geometry.empty());

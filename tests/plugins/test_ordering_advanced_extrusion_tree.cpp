@@ -20,6 +20,7 @@
 #include "libslic3r/Api/internal/LayerRegionAccess.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_ordering.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_seam_placer.h"
+#include "libslic3r/Plugins/SeamPlacer/SeamPlacerRouter.hpp"
 #include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/SeamPlacerViews.hpp"
@@ -93,6 +94,9 @@ struct SeamServiceState
     SeamPublishMode mode = SeamPublishMode::Valid;
     SeamStrategy strategy = SeamStrategy::Front;
     c_point fixed_point = {};
+    const extrusion_entity_handle *empty_trigger = nullptr;
+    ExtrusionEntity *empty_victim = nullptr;
+    std::atomic<uint32_t> trigger_count { 0 };
 
     void reset()
     {
@@ -103,6 +107,9 @@ struct SeamServiceState
         mode = SeamPublishMode::Valid;
         strategy = SeamStrategy::Front;
         fixed_point = {};
+        empty_trigger = nullptr;
+        empty_victim = nullptr;
+        trigger_count.store(0, std::memory_order_relaxed);
     }
 };
 
@@ -216,6 +223,11 @@ public:
                        const c_point start_position) const override
     {
         m_state.place_count.fetch_add(1, std::memory_order_relaxed);
+        // Regression injection after the trigger's four estimates: invalidate a
+        // different, already coarse-ordered unit before the final pass reaches it.
+        if (loop.handle() == m_state.empty_trigger && m_state.empty_victim != nullptr &&
+            m_state.trigger_count.fetch_add(1, std::memory_order_relaxed) == 4)
+            m_state.empty_victim->set_polyline(ArcPolyline());
         if (m_state.strategy == SeamStrategy::FixedPoint)
             return m_state.fixed_point;
         if (m_state.strategy == SeamStrategy::NearestVertex)
@@ -473,6 +485,7 @@ void check_ordering_disabled_recursively(const ExtrusionEntity &entity)
 {
     CHECK_FALSE(entity.can_sort());
     CHECK_FALSE(entity.can_reverse());
+    CHECK_FALSE(entity.can_rotate());
     for (const ExtrusionEntityUPtr &child : entity.children())
         check_ordering_disabled_recursively(*child);
 }
@@ -520,6 +533,180 @@ TEST_CASE("Advanced extrusion-tree ordering registers beside the fallback",
     contents << stream.rdbuf();
     CHECK(contents.str().find("ordering.extrusion_tree.advanced = 1") != std::string::npos);
     CHECK(contents.str().find("ordering.extrusion_tree.default = 1") == std::string::npos);
+}
+
+TEST_CASE("Advanced ordering retains routed child identities when provisional seams close their parent",
+          "[plugins][ordering][advanced-extrusion-tree][seam-activation]")
+{
+    ensure_ordering_seam_provider_registered();
+    for (const bool provider : {false, true}) {
+        CAPTURE(provider);
+        ScopedActivePlugins active{k_advanced_plugin, k_seam_plugin};
+        g_seam_state.strategy = SeamStrategy::FixedPoint;
+        g_seam_state.fixed_point = mm_point(5, 0);
+        Print print;
+        PrintingPlan &plan = print.mutable_printing_plan();
+        plan.groups.emplace_back();
+        PrintingToolGroup &tool = append_tool(append_layer(plan.groups.back()), 0);
+        ExtrusionEntity::Children children;
+        children.push_back(make_rectangular_loop(0, 10, 0, 10));
+        children.push_back(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{
+            Point::new_scale(10, 0), Point::new_scale(10, 10), Point::new_scale(0, 10),
+            Point::new_scale(0, 0), Point::new_scale(10, 0)})));
+        auto root = make_collection(std::move(children), false, false);
+        REQUIRE_FALSE(root->is_continuous());
+        const ExtrusionEntity *first = &root->child(0);
+        const ExtrusionEntity *second = &root->child(1);
+        PrintingExtrusion &extrusion = append_extrusion(tool, std::move(root), 1);
+        if (!provider)
+            REQUIRE(extrusion_property_remove(mutable_root(extrusion).mutable_handle(), EXTRUSION_PROPERTY_TYPE_PERIMETER) != 0);
+        publish_entry_points(extrusion, mm_point(0, 0), mm_point(10, 0));
+        REQUIRE(run_advanced_ordering(print) == RAW_PLUGIN_EXECUTION_SUCCESS);
+        REQUIRE(extrusion.root->child_count() == 2);
+        CHECK(&extrusion.root->child(0) == first);
+        CHECK(&extrusion.root->child(1) == second);
+        CHECK(extrusion.root->is_continuous());
+        const Point expected = provider ? Point::new_scale(5, 0) : Point::new_scale(0, 0);
+        CHECK(first->ExtrusionEntity::first_point() == expected);
+        CHECK(second->ExtrusionEntity::first_point() == expected);
+        CHECK(g_seam_state.place_count.load(std::memory_order_relaxed) == (provider ? 12 : 0));
+        check_ordering_disabled_recursively(*extrusion.root);
+    }
+}
+
+TEST_CASE("Advanced ordering respects fixed contour context and keeps structural wrapper events",
+          "[plugins][ordering][advanced-extrusion-tree][seam-activation]")
+{
+    ensure_ordering_seam_provider_registered();
+    for (const bool wrapper : {false, true}) {
+        CAPTURE(wrapper);
+        ScopedActivePlugins active{k_advanced_plugin, k_seam_plugin};
+        g_seam_state.strategy = SeamStrategy::FixedPoint;
+        g_seam_state.fixed_point = mm_point(5, 0);
+        Print print;
+        PrintingPlan &plan = print.mutable_printing_plan();
+        plan.groups.emplace_back();
+        PrintingToolGroup &tool = append_tool(append_layer(plan.groups.back()), 0);
+        auto root = make_collection({}, false, false);
+        root->set_can_rotate(false);
+        if (wrapper) {
+            root->append_child(std::make_unique<ExtrusionEntity>(false));
+            root->child(0).add_property(ExtrusionPropertySpeed(25.f));
+        }
+        root->append_child(make_rectangular_loop(0, 10, 0, 10));
+        const size_t contour_index = wrapper ? 1 : 0;
+        const ExtrusionEntity *contour = &root->child(contour_index);
+        const ExtrusionEntity *event = wrapper ? &root->child(0) : nullptr;
+        PrintingExtrusion &extrusion = append_extrusion(tool, std::move(root), 1);
+        publish_entry_points(extrusion, mm_point(0, 0), mm_point(0, 0));
+        REQUIRE(run_advanced_ordering(print) == RAW_PLUGIN_EXECUTION_SUCCESS);
+        CHECK(contour->ExtrusionEntity::first_point() == (wrapper ? Point::new_scale(5, 0) : Point::new_scale(0, 0)));
+        CHECK(g_seam_state.place_count.load(std::memory_order_relaxed) == (wrapper ? 6 : 0));
+        CHECK(&extrusion.root->child(contour_index) == contour);
+        if (wrapper) {
+            CHECK(&extrusion.root->child(0) == event);
+            CHECK(event->get_property<ExtrusionPropertySpeed>()->speed_mm_per_s == 25.f);
+        }
+        check_ordering_disabled_recursively(*extrusion.root);
+    }
+}
+
+TEST_CASE("Advanced ordering does not move a closed subloop anchored by a continuous sequence",
+          "[plugins][ordering][advanced-extrusion-tree][seam-activation]")
+{
+    ensure_ordering_seam_provider_registered();
+    ScopedActivePlugins active{k_advanced_plugin, k_seam_plugin};
+    g_seam_state.strategy = SeamStrategy::FixedPoint;
+    g_seam_state.fixed_point = mm_point(5, 0);
+    Print print;
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    PrintingToolGroup &tool = append_tool(append_layer(plan.groups.back()), 0);
+    ExtrusionEntity::Children children;
+    children.push_back(make_open_path(-5, 0, 0, 0, false));
+    children.push_back(make_rectangular_loop(0, 10, 0, 10));
+    children.push_back(make_open_path(0, 0, 15, 0, false));
+    auto root = make_collection(std::move(children), false, false);
+    root->set_can_rotate(false);
+    REQUIRE(root->is_continuous());
+    const ExtrusionEntity *contour = &root->child(1);
+    PrintingExtrusion &extrusion = append_extrusion(tool, std::move(root), 1);
+    publish_entry_points(extrusion, mm_point(-5, 0), mm_point(15, 0));
+    REQUIRE(run_advanced_ordering(print) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(extrusion.root->is_continuous());
+    CHECK(contour->ExtrusionEntity::first_point() == Point::new_scale(0, 0));
+    CHECK(g_seam_state.place_count.load(std::memory_order_relaxed) == 0);
+    check_ordering_disabled_recursively(*extrusion.root);
+}
+
+TEST_CASE("A frozen seam route rejects a unit invalidated after construction",
+          "[plugins][ordering][advanced-extrusion-tree][seam-activation]")
+{
+    ensure_ordering_seam_provider_registered();
+    ScopedActivePlugins active{k_advanced_plugin, k_seam_plugin};
+    Print print;
+    PrintingPlan &plan = print.mutable_printing_plan();
+    plan.groups.emplace_back();
+    PrintingToolGroup &tool = append_tool(append_layer(plan.groups.back()), 0);
+    PrintingExtrusion &extrusion = append_extrusion(tool, make_rectangular_loop(0, 10), 1);
+    PluginStorage storage;
+    slic3r_api::SeamPlacement::SeamPlacerRouter router(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+        slic3r_api::Print(reinterpret_cast<const print_handle *>(&broad_source_print())),
+        slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&plan)),
+        reinterpret_cast<storage_handle *>(&storage));
+    const slic3r_api::ExtrusionEntity root = mutable_root(extrusion).readonly();
+    REQUIRE(router.has_loop_route(root));
+    extrusion.root->set_can_rotate(false);
+    CHECK(router.has_loop_route(root));
+    CHECK_THROWS(router.place_seam(root, mm_point(5, 0)));
+    CHECK(extrusion.root->ExtrusionEntity::first_point() == Point::new_scale(0, 0));
+    CHECK(g_seam_state.place_count.load(std::memory_order_relaxed) == 0);
+}
+
+TEST_CASE("Advanced ordering diagnoses routed units emptied between coarse and final passes",
+          "[plugins][ordering][advanced-extrusion-tree][seam-activation]")
+{
+    ensure_ordering_seam_provider_registered();
+    for (const bool nested : {false, true}) {
+        CAPTURE(nested);
+        ScopedActivePlugins active{k_advanced_plugin, k_seam_plugin};
+        g_seam_state.strategy = SeamStrategy::FixedPoint;
+        g_seam_state.fixed_point = mm_point(5, 0);
+        Print print;
+        PrintingPlan &plan = print.mutable_printing_plan();
+        plan.groups.emplace_back();
+        PrintingToolGroup &tool = append_tool(append_layer(plan.groups.back()), 0);
+        ExtrusionEntity *victim = nullptr;
+        ExtrusionEntity *trigger = nullptr;
+        if (nested) {
+            ExtrusionEntity::Children children;
+            children.push_back(make_rectangular_loop(0, 10, 0, 10));
+            children.push_back(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{
+                Point::new_scale(10, 0), Point::new_scale(10, 10), Point::new_scale(0, 10),
+                Point::new_scale(0, 0), Point::new_scale(10, 0)})));
+            auto root = make_collection(std::move(children), false, false);
+            victim = &root->child(0);
+            trigger = &root->child(1);
+            PrintingExtrusion &extrusion = append_extrusion(tool, std::move(root), 1);
+            publish_entry_points(extrusion, mm_point(0, 0), mm_point(10, 0));
+        } else {
+            auto first = make_rectangular_loop(0, 10, 0, 10);
+            victim = first.get();
+            PrintingExtrusion &extrusion = append_extrusion(tool, std::move(first), 1);
+            publish_entry_points(extrusion, mm_point(0, 0), mm_point(0, 0));
+            auto second = make_rectangular_loop(0, 10, 0, 10);
+            trigger = second.get();
+            PrintingExtrusion &next = append_extrusion(tool, std::move(second), 2);
+            publish_entry_points(next, mm_point(0, 0), mm_point(0, 0));
+        }
+        g_seam_state.empty_victim = victim;
+        g_seam_state.empty_trigger = reinterpret_cast<const extrusion_entity_handle *>(trigger);
+        REQUIRE(run_advanced_ordering(print) == RAW_PLUGIN_EXECUTION_PLUGIN_ERROR);
+        CHECK(g_seam_state.trigger_count.load(std::memory_order_relaxed) == 5);
+        CHECK(victim->ExtrusionEntity::empty());
+        CHECK(victim->can_rotate()); // The invalidated unit was diagnosed, not silently consumed.
+    }
 }
 
 TEST_CASE("Advanced ordering shares one seam session across both parallel passes",

@@ -610,8 +610,10 @@ void estimate_entity_entry_exit(
     const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    if (entity.empty())
+    if (entity.empty()) {
+        seam_router.validate_empty_subtree(entity);
         return;
+    }
 
     // A continuous split strand offers whole-strand endpoints, never child candidates.
     if (TreeOrderingGeometry::atomic_strand(entity)) {
@@ -626,7 +628,7 @@ void estimate_entity_entry_exit(
     publish independent candidates because the future sorter may only rotate
     the complete closed path, not reorder its internal path fragments.
     */
-    if (entity.is_loop()) {
+    if (seam_router.has_loop_route(entity)) {
         estimates.emplace(
             entity.handle(), estimate_loop_entry_exit(
                 entity, seam_router, run_ctx));
@@ -700,7 +702,8 @@ EntryExitEstimates estimate_loop_entry_exit(
         throw_if_cancelled(run_ctx);
         const c_point seam = seam_router.place_seam(loop, probe);
         throw_if_cancelled(run_ctx);
-        append_distinct_point(result.entries, seam);
+        append_distinct_point(result.entries,
+            TreeOrderingGeometry::legal_seam_point(loop, seam, true, run_ctx));
     }
 
     /* A closed loop exits at the selected seam, so both bounded sets match. */
@@ -939,21 +942,23 @@ c_point coarsely_order_entity_descending(
     const plugin_run_context *run_ctx)
 {
     throw_if_cancelled(run_ctx);
-    if (entity.empty())
+    if (entity.empty()) {
+        seam_router.validate_empty_subtree(entity.readonly());
         return current_position;
+    }
 
     /*
     A loop is atomic even when its geometry is distributed among children.
     Asking again from the real current position replaces the four speculative
     seams used by the post-order pass with the seam that will actually print.
     */
-    if (entity.is_loop()) {
+    if (seam_router.has_loop_route(entity.readonly())) {
         throw_if_cancelled(run_ctx);
         const c_point seam = seam_router.place_seam(
             entity.readonly(), current_position);
         throw_if_cancelled(run_ctx);
-        TreeOrderingGeometry::rotate_loop_to_seam(
-            scratch_storage, entity, seam, run_ctx);
+        TreeOrderingGeometry::rotate_loop_to_legal_seam(
+            scratch_storage, entity, seam, true, run_ctx);
         return entity.back();
     }
 
@@ -1207,9 +1212,11 @@ c_point finalize_entity_descending(
 {
     throw_if_cancelled(run_ctx);
     if (entity.empty()) {
+        seam_router.validate_empty_subtree(entity.readonly());
         throw_if_cancelled(run_ctx);
         entity.disable_sort();
         entity.disable_reverse();
+        entity.set_can_rotate(false);
         return current_position;
     }
 
@@ -1218,13 +1225,13 @@ c_point finalize_entity_descending(
     so clear ordering permissions recursively only after the final seam has
     produced the complete final subtree.
     */
-    if (entity.is_loop()) {
+    if (seam_router.has_loop_route(entity.readonly())) {
         throw_if_cancelled(run_ctx);
         const c_point seam = seam_router.place_seam(
             entity.readonly(), current_position);
         throw_if_cancelled(run_ctx);
-        TreeOrderingGeometry::rotate_loop_to_seam(
-            scratch_storage, entity, seam, run_ctx);
+        TreeOrderingGeometry::rotate_loop_to_legal_seam(
+            scratch_storage, entity, seam, true, run_ctx);
         throw_if_cancelled(run_ctx);
         TreeOrderingGeometry::disable_ordering_flags_recursively(entity, run_ctx);
         return entity.back();
@@ -1267,6 +1274,7 @@ c_point finalize_entity_descending(
         throw_if_cancelled(run_ctx);
         entity.disable_sort();
         entity.disable_reverse();
+        entity.set_can_rotate(false);
         return child_position;
     }
 
@@ -1294,6 +1302,7 @@ c_point finalize_entity_descending(
     throw_if_cancelled(run_ctx);
     entity.disable_sort();
     entity.disable_reverse();
+    entity.set_can_rotate(false);
     return entity.back();
 }
 
@@ -1457,8 +1466,10 @@ void coarsely_order_tool_group_job(
         PrintingExtrusion extrusion =
             job.tool_group.extrusion(extrusion_idx);
         MutableExtrusionEntity root = extrusion.mutable_root();
-        if (root.empty())
+        if (root.empty()) {
+            seam_router->validate_empty_subtree(root.readonly());
             continue;
+        }
 
         EntryPointProperty *entry_points = entry_point_key->get_mutable(root);
         if (entry_points == nullptr)
@@ -1521,8 +1532,10 @@ void finalize_tool_group_job(
         PrintingExtrusion extrusion =
             job.tool_group.extrusion(extrusion_idx);
         MutableExtrusionEntity root = extrusion.mutable_root();
-        if (root.empty())
+        if (root.empty()) {
+            seam_router->validate_empty_subtree(root.readonly());
             continue;
+        }
 
         EntryPointProperty *entry_points = entry_point_key->get_mutable(root);
         if (entry_points == nullptr)

@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "libslic3r/ExtrusionEntityCollection.hpp"
+#include "libslic3r/ExtrusionSeamPlanning.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
 #include "libslic3r/Print.hpp"
@@ -218,14 +219,6 @@ is the right lookup here. Tolerant geometric splitting belongs to a later, more
 expensive travel optimizer.
 */
 size_t find_polyline_point_index(const ArcPolyline &polyline, const Point &point);
-
-/*
-Return true when entity contains point as an existing vertex.
-
-This is used to rotate composed loops: the parent first finds which direct child
-contains the selected vertex, then rotates the child list around that child.
-*/
-bool entity_contains_point(const ExtrusionEntity &entity, const Point &point);
 
 /*
 Move all children out of entity while preserving the concrete node object.
@@ -1009,6 +1002,7 @@ void order_sortable_extrusion_children(ExtrusionEntity &entity,
     the computed continuity ambiguous again for later G-code and debug code.
     */
     entity.set_can_sort_reverse(false, false);
+    entity.set_can_rotate(false);
 }
 
 ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
@@ -1044,10 +1038,14 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
         return best;
     }
 
-    if (entity.is_loop()) {
+    if (is_seam_unit(entity)) {
         std::unique_ptr<LoopEntryAnalysis> analysis = loop_policy.analyze_loop(entity, context);
-        if (!analysis || analysis->candidate_count() == 0)
+        if (!analysis || analysis->candidate_count() == 0) {
+            best.point = entity.ExtrusionEntity::first_point();
+            best.score = current_point.distance_to_square(best.point);
+            best.valid = true;
             return best;
+        }
 
         std::shared_ptr<const LoopEntryAnalysis> shared_analysis(std::move(analysis));
         const size_t candidate_count = shared_analysis->candidate_count();
@@ -1055,12 +1053,19 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
         for (size_t candidate_idx = 0; candidate_idx < candidate_count; ++candidate_idx) {
             ExtrusionEntryCandidate candidate;
             candidate.point = shared_analysis->candidate_point(candidate_idx);
+            if (!is_directly_legal_seam(entity, candidate.point, true))
+                continue;
             candidate.score = shared_analysis->score_candidate(candidate_idx, current_point);
             candidate.loop_analysis = shared_analysis;
             candidate.loop_candidate_idx = candidate_idx;
             candidate.valid = true;
             if (!best.valid || candidate.score < best.score)
                 best = candidate;
+        }
+        if (!best.valid) {
+            best.point = entity.ExtrusionEntity::first_point();
+            best.score = current_point.distance_to_square(best.point);
+            best.valid = true;
         }
         return best;
     }
@@ -1113,94 +1118,73 @@ void prepare_child_for_entry(ExtrusionEntity &child,
 {
     assert(candidate.valid);
 
-    if (candidate.loop_analysis)
+    const bool finalized_unit = is_seam_unit(child);
+    if (candidate.loop_analysis) {
+        if (!finalized_unit || !is_directly_legal_seam(child, candidate.point, true))
+            throw std::runtime_error("A native loop candidate is no longer directly materializable.");
         candidate.loop_analysis->rotate_loop_to_candidate(child, candidate.loop_candidate_idx);
-    else if (candidate.reverse_before_printing)
+        if (child.ExtrusionEntity::first_point() != candidate.point)
+            throw std::runtime_error("A native loop callback did not produce its announced entry.");
+    } else if (candidate.reverse_before_printing)
         child.reverse();
 
     if (child.can_sort())
         order_sortable_extrusion_children(child, candidate.point, loop_policy, context);
+    else if (finalized_unit) {
+        const auto consume = [](auto &&self, ExtrusionEntity &entity) -> void {
+            for (size_t index = 0; index < entity.child_count(); ++index)
+                self(self, entity.child(index));
+            entity.set_can_rotate(false);
+        };
+        consume(consume, child);
+    }
 }
 
 void rotate_loop_to_point(ExtrusionEntity &entity, const Point &entry_point)
 {
-    if (ArcPolyline *polyline = entity.polyline_or_null()) {
-        const size_t point_idx = find_polyline_point_index(*polyline, entry_point);
-        if (point_idx != size_t(-1))
-            rotate_polyline_to_index(*polyline, point_idx);
+    const auto plan = legal_seam_entry(entity, entry_point, true);
+    if (!plan || plan->point != entry_point)
+        throw std::runtime_error("The native vertex seam is outside its legal domain.");
+    ExtrusionEntity *target = &entity;
+    for (const size_t index : plan->delegation)
+        target = &target->child(index);
+    using Operation = ExtrusionSeamPlan::Operation;
+    if (plan->operation == Operation::KeepStart)
+        return;
+    if (plan->operation == Operation::RotateLocal) {
+        ArcPolyline &polyline = target->polyline_ref();
+        const size_t point_idx = find_polyline_point_index(polyline, entry_point);
+        if (point_idx == size_t(-1))
+            throw std::runtime_error("The native vertex policy requires a stored local vertex.");
+        rotate_polyline_to_index(polyline, point_idx);
         return;
     }
 
-    if (entity.is_leaf())
-        return;
-
-    ExtrusionEntity::Children children = release_all_children(entity);
-    if (children.empty())
-        return;
-
-    size_t containing_idx = size_t(-1);
-    for (size_t child_idx = 0; child_idx < children.size(); ++child_idx) {
-        if (children[child_idx] && entity_contains_point(*children[child_idx], entry_point)) {
-            containing_idx = child_idx;
-            break;
-        }
-    }
-
-    if (containing_idx == size_t(-1)) {
-        for (ExtrusionEntityUPtr &child : children)
-            append_owned_child(entity, std::move(child));
-        return;
-    }
-
-    size_t start_idx = containing_idx;
+    const size_t start_idx = plan->child_index;
     ExtrusionEntityUPtr closing_piece;
-
-    if (ArcPolyline *polyline = children[containing_idx]->polyline_or_null()) {
-        const size_t point_idx = find_polyline_point_index(*polyline, entry_point);
-        if (point_idx == size_t(-1)) {
-            assert(false);
-        } else if (point_idx == 0) {
-            start_idx = containing_idx;
-        } else if (point_idx == polyline->size() - 1) {
-            /*
-            The chosen point is the end of this child and the start of the next
-            child in the continuous loop. Starting from the next child avoids
-            making an unnecessary one-point split.
-            */
-            start_idx = (containing_idx + 1) % children.size();
-        } else {
-            /*
-            The chosen point is inside a leaf path that participates in a larger
-            loop. Split that leaf into tail and head, print the tail first, then
-            append the head after the rest of the loop closes back to it.
-            */
-            ArcPolyline before_entry;
-            ArcPolyline after_entry;
-            const bool split = polyline->split_at_index(point_idx, before_entry, after_entry);
-            assert(split);
-            if (split) {
-                closing_piece = ExtrusionEntityUPtr(children[containing_idx]->clone());
-                closing_piece->set_polyline(std::move(before_entry));
-                children[containing_idx]->set_polyline(std::move(after_entry));
-            }
-            start_idx = containing_idx;
-        }
-    } else {
-        /*
-        A child collection may itself contain the selected vertex. Rotate it
-        first, then move the child collection to the front of this loop.
-        */
-        rotate_loop_to_point(*children[containing_idx], entry_point);
-        start_idx = containing_idx;
+    if (plan->operation == Operation::SplitChild) {
+        ExtrusionEntity &child = target->child(start_idx);
+        if (has_one_shot_extrusion_event(child))
+            throw std::runtime_error("A native seam split must not duplicate a one-shot event.");
+        ArcPolyline &polyline = child.polyline_ref();
+        const size_t point_idx = find_polyline_point_index(polyline, entry_point);
+        ArcPolyline before;
+        ArcPolyline after;
+        if (point_idx == size_t(-1) || !polyline.split_at_index(point_idx, before, after))
+            throw std::runtime_error("The native vertex policy could not split its direct leaf.");
+        closing_piece.reset(child.clone());
+        closing_piece->set_polyline(std::move(before));
+        child.set_polyline(std::move(after));
     }
-
+    ExtrusionEntity::Children children = release_all_children(*target);
     for (size_t offset = 0; offset < children.size(); ++offset) {
         const size_t child_idx = (start_idx + offset) % children.size();
-        append_owned_child(entity, std::move(children[child_idx]));
+        append_owned_child(*target, std::move(children[child_idx]));
     }
-
     if (closing_piece)
-        append_owned_child(entity, std::move(closing_piece));
+        append_owned_child(*target, std::move(closing_piece));
+    if (entity.ExtrusionEntity::first_point() != entry_point)
+        throw std::runtime_error("The native vertex seam differs from its legal plan.");
 }
 
 void rotate_polyline_to_index(ArcPolyline &polyline, const size_t point_idx)
@@ -1229,18 +1213,6 @@ size_t find_polyline_point_index(const ArcPolyline &polyline, const Point &point
         if (polyline.get_point(point_idx) == point)
             return point_idx;
     return size_t(-1);
-}
-
-bool entity_contains_point(const ExtrusionEntity &entity, const Point &point)
-{
-    if (const ArcPolyline *polyline = entity.polyline_or_null())
-        return find_polyline_point_index(*polyline, point) != size_t(-1);
-
-    if (!entity.is_leaf())
-        for (const ExtrusionEntityUPtr &child : entity.children())
-            if (child && entity_contains_point(*child, point))
-                return true;
-    return false;
 }
 
 ExtrusionEntity::Children release_all_children(ExtrusionEntity &entity)

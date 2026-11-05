@@ -42,6 +42,13 @@ public:
     /* Release the immutable route table and its shared provider sessions. */
     ~SeamPlacerRouter();
 
+    /* Immutable identities selected on input, including routes without a provider. */
+    bool has_loop_route(const ExtrusionEntity &entity) const;
+
+    /* Before skipping an empty borrowed subtree, reject any initially routed
+       unit it still contains. No geometry, flags or provider state is mutated. */
+    void validate_empty_subtree(const ExtrusionEntity &entity) const;
+
     SeamPlacerRouter(const SeamPlacerRouter &) = delete;
     SeamPlacerRouter &operator=(const SeamPlacerRouter &) = delete;
 

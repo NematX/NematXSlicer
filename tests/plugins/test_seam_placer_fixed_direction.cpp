@@ -23,6 +23,7 @@
 #include "libslic3r/Api/internal/ArcPolylineAccess.hpp"
 #include "libslic3r/Api/internal/LayerAccess.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_seam_placer.h"
+#include "libslic3r/Api/plugin/cpp/properties/DataTreeProperties.hpp"
 #include "libslic3r/Api/plugin/cpp/OrchestratorViews.hpp"
 #include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Api/plugin/cpp/SeamPlacerViews.hpp"
@@ -1953,6 +1954,147 @@ TEST_CASE("Regional seam router selects the configured Random provider", "[plugi
     CHECK(storage.size()==0);
 }
 
+TEST_CASE("Random ordering routes the marked child of a protected event wrapper",
+          "[plugins][seam-placer][random][router][seam-activation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedSeamProviders active({"seam_placer.random", "ordering.extrusion_tree.xy_serpentine"});
+    ConstraintFixture fixture;
+    random_options(fixture,false,false);
+    const std::string selector=Steps::plugin_exclusive_group_option_key(Orchestrator::instance(),SEAM_PLACER,"seam_placer_plugin");
+    PrintRegionConfig config=fixture.region->region().config();
+    config.set_deserialize_strict(selector,"seam_placer.random");
+    replace_region_config(*fixture.region,config);
+    ExtrusionEntity wrapper(ExtrusionEntity::Children(),false,false,true);
+    wrapper.set_can_rotate(false);
+    wrapper.append_child(std::make_unique<ExtrusionEntity>(false));
+    wrapper.child(0).add_property(ExtrusionPropertySpeed(25.f));
+    wrapper.append_child(std::make_unique<ExtrusionEntity>(square_loop()));
+    slic3r_api::PrintingExtrusion extrusion=fixture.add(wrapper);
+    random_tags(extrusion.mutable_root().child_mutable(1),true);
+    const slic3r_api::ExtrusionEntity loop=extrusion.root().child(1);
+    const extrusion_entity_handle *event=extrusion.root().child(0).handle();
+    slic3r_api::SeamPlacer reference=create_fixed_session(fixture.prepared.print,"seam_placer.random");
+    const c_point expected=reference.place_seam(loop,fixture.view(),{0,0});
+    REQUIRE_FALSE(same_point(expected,loop.front()));
+    slic3r_api::OrchestratorView orchestrator(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    run_ctx_extrusion_ordering context{};
+    context.print=reinterpret_cast<const print_handle *>(&fixture.prepared.print);
+    context.plan=reinterpret_cast<printing_plan_handle *>(&fixture.prepared.print.mutable_printing_plan());
+    REQUIRE(orchestrator.execute(orchestrator.find_plugin("ordering.extrusion_tree.xy_serpentine"),context.print,context)==RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(same_point(loop.front(),expected));
+    CHECK(extrusion.root().child_count()==2);
+    CHECK(extrusion.root().child(0).handle()==event);
+    CHECK_FALSE(extrusion.root().can_rotate());
+    CHECK_FALSE(loop.can_rotate());
+}
+
+TEST_CASE("A closed fixed MultiPath does not consume Random draws or become an alignment reference",
+          "[plugins][seam-placer][random][router][seam-activation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedSeamProviders active({"seam_placer.random"});
+    ConstraintFixture fixture;
+    random_options(fixture,false,true);
+    slic3r_api::PrintingExtrusion original=fixture.add(square_loop());
+    random_tags(original.mutable_root(),false);
+    const slic3r_api::ExtrusionEntity loop=original.root();
+    slic3r_api::SeamPlacer before=create_fixed_session(fixture.prepared.print,"seam_placer.random");
+    const c_point expected=before.place_seam(loop,fixture.view(),{0,0});
+    ExtrusionPath path(ExtrusionAttributes{ExtrusionRole::ExternalPerimeter});
+    path.set_polyline(square_loop().polyline_ref());
+    ExtrusionMultiPath fixed(path);
+    REQUIRE_FALSE(fixed.can_rotate());
+    slic3r_api::PrintingExtrusion added=fixture.add(fixed);
+    random_tags(added.mutable_root(),true);
+    const slic3r_api::ExtrusionEntity added_root=added.root();
+    REQUIRE(added_root.is_loop());
+    REQUIRE_FALSE(added_root.is_seam_unit());
+    slic3r_api::PrintingPlan plan(reinterpret_cast<printing_plan_handle *>(&fixture.prepared.print.mutable_printing_plan()));
+    REQUIRE(plan.group(0).layer_group(0).tool_group(0).move_extrusion(1,0));
+    slic3r_api::SeamPlacer after=create_fixed_session(fixture.prepared.print,"seam_placer.random");
+    CHECK(same_point(after.place_seam(loop,fixture.view(),{100,200}),expected));
+    CHECK(added_root.child(0).can_rotate());
+    CHECK_FALSE(added_root.can_rotate());
+}
+
+
+// Unrouted adhesion contours must not consume random draws or align printed perimeters.
+TEST_CASE("Random seam preparation ignores skirt roles and markers without changing their geometry",
+          "[plugins][seam-placer][random][router][seam-activation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedSeamProviders active({"seam_placer.random"});
+    for (const bool skirt_role : {false, true}) {
+        CAPTURE(skirt_role);
+        ConstraintFixture fixture;
+        random_options(fixture, false, true);
+        slic3r_api::PrintingExtrusion original = fixture.add(square_loop());
+        random_tags(original.mutable_root(), false);
+        const slic3r_api::ExtrusionEntity loop = original.root();
+        slic3r_api::SeamPlacer before = create_fixed_session(fixture.prepared.print, "seam_placer.random");
+        const c_point expected = before.place_seam(loop, fixture.view(), {0, 0});
+
+        ExtrusionEntity skirt = square_loop();
+        skirt.add_property(ExtrusionAttributes{skirt_role ? ExtrusionRole::Skirt : ExtrusionRole::ExternalPerimeter});
+        skirt.get_or_add_property<ExtrusionPropertyLoopRole>().set_perimeter_role(skirt_role ? elrDefault : elrSkirt);
+        const slic3r_api::PrintingExtrusion added = fixture.add(skirt);
+        const slic3r_api::ExtrusionEntity added_root = added.root();
+        const c_point start = added_root.front();
+        const uint32_t points = added_root.point_count();
+        slic3r_api::PrintingPlan plan(reinterpret_cast<printing_plan_handle *>(&fixture.prepared.print.mutable_printing_plan()));
+        REQUIRE(plan.group(0).layer_group(0).tool_group(0).move_extrusion(1, 0));
+        slic3r_api::SeamPlacer after = create_fixed_session(fixture.prepared.print, "seam_placer.random");
+        CHECK(same_point(after.place_seam(loop, fixture.view(), {100, 200}), expected));
+        CHECK_THROWS(after.place_seam(added_root, fixture.view(), {0, 0}));
+        CHECK(same_point(added_root.front(), start));
+        CHECK(added_root.point_count() == points);
+        CHECK(added_root.can_rotate());
+    }
+}
+
+// Adhesion provenance applies even when its perimeter-bucket wrapper has no skirt role or marker.
+TEST_CASE("Random seam preparation excludes source adhesion layers behind unmarked wrappers",
+          "[plugins][seam-placer][random][router][seam-activation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedSeamProviders active({"seam_placer.random"});
+    for (const raw_layer_adhesion_kind kind : {RAW_LAYER_ADHESION_KIND_BRIM, RAW_LAYER_ADHESION_KIND_SKIRT}) {
+        CAPTURE(kind);
+        ConstraintFixture fixture;
+        const std::string selector = Steps::plugin_exclusive_group_option_key(
+            Orchestrator::instance(), SEAM_PLACER, "seam_placer_plugin");
+        PrintRegionConfig config = fixture.region->region().config();
+        config.set_deserialize_strict(selector, "seam_placer.random");
+        replace_region_config(*fixture.region, config);
+        ExtrusionEntity wrapper(ExtrusionEntity::Children(), false, false, true);
+        wrapper.append_child(std::make_unique<ExtrusionEntity>(square_loop()));
+        slic3r_api::PrintingExtrusion extrusion = fixture.add(wrapper);
+        mark_perimeter_loop(extrusion.mutable_root());
+        const slic3r_api::ExtrusionEntity root = extrusion.root();
+        REQUIRE(root.is_seam_unit());
+        slic3r_api::LayerAdhesionProperty &adhesion = fixture.view().layer().mutable_properties().get_or_add<
+            slic3r_api::LayerAdhesionProperty>(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+                                              PLUGIN_PROPERTY_TYPE_LAYER_ADHESION);
+        adhesion.kind = kind;
+        slic3r_api::SeamPlacer session = create_fixed_session(fixture.prepared.print, "seam_placer.random");
+        CHECK_THROWS(session.place_seam(root, fixture.view(), {0, 0}));
+        CHECK(root.is_seam_unit());
+        CHECK(root.child_count() == 1);
+        CHECK(root.child(0).point_count() == 5);
+        PluginStorage storage;
+        slic3r_api::SeamPlacement::SeamPlacerRouter router(
+            reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+            slic3r_api::Print(reinterpret_cast<const print_handle *>(&fixture.prepared.print)),
+            slic3r_api::PrintingPlan(reinterpret_cast<printing_plan_handle *>(&fixture.prepared.print.mutable_printing_plan())),
+            reinterpret_cast<storage_handle *>(&storage));
+        REQUIRE(router.has_loop_route(root));
+        const c_point start = root.child(0).point(0);
+        const c_point next = root.child(0).point(1);
+        const c_point approach{(start.x + next.x) / 2, (start.y + next.y) / 2};
+        CHECK(same_point(router.place_seam(root, approach), approach));
+    }
+}
 
 TEST_CASE("Regional registry survives apply and rebinds retained layers", "[plugins][print-region-registry]")
 {

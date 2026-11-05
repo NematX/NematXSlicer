@@ -205,6 +205,7 @@ inline ExtrusionSeamPlan plan_on_contour(const ExtrusionEntity &entity, const Po
 
 // Validate against the full current contour before restricting to materializable
 // entries. Off-contour and ineligible requests remain errors, even behind a barrier.
+// Callers retain their selection policy; this function never consumes permission.
 inline std::optional<ExtrusionSeamPlan> legal_seam_entry(const ExtrusionEntity &entity,
                                                        const Point &requested,
                                                        const bool ancestors_allow_seams)

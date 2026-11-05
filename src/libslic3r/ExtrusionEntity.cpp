@@ -464,7 +464,7 @@ ExtrusionEntity* ExtrusionEntity::emplace_ordered_leaf(
     */
     Children *current_children = std::get_if<Children>(&m_content);
     const bool is_fixed_collection =
-        current_children != nullptr && !m_can_sort && !m_can_reverse;
+        current_children != nullptr && !m_can_sort && !m_can_reverse && !m_can_rotate;
     if (property_placement == ExistingPropertyPlacement::KeepOnParent && is_fixed_collection) {
         const size_t insertion_idx =
             position == OrderedLeafPosition::Before ? 0 : current_children->size();

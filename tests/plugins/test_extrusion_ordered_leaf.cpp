@@ -826,7 +826,7 @@ TEST_CASE("Ordered leaves insert directly into fixed parents",
     children.emplace_back(empty_child());
     children.emplace_back(empty_child());
     Slic3r::ExtrusionEntity root(std::move(children), false, false, true);
-    root.set_can_rotate(true);
+    root.set_can_rotate(false);
     root.child(0).set_can_rotate(false);
     root.child(1).set_can_rotate(true);
     root.add_property(Slic3r::ExtrusionPropertySpeed(35.f, 700.f));
@@ -851,6 +851,116 @@ TEST_CASE("Ordered leaves insert directly into fixed parents",
     CHECK(second_original->can_rotate());
     CHECK((inserted.flags() & RAW_EXTRUSION_FLAG_SORTABLE) == 0);
     CHECK((inserted.flags() & RAW_EXTRUSION_FLAG_REVERSIBLE) == 0);
+}
+
+TEST_CASE("Ordered leaves wrap a fixed-order collection that still permits rotation",
+          "[plugins][extrusion][ordered-leaf][rotation][seam-activation]")
+{
+    using namespace Slic3r;
+    ExtrusionEntity root(ExtrusionEntity::Children(), false, false, true);
+    root.append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 0}, {0, 0}})));
+    REQUIRE(root.can_rotate());
+    root.add_property(ExtrusionPropertySpeed(35.f, 700.f));
+    const ExtrusionEntity *original = &root.child(0);
+    ExtrusionEntity *event = root.emplace_ordered_leaf(OrderedLeafPosition::Before, ExistingPropertyPlacement::KeepOnParent);
+    REQUIRE(event);
+    REQUIRE(root.child_count() == 2);
+    CHECK(&root.child(0) == event);
+    REQUIRE(root.child(1).child_count() == 1);
+    CHECK(&root.child(1).child(0) == original);
+    CHECK(root.child(1).can_rotate());
+    CHECK_FALSE(root.can_rotate());
+    CHECK_FALSE(event->can_rotate());
+    CHECK(root.get_property<ExtrusionPropertySpeed>() != nullptr);
+    CHECK(root.child(1).get_property<ExtrusionPropertySpeed>() == nullptr);
+}
+
+TEST_CASE("Core C and SDK agree on geometric loops and independent seam permission",
+          "[plugins][extrusion][seam-activation]")
+{
+    using namespace Slic3r;
+    ExtrusionPath path(ExtrusionAttributes{ExtrusionRole::Perimeter});
+    path.set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {0, 0}}));
+    ExtrusionMultiPath fixed(path);
+    REQUIRE_FALSE(fixed.is_loop());
+    REQUIRE(fixed.ExtrusionEntity::is_loop());
+    CHECK(mutable_view(fixed).readonly().is_loop());
+    CHECK_FALSE(mutable_view(fixed).readonly().is_seam_unit());
+    CHECK(mutable_view(path).readonly().is_seam_unit());
+    ExtrusionEntityUPtr copy = fixed.clone_canonical();
+    CHECK(mutable_view(*copy).readonly().is_loop());
+    CHECK_FALSE(mutable_view(*copy).readonly().is_seam_unit());
+    fixed.set_can_rotate(true);
+    CHECK(mutable_view(fixed).readonly().is_seam_unit());
+    ExtrusionLoop near;
+    path.set_polyline(ArcPolyline(Points{{0, 0}, {10000, 0}, {10000, 10000}, {1, 0}}));
+    near.append_child(std::make_unique<ExtrusionPath>(path));
+    REQUIRE(near.is_loop());
+    CHECK_FALSE(mutable_view(near).readonly().is_loop());
+    CHECK_FALSE(mutable_view(near).readonly().is_seam_unit());
+}
+
+TEST_CASE("Native custom seam scores keep original legal indices and fall back without a callback",
+          "[plugins][extrusion][seam-activation]")
+{
+    using namespace Slic3r;
+    using namespace Slic3r::Printing;
+    struct Analysis final : LoopEntryAnalysis {
+        Points points;
+        std::vector<size_t> &scored;
+        std::vector<size_t> &selected;
+        Analysis(Points values, std::vector<size_t> &scores, std::vector<size_t> &selections)
+            : points(std::move(values)), scored(scores), selected(selections) {}
+        size_t candidate_count() const override { return points.size(); }
+        Point candidate_point(size_t index) const override { return points.at(index); }
+        double score_candidate(size_t index, const Point &) const override {
+            scored.push_back(index);
+            return index == 0 ? -1000. : 42.;
+        }
+        void rotate_loop_to_candidate(ExtrusionEntity &, size_t index) const override {
+            selected.push_back(index);
+            CHECK(index == 1);
+            // The only admissible candidate is the existing entry.
+        }
+    };
+    struct Policy final : LoopEntryPolicy {
+        Points points;
+        mutable std::vector<size_t> scored;
+        mutable std::vector<size_t> selected;
+        std::unique_ptr<LoopEntryAnalysis> analyze_loop(const ExtrusionEntity &, const LoopEntryContext &) const override {
+            return std::make_unique<Analysis>(points, scored, selected);
+        }
+    };
+    for (const bool has_legal : {false, true}) {
+        CAPTURE(has_legal);
+        ExtrusionEntity outer(ExtrusionEntity::Children(), true, false, false);
+        auto loop = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+        loop->append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 0}, {10000, 0}})));
+        auto atomic = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+        atomic->append_child(std::make_unique<ExtrusionEntity>(false,
+            ArcPolyline(Points{{10000, 0}, {10000, 10000}, {0, 10000}})));
+        loop->append_child(std::move(atomic));
+        loop->append_child(std::make_unique<ExtrusionEntity>(false, ArcPolyline(Points{{0, 10000}, {0, 0}})));
+        const ExtrusionEntity *before = loop.get();
+        outer.append_child(std::move(loop));
+        Policy policy;
+        policy.points = Points{{10000, 10000}}; // Preferred -1000 score, but illegal inside the atomic composite.
+        if (has_legal)
+            policy.points.emplace_back(0, 0);
+        order_extrusion_tree(outer, Point(10000, 10000), policy, LoopEntryContext{});
+        REQUIRE(outer.child_count() == 1);
+        CHECK(&outer.child(0) == before);
+        CHECK(outer.ExtrusionEntity::first_point() == Point(0, 0));
+        CHECK(outer.child(0).child_count() == 3);
+        CHECK_FALSE(outer.child(0).can_rotate());
+        if (has_legal) {
+            CHECK(policy.scored == std::vector<size_t>{1});
+            CHECK(policy.selected == std::vector<size_t>{1});
+        } else {
+            CHECK(policy.scored.empty());
+            CHECK(policy.selected.empty());
+        }
+    }
 }
 
 // Repeated fixed-parent insertions keep the first wrapper's permission and its child objects intact.
