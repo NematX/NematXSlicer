@@ -98,7 +98,7 @@ protected:
     static Point NOT_A_POINT;
 
     uint32_t m_id; // for travel map
-    // even if no_sort, allow to reverse() us (and our entities if they allow it, but they should) 
+    // Reversing an authorized unit reverses its complete content, including fixed descendants.
     bool m_can_reverse; //TODO: use (int64_t) m_id sign to embed this property, currently not an issue as 32+8 <= 64
     Content m_content;
     bool    m_can_sort = false;
@@ -236,6 +236,8 @@ public:
     // Create a new object, initialize it with this object using the move semantics.
     virtual ExtrusionEntity* clone_move() { return new ExtrusionEntity(std::move(*this)); }
     virtual ~ExtrusionEntity() = default;
+    // Reverse all stored paths and child order as one unit, without descendant permission vetoes.
+    // The caller chooses/authorizes the operation; properties, resources and handles stay on their nodes.
     virtual void reverse();
     // Borrow the first stored XY point, skipping empty children, or the no-point sentinel.
     virtual const Point& first_point() const;
@@ -316,7 +318,7 @@ public:
     ExtrusionEntity *clone() const override { return new ExtrusionNop(*this); }
     // Create a new object, initialize it with this object using the move semantics.
     virtual ExtrusionEntity* clone_move() { return new ExtrusionNop(std::move(*this)); }
-    void reverse() override {}
+    void reverse() override { ExtrusionEntity::reverse(); }
     const Point &first_point() const override { return position; }
     const Point& last_point() const override { return position; }
     const Point& middle_point() const override { return position; }
@@ -423,12 +425,7 @@ public:
     // A structural plugin operation may replace this path's local polyline by
     // ordered path children while keeping the object's stable handle. Read and
     // traversal operations therefore delegate to ExtrusionEntity in that state.
-    void reverse() override {
-        if (this->has_polyline())
-            this->polyline().reverse();
-        else
-            ExtrusionEntity::reverse();
-    }
+    void reverse() override { ExtrusionEntity::reverse(); }
     void set_can_reverse(bool can_reverse) { this->m_can_reverse = can_reverse; }
     const Point& first_point() const override {
         return this->has_polyline() ? this->polyline().front() : ExtrusionEntity::first_point();
@@ -739,11 +736,7 @@ public:
     virtual const Point& first_point() const override { return this->paths().front().polyline().front(); }
     virtual const Point& last_point() const override { return this->paths().back().polyline().back(); }
 
-    virtual void reverse() override {
-        for (THING &entity : this->paths())
-            entity.reverse();
-        std::reverse(this->paths().begin(), this->paths().end());
-    }
+    virtual void reverse() override { ExtrusionEntity::reverse(); }
     ExtrusionRole role() const override
     {
         if (this->paths().empty())

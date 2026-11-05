@@ -26,6 +26,9 @@
    A node owns either a path, child nodes or no geometry, together with properties
    such as physical flow. Geometry queries, traversal, splitting and simplification
    must preserve the effective properties inherited by printable leaves.
+   reverse() is a full-unit operation: callers authorize the enclosing unit,
+   then every stored path and child order is reversed without descendant vetoes.
+   Command properties and positioned-command state remain attached to their nodes.
 
    swap_content() supports checked publication of prepared infill trees. It exchanges
    geometry, properties and ordering permissions without allocation, while leaving
@@ -637,6 +640,7 @@ bool ExtrusionEntity::has_role(ExtrusionRole test_role) const
     return false;
 }
 
+// Reverse complete stored content without permission checks; nodes and their payloads stay owned in place.
 void ExtrusionEntity::reverse()
 {
     if (ArcPolyline *polyline = this->polyline_or_null()) {
@@ -648,7 +652,7 @@ void ExtrusionEntity::reverse()
     if (children == nullptr)
         return;
     for (ExtrusionEntityUPtr &child : *children)
-        if (child && child->can_reverse() && !child->is_loop())
+        if (child)
             child->reverse();
     std::reverse(children->begin(), children->end());
 }
@@ -994,9 +998,8 @@ bool ExtrusionLoop::is_clockwise() const { return !is_counter_clockwise(); }
 
 void ExtrusionLoop::reverse()
 {
-    for (ExtrusionPath &path : this->paths())
-        path.reverse();
-    std::reverse(this->paths().begin(), this->paths().end());
+    // Preserve the full-unit contract even when structural edits added non-path children.
+    ExtrusionEntity::reverse();
 }
 
 Polygon ExtrusionLoop::polygon() const

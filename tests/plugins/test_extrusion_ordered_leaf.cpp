@@ -22,6 +22,8 @@ with the content; ordered command boundaries forbid rotation of their wrapper.
 
 Canonical-copy tests compare stored geometry and properties recursively, without
 requiring the virtual behavior of legacy path and collection views.
+Full-unit reversal probes compare native and SDK operations on fixed descendants,
+command phases and arc/Z paths, then reverse again to check exact restoration.
 Seam plans are inspected before any materialization: local paths, nested sole
 contours, open atomic composites and event barriers must offer only legal entries
 without editing geometry, endpoint Z, identities or permissions. Native split
@@ -47,6 +49,7 @@ previews distinguish the rounded input from the exact point they will publish.
 #include "libslic3r/ExtrusionEntityOrdering.hpp"
 #include "libslic3r/ExtrusionSeamPlanning.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
 
 namespace {
 
@@ -119,6 +122,121 @@ void check_canonical_copy(const Slic3r::ExtrusionEntity &source, const Slic3r::E
 }
 
 } // namespace
+
+// Root permission authorizes the whole unit, including fixed descendants and commands.
+TEST_CASE("Reversing an authorized unit reverses every stored node without command exceptions",
+          "[plugins][extrusion][tree-reverse]")
+{
+    using namespace Slic3r;
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    for (const std::string form : {"base", "collection", "loop", "multipath", "path", "nop"}) {
+        for (const bool sdk : {false, true}) {
+            CAPTURE(form, sdk);
+            ExtrusionEntityUPtr root;
+            if (form == "collection") root = std::make_unique<ExtrusionEntityCollection>();
+            else if (form == "loop") root = std::make_unique<ExtrusionLoop>();
+            else if (form == "multipath") root = std::make_unique<ExtrusionMultiPath>();
+            else if (form == "path") root = std::make_unique<ExtrusionPath>(ExtrusionAttributes{ExtrusionRole::Perimeter});
+            else if (form == "nop") root = std::make_unique<ExtrusionNop>();
+            else root = std::make_unique<ExtrusionEntity>(true);
+            root->set_can_sort_reverse(false, true);
+            root->set_can_rotate(false);
+            if (ExtrusionNop *nop = dynamic_cast<ExtrusionNop *>(root.get())) {
+                nop->position = Point(77, 88);
+                nop->set_role(ExtrusionRole::SupportMaterial);
+            }
+            ExtrusionEntityUPtr first = std::make_unique<ExtrusionEntity>(false);
+            first->add_property(ExtrusionPropertyCustomGcodeText("M117 first phase"));
+            root->append_child(std::move(first));
+            std::unique_ptr<ExtrusionNop> nested = std::make_unique<ExtrusionNop>();
+            nested->position = Point(123, 456);
+            nested->set_can_sort_reverse(false, false);
+            nested->set_can_rotate(false);
+            ArcPolyline arc;
+            arc.append(Point(10000, 0));
+            arc.append(Geometry::ArcWelder::Segment(Point(0, 10000), 10000.f, Geometry::ArcWelder::Orientation::CCW));
+            arc.set_z_offset(0, 100);
+            arc.set_z_offset(1, 900);
+            nested->append_child(std::make_unique<ExtrusionEntity>(false, arc));
+            ExtrusionEntityUPtr event = std::make_unique<ExtrusionEntity>(false);
+            for (const extrusion_property_type type : {EXTRUSION_PROPERTY_TYPE_SPECIAL_COMMAND, EXTRUSION_PROPERTY_TYPE_HEATER,
+                                     EXTRUSION_PROPERTY_TYPE_EXTRUSION_AXIS})
+                REQUIRE(Access::get_or_add_property_data_mutable(*event, type, 32, alignof(uint64_t)) != nullptr);
+            nested->append_child(std::move(event));
+            nested->set_can_sort_reverse(false, false);
+            root->append_child(std::move(nested));
+            ExtrusionPath path(ExtrusionAttributes{ExtrusionRole::Perimeter}, false);
+            path.set_polyline(ArcPolyline(Points{{0, 0}, {5000, 0}, {0, 5000}, {0, 0}}));
+            std::unique_ptr<ExtrusionLoop> loop = std::make_unique<ExtrusionLoop>(path);
+            loop->set_can_sort_reverse(false, false);
+            root->append_child(std::move(loop));
+            // Structural materialization may enable sorting; authorize only
+            // reversal on the completed unit, not on its descendants.
+            root->set_can_sort_reverse(false, true);
+            REQUIRE_FALSE(root->can_sort());
+            if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(root.get()))
+                (void)collection->entities();
+            const ExtrusionEntityUPtr before = root->clone_canonical();
+            std::vector<const ExtrusionEntity *> handles;
+            const auto collect = [&](const auto &self, const ExtrusionEntity &node) -> void {
+                handles.push_back(&node);
+                for (const ExtrusionEntityUPtr &child : node.children()) if (child) self(self, *child);
+            };
+            collect(collect, *root);
+            REQUIRE(root->can_reverse());
+            if (sdk) slic3r_api::Ordering::TreeOrderingGeometry::reverse_tree(mutable_view(*root));
+            else root->reverse();
+            const auto check = [&](const auto &self, const ExtrusionEntity &original, const ExtrusionEntity &actual) -> void {
+                CHECK(std::find(handles.begin(), handles.end(), &actual) != handles.end());
+                CHECK(actual.get_id() == original.get_id());
+                CHECK(actual.can_sort() == original.can_sort());
+                CHECK(actual.can_reverse() == original.can_reverse());
+                CHECK(actual.can_rotate() == original.can_rotate());
+                if (const ExtrusionNop *nop = dynamic_cast<const ExtrusionNop *>(&original)) {
+                    const ExtrusionNop *result = dynamic_cast<const ExtrusionNop *>(&actual);
+                    REQUIRE(result != nullptr);
+                    CHECK(result->position == nop->position);
+                    CHECK(result->role() == nop->role());
+                }
+                REQUIRE(Access::property_count(actual) == Access::property_count(original));
+                for (size_t i = 0; i < Access::property_count(original); ++i)
+                    CHECK(Access::same_property_payload(actual, Access::property_type_at(original, i), original));
+                if (original.has_polyline()) {
+                    ArcPolyline expected = original.polyline_ref();
+                    expected.reverse();
+                    REQUIRE(actual.has_polyline());
+                    const ArcPolyline &poly = actual.polyline_ref();
+                    REQUIRE(poly.size() == expected.size());
+                    CHECK(poly.has_arc() == expected.has_arc());
+                    CHECK(poly.has_z_offset() == expected.has_z_offset());
+                    for (size_t i = 0; i < poly.size(); ++i) {
+                        CHECK(poly.get_point(i) == expected.get_point(i));
+                        if (poly.has_z_offset()) CHECK(poly.z_offset(i) == expected.z_offset(i));
+                        if (poly.has_arc()) {
+                            CHECK(poly.get_arc(i).radius == expected.get_arc(i).radius);
+                            CHECK(poly.get_arc(i).orientation == expected.get_arc(i).orientation);
+                        }
+                    }
+                }
+                REQUIRE(actual.child_count() == original.child_count());
+                for (size_t i = 0; i < original.child_count(); ++i)
+                    self(self, original.child(i), actual.child(original.child_count() - 1 - i));
+            };
+            check(check, *before, *root);
+            const ExtrusionEntity &last = root->child(root->child_count() - 1);
+            REQUIRE(last.get_property<ExtrusionPropertyCustomGcode>() != nullptr);
+            CHECK(last.custom_gcode_string(*last.get_property<ExtrusionPropertyCustomGcode>()) == "M117 first phase");
+            if (ExtrusionEntityCollection *collection = dynamic_cast<ExtrusionEntityCollection *>(root.get())) {
+                REQUIRE(collection->entities().size() == root->child_count());
+                CHECK(collection->entities().front() == &root->child(0));
+            }
+            if (sdk) slic3r_api::Ordering::TreeOrderingGeometry::reverse_tree(mutable_view(*root));
+            else root->reverse();
+            ExtrusionEntityUPtr restored = root->clone_canonical();
+            check_canonical_copy(*before, *restored);
+        }
+    }
+}
 
 // Seam eligibility uses stored geometry and permission, never the legacy type's unconditional loop answer.
 TEST_CASE("Seam units use exact closure and an independent rotation permission",

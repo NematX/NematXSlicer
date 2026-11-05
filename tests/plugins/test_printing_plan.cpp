@@ -14,6 +14,7 @@
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/Plugin.hpp"
+#include "libslic3r/Api/internal/ExtrusionPropertyAccess.hpp"
 #include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/slic3r_printing_plan.h"
@@ -34,6 +35,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
+#include "libslic3r/Plugins/PrintingPlan/EntryPointProperty.h"
 #include "libslic3r/Printing/PrintingPlan.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
@@ -44,6 +46,10 @@
 PrintingPlan tests build small ordered trees and source layers to verify cloning,
 scope events and plugin ordering. A deposit's one stored position follows the
 same instance translation as segmented leaves while the source stays unchanged.
+Finalization probes run each tree orderer, inspect every event scope and restore
+checkpoints. A late provider observes live permissions, appends work and can fail;
+only a successful complete chain freezes the resulting plan. Reversal probes
+verify the full authorized unit, including fixed descendants and command phases.
 */
 namespace {
 using namespace Slic3r;
@@ -273,6 +279,7 @@ public:
         m_orchestrator.clear_active_plugins();
         for (const char *plugin_id : plugin_ids)
             REQUIRE(m_orchestrator.set_plugin_active(plugin_id, true));
+        m_orchestrator.reset_plugin_cancel();
     }
 
     ~ScopedActivePlugins()
@@ -280,6 +287,7 @@ public:
         m_orchestrator.clear_active_plugins();
         for (Plugin *plugin : m_previous)
             m_orchestrator.set_plugin_active(plugin, true);
+        m_orchestrator.reset_plugin_cancel();
     }
 
 private:
@@ -300,6 +308,8 @@ struct PlanEventEditorState
 
 PlanEventEditorState g_first_plan_event_editor{"test.extrusion_edit.events.first", -10, 0};
 PlanEventEditorState g_second_plan_event_editor{"test.extrusion_edit.events.second", 10, 1};
+PlanEventEditorState g_ordering_boundary_probe{"test.ordering.boundary.probe", 20000, 0};
+bool g_ordering_boundary_fail = false;
 
 const char *plan_event_editor_id(void *ctx) { return static_cast<PlanEventEditorState *>(ctx)->id; }
 const char *plan_event_editor_name(void *ctx) { return static_cast<PlanEventEditorState *>(ctx)->id; }
@@ -1415,6 +1425,47 @@ TEST_CASE("Event roots remain fixed across repeated clear append and cloned scop
     }
 }
 
+// The last plugin observes live permissions and may append more event content.
+// A reported error must escape without consuming those permissions.
+void ordering_boundary_probe_run(void *ctx, const plugin_run_context *run_ctx);
+// Register the late ordering probe once, preserving its state for controlled runs.
+void register_ordering_boundary_probe();
+
+void ordering_boundary_probe_run(void *ctx, const plugin_run_context *run_ctx)
+{
+    PlanEventEditorState &state = *static_cast<PlanEventEditorState *>(ctx);
+    const run_ctx_extrusion_ordering *payload = plugin_ctx_as_extrusion_ordering(run_ctx);
+    if (payload == nullptr || payload->plan == nullptr) {
+        state.payload_valid = false;
+        return;
+    }
+    PrintingPlan &plan = *reinterpret_cast<PrintingPlan *>(payload->plan);
+    state.payload_valid = plan.events.before().child_count() == 1 &&
+                          plan.events.before().child(0).can_reverse() &&
+                          plan.events.before().child(0).can_rotate();
+    ExtrusionEntity appended(true);
+    plan.events.append_after(std::move(appended));
+    ++state.run_count;
+    if (g_ordering_boundary_fail)
+        run_ctx->report_error(run_ctx->host_context, "Intentional ordering boundary failure");
+}
+
+void register_ordering_boundary_probe()
+{
+    Orchestrator &orchestrator = Orchestrator::instance();
+    if (orchestrator.get_plugin(g_ordering_boundary_probe.id) != nullptr)
+        return;
+    static const plugin_vtable table = [] {
+        plugin_vtable value = *plan_event_editor_vtable();
+        value.get_step = [](void *) { return STEP_ORDERING; };
+        value.setup = [](void *, const plugin_run_context *, uint32_t) {};
+        value.setup_run = [](void *, const plugin_run_context *) {};
+        value.run = &ordering_boundary_probe_run;
+        return value;
+    }();
+    REQUIRE(orchestrator.register_plugin({&g_ordering_boundary_probe, &table}));
+}
+
 TEST_CASE("PrintingPlan deep clone owns independent trees, events and properties",
           "[plugins][printing][plan][clone]")
 {
@@ -1813,6 +1864,261 @@ TEST_CASE("Default plan builder shifts Nop positions and their stored geometry t
         CHECK(source->position == original_position);
         CHECK(source->child(0).polyline_ref().front() == arc.front());
         CHECK(source->child(0).polyline_ref().back() == arc.back());
+    }
+}
+
+TEST_CASE("STEP_ORDERING locks unvisited trees and all event scopes only at its final boundary",
+          "[plugins][printing][plan][step-ordering][ordering-finalization]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    using Access = ApiInternal::ExtrusionPropertyAccess;
+    for (const char *engine : {"ordering.extrusion_tree.default", "ordering.extrusion_tree.advanced",
+                               "ordering.extrusion_tree.xy_serpentine"}) {
+        CAPTURE(engine);
+        ScopedActivePlugins active{engine};
+        Print print;
+        PrintingPlan &plan = print.mutable_printing_plan();
+        slic3r_api::PrintingPlan view(reinterpret_cast<printing_plan_handle *>(&plan));
+        slic3r_api::PrintingToolGroup tool_view = view.append_group().append_layer_group(1000).append_tool_group(0);
+        (void)tool_view;
+        PrintingGroup &group = plan.groups[0];
+        PrintingLayerGroup &layer = group.layers[0];
+        PrintingToolGroup &tool = layer.tool_groups[0];
+        // A fixed root is deliberately not a request for a new ordering or seam.
+        std::unique_ptr<ExtrusionEntityCollection> source = test_root(false, false);
+        source->set_can_rotate(false);
+        source->append(test_path({Point(200, 0), Point(210, 0)}));
+        std::unique_ptr<ExtrusionEntityCollection> empty = test_root(true, true);
+        empty->append_child(std::make_unique<ExtrusionEntity>(true));
+        source->append(std::move(empty));
+        // Keep both reversible paths already nearest-entry oriented, so the
+        // exact geometry oracle isolates finalization from legal optimization.
+        source->append(test_path({Point(300, 0), Point(310, 0)}));
+        const ExtrusionEntityUPtr original = source->clone_canonical();
+        tool.extrusions.emplace_back();
+        tool.extrusions.back().root.reset(source->clone());
+        auto key = slic3r_api::entry_point_property_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+        slic3r_api::EntryPointProperty &entry = key.get_or_add(slic3r_api::MutableExtrusionEntity(
+            reinterpret_cast<extrusion_entity_handle *>(tool.extrusions.back().root.get())));
+        entry.entry = {200, 0};
+        entry.exit = {310, 0};
+        tool.extrusions.emplace_back();
+        tool.extrusions.back().root = std::make_unique<ExtrusionEntity>(true); // empty root too
+        std::vector<const ExtrusionEntity *> roots{tool.extrusions[0].root.get(), tool.extrusions[1].root.get()};
+        std::vector<ExtrusionEntity *> event_nodes;
+        for (PrintingScopeEvents *events : {&plan.events, &group.events, &layer.events, &tool.events}) {
+            ExtrusionEntity event(ExtrusionEntity::Children(), true, true, false);
+            event.append_child(test_path({Point(1, 2), Point(3, 4)}));
+            event.append_child(test_path({Point(30, 40), Point(50, 60)}));
+            event.append_child(std::make_unique<ExtrusionNop>(ExtrusionPropertyCustomGcodeText("M117 final scope")));
+            event_nodes.push_back(&events->append_before(event));
+            event_nodes.push_back(&events->append_after(event));
+            roots.push_back(&events->before());
+            roots.push_back(&events->after());
+        }
+        std::vector<ExtrusionEntityUPtr> snapshots;
+        std::vector<const ExtrusionEntity *> handles;
+        const auto collect = [&](const auto &self, const ExtrusionEntity &node) -> void {
+            handles.push_back(&node);
+            for (const ExtrusionEntityUPtr &child : node.children()) if (child) self(self, *child);
+        };
+        for (const ExtrusionEntity *root : roots) {
+            snapshots.push_back(root->clone_canonical());
+            collect(collect, *root);
+        }
+        REQUIRE(source->child(0).can_reverse());
+        REQUIRE(event_nodes.front()->can_sort());
+        Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+        const auto check = [&](const auto &self, const ExtrusionEntity &node, const ExtrusionEntity &before,
+                               const bool same_handles, const bool new_scope_root) -> void {
+            if (same_handles) CHECK(std::find(handles.begin(), handles.end(), &node) != handles.end());
+            CHECK_FALSE(node.can_sort());
+            CHECK_FALSE(node.can_reverse());
+            CHECK_FALSE(node.can_rotate());
+            if (new_scope_root) CHECK(node.get_id() != before.get_id());
+            else CHECK(node.get_id() == before.get_id());
+            REQUIRE(node.has_polyline() == before.has_polyline());
+            if (node.has_polyline()) {
+                const ArcPolyline &poly = node.polyline_ref();
+                REQUIRE(poly.size() == before.polyline_ref().size());
+                for (size_t i = 0; i < poly.size(); ++i)
+                    CHECK(poly.get_point(i) == before.polyline_ref().get_point(i));
+            }
+            // Ordering may add its entry-point diagnostic property. Existing
+            // payloads must remain exact; finalization must not remove them.
+            REQUIRE(Access::property_count(node) >= Access::property_count(before));
+            for (size_t i = 0; i < Access::property_count(before); ++i)
+                CHECK(Access::same_property_payload(node, Access::property_type_at(before, i), before));
+            REQUIRE(node.child_count() == before.child_count());
+            for (size_t i = 0; i < node.child_count(); ++i) self(self, node.child(i), before.child(i), same_handles, false);
+        };
+        for (size_t i = 0; i < roots.size(); ++i) check(check, *roots[i], *snapshots[i], true, false);
+        CHECK(source->child(0).can_reverse());
+        CHECK(source->child(1).can_reverse());
+        CHECK(source->child(0).polyline_ref().front() == original->child(0).polyline_ref().front());
+        std::string error;
+        CHECK(Steps::StepExtrusionOrdering::validate_post(print, &error));
+        REQUIRE(print.save_ordering_checkpoint());
+        tool.extrusions[0].root->set_can_rotate(true);
+        REQUIRE(print.restore_ordering_checkpoint());
+        const PrintingPlan &restored = *print.printing_plan();
+        const PrintingGroup &restored_group = restored.groups[0];
+        const PrintingLayerGroup &restored_layer = restored_group.layers[0];
+        const PrintingToolGroup &restored_tool = restored_layer.tool_groups[0];
+        std::vector<const ExtrusionEntity *> restored_roots{restored_tool.extrusions[0].root.get(), restored_tool.extrusions[1].root.get()};
+        for (const PrintingScopeEvents *events : {&restored.events, &restored_group.events, &restored_layer.events, &restored_tool.events}) {
+            restored_roots.push_back(&events->before());
+            restored_roots.push_back(&events->after());
+        }
+        // Checkpoint scope roots are newly owned nodes; their event descendants
+        // retain identity, payloads and selected geometry across that clone.
+        for (size_t i = 0; i < restored_roots.size(); ++i) check(check, *restored_roots[i], *snapshots[i], false, i >= 2);
+        CHECK(Steps::StepExtrusionOrdering::validate_post(print, &error));
+    }
+}
+
+TEST_CASE("Ordering providers reverse authorized composed units with fixed paths and commands",
+          "[plugins][printing][plan][tree-reverse][ordering-finalization]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const char *engine : {"native", "ordering.extrusion_tree.default", "ordering.extrusion_tree.advanced",
+                               "ordering.extrusion_tree.xy_serpentine"}) {
+        CAPTURE(engine);
+        std::unique_ptr<ExtrusionEntityCollection> unit = test_root(false, true);
+        unit->set_can_rotate(false);
+        ExtrusionEntityUPtr before = std::make_unique<ExtrusionEntity>(false);
+        before->add_property(ExtrusionPropertyCustomGcodeText("M117 unit before"));
+        const ExtrusionEntity *before_handle = before.get();
+        unit->append(std::move(before));
+        unit->append(test_path({Point(100, 0), Point(50, 0)}, false));
+        unit->append(test_path({Point(50, 0), Point(10, 0)}, false));
+        ExtrusionEntityUPtr after = std::make_unique<ExtrusionEntity>(false);
+        after->add_property(ExtrusionPropertyCustomGcodeText("M117 unit after"));
+        const ExtrusionEntity *after_handle = after.get();
+        unit->append(std::move(after));
+        std::unique_ptr<ExtrusionEntityCollection> outer = test_root(true, true);
+        const ExtrusionEntity *unit_handle = unit.get();
+        outer->append(std::move(unit));
+        if (std::string(engine) == "native") {
+            order_extrusion_tree(*outer, Point(0, 0));
+        } else {
+            ScopedActivePlugins active{engine};
+            Print print;
+            PrintingPlan &plan = print.mutable_printing_plan();
+            slic3r_api::PrintingPlan view(reinterpret_cast<printing_plan_handle *>(&plan));
+            (void)view.append_group().append_layer_group(1000).append_tool_group(0);
+            PrintingToolGroup &tool = plan.groups[0].layers[0].tool_groups[0];
+            tool.extrusions.emplace_back();
+            tool.extrusions[0].root = std::move(outer);
+            auto key = slic3r_api::entry_point_property_key(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+            slic3r_api::EntryPointProperty &entry = key.get_or_add(slic3r_api::MutableExtrusionEntity(
+                reinterpret_cast<extrusion_entity_handle *>(tool.extrusions[0].root.get())));
+            entry.entry = {0, 0};
+            entry.exit = {10, 0};
+            Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+            outer.reset(static_cast<ExtrusionEntityCollection *>(tool.extrusions[0].root.release()));
+        }
+        REQUIRE(outer->child_count() == 1);
+        const ExtrusionEntity &actual = outer->child(0);
+        CHECK(&actual == unit_handle);
+        REQUIRE(actual.child_count() == 4);
+        CHECK(&actual.child(0) == after_handle);
+        CHECK(&actual.child(3) == before_handle);
+        CHECK(actual.child(1).polyline_ref().front() == Point(10, 0));
+        CHECK(actual.child(1).polyline_ref().back() == Point(50, 0));
+        CHECK(actual.child(2).polyline_ref().front() == Point(50, 0));
+        CHECK(actual.child(2).polyline_ref().back() == Point(100, 0));
+        CHECK(actual.child(0).custom_gcode_string(*actual.child(0).get_property<ExtrusionPropertyCustomGcode>()) == "M117 unit after");
+        CHECK(actual.child(3).custom_gcode_string(*actual.child(3).get_property<ExtrusionPropertyCustomGcode>()) == "M117 unit before");
+    }
+}
+
+TEST_CASE("Ordering finalization waits for the last plugin and never hides a plugin failure",
+          "[plugins][printing][plan][ordering-finalization]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    register_ordering_boundary_probe();
+    for (const bool fail : {false, true}) {
+        CAPTURE(fail);
+        ScopedActivePlugins active{g_ordering_boundary_probe.id};
+        g_ordering_boundary_fail = fail;
+        reset_plan_event_editor(g_ordering_boundary_probe);
+        Orchestrator::instance().reset_plugin_cancel();
+        Orchestrator::instance().consume_plugin_messages();
+        Print print;
+        PrintingPlan &plan = print.mutable_printing_plan();
+        plan.events.append_before(ExtrusionEntity(true));
+        std::string error;
+        try { Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print); }
+        catch (const std::exception &exception) { error = exception.what(); }
+        const auto messages = Orchestrator::instance().consume_plugin_messages();
+        CHECK(g_ordering_boundary_probe.run_count == 1);
+        CHECK(g_ordering_boundary_probe.payload_valid);
+        REQUIRE(plan.events.after().child_count() == 1);
+        if (fail) {
+            CHECK_FALSE(error.empty());
+            CHECK(error.find(g_ordering_boundary_probe.id) != std::string::npos);
+            CHECK(error.find("during run") != std::string::npos);
+            REQUIRE(messages.size() == 1);
+            CHECK(messages[0].message == "Intentional ordering boundary failure");
+            CHECK(messages[0].level == Orchestrator::PluginMessageLevel::Error);
+            CHECK(messages[0].step == STEP_ORDERING);
+            CHECK(messages[0].plugin_id == g_ordering_boundary_probe.id);
+            CHECK(plan.events.before().child(0).can_reverse());
+            CHECK(plan.events.after().child(0).can_rotate());
+        } else {
+            CHECK(error.empty());
+            CHECK(messages.empty());
+            CHECK_FALSE(plan.events.before().child(0).can_reverse());
+            CHECK_FALSE(plan.events.before().child(0).can_rotate());
+            CHECK_FALSE(plan.events.after().child(0).can_reverse());
+            CHECK_FALSE(plan.events.after().child(0).can_rotate());
+        }
+        Orchestrator::instance().reset_plugin_cancel();
+    }
+    g_ordering_boundary_fail = false;
+}
+
+TEST_CASE("STEP_ORDERING post validation diagnoses remaining permissions at exact tree paths",
+          "[plugins][printing][plan][ordering-finalization]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedActivePlugins active{};
+    Print print;
+    PrintingPlan &plan = print.mutable_printing_plan();
+    slic3r_api::PrintingPlan view(reinterpret_cast<printing_plan_handle *>(&plan));
+    (void)view.append_group().append_layer_group(1000).append_tool_group(0);
+    PrintingGroup &group = plan.groups[0];
+    PrintingLayerGroup &layer = group.layers[0];
+    PrintingToolGroup &tool = layer.tool_groups[0];
+    ExtrusionEntity event(ExtrusionEntity::Children(), false, false, false);
+    event.set_can_rotate(false);
+    event.append_child(test_path({Point(0, 0), Point(10, 0)}, false));
+    event.append_child(test_path({Point(20, 0), Point(30, 0)}, false));
+    std::vector<std::pair<ExtrusionEntity *, std::string>> nodes;
+    tool.extrusions.emplace_back();
+    tool.extrusions[0].root = event.clone_canonical();
+    nodes.emplace_back(tool.extrusions[0].root.get(), "group[0].layer[0].tool[0].extrusion[0].root");
+    for (const auto scope : std::vector<std::pair<PrintingScopeEvents *, std::string>>{
+             {&plan.events, "plan"}, {&group.events, "group[0]"},
+             {&layer.events, "group[0].layer[0]"}, {&tool.events, "group[0].layer[0].tool[0]"}}) {
+        nodes.emplace_back(&scope.first->append_before(event), scope.second + ".events.before.child[0]");
+        nodes.emplace_back(&scope.first->append_after(event), scope.second + ".events.after.child[0]");
+    }
+    Steps::StepExtrusionOrdering::run_step(Orchestrator::instance(), print);
+    for (const auto &node : nodes) {
+        for (const std::string permission : {"can_sort", "can_reverse", "can_rotate"}) {
+            CAPTURE(node.second, permission);
+            node.first->set_can_sort_reverse(permission == "can_sort", permission == "can_reverse");
+            node.first->set_can_rotate(permission == "can_rotate");
+            std::string error;
+            CHECK_FALSE(Steps::StepExtrusionOrdering::validate_post(print, &error));
+            CHECK(error.find(node.second) != std::string::npos);
+            CHECK(error.find(permission) != std::string::npos);
+            node.first->set_can_sort_reverse(false, false);
+            node.first->set_can_rotate(false);
+            CHECK(Steps::StepExtrusionOrdering::validate_post(print, &error));
+        }
     }
 }
 

@@ -61,7 +61,7 @@ The normal call flow is:
         |   |-- move the selected child into the fixed prefix
         |   `-- prepare_child_for_entry()
         |       |-- rotate_loop_to_legal_seam() for loops
-        |       |-- reverse() for a selected reverse candidate
+        |       |-- reverse_tree() for a selected reverse candidate
         |       `-- recurse into sortable children
         `-- publish EntryPointProperty{root.front(), root.back()}
 
@@ -215,16 +215,16 @@ void prepare_child_for_entry(storage_handle *storage,
     }
 
     /*
-    Non-sortable children are atomic. The only legal preparation is changing
-    their entry point without changing their internal ordering: rotate a loop or
-    reverse an explicitly reversible open path.
+    Non-sortable children are atomic units: rotate a seam unit or reverse an
+    explicitly reversible open unit completely, including fixed descendants,
+    command phases and their stored child order.
     */
     if (child.readonly().is_seam_unit()) {
         TreeOrderingGeometry::rotate_loop_to_legal_seam(storage, child, candidate.point, true, run_ctx);
         TreeOrderingGeometry::disable_rotation_recursively(child, run_ctx);
     } else if (candidate.reverse_before_printing) {
         throw_if_cancelled(run_ctx);
-        child.reverse();
+        TreeOrderingGeometry::reverse_tree(child, run_ctx);
     }
 }
 

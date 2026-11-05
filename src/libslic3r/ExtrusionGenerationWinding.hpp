@@ -16,9 +16,11 @@
    identities, properties, permissions, arc data and endpoint Z stay on the nodes.
 
        const GenerationWindingResult result = normalize_generation_winding(tree, true);
-   Inspect deferred_contours: fragmented command phases are left unchanged, not
-   silently reported as normalized. A sole closed child can receive the reversal
-   through wrappers while surrounding empty events remain at their original indices.
+   An explicitly reversible target authorizes inversion of its complete command
+   phases and fixed descendants. Otherwise inspect deferred_contours: fragmented
+   command phases are left unchanged, not silently reported as normalized. A sole
+   closed child can receive the reversal through non-reversible wrappers while
+   surrounding empty events remain at their original indices.
    The caller exclusively owns the generated tree. Orientation allocates before
    each contour's mutation; no borrowed geometry or resource is retained.
 */
@@ -47,8 +49,8 @@ inline void collect_points(const ExtrusionEntity &entity, Points &out)
             collect_points(*child, out);
 }
 
-// A fragmented contour's event phases cannot be reversed without a separate
-// contract. Read without mutation; the caller reports this explicitly as deferred.
+// Non-reversible generation contours retain the historical pure-geometry policy.
+// Reversible units bypass these barriers and reverse their complete command phases.
 inline bool has_barrier(const ExtrusionEntity &entity)
 {
     if (dynamic_cast<const ExtrusionNop *>(&entity) != nullptr ||
@@ -83,10 +85,13 @@ inline void reverse_geometry(ExtrusionEntity &entity)
 
 } // namespace GenerationWindingDetail
 
-// Normalize borrowed generation output only, independently of ordering flags.
-// Selection and geometry use stored content; no virtual loop/projection/reverse
-// is invoked and no permission or resource is changed. Orientation allocation
-// precedes a contour's writes. Barriers are reported, not rejected or moved;
+// Normalize borrowed generation output only. An explicitly reversible target
+// authorizes its complete inversion, including commands and fixed descendants.
+// Selection and geometry use stored content, not virtual loop/projection queries.
+// The reversible branch calls virtual reverse (including Collection cache
+// invalidation); the historical pure-geometry branch avoids it. No permission or
+// resource is changed. Orientation allocation precedes a contour's writes.
+// Non-reversible barriers are reported, not rejected or moved;
 // callers must not silently claim such contours have been normalized.
 inline GenerationWindingResult normalize_generation_winding(ExtrusionEntity &entity, const bool clockwise)
 {
@@ -108,10 +113,10 @@ inline GenerationWindingResult normalize_generation_winding(ExtrusionEntity &ent
     if (Polygon(std::move(points)).is_counter_clockwise() != clockwise)
         return result;
 
-    // Delegation precedes the barrier check: empty siblings and their event
-    // phases stay at the same indices around the single closed geometric child.
+    // A reversible target is an authorized unit: do not delegate away its events.
+    // Otherwise empty siblings stay around the sole closed geometric child.
     ExtrusionEntity *target = &entity;
-    while (target->polyline_or_null() == nullptr) {
+    while (!target->can_reverse() && target->polyline_or_null() == nullptr) {
         ExtrusionEntity *only = nullptr;
         size_t count = 0;
         const ExtrusionEntity &view = *target;
@@ -123,6 +128,11 @@ inline GenerationWindingResult normalize_generation_winding(ExtrusionEntity &ent
         if (count != 1 || !only->ExtrusionEntity::is_loop())
             break;
         target = only;
+    }
+    if (target->can_reverse()) {
+        target->reverse();
+        result.reversed_contours = 1;
+        return result;
     }
     // A one-shot on the target itself stays at the same closed-contour entry.
     // Only strict descendants can change execution phase under child reversal;

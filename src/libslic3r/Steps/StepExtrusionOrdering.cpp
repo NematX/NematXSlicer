@@ -14,8 +14,13 @@
    plugins clone or reorder it into PrintingPlan, the output movement plan.
    run_step() rejects unrecognized tree orderers when source trees carry atomic
    bridge strands, before any provider setup or run can change them. It then
-   invokes enabled ordering plugins sequentially, validate_post() checks their result,
-   and clear() releases this step's results before recomputation.
+    invokes enabled ordering plugins sequentially. Only after all have succeeded,
+    finalization disables sorting, reversal and rotation on every stored tree,
+    including empty nodes and event descendants at every scope. Provider failures
+    propagate before this boundary. validate_post() checks the resulting plan and
+    reports any remaining permission with its storage path. clear() releases this
+    step's results before recomputation. The Print owns the plan throughout;
+    finalization changes no geometry, properties, identities or ownership.
 
    Representative direct calls:
 
@@ -29,8 +34,11 @@
            |-- selected_or_active_plugins_for_step()
            |-- plugin->setup()
            |-- plugin->setup_run()
-           |-- plugin->run()
-           `-- validate_post()
+            |-- plugin->run()
+            |-- finalize_ordering_plan()
+            |   |-- lock_ordering_events() [every plan/group/layer/tool scope]
+            |   `-- lock_ordering_tree() [disable permissions without changing content]
+            `-- validate_post()
 
    Provider lifecycle calls occur only after the atomic-strand compatibility
    check. Their order is setup, setup_run, then run; tree branches show callers,
@@ -117,6 +125,18 @@ struct SourceObjectResult {
     const PrintObject *object;
 };
 
+// Disable all permissions on borrowed nodes without materializing child storage.
+// Cancellation propagates between nodes and may leave a partially locked tree.
+void lock_ordering_tree(ExtrusionEntity &entity, const Print &print);
+// Lock owned event descendants; the borrowed event roots are permanently fixed.
+void lock_ordering_events(const Printing::PrintingScopeEvents &events, const Print &print);
+// Lock all extrusion and event trees once, after every ordering plugin succeeds.
+void finalize_ordering_plan(Printing::PrintingPlan &plan, const Print &print);
+// Report the first enabled permission, even on empty nodes, at its exact storage path.
+bool validate_locked_tree(const ExtrusionEntity &entity, const std::string &path, std::string *error);
+// Validate both event roots and their descendants with optional path diagnostics.
+bool validate_locked_events(const Printing::PrintingScopeEvents &events, const std::string &path, std::string *error);
+
 /*
 Distinguish an absent source from an island whose source context is corrupt.
 A valid source has at least one region, and all its regions are on the same
@@ -149,6 +169,67 @@ bool validation_failure(std::string *error,
     if (error != nullptr)
         *error = path + ": " + cause;
     return false;
+}
+
+void lock_ordering_tree(ExtrusionEntity &entity, const Print &print)
+{
+    print.throw_if_canceled();
+    const ExtrusionEntity &view = entity;
+    for (const ExtrusionEntityUPtr &child : view.children())
+        if (child)
+            lock_ordering_tree(*child, print);
+    entity.set_can_sort_reverse(false, false);
+    entity.set_can_rotate(false);
+}
+
+void lock_ordering_events(const Printing::PrintingScopeEvents &events, const Print &print)
+{
+    for (const ExtrusionEntity *root : {&events.before(), &events.after()}) {
+        print.throw_if_canceled();
+        for (const ExtrusionEntityUPtr &child : root->children())
+            if (child)
+                lock_ordering_tree(*child, print);
+    }
+}
+
+void finalize_ordering_plan(Printing::PrintingPlan &plan, const Print &print)
+{
+    lock_ordering_events(plan.events, print);
+    for (Printing::PrintingGroup &group : plan.groups) {
+        lock_ordering_events(group.events, print);
+        for (Printing::PrintingLayerGroup &layer : group.layers) {
+            lock_ordering_events(layer.events, print);
+            for (Printing::PrintingToolGroup &tool : layer.tool_groups) {
+                lock_ordering_events(tool.events, print);
+                for (Printing::PrintingExtrusion &extrusion : tool.extrusions)
+                    if (extrusion.root)
+                        lock_ordering_tree(*extrusion.root, print);
+            }
+        }
+    }
+}
+
+bool validate_locked_tree(const ExtrusionEntity &entity, const std::string &path, std::string *error)
+{
+    if (entity.can_sort())
+        return validation_failure(error, path, "can_sort remains enabled after STEP_ORDERING");
+    if (entity.can_reverse())
+        return validation_failure(error, path, "can_reverse remains enabled after STEP_ORDERING");
+    if (entity.can_rotate())
+        return validation_failure(error, path, "can_rotate remains enabled after STEP_ORDERING");
+    for (size_t i = 0; i < entity.children().size(); ++i) {
+        const ExtrusionEntityUPtr &child = entity.children()[i];
+        if (child && !validate_locked_tree(*child, path + ".child[" + std::to_string(i) + "]", error))
+            return false;
+    }
+    return true;
+}
+
+bool validate_locked_events(const Printing::PrintingScopeEvents &events,
+                            const std::string &path, std::string *error)
+{
+    return validate_locked_tree(events.before(), path + ".events.before", error) &&
+           validate_locked_tree(events.after(), path + ".events.after", error);
 }
 
 /*
@@ -313,6 +394,8 @@ bool validate_post(const Print &print, std::string *error)
     const Printing::PrintingPlan *plan = print.printing_plan();
     if (plan == nullptr)
         return validation_failure(error, "plan", "the PrintingPlan is missing");
+    if (!validate_locked_events(plan->events, "plan", error))
+        return false;
 
     for (size_t object_instance_idx = 0; object_instance_idx < plan->object_instances.size(); ++object_instance_idx) {
         const Printing::PrintingObjectInstance &instance = plan->object_instances[object_instance_idx];
@@ -336,6 +419,8 @@ bool validate_post(const Print &print, std::string *error)
         const std::string group_path = "group[" + std::to_string(group_idx) + "]";
         if (group.plan_identity != plan->identity_token())
             return validation_failure(error, group_path, "group belongs to another PrintingPlan");
+        if (!validate_locked_events(group.events, group_path, error))
+            return false;
         for (const Printing::PrintingObjectInstanceId printing_catalog_id : group.printing_catalog_ids) {
             if (printing_catalog_id == Printing::PRINTING_OBJECT_INSTANCE_ID_NONE ||
                 printing_catalog_id >= plan->object_instances.size())
@@ -348,6 +433,8 @@ bool validate_post(const Print &print, std::string *error)
             const std::string layer_path = group_path + ".layer[" + std::to_string(layer_idx) + "]";
             if (layer.plan_identity != plan->identity_token())
                 return validation_failure(error, layer_path, "layer group belongs to another PrintingPlan");
+            if (!validate_locked_events(layer.events, layer_path, error))
+                return false;
 
             for (size_t tool_idx = 0; tool_idx < layer.tool_groups.size(); ++tool_idx) {
                 const Printing::PrintingToolGroup &tool = layer.tool_groups[tool_idx];
@@ -357,6 +444,8 @@ bool validate_post(const Print &print, std::string *error)
                 if (tool.extruder_id == EXTRUDER_ID_UNKNOWN)
                     return validation_failure(error, tool_path,
                                               "tool group has no concrete extruder after STEP_ORDERING");
+                if (!validate_locked_events(tool.events, tool_path, error))
+                    return false;
 
                 for (size_t extrusion_idx = 0; extrusion_idx < tool.extrusions.size(); ++extrusion_idx) {
                     const Printing::PrintingExtrusion &extrusion = tool.extrusions[extrusion_idx];
@@ -399,6 +488,8 @@ bool validate_post(const Print &print, std::string *error)
                             group.printing_catalog_ids.end())
                         return validation_failure(error, details.str(),
                                                   "extrusion ID is not listed by its enclosing group");
+                    if (!validate_locked_tree(*extrusion.root, extrusion_path + ".root", error))
+                        return false;
                 }
             }
         }
@@ -466,6 +557,8 @@ void run_step(Orchestrator &orchestrator, Print &print)
         Detail::throw_if_plugin_stopped(orchestrator, print, STEP_ORDERING, *plugin, execution_error, "run");
         print.pipeline_progress().complete_plugin(STEP_ORDERING, plugin->get_id());
     }
+
+    finalize_ordering_plan(plan, print);
 
     std::string validation_error;
     if (!validate_post(print, &validation_error))

@@ -1930,6 +1930,7 @@ TEST_CASE("Generation winding reports fragmented event contours without moving o
         }
     }
     ExtrusionNop positioned;
+    positioned.set_can_sort_reverse(false, false);
     positioned.position = Point(1234, 5678);
     positioned.set_polyline(stored_winding_geometry(*winding_arc_loop()));
     const ArcPolyline before = positioned.polyline_ref();
@@ -1944,6 +1945,58 @@ TEST_CASE("Generation winding reports fragmented event contours without moving o
     CHECK(no_loop.reversed_contours == 0);
     CHECK(no_loop.deferred_contours == 0);
     check_winding_geometry(open.polyline_ref(), unchanged);
+}
+
+TEST_CASE("Generation winding reverses authorized contours together with their command phases",
+          "[plugins][skirt-brim][source-winding][tree-reverse]")
+{
+    for (const bool wrapped : {false, true}) {
+        CAPTURE(wrapped);
+        std::unique_ptr<ExtrusionLoop> source = winding_arc_loop();
+        std::unique_ptr<ExtrusionNop> contour = std::make_unique<ExtrusionNop>();
+        contour->position = Point(1234, 5678);
+        contour->set_can_sort_reverse(false, true);
+        contour->set_can_rotate(false);
+        ExtrusionEntityUPtr before_event = std::make_unique<ExtrusionEntity>(false);
+        before_event->add_property(ExtrusionPropertyCustomGcodeText("M117 contour before"));
+        ExtrusionEntity *before = before_event.get();
+        contour->append_child(std::move(before_event));
+        contour->append_child(ExtrusionEntityUPtr(source->child(0).clone()));
+        ExtrusionEntityUPtr after_event = std::make_unique<ExtrusionEntity>(false);
+        after_event->add_property(ExtrusionPropertyCustomGcodeText("M117 contour after"));
+        ExtrusionEntity *after = after_event.get();
+        contour->append_child(std::move(after_event));
+        contour->append_child(ExtrusionEntityUPtr(source->child(1).clone()));
+        contour->set_can_sort_reverse(false, true);
+        REQUIRE(contour->ExtrusionEntity::is_loop());
+        ExtrusionNop *target = contour.get();
+        ExtrusionEntityUPtr root;
+        const ExtrusionEntity *outer_event = nullptr;
+        if (wrapped) {
+            root = std::make_unique<ExtrusionEntity>(ExtrusionEntity::Children(), false, false, true);
+            root->append_child(std::make_unique<ExtrusionEntity>(false));
+            outer_event = &root->child(0);
+            root->append_child(std::move(contour));
+        } else root = std::move(contour);
+        ArcPolyline expected = stored_winding_geometry(*root);
+        expected.reverse();
+        const ExtrusionTreeTransforms::GenerationWindingResult result = ExtrusionTreeTransforms::normalize_generation_winding(*root, true);
+        CHECK(result.reversed_contours == 1);
+        CHECK(result.deferred_contours == 0);
+        check_winding_geometry(stored_winding_geometry(*root), expected);
+        CHECK(&target->child(1) == after);
+        CHECK(&target->child(3) == before);
+        CHECK(target->position == Point(1234, 5678));
+        CHECK(target->can_reverse());
+        CHECK_FALSE(target->can_rotate());
+        CHECK(before->custom_gcode_string(*before->get_property<ExtrusionPropertyCustomGcode>()) == "M117 contour before");
+        CHECK(after->custom_gcode_string(*after->get_property<ExtrusionPropertyCustomGcode>()) == "M117 contour after");
+        if (wrapped) CHECK(&root->child(0) == outer_event);
+        const ExtrusionTreeTransforms::GenerationWindingResult again = ExtrusionTreeTransforms::normalize_generation_winding(*root, true);
+        CHECK(again.reversed_contours == 0);
+        CHECK(again.deferred_contours == 0);
+        check_winding_geometry(stored_winding_geometry(*root), expected);
+    }
 }
 
 TEST_CASE("Generation winding keeps target one shots at their entry and uses exact stored closure",

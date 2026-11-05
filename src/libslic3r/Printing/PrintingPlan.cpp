@@ -599,8 +599,8 @@ void order_extrusion_tree(PrintingGroup &printing_group,
                 context.role = extrusion.sregion_island_role;
 
                 order_extrusion_tree(*extrusion.root, current_point, loop_policy, context);
-                if (!extrusion.root->empty())
-                    current_point = extrusion.root->last_point();
+                if (!extrusion.root->ExtrusionEntity::empty())
+                    current_point = extrusion.root->ExtrusionEntity::last_point();
             }
 }
 
@@ -973,9 +973,9 @@ void order_sortable_extrusion_children(ExtrusionEntity &entity,
         }
 
         /*
-        Empty and nop children do not have a printable entry point. Once only
-        such children remain, keep their relative order and append them after
-        the printable work already selected.
+        Children without stored geometry (including geometry-less Nops) have no
+        printable entry point. Once only such children remain, keep their relative
+        order and append them after the printable work already selected.
         */
         if (selected_idx == size_t(-1)) {
             for (ExtrusionEntityUPtr &child : remaining_children)
@@ -988,8 +988,8 @@ void order_sortable_extrusion_children(ExtrusionEntity &entity,
         remaining_children.erase(remaining_children.begin() + selected_idx);
 
         prepare_child_for_entry(*child, selected_candidate, loop_policy, context);
-        if (!child->empty())
-            current_point = child->last_point();
+        if (!child->ExtrusionEntity::empty())
+            current_point = child->ExtrusionEntity::last_point();
         append_owned_child(entity, std::move(child));
     }
 
@@ -1007,7 +1007,7 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
                                              const LoopEntryContext &context)
 {
     ExtrusionEntryCandidate best;
-    if (entity.empty())
+    if (entity.ExtrusionEntity::empty())
         return best;
 
     if (entity.can_sort()) {
@@ -1066,13 +1066,15 @@ ExtrusionEntryCandidate best_entry_candidate(const ExtrusionEntity &entity,
         return best;
     }
 
-    best.point = entity.first_point();
+    // Commands may occupy either boundary of a composed unit. Like the SDK,
+    // choose endpoints from stored geometry, not legacy first/last projections.
+    best.point = entity.ExtrusionEntity::first_point();
     best.score = current_point.distance_to_square(best.point);
     best.valid = true;
 
     if (entity.can_reverse()) {
         ExtrusionEntryCandidate reversed;
-        reversed.point = entity.last_point();
+        reversed.point = entity.ExtrusionEntity::last_point();
         reversed.score = current_point.distance_to_square(reversed.point);
         reversed.reverse_before_printing = true;
         reversed.valid = true;
