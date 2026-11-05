@@ -829,7 +829,8 @@ TEST_CASE("Support enum helpers read every serialized value", "[plugins][support
         const SupportMaterialStyle native = config.opt_enum<SupportMaterialStyle>("support_material_style");
         const Common::SupportStyle expected = native == smsGrid ? Common::SupportStyle::Grid :
             native == smsSnug ? Common::SupportStyle::Snug : native == smsTree ? Common::SupportStyle::Tree :
-            native == smsOrganic ? Common::SupportStyle::Organic : Common::SupportStyle::Unknown;
+            native == smsOrganic ? Common::SupportStyle::Organic : native == smsFilled ? Common::SupportStyle::Filled :
+            Common::SupportStyle::Unknown;
         CHECK(expected != Common::SupportStyle::Unknown);
         CHECK(Common::support_style(view) == expected);
     }
@@ -862,6 +863,7 @@ TEST_CASE("Support enum helpers read every serialized value", "[plugins][support
             }
     }
     CHECK(Common::parse_support_style("tree") == Common::SupportStyle::Tree);
+    CHECK(Common::parse_support_style("filled") == Common::SupportStyle::Filled);
     CHECK(Common::parse_contact_distance_type("") == Common::ContactDistanceType::Unknown);
     CHECK(Common::parse_base_pattern("lightning") == Common::BasePattern::Unknown);
 
@@ -914,7 +916,7 @@ TEST_CASE("Support plugins declare their keys from the Common library", "[plugin
     REQUIRE(family != nullptr);
     declares(*family, geometry);
     CHECK(family->get_used_config_keys().size() == geometry.size);
-    // The raft does not exist in the support plugins: no list and no family declares raft_layers.
+    // The filled family reads raft_layers only to reject a raft; other families and common key lists do not declare it.
     const auto declares_raft = [](const Plugin &plugin) {
         return std::any_of(plugin.get_used_config_keys().begin(), plugin.get_used_config_keys().end(),
                            [](const Plugin::UsedConfigKey &used) { return used.key == "raft_layers"; });

@@ -1006,6 +1006,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "support.demand.bridge_removal");
         activate_plugin_or_fail(orchestrator, "support.demand.bridge_infill_removal");
         activate_plugin_or_fail(orchestrator, "support.family.grid");
+        activate_plugin_or_fail(orchestrator, "support.family.filled");
         activate_plugin_or_fail(orchestrator, "support.family.tree");
         activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_sparse");
         activate_plugin_or_fail(orchestrator, "support.toolpath.legacy_bottom");

@@ -153,6 +153,7 @@ plugin settings. A plugin's own layout fragment takes precedence over generated 
 #include "libslic3r/Plugins/WipeTower/ToolChangeUnretract.hpp"
 #include "libslic3r/Plugins/WipeTower/ToolChangeWipe.hpp"
 #include "libslic3r/Plugins/WipeTower/WipeTowerManager.hpp"
+#include "libslic3r/Plugins/Support/Filled/SupportFamilyFilled.hpp"
 #include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
 #include "libslic3r/Plugins/Support/Tree/SupportFamilyTree.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/SupportToolpathBranch.hpp"
@@ -974,6 +975,8 @@ void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Support::SupportDemandBridgeInfillRemovalPlugin::register_support_demand_bridge_infill_removal_plugin);
     register_builtin_plugin(orchestrator, "support.family.grid",
         slic3r_api::Support::Grid::register_support_family_grid_plugin);
+    register_builtin_plugin(orchestrator, "support.family.filled",
+        slic3r_api::Support::Filled::register_support_family_filled_plugin);
     register_builtin_plugin(orchestrator, "support.family.tree",
         slic3r_api::Support::Tree::register_support_family_tree_plugin);
     register_builtin_plugin(orchestrator, "support.toolpath.legacy_sparse",

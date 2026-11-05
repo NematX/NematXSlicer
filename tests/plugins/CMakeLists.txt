@@ -90,6 +90,7 @@ add_executable(${_TEST_NAME}_tests
     test_layer_extrusion_edit_travel_deceleration.cpp
     test_layer_extrusion_edit_speed.cpp
     test_layer_region_support_flow.cpp
+    test_support_filled_family.cpp
     test_support_grid_family.cpp
     test_support_grid_legacy_compare.cpp
     test_support_tree_dump.cpp

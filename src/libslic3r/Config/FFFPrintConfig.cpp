@@ -165,7 +165,8 @@ CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialStyle, {
     { "grid",           smsGrid },
     { "snug",           smsSnug },
     { "tree",           smsTree },
-    { "organic",        smsOrganic }
+    { "organic",        smsOrganic },
+    { "filled",         smsFilled }
 })
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SeamPosition, {
         {"random",    spRandom},
@@ -5277,7 +5278,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->full_label = L("Raft and support first layer expansion");
     def->category = OptionCategory::support;
     def->invalidates_step = STEP_SUPPORT;
-    def->tooltip = L("Expansion of the first raft layer or of the foot of the support (grid, snug, tree and organic styles) to improve adhesion to the print bed. The expanded foot does not cross the object.");
+    def->tooltip = L("Expansion of the first raft layer or of the foot of the support (grid, snug, tree, organic and filled styles) to improve adhesion to the print bed. The expanded foot does not cross the object.");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comExpert | comPrusa;
@@ -6640,11 +6641,13 @@ void init_fff_params(PrintConfigDef &definition)
     def->tooltip = L("Style and shape of the support towers. Projecting the supports into a regular grid "
         "will create more stable supports, while snug support towers will save material and reduce "
         "object scarring."
-        "\nOrganic: create tree support structure, but this algorithm force to synchronize the support layers with object layers.");
+        "\nOrganic: create tree support structure, but this algorithm force to synchronize the support layers with object layers."
+        "\nFilled: dense support made only of interface layers, printed at the height of every object layer. It needs the contact distance type 'none' (soluble) and no raft.");
     def->set_enum<SupportMaterialStyle>({
         { "grid", L("Grid") }, 
         { "snug", L("Snug") },
-        { "organic", L("Organic") }
+        { "organic", L("Organic") },
+        { "filled", L("Filled") }
     });
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionEnum<SupportMaterialStyle>(smsGrid));

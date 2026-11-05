@@ -15,7 +15,7 @@
    replaced by demand minus covered through support_demand_get_island_mutable.
    This removes overhang, painted and modifier demand alike; unlike the legacy
    support generator, it does not keep enforced support above the object.
-   The filter applies to grid and snug objects only: the tree and organic
+    The filter applies to grid, snug and filled objects only: the tree and organic
    families route their branches to the bed themselves and keep their demand.
    With support_material_buildplate_only disabled, the filter does nothing.
    The plugin API supplies all geometry and settings. Temporary results use
@@ -40,7 +40,7 @@ int32_t SupportDemandBuildplateOnly::used_config_keys(raw_used_config_key *keys)
     return 2;
 }
 
-// Accumulates borrowed lower slices through Common and subtracts coverage from grid/snug island demand; the context supplies mutable demand, other styles/disabled filters/missing payloads are skipped, and cancellation/geometry/allocation failures propagate.
+// Accumulates borrowed lower slices through Common and subtracts coverage from grid/snug/filled island demand; the context supplies mutable demand, other styles/disabled filters/missing payloads are skipped, and cancellation/geometry/allocation failures propagate.
 void SupportDemandBuildplateOnly::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
@@ -51,8 +51,9 @@ void SupportDemandBuildplateOnly::run_impl(const plugin_run_context *run_ctx) co
     const Object object(ctx->object);
     const Config config = object.config();
     const Common::SupportStyle style = Common::support_style(config);
-    const bool grid_or_snug = style == Common::SupportStyle::Grid || style == Common::SupportStyle::Snug;
-    if (!grid_or_snug || !config.get("support_material_buildplate_only").get_bool()) {
+    const bool straight_columns = style == Common::SupportStyle::Grid || style == Common::SupportStyle::Snug ||
+                                  style == Common::SupportStyle::Filled;
+    if (!straight_columns || !config.get("support_material_buildplate_only").get_bool()) {
         progress().finish_run();
         return;
     }

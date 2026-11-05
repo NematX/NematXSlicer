@@ -2,7 +2,7 @@
 
 /* This demand filter runs after overhang, painting and modifier demand.
    It removes areas above any lower object slice when buildplate-only support
-   is enabled on a grid or snug object. Geometry is accessed only through the
+    is enabled on a grid, snug or filled object. Geometry is accessed only through the
    plugin API; the object keeps the resulting demand, while temporary polygons
    use plugin storage. */
 #ifndef plugins_support_supportdemandbuildplateonly_hpp_

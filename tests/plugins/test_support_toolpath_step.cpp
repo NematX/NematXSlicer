@@ -718,7 +718,7 @@ TEST_CASE("Support toolpath selectors default to auto and follow the support sty
     print.apply(model, config);
     CHECK(Steps::selected_active_plugin_from_group(host, STEP_SUPPORT_TOOLPATH, Common::k_sparse_role,
           &print.object(0).config())->get_id() == Common::k_legacy_sparse_id);
-    for (const char *style : {"grid", "snug", "tree", "organic"}) {
+    for (const char *style : {"grid", "snug", "tree", "organic", "filled"}) {
         for (const Common::ToolpathPreference &preference : Common::legacy_toolpath_preferences(
                  std::string_view(style) == "organic" ? Common::k_branch_sheath_id : Common::k_legacy_sparse_id)) {
             CHECK(std::count_if(host.selector_auto_choices().begin(), host.selector_auto_choices().end(),

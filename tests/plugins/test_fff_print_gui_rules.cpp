@@ -436,7 +436,7 @@ void randomize(DynamicPrintConfig &config, std::mt19937 &rng)
     // ConfigOptionEnumGeneric, so write through the virtual int accessor.
     const auto set_enum = [&config](const char *key, int value) { config.option(key)->set_int(value); };
     set_enum("perimeter_generator", coin(rng) ? int(PerimeterGeneratorType::Arachne) : int(PerimeterGeneratorType::Classic));
-    set_enum("support_material_style", small(rng) % 4);
+    set_enum("support_material_style", small(rng) % 5);
     set_enum("fuzzy_skin", coin(rng) ? int(FuzzySkinType::External) : int(FuzzySkinType::None));
     set_enum("seam_slope_type", coin(rng) ? int(SeamScarfType::External) : int(SeamScarfType::None));
     set_enum("infill_connection", coin(rng) ? int(InfillConnection::icNotConnected) : int(InfillConnection::icConnected));
@@ -508,7 +508,7 @@ TEST_CASE("FFF print GUI rules match independent activation logic on a seeded fu
 
 // Spell out the expected activation of each support setting group for every style, with support on and off.
 // The tree and organic styles share the support_tree_* settings; interfaces and the layer height are common to all
-// styles; the sparse base fill settings serve grid, snug and tree but not organic (its body is the branch sheath).
+// styles; the sparse base fill settings serve grid, snug, tree and filled but not organic (its body is the branch sheath).
 // Evaluate all registered activation reasons with automatic sparse selection; organic branch controls stay editable.
 TEST_CASE("Auto support toolpath selectors keep every provider setting editable",
           "[plugins][gui-rules][support-toolpath][support-toolpath-auto]")
@@ -560,6 +560,7 @@ TEST_CASE("Support setting groups follow the support style", "[plugins][gui-rule
         { SupportMaterialStyle::smsSnug,    false, true,  true  },
         { SupportMaterialStyle::smsTree,    true,  true,  false },
         { SupportMaterialStyle::smsOrganic, true,  false, false },
+        { SupportMaterialStyle::smsFilled,  false, true,  false },
     };
     for (const StyleCase &style_case : cases) {
         for (const bool support_on : { true, false }) {

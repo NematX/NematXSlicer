@@ -522,6 +522,10 @@ set(SLIC3R_SOURCES
 	Plugins/Support/Common/SupportToolpathRoles.hpp
 	Plugins/Support/Common/SupportZPlacement.cpp
 	Plugins/Support/Common/SupportZPlacement.hpp
+	Plugins/Support/Filled/FilledSupportGenerator.cpp
+	Plugins/Support/Filled/FilledSupportGenerator.hpp
+	Plugins/Support/Filled/SupportFamilyFilled.cpp
+	Plugins/Support/Filled/SupportFamilyFilled.hpp
 	Plugins/Support/Grid/GridSupportGenerator.cpp
 	Plugins/Support/Grid/GridSupportGenerator.hpp
 	Plugins/Support/Grid/SupportFamilyGrid.cpp

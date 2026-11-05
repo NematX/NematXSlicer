@@ -61,11 +61,11 @@ TEST_CASE("Production demand registrations include all producers and filters", "
                       [](const Plugin::UsedConfigKey &key) { return key.key == "support_material_buildplate_only"; }));
 }
 
-TEST_CASE("Buildplate-only demand removes expanded lower coverage for grid and snug objects only", "[plugins][support-demand]")
+TEST_CASE("Buildplate-only demand removes expanded lower coverage for grid snug and filled objects only", "[plugins][support-demand]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool enabled = GENERATE(false, true);
-    const char *style = GENERATE("grid", "snug", "organic");
+    const char *style = GENERATE("grid", "snug", "filled", "organic");
     const bool filtered = enabled && std::string(style) != "organic";
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict({{"layer_height", "1"}, {"first_layer_height", "1"},
