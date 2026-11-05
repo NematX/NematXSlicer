@@ -16,6 +16,9 @@ separate configuration copy, then read its published file for assertions.
 
 Default firmware-session tests verify neutral machine-state interpretation, extrusion traversal and extension hooks.
 Shared plan construction and output helpers live in gcode_test_helpers so this file keeps only component-specific behavior.
+Seam export probes materialize an exact entry, consume rotation permission and
+verify the writer's first extrusion and marker. Fixed closed sequences and their
+canonical copies keep their entry even when a child remains rotatable.
 
 Representative direct calls (branches are not a timeline):
 
@@ -78,6 +81,7 @@ Representative direct calls (branches are not a timeline):
 #include "libslic3r/GCodeReader.hpp"
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Plugins/Ordering/ObjectInstanceCatalog.hpp"
+#include "libslic3r/Plugins/Ordering/ExtrusionTreeOrderingGeometry.hpp"
 #include "libslic3r/GCode/Thumbnails.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
@@ -2542,6 +2546,88 @@ TEST_CASE("Default firmware emits one seam after a complete composed arc loop",
     CHECK(count_occurrences(output, ";TYPE:External perimeter\n") == 1);
     CHECK(count_occurrences(output, ";WIDTH:0.4\n") == 1);
     CHECK(count_occurrences(output, ";HEIGHT:0.2\n") == 1);
+}
+
+// The writer must serialize the chosen entry, not choose or cut a new seam.
+TEST_CASE("Active writer preserves a finalized legal seam after rotation is consumed",
+          "[plugins][gcode][firmware][markers][seam][seam-writer-preparation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    configure_standard_firmware(print);
+    PrintingLayerGroup &layer = append_marker_test_layer(print, scale_i(0.2));
+    std::unique_ptr<ExtrusionPath> path = make_firmware_path(ArcPolyline(Points{
+        Point::new_scale(1, 1), Point::new_scale(9, 1), Point::new_scale(9, 9),
+        Point::new_scale(1, 9), Point::new_scale(1, 1)}),
+        20.f, 500.f, -1.f, -1.f, -1.f, ExtrusionRole::ExternalPerimeter);
+    path->get_or_add_property<slic3r_api::EPropertyPerimeter>().shell_count(0);
+    PluginStorage storage;
+    storage_handle *handle = reinterpret_cast<storage_handle *>(&storage);
+    slic3r_api::MutableExtrusionEntity view(reinterpret_cast<extrusion_entity_handle *>(path.get()));
+    const Point chosen = Point::new_scale(9, 5);
+    slic3r_api::Ordering::TreeOrderingGeometry::rotate_loop_to_legal_seam(
+        handle, view, c_point{chosen.x(), chosen.y()}, true);
+    REQUIRE(path->ExtrusionEntity::first_point() == chosen);
+    // Simulate the final pass's consumption, not a new exemption in the writer.
+    path->set_can_rotate(false);
+    const ExtrusionEntity *root = path.get();
+    append_path_extrusion(layer.tool_groups.front(), std::move(path));
+    const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+    INFO(output);
+    CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:5"});
+    bool checked_first_extrusion = false;
+    GCodeReader reader;
+    reader.parse_buffer(output, [&checked_first_extrusion](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+        if (!checked_first_extrusion && line.extruding(state) && line.dist_XY(state) > 0.) {
+            CHECK(state.x() == 9.f);
+            CHECK(state.y() == 5.f);
+            checked_first_extrusion = true;
+        }
+    });
+    CHECK(checked_first_extrusion);
+    CHECK(root->ExtrusionEntity::first_point() == chosen);
+    CHECK_FALSE(root->can_rotate());
+}
+
+// Fixed parent entry governs export independently of the child's own permission.
+TEST_CASE("Active writer does not recut a closed fixed MultiPath or its canonical copy",
+          "[plugins][gcode][firmware][markers][seam][seam-writer-preparation]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    for (const bool canonical : {false, true}) {
+        CAPTURE(canonical);
+        Print print;
+        configure_standard_firmware(print);
+        PrintingLayerGroup &layer = append_marker_test_layer(print, scale_i(0.2));
+        std::unique_ptr<ExtrusionPath> path = make_firmware_path(ArcPolyline(Points{
+            Point::new_scale(9, 9), Point::new_scale(1, 9), Point::new_scale(1, 1),
+            Point::new_scale(9, 1), Point::new_scale(9, 9)}),
+            20.f, 500.f, -1.f, -1.f, -1.f, ExtrusionRole::ExternalPerimeter);
+        std::unique_ptr<ExtrusionMultiPath> fixed = std::make_unique<ExtrusionMultiPath>(*path);
+        fixed->get_or_add_property<slic3r_api::EPropertyPerimeter>().shell_count(0);
+        std::unique_ptr<ExtrusionEntity> root = canonical ? fixed->clone_canonical() :
+                                                          std::unique_ptr<ExtrusionEntity>(std::move(fixed));
+        const ExtrusionEntity *before = root.get();
+        REQUIRE_FALSE(before->can_rotate());
+        REQUIRE(before->child(0).can_rotate());
+        append_path_extrusion(layer.tool_groups.front(), std::move(root));
+        const std::string output = export_with_firmware(print, "gcode.firmware.marlin2");
+        INFO(output);
+        CHECK(seam_marker_lines(output) == std::vector<std::string>{";SEAM:9:9"});
+        bool checked_first_extrusion = false;
+        GCodeReader reader;
+        reader.parse_buffer(output, [&checked_first_extrusion](GCodeReader &state, const GCodeReader::GCodeLine &line) {
+            if (!checked_first_extrusion && line.extruding(state) && line.dist_XY(state) > 0.) {
+                CHECK(state.x() == 9.f);
+                CHECK(state.y() == 9.f);
+                checked_first_extrusion = true;
+            }
+        });
+        CHECK(checked_first_extrusion);
+        CHECK(before->ExtrusionEntity::first_point() == Point::new_scale(9, 9));
+        CHECK_FALSE(before->can_rotate());
+        CHECK(before->child(0).can_rotate());
+    }
 }
 
 TEST_CASE("Default firmware omits seam markers for ineligible roots",
