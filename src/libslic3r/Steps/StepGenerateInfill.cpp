@@ -3,14 +3,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* STEP_INFILL runs the selected generator over fill surfaces. Its C callbacks
-   resolve pattern ids, collect discovery groups, apply recipe modifiers, run
-   INFILL_PATTERN plugins and publish extrusion into region-island buckets. The
-   host keeps the C++ step state behind the opaque payload context and contains
-   callback failures before control returns through the C ABI. Discovery ends
-   before pattern initialization, and the runner checks a requested stop at each
-   plugin phase boundary. */
-
 #include "StepGenerateInfill.hpp"
 
 #include <atomic>
@@ -33,6 +25,40 @@
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/Surface.hpp"
+
+/*
+STEP_INFILL runs the selected generator over fill surfaces.
+Its callbacks find filling patterns, collect their work, modify pattern parameters,
+run INFILL_PATTERN plugins and store the generated extrusion for each region island.
+A region island is the part of a layer island assigned to one print region.
+Work discovery finishes before pattern initialization begins.
+
+The host retains the C++ step state behind the data passed to C callbacks.
+It catches callback failures before returning through C. Stop checks pass the
+owning Print to Orchestrator. A registered execution uses its own stop flag;
+an unregistered Print uses the shared flag.
+
+Operation notes:
+- run_step: coordinate the generator and pattern work
+- Plugin::setup / setup_run / run: prepare and execute plugin calls
+- Host callbacks: resolve patterns, collect work and publish extrusion
+- Phase-boundary stop checks: stop before starting the next phase
+
+Representative direct calls (branches are not a timeline):
+
+    run_step()
+        |-- prepare_recipe_modifier_plugins()
+        |-- Detail::prepare_guarded_plugin_host_context()
+        |-- plugin->setup()
+        |-- prepare_generator_for_object()
+        |-- initialize_pattern_plugins()
+        `-- run_generator_for_object()
+
+    run_generator_for_object()
+        |-- orchestrator.prepare_plugin_run_context()
+        |-- plugin.run()
+        `-- Detail::throw_if_plugin_stopped()
+*/
 
 namespace Slic3r::Steps::StepGenerateInfill {
 
@@ -163,10 +189,10 @@ int32_t append_region_island_extrusion_callback(layer_region_island_handle *regi
                                                 raw_extrusion_role role,
                                                 extrusion_entity_handle *extrusion_handle) noexcept;
 
-// Check host-owned stop flags without changing the print, plugin state or callback data.
+// Read this Print's user-cancel and execution-stop flags without changing them.
 bool step_is_stopping(const InfillStepHostContext &host) noexcept
 {
-    return (host.orchestrator != nullptr && host.orchestrator->is_plugin_cancelled()) ||
+    return (host.orchestrator != nullptr && host.orchestrator->is_plugin_cancelled(host.print)) ||
            (host.print != nullptr && host.print->canceled());
 }
 

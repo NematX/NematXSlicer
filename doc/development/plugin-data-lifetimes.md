@@ -529,6 +529,35 @@ Plugin instances are singletons: `plugin_ctx` and this storage designate the plu
 
 Participant tracking belongs to the Print. Their presence does not mean their caches are invalid: a separate atomic flag signals cleanups caused by an invalidation or a failure. An unchanged apply does not traverse this tracking and does not cancel a valid worker; tracking reads needed for cleanup happen after the workers have stopped. An apply retry after a failed cleanup is still treated as an invalidation, even if the inputs have already been applied.
 
+### Independent host executions
+
+For each independent print, the host creates an `Orchestrator::RunContext`.
+It holds the progress counters, stop flag and first known stop cause.
+The host keeps both this context and the scope returned by `enter_run(context, &print)`
+alive until all execution workers have finished.
+
+A `plugin_host_context` carries a borrowed pointer to that context. Copying the
+pointer does not extend its lifetime. Plugin wrappers and C parallel loops associate
+it with each worker thread for the duration of a callback. A check with an explicit
+`Print` selects that Print's registered context. A check without a `Print` selects
+the calling thread's context. If that lookup finds none, it uses the shared stop state.
+Without an execution context, native C++ plugins use their own progress counters.
+
+`PLUGIN_RUN_CONTEXT` 2.1 keeps the 2.0 prefix and places `progress_context` after it.
+Native `PluginBase` callbacks use these host-owned counters when supplied.
+Returning from a nested callback restores the previous counter selection.
+On the callback thread, obtain `PluginProgress &counters = progress()` before starting
+other threads. Pass that reference to them and wait for them before returning.
+
+Older native plugin binaries and Python's `PluginProgress` helper do not use these
+C++ counters. This mechanism does not make concurrent calls to those helpers safe.
+
+Ending an execution scope does not replace or clear `plugin_storage`.
+Its allocations remain available to `clear(print, storage)` afterwards.
+Print calls this cleanup when replaying from a saved pipeline boundary, called a
+checkpoint, or during destruction. Plugins must still separate caches by Print
+and protect access to shared mutable data. RunScope does not protect those caches.
+
 ### Planned rework
 
 Replace the central storage lock with private storage per executed element (object, layer location or sub-plugin call), shared by that element's `setup_run()` and `run()`. Keep persistent storage for `setup()`/`clear()` and print-wide calls: G-code firmware sessions retain a config allocated during their factory `run()` and use it later while writing the print. A future per-object pipeline must prevent object steps from writing print-wide data (`print_records_*` or the print's auxiliary object). The current `setup_run()` discovery barrier across objects must also be reviewed before changing that scheduling.

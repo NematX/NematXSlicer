@@ -33,6 +33,36 @@
 #include "libslic3r/SurfaceCollection.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 
+/*
+These C functions let plugins access slicing objects through opaque handles.
+Print owns the slicing tree. Exposing it through a handle does not transfer ownership.
+Protected edits check whether the current slicing step may still change the data.
+With SLIC3R_STRICT_FREEZE, an invalid edit is refused and requests a stop for
+the owning Print. Without that mode, the check is an assertion.
+
+Protected editing calls
+  Resolve the owning Print from the object, layer or region
+
+Operation notes:
+- check_freeze: verify the permitted editing step
+- Access the permitted data, or refuse the edit in strict mode
+
+Representative direct calls (branches are not a timeline):
+
+    object_get_layer()
+        |-- Slic3r::to_object()
+        |-- layer_count()
+        `-- layer()
+
+    layer_region_island_set_fill_surfaces()
+        |-- Slic3r::to_layer_region_island()
+        |-- island->regions()
+        |-- region->layer()
+        |-- layer->object()
+        |-- object->auxiliary_layers()
+        `-- Slic3r::data_tree_editable()
+*/
+
 namespace Slic3r {
 
 static Surface *to_surface(surface_handle *me) { return reinterpret_cast<Surface*>(me); }
@@ -95,7 +125,7 @@ static bool check_freeze(const Print *print, slicing_step_t last_editor_step, co
 #if defined(SLIC3R_STRICT_FREEZE)
     if (!allowed) {
         Orchestrator &orchestrator = Orchestrator::instance();
-        orchestrator.request_plugin_cancel_after_host_failure();
+        orchestrator.request_plugin_cancel_after_host_failure(print);
         if (!print->claim_freeze_diagnostic())
             return false;
         try {

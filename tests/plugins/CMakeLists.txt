@@ -132,6 +132,7 @@ test_support_tree_family.cpp
     test_perimeter_separate_hole_contour.cpp
     test_perimeter_simple_generator.cpp
     test_plugin_storage.cpp
+    test_plugin_run_context.cpp
     test_polygon_simplify.cpp
     test_polyholes.cpp
     test_output_filename.cpp

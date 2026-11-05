@@ -2,40 +2,7 @@
 ///|/
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* This file registers plugins, creates their selection settings and runs their jobs.
-   The host is the slicer application that loads plugins. Orchestrator is its
-   process-wide manager; a plugin is a component that performs a slicing job.
 
-   Use instance(), then plugin_registration_scope() to identify an installed
-   package directory while register_plugin() introduces its instances.
-   PluginRegistrationScope ends that directory association when destroyed.
-   PluginPackageLoadReport stores load errors and non-fatal internal warnings.
-
-   An exclusive group contains alternative plugins for one processing step.
-   Its selector is a setting naming the member to use. ExclusiveGroupDefinition
-   stores text, source package and StepSelectorTraits, its placement and selection
-   rules. Register built-in or member descriptions, enable members, then call
-   elect_exclusive_group_definitions(), create_selector_print_config() and
-   finalize_selector_option() to retain descriptions, create settings and filter
-   unavailable choices. The retained description also controls text translation.
-
-   initialize_plugins() interprets each initialization return code, disables
-   failures and preserves an already-recorded rejection. execute_plugin() runs
-   a service, a directly callable job, with borrowed data valid for that call.
-   Per-call preparations and executions may run in parallel.
-   Invalidation means recomputing affected results; service steps resolve to
-   the processing stages that produce those results.
-
-   Startup calls from load_plugins() in Plugins/PluginLoader.cpp:
-     load_plugins
-       register_plugin
-       elect_exclusive_group_definitions
-       create_selector_print_config
-         create_print_config_impl
-       initialize_plugins
-         Plugin::initialize
-         record_plugin_initialization_failure
-       finalize_plugin_option_defs */
 #include "Orchestrator.hpp"
 #include "GCodeReaderService.hpp"
 #include "GCodeThumbnailRenderer.hpp"
@@ -53,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 
@@ -64,6 +32,7 @@
 #include "libslic3r/Api/plugin/c/slic3r_gcode_script.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
+#include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/ExPolygon.hpp"
@@ -84,7 +53,85 @@
 #include "ClipperShapes.hpp"
 #include "Plugin.hpp"
 
+/*
+This file registers plugins, creates their selection settings and runs their jobs.
+The host is the slicer application that loads plugins. Orchestrator is its
+process-wide manager; a plugin is a component that performs a slicing job.
+
+Use instance(), then plugin_registration_scope() to identify an installed
+package directory while register_plugin() introduces its instances.
+PluginRegistrationScope ends that directory association when destroyed.
+PluginPackageLoadReport stores load errors and non-fatal internal warnings.
+
+An exclusive group contains alternative plugins for one processing step.
+Its selector is a setting naming the member to use. ExclusiveGroupDefinition
+stores text, source package and StepSelectorTraits, its placement and selection
+rules. Register built-in or member descriptions, enable members, then call
+elect_exclusive_group_definitions(), create_selector_print_config() and
+finalize_selector_option() to retain descriptions, create settings and filter
+unavailable choices. The retained description also controls text translation.
+
+RunContext holds progress counters and stop state for one independent print.
+enter_run() associates it with the calling thread and, when supplied, a Print.
+prepare_plugin_host_context() copies the pointer for worker callbacks.
+Plugin::setup/setup_run/run and the C parallel loops install this association
+on each calling thread. The owner keeps RunContext alive until all calls finish.
+
+PluginStorage is still shared by the plugin's executions. Print tracks which
+plugins prepared data so it can ask clear(print, storage) to release that data.
+Cleanup happens when recomputing from a saved pipeline boundary or destroying Print.
+
+initialize_plugins() interprets each initialization return code, disables
+failures and preserves an already-recorded rejection. execute_plugin() runs
+a service, a directly callable job, with borrowed data valid for that call.
+Per-call preparations and executions may run in parallel.
+Invalidation means recomputing affected results; service steps resolve to
+the processing stages that produce those results.
+
+Operation notes:
+- elect_exclusive_group_definitions
+- create_selector_print_config
+- create_print_config_impl
+- record_plugin_initialization_failure
+- finalize_plugin_option_defs
+- enter_run: associate state with the driving thread and optional Print
+- prepare_plugin_host_context: pass that association to callbacks
+- prepare_plugin_run_context: supply progress counters and shared storage
+- Plugin::setup / setup_run / run: install the association while calling the plugin
+- clear_plugin_participants: release Print-specific caches at a later cleanup boundary
+
+Representative direct calls (branches are not a timeline):
+
+    Orchestrator::initialize_plugins()
+        |-- this->is_plugin_active()
+        |-- plugin_ptr->initialize()
+        |-- error_message()
+        |-- record_plugin_initialization_failure()
+        |-- this->set_plugin_active()
+        `-- validate_used_config_key_definition()
+
+    Orchestrator::execute_plugin()
+        |-- this->prepare_plugin_host_context()
+        |-- this->prepare_plugin_run_context()
+        |-- plugin.setup()
+        `-- parallel_for()
+*/
+
 namespace Slic3r {
+
+// Progress and stop diagnostics belong to an execution, while plugin allocations keep their checkpoint lifetime.
+struct Orchestrator::RunContext::State
+{
+    std::atomic_bool plugin_cancel_requested { false };
+    mutable std::mutex mutex;
+    PluginStopCause stop_cause;
+    std::map<Plugin *, std::unique_ptr<slic3r_api::PluginProgress>> progress_by_plugin;
+};
+
+namespace {
+// Host callbacks without a Print use the innermost binding of their calling thread.
+thread_local Orchestrator::RunContext *g_active_run_context = nullptr;
+}
 
 // Return whether every field of the two selector declarations is equal.
 static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelectorTraits &rhs);
@@ -1157,6 +1204,96 @@ Orchestrator &Orchestrator::instance() {
     return s_instance;
 }
 
+Orchestrator::RunContext::RunContext() : state_(std::make_unique<State>()) {}
+
+Orchestrator::RunContext::~RunContext() = default;
+
+void Orchestrator::RunContext::request_plugin_cancel(const Plugin *failed_plugin) noexcept
+{
+    try {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (failed_plugin != nullptr && state_->stop_cause.kind == PluginStopCause::Kind::Unknown) {
+            state_->stop_cause.kind = PluginStopCause::Kind::Plugin;
+            state_->stop_cause.plugin = failed_plugin;
+        }
+        state_->plugin_cancel_requested.store(true, std::memory_order_release);
+    } catch (...) {
+        state_->plugin_cancel_requested.store(true, std::memory_order_release);
+    }
+}
+
+void Orchestrator::RunContext::request_plugin_cancel_after_host_failure() noexcept
+{
+    try {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->stop_cause.kind == PluginStopCause::Kind::Unknown)
+            state_->stop_cause.kind = PluginStopCause::Kind::Host;
+        state_->plugin_cancel_requested.store(true, std::memory_order_release);
+    } catch (...) {
+        state_->plugin_cancel_requested.store(true, std::memory_order_release);
+    }
+}
+
+bool Orchestrator::RunContext::plugin_cancel_requested() const noexcept
+{
+    return state_->plugin_cancel_requested.load(std::memory_order_acquire);
+}
+
+Orchestrator::PluginStopCause Orchestrator::RunContext::plugin_stop_cause() const
+{
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    return state_->stop_cause;
+}
+
+void Orchestrator::RunContext::reset_plugin_cancel()
+{
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    state_->stop_cause = PluginStopCause();
+    state_->plugin_cancel_requested.store(false, std::memory_order_release);
+}
+
+Orchestrator::RunScope::RunScope(Orchestrator &orchestrator, RunContext *context, Print *print)
+    : orchestrator_(&orchestrator), context_(context), previous_context_(g_active_run_context), print_(print)
+{
+    if (print_ != nullptr) {
+        std::lock_guard<std::mutex> lock(orchestrator_->m_run_contexts_mutex);
+        const std::pair<std::map<const Print *, RunContext *>::iterator, bool> inserted =
+            orchestrator_->m_run_contexts.emplace(print_, context_);
+        if (!inserted.second && inserted.first->second != context_)
+            throw std::invalid_argument("A Print already belongs to another plugin execution.");
+        owns_registration_ = inserted.second;
+    }
+    g_active_run_context = context_;
+}
+
+Orchestrator::RunScope::~RunScope()
+{
+    if (owns_registration_) {
+        std::lock_guard<std::mutex> lock(orchestrator_->m_run_contexts_mutex);
+        orchestrator_->m_run_contexts.erase(print_);
+    }
+    g_active_run_context = previous_context_;
+}
+
+Orchestrator::RunScope Orchestrator::enter_run(RunContext &context, Print *print)
+{
+    return RunScope(*this, &context, print);
+}
+
+Orchestrator::RunScope Orchestrator::bind_run(const plugin_host_context *host_context)
+{
+    return RunScope(*this, host_context != nullptr ? static_cast<RunContext *>(host_context->run_context) : nullptr, nullptr);
+}
+
+Orchestrator::RunContext *Orchestrator::find_run_context(const Print *print) const
+{
+    if (print == nullptr)
+        return g_active_run_context;
+    std::lock_guard<std::mutex> lock(m_run_contexts_mutex);
+    const std::map<const Print *, RunContext *>::const_iterator found = m_run_contexts.find(print);
+    return found != m_run_contexts.end() ? found->second : nullptr;
+}
+
 bool Orchestrator::register_plugin(plugin_instance plugin) {
     const std::chrono::steady_clock::time_point start = std::chrono::steady_clock::now();
     std::unique_ptr<Plugin> new_plugin;
@@ -1770,6 +1907,7 @@ plugin_host_context Orchestrator::prepare_plugin_host_context(slicing_step_t ste
     context.print = print;
     context.plugin = plugin;
     context.step = step;
+    context.run_context = this->find_run_context(print);
     return context;
 }
 
@@ -1781,7 +1919,19 @@ plugin_run_context Orchestrator::prepare_plugin_run_context(slicing_step_t step,
     context.step = step;
     context.print = host_context != nullptr && host_context->print != nullptr ?
         reinterpret_cast<const print_handle *>(host_context->print) : nullptr;
-    context.plugin_storage = reinterpret_cast<storage_handle *>(&this->plugin_storage()[plugin]);
+    // Only entry lookup/insertion needs this lock; the storage protects its own allocations after it is released.
+    {
+        std::lock_guard<std::mutex> lock(m_plugin_storage_map_mutex);
+        context.plugin_storage = reinterpret_cast<storage_handle *>(&m_plugin_storage[plugin]);
+    }
+    RunContext *run = host_context != nullptr ? static_cast<RunContext *>(host_context->run_context) : g_active_run_context;
+    if (run != nullptr) {
+        std::lock_guard<std::mutex> lock(run->state_->mutex);
+        std::unique_ptr<slic3r_api::PluginProgress> &progress = run->state_->progress_by_plugin[plugin];
+        if (progress == nullptr)
+            progress = std::make_unique<slic3r_api::PluginProgress>();
+        context.progress_context = progress.get();
+    }
     context.host_context = host_context;
     context.is_cancelled = orchestrator_plugin_is_cancelled;
     context.report_warning = orchestrator_plugin_report_warning;
@@ -1822,9 +1972,14 @@ bool Orchestrator::clear_plugin_participants(Print &print, const slicing_step_t 
             Steps::execution_index(participant.step) < first_invalid_index)
             continue;
 
-        std::map<Plugin *, PluginStorage>::iterator storage =
-            m_plugin_storage.find(participant.plugin);
-        if (storage == m_plugin_storage.end()) {
+        PluginStorage *storage = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_plugin_storage_map_mutex);
+            const std::map<Plugin *, PluginStorage>::iterator found = m_plugin_storage.find(participant.plugin);
+            if (found != m_plugin_storage.end())
+                storage = &found->second;
+        }
+        if (storage == nullptr) {
             this->add_plugin_message(PluginMessageLevel::Error, participant.plugin, participant.step,
                                      "Cannot clear Print state: plugin storage is missing.");
             all_clear_succeeded = false;
@@ -1835,7 +1990,7 @@ bool Orchestrator::clear_plugin_participants(Print &print, const slicing_step_t 
         try {
             clear_code = participant.plugin->clear(
                 reinterpret_cast<const print_handle *>(&print),
-                reinterpret_cast<storage_handle *>(&storage->second));
+                reinterpret_cast<storage_handle *>(storage));
         } catch (const std::exception &error) {
             clear_code = this->store_error_message(error.what());
         } catch (...) {
@@ -1874,7 +2029,7 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
         return RAW_PLUGIN_EXECUTION_INVALID_ARGUMENT;
     if (!this->is_plugin_active(&plugin))
         return RAW_PLUGIN_EXECUTION_INACTIVE;
-    if (this->is_plugin_cancelled() ||
+    if (this->is_plugin_cancelled(print) ||
         (print != nullptr && print->canceled()))
         return RAW_PLUGIN_EXECUTION_CANCELLED;
 
@@ -1889,7 +2044,7 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
     plugin.setup(run_context, run_count);
     if (execution_error.load(std::memory_order_relaxed))
         return RAW_PLUGIN_EXECUTION_PLUGIN_ERROR;
-    if (this->is_plugin_cancelled() ||
+    if (this->is_plugin_cancelled(print) ||
         (print != nullptr && print->canceled()))
         return RAW_PLUGIN_EXECUTION_CANCELLED;
 
@@ -1908,7 +2063,7 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
 
     if (execution_error.load(std::memory_order_relaxed))
         return RAW_PLUGIN_EXECUTION_PLUGIN_ERROR;
-    if (this->is_plugin_cancelled() ||
+    if (this->is_plugin_cancelled(print) ||
         (print != nullptr && print->canceled()))
         return RAW_PLUGIN_EXECUTION_CANCELLED;
 
@@ -1927,7 +2082,7 @@ raw_plugin_execution_status Orchestrator::execute_plugin(
 
     if (execution_error.load(std::memory_order_relaxed))
         return RAW_PLUGIN_EXECUTION_PLUGIN_ERROR;
-    return this->is_plugin_cancelled() ||
+    return this->is_plugin_cancelled(print) ||
                    (print != nullptr && print->canceled()) ?
         RAW_PLUGIN_EXECUTION_CANCELLED : RAW_PLUGIN_EXECUTION_SUCCESS;
 }
@@ -2003,15 +2158,21 @@ std::string Orchestrator::error_message(int32_t id) const
     return m_error_messages[index];
 }
 
-// Read the host cancellation flag without changing it.
-bool Orchestrator::is_plugin_cancelled() const { return m_plugin_cancel_requested.load(std::memory_order_relaxed); }
+bool Orchestrator::is_plugin_cancelled(const Print *print) const
+{
+    if (RunContext *context = this->find_run_context(print))
+        return context->plugin_cancel_requested();
+    return m_plugin_cancel_requested.load(std::memory_order_relaxed);
+}
 
-// Publish cancellation for running plugin code to observe at its next cancellation point.
-// The cause stays unchanged: an earlier recorded cause is kept and none is invented.
-void Orchestrator::request_plugin_cancel() noexcept
+void Orchestrator::request_plugin_cancel(const Print *print) noexcept
 {
     // Locking can in theory throw; the flag must be set in every case, so the fallback sets it without the lock.
     try {
+        if (RunContext *context = this->find_run_context(print)) {
+            context->request_plugin_cancel();
+            return;
+        }
         std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
         m_plugin_cancel_requested.store(true, std::memory_order_relaxed);
     } catch (...) {
@@ -2019,11 +2180,14 @@ void Orchestrator::request_plugin_cancel() noexcept
     }
 }
 
-// Record the plugin as the cause if none is known yet, then publish cancellation.
-void Orchestrator::request_plugin_cancel(const Plugin &failed_plugin) noexcept
+void Orchestrator::request_plugin_cancel(const Plugin &failed_plugin, const Print *print) noexcept
 {
     // If the lock fails, the flag is still set and the cause stays unrecorded.
     try {
+        if (RunContext *context = this->find_run_context(print)) {
+            context->request_plugin_cancel(&failed_plugin);
+            return;
+        }
         std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
         if (m_plugin_stop_cause.kind == PluginStopCause::Kind::Unknown) {
             m_plugin_stop_cause.kind   = PluginStopCause::Kind::Plugin;
@@ -2035,11 +2199,14 @@ void Orchestrator::request_plugin_cancel(const Plugin &failed_plugin) noexcept
     }
 }
 
-// Record the host as the cause if none is known yet, then publish cancellation.
-void Orchestrator::request_plugin_cancel_after_host_failure() noexcept
+void Orchestrator::request_plugin_cancel_after_host_failure(const Print *print) noexcept
 {
     // If the lock fails, the flag is still set and the cause stays unrecorded.
     try {
+        if (RunContext *context = this->find_run_context(print)) {
+            context->request_plugin_cancel_after_host_failure();
+            return;
+        }
         std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
         if (m_plugin_stop_cause.kind == PluginStopCause::Kind::Unknown)
             m_plugin_stop_cause.kind = PluginStopCause::Kind::Host;
@@ -2049,16 +2216,20 @@ void Orchestrator::request_plugin_cancel_after_host_failure() noexcept
     }
 }
 
-// Copy the recorded cause under the mutex.
-Orchestrator::PluginStopCause Orchestrator::plugin_stop_cause() const
+Orchestrator::PluginStopCause Orchestrator::plugin_stop_cause(const Print *print) const
 {
+    if (RunContext *context = this->find_run_context(print))
+        return context->plugin_stop_cause();
     std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
     return m_plugin_stop_cause;
 }
 
-// Clear cancellation and the cause before starting an independent operation.
-void Orchestrator::reset_plugin_cancel()
+void Orchestrator::reset_plugin_cancel(const Print *print)
 {
+    if (RunContext *context = this->find_run_context(print)) {
+        context->reset_plugin_cancel();
+        return;
+    }
     std::lock_guard<std::mutex> lock(m_plugin_stop_cause_mutex);
     m_plugin_stop_cause = PluginStopCause();
     m_plugin_cancel_requested.store(false, std::memory_order_relaxed);

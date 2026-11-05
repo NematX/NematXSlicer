@@ -3,38 +3,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* This file coordinates slicing stages and selects the plugins that perform them.
-   A pipeline is an ordered series of processing stages, called steps. Print
-   holds one slicing job's data; Orchestrator is the slicer application's manager
-   of plugins, components that implement jobs within those steps.
-
-   StepPipeline::run_slice() runs geometry processing; run_gcode() produces the
-   printer-command file, and run() combines both. Checkpoint identifies a saved
-   boundary between stages. clear_checkpoint_outputs() discards results after
-   that boundary when changed settings require recomputation. Producer steps
-   create results; service steps describe callable jobs used by those producers.
-
-   An exclusive group is a set of alternative plugins for one step. Its selector
-   is a setting naming a member. StepExclusiveGroup owns the text and enum (list
-   of choices) used to describe that setting; set_enum_plugins() fills choices
-   ordered by group preference, the rank among alternatives, then id.
-   plugin_exclusive_group_definition() uses descriptions already retained by
-   Orchestrator. selected_plugin_from_group() reads settings, tries automatic
-   key/value conditions when requested, then resolves a selected or default member.
-   Required-setting checks ensure selected members can read their declared keys.
-
-   Output reading is separate from slicing. Requested preview reads also fill
-   Print statistics measured from generated commands. Command-line output reading
-   occurs only when explicitly requested.
-
-   Call graph:
-     StepPipeline::run
-       run_slice
-         run_step_if_requested
-       run_gcode
-         run_step_if_requested
-     selected_active_plugin_from_group
-       selected_plugin_from_group */
 #include "StepPipeline.hpp"
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
@@ -89,6 +57,60 @@
 #include <string>
 #include <stdexcept>
 #include <vector>
+
+/*
+This file coordinates slicing stages and selects the plugins that perform them.
+A pipeline is an ordered series of processing stages, called steps. Print
+holds one slicing job's data; Orchestrator is the slicer application's manager
+of plugins, components that implement jobs within those steps.
+
+StepPipeline::run_slice() runs geometry processing; run_gcode() produces the
+printer-command file, and run() combines both. Checkpoint identifies a saved
+boundary between stages. clear_checkpoint_outputs() discards results after
+that boundary when changed settings require recomputation. Producer steps
+create results; service steps describe callable jobs used by those producers.
+
+An exclusive group is a set of alternative plugins for one step. Its selector
+is a setting naming a member. StepExclusiveGroup owns the text and enum (list
+of choices) used to describe that setting; set_enum_plugins() fills choices
+ordered by group preference, the rank among alternatives, then id.
+plugin_exclusive_group_definition() uses descriptions already retained by
+Orchestrator. selected_plugin_from_group() reads settings, tries automatic
+key/value conditions when requested, then resolves a selected or default member.
+Required-setting checks ensure selected members can read their declared keys.
+
+Output reading is separate from slicing. Requested preview reads also fill
+Print statistics measured from generated commands. Command-line output reading
+occurs only when explicitly requested.
+
+run_slice() and run_gcode() reset stop state for their supplied Print.
+When that Print has a registered RunContext, the reset affects only that execution.
+Without one, the orchestrator uses its shared stop state.
+
+Operation notes:
+- run_step_if_requested
+- run_step_if_requested
+- selected_active_plugin_from_group
+- selected_plugin_from_group
+
+Representative direct calls (branches are not a timeline):
+
+    StepPipeline::run()
+        |-- StepPipeline::run_slice()
+        `-- StepPipeline::run_gcode()
+
+    StepPipeline::run_slice()
+        |-- print.prepare_checkpoint_resume()
+        |-- run_layer_height_generation()
+        |-- run_slicing()
+        |-- run_post_slicing()
+        `-- run_remaining_steps()
+
+    StepPipeline::run_gcode()
+        |-- print.prepare_checkpoint_resume()
+        |-- initialize_pipeline_progress()
+        `-- run_remaining_steps()
+*/
 
 namespace Slic3r::Steps {
 
@@ -1302,7 +1324,7 @@ void StepPipeline::run_slice(Orchestrator &orchestrator, Print &print)
 #endif
 
     const std::string path;
-    orchestrator.reset_plugin_cancel();
+    orchestrator.reset_plugin_cancel(&print);
     const Checkpoint checkpoint = print.current_checkpoint();
     if (checkpoint == Checkpoint::None ||
         checkpoint == Checkpoint::Slicing ||
@@ -1333,7 +1355,7 @@ std::string StepPipeline::run_gcode(Orchestrator &orchestrator, Print &print,
     // Reject before cleanup can delete layers whose replacement this export entry point cannot build.
     if (print.current_checkpoint() == Checkpoint::None)
         throw SlicingError("G-code export requires slicing first: run_slice() must complete before run_gcode().");
-    orchestrator.reset_plugin_cancel();
+    orchestrator.reset_plugin_cancel(&print);
     // A direct G-code invocation does not execute the three slice-prefix
     // steps. A continuation after run_slice() keeps the complete plan already
     // stored in Print and therefore preserves its original denominator.
