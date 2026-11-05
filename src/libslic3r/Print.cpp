@@ -68,6 +68,7 @@ Representative direct calls (branches are not a timeline):
 #include <string>
 #include <unordered_set>
 
+#include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -359,6 +360,10 @@ void Print::clear() {
     // Plans borrow islands and layers; release them before their owners.
     this->reset_printing_plan();
     this->reset_gcode_reader_source_path();
+    // The request owns a configuration copy and a GUI callback: it must not outlive the print it was made for.
+    m_export_request.reset();
+    m_export_result = ExportResult();
+    m_print_statistics.statistics_available = false;
     this->reset_step_execution_plan_all_unguarded();
     m_pipeline_state.clear();
     m_running_step.store(STEP_NONE, std::memory_order_release);
@@ -509,6 +514,22 @@ bool Print::mark_step_for_execution_unguarded(slicing_step_t step)
 {
     if (step == STEP_NONE)
         return false;
+    // Every invalidation of STEP_GCODE by the step plan (config change, replay, full reset) goes through here;
+    // the measured statistics describe the old G-code and are no longer usable. Print::clear() and
+    // PrintStatistics::clear() also lower the availability flag.
+    if (step == STEP_GCODE)
+        m_print_statistics.statistics_available = false;
+    const bool affected = this->queue_step_unguarded(step);
+    // The step may reuse owners that plugin caches still hold, so the next
+    // apply() or resume must offer a clear callback before running it.
+    m_plugin_cleanup_pending.store(true, std::memory_order_release);
+    return affected;
+}
+
+// Mark the step as not done and add it to the steps to execute. state_mutex() must be held. The plugin cleanup
+// is not armed here. Return whether the step was done or running, that is whether the request changes a result.
+bool Print::queue_step_unguarded(slicing_step_t step)
+{
     PipelineStepState &state = m_pipeline_state[step];
     const bool affected = state.done || running_step() == step;
     const bool warnings_changed = std::any_of(state.warnings.begin(), state.warnings.end(),
@@ -520,10 +541,71 @@ bool Print::mark_step_for_execution_unguarded(slicing_step_t step)
         state.timestamp = PrintStateBase::next_timestamp();
     }
     m_steps_to_execute.insert(step);
-    // The step may reuse owners that plugin caches still hold, so the next
-    // apply() or resume must offer a clear callback before running it.
-    m_plugin_cleanup_pending.store(true, std::memory_order_release);
     return affected;
+}
+
+// Build a request owned by the caller: copy m_full_print_config and keep the thumbnail renderer. The copy is taken under
+// state_mutex(), which this function locks itself (the caller must not hold it), so that a concurrent apply() cannot
+// replace the configuration while it is read. The Print is not modified.
+Print::ExportRequest Print::make_export_request(ThumbnailsGeneratorCallback thumbnails) const
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    ExportRequest request;
+    request.config     = m_full_print_config;
+    request.thumbnails = std::move(thumbnails);
+    return request;
+}
+
+// Store the request (replacing an unconsumed one), forget the result of the previous export and queue STEP_EXPORT, all under
+// state_mutex(), which this function locks itself. Only queue_step_unguarded() is used, never the generic marking: the
+// plugin cleanup stays unarmed, because the export only reads the reference and a later apply() must not stop the worker
+// for it. The Print owns the request until take_export_request() or clear().
+void Print::request_export(ExportRequest request)
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    m_export_request = std::move(request);
+    m_export_result = ExportResult();
+    // The export only reads the reference: queuing it must not stop the worker through a pending cleanup.
+    this->queue_step_unguarded(STEP_EXPORT);
+}
+
+// Move the pending request out of the Print under state_mutex() (locked here), leaving none: a request serves one attempt.
+// Return an empty optional when nothing was deposited or when it was already taken. STEP_EXPORT stays queued.
+std::optional<Print::ExportRequest> Print::take_export_request()
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    std::optional<ExportRequest> request = std::move(m_export_request);
+    m_export_request.reset();
+    return request;
+}
+
+// Return the reference path when STEP_GCODE is done and not running, or an empty string. The step state is read under
+// state_mutex() (locked here), but the path itself is written without that lock by set_gcode_reader_source_path() and
+// reset_gcode_reader_source_path(): it is safe to read only from the thread that produces or consumes the reference
+// (the worker, or the thread that runs the pipeline), never concurrently with its regeneration.
+std::string Print::ready_gcode_reference_path() const
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    const std::map<slicing_step_t, PipelineStepState>::const_iterator found = m_pipeline_state.find(STEP_GCODE);
+    const bool ready = found != m_pipeline_state.end() && found->second.done && running_step() != STEP_GCODE;
+    return ready ? m_gcode_reader_source_path : std::string();
+}
+
+// Return a copy, read under state_mutex() (locked here), of the result reported by the last export. It is valid until the
+// next export, request_export() or clear(): an invalidation of STEP_GCODE does not clear it, because it may name a file that
+// the export already published and that its caller may still have to remove.
+Print::ExportResult Print::export_result() const
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    return m_export_result;
+}
+
+// Record the result reported by the exporter, under state_mutex() (locked here). Called while the exporter runs, as soon as
+// it reports, so that no later check can lose it.
+void Print::set_export_result(ExportResult result)
+{
+    std::scoped_lock<std::mutex> lock(this->state_mutex());
+    m_export_result = std::move(result);
 }
 
 void Print::mark_step_and_dependents_for_execution(slicing_step_t step)
@@ -588,8 +670,10 @@ void Print::reset_step_execution_plan_all_unguarded()
     clear_ordering_checkpoint();
     m_slicing_metadata_checkpoint.reset();
     m_steps_to_execute.clear();
+    // The export is never queued by a reset: only request_export() does, when a destination exists.
     for (slicing_step_t step : Steps::execution_order())
-        mark_step_for_execution_unguarded(step);
+        if (step != STEP_EXPORT)
+            mark_step_for_execution_unguarded(step);
     // A full replay can reuse every owner, so plugin caches must be cleared first.
     m_plugin_cleanup_pending.store(true, std::memory_order_release);
 }
@@ -673,7 +757,8 @@ const PrintObject *Print::get_object(ObjectID object_id) const {
     return (it == m_objects.end()) ? nullptr : it->get();
 }
 
-// All FFF config scopes use the same declared first-consumer checkpoint.
+// Request the replay of each changed key from its checkpoint (Steps::config_option_replay_checkpoint)
+// and return true if finished or running work is affected. Keys without a replay are skipped.
 bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* new_config */,
                                                const std::vector<t_config_option_key> &opt_keys) {
     if (opt_keys.empty())
@@ -681,14 +766,9 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
 
     bool invalidated = false;
     for (const t_config_option_key &opt_key : opt_keys) {
-        const ConfigOptionDef *def = PrintConfigDef::instance().get(opt_key);
-        if (def == nullptr) {
-            invalidated |= this->request_replay_from(Steps::Checkpoint::None);
-            continue;
-        }
-        if (def->invalidates_step == STEP_NONE)
-            continue;
-        invalidated |= this->request_replay_from(Steps::checkpoint_before_step(def->invalidates_step));
+        const std::optional<Steps::Checkpoint> checkpoint = Steps::config_option_replay_checkpoint(opt_key);
+        if (checkpoint.has_value())
+            invalidated |= this->request_replay_from(*checkpoint);
     }
     if (invalidated)
         m_timestamp_last_change = std::time(0);
@@ -1863,11 +1943,19 @@ bool Print::has_global_wipe_tower() const {
     return true;
 }
 
-// Generate a recommended G-code output file name based on the format template, default extension, and template parameters
-// (timestamps, object placeholders derived from the model, current placeholder prameters and print statistics.
-// Use the final print statistics if available, or just keep the print statistics placeholders if not available yet (before G-code is finalized).
-std::string Print::output_filename(const std::string &filename_base) const 
-{ 
+// Format the borrowed base name with the legacy `.gcode` suffix; return an owned filename and propagate placeholder-format errors.
+std::string Print::output_filename(const std::string &filename_base) const
+{
+    return this->output_filename(filename_base, ".gcode");
+}
+
+// Format the FFF output template with print statistics (or their placeholders) and the borrowed exporter extension,
+// then replace a literal G-code-family suffix (including the complete .gcode.3mf suffix) by that extension, unless it is a text alias
+// (.g, .gco) of the .gcode extension, which stays as written. Return an owned filename; Print state is unchanged and
+// placeholder-format errors propagate.
+std::string Print::output_filename(const std::string &filename_base,
+                                   const std::string &default_extension) const
+{
     // Set the placeholders for the data know first after the G-code export is finished.
     // These values will be just propagated into the output file name.
     DynamicConfig config = this->finished() ? this->print_statistics().config() : this->print_statistics().placeholders();
@@ -1875,16 +1963,23 @@ std::string Print::output_filename(const std::string &filename_base) const
     config.set_key_value("extruders_count", new ConfigOptionInt((int)m_config.nozzle_diameter.size()));
     config.set_key_value("num_milling", new ConfigOptionInt((int)m_config.milling_diameter.size()));
     config.set_key_value("milling_count", new ConfigOptionInt((int)m_config.milling_diameter.size()));
-    config.set_key_value("default_output_extension", new ConfigOptionString(".gcode"));
+    config.set_key_value("default_output_extension", new ConfigOptionString(default_extension));
+    std::string filename = this->PrintBase::output_filename(
+        m_config.output_filename_format.value, default_extension, filename_base, &config);
 
-    // Handle output_filename_format. There is a hack related to binary G-codes: gcode / bgcode substitution.
-    std::string output_filename_format = m_config.output_filename_format.value;
-    if (m_config.binary_gcode && boost::iends_with(output_filename_format, ".gcode"))
-        output_filename_format.insert(output_filename_format.end()-5, 'b');
-    if (! m_config.binary_gcode && boost::iends_with(output_filename_format, ".bgcode"))
-        output_filename_format.erase(output_filename_format.end()-6);
-
-    return this->PrintBase::output_filename(output_filename_format, ".gcode", filename_base, &config);
+    // A suffix written literally in the template (.gcode, or an old .bgcode) names the file, not the format:
+    // replace any G-code-family suffix that the exporter would refuse. The text aliases .g and .gco stay when the
+    // extension is .gcode, because the built-in exporter accepts them.
+    boost::filesystem::path filepath(filename);
+    const bool composed = boost::iends_with(filename, ".gcode.3mf");
+    const std::string suffix = composed ? ".gcode.3mf" : filepath.extension().string();
+    const bool text_alias = default_extension == ".gcode" && (boost::iequals(suffix, ".g") || boost::iequals(suffix, ".gco"));
+    if (!boost::iequals(suffix, default_extension) && !text_alias &&
+         (composed || boost::iequals(suffix, ".gcode") || boost::iequals(suffix, ".bgcode") ||
+         boost::iequals(suffix, ".bgc") || boost::iequals(suffix, ".g") || boost::iequals(suffix, ".gco")))
+        filename = composed ? filename.substr(0, filename.size() - suffix.size()) + default_extension :
+                              filepath.replace_extension(default_extension).string();
+    return filename;
 }
 
 // Sort the PrintObjects by their increasing Z, likely useful for avoiding colisions on Deltas during sequential prints.
@@ -2035,20 +2130,21 @@ DynamicConfig PrintStatistics::placeholders()
     return config;
 }
 
+// Apply the print statistics to the stem of an output path; a variable that the statistics do not hold (for example print_time
+// when the G-code was not read back) throws a PlaceholderParserError that cites the template line and the variable, instead of
+// keeping the variable in the name.
 std::string PrintStatistics::finalize_output_path(const std::string &path_in) const
 {
-    std::string final_path;
+    const boost::filesystem::path path(path_in);
+    const DynamicConfig cfg = this->config();
+    const PlaceholderParser pp;
     try {
-        boost::filesystem::path path(path_in);
-        DynamicConfig cfg = this->config();
-        PlaceholderParser pp;
-        std::string new_stem = pp.process(path.stem().string(), 0, &cfg);
-        final_path = (path.parent_path() / (new_stem + path.extension().string())).string();
-    } catch (const std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to apply the print statistics to the export file name: " << ex.what();
-        final_path = path_in;
+        const std::string new_stem = pp.process(path.stem().string(), 0, &cfg);
+        return (path.parent_path() / (new_stem + path.extension().string())).string();
+    } catch (const PlaceholderParserError &error) {
+        throw PlaceholderParserError(_u8L("Cannot apply the print statistics to the export file name (output_filename_format):") +
+                                     "\n" + error.what());
     }
-    return final_path;
 }
 
 

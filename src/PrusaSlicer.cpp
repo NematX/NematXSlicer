@@ -1,6 +1,31 @@
-/* CLI actions load models/config and run exports or launch the GUI. FFF export
-   explicitly rereads its published G-code for statistics before resolving
-   measured filename placeholders and running post-processing scripts. */
+/*
+This is the command-line application entry point. It parses options, loads model
+and configuration inputs, applies requested model operations, then either runs
+the selected exports or starts the graphical application. FFF and SLA have
+different processing and output paths; GUI startup is not an export action.
+
+For FFF, slicing prepares the generated command reference before file export.
+Statistics-dependent filename values can be resolved only after reading those
+commands. Argument and action handling stays separate from that processing so
+an error can be reported as a command-line failure without leaving GUI work queued.
+
+CLI actions load models/config and run exports or launch the GUI. FFF export
+explicitly rereads its published G-code for statistics before resolving
+measured filename placeholders. The post-processing scripts have already run,
+during the generation of that G-code (STEP_GCODE), before it is reread.
+
+Representative direct calls (branches are not a timeline):
+
+    CLI::run()
+        |-- this->setup()
+        |-- Model::read_from_file()
+        |-- this->export_models()
+        |-- print->apply()
+        |-- print->validate()
+        |-- print->process()
+        |-- export_gcode_cli()
+        `-- Slic3r::GUI::GUI_Run()
+*/
 #ifdef WIN32
     // Why?
     #define _WIN32_WINNT 0x0502
@@ -44,10 +69,8 @@
 #endif // ENABLE_GL_CORE_PROFILE
 #include "libslic3r/Config/AppConfig.hpp"
 #include "libslic3r/Api/host/Orchestrator.hpp"
-#include "libslic3r/Steps/StepReadGeneratedGcode.hpp"
 #include "libslic3r/Config/ConfigOption.hpp"
 #include "libslic3r/Geometry.hpp"
-#include "libslic3r/GCode/PostProcessor.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/CutUtils.hpp"
 #include "libslic3r/ModelArrange.hpp"
@@ -712,10 +735,8 @@ int CLI::run(int argc, char **argv)
                         std::string outfile_final;
                         print->process();
                         if (printer_technology == ptFFF) {
-                            // The outfile is processed by a PlaceholderParser.
-                            outfile = Orchestrator::instance().export_gcode(fff_print, outfile, nullptr, nullptr);
-                            Steps::StepReadGeneratedGcode::read_statistics(Orchestrator::instance(), fff_print);
-                            outfile_final = fff_print.print_statistics().finalize_output_path(outfile);
+                            outfile = Orchestrator::instance().export_gcode_cli(fff_print, outfile);
+                            outfile_final = outfile;
                         } else if (printer_technology == ptSLA) {
                             outfile = sla_print.output_filepath(outfile);
                             // We need to finalize the filename beforehand because the export function sets the filename inside the zip metadata
@@ -729,8 +750,6 @@ int CLI::run(int argc, char **argv)
                             }
                             outfile = outfile_final;
                         }
-                        // Run the post-processing scripts if defined.
-                        run_post_process_scripts(outfile, fff_print.full_print_config());
                         boost::nowide::cout << "Slicing result exported to " << outfile << std::endl;
                     } catch (const std::exception &ex) {
                         boost::nowide::cerr << ex.what() << std::endl;

@@ -29,29 +29,37 @@
 #include "libslic3r/Steps/StepRunner.hpp"
 #include "libslic3r/Utils.hpp"
 
-/* This file tests plugin registration, callable jobs and error reporting.
-   The host is the slicer application; Orchestrator manages its plugins.
-   A service is a plugin job invoked directly rather than a whole slicing stage.
+/*
+This file tests plugin registration, callable jobs and error reporting.
+The host is the slicer application; Orchestrator manages its plugins.
+A service is a plugin job invoked directly rather than a whole slicing stage.
 
-   ServicePluginState holds controlled behavior and counters. Build its C ABI
-   instance (the binary-callable function table plus object pointer), then use
-   register_service_plugin(). Registered state lasts for the process because
-   calls retain borrowed pointers. ActivePluginGuard restores temporary activation.
+ServicePluginState holds controlled behavior and counters. Build its C ABI
+instance (the binary-callable function table plus object pointer), then use
+register_service_plugin(). Registered state lasts for the process because
+calls retain borrowed pointers. ActivePluginGuard restores temporary activation.
 
-   TEST_CASE, the test runner's case declaration, exercises manager execution
-   through preparation and run calls, cancellation and diagnostics. Separate
-   local Plugin wrappers check function tables with explicit byte counts without registering
-   them. InitializerExceptionProbe uses PluginBase, the C++-to-C adapter, to
-   verify initialization return codes disable a member with one explanation.
+TEST_CASE, the test runner's case declaration, exercises manager execution
+through preparation and run calls, cancellation and diagnostics. Separate
+local Plugin wrappers check function tables with explicit byte counts without registering
+them. InitializerExceptionProbe uses PluginBase, the C++-to-C adapter, to
+verify initialization return codes disable a member with one explanation.
 
-   Main test calls:
-     TEST_CASE
-       register_service_plugin
-         Orchestrator::register_plugin
-       Orchestrator::initialize_plugins
-         service_initialize
-       Orchestrator::execute_plugin
-         service_setup / service_run */
+Main test calls:
+
+Operation notes:
+- service_setup / service_run
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- host.register_step()
+        |-- host.register_plugin()
+        |-- local.create_empty_option()
+        |-- initial.release()
+        `-- host.initialize_plugins()
+*/
 
 namespace {
 
@@ -520,9 +528,9 @@ TEST_CASE("Group preference defaults to 100 when the optional ABI callback is om
           "[plugins][orchestrator][abi][selector-group-priority]")
 {
     static_assert(SLIC3R_PLUGIN_API_PLUGIN_TYPES_MAJOR == 4u && SLIC3R_PLUGIN_API_PLUGIN_TYPES_MINOR == 1u,
-                  "Sized provider metadata requires plugin_types 4.0.");
-    static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 5u,
-                  "Complete group declarations require config_def 1.5.");
+                  "Provider metadata matches plugin_types 4.1.");
+    static_assert(SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR == 1u && SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR == 6u,
+                  "Group declarations and file paths use config_def 1.6.");
     static_assert(SLIC3R_PLUGIN_API_ORCHESTRATOR_MAJOR == 3u && SLIC3R_PLUGIN_API_ORCHESTRATOR_MINOR == 5u,
                   "Registration queries and application logging require orchestrator 3.5.");
     static_assert(std::is_same<plugin_initialize_fn, int32_t (*)(void *, storage_handle *)>::value,

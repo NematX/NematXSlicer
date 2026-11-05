@@ -19,6 +19,12 @@ concurrent entries but provider code must still follow the documented nesting.
 The consumer :class:`GCodeFirmwareView` borrows an instance and copies every
 result before returning. It never destroys the instance. The owner that
 received ``raw_gcode_firmware_instance`` must call its destroy callback once.
+
+To implement a provider, derive a GCodeFirmwareSession and publish a new instance
+through GCodeFirmwareContext for each export. A consumer borrows that instance
+through GCodeFirmwareView, enters the documented boundaries in nesting order,
+and writes each copied result before advancing. The owner of the raw instance
+destroys it once after the writer finishes; a borrowed view never destroys it.
 """
 
 from __future__ import annotations
@@ -63,9 +69,6 @@ from slic3r_api_generated import (
     SLIC3R_CONFIG_OPTION_INT,
     SLIC3R_CONFIG_OPTION_INTS,
     SLIC3R_CONFIG_OPTION_STRING,
-)
-from .gcode_thumbnail import (
-    GCodeThumbnailRendererView,
 )
 from slic3r_datatree_views import Config, MutableConfig, Print
 from slic3r_extrusion_views import ExtrusionEntity
@@ -765,10 +768,6 @@ class GCodeFirmwareContext:
         if not self.payload.print:
             raise ValueError("the G-code firmware context has no Print")
         return Print(self.api, self.payload.print)
-
-    def thumbnail_renderer(self) -> GCodeThumbnailRendererView:
-        """Borrow the export renderer through this firmware's destruction."""
-        return GCodeThumbnailRendererView(self.payload.thumbnail_renderer)
 
     def gcode_firmware_script_processor(self) -> GCodeScriptProcessorView:
         """Borrow the processor that remains valid for the published session."""

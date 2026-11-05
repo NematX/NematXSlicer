@@ -153,6 +153,35 @@
     #include <gtk/gtk.h>
 #endif
 
+/*
+GUI_App owns the graphical application's startup and shutdown coordination.
+It loads application/profile state, creates the main windows and routes shared
+actions to the active Plater. UI callbacks, translation setup and closing of
+dependent dialogs belong to this thread rather than the slicing worker.
+
+Export input or rendering work requested by background processing must be
+dispatched to the UI and completed or cancelled before its borrowed callback
+state is destroyed. Closing the application stops dependent work before freeing
+the windows and configuration objects it uses.
+
+Representative direct calls (branches are not a timeline):
+
+    GUI_App::OnInit()
+        |-- this->init_app_config()
+        |-- Slic3r::instance_check()
+        |-- std::exit()
+        |-- on_init_inner()
+        `-- generic_exception_handle()
+
+    GUI_App::post_init()
+        |-- initialized()
+        |-- this->initialized()
+        |-- load_gcode()
+        |-- this->gui->mainframe->load_config()
+        |-- this->mainframe->load_config_file()
+        `-- load_files()
+*/
+
 using namespace std::literals;
 
 namespace Slic3r {
@@ -2751,6 +2780,10 @@ void GUI_App::check_printer_presets()
 
 void GUI_App::recreate_GUI(const wxString& msg_name)
 {
+    // The dialog of the inputs of an export is a modal child of the main window, which is about to be destroyed: wait for it.
+    if (mainframe->plater()->close_export_inputs_dialog([this, msg_name]() { recreate_GUI(msg_name); }))
+        return;
+
     m_is_recreating_gui = true;
 
     mainframe->shutdown();

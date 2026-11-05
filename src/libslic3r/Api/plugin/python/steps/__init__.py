@@ -3,6 +3,14 @@
 #/|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 #/|/
 
+"""Public imports for the Python slicing-step contexts and service adapters.
+
+Import a context from this package when implementing the corresponding step.
+Each context module documents the data borrowed for that call and the mutations
+its callbacks permit. Service modules additionally provide session providers and
+consumer views; importing them does not itself register or execute a plugin.
+"""
+
 from .layer_height import LayerConfigRange, LayerDescriptor, LayerHeightContext
 from .slicing import SlicingContext, SlicingLayerRange, SlicingVolumeRegion
 from .post_slicing import PostSlicingContext
@@ -26,6 +34,7 @@ from .gcode_firmware import (
 from slic3r_gcode_reader_service import GCodeReaderService
 from .gcode_thumbnail import (
     GCodeThumbnailContext,
+    GCodeThumbnailEncodedImage,
     GCodeThumbnailEncoderSession,
     GCodeThumbnailEncoderView,
     GCodeThumbnailImage,
@@ -85,6 +94,7 @@ __all__ = [
     "GCodeReaderService",
     "make_gcode_firmware_instance",
     "GCodeThumbnailContext",
+    "GCodeThumbnailEncodedImage",
     "GCodeThumbnailEncoderSession",
     "GCodeThumbnailEncoderView",
     "GCodeThumbnailImage",

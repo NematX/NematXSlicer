@@ -1,9 +1,28 @@
-// Checkpoint tests exercise rollback and cleanup barriers before source owners are reused.
+/*
+Check which pipeline results survive an invalidation and which must be rebuilt.
+A checkpoint is a saved processing boundary. Fixtures run to selected boundaries,
+change inputs or stop a plugin, then observe replay and cleanup through controlled
+providers. Assertions distinguish completion from partial or cancelled work so
+old owners cannot be reused while callbacks still depend on their data.
+
+Checkpoint tests exercise rollback and cleanup barriers before source owners are reused.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- host.register_plugin()
+        |-- Steps::checkpoint_before_step()
+        |-- Steps::checkpoint_resume_step()
+        |-- Test::init_print()
+        |-- applied.apply()
+        `-- Steps::executes_before()
+*/
 #include <catch2/catch.hpp>
 
 #include <algorithm>
 #include <future>
 #include <thread>
+#include <boost/filesystem.hpp>
 #include <tbb/global_control.h>
 
 #include "gcode_test_helpers.hpp"
@@ -30,6 +49,53 @@
 #include "libslic3r/Steps/StepSlicing.hpp"
 
 namespace {
+
+// This provider declares a bookkeeping reader without defining or changing its catalogue entry.
+class BookkeepingReader final : public slic3r_api::PluginBase
+{
+public:
+    // Bind this process-lifetime provider to the borrowed orchestrator.
+    explicit BookkeepingReader(orchestrator_handle *host) : PluginBase(host) {}
+private:
+    // Supply a stable registration identity without allocating storage.
+    const char *id_impl() const noexcept override { return "test.bookkeeping.reader"; }
+    // Label the provider without transferring string ownership.
+    const char *name_impl() const noexcept override { return "Bookkeeping reader"; }
+    // Consume bookkeeping while the extrusion-edit producer executes.
+    slicing_step_t step_impl() const noexcept override { return STEP_EXTRUSION_EDIT; }
+    // Require no other provider.
+    const char *const *dependencies_impl() const noexcept override { return nullptr; }
+    // Use the default execution priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Leave Print state unchanged; the declaration alone determines invalidation.
+    void run_impl(const plugin_run_context *) const override {}
+    // Fill the caller's optional single slot with borrowed key metadata; count queries return one and cannot fail.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
+    {
+        if (keys != nullptr)
+            keys[0] = raw_used_config_key{"printer_settings_modified", RAW_CO_BOOL,
+                RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE};
+        return 1;
+    }
+};
+
+// Restore borrowed definition metadata and plugin activation even when a test assertion throws.
+struct ReplayMetadataScope
+{
+    Slic3r::ConfigOptionDef &definition;
+    slicing_step_t step;
+    Slic3r::ConfigOptionNature nature;
+    // Borrow a catalogue definition and remember both fields without changing them.
+    explicit ReplayMetadataScope(Slic3r::ConfigOptionDef &value)
+        : definition(value), step(value.invalidates_step), nature(value.nature) {}
+    // Restore the borrowed fields and deactivate the test reader; no catalogue ownership is transferred.
+    ~ReplayMetadataScope()
+    {
+        definition.invalidates_step = step;
+        definition.nature = nature;
+        Slic3r::Orchestrator::instance().set_plugin_active("test.bookkeeping.reader", false);
+    }
+};
 
 class LifecyclePrint final : public Slic3r::Print
 {
@@ -269,7 +335,8 @@ TEST_CASE("Pipeline state invalidation preserves checkpoint prefixes and is idem
             CHECK_FALSE(print.request_replay_from(checkpoint));
         }
         for (const slicing_step_t step : Steps::execution_order()) {
-            const bool invalid = checkpoint != Checkpoint::GCode &&
+            // The export is never invalidated by a replay: it is queued by an export request only.
+            const bool invalid = checkpoint != Checkpoint::GCode && step != STEP_EXPORT &&
                 !Steps::executes_before(step, Steps::checkpoint_resume_step(checkpoint));
             const PrintStateBase::StateWithWarnings state = print.step_state_with_warnings(step);
             CAPTURE(checkpoint, step);
@@ -387,7 +454,8 @@ TEST_CASE("Apply retains the affected first running step across stops and deeper
     CHECK(print.current_checkpoint() == Steps::Checkpoint::None);
     for (const slicing_step_t step : Steps::execution_order()) {
         CHECK_FALSE(print.is_step_done(step));
-        CHECK(print.should_execute_step(step));
+        // A full replay queues every step except the export, which only an export request queues.
+        CHECK(print.should_execute_step(step) == (step != STEP_EXPORT));
     }
     print.set_cancel_callback([]() {});
 }
@@ -444,6 +512,172 @@ TEST_CASE("Canonical config invalidation follows metadata and returns affected b
     CHECK(print.is_step_done(STEP_POST_SLICING));
     CHECK(print.should_execute_step(STEP_PERIMETER));
     CHECK_FALSE(print.is_step_done(STEP_FINALIZE_SLICING));
+}
+
+// Produce a real reference, apply only tracking/selector changes and prove that later export reuses the same generation.
+TEST_CASE("Bookkeeping changes retain the generated reference and copy new values",
+          "[plugins][step-pipeline][config][nature][export-reuse][bookkeeping-replay]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::string key = GENERATE(std::string("printer_settings_modified"), std::string("print_settings_id"),
+        std::string("gcode_exporter_plugin"), std::string("physical_printer_settings_id"));
+    Print print;
+    Model model;
+    DynamicPrintConfig config = Test::PerimeterPluginTests::perimeter_config({});
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    Test::GCode::select_printing_plan_firmware(print);
+    config = print.full_print_config();
+    print.process();
+    const boost::filesystem::path path = Test::GCode::temporary_gcode_path();
+    Test::GCode::remove_output_pair(path);
+    Orchestrator &host = Orchestrator::instance();
+    host.export_gcode(print, path.string(), nullptr);
+    const PrintStateBase::TimeStamp timestamp = print.step_state_with_timestamp(STEP_GCODE).timestamp;
+    const uint64_t runs = host.get_plugin("gcode.printing_plan_file_writer")->get_run_count();
+    config.set_deserialize_strict(key, key == "printer_settings_modified" ? "1" :
+        key == "gcode_exporter_plugin" ? "gcode.exporter.bgcode" : "tracking-value");
+    if (key == "gcode_exporter_plugin")
+        config.set_deserialize_strict("printer_settings_modified", "1");
+    const Print::ApplyStatus status = print.apply(model, config);
+    CHECK(status == Print::APPLY_STATUS_CHANGED);
+    CHECK(print.full_print_config().opt_serialize(key) == config.opt_serialize(key));
+    if (print.config().option(key) != nullptr)
+        CHECK(print.config().opt_serialize(key) == config.opt_serialize(key));
+    if (key == "gcode_exporter_plugin")
+        CHECK(print.full_print_config().opt_bool("printer_settings_modified"));
+    for (const slicing_step_t step : Steps::execution_order())
+        if (step != STEP_EXPORT) {
+            CHECK(print.is_step_done(step));
+            CHECK_FALSE(print.should_execute_step(step));
+        }
+    CHECK(print.ready_gcode_reference_path() == path.string());
+    host.export_gcode(print, path.string(), nullptr);
+    CHECK(print.step_state_with_timestamp(STEP_GCODE).timestamp == timestamp);
+    CHECK(host.get_plugin("gcode.printing_plan_file_writer")->get_run_count() == runs);
+    Test::GCode::remove_output_pair(path);
+}
+
+// A worker reads the full configuration without a lock: a bookkeeping-only change must stop it before the storage
+// is replaced, but request no replay, so finished steps stay done and the status is CHANGED, which makes the caller restart the work.
+TEST_CASE("Bookkeeping stops a running worker without invalidating it",
+          "[plugins][step-pipeline][config][nature][bookkeeping-replay]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const std::string key = GENERATE(std::string("printer_settings_modified"), std::string("print_settings_id"), std::string("gcode_exporter_plugin"));
+    ConfigOptionDef &definition = *const_cast<ConfigOptionDef *>(PrintConfigDef::instance().get(key));
+    const ReplayMetadataScope scope(definition);
+    if (key == "gcode_exporter_plugin") {
+        definition.nature = ConfigOptionNature::Bookkeeping;
+        definition.invalidates_step = STEP_ANY;
+    }
+    LifecyclePrint print;
+    Model model;
+    DynamicPrintConfig config = Test::PerimeterPluginTests::perimeter_config({});
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    print.prepare_checkpoint_resume();
+    for (const slicing_step_t step : Steps::execution_order())
+        if (step != STEP_GCODE && step != STEP_EXPORT)
+            print.mark_step_executed(step);
+    print.set_running_step(STEP_GCODE);
+    bool cancelled = false;
+    print.set_cancel_callback([&print, &cancelled]() {
+        cancelled = true;
+        print.state_mutex().unlock();
+        print.set_running_step(STEP_NONE);
+        print.state_mutex().lock();
+    });
+    config.set_deserialize_strict(key, key == "printer_settings_modified" ? "1" :
+        key == "gcode_exporter_plugin" ? "gcode.exporter.bgcode" : "tracking-value");
+    const Print::ApplyStatus status = print.apply(model, config);
+    print.set_cancel_callback([]() {});
+    CHECK(status == Print::APPLY_STATUS_CHANGED);
+    CHECK(cancelled);
+    CHECK(print.running_step() == STEP_NONE);
+    for (const slicing_step_t step : Steps::execution_order())
+        if (step != STEP_GCODE && step != STEP_EXPORT)
+            CHECK(print.is_step_done(step));
+    CHECK(print.full_print_config().opt_serialize(key) == config.opt_serialize(key));
+}
+
+// Cover explicit consumers, active readers and unchanged non-bookkeeping/unknown-key behavior through the shared resolver, the direct invalidation entry and a real Print::apply.
+TEST_CASE("Replay resolution preserves consumers and ignores only default bookkeeping",
+          "[plugins][step-pipeline][config][nature][bookkeeping-replay]")
+{
+    using namespace Slic3r;
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    static BookkeepingReader reader(reinterpret_cast<orchestrator_handle *>(&host));
+    if (host.get_plugin("test.bookkeeping.reader") == nullptr)
+        REQUIRE(host.register_plugin(reader.c_instance()));
+    REQUIRE(host.set_plugin_active("test.bookkeeping.reader", false));
+    ConfigOptionDef &definition = *const_cast<ConfigOptionDef *>(PrintConfigDef::instance().get("printer_settings_modified"));
+    const ReplayMetadataScope scope(definition);
+    std::string key = "printer_settings_modified";
+    std::optional<Steps::Checkpoint> expected;
+    SECTION("default bookkeeping") {}
+    SECTION("active reader") {
+        REQUIRE(host.set_plugin_active("test.bookkeeping.reader", true));
+        expected = Steps::checkpoint_before_step(STEP_EXTRUSION_EDIT);
+    }
+    SECTION("explicit step") {
+        definition.invalidates_step = STEP_GCODE;
+        expected = Steps::Checkpoint::Plan;
+    }
+    SECTION("local remains conservative") {
+        key = "print_host";
+        expected = Steps::Checkpoint::None;
+    }
+    SECTION("preset metadata remains conservative") {
+        key = "default_print_profile";
+        expected = Steps::Checkpoint::None;
+    }
+    SECTION("normal G-code consumer") {
+        key = "milling_diameter";
+        expected = Steps::Checkpoint::Plan;
+    }
+    SECTION("undefined key") {
+        key = "test.undefined.replay.key";
+        expected = Steps::Checkpoint::None;
+    }
+    INFO("key=" << key);
+    CHECK(Steps::config_option_replay_checkpoint(key) == expected);
+    LifecyclePrint print;
+    for (const slicing_step_t step : Steps::execution_order())
+        print.mark_step_executed(step);
+    DynamicPrintConfig config;
+    {
+        std::scoped_lock<std::mutex> lock(print.state_mutex());
+        CHECK(print.invalidate_state_by_config_options(config, {key}) == expected.has_value());
+    }
+    CHECK(print.should_execute_step(STEP_GCODE) == expected.has_value());
+    if (expected.has_value())
+        CHECK(print.should_execute_step(Steps::checkpoint_resume_step(*expected)));
+    if (key != "test.undefined.replay.key") {
+        LifecyclePrint applied;
+        Model model;
+        DynamicPrintConfig changed = Test::PerimeterPluginTests::perimeter_config({});
+        Test::init_print({Test::TestMesh::cube_20x20x20}, applied, model, changed);
+        for (const slicing_step_t step : Steps::execution_order())
+            applied.mark_step_executed(step);
+        changed.set_deserialize_strict(key, key == "printer_settings_modified" ? "1" :
+            key == "milling_diameter" ? "9" : "changed-metadata");
+        CHECK((applied.apply(model, changed) == Print::APPLY_STATUS_INVALIDATED) == expected.has_value());
+        CHECK(applied.should_execute_step(STEP_GCODE) == expected.has_value());
+        // Planning and earlier work are replayed from the key's own checkpoint, but LOCAL and PRESET_META
+        // keys never replay from before the plan: only the full configuration changed for them. The export is not part
+        // of the reference, so it is outside this prefix comparison.
+        if (expected.has_value()) {
+            const bool plan_only = key == "print_host" || key == "default_print_profile";
+            const Steps::Checkpoint applied_checkpoint = plan_only ? Steps::checkpoint_before_step(STEP_GCODE) : *expected;
+            for (const slicing_step_t step : Steps::execution_order())
+                if (step != STEP_EXPORT)
+                    CHECK(applied.should_execute_step(step) ==
+                          !Steps::executes_before(step, Steps::checkpoint_resume_step(applied_checkpoint)));
+        }
+        CHECK(applied.full_print_config().opt_serialize(key) == changed.opt_serialize(key));
+    }
 }
 
 TEST_CASE("Task bounds only stop the worker and slicing still completes the full prefix",
@@ -1232,7 +1466,8 @@ TEST_CASE("Checkpoint replay invalidates and republishes every canonical Print r
     print.set_cancel_callback([]() {});
     for (size_t index = 0; index < milestones.size(); ++index) {
         const slicing_step_t step = milestones[index];
-        const bool invalidated = checkpoint != Checkpoint::GCode &&
+        // The export is never queued by a replay: it stays done until an export is requested.
+        const bool invalidated = checkpoint != Checkpoint::GCode && step != STEP_EXPORT &&
             !Steps::executes_before(step, Steps::checkpoint_resume_step(checkpoint));
         CAPTURE(checkpoint, step);
         CHECK(print.is_step_done(step) == !invalidated);
@@ -1355,7 +1590,8 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
         { STEP_LAYER_STICHING, Checkpoint::Ordering },
         { STEP_EXTRUSION_EDIT, Checkpoint::Ordering },
         { STEP_EXTRUSION_SIMPLIFICATION, Checkpoint::Ordering },
-        { STEP_GCODE, Checkpoint::Plan }
+        { STEP_GCODE, Checkpoint::Plan },
+        { STEP_EXPORT, Checkpoint::GCode }
     };
 
     REQUIRE(expected.size() == Slic3r::Steps::execution_order().size());
@@ -1372,7 +1608,7 @@ TEST_CASE("Every executable step resumes from the last checkpoint before it",
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Print) == STEP_ORDERING);
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Ordering) == STEP_WIPETOWER);
     CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::Plan) == STEP_GCODE);
-    CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::GCode) == STEP_NONE);
+    CHECK(Slic3r::Steps::checkpoint_resume_step(Checkpoint::GCode) == STEP_EXPORT);
 
     // Numeric ABI values deliberately disagree with the execution order here.
     CHECK(STEP_SKIRT_BRIM < STEP_SUPPORT);
@@ -1533,7 +1769,9 @@ TEST_CASE("Tower position changes replay only from the ordering checkpoint",
     CHECK(print.has_ordering_checkpoint());
     for (const slicing_step_t step : Steps::execution_order()) {
         CAPTURE(step);
-        CHECK(print.should_execute_step(step) == !Steps::executes_before(step, STEP_WIPETOWER));
+        // The export is queued by an export request only, never by a replay.
+        CHECK(print.should_execute_step(step) ==
+              (step != STEP_EXPORT && !Steps::executes_before(step, STEP_WIPETOWER)));
     }
     print.prepare_checkpoint_resume();
     CHECK(print.current_checkpoint() == Checkpoint::Ordering);
@@ -1569,6 +1807,11 @@ TEST_CASE("G-code clear resets every published statistic",
     statistics.color_extruderid_to_used_filament.emplace_back(0, 42.0);
     statistics.color_extruderid_to_used_weight.emplace_back(0, 3.0);
     statistics._layer_area_stats.emplace_back(1, 4.0f);
+    statistics.total_toolchanges = 3;
+    statistics.object_layer_count = 5;
+    statistics.total_layer_count = 6;
+    statistics.has_support = true;
+    statistics.statistics_available = true;
     statistics.is_computing_gcode = true;
     print.set_gcode_reader_source_path("old.gcode");
 
@@ -1579,6 +1822,11 @@ TEST_CASE("G-code clear resets every published statistic",
     CHECK(statistics.color_extruderid_to_used_filament.empty());
     CHECK(statistics.color_extruderid_to_used_weight.empty());
     CHECK(statistics._layer_area_stats.empty());
+    CHECK(statistics.total_toolchanges == 0);
+    CHECK(statistics.object_layer_count == 0);
+    CHECK(statistics.total_layer_count == 0);
+    CHECK_FALSE(statistics.has_support);
+    CHECK_FALSE(statistics.statistics_available.load());
     CHECK_FALSE(statistics.is_computing_gcode.load());
     CHECK(print.gcode_reader_source_path().empty());
 }
@@ -1605,7 +1853,6 @@ TEST_CASE("Apply destroys invalidated outputs and the next run restores saved ch
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("gcode_flavor", "marlin");
-    config.set_deserialize_strict("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
     LifecyclePrint print;
     Model model;

@@ -27,6 +27,20 @@
 #include "libslic3r/PrintBase.hpp"
 
 #include "slic3r/Utils/PrintHost.hpp"
+
+/*
+Coordinate background processing between the GUI and the slicing worker.
+
+The GUI supplies the model, configuration and requested action. The worker
+performs slicing or export and posts status/completion events; GUI callbacks
+update the preview and controls on the UI thread. Stopping joins or suspends
+the worker before data needed by its current operation is replaced.
+
+File export and print-host upload share generated print results, but have
+different final owners. An upload must first finish a private file, then hand
+that file to the upload queue. GUI rendering or input requests must be serviced
+on the UI thread without holding the print-state lock while waiting.
+*/
 namespace boost { namespace filesystem { class path; } }
 
 namespace Slic3r {
@@ -36,6 +50,7 @@ struct GCodeProcessorResult;
 class Model;
 class Print;
 class SLAPrint;
+struct ExportInputForm;
 
 class SlicingStatusEvent : public wxEvent
 {
@@ -128,7 +143,10 @@ public:
 	const SLAPrint* 	sla_print() const { return m_sla_print; }
     // Take the project path (if provided), extract the name of the project, run it through the macro processor and save it next to the project file.
     // If the project_path is empty, just run output_filepath().
-	std::string 		output_filepath_for_project(const boost::filesystem::path &project_path);
+    std::string 		output_filepath_for_project(const boost::filesystem::path &project_path);
+    // Resolve automatic or project-based FFF output paths with a borrowed exporter suffix; SLA uses the existing overload.
+    std::string output_filepath_for_project(const boost::filesystem::path &project_path,
+                                            const std::string &default_extension);
 
 	// Start the background processing. Returns false if the background processing was already running.
 	bool start();
@@ -151,16 +169,22 @@ public:
 	// Call validate before calling start().
 	std::pair<PrintBase::PrintValidationError, std::string> validate(std::vector<std::string>* warnings = nullptr);
 
-	// Set the export path of the G-code.
-	// Once the path is set, the G-code 
-	void schedule_export(const std::string &path, bool export_path_on_removable_media);
-	// Set print host upload job data to be enqueued to the PrintHostJobQueue
-	// after current print slicing is complete
+	// Schedule the complete output path used by the SLA export step.
+	void schedule_export(const std::string &path);
+	// Schedule FFF output using a proposed directory, filename base, and optional ASCII fallback without choosing its destination.
+	// A non-empty exporter_id names the G-code exporter of this export instead of the printer setting; empty uses the setting.
+	void schedule_fff_export(const std::string &suggestion_directory,
+	                         const std::string &suggestion_filename_base,
+	                         bool ascii_fallback,
+	                         const std::string &exporter_id);
+	// Move an upload job into the pending request to enqueue it after print slicing completes.
 	void schedule_upload(Slic3r::PrintHostJob upload_job);
-	// Clear m_export_path.
+	// Clear the pending SLA or FFF export request and its suggestion values.
 	void reset_export();
-	// Once the G-code export is scheduled, the apply() methods will do nothing.
-	bool is_export_scheduled() const { return ! m_export_path.empty(); }
+	// On the UI thread outside locks, cancel the requester and move an accepted `after` into process state until return; application then forced closing takes precedence, and false means none is open.
+	bool close_inputs_dialog(std::function<void()> after = nullptr, bool forced = false, bool closing = false);
+	// Report whether either the SLA path or explicit FFF export flag is set.
+	bool is_export_scheduled() const { return !m_export_path.empty() || m_fff_export_scheduled; }
 	bool is_upload_scheduled() const { return ! m_upload_job.empty(); }
 
 	enum State {
@@ -204,9 +228,10 @@ private:
 	// To be called by Print::apply() through the Print::m_cancel_callback to stop the background
 	// processing before changing any data of running or finalized milestones.
 	// This function shall not trigger any UI update through the wxWidgets event.
+	// It may queue a CallAfter (cancel_ui_task() does, for the dialog of the export inputs), but touches no window.
 	void	stop_internal();
 
-	// Helper to wrap the FFF slicing & G-code generation.
+	// Process FFF slicing and reference generation, then perform any scheduled file export or upload.
 	void	process_fff();
 
     // Temporary: for mimicking the fff file export behavior with the raster output
@@ -238,10 +263,15 @@ private:
     // Temporary G-code, there is one defined for the BackgroundSlicingProcess,
     // differentiated from the other processes by a process ID.
 	std::string 				m_temp_output_path;
-	// Output path provided by the user. The output path may be set even if the slicing is running,
-	// but once set, it cannot be re-set.
+	// Complete SLA output path provided by the user; it remains separate from the deferred FFF destination.
 	std::string 				m_export_path;
-	bool 						m_export_path_on_removable_media = false;
+	// Explicit FFF export state and the values used to form the exporter's suggested path.
+	bool                            m_fff_export_scheduled = false;
+	std::string                     m_fff_export_suggestion_directory;
+	std::string                     m_fff_export_suggestion_filename_base;
+	bool                            m_fff_export_suggestion_ascii_fallback = false;
+	// Exporter ID requested for the scheduled FFF export; empty means the printer setting.
+	std::string                     m_fff_export_exporter_id;
 	// Print host upload job to schedule after slicing is complete, used by schedule_upload(),
 	// empty by default (ie. no upload to schedule)
 	PrintHostJob                m_upload_job;
@@ -278,14 +308,27 @@ private:
     bool                invalidate_all_steps();
     // If the background processing stop was requested, throw CanceledException.
     void                throw_if_canceled() const { if (m_print->canceled()) throw CanceledException(); }
+    // Deposit an FFF export request with its thumbnail renderer, input requester and suggested path; STEP_GCODE reference comes from the Print.
 	void				finalize_gcode();
+    // Export the borrowed FFF reference, run scripts once, and queue the owned upload path; throw on export or script errors.
     void                prepare_upload();
     // To be executed at the background thread.
 	ThumbnailsList		render_thumbnails(const ThumbnailsParams &params);
+	// On the worker thread, ask on the UI thread for one direct path or a multi-field form; update form only on validation, return false on cancellation, and throw requester failures.
+	bool				request_export_inputs(ExportInputForm &form);
 	// Execute task from background thread on the UI thread synchronously. Returns true if processed, false if cancelled before executing the task.
 	bool 				execute_ui_task(std::function<void()> task);
-	// To be called from inside m_mutex to cancel a planned UI task.
-	static void			cancel_ui_task(std::shared_ptr<BackgroundSlicingProcess::UITask> task);
+	// Under m_mutex on the UI thread, invalidate the task and request its export-input requester to cancel without touching windows.
+	void				cancel_ui_task(std::shared_ptr<BackgroundSlicingProcess::UITask> task);
+	// Requests cancellation of the export-input requester; set and cleared on the UI thread by its UI task, empty when none is open.
+	std::function<void()>	m_close_inputs_dialog;
+	// What to do once the export-input requester has returned, asked by close_inputs_dialog(); empty when nothing.
+	std::function<void()>	m_after_inputs_dialog;
+	// Whether m_after_inputs_dialog closes the application, and whether that closing cannot be refused.
+	bool					m_after_inputs_closing = false;
+	bool					m_after_inputs_forced = false;
+	// Called by the UI task when the requester has returned (or could not be shown): clear its closer and run m_after_inputs_dialog.
+	void				end_inputs_dialog();
 
 	// wxWidgets command ID to be sent to the plater to inform that the slicing is finished, and the G-code export will continue.
 	int 						m_event_slicing_completed_id 	= 0;

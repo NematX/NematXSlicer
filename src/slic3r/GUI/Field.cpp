@@ -50,6 +50,31 @@
 #define wxOSX false
 #endif
 
+/*
+Field and its specializations turn one configuration option into a GUI editor.
+The option definition chooses the widget and supplies its bounds, labels and
+display hints; the field parses the user's edit and reports a typed value to
+its options group. Validation and change notification are separate from saving
+the configuration to a preset or file.
+
+Create fields through the owning group's factory, then use their value and
+validation callbacks rather than reading widget text directly. Path fields add
+file selection to a string editor; their filter text is UI metadata, not the
+value stored for the setting. Widgets stay on the UI thread and belong to their
+wxWidgets parent.
+
+Representative direct calls (branches are not a timeline):
+
+    TextField::get_value_by_opt_type()
+        |-- get_vector_value()
+        |-- set_text_value()
+        `-- set_any_value()
+
+    Field::on_change_field()
+        |-- m_on_change()
+        `-- get_value()
+*/
+
 namespace Slic3r :: GUI {
 
 // Return owned display text from borrowed setting data, using its application/plugin catalogue unless marked verbatim.
@@ -963,8 +988,9 @@ bool is_defined_input_value(wxWindow* win, const ConfigOptionType& type)
     return true;
 }
 
+// Build a text widget from the option definition copied into m_opt, using its explicit or virtual preferred width; the parent is borrowed, owns the widget, and creation failures propagate.
 void TextCtrl::BUILD() {
-    auto size = wxSize((this->m_opt.type == coPercent ? def_width_thinner() : def_width())*m_em_unit, wxDefaultCoord);
+    wxSize size((this->m_opt.type == coPercent ? def_width_thinner() : default_width())*m_em_unit, wxDefaultCoord);
     if (m_opt.height >= 0) size.SetHeight(m_opt.height*m_em_unit);
     if (m_opt.width >= 0) size.SetWidth(m_opt.width*m_em_unit);
 
@@ -974,7 +1000,7 @@ void TextCtrl::BUILD() {
     text_value = any_to_wxstring(m_opt.default_value->get_any(m_opt_key_idx.idx), m_opt, m_opt_key_idx.idx);
 
     long style = m_opt.multiline ? wxTE_MULTILINE : wxTE_PROCESS_ENTER;
-	auto temp = new text_ctrl(m_parent, text_value, "", "", wxDefaultPosition, size, style);
+	text_ctrl *temp = new text_ctrl(m_parent, text_value, "", "", wxDefaultPosition, size, style);
     if (parent_is_custom_ctrl && m_opt.height < 0)
         opt_height = (double)temp->GetSize().GetHeight()/m_em_unit;
     temp->SetFont(m_opt.is_code ?
@@ -1162,10 +1188,11 @@ boost::any& TextCtrl::get_value()
 	return m_value;
 }
 
+// Reapply the explicit or virtual text width after updating em units; this mutates a built, parent-owned widget on the GUI thread and lets sizing exceptions propagate.
 void TextCtrl::msw_rescale()
 {
     Field::msw_rescale();
-    auto size = wxSize(def_width() * m_em_unit, wxDefaultCoord);
+    wxSize size(default_width() * m_em_unit, wxDefaultCoord);
 
     if (m_opt.height >= 0)
         size.SetHeight(m_opt.height*m_em_unit);
@@ -1204,6 +1231,138 @@ void TextCtrl::change_field_value(wxEvent& event)
     event.Skip();
 };
 #endif //__WXGTK__
+
+PathCtrl::~PathCtrl()
+{
+    // The option groups of the tabs (custom controls) place the windows by hand and never give the sizer to a parent
+    // sizer, so nobody else frees it: deleting it detaches the windows that are still alive. In the other groups the
+    // sizer is added to a parent sizer, which owns it.
+    if (parent_is_custom_ctrl)
+        delete m_sizer;
+}
+
+void PathCtrl::BUILD()
+{
+    TextCtrl::BUILD();
+
+    m_button = new ScalableButton(m_parent, wxID_ANY, "browse", _L("Browse") + " " + dots, wxDefaultSize, wxDefaultPosition,
+                                  wxBU_LEFT | wxBU_EXACTFIT);
+    m_button->SetFont(wxGetApp().normal_font());
+    m_button->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { browse(); });
+
+    // Both controls are direct children of the sizer: the layout of the custom controls does not look into nested sizers.
+    m_sizer = new wxBoxSizer(wxHORIZONTAL);
+    m_sizer->Add(window, 1, wxALIGN_CENTER_VERTICAL);
+    m_sizer->Add(m_button, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 4);
+}
+
+int PathCtrl::extra_width() const
+{
+    return m_button->GetSize().GetWidth();
+}
+
+// The sidetext of the option is the wildcard of the dialog, as wxFileDialog writes it ("Name (*.ext)|*.ext|All|*.*").
+// It is a filter chosen by the author of the option, so it is neither shown elsewhere nor translated.
+// Read the UTF-8 proposal, open a save/open picker with the raw filter and overwrite preference, replace it on selection, and notify around the modal lifetime; parent, definition, and callback are borrowed, false means cancellation, and picker exceptions propagate.
+bool PathCtrl::choose_path(wxWindow *parent, const ConfigOptionDef &option, std::string &value,
+                           bool defer_overwrite_confirmation, const std::function<void(bool)> &on_modal)
+{
+    // Notify the field owner while the native picker is open, including when it exits by cancellation or exception.
+    struct ModalNotice
+    {
+        // Retain the borrowed callback and announce entry; the callback must not throw.
+        explicit ModalNotice(const std::function<void(bool)> &notify) : notify(notify) { if (notify) notify(true); }
+        // Announce that the nested modal window has returned; the callback must not throw.
+        ~ModalNotice() { if (notify) notify(false); }
+
+        const std::function<void(bool)> &notify;
+    };
+
+    const bool saving = option.gui_type == ConfigOptionDef::GUIType::save_path;
+
+    const boost::filesystem::path current = into_path(from_u8(value));
+    wxString folder;
+    wxString name;
+    boost::system::error_code ec;
+    if (boost::filesystem::is_directory(current, ec)) {
+        folder = from_path(current);
+    } else {
+        folder = from_path(current.parent_path());
+        name = from_path(current.filename());
+    }
+
+    const long style = saving ? wxFD_SAVE | (!defer_overwrite_confirmation && wxGetApp().app_config->get_show_overwrite_dialog() ? wxFD_OVERWRITE_PROMPT : 0) :
+                                wxFD_OPEN | wxFD_FILE_MUST_EXIST;
+    wxFileDialog dialog(wxGetTopLevelParent(parent), saving ? _L("Save file as:") : _L("Open file:"), folder, name,
+                        from_u8(option.sidetext), style);
+    {
+        ModalNotice notice(on_modal);
+        if (dialog.ShowModal() != wxID_OK)
+            return false;
+    }
+
+    value = into_u8(dialog.GetPath());
+    return true;
+}
+
+// Use the shared picker for this field's current path, propagate a selection to the option, and report picker exceptions; the field and parent-owned controls are borrowed, cancellation changes nothing, and reported failures do not escape.
+void PathCtrl::browse()
+{
+    try {
+        std::string value = into_u8(static_cast<text_ctrl *>(window)->GetValue());
+        if (!choose_path(wxGetTopLevelParent(window), m_opt, value, m_defer_overwrite_confirmation, m_on_browse_modal))
+            return;
+        set_any_value(value, false);
+        field_changed();
+    } catch (const std::exception &ex) {
+        report_browse_error(ex.what());
+    } catch (...) {
+        report_browse_error("Unknown error while choosing a file.");
+    }
+}
+
+void PathCtrl::report_browse_error(const std::string &message)
+{
+    if (m_on_browse_error) {
+        m_on_browse_error(message);
+        return;
+    }
+    BOOST_LOG_TRIVIAL(error) << "Choosing a file for '" << m_opt_key_idx.key << "' failed: " << message;
+    show_error(window, message);
+}
+// Set the parent-owned text widget's minimum to one ordinary field width at the current scale; the field must be built and wx sizing failures propagate.
+void PathCtrl::set_minimum_width()
+{
+    window->SetMinSize(wxSize(def_width() * m_em_unit, -1));
+}
+
+// Rescale the text box and browse button after DPI changes, then apply the ordinary-width minimum; both controls are parent-owned and wx sizing failures propagate.
+void PathCtrl::msw_rescale()
+{
+    TextCtrl::msw_rescale();
+    set_minimum_width();
+    m_button->sys_color_changed();
+    m_button->InvalidateBestSize();
+    m_button->SetSize(m_button->GetBestSize());
+}
+
+void PathCtrl::sys_color_changed()
+{
+    TextCtrl::sys_color_changed();
+    m_button->sys_color_changed();
+}
+
+void PathCtrl::widget_enable()
+{
+    TextCtrl::widget_enable();
+    m_button->Enable(is_setting_enabled());
+}
+
+void PathCtrl::widget_disable()
+{
+    TextCtrl::widget_disable();
+    m_button->Disable();
+}
 
 
 wxWindow* CheckBox::GetNewWin(wxWindow* parent, const wxString& label /*= wxEmptyString*/)

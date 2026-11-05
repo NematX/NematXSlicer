@@ -2,7 +2,42 @@
 
 #include "libslic3r/Config/ConfigDef.hpp"
 
+/*
+Check translated configuration-definition text without building GUI widgets.
+Tests copy local definitions, fill translated labels, then rebuild choices and
+read the resulting metadata. Serialized enum values and option keys stay
+unchanged; only displayed text belongs to a translation catalogue.
+
+Path-widget cases distinguish file filters from ordinary side text. Each test
+owns its descriptions so refreshing or clearing translations cannot retain
+pointers to temporary labels from a previous query.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- def.add()
+        |-- enum_opt->set_enum_values()
+        |-- def.update_translations()
+        |-- plain->translated_label()
+        |-- plain->translated_full_label()
+        `-- other.update_translations()
+*/
+
 using namespace Slic3r;
+
+// File filters belong only to the two path widgets; all other GUI types keep
+// their ordinary side text, independently of the contents of that text.
+TEST_CASE("Path GUI types use side text as a file filter", "[config][gui-type]")
+{
+    ConfigOptionDef definition;
+    for (int value = int(ConfigOptionDef::GUIType::undefined);
+         value <= int(ConfigOptionDef::GUIType::open_path); ++value) {
+        definition.gui_type = static_cast<ConfigOptionDef::GUIType>(value);
+        CHECK(definition.sidetext_is_file_filter() ==
+              (definition.gui_type == ConfigOptionDef::GUIType::save_path ||
+               definition.gui_type == ConfigOptionDef::GUIType::open_path));
+    }
+}
 
 // The GUI fills translated labels into the configuration definitions after the
 // language is loaded. The fill recomputes everything from the raw fields, so it

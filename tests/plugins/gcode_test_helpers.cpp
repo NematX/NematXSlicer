@@ -17,6 +17,28 @@
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
 #include "test_data.hpp"
 
+/*
+Provide neutral fixtures shared by G-code plugin tests: small printing plans,
+firmware probes, owned session guards and temporary text files. A component test
+selects the fixture it needs, drives the real public execution path, then reads
+the resulting text or exposed state for its own assertions.
+
+For a typical writer test, construct the source Print and plan, acquire a
+firmware instance, run the writer, and read the completed file before cleanup.
+Keep the plan and Print alive while sessions borrow them. FirmwareInstanceOwner
+destroys its raw session once; file helpers do not transfer the caller's Print.
+
+Representative direct calls (branches are not a timeline):
+
+    export_with_firmware()
+        |-- select_printing_plan_firmware()
+        |-- temporary_gcode_path()
+        |-- remove_output_pair()
+        |-- Orchestrator::instance()
+        |-- Steps::StepGenerateGcode::run_step()
+        `-- read_text_file()
+*/
+
 namespace Slic3r::Test::GCode {
 
 FirmwareInstanceOwner::FirmwareInstanceOwner(raw_gcode_firmware_instance instance) :
@@ -329,12 +351,11 @@ std::unique_ptr<ExtrusionEntity> special_command_entity(
         new ExtrusionNop(ExtrusionPropertySpecialCommand(code, value)));
 }
 
-void select_printing_plan_writer(Print &print, const std::string &firmware_id)
+void select_printing_plan_firmware(Print &print, const std::string &firmware_id)
 {
-    // Tests opt into the PrintingPlan writer through the same printer options
-    // used by presets; the legacy generator remains the application default.
+    // The PrintingPlan writer is active by default; only the firmware, chosen
+    // through the same printer option as in presets, needs to be selected.
     DynamicPrintConfig &config = const_cast<DynamicPrintConfig &>(print.full_print_config());
-    config.set_deserialize("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize("gcode_firmware_plugin", firmware_id);
 }
 
@@ -348,7 +369,7 @@ std::string export_with_firmware(Print &print, const std::string &firmware_id)
 {
     // Exercise provider selection, the C ABI session and atomic file writer as
     // one path so dialect tests cannot bypass normal printer configuration.
-    select_printing_plan_writer(print, firmware_id);
+    select_printing_plan_firmware(print, firmware_id);
     const boost::filesystem::path output_path = temporary_gcode_path();
     remove_output_pair(output_path);
     Orchestrator &orchestrator = Orchestrator::instance();

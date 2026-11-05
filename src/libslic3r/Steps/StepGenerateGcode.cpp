@@ -18,9 +18,7 @@
 #include "libslic3r/Api/host/GCodeReaderService.hpp"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
-#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_thumbnail.h"
 #include "libslic3r/Api/plugin/cpp/gcode/GCodeFirmwareViews.hpp"
-#include "libslic3r/Api/plugin/cpp/gcode/GCodeThumbnailViews.hpp"
 #include "libslic3r/ExtrusionProperty.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -29,6 +27,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Printing/PrintingPlanFacts.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Steps/StepRunner.hpp"
 
@@ -36,15 +35,20 @@
 STEP_GCODE bridge
 =================
 
-The G-code step delegates file creation to a plugin. Earlier pipeline steps build a
+The G-code step is a plugin boundary. Earlier pipeline steps build a
 PrintingPlan, then this step creates the selected firmware session and invokes
-the active STEP_GCODE writer. The writer receives the source Print, read-only
-PrintingPlan, borrowed firmware session, and resolved final output path.
-Changing the writer, firmware or thumbnail selector requires G-code generation
-to run again, because it uses those choices to produce the output file.
-The thumbnail selector is stored under thumbnails_format. Callers can request
-an encoder without using that setting, so shared renderer settings remain editable
-regardless of the selected encoder.
+every selected STEP_GCODE plugin, one after the other, by increasing priority.
+All of them receive the same payload: the source Print, read-only
+PrintingPlan, borrowed firmware session, and resolved final output path. The
+built-in writer (priority 0) creates and publishes that file; plugins of higher
+priority may then modify it before the host Reader consumes it.
+
+The first plugin error or cancellation aborts the step, which is not marked as
+done; the next attempt rebuilds the file. Progress units are recorded only after
+every plugin succeeded, and a failure of the step resets the whole progress table,
+so the next attempt starts from a fresh one. The Reader pass that follows this step
+is a further host progress unit (k_gcode_read_progress_unit), completed by the
+pipeline after the read.
 
 Before crossing that plugin boundary, the step validates the process speed of
 every geometric leaf and explicit E-only extrusion command, including those in
@@ -58,12 +62,22 @@ time and cannot recover that context.
 
 File format decisions still belong to the selected plugin, so external writers
 can replace the built-in implementation without changing the pipeline runner.
+
+Representative direct calls (branches are not a timeline):
+
+    run_step()
+        |-- validate_pre()
+        |-- create_firmware_session()
+        |-- Detail::prepare_guarded_plugin_host_context()
+        |-- plugin->setup()
+        |-- plugin->setup_run()
+        `-- plugin->run()
 */
 
 namespace Slic3r::Steps::StepGenerateGcode {
 
-// Copy application text, catalogue names and output/printer selection rules into the borrowed host; all three selectors recompute G-code.
-// Writer line text is separate from its stage-table label; output and firmware show singleton selectors.
+// Copy producer, firmware and thumbnail selection rules into the borrowed host; thumbnails are encoded only during export.
+// Firmware and declared writer groups show their selectors even with one provider.
 // Encoders read singleton ids strictly, keep their stable key and independent settings, and use Notes when placement is empty.
 // Print data and provider ownership are unchanged; conflicts assert, and allocation errors propagate.
 void register_selector_traits(Orchestrator &orchestrator);
@@ -105,7 +119,7 @@ void register_selector_traits(Orchestrator &orchestrator)
     StepSelectorTraits thumbnail;
     thumbnail.category = RAW_OPTION_CATEGORY_OUTPUT;
     thumbnail.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
-    thumbnail.invalidates_step = STEP_GCODE;
+    thumbnail.invalidates_step = STEP_NONE;
     thumbnail.read_with_one_provider = true;
     thumbnail.provider_settings_rules = false;
     thumbnail.ui_target_file = "print.ui";
@@ -372,14 +386,17 @@ private:
 
 // Select the GCODE_FIRMWARE provider from the print configuration and ask it
 // to create a session for this export.
-// Supply the Print, script processor and thumbnail renderer as borrowed inputs.
+// Supply the Print and script processor as borrowed inputs.
 // Store the returned instance in owner, which is responsible for destroying it,
 // and validate its C interface before the STEP_GCODE writer uses it.
 void create_firmware_session(Orchestrator &orchestrator,
                              Print &print,
                              const raw_gcode_script_processor *script_processor,
-                             const raw_gcode_thumbnail_renderer *renderer,
                              FirmwareInstanceOwner &owner);
+
+// Store the plan-derived print facts (tool changes, initial and used tools with their filament types, layer counts) in the
+// Print statistics. Expects the finalized PrintingPlan of the Print; leaves every measured value untouched.
+void publish_plan_facts(Print &print);
 
 ReaderSourcePathReceiver::ReaderSourcePathReceiver(Print &print) : m_print(print) {}
 
@@ -936,7 +953,6 @@ const raw_gcode_firmware_instance *FirmwareInstanceOwner::instance() const
 void create_firmware_session(Orchestrator &orchestrator,
                              Print &print,
                              const raw_gcode_script_processor *script_processor,
-                             const raw_gcode_thumbnail_renderer *renderer,
                              FirmwareInstanceOwner &owner)
 {
     Plugin *firmware_plugin = selected_or_active_plugin_for_step(
@@ -953,7 +969,6 @@ void create_firmware_session(Orchestrator &orchestrator,
     run_ctx_gcode_firmware payload = {};
     payload.print = reinterpret_cast<const print_handle *>(&print);
     payload.script_processor = script_processor;
-    payload.thumbnail_renderer = renderer;
     run_context.data = &payload;
 
     firmware_plugin->setup(run_context, 1);
@@ -971,6 +986,30 @@ void create_firmware_session(Orchestrator &orchestrator,
     // callback without invoking firmware code.
     const slic3r_api::GCodeFirmwareView validated(owner.instance());
     (void)validated;
+}
+
+// The facts come from the plan, not from the text, so they exist even when no Reader result is requested. The used tools
+// are sorted by index; their filament types are sorted alphabetically and joined by "," without removing duplicates, as
+// the {printing_filament_types} file name variable has always been.
+void publish_plan_facts(Print &print)
+{
+    const Printing::PlanFacts facts = Printing::summarize_plan(print.printing_plan());
+    const PrintConfig &config = print.config();
+    PrintStatistics &statistics = print.print_statistics();
+    statistics.total_toolchanges = facts.toolchanges;
+    statistics.initial_extruder_id = facts.initial_tool;
+    statistics.initial_filament_type = config.filament_type.get_at(size_t(facts.initial_tool));
+    statistics.printing_extruders = facts.used_tools;
+    std::vector<std::string> filament_types;
+    for (extruder_index_t tool : facts.used_tools)
+        filament_types.push_back(config.filament_type.get_at(size_t(tool)));
+    std::sort(filament_types.begin(), filament_types.end());
+    statistics.printing_filament_types.clear();
+    for (size_t index = 0; index < filament_types.size(); ++index)
+        statistics.printing_filament_types += (index == 0 ? "" : ",") + filament_types[index];
+    statistics.object_layer_count = Printing::object_layer_count(print);
+    statistics.total_layer_count = facts.layer_count;
+    statistics.max_print_z = unscaled(facts.max_print_z);
 }
 
 } // namespace
@@ -1089,8 +1128,12 @@ bool validate_post(const Print &, std::string *)
     return true;
 }
 
-std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path,
-                     const raw_gcode_thumbnail_renderer *thumbnail_renderer)
+// Validate the plan, build the firmware session and the Reader association once,
+// then run every selected STEP_GCODE plugin in priority order on one payload.
+// Returns the Reader plugin ID chosen by the firmware. Any validation, plugin
+// error or cancellation throws; no plugin is then recorded as completed. The host
+// Reader unit is not completed here: the pipeline does it after the read.
+std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path)
 {
     if (path.empty())
         throw RuntimeError("G-code generation plugin needs a non-empty output path.");
@@ -1102,8 +1145,9 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     if (!validate_pre(print, &validation_error))
         throw RuntimeError(validation_error);
 
-    Plugin *plugin = selected_or_active_plugin_for_step(orchestrator, STEP_GCODE, &print.full_print_config());
-    if (plugin == nullptr)
+    const std::vector<Plugin *> plugins = selected_or_active_plugins_for_step(
+        orchestrator, STEP_GCODE, &print.full_print_config());
+    if (plugins.empty())
         throw RuntimeError("No active G-code generation plugin is available.");
 
     // The G-code step consumes the finalized PrintingPlan created by the
@@ -1117,8 +1161,7 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     GCodeScriptProcessor scripts(print, orchestrator);
     GCodeReaderService readers(orchestrator, &print);
     FirmwareInstanceOwner firmware;
-    create_firmware_session(orchestrator, print, scripts.c_processor(), thumbnail_renderer,
-                            firmware);
+    create_firmware_session(orchestrator, print, scripts.c_processor(), firmware);
     const slic3r_api::GCodeFirmwareView firmware_view(firmware.instance());
     const std::string reader_plugin_id = readers.validated_reader_id(
         firmware_view.reader_plugin_id());
@@ -1131,18 +1174,33 @@ std::string run_step(Orchestrator &orchestrator, Print &print, const std::string
     payload.reader_source_context = &reader_source;
     payload.publish_reader_source_path = &ReaderSourcePathReceiver::publish_callback;
 
-    std::atomic_bool execution_error { false };
-    plugin_host_context host_context =
-        Detail::prepare_guarded_plugin_host_context(orchestrator, STEP_GCODE, *plugin, print, execution_error);
-    plugin_run_context run_context = orchestrator.prepare_plugin_run_context(STEP_GCODE, plugin, &host_context);
-    run_context.data = &payload;
+    // Plugins run one after the other, by increasing priority, on the same
+    // payload and firmware session: the writer creates the file, the following
+    // ones may modify it. The first error or cancellation aborts the step.
+    for (Plugin *plugin : plugins) {
+        if (plugin == nullptr)
+            continue;
 
-    plugin->setup(run_context, 1);
-    Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup");
-    plugin->setup_run(run_context);
-    Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup_run");
-    plugin->run(run_context);
-    Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "run");
+        std::atomic_bool execution_error { false };
+        plugin_host_context host_context =
+            Detail::prepare_guarded_plugin_host_context(orchestrator, STEP_GCODE, *plugin, print, execution_error);
+        plugin_run_context run_context = orchestrator.prepare_plugin_run_context(STEP_GCODE, plugin, &host_context);
+        run_context.data = &payload;
+
+        plugin->setup(run_context, 1);
+        Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup");
+        plugin->setup_run(run_context);
+        Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "setup_run");
+        plugin->run(run_context);
+        Detail::throw_if_plugin_stopped(orchestrator, print, STEP_GCODE, *plugin, execution_error, "run");
+    }
+    // Everything that can still fail runs before the progress units are recorded;
+    // the units are then marked in plan order. A failure of the step resets the whole
+    // progress table (see run_step_if_requested), so no unit stays half consumed.
+    publish_plan_facts(print);
+    for (const Plugin *plugin : plugins)
+        if (plugin != nullptr)
+            print.pipeline_progress().complete_plugin(STEP_GCODE, plugin->get_id());
     return reader_plugin_id;
 }
 

@@ -8,9 +8,27 @@
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 
-/* Filled-family tests inspect temporary slabs, published auxiliary layers, extrusion shapes and complete G-code.
-   The production slicing prefix supplies final island demand; local helpers copy polygons for area comparisons.
-   Tests cover downward projection, contact splitting, object-layer Z, foot expansion, refusal and empty inputs. */
+/*
+A filled support family plans horizontal regions to be supported before another
+step creates extrusion paths on them. Its temporary slabs describe those height
+bands; published auxiliary layers make the resulting typed surfaces available to
+the rest of the pipeline. Tests inspect both representations and use complete
+exports only where downstream interpretation is part of the behavior checked.
+
+Filled-family tests inspect temporary slabs, published auxiliary layers, extrusion shapes and complete G-code.
+The production slicing prefix supplies final island demand; local helpers copy polygons for area comparisons.
+Tests cover downward projection, contact splitting, object-layer Z, foot expansion, refusal and empty inputs.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::init_print()
+        |-- two_roofs()
+        |-- filled_config()
+        |-- SG::prefix()
+        |-- print.object()
+        `-- append()
+*/
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -566,7 +584,7 @@ TEST_CASE("Filled print exports support interface extrusions", "[plugins][suppor
             CHECK(area_mm2(foot) < 1e-4);
         }
         print.process();
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Test::GCode::read_text_file(path);
     } catch (...) {
         Test::GCode::remove_output_pair(path);

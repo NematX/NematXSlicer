@@ -50,6 +50,7 @@ Representative direct calls (branches are not a timeline):
 
     Plugin::run()
         |-- bind_run()
+        |-- m_run_count.value.fetch_add()
         `-- m_c_api.vt->run()
 */
 
@@ -233,6 +234,7 @@ void Plugin::setup_run(const plugin_run_context &context) const
 void Plugin::run(const plugin_run_context &context) const
 {
     Orchestrator::RunScope run_scope = Orchestrator::instance().bind_run(context.host_context);
+    m_run_count.value.fetch_add(1, std::memory_order_relaxed);
     m_c_api.vt->run(m_c_api.ctx, &context);
 }
 

@@ -20,7 +20,6 @@
 
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/GCode/PostProcessor.hpp"
 #include "libslic3r/Geometry.hpp"
 #include "libslic3r/Geometry/Circle.hpp"
 #include "libslic3r/libslic3r.h"
@@ -34,6 +33,29 @@
 #include "GUI_App.hpp"
 #include "OpenGLManager.hpp"
 #include "Plater.hpp"
+
+/*
+Build and render the print bed displayed by the 3D canvas. The configured bed
+shape supplies its outline; this module prepares the surface, grid, coordinate
+axes and optional model or texture used for display. Changing the bed invalidates
+the corresponding render data before it is drawn again.
+
+These meshes and buffers are display resources, not printable model geometry.
+Bed3D owns its prepared resources and uses the active OpenGL context when it
+creates, updates or releases GPU objects.
+
+Representative direct calls (branches are not a timeline):
+
+    Bed3D::set_shape()
+        |-- detect_type()
+        |-- check_texture()
+        |-- check_model()
+        |-- this->calc_extended_bounding_box()
+        `-- remove_raycasters_for_picking()
+
+    Bed3D::render()
+        `-- render_internal()
+*/
 static const float GROUND_Z = -0.02f;
 static const Slic3r::ColorRGBA DEFAULT_MODEL_COLOR             = Slic3r::ColorRGBA::DARK_GRAY();
 static const Slic3r::ColorRGBA PICKING_MODEL_COLOR             = Slic3r::ColorRGBA::BLACK();

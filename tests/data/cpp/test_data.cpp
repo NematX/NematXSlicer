@@ -17,6 +17,35 @@
 #include <boost/regex.hpp>
 #include <libslic3r/ModelArrange.hpp>
 
+/*
+Provide small model and print fixtures shared by C++ tests. Mesh helpers return
+owned geometry; print helpers apply supplied settings, run the required slicing
+work and expose generated G-code for assertions. The caller owns Model and Print
+and keeps them alive while inspecting their generated layers or outputs.
+
+Fixture construction and command export are separate operations so a test can
+stop at the stage it needs. Temporary outputs must be removed by the fixture or
+test that requested them, rather than becoming inputs to an unrelated case.
+
+Representative direct calls (branches are not a timeline):
+
+    init_print()
+        |-- config.apply()
+        |-- verbose_gcode()
+        |-- config.set_key_value()
+        |-- model.add_object()
+        |-- print.apply()
+        `-- print.validate()
+
+    gcode()
+        |-- boost::filesystem::unique_path()
+        |-- print.set_status_silent()
+        |-- print.process()
+        |-- Orchestrator::instance()
+        |-- export_gcode()
+        `-- boost::nowide::remove()
+*/
+
 using namespace std;
 
 namespace Slic3r { namespace Test {
@@ -340,7 +369,7 @@ std::string gcode(Print & print)
 	boost::filesystem::path temp = boost::filesystem::unique_path();
     print.set_status_silent();
     print.process();
-    Orchestrator::instance().export_gcode(print, temp.string(), nullptr, nullptr);
+    Orchestrator::instance().export_gcode(print, temp.string(), nullptr);
     boost::nowide::ifstream t(temp.string());
 	std::string str((std::istreambuf_iterator<char>(t)), std::istreambuf_iterator<char>());
 	boost::nowide::remove(temp.string().c_str());

@@ -1,15 +1,30 @@
-/* This file initializes the plugin runtime shared by plugin tests.
-   Providers are plugins registered with Orchestrator, the runtime's plugin manager.
-   Selectors are settings that choose a provider; layout fragments describe pieces of the settings UI.
+/*
+This file initializes the plugin runtime shared by plugin tests.
+Providers are plugins registered with Orchestrator, the runtime's plugin manager.
+Selectors are settings that choose a provider; layout fragments describe pieces of the settings UI.
 
-   Initialization registers providers and settings, applies activation choices, then copies
-   provider ids, selector keys and layout fragment ids before individual tests run.
-   Call graph:
-     plugin_test_startup_sets
-       ensure_plugin_test_runtime_initialized
-         register_config_option_or_fail
-         activate_plugin_or_fail
-   The copied sets remain unchanged when later tests register or activate providers. */
+Initialization registers providers and settings, applies activation choices, then copies
+provider ids, selector keys and layout fragment ids before individual tests run.
+The copied sets remain unchanged when later tests register or activate providers.
+
+Operation notes:
+- plugin_test_startup_sets
+- ensure_plugin_test_runtime_initialized
+- register_config_option_or_fail
+- activate_plugin_or_fail
+
+Representative direct calls (branches are not a timeline):
+
+    plugin_test_startup_sets()
+        `-- ensure_plugin_test_runtime_initialized()
+
+    one-time initialization lambda [not a direct call of the enclosing function]
+        |-- init_common_params()
+        |-- init_fff_params()
+        |-- init_sla_params()
+        |-- register_config_introspection_fixture()
+        `-- register_plugin_option_list_fixtures()
+*/
 #include "plugin_test_helpers.hpp"
 
 #include "probe_pattern_plugin.hpp"
@@ -55,8 +70,12 @@
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Plugins/GCode/FeatureGCode.hpp"
 #include "libslic3r/Plugins/GCode/CustomGCodePerPrintZ.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/BinaryGCodeExporter.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/BambuGCodeExporter.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/DefaultGCodeExporter.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp"
 #include "libslic3r/Plugins/GCode/Thumbnail/BuiltinGCodeThumbnails.hpp"
+#include "libslic3r/Plugins/GCode/PostProcessScripts.hpp"
 #include "libslic3r/Plugins/GCode/PrintingPlanFileWriter.hpp"
 #include "libslic3r/Plugins/GCode/Reader/DefaultGCodeReader.hpp"
 #include "libslic3r/Plugins/GCode/SettingsGCodeScripts.hpp"
@@ -734,6 +753,17 @@ void activate_plugin_or_fail(Slic3r::Orchestrator &orchestrator, const char *plu
 
 namespace Slic3r::Test::Plugins {
 
+// A function-local static caches successful initialization once per process; this no-argument
+// void function registers and activates providers in the process-wide Orchestrator.
+// The Orchestrator owns the registered Plugin objects, which borrow the provider instances; those
+// instances stay owned by function-local statics in plugin sources and test files. Option
+// definitions are finalized and FFF/SLA print-config caches are initialized. Exporter, regional seam, and
+// storage test providers, plus the aligned, contiguous, cost, and random seam placers, are
+// deactivated. The failing exclusive-selector test provider is disabled during initialization, and
+// its one expected option diagnostic is filtered; the valid test provider is disabled after option
+// finalization. Call before Slic3r::Print or DynamicPrintConfig::full_print_config(). A missing
+// expected plugin is logged then asserted; a failed option or test-provider registration, or a
+// Python plugin load, can throw std::runtime_error.
 void ensure_plugin_test_runtime_initialized()
 {
     static bool initialized = []() {
@@ -756,6 +786,15 @@ void ensure_plugin_test_runtime_initialized()
             orchestrator_handle_value);
         slic3r_api::GCodeGeneration::PrintingPlanFileWriterPlugin::register_printing_plan_file_writer_plugin(
             orchestrator_handle_value);
+        slic3r_api::GCodeGeneration::Exporter::register_default_gcode_exporter_plugin(
+            orchestrator_handle_value);
+        slic3r_api::GCodeGeneration::Exporter::register_binary_gcode_exporter_plugin(
+            orchestrator_handle_value);
+        slic3r_api::GCodeGeneration::Exporter::register_bambu_gcode_exporter_plugin(
+            orchestrator_handle_value);
+        slic3r_api::GCodeGeneration::PostProcessScriptsPlugin::register_post_process_scripts_plugin(
+            orchestrator_handle_value);
+        register_gcode_exporter_test_providers(orchestrator_handle_value);
         slic3r_api::GCodeGeneration::SettingsGCodeScriptsPlugin::register_settings_gcode_scripts_plugin(
             orchestrator_handle_value);
         slic3r_api::GCodeGeneration::FeatureGCodePlugin::register_feature_gcode_plugin(
@@ -908,9 +947,23 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "overhang_slope_fill");
         activate_plugin_or_fail(orchestrator, "vase.multi_island_connector");
         activate_plugin_or_fail(orchestrator, "gcode.printing_plan_file_writer");
+        activate_plugin_or_fail(orchestrator, "gcode.post_process");
+        // A child test process can start without the built-in exporter to check how an unavailable default behaves.
+        if (std::getenv("SLIC3R_TEST_SIMPLE_EXPORTER_DISABLED") == nullptr)
+            activate_plugin_or_fail(orchestrator, "gcode.exporter.simple");
+        else
+            orchestrator.set_plugin_active("gcode.exporter.simple", false);
+        activate_plugin_or_fail(orchestrator, "gcode.exporter.bgcode");
+        activate_plugin_or_fail(orchestrator, "gcode.exporter.bambu3mf");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.probe");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.raw_query");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.nofile");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.inputs");
+        activate_plugin_or_fail(orchestrator, "test.gcode.exporter.raw_inputs");
         activate_plugin_or_fail(orchestrator, "gcode.settings_scripts");
         activate_plugin_or_fail(orchestrator, "gcode.feature_gcode");
         activate_plugin_or_fail(orchestrator, "gcode.reader.default");
+        activate_plugin_or_fail(orchestrator, "gcode.reader.bambu");
         activate_plugin_or_fail(orchestrator, "gcode.reader.klipper");
         activate_plugin_or_fail(orchestrator, "gcode.reader.marlin1");
         activate_plugin_or_fail(orchestrator, "gcode.reader.marlin2");
@@ -932,6 +985,7 @@ void ensure_plugin_test_runtime_initialized()
         activate_plugin_or_fail(orchestrator, "gcode.firmware.reprap");
         activate_plugin_or_fail(orchestrator, "gcode.firmware.sprinter");
         activate_plugin_or_fail(orchestrator, "gcode.firmware.klipper");
+        activate_plugin_or_fail(orchestrator, "gcode.firmware.bambu");
         activate_plugin_or_fail(orchestrator, "PNG");
         activate_plugin_or_fail(orchestrator, "JPG");
         activate_plugin_or_fail(orchestrator, "QOI");
@@ -1065,6 +1119,11 @@ void ensure_plugin_test_runtime_initialized()
             throw std::runtime_error("Test runtime requires a registered bool seam_visibility before config caches");
         visibility->second.set_default_value(new ConfigOptionBool(false));
         orchestrator.finalize_plugin_option_defs();
+        orchestrator.set_plugin_active("test.gcode.exporter.probe", false);
+        orchestrator.set_plugin_active("test.gcode.exporter.raw_query", false);
+        orchestrator.set_plugin_active("test.gcode.exporter.nofile", false);
+        orchestrator.set_plugin_active("test.gcode.exporter.inputs", false);
+        orchestrator.set_plugin_active("test.gcode.exporter.raw_inputs", false);
         orchestrator.set_plugin_active(k_exclusive_pruning_valid_plugin_id, false);
         orchestrator.set_plugin_active("com.example.selector", false);
         orchestrator.set_plugin_active("com.example.selector.foreign", false);

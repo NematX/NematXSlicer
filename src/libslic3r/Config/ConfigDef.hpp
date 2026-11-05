@@ -24,11 +24,23 @@
 #ifndef slic3r_ConfigDef_hpp_
 #define slic3r_ConfigDef_hpp_
 
-/* Configuration definitions own option metadata/defaults; config stores hold
-   the corresponding values. Nature predicates describe persistence and comparison
-   eligibility by testing withdrawal flags without filtering values; zero withdraws nothing.
-   A required plugin group connects an active value
-   (different from its definition default) to a provider's declared config keys. */
+/*
+A configuration definition describes an option's key, value type, default and
+display metadata. A configuration store holds chosen values. ConfigOptionNature
+controls where a value may be saved or compared: its withdrawal flags remove
+permissions from the normal set, without deleting or changing the stored value.
+
+Define metadata before loading typed values. During loading, known keys can be
+parsed into options; unrecognized keys can instead be reported as name/text
+substitutions for the caller to preserve separately. A required plugin group
+links an active setting to the selected provider's declared support for that key.
+
+Configuration definitions own option metadata/defaults; config stores hold
+the corresponding values. Nature predicates describe persistence and comparison
+eligibility by testing withdrawal flags without filtering values; zero withdraws nothing.
+A required plugin group connects an active value
+(different from its definition default) to a provider's declared config keys.
+*/
 
 #include <cstdint>
 #include <functional>
@@ -286,7 +298,17 @@ public:
         // one_string,// it's now the default for vector without any idx. If you want to edit the first value, set the idx to 0
         // Close parameter, string value could be one of the list values.
         select_close,
+        // File path, string value, chosen to be written. sidetext holds the file filter (wxWidgets format).
+        save_path,
+        // File path, string value, chosen to be read. sidetext holds the file filter (wxWidgets format).
+        open_path,
     };
+    // Whether the value is in the range of the enumeration; the plugin ABI lets any integer through.
+    static bool is_gui_type_valid(GUIType gui_type)
+        { return gui_type >= GUIType::undefined && gui_type <= GUIType::open_path; }
+    // Whether sidetext holds a file filter instead of a displayed unit.
+    bool sidetext_is_file_filter() const
+        { return gui_type == GUIType::save_path || gui_type == GUIType::open_path; }
     static bool is_gui_type_enum_open(const GUIType gui_type) 
         { return gui_type == ConfigOptionDef::GUIType::i_enum_open || gui_type == ConfigOptionDef::GUIType::f_enum_open || gui_type == ConfigOptionDef::GUIType::select_open; }
 
@@ -304,7 +326,8 @@ public:
     // orchestrator prunes values whose plugin is missing or inactive when
     // plugin option definitions are finalized.
     bool                                contains_plugin_id = false;
-    // Persistence and comparison policy, also checked when plugins redeclare a definition.
+    // Persistence and comparison policy, also checked when a plugin redefines the option
+    // (Orchestrator.cpp). A bookkeeping option at STEP_ANY replays only for its active plugin readers.
     ConfigOptionNature                  nature = ConfigOptionNature::Normal;
     // Host-only link (1-based, 0 = none) into the orchestrator GUI activation
     // pool. It lets the GUI ask for the activation rules of the settings a page
@@ -879,6 +902,10 @@ public:
     //bool&               opt_bool(const t_config_option_key &opt_key)                            { return this->option<ConfigOptionBool>(opt_key)->value; }
     //uint8_t&            opt_bool(const t_config_option_key &opt_key, size_t idx)          { return this->option<ConfigOptionBools>(opt_key)->get_at(idx); }
 
+    // Put the options in the environment of the process as SLIC3R_<KEY> (upper case), for the programs started afterwards.
+    // Only the keys that writes_key() accepts for ConfigWriteTarget::Project are exported: LOCAL (connection, secrets)
+    // and VOLATILE keys never are. The environment is process-wide and is not restored; the variables inherited from the user
+    // are neither read nor filtered.
     void setenv_() const;
     ConfigSubstitutions load(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule);
     ConfigSubstitutions load_from_ini(const std::string &file, ForwardCompatibilitySubstitutionRule compatibility_rule);

@@ -14,19 +14,6 @@ the user's activation choices.
 
 The normal execution flow is:
 
-    load_plugins()
-    |-- reconcile the requested package configuration with the local cache
-    |-- register built-in plugins
-    |-- scan the plugins repository
-    |   |-- validate each package description
-    |   |-- load native libraries and call register_plugin()
-    |   `-- leave pure Python packages to PythonPluginLoader
-    |-- record package associations for successfully registered plugins
-    |-- activate the configured plugin IDs
-    |-- build dynamic choices for infill patterns and exclusive step groups
-    |-- initialize all registered plugins
-    `-- register GUI fragments that depend on initialized exclusive groups
-
 Native package loading is guarded by a package-registration scope. The loader
 checks that the library exports `slic3r_plugin_abi_version()` and
 `register_plugin()`, rejects incompatible C header versions, catches registration
@@ -44,6 +31,30 @@ user-facing names as labels; their setting and GUI fragment are created only
 after the available plugin set is known.
 StepSelectorTraits.hpp defines how step modules place selectors in the UI and enable
 plugin settings. A plugin's own layout fragment takes precedence over generated placement.
+
+Operation notes:
+- reconcile the requested package configuration with the local cache
+- register built-in plugins
+- scan the plugins repository
+- validate each package description
+- load native libraries and call register_plugin()
+- leave pure Python packages to PythonPluginLoader
+- record package associations for successfully registered plugins
+- activate the configured plugin IDs
+- build dynamic choices for infill patterns and exclusive step groups
+- initialize all registered plugins
+- register GUI fragments that depend on initialized exclusive groups
+
+Representative direct calls (branches are not a timeline):
+
+    load_plugins()
+        |-- register_builtin_plugins()
+        |-- load_plugins_from_repository_impl()
+        |-- activate_plugins_from_ids()
+        |-- register_exclusive_step_group_options_impl()
+        |-- orchestrator.initialize_plugins()
+        |-- orchestrator.finalize_plugin_option_defs()
+        `-- register_exclusive_step_group_ui_fragments_impl()
 */
 
 #include "PluginLoader.hpp"
@@ -85,9 +96,13 @@ plugin settings. A plugin's own layout fragment takes precedence over generated 
 #include "libslic3r/Config/FFFPrintConfig.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Plugins/GCode/CustomGCodePerPrintZ.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/BinaryGCodeExporter.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/BambuGCodeExporter.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/DefaultGCodeExporter.hpp"
 #include "libslic3r/Plugins/GCode/FeatureGCode.hpp"
 #include "libslic3r/Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp"
 #include "libslic3r/Plugins/GCode/Thumbnail/BuiltinGCodeThumbnails.hpp"
+#include "libslic3r/Plugins/GCode/PostProcessScripts.hpp"
 #include "libslic3r/Plugins/GCode/PrintingPlanFileWriter.hpp"
 #include "libslic3r/Plugins/SeamPlacer/AlignedSeamPlacer.hpp"
 #include "libslic3r/Plugins/SeamPlacer/ContiguousSeamPlacer.hpp"
@@ -714,6 +729,14 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
         slic3r_api::VaseMultiIslandConnectorPlugin::register_vase_multi_island_connector_plugin);
     register_builtin_plugin(orchestrator, "gcode.printing_plan_file_writer",
         slic3r_api::GCodeGeneration::PrintingPlanFileWriterPlugin::register_printing_plan_file_writer_plugin);
+    register_builtin_plugin(orchestrator, "gcode.post_process",
+        slic3r_api::GCodeGeneration::PostProcessScriptsPlugin::register_post_process_scripts_plugin);
+    register_builtin_plugin(orchestrator, "gcode.exporter.simple",
+        slic3r_api::GCodeGeneration::Exporter::register_default_gcode_exporter_plugin);
+    register_builtin_plugin(orchestrator, "gcode.exporter.bgcode",
+        slic3r_api::GCodeGeneration::Exporter::register_binary_gcode_exporter_plugin);
+    register_builtin_plugin(orchestrator, "gcode.exporter.bambu3mf",
+        slic3r_api::GCodeGeneration::Exporter::register_bambu_gcode_exporter_plugin);
     register_builtin_plugin(
         orchestrator, "gcode.settings_scripts",
         slic3r_api::GCodeGeneration::SettingsGCodeScriptsPlugin::register_settings_gcode_scripts_plugin);

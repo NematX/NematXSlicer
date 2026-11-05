@@ -31,7 +31,7 @@
 #define slic3r_config_def_h_
 
 #define SLIC3R_PLUGIN_API_CONFIG_DEF_MAJOR 1u
-#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 5u
+#define SLIC3R_PLUGIN_API_CONFIG_DEF_MINOR 6u
 
 #include "slic3r_config_option.h"
 #include "slic3r_config_types.h"
@@ -79,7 +79,13 @@ typedef enum raw_gui_type {
     RAW_GUI_TYPE_LEGEND,
 
     /* Closed enum (must match provided values) */
-    RAW_GUI_TYPE_SELECT_CLOSE
+    RAW_GUI_TYPE_SELECT_CLOSE,
+
+    /* File path (string value) chosen to be written; sidetext is the file filter in the wxWidgets format */
+    RAW_GUI_TYPE_SAVE_PATH,
+
+    /* File path (string value) chosen to be read; sidetext is the file filter in the wxWidgets format */
+    RAW_GUI_TYPE_OPEN_PATH
 } raw_gui_type;
 
 /* Category of a configuration field (GUI grouping) */
@@ -276,6 +282,10 @@ typedef struct raw_config_option_def {
     a plugin is initialized, the host replaces it with the plugin's own step.
     Use STEP_ANY to force conservative full invalidation. Outside plugin option
     registration, STEP_NONE still means no slicing invalidation.
+    For a BOOKKEEPING option, STEP_ANY is the same as the default: it replays
+    nothing by itself. Only a concrete step, or an active plugin with a producing
+    step that reads the option, makes a change replay the pipeline; STEP_NONE
+    always replays nothing.
     */
     slicing_step_t invalidates_step;
 

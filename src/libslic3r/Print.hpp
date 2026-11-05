@@ -19,12 +19,25 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* Print owns effective configuration, sliced objects and pipeline state. Its
-   placement checks borrow model instances and use config-derived square tower
-   envelopes; instance-tower offsets follow model translation, not rotation.
-   Tool ordering supports preview ticks and legacy export. Statistics store
-   measured totals including the wipe-tower share for sidebar and placeholders.
-   Validation includes print-level setting requirements on selected providers. */
+/*
+Print represents one FFF slicing job. It owns the applied configuration, sliced
+objects and processing state. Applying a model updates that state and marks
+affected results for recomputation; the pipeline then produces geometry, a
+printing plan and the G-code used by the preview. Exporting a file consumes
+those results rather than transferring ownership of the sliced objects.
+
+The model describes source geometry and placements. PrintObject holds the
+corresponding sliced data; the printing plan places generated extrusion paths
+in print order. Placement checks and measured statistics serve different parts
+of that lifecycle and must not be confused with generated geometry.
+
+Print owns effective configuration, sliced objects and pipeline state. Its
+placement checks borrow model instances and use config-derived square tower
+envelopes; instance-tower offsets follow model translation, not rotation.
+Tool ordering supports preview ticks and legacy export. Statistics store
+measured totals including the wipe-tower share for sidebar and placeholders.
+Validation includes print-level setting requirements on selected providers.
+*/
 #ifndef slic3r_Print_hpp_
 #define slic3r_Print_hpp_
 
@@ -52,6 +65,7 @@
 #include "PrintBase.hpp"
 #include "Config/FFFPrintConfig.hpp"
 #include "PrintRecords.hpp"
+#include "Api/host/ExportInputs.hpp"
 #include "Api/plugin/c/slic3r_slicing_step.h"
 #include "Steps/PipelineProgress.hpp"
 
@@ -95,7 +109,25 @@ struct PrintStatistics
     std::map<extruder_index_t, double> filament_stats; // extruder id -> volume in mm3
     std::vector<std::pair<coord_t, float>> _layer_area_stats; // print_z to area
 
+    // Z-distinct layers of the objects only (the "objects layers count" of the exported statistics).
+    int                             object_layer_count;
+    // Every PrintingLayerGroup of the PrintingPlan, auxiliary layers included (the "total layers count" of the exported statistics).
+    int                             total_layer_count;
+    // True when the Reader saw a positive filament volume extruded with a support or support interface role.
+    bool                            has_support;
+
     std::atomic_bool is_computing_gcode;
+    // Seconds that the Reader attributed to its layer 0 (the moves before the first layer included), 0 when the Reader
+    // gave no layer time. Set with the estimated time, so it is valid exactly when statistics_available is.
+    double                          first_layer_time;
+    // Highest layer print Z of the printing plan in millimeters, without the Z offset; 0 without a plan. A plan fact
+    // published when the G-code is written, valid without a Reader pass (like the two layer counts above).
+    double                          max_print_z;
+
+    // True only after the Reader result of the current G-code has been fully converted into the measured totals above
+    // (the estimated times, the filament volumes and the first-layer time).
+    // It is the sole signal that the measured values are usable; zero totals never mean "unavailable".
+    std::atomic_bool statistics_available;
 
     // Copy measured print statistics, including tower shares, into a placeholder config.
     DynamicConfig           config() const;
@@ -125,7 +157,13 @@ struct PrintStatistics
         color_extruderid_to_used_filament.clear();
         color_extruderid_to_used_weight.clear();
         _layer_area_stats.clear();
+        object_layer_count     = 0;
+        total_layer_count      = 0;
+        has_support            = false;
+        first_layer_time       = 0.;
+        max_print_z            = 0.;
         is_computing_gcode = false;
+        statistics_available = false;
     }
 
     static const std::string FilamentUsedG;
@@ -309,11 +347,80 @@ public:
     void set_gcode_reader_source_path(std::string path, std::string reader_plugin_id = {});
     // Discard the published source path and reader identity together.
     void reset_gcode_reader_source_path();
+
+    /*
+    One export request, from its deposit by the caller to its consumption by the STEP_EXPORT runner.
+    It is single-use: the runner moves it out of the Print when it starts, so a later export needs a
+    new request. config is a private copy of full_print_config() plus the request-only entries
+    (output_path, output_path_suggestion); it never takes part in Print::apply(). The optional suggestion directory and
+    filename base let the caller influence the exporter's proposed path without setting its destination. exporter_id lets the
+    caller name the exporter of this request without touching the configuration. thumbnails renders
+    the images the exporter asks for, and stays empty when no graphical renderer exists (command line). inputs asks the
+    requester for the values that the exporter needs (see ExportInputForm); it stays empty when the requester cannot be
+    asked, which fails an exporter that asks.
+    */
+    struct ExportRequest
+    {
+        DynamicPrintConfig          config;
+        ThumbnailsGeneratorCallback thumbnails;
+        ExportInputsCallback        inputs;
+        // Existing directory to use when forming the exporter's proposed destination; empty keeps the model-derived directory.
+        std::string output_path_suggestion_directory;
+        // Base name used when forming the exporter's proposed destination; empty keeps the automatic name.
+        std::string output_path_suggestion_filename_base;
+        // Fold accents in the suggested filename for outputs intended for legacy firmware.
+        bool output_path_suggestion_ascii_fallback = false;
+        // ID of the G-code exporter to use for this request only; empty uses the `gcode_exporter_plugin` setting of config.
+        // The setting itself is never changed by it.
+        std::string exporter_id;
+
+        // Destination of the export, or an empty string when none was set.
+        std::string output_path() const
+        {
+            const ConfigOptionString *option = config.option<ConfigOptionString>("output_path");
+            return option == nullptr ? std::string() : option->value;
+        }
+        void        set_output_path(const std::string &path) { config.set_key_value("output_path", new ConfigOptionString(path)); }
+    };
+    // Copy full_print_config() under state_mutex() (which the caller must not hold) into a new request
+    // without destination. The request is owned by the caller until request_export().
+    ExportRequest make_export_request(ThumbnailsGeneratorCallback thumbnails) const;
+    // Queue STEP_EXPORT with this request. Takes state_mutex() (the caller must not hold it), replaces
+    // any previous unconsumed request and discards the previous result. It never arms the plugin
+    // cleanup, so a later apply() does not stop the worker because of it. The request lives until
+    // take_export_request() or clear().
+    void request_export(ExportRequest request);
+    // Move the pending request out of the Print under state_mutex(); empty when none was deposited
+    // or when it was already taken.
+    std::optional<ExportRequest> take_export_request();
+    // Path of the G-code reference when STEP_GCODE is done, or an empty string when the reference is not
+    // ready (never produced, invalidated or being regenerated). The step state is read under state_mutex(); the path
+    // is only safe to read from the thread that produces or consumes the reference (see Print.cpp).
+    std::string ready_gcode_reference_path() const;
+    /*
+    What the exporter reported about its export: the local file it wrote and a label to display. Either may be empty;
+    an exporter that writes no local file reports an empty local_path.
+    */
+    struct ExportResult
+    {
+        std::string local_path;
+        std::string label;
+    };
+    // Result reported by the last export, or an empty result. Orchestrator::export_print() empties it when it starts, then it is recorded as soon as the exporter reports it, before
+    // the step returns, so that a caller can clean up a file already published even when the step fails or is cancelled
+    // afterwards. Valid until the next export, request_export() or clear(); an invalidation of STEP_GCODE leaves it.
+    ExportResult export_result() const;
+    // Record the result under state_mutex() (locked here). The host calls it while the exporter runs, when it reports; it replaces the previous result.
+    void         set_export_result(ExportResult result);
+
     const PrintObject *auxiliary_object() const { return m_auxiliary_object.get(); }
     PrintObject &mutable_auxiliary_object();
     void reset_auxiliary_object();
 
     std::string                 output_filename(const std::string &filename_base = std::string()) const override;
+    // Format FFF output placeholders with the G-code exporter extension rather than the binary preference.
+    std::string                 output_filename(const std::string &filename_base,
+                                                 const std::string &default_extension) const override;
 
     // Intern a complete snapshot. Concurrent registrations/readers are allowed;
     // apply() and clear() must run with workers stopped. Does not activate it.
@@ -425,6 +532,8 @@ private:
     bool                request_steps_after(Steps::Checkpoint checkpoint);
     // Control paths already own the non-recursive state mutex.
     bool                mark_step_for_execution_unguarded(slicing_step_t step);
+    // Queue one step without arming the plugin cleanup; state_mutex() must be held.
+    bool                queue_step_unguarded(slicing_step_t step);
     bool                mark_step_and_dependents_for_execution_unguarded(slicing_step_t step);
     void                reset_step_execution_plan_all_unguarded();
     void                restore_metadata_checkpoint(Steps::Checkpoint checkpoint);
@@ -495,6 +604,9 @@ private:
     mutable std::atomic_bool                m_freeze_diagnostic_claimed{false};
     std::string                             m_gcode_reader_source_path;
     std::string                             m_gcode_reader_plugin_id;
+    // Pending export request and last reported export result, both guarded by state_mutex().
+    std::optional<ExportRequest>            m_export_request;
+    ExportResult                            m_export_result;
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;

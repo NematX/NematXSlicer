@@ -1,0 +1,6158 @@
+/*
+Tests cover exporter selection, synchronous QUERY validation and publication, including Bambu archive metadata.
+Models, source layers and plans stay owned by each test; decoded XML/JSON and copied host facts own their data.
+Literal meshes check sliced areas and instance placement; controlled final-plan paths isolate coverage and physical Z.
+
+G-code exporter service tests
+=============================
+
+The host selects an active FFF exporter from the printer configuration, asks it
+synchronously for compatibility and a file suffix, then executes it against an
+existing G-code reference. The built-in text and binary exporters are checked
+alongside test providers for byte copying, per-call failures and malformed QUERY
+answers. Test files live in unique directories under the current project working
+directory and are removed at scope exit; the print pipeline and exporter action
+are checked separately.
+
+Controlled exporters isolate compatibility queries, input requests, failure
+reporting and publication. Production exporters are then exercised through the
+same host boundary for the formats available in this build. Assertions inspect
+the published bytes, metadata and destination preservation, not just a provider's
+return value. The source reference is checked separately from the destination.
+
+Operation notes:
+- Bambu geometry/archive checks use init_print :  process :  export_gcode :  bambu_test_archive :  read_bambu_zip.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- initialize_fff_print()
+        |-- print.process()
+        |-- orchestrator.export_gcode()
+        |-- write_binary_file()
+        |-- read_binary_file()
+        `-- Test::export_print_to()
+*/
+
+#include <catch2/catch.hpp>
+
+#include <algorithm>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
+#include <cstdlib>
+#include <iomanip>
+#include <iterator>
+#include <locale>
+#include <limits>
+#include <map>
+#include <memory>
+#include <sstream>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include <boost/dll/runtime_symbol_info.hpp>
+#include <boost/algorithm/string/predicate.hpp>
+#include <boost/filesystem.hpp>
+#include <boost/nowide/cstdio.hpp>
+#include <boost/nowide/fstream.hpp>
+#include <boost/process/args.hpp>
+#include <boost/process/child.hpp>
+#include <boost/process/env.hpp>
+#include <boost/process/environment.hpp>
+#include <boost/process/exe.hpp>
+#include <boost/process/io.hpp>
+#include <boost/property_tree/ptree.hpp>
+#include <boost/property_tree/xml_parser.hpp>
+#include <boost/uuid/detail/md5.hpp>
+#include <nlohmann/json.hpp>
+#include "miniz/miniz.h"
+#include "quickdigest5/quickdigest5.hpp"
+
+
+#include "plugin_test_helpers.hpp"
+#include "gcode_export_test_helpers.hpp"
+#include "gcode_test_helpers.hpp"
+#include "test_data.hpp"
+
+#include "libslic3r/Api/host/ApiHostUtils.hpp"
+#include "libslic3r/Api/host/ExportInputs.hpp"
+#include "libslic3r/Api/host/GCodeThumbnailRenderer.hpp"
+#include "libslic3r/Api/host/GCodeExportObjects.hpp"
+#include "libslic3r/Api/host/Orchestrator.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_config_def.h"
+#include "libslic3r/Api/plugin/c/slic3r_gcode_firmware.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_export.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_thumbnail.h"
+#include "libslic3r/Api/plugin/cpp/ConfigViews.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginBase.hpp"
+#include "libslic3r/Api/plugin/cpp/PluginContext.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeExportMetadataViews.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeExporterPlugin.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeFilePublisher.hpp"
+#include "libslic3r/Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp"
+#include "libslic3r/Config/ConfigDef.hpp"
+#include "libslic3r/Config/PrintConfig.hpp"
+#include "libslic3r/GCode.hpp"
+#include "libslic3r/GCode/GCodeProcessor.hpp"
+#include "LibBGCode/binarize/binarize.hpp"
+#include "libslic3r/libslic3r.h"
+#include "libslic3r/Model.hpp"
+#include "libslic3r/Plugins/PluginApiCompatibility.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/GCodeExporterShared.hpp"
+#include "libslic3r/Plugins/GCode/Exporter/BambuGCodeExporter.hpp"
+#include "libslic3r/Plugins/GCode/Firmware/BambuGCodeFirmware.hpp"
+#include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Print.hpp"
+#include "libslic3r/PrintObject.hpp"
+#include "libslic3r/SLAPrint.hpp"
+#include "libslic3r/Steps/StepPipeline.hpp"
+#include "libslic3r/Utils.hpp"
+
+
+
+namespace {
+
+using namespace Slic3r;
+
+constexpr const char *k_probe_exporter_id = "test.gcode.exporter.probe";
+constexpr const char *k_raw_query_exporter_id = "test.gcode.exporter.raw_query";
+constexpr const char *k_failing_encoder_id = "test.thumbnail.failing";
+constexpr const char *k_pruned_exporter_id = "test.gcode.exporter.pruned";
+constexpr const char *k_no_file_exporter_id = "test.gcode.exporter.nofile";
+constexpr const char *k_probe_option_key = "test.gcode_exporter_option";
+// Invalidation step that the probe declares for its option; the host must resolve it to STEP_NONE.
+constexpr slicing_step_t k_probe_option_declared_step = STEP_GCODE;
+const char *const k_no_dependencies[] = {nullptr};
+
+class TextOnlyPngProvider;
+// Return the child-process-owned text-only PNG provider without registering it twice.
+TextOnlyPngProvider &text_only_png_provider(orchestrator_handle *host);
+// Reserve the child test's PNG service during the existing exporter-test registration hook.
+void register_text_only_png_capability_provider(orchestrator_handle *host);
+
+enum class ProbeQueryMode { Compatible, Incompatible, NoRemovableMedia };
+// PublishThenCancel copies the reference, publishes and reports it, then raises the Print cancellation before returning.
+enum class ProbeExportMode { Copy, FailOpen, ReportErrorAfterWrite, CancelAfterWrite, FailingEncoder, PublishThenCancel, TamperAfterWrite };
+// What the exporter without local file reports: nothing, a label (whose buffer it overwrites afterwards), or two results.
+enum class NoFileMode { ReportNothing, ReportLabel, ReportTwice };
+enum class RawQueryMode {
+    MissingAnswer,
+    Valid,
+    ActionFields,
+    Version40Prefix,
+    RepeatedAnswer,
+    ShortResult,
+    UnknownStatus,
+    NullExtension,
+    ForwardSlashExtension,
+    BackslashExtension,
+    MissingDotExtension,
+    IncompatibleWithoutMessage
+};
+
+struct ExporterProbeState
+{
+    std::string extension = ".probe";
+    ProbeQueryMode query_mode = ProbeQueryMode::Compatible;
+    ProbeExportMode export_mode = ProbeExportMode::Copy;
+    RawQueryMode raw_query_mode = RawQueryMode::MissingAnswer;
+    NoFileMode no_file_mode = NoFileMode::ReportNothing;
+    // EXPORT runs of the exporter without local file, and whether the request it saw held an output_path setting.
+    size_t no_file_export_count = 0;
+    bool no_file_saw_output_path = false;
+    // Buffers that the raw exporter reports from and overwrites right after the callback, and the callback's answers.
+    std::string raw_report_path;
+    std::string raw_report_label;
+    int32_t raw_first_report_status = -1;
+    int32_t raw_second_report_status = -1;
+    size_t query_count = 0;
+    size_t export_count = 0;
+    // Last values seen by the probe: the exporter selector read from the EXPORT config, and the firmware ID given to QUERY.
+    std::string export_config_selector;
+    // Destination the probe read from the EXPORT configuration (the output_path setting).
+    std::string export_output_path;
+    // The host's statistics-finalized filename proposal, copied during EXPORT.
+    std::string export_output_suggestion;
+    std::string query_firmware_id;
+    const print_handle *query_print = nullptr;
+    std::string query_notes;
+    bool query_generic_print_is_null = false;
+    std::vector<std::pair<std::string, std::string>> export_configuration;
+    std::vector<std::pair<std::string, std::string>> export_extrusion_widths;
+    std::vector<std::pair<std::string, std::string>> export_statistics;
+    // The numeric statistics (contract 4.2) read by the last EXPORT, with the validity the view reports.
+    slic3r_api::GCodeExportNumericStatisticsView export_numeric;
+    std::vector<slic3r_api::GCodeExportFilamentUsageView> export_filaments;
+    bool export_has_numeric = false;
+    bool export_has_measured = false;
+    // Test writer action that changes its open sibling after its stream has been flushed.
+    std::function<void()> tamper_sibling_after_write;
+    // Print whose user cancellation the CancelAfterWrite mode raises, as the GUI Cancel button does.
+    Print *print_to_cancel = nullptr;
+};
+
+ExporterProbeState g_exporter_probe_state;
+
+struct BgcodeThumbnailReadback
+{
+    uint16_t format = 0;
+    uint16_t width = 0;
+    uint16_t height = 0;
+    std::vector<std::byte> bytes;
+};
+
+struct BgcodeReadback
+{
+    std::vector<std::pair<std::string, std::string>> file_metadata;
+    std::vector<std::pair<std::string, std::string>> printer_metadata;
+    std::vector<std::pair<std::string, std::string>> print_metadata;
+    std::vector<std::pair<std::string, std::string>> slicer_metadata;
+    std::vector<BgcodeThumbnailReadback> thumbnails;
+    // Content encoding declared by the G-code blocks on disk.
+    bgcode::core::EGCodeEncodingType gcode_encoding = bgcode::core::EGCodeEncodingType::MeatPack;
+    std::string gcode;
+};
+
+// Open one borrowed path read-only, parse the required bgcode blocks into owned values, and close the FILE on every exit; malformed, truncated or missing blocks fail the current Catch test.
+BgcodeReadback read_bgcode_file(const boost::filesystem::path &path)
+{
+    std::unique_ptr<FILE, int (*)(FILE *)> input(
+        boost::nowide::fopen(path.string().c_str(), "rb"), &std::fclose);
+    REQUIRE(input != nullptr);
+    FILE *stream = input.get();
+    REQUIRE(std::fseek(stream, 0, SEEK_END) == 0);
+    const long file_size = std::ftell(stream);
+    REQUIRE(file_size >= 0);
+    REQUIRE(std::fseek(stream, 0, SEEK_SET) == 0);
+    std::vector<std::byte> scratch(65536);
+    REQUIRE(bgcode::core::is_valid_binary_gcode(*stream, true, scratch.data(), scratch.size()) ==
+            bgcode::core::EResult::Success);
+    REQUIRE(std::fseek(stream, 0, SEEK_SET) == 0);
+
+    bgcode::core::FileHeader file_header;
+    REQUIRE(bgcode::core::read_header(*stream, file_header, nullptr) == bgcode::core::EResult::Success);
+    bgcode::core::BlockHeader block_header;
+    REQUIRE(bgcode::core::read_next_block_header(*stream, file_header, block_header,
+                                                  scratch.data(), scratch.size()) == bgcode::core::EResult::Success);
+    REQUIRE(static_cast<bgcode::core::EBlockType>(block_header.type) == bgcode::core::EBlockType::FileMetadata);
+
+    BgcodeReadback readback;
+    bgcode::binarize::FileMetadataBlock file_metadata;
+    REQUIRE(file_metadata.read_data(*stream, file_header, block_header) == bgcode::core::EResult::Success);
+    readback.file_metadata = file_metadata.raw_data;
+
+    REQUIRE(bgcode::core::read_next_block_header(*stream, file_header, block_header,
+                                                  scratch.data(), scratch.size()) == bgcode::core::EResult::Success);
+    REQUIRE(static_cast<bgcode::core::EBlockType>(block_header.type) == bgcode::core::EBlockType::PrinterMetadata);
+    bgcode::binarize::PrinterMetadataBlock printer_metadata;
+    REQUIRE(printer_metadata.read_data(*stream, file_header, block_header) == bgcode::core::EResult::Success);
+    readback.printer_metadata = printer_metadata.raw_data;
+
+    REQUIRE(bgcode::core::read_next_block_header(*stream, file_header, block_header,
+                                                  scratch.data(), scratch.size()) == bgcode::core::EResult::Success);
+    while (static_cast<bgcode::core::EBlockType>(block_header.type) == bgcode::core::EBlockType::Thumbnail) {
+        bgcode::binarize::ThumbnailBlock thumbnail;
+        REQUIRE(thumbnail.read_data(*stream, file_header, block_header) == bgcode::core::EResult::Success);
+        BgcodeThumbnailReadback &image = readback.thumbnails.emplace_back();
+        image.format = thumbnail.params.format;
+        image.width = thumbnail.params.width;
+        image.height = thumbnail.params.height;
+        image.bytes = thumbnail.data;
+        REQUIRE(bgcode::core::read_next_block_header(*stream, file_header, block_header,
+                                                      scratch.data(), scratch.size()) == bgcode::core::EResult::Success);
+    }
+
+    REQUIRE(static_cast<bgcode::core::EBlockType>(block_header.type) == bgcode::core::EBlockType::PrintMetadata);
+    bgcode::binarize::PrintMetadataBlock print_metadata;
+    REQUIRE(print_metadata.read_data(*stream, file_header, block_header) == bgcode::core::EResult::Success);
+    readback.print_metadata = print_metadata.raw_data;
+
+    REQUIRE(bgcode::core::read_next_block_header(*stream, file_header, block_header,
+                                                  scratch.data(), scratch.size()) == bgcode::core::EResult::Success);
+    REQUIRE(static_cast<bgcode::core::EBlockType>(block_header.type) == bgcode::core::EBlockType::SlicerMetadata);
+    bgcode::binarize::SlicerMetadataBlock slicer_metadata;
+    REQUIRE(slicer_metadata.read_data(*stream, file_header, block_header) == bgcode::core::EResult::Success);
+    readback.slicer_metadata = slicer_metadata.raw_data;
+
+    REQUIRE(bgcode::core::read_next_block_header(*stream, file_header, block_header,
+                                                  scratch.data(), scratch.size()) == bgcode::core::EResult::Success);
+    REQUIRE(static_cast<bgcode::core::EBlockType>(block_header.type) == bgcode::core::EBlockType::GCode);
+    while (static_cast<bgcode::core::EBlockType>(block_header.type) == bgcode::core::EBlockType::GCode) {
+        // BlockHeader carries no encoding member in the installed libbgcode; the
+        // parser stops after type, compression and sizes, so the stream now holds
+        // the little-endian content encoding of this block. Reading it leaves the
+        // stream position unchanged for read_data(), which consumes these bytes again.
+        unsigned char encoding_bytes[2] = {};
+        REQUIRE(std::fread(encoding_bytes, 1, sizeof(encoding_bytes), stream) == sizeof(encoding_bytes));
+        readback.gcode_encoding = static_cast<bgcode::core::EGCodeEncodingType>(
+            unsigned(encoding_bytes[0]) | (unsigned(encoding_bytes[1]) << 8));
+        REQUIRE(std::fseek(stream, -2, SEEK_CUR) == 0);
+        bgcode::binarize::GCodeBlock block;
+        REQUIRE(block.read_data(*stream, file_header, block_header) == bgcode::core::EResult::Success);
+        readback.gcode.append(block.raw_data.begin(), block.raw_data.end());
+        if (std::ftell(stream) == file_size)
+            break;
+        REQUIRE(bgcode::core::read_next_block_header(*stream, file_header, block_header,
+                                                      scratch.data(), scratch.size()) == bgcode::core::EResult::Success);
+    }
+    return readback;
+}
+
+// Find one named metadata entry and return a borrowed pointer into its caller-owned vector, or null when absent; no entries are changed and the vector must outlive the pointer.
+const std::string *find_bgcode_metadata_value(
+    const std::vector<std::pair<std::string, std::string>> &entries, const std::string &key)
+{
+    const std::vector<std::pair<std::string, std::string>>::const_iterator found = std::find_if(
+        entries.begin(), entries.end(), [&key](const std::pair<std::string, std::string> &entry) {
+            return entry.first == key;
+        });
+    return found == entries.end() ? nullptr : &found->second;
+}
+
+// Return the highest value of the ";Z:" layer markers of a G-code text, 0 without a marker. It reads the text, never the
+// host plan, so it is an independent oracle for the highest printed layer Z.
+double highest_marker_z(const std::string &gcode)
+{
+    double highest = 0.;
+    size_t position = 0;
+    while ((position = gcode.find(";Z:", position)) != std::string::npos) {
+        position += 3;
+        highest = (std::max)(highest, std::strtod(gcode.c_str() + position, nullptr));
+    }
+    return highest;
+}
+
+// Count the ";LAYER_CHANGE" markers of a G-code text: one per layer group of the plan, read from the text.
+size_t count_layer_change_markers(const std::string &gcode)
+{
+    size_t count = 0;
+    for (size_t position = gcode.find(";LAYER_CHANGE"); position != std::string::npos;
+         position = gcode.find(";LAYER_CHANGE", position + 1))
+        ++count;
+    return count;
+}
+
+// Format a value with two decimals and the classic decimal point, as the text statistics do.
+std::string format_two_decimals(double value)
+{
+    std::ostringstream output;
+    output.imbue(std::locale::classic());
+    output << std::fixed << std::setprecision(2) << value;
+    return output.str();
+}
+
+// Material of one tool recomputed from a Reader volume and the filament properties of a configuration.
+struct ExpectedMaterial
+{
+    double length_mm = 0.;
+    double volume_mm3 = 0.;
+    double weight_g = 0.;
+};
+
+// Recompute the material of every tool of the nozzle diameters of a configuration from the volumes measured by the Reader,
+// independently of the host: length from the filament diameter, weight from the density; measured tools beyond the
+// configuration are ignored.
+std::vector<ExpectedMaterial> expected_materials(const GCodeProcessorResult &result, const DynamicPrintConfig &config)
+{
+    const size_t tools = config.option<ConfigOptionFloats>("nozzle_diameter")->get_values().size();
+    const ConfigOptionFloats &diameters = *config.option<ConfigOptionFloats>("filament_diameter");
+    const ConfigOptionFloats &densities = *config.option<ConfigOptionFloats>("filament_density");
+    std::vector<ExpectedMaterial> materials(tools);
+    for (const std::pair<const extruder_index_t, double> &measured : result.print_statistics.volumes_per_extruder) {
+        if (size_t(measured.first) >= tools)
+            continue;
+        const double radius = diameters.get_at(size_t(measured.first)) / 2.;
+        materials[size_t(measured.first)].volume_mm3 = measured.second;
+        materials[size_t(measured.first)].length_mm = measured.second / (PI * radius * radius);
+        materials[size_t(measured.first)].weight_g = measured.second / 1000. * densities.get_at(size_t(measured.first));
+    }
+    return materials;
+}
+
+// Find one exact body occurrence and require its application configuration marker immediately afterward.
+size_t expect_body_then_configuration(const std::string &exported, const std::string &body);
+
+// Check the generated header, contiguous width block, exact reference body and filtered configuration footer.
+void expect_simple_export(const std::string &exported, const std::string &body);
+
+// Return the text written between one exact body and the configuration marker: empty without statistics, else the statistics lines.
+std::string text_between_body_and_configuration(const std::string &exported, const std::string &body);
+
+class ScopedTestDirectory
+{
+public:
+    // Create one unique directory below the current working directory for test-owned output files.
+    ScopedTestDirectory()
+        : m_path(boost::filesystem::current_path() /
+                 boost::filesystem::unique_path("slic3r-gcode-export-%%%%-%%%%-%%%%"))
+    {
+        boost::filesystem::create_directories(m_path);
+    }
+
+    // Remove the test-owned directory without throwing during stack unwinding.
+    ~ScopedTestDirectory()
+    {
+        boost::system::error_code ignored;
+        boost::filesystem::remove_all(m_path, ignored);
+    }
+
+    // Return the borrowed path owned by this test-directory scope.
+    const boost::filesystem::path &path() const { return m_path; }
+
+private:
+    boost::filesystem::path m_path;
+};
+
+class ScopedPluginActivation
+{
+public:
+    // Set the registered provider's requested activation state, borrowing the orchestrator and copying its ID; remember the prior state for cleanup, and fail the test if the provider is missing or cannot be changed.
+    ScopedPluginActivation(Orchestrator &orchestrator, const char *plugin_id, bool active = true)
+        : m_orchestrator(orchestrator), m_plugin_id(plugin_id)
+    {
+        Plugin *plugin = m_orchestrator.get_plugin(m_plugin_id);
+        REQUIRE(plugin != nullptr);
+        m_was_active = m_orchestrator.is_plugin_active(plugin);
+        REQUIRE(m_orchestrator.set_plugin_active(m_plugin_id, active));
+    }
+
+    // Restore the saved activation state through the borrowed orchestrator without throwing during cleanup.
+    ~ScopedPluginActivation()
+    {
+        m_orchestrator.set_plugin_active(m_plugin_id, m_was_active);
+    }
+
+private:
+    Orchestrator &m_orchestrator;
+    std::string m_plugin_id;
+    bool m_was_active = false;
+};
+
+// Ask the C selection API for the exporter chosen by a borrowed configuration; return its ID or "<none>".
+std::string select_exporter_id_through_c_api(const ConfigBase *config)
+{
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance());
+    const orchestrator_plugin_handle *selected = orchestrator_select_plugin(
+        handle, config == nullptr ? nullptr : ApiHost::to_config_handle(config), STEP_EXPORT, k_gcode_exporter_option_key);
+    return selected == nullptr ? std::string("<none>") : std::string(orchestrator_plugin_id(selected));
+}
+
+// Write all bytes to a UTF-8 path and fail the current test if opening, writing, or closing fails.
+void write_binary_file(const boost::filesystem::path &path, const std::string &contents)
+{
+    boost::nowide::ofstream output(path.string().c_str(), std::ios::out | std::ios::binary | std::ios::trunc);
+    REQUIRE(output.good());
+    output.write(contents.data(), static_cast<std::streamsize>(contents.size()));
+    output.close();
+    REQUIRE(output.good());
+}
+
+// Read all bytes from a UTF-8 path and return an owned string; opening failures fail the current test.
+std::string read_binary_file(const boost::filesystem::path &path)
+{
+    boost::nowide::ifstream input(path.string().c_str(), std::ios::in | std::ios::binary);
+    REQUIRE(input.good());
+    return std::string(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+}
+
+// Borrow exported bytes and body unchanged, validate each complete comment block once, require the exact header/body/configuration boundaries, and reject trailing content; Catch failures identify the first malformed line.
+void expect_simple_export(const std::string &exported, const std::string &body)
+{
+    const std::string header = "; generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION " on\n\n";
+    REQUIRE(exported.compare(0, header.size(), header) == 0);
+    const size_t body_position = expect_body_then_configuration(exported, body);
+    REQUIRE(body_position >= header.size());
+    const std::string_view width_block(exported.data() + header.size(), body_position - header.size());
+    std::string first_bad_width_line;
+    CHECK_MESSAGE(Slic3r::Test::Plugins::GCodeExportTest::is_width_block(width_block, first_bad_width_line),
+                  "Malformed extrusion-width line: " << first_bad_width_line);
+
+    const size_t body_end = body_position + body.size();
+    const std::string begin_marker = "\n; " SLIC3R_APP_NAME "_config = begin\n";
+    const size_t configuration_begin = body_end + begin_marker.size();
+    const std::string end_marker = "; " SLIC3R_APP_NAME "_config = end\n";
+    const size_t configuration_end = exported.find(end_marker, body_end);
+    REQUIRE(configuration_end != std::string::npos);
+    REQUIRE(exported.compare(body_end, begin_marker.size(), begin_marker) == 0);
+    const std::string_view configuration_block(exported.data() + configuration_begin,
+                                               configuration_end - configuration_begin);
+    std::string first_bad_configuration_line;
+    CHECK_MESSAGE(Slic3r::Test::Plugins::GCodeExportTest::is_configuration_block(
+                      configuration_block, first_bad_configuration_line),
+                  "Malformed configuration line: " << first_bad_configuration_line);
+    CHECK(configuration_end + end_marker.size() == exported.size());
+}
+
+// Find the borrowed body exactly once, verify its adjacent configuration marker and return its byte offset; exported bytes stay unchanged and Catch reports boundary failures.
+size_t expect_body_then_configuration(const std::string &exported, const std::string &body)
+{
+    const size_t body_position = exported.find(body);
+    REQUIRE(body_position != std::string::npos);
+    CHECK(exported.compare(body_position, body.size(), body) == 0);
+    CHECK(exported.find(body, body_position + 1) == std::string::npos);
+    const std::string begin_marker = "\n; " SLIC3R_APP_NAME "_config = begin\n";
+    REQUIRE(exported.compare(body_position + body.size(), begin_marker.size(), begin_marker) == 0);
+    return body_position;
+}
+
+// Find the borrowed body exactly once and return the owned text that separates it from the configuration marker; Catch reports a missing body or marker.
+std::string text_between_body_and_configuration(const std::string &exported, const std::string &body)
+{
+    const size_t body_position = exported.find(body);
+    REQUIRE(body_position != std::string::npos);
+    CHECK(exported.find(body, body_position + 1) == std::string::npos);
+    const std::string begin_marker = "\n; " SLIC3R_APP_NAME "_config = begin\n";
+    const size_t marker_position = exported.find(begin_marker, body_position + body.size());
+    REQUIRE(marker_position != std::string::npos);
+    return exported.substr(body_position + body.size(), marker_position - body_position - body.size());
+}
+
+// Snapshot every file's relative path and bytes so failed exports can prove that the reference and destination directory stayed unchanged.
+std::map<std::string, std::string> snapshot_directory(const boost::filesystem::path &root)
+{
+    std::map<std::string, std::string> snapshot;
+    for (boost::filesystem::recursive_directory_iterator it(root), end; it != end; ++it) {
+        if (!boost::filesystem::is_regular_file(it->path()))
+            continue;
+        const std::string relative_path = it->path().lexically_relative(root).generic_string();
+        snapshot.emplace(relative_path, read_binary_file(it->path()));
+    }
+    return snapshot;
+}
+
+// Initialize a small FFF print with an explicit firmware and exporter selection; processing remains the caller's choice.
+// The optional settings are applied last, so they can replace the defaults chosen here.
+void initialize_fff_print(Print &print, Model &model, const std::string &exporter_id,
+                          const std::vector<std::pair<std::string, std::string>> &settings = {})
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(1);
+    config.set_deserialize_strict({
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"binary_gcode", "1"}});
+    config.set_deserialize_strict("gcode_exporter_plugin", exporter_id);
+    for (const std::pair<std::string, std::string> &setting : settings)
+        config.set_deserialize_strict(setting.first, setting.second);
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+}
+
+class ProbeExporter final : public slic3r_api::GCodeExporterPluginBase
+{
+public:
+    // Bind the test provider to the process-wide orchestrator used by plugin tests.
+    explicit ProbeExporter(orchestrator_handle *orchestrator)
+        : GCodeExporterPluginBase(orchestrator)
+    {}
+
+private:
+    // Return the stable test exporter identity.
+    const char *id_impl() const noexcept override { return k_probe_exporter_id; }
+    // Label the provider in the generated printer selector.
+    const char *name_impl() const noexcept override { return "Exporter probe"; }
+    // Describe the test provider's selectable byte-copy behavior.
+    const char *description_impl() const noexcept override { return "Exercises G-code exporter host calls."; }
+    // Use no dependencies so selection tests isolate the exporter service.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the provider at the default selection priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+
+    // Declare one FFF setting whose host-resolved invalidation is checked by the tests.
+    int32_t used_config_keys(raw_used_config_key *keys) const noexcept override
+    {
+        if (keys != nullptr)
+            keys[0] = raw_used_config_key{
+                k_probe_option_key, RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_FFF_PRINTER};
+        return 1;
+    }
+
+    // Identify the test setting as owned by this exporter.
+    int32_t defined_config_keys(const char **keys) const noexcept override
+    {
+        if (keys != nullptr)
+            keys[0] = k_probe_option_key;
+        return 1;
+    }
+
+    // Register the printer-profile setting with a pipeline invalidation witness for host resolution.
+    void inilialize_impl(storage_handle *) const override
+    {
+        raw_config_option_def definition = raw_config_option_def_init();
+        definition.opt_key = k_probe_option_key;
+        definition.type = RAW_CO_BOOL;
+        definition.container_type = RAW_CONTAINER_TYPE_PROJECT;
+        definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+        definition.printer_technology = RAW_PT_FFF;
+        definition.invalidates_step = k_probe_option_declared_step;
+        definition.category = RAW_OPTION_CATEGORY_OUTPUT;
+        definition.label = "Test exporter option";
+        definition.tooltip = "Exercises exporter-specific profile settings.";
+        definition.mode = RAW_CONFIG_OPTION_MODE_EXPERT;
+        definition.default_serialized_value = "0";
+        if (orchestrator_create_option_def(m_orchestrator, &definition) != OPTION_DEF_ERROR_OK)
+            throw std::runtime_error("Cannot register the test G-code exporter option.");
+    }
+
+    // Read stable borrowed Print settings and record its handle and firmware identity; return the state's owned suffix, compatibility/action text and removable suitability without rendering, propagating configuration failures.
+    slic3r_api::GCodeExportQuery query_impl(const slic3r_api::Print &print, const slic3r_api::Config &, std::string_view firmware_plugin_id) const override
+    {
+        ++g_exporter_probe_state.query_count;
+        g_exporter_probe_state.query_firmware_id = std::string(firmware_plugin_id);
+        g_exporter_probe_state.query_print = print.handle();
+        g_exporter_probe_state.query_notes = print.config().get("notes").serialize();
+        slic3r_api::GCodeExportQuery query;
+        if (g_exporter_probe_state.query_mode == ProbeQueryMode::Incompatible) {
+            query.status = RAW_GCODE_EXPORT_QUERY_INCOMPATIBLE;
+            query.message = "probe exporter is incompatible";
+            return query;
+        }
+        query.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
+        query.extension = g_exporter_probe_state.extension;
+        if (g_exporter_probe_state.query_mode == ProbeQueryMode::NoRemovableMedia) {
+            query.action_label = "Export without removable media";
+            query.supports_removable_media = false;
+        }
+        return query;
+    }
+
+    // Copy borrowed metadata into probe state and publish the request destination using the state's suffix and the SDK helper; reference I/O, selected reports and cancellation propagate through the host without transferring reference ownership.
+    void export_impl(const plugin_run_context &run_context,
+                     const slic3r_api::Print &print,
+                     const slic3r_api::Config &config,
+                     std::string_view reference_path_utf8,
+                     slic3r_api::GCodeThumbnailRendererView thumbnail_renderer,
+                     const raw_gcode_export_metadata *metadata,
+                     const slic3r_api::GCodeExportResultReporter &result) const override
+    {
+        ++g_exporter_probe_state.export_count;
+        g_exporter_probe_state.export_config_selector = config.get(k_gcode_exporter_option_key).serialize();
+        g_exporter_probe_state.export_output_path = slic3r_api::gcode_export_output_path(config);
+        const slic3r_api::GCodeExportMetadataView metadata_view(metadata);
+        g_exporter_probe_state.export_configuration.clear();
+        g_exporter_probe_state.export_extrusion_widths.clear();
+        g_exporter_probe_state.export_statistics.clear();
+        g_exporter_probe_state.export_has_numeric = metadata_view.has_numeric_statistics();
+        g_exporter_probe_state.export_has_measured = metadata_view.has_measured_statistics();
+        g_exporter_probe_state.export_numeric = metadata_view.numeric_statistics();
+        g_exporter_probe_state.export_filaments.clear();
+        const slic3r_api::GCodeExportFilamentListView filaments = metadata_view.filaments();
+        for (size_t index = 0; index < filaments.size(); ++index)
+            g_exporter_probe_state.export_filaments.push_back(filaments.at(index));
+        const slic3r_api::GCodeExportMetadataListView configuration = metadata_view.configuration();
+        for (size_t index = 0; index < configuration.size(); ++index) {
+            const slic3r_api::GCodeExportMetadataEntryView entry = configuration.at(index);
+            g_exporter_probe_state.export_configuration.emplace_back(std::string(entry.key), std::string(entry.value));
+        }
+        const slic3r_api::GCodeExportMetadataListView extrusion_widths = metadata_view.extrusion_widths();
+        for (size_t index = 0; index < extrusion_widths.size(); ++index) {
+            const slic3r_api::GCodeExportMetadataEntryView entry = extrusion_widths.at(index);
+            g_exporter_probe_state.export_extrusion_widths.emplace_back(std::string(entry.key), std::string(entry.value));
+        }
+        const slic3r_api::GCodeExportMetadataListView statistics = metadata_view.statistics();
+        for (size_t index = 0; index < statistics.size(); ++index) {
+            const slic3r_api::GCodeExportMetadataEntryView entry = statistics.at(index);
+            g_exporter_probe_state.export_statistics.emplace_back(std::string(entry.key), std::string(entry.value));
+        }
+        if (g_exporter_probe_state.export_mode == ProbeExportMode::FailOpen)
+            throw std::runtime_error("probe exporter could not open its output");
+        if (g_exporter_probe_state.export_mode == ProbeExportMode::FailingEncoder) {
+            // The encoder refuses to start: the SDK reports it as an ordinary error of this export.
+            const slic3r_api::GCodeThumbnailEncoder encoder(slic3r_api::OrchestratorView(m_orchestrator), print, config,
+                                                            thumbnail_renderer.handle(), k_failing_encoder_id);
+            return;
+        }
+
+        slic3r_api::GCodeFileFormat format;
+        g_exporter_probe_state.export_output_suggestion = config.string_or_default("output_path_suggestion", "");
+        format.exporter_id = k_probe_exporter_id;
+        format.extension = g_exporter_probe_state.extension;
+        const std::string published = slic3r_api::publish_gcode_file(
+            run_context, format, g_exporter_probe_state.export_output_path, reference_path_utf8,
+            [&run_context, reference_path_utf8](std::ostream &output) {
+                return write_probe_output(run_context, reference_path_utf8, output);
+            });
+        if (!published.empty())
+            result.report(published, "Probe export");
+        if (g_exporter_probe_state.export_mode == ProbeExportMode::PublishThenCancel)
+            g_exporter_probe_state.print_to_cancel->cancel();
+    }
+
+    // Borrow the helper-owned stream, copy the reference or write the selected partial failure, then optionally tamper with the flushed sibling; report refusal with false and propagate read, write, callback, and cancellation failures.
+    static bool write_probe_output(const plugin_run_context &run_context,
+                                   std::string_view reference_path_utf8,
+                                   std::ostream &output)
+    {
+        if (g_exporter_probe_state.export_mode != ProbeExportMode::Copy &&
+            g_exporter_probe_state.export_mode != ProbeExportMode::PublishThenCancel &&
+            g_exporter_probe_state.export_mode != ProbeExportMode::TamperAfterWrite) {
+            output.write("partial", 7);
+            output.flush();
+            if (!output)
+                throw std::runtime_error("probe exporter could not flush its partial output");
+            if (g_exporter_probe_state.export_mode == ProbeExportMode::ReportErrorAfterWrite) {
+                if (run_context.report_error == nullptr)
+                    throw std::runtime_error("probe exporter has no error callback");
+                run_context.report_error(run_context.host_context, "probe exporter reports failure");
+                return false;
+            }
+            g_exporter_probe_state.print_to_cancel->cancel();
+            return true;
+        }
+
+        const std::string reference_path(reference_path_utf8);
+        boost::nowide::ifstream input(reference_path.c_str(), std::ios::in | std::ios::binary);
+        if (!input)
+            throw std::runtime_error("probe exporter could not open its reference");
+        std::vector<char> buffer(16384);
+        while (true) {
+            slic3r_api::throw_if_cancelled(&run_context);
+            input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+            const std::streamsize count = input.gcount();
+            if (count > 0)
+                output.write(buffer.data(), count);
+            if (!output || input.bad() || (input.fail() && !input.eof()))
+                throw std::runtime_error("probe exporter encountered a file error");
+            if (input.eof())
+                break;
+        }
+        output.flush();
+        if (!output)
+            throw std::runtime_error("probe exporter could not flush its output");
+        if (g_exporter_probe_state.export_mode == ProbeExportMode::TamperAfterWrite &&
+            g_exporter_probe_state.tamper_sibling_after_write)
+            g_exporter_probe_state.tamper_sibling_after_write();
+        return true;
+    }
+};
+class RawQueryExporter final : public slic3r_api::PluginBase
+{
+public:
+    // Bind the malformed-answer provider to the process-wide plugin-test orchestrator.
+    explicit RawQueryExporter(orchestrator_handle *orchestrator)
+        : PluginBase(orchestrator)
+    {}
+
+private:
+    // Return the stable raw QUERY provider identity.
+    const char *id_impl() const noexcept override { return k_raw_query_exporter_id; }
+    // Label the raw QUERY provider in the generated profile selector.
+    const char *name_impl() const noexcept override { return "Raw QUERY probe"; }
+    // Describe the provider's malformed synchronous answers.
+    const char *description_impl() const noexcept override { return "Exercises G-code exporter QUERY validation."; }
+    // Declare the same selection group as other G-code exporters.
+    const char *exclusive_group_impl() const noexcept override { return "gcode_exporter_plugin"; }
+    // Identify the provider as a G-code export service.
+    slicing_step_t step_impl() const noexcept override { return STEP_EXPORT; }
+    // Use no dependencies for the raw callback probe.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the raw provider at default priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+
+    // Read the borrowed context, record whether its generic Print is null and emit the selected owned answer; invalid fields throw, while EXPORT reports are copied by the host.
+    void run_impl(const plugin_run_context *run_context) const override
+    {
+        const run_ctx_gcode_export *context = plugin_ctx_as_gcode_export(run_context);
+        if (context != nullptr && context->operation == RAW_GCODE_EXPORT_OPERATION_EXPORT && context->report_export_result != nullptr) {
+            // Report from buffers that stay alive, overwrite them at once, then report again: the host must have copied the first
+            // report during the call and must refuse the second.
+            g_exporter_probe_state.raw_report_path = "initial path";
+            g_exporter_probe_state.raw_report_label = "initial label";
+            g_exporter_probe_state.raw_first_report_status = context->report_export_result(
+                context->result_callback_context, g_exporter_probe_state.raw_report_path.c_str(),
+                g_exporter_probe_state.raw_report_label.c_str());
+            g_exporter_probe_state.raw_report_path.assign(g_exporter_probe_state.raw_report_path.size(), 'x');
+            g_exporter_probe_state.raw_report_label.assign(g_exporter_probe_state.raw_report_label.size(), 'x');
+            g_exporter_probe_state.raw_second_report_status = context->report_export_result(
+                context->result_callback_context, g_exporter_probe_state.raw_report_path.c_str(),
+                g_exporter_probe_state.raw_report_label.c_str());
+            return;
+        }
+        if (context == nullptr || context->operation != RAW_GCODE_EXPORT_OPERATION_QUERY ||
+            context->emit_query_result == nullptr)
+            throw std::runtime_error("raw QUERY probe received an invalid context");
+        if (g_exporter_probe_state.raw_query_mode == RawQueryMode::MissingAnswer)
+            return;
+
+        g_exporter_probe_state.query_generic_print_is_null = run_context->print == nullptr;
+
+        raw_gcode_export_query_result result = {};
+        result.struct_size = sizeof(result);
+        result.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
+        result.extension = ".raw";
+        std::string action_label = "Raw export action";
+        if (g_exporter_probe_state.raw_query_mode == RawQueryMode::ActionFields ||
+            g_exporter_probe_state.raw_query_mode == RawQueryMode::Version40Prefix) {
+            result.action_label = action_label.c_str();
+            result.supports_removable_media = 0;
+        }
+
+        switch (g_exporter_probe_state.raw_query_mode) {
+        case RawQueryMode::Version40Prefix:
+            result.struct_size = uint32_t(offsetof(raw_gcode_export_query_result, message) + sizeof(result.message));
+            break;
+        case RawQueryMode::ActionFields:
+            break;
+        case RawQueryMode::RepeatedAnswer:
+            context->emit_query_result(context->query_callback_context, &result);
+            context->emit_query_result(context->query_callback_context, &result);
+            return;
+        case RawQueryMode::ShortResult:
+            result.struct_size = uint32_t(offsetof(raw_gcode_export_query_result, message) +
+                                           sizeof(result.message) - 1);
+            break;
+        case RawQueryMode::UnknownStatus:
+            result.status = static_cast<raw_gcode_export_query_status>(99);
+            break;
+        case RawQueryMode::NullExtension:
+            result.extension = nullptr;
+            break;
+        case RawQueryMode::ForwardSlashExtension:
+            result.extension = ".bad/path";
+            break;
+        case RawQueryMode::BackslashExtension:
+            result.extension = ".bad\\path";
+            break;
+        case RawQueryMode::MissingDotExtension:
+            result.extension = "invalid";
+            break;
+        case RawQueryMode::IncompatibleWithoutMessage:
+            result.status = RAW_GCODE_EXPORT_QUERY_INCOMPATIBLE;
+            result.extension = nullptr;
+            result.message = nullptr;
+            break;
+        case RawQueryMode::Valid:
+            break;
+        case RawQueryMode::MissingAnswer:
+            return;
+        }
+        context->emit_query_result(context->query_callback_context, &result);
+        action_label.assign(action_label.size(), 'x');
+    }
+};
+
+// Thumbnail encoder whose session cannot be created; it is selected only by an explicit provider ID.
+class FailingEncoder final : public slic3r_api::PluginBase
+{
+public:
+    // Bind the failing encoder to the process-wide plugin-test orchestrator.
+    explicit FailingEncoder(orchestrator_handle *orchestrator)
+        : PluginBase(orchestrator)
+    {}
+
+private:
+    // Return the stable test encoder identity.
+    const char *id_impl() const noexcept override { return k_failing_encoder_id; }
+    // Label the test encoder.
+    const char *name_impl() const noexcept override { return "Failing thumbnail encoder"; }
+    // Describe the encoder whose creation always fails.
+    const char *description_impl() const noexcept override { return "Fails when its session is created."; }
+    // Identify the provider as a thumbnail encoder service without an exclusive group.
+    slicing_step_t step_impl() const noexcept override { return GCODE_THUMBNAIL; }
+    // Use no dependencies for the failing encoder.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the provider at default priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Fail instead of publishing an encoder session.
+    void run_impl(const plugin_run_context *) const override
+    {
+        throw std::runtime_error("test encoder cannot create a session");
+    }
+};
+
+// Registered but never activated, so option finalization prunes it from the exporter selector like any inactive provider.
+class PrunedExporter final : public slic3r_api::GCodeExporterPluginBase
+{
+public:
+    // Bind the never-activated provider to the process-wide plugin-test orchestrator.
+    explicit PrunedExporter(orchestrator_handle *orchestrator)
+        : GCodeExporterPluginBase(orchestrator)
+    {}
+
+private:
+    // Return the stable identity of the inactive provider.
+    const char *id_impl() const noexcept override { return k_pruned_exporter_id; }
+    // Label the provider that is absent from the generated selector.
+    const char *name_impl() const noexcept override { return "Pruned exporter"; }
+    // Describe the provider that stays inactive for the whole run.
+    const char *description_impl() const noexcept override { return "Stays inactive to model an uninstalled exporter."; }
+    // Use no dependencies so only its inactivity matters.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the provider at the default selection priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Ignore borrowed Print/settings/firmware and return an owned compatible suffix without effects; the provider stays inactive.
+    slic3r_api::GCodeExportQuery query_impl(const slic3r_api::Print &, const slic3r_api::Config &, std::string_view) const override
+    {
+        slic3r_api::GCodeExportQuery query;
+        query.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
+        query.extension = ".pruned";
+        return query;
+    }
+    // Fail loudly if the host ever runs the inactive provider.
+    void export_impl(const plugin_run_context &, const slic3r_api::Print &, const slic3r_api::Config &,
+                     std::string_view, slic3r_api::GCodeThumbnailRendererView, const raw_gcode_export_metadata *,
+                     const slic3r_api::GCodeExportResultReporter &) const override
+    {
+        throw std::runtime_error("inactive exporter must not run");
+    }
+};
+
+// Exporter without local file: QUERY accepts without extension, and EXPORT publishes nothing on disk. It reads no
+// destination and reports, according to the test mode, nothing, a label or two results.
+class NoFileExporter final : public slic3r_api::GCodeExporterPluginBase
+{
+public:
+    // Bind the provider to the process-wide orchestrator used by plugin tests.
+    explicit NoFileExporter(orchestrator_handle *orchestrator)
+        : GCodeExporterPluginBase(orchestrator)
+    {}
+
+private:
+    // Return the stable identity of the exporter without local file.
+    const char *id_impl() const noexcept override { return k_no_file_exporter_id; }
+    // Label the provider in the generated printer selector.
+    const char *name_impl() const noexcept override { return "Exporter without file"; }
+    // Describe the provider that writes nothing locally.
+    const char *description_impl() const noexcept override { return "Publishes nothing on disk."; }
+    // Use no dependencies so selection tests isolate the exporter step.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the provider at the default selection priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+
+    // Ignore borrowed Print/settings/firmware and return owned compatibility without a suffix or side effects.
+    slic3r_api::GCodeExportQuery query_impl(const slic3r_api::Print &, const slic3r_api::Config &, std::string_view) const override
+    {
+        slic3r_api::GCodeExportQuery query;
+        query.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
+        return query;
+    }
+
+    // Record what the request held and report according to the test mode; no file is created.
+    void export_impl(const plugin_run_context &, const slic3r_api::Print &, const slic3r_api::Config &config,
+                     std::string_view, slic3r_api::GCodeThumbnailRendererView, const raw_gcode_export_metadata *,
+                     const slic3r_api::GCodeExportResultReporter &result) const override
+    {
+        ++g_exporter_probe_state.no_file_export_count;
+        g_exporter_probe_state.no_file_saw_output_path = config.has("output_path");
+        if (g_exporter_probe_state.no_file_mode == NoFileMode::ReportLabel) {
+            // The host copies the text during the call: overwriting the buffer afterwards must not change what it kept.
+            std::string label = "Sent to the printer";
+            result.report(std::string_view(), label);
+            label.assign(label.size(), 'x');
+        } else if (g_exporter_probe_state.no_file_mode == NoFileMode::ReportTwice) {
+            result.report(std::string_view(), "first report");
+            result.report(std::string_view(), "second report");
+        }
+    }
+};
+
+constexpr const char *k_inputs_exporter_id = "test.gcode.exporter.inputs";
+constexpr const char *k_raw_inputs_exporter_id = "test.gcode.exporter.raw_inputs";
+constexpr const char *k_input_note_key = "test.export.note";
+constexpr const char *k_input_flag_key = "test.export.flag";
+// A key of the catalogue that the requests hold: the exporter asks for it to have it confirmed.
+constexpr const char *k_input_existing_key = "notes";
+
+// What the exporter asks for: its three inputs, or one definition that the host has to refuse.
+enum class InputsMode { Standard, EmptyKey, BadDefault, BadGuiType, WrongType, BadGraph, DomainUnregistered, List, RepeatedKey, Point3 };
+// What the raw exporter does with the answer of the host: ignore a refusal, or ask a second time.
+enum class RawInputsMode { IgnoreStop, AskTwice };
+
+struct InputsState
+{
+    InputsMode mode = InputsMode::Standard;
+    RawInputsMode raw_mode = RawInputsMode::IgnoreStop;
+    // EXPORT runs of the C++ exporter, and what its run read from the configuration of the request.
+    size_t export_count = 0;
+    bool saw_note = false;
+    std::string note;
+    std::string flag;
+    std::string existing;
+    std::string suggestion;
+    std::vector<std::pair<std::string, std::string>> configuration;
+    // Runs of the raw exporter, and the answers its two requests got.
+    size_t raw_run_count = 0;
+    int32_t raw_first_status = -1;
+    int32_t raw_second_status = -1;
+};
+
+InputsState g_inputs_state;
+
+// Fill one definition of an input; the strings are literals, valid for the whole process.
+raw_config_option_def make_input_definition(const char *key, raw_config_option_type type, const char *label,
+                                            const char *default_value)
+{
+    raw_config_option_def definition = raw_config_option_def_init();
+    definition.opt_key = key;
+    definition.type = type;
+    definition.container_type = RAW_CONTAINER_TYPE_PLATER;
+    definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINTER;
+    definition.printer_technology = RAW_PT_FFF;
+    definition.label = label;
+    definition.default_serialized_value = default_value;
+    return definition;
+}
+
+// Exporter that asks for inputs while it sets up, then copies the reference to the destination of the request and records
+// the settings it reads in run.
+class InputsExporter final : public slic3r_api::GCodeExporterPluginBase
+{
+public:
+    // Bind the provider to the process-wide orchestrator used by plugin tests.
+    explicit InputsExporter(orchestrator_handle *orchestrator)
+        : GCodeExporterPluginBase(orchestrator)
+    {}
+
+private:
+    // Return the stable identity of the provider that asks for inputs.
+    const char *id_impl() const noexcept override { return k_inputs_exporter_id; }
+    // Label the provider in the generated printer selector.
+    const char *name_impl() const noexcept override { return "Exporter with inputs"; }
+    // Describe the provider that asks its requester for values.
+    const char *description_impl() const noexcept override { return "Asks for inputs before it exports."; }
+    // Use no dependencies so selection tests isolate the exporter step.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the provider at the default selection priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+
+    // Accept every configuration and offer the .inputs suffix.
+    slic3r_api::GCodeExportQuery query_impl(const slic3r_api::Print &, const slic3r_api::Config &, std::string_view) const override
+    {
+        slic3r_api::GCodeExportQuery query;
+        query.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
+        query.extension = ".inputs";
+        return query;
+    }
+
+    // Declare the inputs of the active test mode.
+    void input_definitions(const slic3r_api::Config &, std::vector<raw_config_option_def> &definitions) const override
+    {
+        switch (g_inputs_state.mode) {
+        case InputsMode::Standard: {
+            raw_config_option_def note = make_input_definition(k_input_note_key, RAW_CO_STRING, "Export note", "default note");
+            note.tooltip = "Where the note goes";
+            note.gui_type = RAW_GUI_TYPE_SAVE_PATH;
+            note.sidetext = "Notes (*.txt)|*.txt";
+            definitions.push_back(note);
+            definitions.push_back(make_input_definition(k_input_flag_key, RAW_CO_BOOL, "Export flag", "0"));
+            definitions.push_back(make_input_definition(k_input_existing_key, RAW_CO_STRING, "Notes of the export", "fallback notes"));
+            break;
+        }
+        case InputsMode::EmptyKey:
+            definitions.push_back(make_input_definition("", RAW_CO_STRING, "Empty key", "x"));
+            break;
+        case InputsMode::BadDefault:
+            definitions.push_back(make_input_definition("test.export.bad_default", RAW_CO_INT, "Bad default", "abc"));
+            break;
+        case InputsMode::BadGuiType: {
+            raw_config_option_def bad = make_input_definition("test.export.bad_gui", RAW_CO_STRING, "Bad GUI type", "x");
+            bad.gui_type = static_cast<raw_gui_type>(77);
+            definitions.push_back(bad);
+            break;
+        }
+        case InputsMode::WrongType:
+            definitions.push_back(make_input_definition(k_input_existing_key, RAW_CO_BOOL, "Wrong type", "0"));
+            break;
+        case InputsMode::BadGraph: {
+            // Graph settings only belong to graph options: this string option carries some.
+            static const raw_graph_settings no_graph = {};
+            raw_config_option_def bad = make_input_definition("test.export.bad_graph", RAW_CO_STRING, "Bad graph", "x");
+            bad.graph_settings = &no_graph;
+            definitions.push_back(bad);
+            break;
+        }
+        case InputsMode::DomainUnregistered: {
+            raw_config_option_def domain = make_input_definition("test.export.domain", RAW_CO_STRING, "Domain", "x");
+            domain.translation_domain = "test.unregistered.domain";
+            definitions.push_back(domain);
+            break;
+        }
+        case InputsMode::List:
+            definitions.push_back(make_input_definition("test.export.list", RAW_CO_VECTOR_STRING, "List", "a;b"));
+            break;
+        case InputsMode::Point3:
+            definitions.push_back(make_input_definition("test.export.point3", RAW_CO_POINT3, "Point", "0,0,0"));
+            break;
+        case InputsMode::RepeatedKey:
+            definitions.push_back(make_input_definition("test.export.twice", RAW_CO_STRING, "First", "x"));
+            definitions.push_back(make_input_definition("test.export.twice", RAW_CO_STRING, "Second", "y"));
+            break;
+        }
+    }
+
+    // Copy borrowed input values and metadata into test state, stream the borrowed reference into the helper-owned sibling, and report its path; I/O and publisher failures propagate.
+    void export_impl(const plugin_run_context &run_context,
+                     const slic3r_api::Print &,
+                     const slic3r_api::Config &config,
+                     std::string_view reference_path_utf8,
+                     slic3r_api::GCodeThumbnailRendererView,
+                     const raw_gcode_export_metadata *metadata,
+                     const slic3r_api::GCodeExportResultReporter &result) const override
+    {
+        ++g_inputs_state.export_count;
+        g_inputs_state.saw_note = config.has(k_input_note_key);
+        g_inputs_state.note = g_inputs_state.saw_note ? config.get(k_input_note_key).get_string() : std::string();
+        g_inputs_state.flag = config.has(k_input_flag_key) ? config.get(k_input_flag_key).serialize() : std::string();
+        g_inputs_state.existing = config.has(k_input_existing_key) ? config.get(k_input_existing_key).get_string() : std::string();
+        g_inputs_state.suggestion = config.has("output_path_suggestion") ? config.get("output_path_suggestion").get_string() : std::string();
+        g_inputs_state.configuration.clear();
+        const slic3r_api::GCodeExportMetadataView metadata_view(metadata);
+        const slic3r_api::GCodeExportMetadataListView entries = metadata_view.configuration();
+        for (size_t index = 0; index < entries.size(); ++index) {
+            const slic3r_api::GCodeExportMetadataEntryView entry = entries.at(index);
+            g_inputs_state.configuration.emplace_back(std::string(entry.key), std::string(entry.value));
+        }
+
+        slic3r_api::GCodeFileFormat format;
+        format.exporter_id = k_inputs_exporter_id;
+        format.extension = ".inputs";
+        const std::string reference(reference_path_utf8);
+        const std::string published = slic3r_api::publish_gcode_file(
+            run_context, format, slic3r_api::gcode_export_output_path(config), reference_path_utf8,
+            [&reference](std::ostream &output) {
+                boost::nowide::ifstream input(reference.c_str(), std::ios::in | std::ios::binary);
+                if (!input)
+                    throw std::runtime_error("inputs exporter could not open its reference");
+                std::vector<char> buffer(16384);
+                while (true) {
+                    input.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+                    const std::streamsize count = input.gcount();
+                    if (count > 0)
+                        output.write(buffer.data(), count);
+                    if (!output || input.bad() || (input.fail() && !input.eof()))
+                        throw std::runtime_error("inputs exporter encountered a file error");
+                    if (input.eof())
+                        break;
+                }
+                return true;
+            });
+        if (!published.empty())
+            result.report(published, "Inputs export");
+    }
+};
+
+// Raw exporter that asks for one input in its setup_run and does not stop when the host says so: the host must not run it.
+class RawInputsExporter final : public slic3r_api::PluginBase
+{
+public:
+    // Bind the provider to the process-wide orchestrator used by plugin tests.
+    explicit RawInputsExporter(orchestrator_handle *orchestrator)
+        : PluginBase(orchestrator)
+    {}
+
+private:
+    // Return the stable identity of the raw provider.
+    const char *id_impl() const noexcept override { return k_raw_inputs_exporter_id; }
+    // Label the provider in the generated printer selector.
+    const char *name_impl() const noexcept override { return "Raw exporter with inputs"; }
+    // Describe the provider that ignores the answer of the host.
+    const char *description_impl() const noexcept override { return "Asks for an input and ignores a refusal."; }
+    // Declare the same selection group as other G-code exporters.
+    const char *exclusive_group_impl() const noexcept override { return "gcode_exporter_plugin"; }
+    // Identify the provider as an exporter.
+    slicing_step_t step_impl() const noexcept override { return STEP_EXPORT; }
+    // Use no dependencies for the raw provider.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the raw provider at default priority.
+    int32_t priority_impl() const noexcept override { return 0; }
+
+    // Ask for the input in EXPORT, once or twice, keep the answers and never stop.
+    void setup_run_impl(const plugin_run_context *run_context) const override
+    {
+        const run_ctx_gcode_export *context = plugin_ctx_as_gcode_export(run_context);
+        if (context == nullptr || context->operation != RAW_GCODE_EXPORT_OPERATION_EXPORT)
+            return;
+        const raw_config_option_def note = make_input_definition(k_input_note_key, RAW_CO_STRING, "Raw note", "raw default");
+        g_inputs_state.raw_first_status = context->request_export_inputs(context->input_callback_context, &note, 1);
+        if (g_inputs_state.raw_mode == RawInputsMode::AskTwice)
+            g_inputs_state.raw_second_status = context->request_export_inputs(context->input_callback_context, &note, 1);
+    }
+
+    // Answer QUERY with the .raw2 suffix; in EXPORT only count the run (it must not happen after a refusal).
+    void run_impl(const plugin_run_context *run_context) const override
+    {
+        const run_ctx_gcode_export *context = plugin_ctx_as_gcode_export(run_context);
+        if (context == nullptr)
+            throw std::runtime_error("raw inputs exporter received no context");
+        if (context->operation == RAW_GCODE_EXPORT_OPERATION_EXPORT) {
+            ++g_inputs_state.raw_run_count;
+            return;
+        }
+        raw_gcode_export_query_result result = {};
+        result.struct_size = sizeof(result);
+        result.status = RAW_GCODE_EXPORT_QUERY_COMPATIBLE;
+        result.extension = ".raw2";
+        context->emit_query_result(context->query_callback_context, &result);
+    }
+};} // namespace
+
+namespace Slic3r::Test::Plugins {
+
+// Register process-lived exporters and the optional isolated PNG capability probe before selector construction; the host borrows provider instances and registration failures throw.
+void register_gcode_exporter_test_providers(orchestrator_handle *orchestrator_handle_value)
+{
+    if (std::getenv("SLIC3R_TEST_BAMBU_TEXT_ONLY_PNG") != nullptr)
+        register_text_only_png_capability_provider(orchestrator_handle_value);
+    Orchestrator &orchestrator = *reinterpret_cast<Orchestrator *>(orchestrator_handle_value);
+    static ProbeExporter probe(orchestrator_handle_value);
+    static RawQueryExporter raw_query(orchestrator_handle_value);
+    static PrunedExporter pruned(orchestrator_handle_value);
+    static NoFileExporter no_file(orchestrator_handle_value);
+    static InputsExporter inputs(orchestrator_handle_value);
+    static RawInputsExporter raw_inputs(orchestrator_handle_value);
+    static FailingEncoder failing_encoder(orchestrator_handle_value);
+    if (!orchestrator.register_plugin(probe.c_instance()) ||
+        !orchestrator.register_plugin(raw_query.c_instance()) ||
+        !orchestrator.register_plugin(pruned.c_instance()) ||
+        !orchestrator.register_plugin(no_file.c_instance()) ||
+        !orchestrator.register_plugin(inputs.c_instance()) ||
+        !orchestrator.register_plugin(raw_inputs.c_instance()) ||
+        !orchestrator.register_plugin(failing_encoder.c_instance()))
+        throw std::runtime_error("Cannot register G-code exporter test providers.");
+}
+
+} // namespace Slic3r::Test::Plugins
+
+// Initialize the process-owned plugin runtime, inspect its active built-in exporters by ID without relying on order, then check selection and printer-layout wiring; Catch reports mismatches and the runtime remains initialized.
+TEST_CASE("G-code exporter is the visible FFF profile service", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+
+    CHECK(STEP_EXPORT == 2100);
+    CHECK(SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT == 59);
+    const ConfigOptionDef *selector = PrintConfigDef::instance().get("gcode_exporter_plugin");
+    REQUIRE(selector != nullptr);
+    CHECK(selector->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+    CHECK(selector->invalidates_step == STEP_NONE);
+    CHECK(static_cast<bool>(selector->default_value));
+    CHECK(selector->default_value->serialize() == "gcode.exporter.simple");
+
+    const std::vector<Plugin *> active = orchestrator.get_active_plugins_for_step(STEP_EXPORT);
+    REQUIRE(active.size() == 3);
+    for (const Plugin *plugin : active) {
+        CHECK(plugin->get_priority() == 0);
+        if (plugin->get_id() == "gcode.exporter.bambu3mf")
+            CHECK(plugin->get_exclusive_group_priority() == 110);
+    }
+    CHECK(std::any_of(active.begin(), active.end(), [](const Plugin *plugin) {
+        return plugin->get_id() == "gcode.exporter.bambu3mf";
+    }));
+    CHECK(std::any_of(active.begin(), active.end(), [](const Plugin *plugin) {
+        return plugin->get_id() == "gcode.exporter.simple";
+    }));
+    CHECK(std::any_of(active.begin(), active.end(), [](const Plugin *plugin) {
+        return plugin->get_id() == "gcode.exporter.bgcode";
+    }));
+    Print print;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selection.plugin_id == "gcode.exporter.simple");
+    CHECK(selection.extension == ".gcode");
+    CHECK(selection.action_label == "Export G-code");
+    CHECK(selection.supports_removable_media);
+
+    plugin_run_context no_context = {};
+    CHECK(plugin_ctx_as_gcode_export(nullptr) == nullptr);
+    CHECK(plugin_ctx_as_gcode_export(&no_context) == nullptr);
+    int payload_marker = 0;
+    no_context.step = GCODE_READER;
+    no_context.data = &payload_marker;
+    CHECK(plugin_ctx_as_gcode_export(&no_context) == nullptr);
+    no_context.step = STEP_EXPORT;
+    CHECK(plugin_ctx_as_gcode_export(&no_context) != nullptr);
+
+    bool found_selector_fragment = false;
+    for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file("printer_fff.ui")) {
+        if (fragment.fragment_id == "gcode_exporter_plugin") {
+            found_selector_fragment = true;
+            CHECK(fragment.content.find("insert$aftersetting$gcode_firmware_plugin:gcode_exporter_plugin") !=
+                  std::string::npos);
+        }
+    }
+    CHECK(found_selector_fragment);
+    const std::string merged_layout = orchestrator.merged_ui_layout(
+        "printer_fff.ui",
+        "page:General:printer\n"
+        "group:Firmware\n"
+        "\tsetting:gcode_firmware_plugin\n"
+        "\tsetting:gcode_flavor\n");
+    const size_t firmware_position = merged_layout.find("setting:gcode_firmware_plugin");
+    const size_t exporter_position = merged_layout.find("setting:gcode_exporter_plugin");
+    const size_t flavor_position = merged_layout.find("setting:gcode_flavor");
+    CHECK(merged_layout.find("setting:step_gcode_plugin") == std::string::npos);
+    REQUIRE(firmware_position != std::string::npos);
+    REQUIRE(exporter_position != std::string::npos);
+    REQUIRE(flavor_position != std::string::npos);
+    CHECK(firmware_position < exporter_position);
+    CHECK(exporter_position < flavor_position);
+    for (const Orchestrator::PluginUiFragment &fragment : orchestrator.ui_fragments_for_file("print.ui"))
+        CHECK(fragment.fragment_id != "gcode_exporter_plugin");
+}
+
+// Preserve the generated reference prefix while appending more than one copy buffer, compare every output byte, and distinguish output-setting changes from G-code invalidation.
+TEST_CASE("G-code export copies the reference without rerunning slicing", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    print.process();
+
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    const boost::filesystem::path first_target = directory.path() / "piece";
+    const boost::filesystem::path second_target = directory.path() / "piece.gco";
+    const boost::filesystem::path third_target = directory.path() / "piece.g";
+    CHECK(orchestrator.export_gcode(print, reference.string(), nullptr) == reference.string());
+    std::string expected = read_binary_file(reference);
+    const size_t generated_size = expected.size();
+    expected.resize(generated_size + 128 * 1024 + 19);
+    for (size_t idx = generated_size; idx < expected.size(); ++idx)
+        expected[idx] = static_cast<char>((idx * 37u) & 0xffu);
+    write_binary_file(reference, expected);
+
+    REQUIRE(print.is_step_done(STEP_GCODE));
+    const size_t gcode_timestamp = print.step_state_with_timestamp(STEP_GCODE).timestamp;
+    // The sentinel survives only if no export rereads the reference into the print statistics.
+    const double sentinel_volume = 4242.5;
+    print.print_statistics().total_extruded_volume = sentinel_volume;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::string first_path = Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), first_target.string(), selection);
+    const std::string second_path = Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), second_target.string(), selection);
+
+    CHECK(first_path == (directory.path() / "piece.gcode").string());
+    CHECK(second_path == second_target.string());
+    expect_simple_export(read_binary_file(boost::filesystem::path(first_path)), expected);
+    expect_simple_export(read_binary_file(second_target), expected);
+    CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), third_target.string(), selection) == third_target.string());
+    expect_simple_export(read_binary_file(third_target), expected);
+    CHECK(read_binary_file(reference) == expected);
+    const boost::filesystem::path unsupported_target = directory.path() / "wrong.bgcode";
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), unsupported_target.string(), selection),
+                      "The G-code exporter 'gcode.exporter.simple' does not support the destination extension '.bgcode'.");
+    CHECK_FALSE(boost::filesystem::exists(unsupported_target));
+    CHECK(print.is_step_done(STEP_GCODE));
+    CHECK(print.step_state_with_timestamp(STEP_GCODE).timestamp == gcode_timestamp);
+    CHECK(print.print_statistics().total_extruded_volume == sentinel_volume);
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+
+    {
+        ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+        DynamicPrintConfig exporter_config = print.full_print_config();
+        exporter_config.set_deserialize_strict("gcode_exporter_plugin", k_probe_exporter_id);
+        exporter_config.set_deserialize_strict(k_probe_option_key, "1");
+        CHECK(print.apply(model, exporter_config) == PrintBase::APPLY_STATUS_CHANGED);
+        // The new values must really be in the Print, not just accepted.
+        const ConfigOption *applied_selector = print.full_print_config().option(k_gcode_exporter_option_key);
+        REQUIRE(applied_selector != nullptr);
+        CHECK(applied_selector->serialize() == k_probe_exporter_id);
+        const ConfigOption *applied_option = print.full_print_config().option(k_probe_option_key);
+        REQUIRE(applied_option != nullptr);
+        CHECK(applied_option->serialize() == "1");
+        CHECK(print.is_step_done(STEP_GCODE));
+
+        DynamicPrintConfig firmware_config = print.full_print_config();
+        firmware_config.set_deserialize_strict("gcode_exporter_plugin", "gcode.exporter.simple");
+        firmware_config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.prusa");
+        CHECK(print.apply(model, firmware_config) == PrintBase::APPLY_STATUS_INVALIDATED);
+        CHECK_FALSE(print.is_step_done(STEP_GCODE));
+    }
+}
+
+// Verify partial report_error, cancellation, and incompatible QUERY preserve complete source/destination snapshots and allow a later successful export.
+TEST_CASE("G-code export failures preserve files and do not poison later calls", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    const boost::filesystem::path destination = directory.path() / "final.probe";
+    write_binary_file(reference, std::string("reference bytes\0with tail", 25));
+    write_binary_file(destination, "old destination bytes");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    REQUIRE(selection.plugin_id == k_probe_exporter_id);
+    REQUIRE(selection.extension == ".probe");
+
+    const boost::filesystem::path missing_reference = directory.path() / "missing.gcode";
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), missing_reference.string(), destination.string(), selection));
+    CHECK(snapshot_directory(directory.path()) == original_files);
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), destination.string(), selection) == destination.string());
+    CHECK(read_binary_file(destination) == read_binary_file(reference));
+    write_binary_file(destination, "old destination bytes");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+
+    g_exporter_probe_state.export_mode = ProbeExportMode::FailOpen;
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), destination.string(), selection),
+                      "probe exporter could not open its output");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+
+    g_exporter_probe_state.export_mode = ProbeExportMode::ReportErrorAfterWrite;
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), destination.string(), selection),
+                      "probe exporter reports failure");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), destination.string(), selection) == destination.string());
+    CHECK(read_binary_file(destination) == read_binary_file(reference));
+    write_binary_file(destination, "old destination bytes");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+
+    // The user cancels the Print while the exporter runs; the global plugin flag is never raised.
+    g_exporter_probe_state.export_mode = ProbeExportMode::CancelAfterWrite;
+    g_exporter_probe_state.print_to_cancel = &print;
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), destination.string(), selection),
+                      "G-code export was cancelled.");
+    g_exporter_probe_state.print_to_cancel = nullptr;
+    print.restart();
+    CHECK(snapshot_directory(directory.path()) == original_files);
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), destination.string(), selection) == destination.string());
+    CHECK(read_binary_file(destination) == read_binary_file(reference));
+    write_binary_file(destination, "old destination bytes");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+
+    // An exporter that QUERY refuses is rejected by the selection that precedes every export; nothing is exported.
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Incompatible;
+    const size_t exports_before_refusal = g_exporter_probe_state.export_count;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "probe exporter is incompatible");
+    CHECK(g_exporter_probe_state.export_count == exports_before_refusal);
+    CHECK(snapshot_directory(directory.path()) == original_files);
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(), destination.string(), selection) == destination.string());
+    CHECK(read_binary_file(destination) == read_binary_file(reference));
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+}
+
+// Exercise CLI destination resolution for automatic, directory and explicit paths while keeping every artifact below the test directory.
+TEST_CASE("CLI G-code export publishes the requested exporter extension", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    model.objects().front().name = (directory.path() / "auto-name.stl").string();
+    CHECK(print.apply(model, print.full_print_config()) != PrintBase::APPLY_STATUS_INVALIDATED);
+    print.process();
+
+    const std::string automatic_path = Orchestrator::instance().export_gcode_cli(print, std::string());
+    const boost::filesystem::path automatic_file(automatic_path);
+    CHECK(automatic_file.parent_path() == directory.path());
+    CHECK(automatic_file.extension().string() == ".gcode");
+    const std::string expected = read_binary_file(automatic_file);
+    // The exported file adds one versioned prefix and filtered trailer around the writer reference; the CLI rereads its
+    // reference, so a statistics block sits between the reference and the configuration.
+    const boost::filesystem::path direct_reference = directory.path() / "direct-reference.gcode";
+    Orchestrator::instance().export_gcode(print, direct_reference.string(), nullptr);
+    const std::string direct_body = read_binary_file(direct_reference);
+    const std::string statistics_block = text_between_body_and_configuration(expected, direct_body);
+    std::string first_bad_line;
+    REQUIRE_FALSE(statistics_block.empty());
+    CHECK_MESSAGE(Slic3r::Test::Plugins::GCodeExportTest::is_statistics_block(statistics_block, first_bad_line),
+                  "Malformed statistics line: " << first_bad_line);
+    expect_simple_export(expected, direct_body + statistics_block);
+
+    const boost::filesystem::path output_directory = directory.path() / "café output";
+    boost::filesystem::create_directories(output_directory);
+    const std::string directory_path = Orchestrator::instance().export_gcode_cli(print, output_directory.string());
+    CHECK(boost::filesystem::path(directory_path).parent_path() == output_directory);
+    CHECK(read_binary_file(boost::filesystem::path(directory_path)) == expected);
+
+    const boost::filesystem::path explicit_path = directory.path() / "café piece.gcode";
+    const std::string explicit_export = Orchestrator::instance().export_gcode_cli(print, explicit_path.string());
+    CHECK(explicit_export == explicit_path.string());
+    CHECK(read_binary_file(explicit_path) == expected);
+
+    const boost::filesystem::path suffixless_path = directory.path() / "café suffixless";
+    const boost::filesystem::path suffixless_expected = suffixless_path.parent_path() /
+        boost::filesystem::path(suffixless_path.filename().string() + ".gcode");
+    const std::string suffixless_export = Orchestrator::instance().export_gcode_cli(print, suffixless_path.string());
+    CHECK(suffixless_export == suffixless_expected.string());
+    CHECK(read_binary_file(suffixless_expected) == expected);
+
+    const std::map<std::string, std::string> files_before_rejection = snapshot_directory(directory.path());
+    const boost::filesystem::path unsupported_path = directory.path() / "unsupported.bgcode";
+    CHECK_THROWS_WITH(Orchestrator::instance().export_gcode_cli(print, unsupported_path.string()),
+                      "The G-code exporter 'gcode.exporter.simple' does not support the destination extension '.bgcode'.");
+    CHECK(snapshot_directory(directory.path()) == files_before_rejection);
+
+    const std::map<std::string, std::string> files = snapshot_directory(directory.path());
+    for (const std::pair<const std::string, std::string> &file : files)
+        CHECK(file.first.find(".slic3r-cli-reference-") == std::string::npos);
+}
+
+// Select the raw provider with complete action fields; its overwritten source buffer must not affect the owned label, and its explicit false suitability must survive capture. Selection failures propagate.
+TEST_CASE("Exporter QUERY copies complete action fields", "[plugins][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation raw_query(orchestrator, k_raw_query_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_raw_query_exporter_id);
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::ActionFields;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selection.action_label == "Raw export action");
+    CHECK_FALSE(selection.supports_removable_media);
+}
+
+// Supply a 4.0 prefix with readable but excluded sentinel tail fields; the host must ignore both sentinels and return owned default action information without exporting.
+TEST_CASE("Exporter QUERY ignores action fields outside its size", "[plugins][exporter][export-contract][abi]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation raw_query(orchestrator, k_raw_query_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_raw_query_exporter_id);
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::Version40Prefix;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selection.action_label.empty());
+    CHECK(selection.supports_removable_media);
+}
+
+// Query the SDK provider that leaves action information unset; the SDK's default must survive its C adapter and host capture without modifying the borrowed Print.
+TEST_CASE("Exporter SDK defaults to removable media support", "[plugins][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selection.action_label.empty());
+    CHECK(selection.supports_removable_media);
+}
+
+// Query the SDK provider with removable export explicitly refused and owned action text; both fields must survive the synchronous C adapter and host capture without modifying the borrowed Print.
+TEST_CASE("Exporter SDK preserves explicit removable media refusal", "[plugins][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    g_exporter_probe_state.query_mode = ProbeQueryMode::NoRemovableMedia;
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    CHECK_FALSE(selection.supports_removable_media);
+    CHECK(selection.action_label == "Export without removable media");
+}
+
+// Reject absent/repeated callbacks, short results, unsupported statuses, and invalid compatibility fields before any output action.
+TEST_CASE("G-code exporter QUERY rejects malformed synchronous answers", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation raw_query(orchestrator, k_raw_query_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_raw_query_exporter_id);
+    ScopedTestDirectory directory;
+    const std::map<std::string, std::string> files_before = snapshot_directory(directory.path());
+    const size_t exports_before = g_exporter_probe_state.export_count;
+
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::MissingAnswer;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY did not return a result.");
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::RepeatedAnswer;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY returned more than one result.");
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::ShortResult;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()),
+                      "G-code exporter QUERY result is smaller than the minimum prefix (through message).");
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::UnknownStatus;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY returned an unknown status.");
+    // The extension is optional: an exporter without local file answers without one.
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::NullExtension;
+    Orchestrator::GCodeExporterSelection file_less_selection;
+    REQUIRE_NOTHROW(file_less_selection = orchestrator.select_gcode_exporter(print, print.full_print_config()));
+    CHECK(file_less_selection.plugin_id == k_raw_query_exporter_id);
+    CHECK(file_less_selection.extension.empty());
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::ForwardSlashExtension;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY returned an invalid extension.");
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::BackslashExtension;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY returned an invalid extension.");
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::MissingDotExtension;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()), "G-code exporter QUERY returned an invalid extension.");
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::IncompatibleWithoutMessage;
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()),
+                      "G-code exporter QUERY incompatibility has no message.");
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+    // QUERY never reaches EXPORT and never creates a file.
+    CHECK(g_exporter_probe_state.export_count == exports_before);
+    CHECK(snapshot_directory(directory.path()) == files_before);
+}
+
+// Parse a manifest that requires the given headers and tell whether the host accepts it.
+static bool manifest_is_compatible(const std::string &abi_lines)
+{
+    PluginPackageMetadata metadata;
+    std::string error;
+    REQUIRE(parse_plugin_package_metadata(
+        "[plugin]\npackage_version=1.0.0\nslicer_version=1.0.0\n[abi]\nslic3r_plugin_types.h=4.1\n" + abi_lines,
+        metadata, error));
+    return metadata.compatibility.compatible();
+}
+
+// Selection lends the requested Print even after cancellation, while execution has no generic Print; the SDK refuses a missing payload Print before invoking the provider.
+TEST_CASE("Exporter QUERY borrows the Print only through its payload", "[plugins][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id, {{"notes", "QUERY Print sentinel"}});
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    SECTION("Selection lends a cancelled Print without cancelling QUERY") {
+        print.cancel();
+        REQUIRE_NOTHROW(orchestrator.select_gcode_exporter(print, print.full_print_config()));
+        CHECK(g_exporter_probe_state.query_print == reinterpret_cast<const print_handle *>(&print));
+        CHECK(g_exporter_probe_state.query_notes == "QUERY Print sentinel");
+    }
+    SECTION("The generic execution context has no Print") {
+        ScopedPluginActivation raw(orchestrator, k_raw_query_exporter_id);
+        DynamicPrintConfig raw_config = print.full_print_config();
+        raw_config.set_deserialize_strict(k_gcode_exporter_option_key, k_raw_query_exporter_id);
+        g_exporter_probe_state.raw_query_mode = RawQueryMode::Valid;
+        g_exporter_probe_state.query_generic_print_is_null = false;
+        REQUIRE_NOTHROW(orchestrator.select_gcode_exporter(print, raw_config));
+        CHECK(g_exporter_probe_state.query_generic_print_is_null);
+    }
+    SECTION("The SDK rejects a null payload Print before invoking the provider") {
+        run_ctx_gcode_export context = {};
+        context.operation = RAW_GCODE_EXPORT_OPERATION_QUERY;
+        context.config = ApiHost::to_config_handle(&print.full_print_config());
+        context.firmware_plugin_id = "gcode.firmware.marlin2";
+        size_t answers = 0;
+        context.query_callback_context = &answers;
+        // Count accepted answers without retaining the borrowed result.
+        context.emit_query_result = [](void *count, const raw_gcode_export_query_result *) { ++*static_cast<size_t *>(count); };
+        raw_plugin_run_payload payload = {};
+        payload.data = &context;
+        std::string error;
+        const size_t queries_before = g_exporter_probe_state.query_count;
+        REQUIRE(orchestrator.execute_plugin(*orchestrator.get_plugin(k_probe_exporter_id), nullptr,
+                                            &payload, 1, false, &error) == RAW_PLUGIN_EXECUTION_PLUGIN_ERROR);
+        CHECK(error == "G-code exporter QUERY received invalid operation fields.");
+        CHECK(answers == 0);
+        CHECK(g_exporter_probe_state.query_count == queries_before);
+    }
+}
+
+// The ABI registry exposes exporter 4.2 (4.0 and 4.1 packages accepted), with optional action information, numeric export statistics and a required Print in QUERY, and rejects earlier majors and unsupported minors.
+TEST_CASE("G-code exporter header is part of the plugin ABI registry", "[plugins][gcode][exporter][abi][export-contract]")
+{
+    const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
+    REQUIRE(host.size() > size_t(SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT));
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].header == "steps/slic3r_step_gcode_export.h");
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.major == 4);
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT].version.minor == 2);
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.0\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.1\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=3.2\n"));
+
+    // The path types of the configuration definitions were appended after the former last value, in the C and C++ enums.
+    REQUIRE(host.size() > size_t(SLIC3R_PLUGIN_API_CONFIG_DEF));
+    CHECK(host[SLIC3R_PLUGIN_API_CONFIG_DEF].version.major == 1);
+    CHECK(host[SLIC3R_PLUGIN_API_CONFIG_DEF].version.minor == 6);
+    CHECK(manifest_is_compatible("slic3r_config_def.h=1.5\n"));
+    CHECK(manifest_is_compatible("slic3r_config_def.h=1.6\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_config_def.h=1.7\n"));
+    CHECK(int(RAW_GUI_TYPE_SELECT_CLOSE) == 7);
+    CHECK(int(RAW_GUI_TYPE_SAVE_PATH) == 8);
+    CHECK(int(RAW_GUI_TYPE_OPEN_PATH) == 9);
+    CHECK(int(ConfigOptionDef::GUIType::select_close) == 7);
+    CHECK(int(ConfigOptionDef::GUIType::save_path) == 8);
+    CHECK(int(ConfigOptionDef::GUIType::open_path) == 9);
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=2.2\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=2.0\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=1.0\n"));
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.0\n"));
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.1\n"));
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.2\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_export.h=4.3\n"));
+
+    // The step list lost the former service value and gained a minor version, so other step plugins are not refused.
+    CHECK(SLIC3R_PLUGIN_API_SLICING_STEP_MAJOR == 2);
+    CHECK(SLIC3R_PLUGIN_API_SLICING_STEP_MINOR == 4);
+    CHECK(manifest_is_compatible("slic3r_slicing_step.h=2.3\n"));
+    CHECK(manifest_is_compatible("slic3r_slicing_step.h=2.4\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_slicing_step.h=2.5\n"));
+    // The firmware context lost its renderer: only a 6.x manifest is accepted.
+    CHECK(SLIC3R_PLUGIN_API_STEP_GCODE_FIRMWARE_MAJOR == 6);
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_firmware.h=6.0\n"));
+    CHECK_FALSE(manifest_is_compatible("steps/slic3r_step_gcode_firmware.h=5.0\n"));
+    // The firmware table kept its layout and gained comments only, so a writer built against 6.0 still loads.
+    CHECK(SLIC3R_PLUGIN_API_GCODE_FIRMWARE_MAJOR == 6);
+    CHECK(SLIC3R_PLUGIN_API_GCODE_FIRMWARE_MINOR == 1);
+    CHECK(manifest_is_compatible("slic3r_gcode_firmware.h=6.0\n"));
+    CHECK(manifest_is_compatible("slic3r_gcode_firmware.h=6.1\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_gcode_firmware.h=7.0\n"));
+}
+
+// The thumbnail service is at 2.0 because its encoder table grew after a size check that refuses shorter tables: a package built
+// against 1.0 is refused, while the context header, whose layout did not change, stays at 1.0.
+TEST_CASE("The thumbnail service header is at 2.0 in the plugin ABI registry",
+          "[plugins][gcode][thumbnails][abi][raw-image]")
+{
+    const std::vector<PluginApiRequirement> &host = host_plugin_api_contracts();
+    REQUIRE(host.size() > size_t(SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL));
+    CHECK(host[SLIC3R_PLUGIN_API_GCODE_THUMBNAIL].header == "slic3r_gcode_thumbnail.h");
+    CHECK(host[SLIC3R_PLUGIN_API_GCODE_THUMBNAIL].version.major == 2);
+    CHECK(host[SLIC3R_PLUGIN_API_GCODE_THUMBNAIL].version.minor == 0);
+    CHECK(manifest_is_compatible("slic3r_gcode_thumbnail.h=2.0\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_gcode_thumbnail.h=2.1\n"));
+    CHECK_FALSE(manifest_is_compatible("slic3r_gcode_thumbnail.h=1.0\n"));
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL].header == "steps/slic3r_step_gcode_thumbnail.h");
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL].version.major == 1);
+    CHECK(host[SLIC3R_PLUGIN_API_STEP_GCODE_THUMBNAIL].version.minor == 0);
+    CHECK(manifest_is_compatible("steps/slic3r_step_gcode_thumbnail.h=1.0\n"));
+}
+
+// Construct short, extended, empty, and malformed records; assertions verify borrowed views accept the prefix and reject invalid sizes, lists, and strings without taking ownership.
+TEST_CASE("G-code export metadata views validate the prefix and the statistics list", "[plugins][gcode][exporter][abi]")
+{
+    raw_gcode_export_metadata truncated = {};
+    truncated.struct_size = uint32_t(offsetof(raw_gcode_export_metadata, extrusion_widths));
+    truncated.configuration.count = 1;
+    CHECK_THROWS_WITH((slic3r_api::GCodeExportMetadataView(&truncated)),
+                      "G-code export metadata has an incomplete prefix.");
+
+    struct ExtendedMetadata
+    {
+        raw_gcode_export_metadata metadata;
+        uint64_t extension;
+    } extended = {};
+    extended.metadata.struct_size = uint32_t(sizeof(extended));
+    const slic3r_api::GCodeExportMetadataView extended_view(&extended.metadata);
+    CHECK(extended_view.configuration().size() == 0);
+    CHECK(extended_view.extrusion_widths().size() == 0);
+
+    raw_gcode_export_metadata invalid_list = {};
+    invalid_list.struct_size = uint32_t(sizeof(invalid_list));
+    invalid_list.configuration.count = 1;
+    CHECK_THROWS_AS((slic3r_api::GCodeExportMetadataView(&invalid_list)), std::invalid_argument);
+
+    const raw_gcode_export_entry null_string_entry = {nullptr, "value"};
+    raw_gcode_export_metadata invalid_string = {};
+    invalid_string.struct_size = uint32_t(sizeof(invalid_string));
+    invalid_string.configuration.items = &null_string_entry;
+    invalid_string.configuration.count = 1;
+    const slic3r_api::GCodeExportMetadataView invalid_string_view(&invalid_string);
+    CHECK_THROWS_AS(invalid_string_view.configuration().at(0), std::invalid_argument);
+
+    // A structure that stops after extrusion_widths has no statistics, even if the bytes after it are not zero.
+    const raw_gcode_export_entry statistic = {"has_support", "1"};
+    struct StatisticsMetadata
+    {
+        raw_gcode_export_metadata metadata;
+        uint64_t extension;
+    } with_statistics = {};
+    with_statistics.metadata.statistics.items = &statistic;
+    with_statistics.metadata.statistics.count = 1;
+    with_statistics.metadata.struct_size = uint32_t(offsetof(raw_gcode_export_metadata, statistics));
+    CHECK(slic3r_api::GCodeExportMetadataView(&with_statistics.metadata).statistics().size() == 0);
+    with_statistics.metadata.struct_size = uint32_t(sizeof(with_statistics));
+    const slic3r_api::GCodeExportMetadataListView statistics_view =
+        slic3r_api::GCodeExportMetadataView(&with_statistics.metadata).statistics();
+    REQUIRE(statistics_view.size() == 1);
+    CHECK(statistics_view.at(0).key == "has_support");
+    CHECK(statistics_view.at(0).value == "1");
+    raw_gcode_export_metadata invalid_statistics = {};
+    invalid_statistics.struct_size = uint32_t(sizeof(invalid_statistics));
+    invalid_statistics.statistics.count = 1;
+    CHECK_THROWS_AS((slic3r_api::GCodeExportMetadataView(&invalid_statistics)), std::invalid_argument);
+
+    const raw_gcode_export_entry separator = {"", ""};
+    raw_gcode_export_metadata valid_empty = {};
+    valid_empty.struct_size = uint32_t(sizeof(valid_empty));
+    valid_empty.extrusion_widths.items = &separator;
+    valid_empty.extrusion_widths.count = 1;
+    const slic3r_api::GCodeExportMetadataView valid_empty_view(&valid_empty);
+    const slic3r_api::GCodeExportMetadataEntryView entry = valid_empty_view.extrusion_widths().at(0);
+    CHECK(entry.key.empty());
+    CHECK(entry.value.empty());
+}
+
+// Build a 4.2 record, then cut its size before the last numeric field (a 4.1 host): the view reads values from the
+// complete record only, shows zeros and an empty tool list for the short one even though its bytes are not zero, and
+// rejects a non-empty tool list without items.
+TEST_CASE("G-code export metadata views read the 4.2 numeric statistics only from a complete record",
+          "[plugins][gcode][exporter][abi][export-contract]")
+{
+    const raw_gcode_export_filament_usage usages[] = {{0, 100., 240.5, 0.5}, {1, 0., 0., 0.}};
+    const raw_gcode_export_entry measured_entry = {"has_support", "0"};
+    raw_gcode_export_metadata full = {};
+    full.statistics.items = &measured_entry;
+    full.statistics.count = 1;
+    full.estimated_time_seconds = 123.5;
+    full.first_layer_time_seconds = 7.25;
+    full.layer_count = 67;
+    full.max_print_z = 20.3;
+    full.filaments.items = usages;
+    full.filaments.count = 2;
+    full.total_length_mm = 100.;
+    full.total_volume_mm3 = 240.5;
+    full.total_weight_g = 0.5;
+
+    full.struct_size = uint32_t(sizeof(full));
+    const slic3r_api::GCodeExportMetadataView full_view(&full);
+    CHECK(full_view.has_numeric_statistics());
+    CHECK(full_view.has_measured_statistics());
+    const slic3r_api::GCodeExportNumericStatisticsView numbers = full_view.numeric_statistics();
+    CHECK(numbers.estimated_time_seconds == 123.5);
+    CHECK(numbers.first_layer_time_seconds == 7.25);
+    CHECK(numbers.layer_count == 67);
+    CHECK(numbers.max_print_z == 20.3);
+    CHECK(numbers.total_length_mm == 100.);
+    CHECK(numbers.total_volume_mm3 == 240.5);
+    CHECK(numbers.total_weight_g == 0.5);
+    const slic3r_api::GCodeExportFilamentListView filaments = full_view.filaments();
+    REQUIRE(filaments.size() == 2);
+    CHECK(filaments.at(0).tool == 0);
+    CHECK(filaments.at(0).length_mm == 100.);
+    CHECK(filaments.at(0).volume_mm3 == 240.5);
+    CHECK(filaments.at(0).weight_g == 0.5);
+    CHECK(filaments.at(1).tool == 1);
+    CHECK_THROWS_AS(filaments.at(2), std::out_of_range);
+
+    // A record that stops before the last field of the group is incomplete (a defensive case, not a real 4.1 size):
+    // nothing of the group is read, and the measured values are not valid even though the statistics list has an entry.
+    full.struct_size = uint32_t(offsetof(raw_gcode_export_metadata, total_weight_g));
+    const slic3r_api::GCodeExportMetadataView short_view(&full);
+    CHECK_FALSE(short_view.has_numeric_statistics());
+    CHECK_FALSE(short_view.has_measured_statistics());
+    CHECK(short_view.numeric_statistics().estimated_time_seconds == 0.);
+    CHECK(short_view.numeric_statistics().layer_count == 0);
+    CHECK(short_view.numeric_statistics().total_weight_g == 0.);
+    CHECK(short_view.filaments().size() == 0);
+
+    // The real 4.1 record ends right after the statistics list. The bytes after it are not zero in this buffer, yet the
+    // view reads the list and nothing of the numeric group.
+    full.struct_size = uint32_t(offsetof(raw_gcode_export_metadata, statistics) + sizeof(full.statistics));
+    const slic3r_api::GCodeExportMetadataView old_view(&full);
+    CHECK(old_view.statistics().size() == 1);
+    CHECK_FALSE(old_view.has_numeric_statistics());
+    CHECK_FALSE(old_view.has_measured_statistics());
+    CHECK(old_view.numeric_statistics().estimated_time_seconds == 0.);
+    CHECK(old_view.numeric_statistics().first_layer_time_seconds == 0.);
+    CHECK(old_view.numeric_statistics().layer_count == 0);
+    CHECK(old_view.numeric_statistics().max_print_z == 0.);
+    CHECK(old_view.numeric_statistics().total_length_mm == 0.);
+    CHECK(old_view.filaments().size() == 0);
+
+    // The measured values need the numeric statistics and a non-empty statistics list: here the list is empty.
+    raw_gcode_export_metadata unmeasured = {};
+    unmeasured.struct_size = uint32_t(sizeof(unmeasured));
+    unmeasured.layer_count = 5;
+    const slic3r_api::GCodeExportMetadataView unmeasured_view(&unmeasured);
+    CHECK(unmeasured_view.has_numeric_statistics());
+    CHECK_FALSE(unmeasured_view.has_measured_statistics());
+    CHECK(unmeasured_view.numeric_statistics().layer_count == 5);
+
+    raw_gcode_export_metadata invalid_filaments = {};
+    invalid_filaments.struct_size = uint32_t(sizeof(invalid_filaments));
+    invalid_filaments.filaments.count = 1;
+    CHECK_THROWS_AS((slic3r_api::GCodeExportMetadataView(&invalid_filaments)), std::invalid_argument);
+}
+
+// Export with a changed config copy and a secret sentinel, import the output, and copy probe-visible metadata during its callback; assertions verify source, ordering, filtering, and region separators.
+TEST_CASE("G-code export metadata matches the export configuration", "[plugins][gcode][exporter][abi][config]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    print.process();
+
+    DynamicPrintConfig exported_config = print.full_print_config();
+    exported_config.set_deserialize_strict("layer_height", "0.32");
+    exported_config.set_deserialize_strict("printhost_apikey", "E2B_SECRET_SENTINEL");
+    // One key of each other nature, with a distinct non-empty value: the LOCAL, PRESET_META and VOLATILE ones must not reach the file.
+    exported_config.set_deserialize_strict({{"host_type", "octoprint"},
+                                            {"compatible_printers", "E2B_PRESET_META_SENTINEL"},
+                                            {"inherits", "E2B_INHERITS_SENTINEL"},
+                                            {"default_print_profile", "E2B_DEFAULT_PROFILE_SENTINEL"},
+                                            {"print_settings_id", "E2B_BOOKKEEPING_SENTINEL"},
+                                            {"test_config_nature_volatile", "15"}});
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    const boost::filesystem::path exported_file = directory.path() / "exported.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const Orchestrator::GCodeExporterSelection simple_selection = orchestrator.select_gcode_exporter(print, exported_config);
+    Test::export_print_to(orchestrator, print, exported_config, reference.string(), exported_file.string(), simple_selection);
+
+    const std::string exported = read_binary_file(exported_file);
+    CHECK(exported.find("; layer_height = 0.32\n") != std::string::npos);
+    CHECK(exported.find("E2B_SECRET_SENTINEL") == std::string::npos);
+    // Complete lines are compared: "inherits" is a prefix of "inherits_cummulative". The destination of the export is a one-shot setting.
+    CHECK(exported.find("\n; host_type = ") == std::string::npos);
+    CHECK(exported.find("\n; compatible_printers = ") == std::string::npos);
+    CHECK(exported.find("\n; inherits = ") == std::string::npos);
+    CHECK(exported.find("\n; default_print_profile = ") == std::string::npos);
+    CHECK(exported.find("\n; test_config_nature_volatile = ") == std::string::npos);
+    CHECK(exported.find("\n; output_path = ") == std::string::npos);
+    CHECK(exported.find("E2B_PRESET_META_SENTINEL") == std::string::npos);
+    CHECK(exported.find("E2B_INHERITS_SENTINEL") == std::string::npos);
+    CHECK(exported.find("E2B_DEFAULT_PROFILE_SENTINEL") == std::string::npos);
+    CHECK(exported.find("\n; print_settings_id = E2B_BOOKKEEPING_SENTINEL\n") != std::string::npos);
+    CHECK(print.full_print_config().opt_serialize("layer_height") != "0.32");
+    DynamicPrintConfig imported_config = DynamicPrintConfig::full_print_config();
+    imported_config.load_from_gcode_file(exported_file.string(), ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(imported_config.opt_float("layer_height") == Approx(0.32));
+
+    DynamicPrintConfig probe_config = exported_config;
+    probe_config.set_deserialize_strict("gcode_exporter_plugin", k_probe_exporter_id);
+    probe_config.set_deserialize_strict(k_probe_option_key, "1");
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    const Orchestrator::GCodeExporterSelection probe_selection = orchestrator.select_gcode_exporter(print, probe_config);
+    Test::export_print_to(orchestrator, print, probe_config, reference.string(), (directory.path() / "probe.probe").string(), probe_selection);
+
+    CHECK(std::is_sorted(g_exporter_probe_state.export_configuration.begin(),
+                         g_exporter_probe_state.export_configuration.end(),
+                         [](const std::pair<std::string, std::string> &lhs,
+                            const std::pair<std::string, std::string> &rhs) { return lhs.first < rhs.first; }));
+    CHECK(std::none_of(g_exporter_probe_state.export_configuration.begin(),
+                       g_exporter_probe_state.export_configuration.end(),
+                       [](const std::pair<std::string, std::string> &entry) {
+                           return entry.first == "printhost_apikey" || entry.first == "host_type" ||
+                                  entry.first == "compatible_printers" || entry.first == "inherits" ||
+                                  entry.first == "default_print_profile" || entry.first == "output_path" ||
+                                  entry.first == "test_config_nature_volatile";
+                       }));
+    CHECK(std::any_of(g_exporter_probe_state.export_configuration.begin(), g_exporter_probe_state.export_configuration.end(),
+                      [](const std::pair<std::string, std::string> &entry) {
+                          return entry.first == "print_settings_id" && entry.second == "E2B_BOOKKEEPING_SENTINEL";
+                      }));
+    const std::vector<std::pair<std::string, std::string>>::const_iterator layer_height_entry = std::find_if(
+        g_exporter_probe_state.export_configuration.begin(), g_exporter_probe_state.export_configuration.end(),
+        [](const std::pair<std::string, std::string> &entry) { return entry.first == "layer_height"; });
+    REQUIRE(layer_height_entry != g_exporter_probe_state.export_configuration.end());
+    CHECK(layer_height_entry->second == "0.32");
+    const size_t region_separators = size_t(std::count_if(
+        g_exporter_probe_state.export_extrusion_widths.begin(), g_exporter_probe_state.export_extrusion_widths.end(),
+        [](const std::pair<std::string, std::string> &entry) { return entry.first.empty() && entry.second.empty(); }));
+    CHECK(region_separators == print.num_print_regions());
+    // The Print was processed but its reference was never reread, so the host sends no statistics.
+    CHECK(g_exporter_probe_state.export_statistics.empty());
+}
+
+// Export one print twice through the probe provider: after a reread (a Reader result was requested) it receives the
+// statistics list in file order, and after a generation without result it receives an empty list.
+TEST_CASE("G-code exporter receives the statistics list only after a Reader result", "[plugins][gcode][exporter][abi][print-statistics]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    print.process();
+
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    GCodeProcessorResult result;
+    orchestrator.export_gcode(print, reference.string(), &result);
+    DynamicPrintConfig probe_config = print.full_print_config();
+    probe_config.set_deserialize_strict("gcode_exporter_plugin", k_probe_exporter_id);
+    probe_config.set_deserialize_strict(k_probe_option_key, "1");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, probe_config);
+    Test::export_print_to(orchestrator, print, probe_config, reference.string(), (directory.path() / "one.probe").string(), selection);
+
+    REQUIRE(g_exporter_probe_state.export_statistics.size() >= 9);
+    CHECK(g_exporter_probe_state.export_statistics.front().first == "filament used [mm]");
+    CHECK(g_exporter_probe_state.export_statistics.back().first == "has_support");
+    CHECK(g_exporter_probe_state.export_statistics.back().second == "0");
+    std::string block;
+    for (const std::pair<std::string, std::string> &entry : g_exporter_probe_state.export_statistics)
+        block += "; " + entry.first + " = " + entry.second + "\n";
+    std::string first_bad_line;
+    CHECK_MESSAGE(Slic3r::Test::Plugins::GCodeExportTest::is_statistics_block(block, first_bad_line),
+                  "Malformed statistics line: " << first_bad_line);
+
+    // Generate the reference again without a result: a valid one would be reused, with the statistics of the reading above.
+    print.request_replay_from_worker(Steps::Checkpoint::Plan);
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    Test::export_print_to(orchestrator, print, probe_config, reference.string(), (directory.path() / "two.probe").string(), selection);
+    CHECK(g_exporter_probe_state.export_statistics.empty());
+}
+// The exporter and configuration copy given by the caller drive the export, not the Print's own configuration, and a unique
+// temporary path built for it keeps the exporter extension even when the prefix contains dots.
+TEST_CASE("G-code export goes through the selected exporter service", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    DynamicPrintConfig probe_config = print.full_print_config();
+    probe_config.set_deserialize_strict(k_gcode_exporter_option_key, k_probe_exporter_id);
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, probe_config);
+    REQUIRE(selection.plugin_id == k_probe_exporter_id);
+    const size_t exports_before = g_exporter_probe_state.export_count;
+    const std::string first = Test::export_print_to(orchestrator,
+        print, probe_config, reference.string(), (directory.path() / "one").string(), selection);
+    const std::string second = Test::export_print_to(orchestrator,
+        print, probe_config, reference.string(), (directory.path() / "two").string(), selection);
+    CHECK(g_exporter_probe_state.export_count == exports_before + 2);
+    // EXPORT reads its settings from the configuration copy, while the Print still names the simple exporter.
+    CHECK(g_exporter_probe_state.export_config_selector == k_probe_exporter_id);
+    CHECK(print.full_print_config().opt_serialize(k_gcode_exporter_option_key) == k_default_gcode_exporter_id);
+    CHECK(boost::filesystem::path(first).extension().string() == ".probe");
+    CHECK(read_binary_file(boost::filesystem::path(first)) == "G1 X1\n");
+    CHECK(read_binary_file(boost::filesystem::path(second)) == "G1 X1\n");
+    CHECK(read_binary_file(reference) == "G1 X1\n");
+
+    // The exporter that runs is the one the caller selected, whatever the configuration given to the export names: the host does not
+    // select again. That configuration is still the one the exporter reads its settings from.
+    std::string third;
+    CHECK_NOTHROW(third = Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                                (directory.path() / "three").string(), selection));
+    CHECK(boost::filesystem::path(third).extension().string() == ".probe");
+    CHECK(g_exporter_probe_state.export_count == exports_before + 3);
+    CHECK(g_exporter_probe_state.export_config_selector == k_default_gcode_exporter_id);
+
+    const std::string temporary = selection.temporary_path(".app.upload.");
+    CHECK(boost::filesystem::path(temporary).extension().string() == ".probe");
+    CHECK(Test::export_print_to(orchestrator, print, probe_config, reference.string(), temporary, selection) == temporary);
+    boost::filesystem::remove(temporary);
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, probe_config, reference.string(),
+                                                (directory.path() / ".app.upload.ab12-cd34").string(), selection),
+                      "The G-code exporter 'test.gcode.exporter.probe' does not support the destination extension '.ab12-cd34'.");
+}
+
+// Selection and export never clear a cancellation raised elsewhere: the flag belongs to the slicing run that raised it.
+TEST_CASE("G-code exporter calls leave the global cancellation flag alone", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+
+    orchestrator.request_plugin_cancel();
+    CHECK_THROWS(orchestrator.select_gcode_exporter(print, print.full_print_config()));
+    CHECK(orchestrator.is_plugin_cancelled());
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                           (directory.path() / "out").string(), selection));
+    CHECK(orchestrator.is_plugin_cancelled());
+    orchestrator.reset_plugin_cancel();
+    CHECK(snapshot_directory(directory.path()).size() == 1);
+}
+
+// Exercise one literal destination table through host selection and actual publication; temporary files stay owned by the scoped directory and validation failures must leave no destination.
+TEST_CASE("Destination names share the host and publisher suffix rule", "[plugins][gcode][exporter][export-contract][compound-extension]")
+{
+    ScopedTestDirectory directory;
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const plugin_run_context context = {};
+    struct NameCase { const char *extension; const char *name; bool accepted; bool text_aliases; };
+    const NameCase cases[] = {
+        {".gcode.3mf", "x", true, false},
+        {".gcode.3mf", "x.gcode.3mf", true, false},
+        {".gcode.3mf", "X.GCODE.3MF", true, false},
+        {".gcode.3mf", "x.3mf", true, false},
+        {".gcode.3mf", "X.3MF", true, false},
+        {".gcode.3mf", "x.gcode", false, false},
+        {".gcode.3mf", "x.3mf.bak", false, false},
+        {".gcode.3mf", "x3mf", true, false},
+        {".gcode.3mf", "x.foo.3mf", true, false},
+        {".gcode", "x.GCO", true, true},
+        {".gcode", "x.3mf", false, true},
+        {".gcode", "x.gcode.3mf", false, true},
+        {".gcode", "x.g", true, true},
+        {".gcode", "x.gcode", true, true},
+        {".gcode", "x.bgcode", false, true},
+        {".bgcode", "x.bgc", false, false},
+        {".bgcode", "x.BGCODE", true, false}
+    };
+    for (const NameCase &item : cases) {
+        CAPTURE(item.extension, item.name);
+        Orchestrator::GCodeExporterSelection selection;
+        selection.plugin_id = item.text_aliases ? "gcode.exporter.simple" : "test.compound";
+        selection.extension = item.extension;
+        slic3r_api::GCodeFileFormat format;
+        format.exporter_id = selection.plugin_id;
+        format.extension = item.extension;
+        if (item.text_aliases)
+            format.aliases = {".g", ".gco"};
+        const boost::filesystem::path destination = directory.path() / item.name;
+        const bool bare = destination.extension().empty();
+        // The host receives names after the existing suffixless-name appending step; the publisher performs that step itself.
+        const std::string expected = destination.string() + (bare ? item.extension : "");
+        CHECK(selection.accepts_extension(expected) == item.accepted);
+        bool wrote = false;
+        const slic3r_api::GCodeFileWriter writer = [&wrote](std::ostream &output) {
+            wrote = true;
+            output << "published\n";
+            return true;
+        };
+        if (item.accepted) {
+            const std::string published = slic3r_api::publish_gcode_file(context, format, destination.string(), reference.string(), writer);
+            CHECK(published == expected);
+            CHECK(read_binary_file(published) == "published\n");
+            CHECK(wrote);
+            boost::filesystem::remove(published);
+        } else {
+            CHECK_THROWS(slic3r_api::publish_gcode_file(context, format, destination.string(), reference.string(), writer));
+            CHECK_FALSE(wrote);
+            CHECK_FALSE(boost::filesystem::exists(destination));
+        }
+    }
+    CHECK(read_binary_file(reference) == "G1 X1\n");
+    CHECK(snapshot_directory(directory.path()).size() == 1);
+}
+
+// Format literal and placeholder suffixes in both directions without generating toolpaths; Print and scoped files remain locally owned and formatting failures are test failures.
+TEST_CASE("Composed output suffixes are replaced as one unit", "[plugins][gcode][exporter][output-filename][compound-extension]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    DynamicPrintConfig config = print.full_print_config();
+    const std::vector<std::string> templates = {
+        "{input_filename_base}.gcode.3mf", "{input_filename_base}.GCODE.3MF",
+        "{input_filename_base}.gcode", "{input_filename_base}.bgcode",
+        "{input_filename_base}{default_output_extension}"};
+    for (const std::string &pattern : templates) {
+        CAPTURE(pattern);
+        config.set_deserialize_strict("output_filename_format", pattern);
+        print.apply(model, config);
+        CHECK(print.output_filename("name", ".gcode") == "name.gcode");
+        CHECK(print.output_filename("name", ".bgcode") == "name.bgcode");
+        const std::string compound = print.output_filename("name", ".gcode.3mf");
+        CHECK(boost::iequals(compound, "name.gcode.3mf"));
+        CHECK(boost::filesystem::path(print.output_filepath(directory.path().string(), "name", ".gcode.3mf")).filename().string() == compound);
+    }
+}
+
+// Inspect the shared synchronous save request without a renderer; descriptor strings are consumed before the next helper call and the empty config stays borrowed.
+TEST_CASE("Save path descriptions preserve text formats and list composed patterns", "[plugins][gcode][exporter][export-inputs][compound-extension]")
+{
+    using namespace slic3r_api::GCodeGeneration::Exporter;
+    DynamicConfig config;
+    const slic3r_api::Config view(Slic3r::ApiHost::to_config_handle(&config));
+    const std::vector<std::string> extensions = {".gcode", ".bgcode", ".gcode.3mf"};
+    for (const std::string &extension : extensions) {
+        CAPTURE(extension);
+        slic3r_api::GCodeFileFormat format;
+        format.extension = extension;
+        if (extension == ".gcode")
+            format.aliases = {".g", ".gco"};
+        GCodeOutputPathDescription description;
+        if (extension == ".gcode.3mf") {
+            description.label = "Bambu sliced file";
+            description.tooltip = "Where the sliced archive is written.";
+            description.patterns = "*.gcode.3mf;*.3mf";
+        }
+        std::vector<raw_config_option_def> definitions;
+        append_gcode_output_path_input_definition(format, view, definitions, description);
+        REQUIRE(definitions.size() == 1);
+        CHECK(std::string(definitions.front().label) == "Output path");
+        const std::string expected = extension == ".gcode" ? "G-code (*.gcode;*.g;*.gco)|*.gcode;*.g;*.gco" :
+            extension == ".bgcode" ? "G-code (*.bgcode)|*.bgcode" :
+            "Bambu sliced file (*.gcode.3mf;*.3mf)|*.gcode.3mf;*.3mf";
+        CHECK(std::string(definitions.front().sidetext) == expected);
+        CHECK(std::string(definitions.front().tooltip) == (extension == ".gcode.3mf" ?
+              "Where the sliced archive is written." : "Where the G-code file is written."));
+    }
+}
+
+// Run the existing probe with a composed suffix through CLI validation and STEP_EXPORT suggestions; files remain in the scoped project directory and the reset probe state owns no external resources.
+TEST_CASE("Composed exporters keep CLI aliases and temporary suffixes", "[plugins][gcode][exporter][compound-extension]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation activation(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    g_exporter_probe_state = ExporterProbeState{};
+    g_exporter_probe_state.extension = ".gcode.3mf";
+    print.process();
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::string temporary = selection.temporary_path(".f4a.upload.");
+    CHECK(boost::iends_with(temporary, ".gcode.3mf"));
+    CHECK(selection.accepts_extension(temporary));
+    CHECK_FALSE(boost::filesystem::exists(temporary));
+    for (const std::string &name : {std::string("cli.gcode.3mf"), std::string("cli.3mf")}) {
+        const std::string destination = (directory.path() / name).string();
+        std::istringstream input;
+        std::ostringstream output;
+        CHECK(orchestrator.export_gcode_cli(print, destination, input, output) == destination);
+        CHECK(boost::filesystem::exists(destination));
+    }
+    CHECK(print.output_filename("suggested", selection.extension) == "suggested.gcode.3mf");
+    g_exporter_probe_state = ExporterProbeState{};
+}
+
+// Generated names follow the exporter extension, whether it comes from the placeholder or from a suffix written in the template.
+TEST_CASE("Automatic output names follow the exporter extension", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    DynamicPrintConfig config = print.full_print_config();
+    REQUIRE(config.opt_bool("binary_gcode"));
+
+    const std::vector<std::string> formats = {
+        "{input_filename_base}{default_output_extension}", "{input_filename_base}.gcode", "{input_filename_base}.bgcode"};
+    for (const std::string &format : formats) {
+        config.set_deserialize_strict("output_filename_format", format);
+        REQUIRE(print.apply(model, config) != PrintBase::APPLY_STATUS_INVALIDATED);
+        CHECK(print.output_filename("name", ".probe") == "name.probe");
+        CHECK(print.output_filename("name", ".gcode") == "name.gcode");
+        CHECK(boost::filesystem::path(print.output_filepath(directory.path().string(), "name", ".probe")).filename() ==
+              "name.probe");
+        CHECK(boost::filesystem::path(print.output_filepath(std::string(), "name", ".probe")).extension() == ".probe");
+    }
+
+    // The text aliases accepted by the built-in exporter stay as written; another exporter extension replaces them.
+    config.set_deserialize_strict("output_filename_format", "{input_filename_base}.gco");
+    REQUIRE(print.apply(model, config) != PrintBase::APPLY_STATUS_INVALIDATED);
+    CHECK(print.output_filename("name", ".gcode") == "name.gco");
+    CHECK(print.output_filename("name", ".probe") == "name.probe");
+}
+
+// Check how a serialized exporter ID behaves when a real profile INI is loaded: known IDs load as written, unknown or
+// pruned (inactive at finalization) IDs fall back to the built-in exporter, reported unless the rule is silent.
+void check_exporter_profile_loading()
+{
+    const std::string key = k_gcode_exporter_option_key;
+    const std::vector<std::string> replaced_ids = {"test.gcode.exporter.missing", k_pruned_exporter_id};
+    for (const std::string &id : replaced_ids) {
+        DynamicPrintConfig reported = DynamicPrintConfig::full_print_config();
+        const ConfigSubstitutions substitutions = reported.load_from_ini_string(
+            key + " = " + id + "\n", ForwardCompatibilitySubstitutionRule::Enable);
+        CHECK(reported.opt_serialize(key) == k_default_gcode_exporter_id);
+        REQUIRE(substitutions.size() == 1);
+        CHECK(substitutions.front().old_value == id);
+        CHECK(substitutions.front().new_value->serialize() == k_default_gcode_exporter_id);
+
+        DynamicPrintConfig silent = DynamicPrintConfig::full_print_config();
+        CHECK(silent.load_from_ini_string(key + " = " + id + "\n",
+                                          ForwardCompatibilitySubstitutionRule::EnableSilent).empty());
+        CHECK(silent.opt_serialize(key) == k_default_gcode_exporter_id);
+    }
+
+    // A provider that is registered but inactive only at run time stays in the list and is refused at export time.
+    DynamicPrintConfig known = DynamicPrintConfig::full_print_config();
+    CHECK(known.load_from_ini_string(key + " = " + k_probe_exporter_id + "\n",
+                                     ForwardCompatibilitySubstitutionRule::Enable).empty());
+    CHECK(known.opt_serialize(key) == k_probe_exporter_id);
+}
+
+// Profiles replace unknown or inactive exporters by the built-in one while loading, and the substitution is reported.
+TEST_CASE("Profile loading replaces an unavailable exporter by the built-in one", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    REQUIRE_FALSE(Orchestrator::instance().is_plugin_active(Orchestrator::instance().get_plugin(k_pruned_exporter_id)));
+    check_exporter_profile_loading();
+
+    DynamicPrintConfig strict = DynamicPrintConfig::full_print_config();
+    CHECK_THROWS(strict.set_deserialize_strict(k_gcode_exporter_option_key, "test.gcode.exporter.missing"));
+}
+
+// The exporter group uses a strict resolution in every caller: C selection API, Print validation and the export action.
+TEST_CASE("Exporter selection through the C API never falls back to another provider", "[plugins][gcode][exporter][api-c]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    DynamicConfig probe_choice;
+    probe_choice.set_key_value(k_gcode_exporter_option_key, new ConfigOptionString(k_probe_exporter_id));
+    DynamicConfig missing_choice;
+    missing_choice.set_key_value(k_gcode_exporter_option_key, new ConfigOptionString("test.gcode.exporter.missing"));
+
+    CHECK(select_exporter_id_through_c_api(nullptr) == k_default_gcode_exporter_id);
+    CHECK(select_exporter_id_through_c_api(&missing_choice) == "<none>");
+    CHECK(select_exporter_id_through_c_api(&probe_choice) == "<none>");
+    {
+        ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+        CHECK(select_exporter_id_through_c_api(&probe_choice) == k_probe_exporter_id);
+        CHECK(select_exporter_id_through_c_api(&missing_choice) == "<none>");
+    }
+}
+
+// A clean reference is exported twice: neither the writer nor the reader runs again, and the kept results stay as they were.
+TEST_CASE("G-code export leaves the writer, the reader and their results untouched", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    print.process();
+
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    GCodeProcessorResult result;
+    orchestrator.export_gcode(print, reference.string(), &result);
+    const Plugin *writer = orchestrator.get_plugin("gcode.printing_plan_file_writer");
+    const Plugin *reader = orchestrator.get_plugin(print.gcode_reader_plugin_id());
+    REQUIRE(writer != nullptr);
+    REQUIRE(reader != nullptr);
+    const uint64_t writer_runs = writer->get_run_count();
+    const uint64_t reader_runs = reader->get_run_count();
+    REQUIRE(writer_runs >= 1);
+    REQUIRE(reader_runs >= 1);
+
+    // Age the reference so that a rewrite changes its time, and keep real reader results to compare afterwards.
+    boost::filesystem::last_write_time(reference, boost::filesystem::last_write_time(reference) - 3600);
+    const std::time_t reference_time = boost::filesystem::last_write_time(reference);
+    const std::string reference_bytes = read_binary_file(reference);
+    REQUIRE_FALSE(result.moves.empty());
+    const size_t move_count = result.moves.size();
+    const Vec3f last_position = result.moves.back().position;
+    REQUIRE(print.print_statistics().total_extruded_volume > 0.);
+    REQUIRE(print.print_statistics().statistics_available);
+    const double sentinel_volume = 4242.5;
+    print.print_statistics().total_extruded_volume = sentinel_volume;
+    const size_t gcode_timestamp = print.step_state_with_timestamp(STEP_GCODE).timestamp;
+
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::string first = Test::export_print_to(orchestrator,
+        print, print.full_print_config(), reference.string(), (directory.path() / "one").string(), selection);
+    const std::string second = Test::export_print_to(orchestrator,
+        print, print.full_print_config(), reference.string(), (directory.path() / "two").string(), selection);
+
+    // The reread made the statistics available, so both files carry the same statistics block before the configuration.
+    const std::string first_text = read_binary_file(boost::filesystem::path(first));
+    const std::string second_text = read_binary_file(boost::filesystem::path(second));
+    const std::string statistics_block = text_between_body_and_configuration(first_text, reference_bytes);
+    std::string first_bad_line;
+    REQUIRE_FALSE(statistics_block.empty());
+    CHECK_MESSAGE(Slic3r::Test::Plugins::GCodeExportTest::is_statistics_block(statistics_block, first_bad_line),
+                  "Malformed statistics line: " << first_bad_line);
+    CHECK(text_between_body_and_configuration(second_text, reference_bytes) == statistics_block);
+    expect_simple_export(first_text, reference_bytes + statistics_block);
+    expect_simple_export(second_text, reference_bytes + statistics_block);
+    // Run counters, plus witnesses of a rewrite: the reference time and content, and the step timestamp.
+    CHECK(writer->get_run_count() == writer_runs);
+    CHECK(reader->get_run_count() == reader_runs);
+    CHECK(boost::filesystem::last_write_time(reference) == reference_time);
+    CHECK(read_binary_file(reference) == reference_bytes);
+    CHECK(print.step_state_with_timestamp(STEP_GCODE).timestamp == gcode_timestamp);
+    CHECK(result.moves.size() == move_count);
+    CHECK(result.moves.back().position == last_position);
+    CHECK(print.print_statistics().total_extruded_volume == sentinel_volume);
+}
+// The EXPORT payload carries a valid empty metadata prefix, configuration copy (with the destination), renderer and result callback; the adapter refuses any missing required input.
+TEST_CASE("G-code exporter EXPORT requires the host configuration", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    const boost::filesystem::path output = directory.path() / "output.probe";
+    write_binary_file(reference, "G1 X1\n");
+    const std::string reference_path = reference.string();
+    // The destination is a setting of the configuration given to the exporter.
+    DynamicPrintConfig export_config = print.full_print_config();
+    export_config.set_key_value("output_path", new ConfigOptionString(output.string()));
+    raw_gcode_export_metadata metadata = {};
+    metadata.struct_size = uint32_t(sizeof(metadata));
+    // The host side of the result callback: it keeps the last report and counts them.
+    struct ResultSink
+    {
+        int         count = 0;
+        std::string local_path;
+        std::string label;
+    } sink;
+    const gcode_exporter_report_result_fn report_result = [](void *context, const char *local_path, const char *label) -> int32_t {
+        ResultSink &received = *static_cast<ResultSink *>(context);
+        ++received.count;
+        received.local_path = local_path;
+        received.label = label;
+        return 1;
+    };
+
+    run_ctx_gcode_export context = {};
+    context.operation = RAW_GCODE_EXPORT_OPERATION_EXPORT;
+    context.print = reinterpret_cast<const print_handle *>(&print);
+    context.reference_path = reference_path.c_str();
+    context.metadata = &metadata;
+    raw_plugin_run_payload payload = {};
+    payload.data = &context;
+    Plugin *plugin = orchestrator.get_plugin(k_probe_exporter_id);
+    REQUIRE(plugin != nullptr);
+
+    const size_t exports_before = g_exporter_probe_state.export_count;
+    std::string reported_error;
+    CHECK(orchestrator.execute_plugin(*plugin, &print, &payload, 1, false, &reported_error) !=
+          RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(reported_error.find("EXPORT received invalid operation fields") != std::string::npos);
+    CHECK(g_exporter_probe_state.export_count == exports_before);
+    CHECK_FALSE(boost::filesystem::exists(output));
+
+    // A configuration alone is not enough: the renderer bridge is always present in EXPORT.
+    context.config = ApiHost::to_config_handle(&export_config);
+    CHECK(orchestrator.execute_plugin(*plugin, &print, &payload, 1, false, &reported_error) !=
+          RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(reported_error.find("EXPORT received invalid operation fields") != std::string::npos);
+    CHECK(g_exporter_probe_state.export_count == exports_before);
+
+    // The result callback is required too: an exporter that cannot report would leave the host without its outcome.
+    const GCodeThumbnailRenderer renderer(print, ThumbnailsGeneratorCallback());
+    context.thumbnail_renderer = renderer.c_renderer();
+    CHECK(orchestrator.execute_plugin(*plugin, &print, &payload, 1, false, &reported_error) !=
+          RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(reported_error.find("EXPORT received invalid operation fields") != std::string::npos);
+    CHECK(g_exporter_probe_state.export_count == exports_before);
+    CHECK_FALSE(boost::filesystem::exists(output));
+
+    context.result_callback_context = &sink;
+    context.report_export_result = report_result;
+    CHECK(orchestrator.execute_plugin(*plugin, &print, &payload, 1, false, &reported_error) !=
+          RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(reported_error.find("EXPORT received invalid operation fields") != std::string::npos);
+    CHECK(g_exporter_probe_state.export_count == exports_before);
+
+    // The input callback is required too: an exporter that cannot ask would have no way to reach the requester.
+    const gcode_exporter_request_inputs_fn refuse_inputs = [](void *, const raw_config_option_def *, size_t) -> int32_t { return 0; };
+    context.input_callback_context = &sink;
+    context.request_export_inputs = refuse_inputs;
+    CHECK(orchestrator.execute_plugin(*plugin, &print, &payload, 1, false, &reported_error) ==
+          RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(g_exporter_probe_state.export_count == exports_before + 1);
+    CHECK(read_binary_file(output) == "G1 X1\n");
+    CHECK(sink.count == 1);
+    CHECK(sink.local_path == output.string());
+    CHECK(sink.label == "Probe export");
+
+    context.metadata = nullptr;
+    CHECK(orchestrator.execute_plugin(*plugin, &print, &payload, 1, false, &reported_error) !=
+          RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(reported_error.find("EXPORT received invalid operation fields") != std::string::npos);
+    CHECK(g_exporter_probe_state.export_count == exports_before + 1);
+    CHECK(sink.count == 1);
+}
+// Build a render callback that returns a white square of the requested size and counts its calls.
+static ThumbnailsGeneratorCallback white_square_renderer(uint32_t &calls)
+{
+    return [&calls](const ThumbnailsParams &params) {
+        ++calls;
+        ThumbnailData image;
+        image.set(uint32_t(params.sizes.front().x()), uint32_t(params.sizes.front().y()));
+        std::fill(image.pixels.begin(), image.pixels.end(), 255);
+        return ThumbnailsList{image};
+    };
+}
+
+// Return a deterministic RGBA renderer that increments a borrowed counter and uses the first requested size; the request must contain a size and image allocation failures propagate.
+static ThumbnailsGeneratorCallback large_noise_renderer(uint32_t &calls)
+{
+    return [&calls](const ThumbnailsParams &params) {
+        ++calls;
+        ThumbnailData image;
+        image.set(uint32_t(params.sizes.front().x()), uint32_t(params.sizes.front().y()));
+        uint32_t state = 0x6d2b79f5u;
+        const size_t pixel_count = image.pixels.size() / 4;
+        for (size_t pixel = 0; pixel < pixel_count; ++pixel) {
+            state = state * 1664525u + 1013904223u;
+            image.pixels[pixel * 4] = uint8_t(state >> 24);
+            state = state * 1664525u + 1013904223u;
+            image.pixels[pixel * 4 + 1] = uint8_t(state >> 24);
+            state = state * 1664525u + 1013904223u;
+            image.pixels[pixel * 4 + 2] = uint8_t(state >> 24);
+            image.pixels[pixel * 4 + 3] = 255;
+        }
+        return ThumbnailsList{image};
+    };
+}
+
+// Export a Print without objects for four note forms into test-scoped files; require the exact header/notes prefix, one adjacent body, no width comments, and an immediate configuration footer.
+TEST_CASE("Exporter writes the notes after the producer line", "[plugins][gcode][exporter][notes]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+
+    const std::string generated_header = "; generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION " on\n\n";
+    const std::vector<std::pair<std::string, std::string>> cases = {
+        {"", generated_header},
+        {"single", generated_header + "; single\n\n"},
+        {"first\r\nsecond", generated_header + "; first\n; second\n\n"},
+        {"ends\n", generated_header + "; ends\n; \n\n"}};
+    for (const std::pair<std::string, std::string> &entry : cases) {
+        INFO("notes: " << entry.first);
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_key_value("notes", new ConfigOptionString(entry.first));
+        const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
+        const boost::filesystem::path destination = directory.path() / "notes.gcode";
+        Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection);
+        const std::string exported = read_binary_file(destination);
+        REQUIRE(exported.compare(0, entry.second.size(), entry.second) == 0);
+        CHECK(exported.find("extrusion width =") == std::string::npos);
+        const std::string body = "G1 X1\n";
+        const size_t body_position = entry.second.size();
+        REQUIRE(exported.compare(body_position, body.size(), body) == 0);
+        CHECK(exported.find(body, body_position + 1) == std::string::npos);
+        const std::string begin_marker = "\n; " SLIC3R_APP_NAME "_config = begin\n";
+        const size_t configuration_position = body_position + body.size();
+        REQUIRE(exported.compare(configuration_position, begin_marker.size(), begin_marker) == 0);
+        const std::string end_marker = "; " SLIC3R_APP_NAME "_config = end\n";
+        REQUIRE(exported.size() >= end_marker.size());
+        CHECK(exported.compare(exported.size() - end_marker.size(), end_marker.size(), end_marker) == 0);
+    }
+}
+
+// Export oversized configuration and test legacy imports in scoped files; assert exact output boundaries, rollback after a failed delimiter import, old-header compatibility, and the viewer's 65,535-byte fallback, with Catch failures identifying mismatches.
+TEST_CASE("Large G-code configuration imports with and without an end thumbnail",
+          "[plugins][gcode][exporter][config][thumbnails][viewer]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+
+    SECTION("configuration closes a file without an end thumbnail")
+    {
+        ScopedTestDirectory directory;
+        Print print;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict("default_acceleration", "42");
+        config.set_deserialize_strict("before_layer_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("end_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("layer_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("start_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("toolchange_gcode", std::string(18000, 'G'));
+        const boost::filesystem::path reference = directory.path() / "reference.gcode";
+        const boost::filesystem::path destination = directory.path() / "exported.gcode";
+        write_binary_file(reference, "G1 X1\n");
+        const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
+        Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection);
+
+        const std::string exported = read_binary_file(destination);
+        const std::string generated_header = "; generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION " on\n\n";
+        REQUIRE(exported.compare(0, generated_header.size(), generated_header) == 0);
+        const std::string body = "G1 X1\n";
+        const size_t body_position = generated_header.size();
+        REQUIRE(exported.compare(body_position, body.size(), body) == 0);
+        CHECK(exported.find(body, body_position + 1) == std::string::npos);
+        const std::string begin_marker = "\n; " SLIC3R_APP_NAME "_config = begin\n";
+        const std::string end_marker = "; " SLIC3R_APP_NAME "_config = end\n";
+        const size_t begin_position = body_position + body.size();
+        REQUIRE(exported.compare(begin_position, begin_marker.size(), begin_marker) == 0);
+        const size_t end_position = exported.find(end_marker);
+        REQUIRE(end_position != std::string::npos);
+        CHECK(exported.find("; default_acceleration = 42\n", begin_position + begin_marker.size()) != std::string::npos);
+        CHECK(end_position - begin_position > 65535);
+        CHECK(exported.compare(exported.size() - end_marker.size(), end_marker.size(), end_marker) == 0);
+
+        DynamicPrintConfig imported = DynamicPrintConfig::full_print_config();
+        imported.load_from_gcode_file(destination.string(), ForwardCompatibilitySubstitutionRule::EnableSilent);
+        const ConfigOptionFloatOrPercent *acceleration = imported.option<ConfigOptionFloatOrPercent>("default_acceleration");
+        REQUIRE(acceleration != nullptr);
+        CHECK(acceleration->value == Approx(42.0));
+        CHECK_FALSE(acceleration->percent);
+    }
+
+    SECTION("configuration precedes a large end thumbnail and the viewer reads its early options")
+    {
+        ScopedTestDirectory directory;
+        Print print;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict("max_print_height", "321");
+        config.set_deserialize_strict("default_acceleration", "42");
+        config.set_deserialize_strict("before_layer_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("end_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("layer_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("start_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict("toolchange_gcode", std::string(18000, 'G'));
+        config.set_deserialize_strict({{"thumbnails", "512x512"},
+                                       {"thumbnails_format", "PNG"},
+                                       {"thumbnails_end_file", "1"}});
+        const boost::filesystem::path reference = directory.path() / "reference.gcode";
+        const boost::filesystem::path destination = directory.path() / "exported.gcode";
+        write_binary_file(reference, "G1 X1\n");
+        const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
+        uint32_t calls = 0;
+        Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection,
+                                  large_noise_renderer(calls));
+
+        const std::string exported = read_binary_file(destination);
+        const std::string generated_header = "; generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION " on\n\n";
+        REQUIRE(exported.compare(0, generated_header.size(), generated_header) == 0);
+        const std::string body = "G1 X1\n";
+        const size_t body_position = generated_header.size();
+        REQUIRE(exported.compare(body_position, body.size(), body) == 0);
+        CHECK(exported.find(body, body_position + 1) == std::string::npos);
+        const std::string config_end = "; " SLIC3R_APP_NAME "_config = end\n";
+        const std::string thumbnail_begin = "; thumbnail begin 512x512";
+        const size_t config_position = exported.find(config_end);
+        const size_t thumbnail_position = exported.find(thumbnail_begin);
+        REQUIRE(config_position != std::string::npos);
+        REQUIRE(thumbnail_position != std::string::npos);
+        const std::string config_begin = "\n; " SLIC3R_APP_NAME "_config = begin\n";
+        const size_t body_end = body_position + body.size();
+        REQUIRE(exported.compare(body_end, config_begin.size(), config_begin) == 0);
+        CHECK(config_position < thumbnail_position);
+        CHECK(exported.size() - (config_position + config_end.size()) > 65535);
+        CHECK(exported.compare(exported.size() - std::string("thumbnail end\n;\n").size(),
+                               std::string("thumbnail end\n;\n").size(), "thumbnail end\n;\n") == 0);
+        CHECK(calls == 1);
+
+        DynamicPrintConfig imported = DynamicPrintConfig::full_print_config();
+        imported.load_from_gcode_file(destination.string(), ForwardCompatibilitySubstitutionRule::EnableSilent);
+        CHECK(imported.opt_float("max_print_height") == Approx(321.0));
+        const ConfigOptionFloatOrPercent *acceleration = imported.option<ConfigOptionFloatOrPercent>("default_acceleration");
+        REQUIRE(acceleration != nullptr);
+        CHECK(acceleration->value == Approx(42.0));
+        CHECK_FALSE(acceleration->percent);
+
+        GCodeProcessor viewer;
+        viewer.process_file(destination.string());
+        CHECK(viewer.get_result().max_print_height == Approx(321.0f));
+    }
+
+    SECTION("postprocessed legacy files use the tail reader")
+    {
+        ScopedTestDirectory directory;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict("max_print_height", "177");
+        std::string legacy = "; postprocessed: generated by " SLIC3R_APP_KEY "\n\n";
+        legacy += "G1 X1\n";
+        const std::vector<std::string> keys = config.keys();
+        size_t legacy_entries = 0;
+        for (const std::string &key : keys) {
+            if (key == "max_print_height")
+                continue;
+            const std::string value = config.opt_serialize(key);
+            if (value.find_first_of("\r\n") == std::string::npos) {
+                legacy += "; " + key + " = " + value + "\n";
+                ++legacy_entries;
+                if (legacy_entries == 80)
+                    break;
+            }
+        }
+        REQUIRE(legacy_entries == 80);
+        legacy += "; max_print_height = 177\n";
+        REQUIRE(legacy.size() < 65535);
+        const boost::filesystem::path path = directory.path() / "legacy.gcode";
+        write_binary_file(path, legacy);
+
+        DynamicPrintConfig imported = DynamicPrintConfig::full_print_config();
+        CHECK_THROWS(imported.load_from_gcode_file(path.string(), ForwardCompatibilitySubstitutionRule::EnableSilent));
+
+        GCodeProcessor viewer;
+        viewer.process_file(path.string());
+        CHECK(viewer.get_result().max_print_height == Approx(177.0f));
+    }
+
+    SECTION("a failed delimiter import does not leak a setting into the tail fallback")
+    {
+        ScopedTestDirectory directory;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        const double default_max_print_height = config.opt_float("max_print_height");
+        REQUIRE(default_max_print_height != 177.0);
+        std::string gcode = "; generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION " on\n\n";
+        gcode += "; max_print_height = 177\n";
+        gcode += "; " + std::string(70000, 'X') + "\n";
+
+        size_t valid_entries = 0;
+        for (const std::string &key : config.keys()) {
+            if (key == "max_print_height")
+                continue;
+            const std::string value = config.opt_serialize(key);
+            if (value.find_first_of("\r\n") != std::string::npos)
+                continue;
+            gcode += "; " + key + " = " + value + "\n";
+            if (++valid_entries == 80)
+                break;
+        }
+        REQUIRE(valid_entries == 80);
+        gcode += "; " SLIC3R_APP_NAME "_config = end\n";
+        const size_t witness_position = gcode.find("; max_print_height = 177\n");
+        REQUIRE(witness_position != std::string::npos);
+        REQUIRE(gcode.size() - witness_position > 65535);
+
+        const boost::filesystem::path path = directory.path() / "missing-begin.gcode";
+        write_binary_file(path, gcode);
+        GCodeProcessor viewer;
+        viewer.process_file(path.string());
+        CHECK(viewer.get_result().max_print_height == Approx(static_cast<float>(default_max_print_height)));
+    }
+
+    SECTION("an older recognized header without a version still imports the tail")
+    {
+        ScopedTestDirectory directory;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        std::string gcode = "; generated by " SLIC3R_APP_KEY "\n\nG1 X1\n";
+        size_t valid_entries = 0;
+        for (const std::string &key : config.keys()) {
+            if (key == "max_print_height")
+                continue;
+            const std::string value = config.opt_serialize(key);
+            if (value.find_first_of("\r\n") != std::string::npos)
+                continue;
+            gcode += "; " + key + " = " + value + "\n";
+            if (++valid_entries == 80)
+                break;
+        }
+        REQUIRE(valid_entries == 80);
+        gcode += "; max_print_height = 177\n";
+        REQUIRE(gcode.size() < 65535);
+
+        const boost::filesystem::path path = directory.path() / "old-header.gcode";
+        write_binary_file(path, gcode);
+        DynamicPrintConfig imported = DynamicPrintConfig::full_print_config();
+        imported.load_from_gcode_file(path.string(), ForwardCompatibilitySubstitutionRule::EnableSilent);
+        CHECK(imported.opt_float("max_print_height") == Approx(177.0));
+
+        GCodeProcessor viewer;
+        viewer.process_file(path.string());
+        CHECK(viewer.get_result().max_print_height == Approx(177.0f));
+    }
+}
+
+// Slice two volume-specific regions through three first-layer-option states and compare each test-scoped export's literal width block with the legacy writer before the unique body; Catch failures report mismatches.
+TEST_CASE("G-code export widths match legacy regions and first-layer options", "[plugins][gcode][exporter][gcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    struct WidthScenario
+    {
+        const char *name;
+        bool first_layer_perimeter;
+        bool first_layer_infill;
+        const char *expected;
+    };
+    const WidthScenario scenarios[] = {
+        {"perimeter only", true, false,
+         "; external perimeters extrusion width = 0.42mm\n"
+         "; perimeters extrusion width = 0.45mm\n"
+         "; infill extrusion width = 0.45mm\n"
+         "; solid infill extrusion width = 0.45mm\n"
+         "; top infill extrusion width = 0.42mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer extrusion width = 0.49mm\n\n"
+         "; external perimeters extrusion width = 0.40mm\n"
+         "; perimeters extrusion width = 0.45mm\n"
+         "; infill extrusion width = 0.50mm\n"
+         "; solid infill extrusion width = 0.55mm\n"
+         "; top infill extrusion width = 0.60mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer extrusion width = 0.49mm\n\n"
+         "; external perimeters extrusion width = 0.65mm\n"
+         "; perimeters extrusion width = 0.70mm\n"
+         "; infill extrusion width = 0.75mm\n"
+         "; solid infill extrusion width = 0.80mm\n"
+         "; top infill extrusion width = 0.85mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer extrusion width = 0.49mm\n\n"},
+        {"infill only", false, true,
+         "; external perimeters extrusion width = 0.42mm\n"
+         "; perimeters extrusion width = 0.45mm\n"
+         "; infill extrusion width = 0.45mm\n"
+         "; solid infill extrusion width = 0.45mm\n"
+         "; top infill extrusion width = 0.42mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer infill extrusion width = 0.54mm\n\n"
+         "; external perimeters extrusion width = 0.40mm\n"
+         "; perimeters extrusion width = 0.45mm\n"
+         "; infill extrusion width = 0.50mm\n"
+         "; solid infill extrusion width = 0.55mm\n"
+         "; top infill extrusion width = 0.60mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer infill extrusion width = 0.54mm\n\n"
+         "; external perimeters extrusion width = 0.65mm\n"
+         "; perimeters extrusion width = 0.70mm\n"
+         "; infill extrusion width = 0.75mm\n"
+         "; solid infill extrusion width = 0.80mm\n"
+         "; top infill extrusion width = 0.85mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer infill extrusion width = 0.54mm\n\n"},
+        {"both first-layer options", true, true,
+         "; external perimeters extrusion width = 0.42mm\n"
+         "; perimeters extrusion width = 0.45mm\n"
+         "; infill extrusion width = 0.45mm\n"
+         "; solid infill extrusion width = 0.45mm\n"
+         "; top infill extrusion width = 0.42mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer extrusion width = 0.49mm\n"
+         "; first layer infill extrusion width = 0.54mm\n\n"
+         "; external perimeters extrusion width = 0.40mm\n"
+         "; perimeters extrusion width = 0.45mm\n"
+         "; infill extrusion width = 0.50mm\n"
+         "; solid infill extrusion width = 0.55mm\n"
+         "; top infill extrusion width = 0.60mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer extrusion width = 0.49mm\n"
+         "; first layer infill extrusion width = 0.54mm\n\n"
+         "; external perimeters extrusion width = 0.65mm\n"
+         "; perimeters extrusion width = 0.70mm\n"
+         "; infill extrusion width = 0.75mm\n"
+         "; solid infill extrusion width = 0.80mm\n"
+         "; top infill extrusion width = 0.85mm\n"
+         "; support material extrusion width = 0.43mm\n"
+         "; support material interface extrusion width = 0.43mm\n"
+         "; first layer extrusion width = 0.49mm\n"
+         "; first layer infill extrusion width = 0.54mm\n\n"}
+    };
+
+    for (const WidthScenario &scenario : scenarios) {
+        INFO(scenario.name);
+        ScopedTestDirectory directory;
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_num_extruders(1);
+        config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+                                       {"gcode_exporter_plugin", "gcode.exporter.simple"},
+                                       {"binary_gcode", "0"},
+                                       {"layer_height", "0.20"},
+                                       {"support_material", "1"},
+                                       {"support_material_interface_layers", "3"},
+                                       {"support_material_extrusion_width", "0.43"},
+                                       {"first_layer_extrusion_width", "0.49"},
+                                       {"first_layer_infill_extrusion_width", "0.54"}});
+        config.option("first_layer_extrusion_width")->set_enabled(scenario.first_layer_perimeter);
+        config.option("first_layer_infill_extrusion_width")->set_enabled(scenario.first_layer_infill);
+        Model model;
+        Print print;
+        Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+        const std::vector<std::pair<std::string, std::string>> first_region = {
+            {"external_perimeter_extrusion_width", "0.40"}, {"perimeter_extrusion_width", "0.45"},
+            {"infill_extrusion_width", "0.50"}, {"solid_infill_extrusion_width", "0.55"},
+            {"top_infill_extrusion_width", "0.60"}};
+        const std::vector<std::pair<std::string, std::string>> second_region = {
+            {"external_perimeter_extrusion_width", "0.65"}, {"perimeter_extrusion_width", "0.70"},
+            {"infill_extrusion_width", "0.75"}, {"solid_infill_extrusion_width", "0.80"},
+            {"top_infill_extrusion_width", "0.85"}};
+        for (const std::pair<std::string, std::string> &entry : first_region)
+            model.objects()[0].volumes.front()->config.set_deserialize_strict(entry.first, entry.second);
+        for (const std::pair<std::string, std::string> &entry : second_region)
+            model.objects()[1].volumes.front()->config.set_deserialize_strict(entry.first, entry.second);
+        CHECK(print.apply(model, config) != PrintBase::APPLY_STATUS_INVALIDATED);
+        print.process();
+        // The two volume-specific configurations coexist with the active default region.
+        REQUIRE(print.num_print_regions() == 3);
+
+        const boost::filesystem::path reference = directory.path() / "reference.gcode";
+        const std::string reference_path = orchestrator.export_gcode(print, reference.string(), nullptr);
+        const boost::filesystem::path legacy_path = directory.path() / "legacy.gcode";
+        GCodeGenerator legacy_generator;
+        const std::string legacy_path_string = legacy_path.string();
+        legacy_generator.do_export(&print, legacy_path_string.c_str(), nullptr);
+        const std::string legacy = read_binary_file(legacy_path);
+        const std::string first_width_label = "; external perimeters extrusion width =";
+        const size_t legacy_width_begin = legacy.find(first_width_label);
+        REQUIRE(legacy_width_begin != std::string::npos);
+        size_t legacy_width_end = legacy_width_begin;
+        for (size_t region = 0; region < print.num_print_regions(); ++region) {
+            legacy_width_end = legacy.find("\n\n", legacy_width_end);
+            REQUIRE(legacy_width_end != std::string::npos);
+            legacy_width_end += 2;
+        }
+        const std::string legacy_widths = legacy.substr(legacy_width_begin, legacy_width_end - legacy_width_begin);
+
+        const DynamicPrintConfig export_config = print.full_print_config();
+        const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, export_config);
+        const boost::filesystem::path exported_path = directory.path() / "exported.gcode";
+        Test::export_print_to(orchestrator, print, export_config, reference_path, exported_path.string(), selection);
+        const std::string exported = read_binary_file(exported_path);
+        const size_t exported_width_begin = exported.find(first_width_label);
+        REQUIRE(exported_width_begin != std::string::npos);
+        size_t exported_width_end = exported_width_begin;
+        for (size_t region = 0; region < print.num_print_regions(); ++region) {
+            exported_width_end = exported.find("\n\n", exported_width_end);
+            REQUIRE(exported_width_end != std::string::npos);
+            exported_width_end += 2;
+        }
+        const std::string exported_widths = exported.substr(exported_width_begin, exported_width_end - exported_width_begin);
+        const std::string reference_body = read_binary_file(reference);
+        const size_t body_position = exported.find(reference_body);
+        REQUIRE(body_position != std::string::npos);
+        CHECK(exported.find(reference_body, body_position + 1) == std::string::npos);
+        CHECK(exported_width_end <= body_position);
+        CHECK(exported_widths == scenario.expected);
+        CHECK(exported_widths == legacy_widths);
+    }
+}
+
+// Export a rendered thumbnail around a processed reference, then check the producer, notes, adjacent width block, exact body, and configuration boundaries; temporary files are test-owned and Catch reports output mismatches.
+TEST_CASE("Reference holds G-code only while the exported file carries notes and thumbnails",
+          "[plugins][gcode][exporter][thumbnails]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple",
+                         {{"thumbnails", "4x4"}, {"thumbnails_format", "PNG"}, {"notes", "secret note"}});
+    print.process();
+    uint32_t calls = 0;
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    const std::string body = read_binary_file(reference);
+    CHECK(body.find("secret note") == std::string::npos);
+    CHECK(body.find("generated by") == std::string::npos);
+    CHECK(body.find("thumbnail") == std::string::npos);
+
+    const DynamicPrintConfig config = print.full_print_config();
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
+    const boost::filesystem::path destination = directory.path() / "exported.gcode";
+    Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection, white_square_renderer(calls));
+    const std::string exported = read_binary_file(destination);
+    CHECK(calls == 1);
+    REQUIRE(exported.size() >= body.size());
+    // The checked prefix covers producer, before-start thumbnail, and notes; widths follow before the body.
+    const std::string expected_header =
+        "; generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION " on\n\n"
+        "\n;\n; thumbnail begin 4x4 112\n"
+        "; iVBORw0KGgoAAAANSUhEUgAAAAQAAAAECAYAAACp8Z5+AAAAGUlEQVR4AZXIIQEAAACDMPqX/j2OyT\n"
+        "; GhxwF4PD/BCv/g/AAAAABJRU5ErkJggg==\n"
+        "; thumbnail end\n;\n"
+        "; secret note\n\n";
+    CHECK(exported.compare(0, expected_header.size(), expected_header) == 0);
+    const size_t body_position = expect_body_then_configuration(exported, body);
+    const size_t width_position = exported.find("; external perimeters extrusion width = ", expected_header.size());
+    REQUIRE(width_position != std::string::npos);
+    REQUIRE(width_position == expected_header.size());
+    REQUIRE(width_position < body_position);
+    const std::string_view width_block(exported.data() + width_position, body_position - width_position);
+    std::string first_bad_width_line;
+    CHECK_MESSAGE(Slic3r::Test::Plugins::GCodeExportTest::is_width_block(width_block, first_bad_width_line),
+                  "Malformed extrusion-width line: " << first_bad_width_line);
+    const std::string config_end = "; " SLIC3R_APP_NAME "_config = end\n";
+    REQUIRE(exported.size() >= config_end.size());
+    CHECK(exported.compare(exported.size() - config_end.size(), config_end.size(), config_end) == 0);
+}
+
+// Export a BIQU thumbnail with firmware object definitions and assert byte-zero placement, exact reference bytes, an adjacent configuration footer, and its EOF boundary in scoped files.
+TEST_CASE("BIQU thumbnails stay at byte zero with firmware object definitions",
+          "[plugins][gcode][exporter][thumbnails]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple",
+                         {{"gcode_firmware_plugin", "gcode.firmware.klipper"}, {"gcode_label_objects", "firmware"},
+                          {"thumbnails", "4x4"}, {"thumbnails_format", "BIQU"}});
+    print.process();
+    uint32_t calls = 0;
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    const std::string body = read_binary_file(reference);
+    REQUIRE(body.compare(0, 21, "EXCLUDE_OBJECT_DEFINE") == 0);
+
+    const DynamicPrintConfig config = print.full_print_config();
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
+    const boost::filesystem::path destination = directory.path() / "exported.gcode";
+    Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection, white_square_renderer(calls));
+    const std::string exported = read_binary_file(destination);
+    CHECK(calls == 1);
+    CHECK(exported.compare(0, 9, ";00040004") == 0);
+    const std::string generated_header = "; generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION " on\n\n";
+    CHECK(exported.find("EXCLUDE_OBJECT_DEFINE") > exported.find(generated_header));
+    REQUIRE(exported.size() >= body.size());
+    expect_body_then_configuration(exported, body);
+    const std::string config_end = "; " SLIC3R_APP_NAME "_config = end\n";
+    REQUIRE(exported.size() >= config_end.size());
+    CHECK(exported.compare(exported.size() - config_end.size(), config_end.size(), config_end) == 0);
+}
+
+// Thumbnail settings only change what the exporter writes, so they never replay the G-code of an unchanged print.
+TEST_CASE("Thumbnail settings leave the G-code reference alone", "[plugins][gcode][exporter][thumbnails][config]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const std::vector<std::string> silent_keys = {
+        "thumbnails", "thumbnails_color", "thumbnail_color_mode", "thumbnails_end_file", "thumbnails_with_bed",
+        "thumbnails_tag_format", "thumbnails_with_support", "thumbnail_background", "thumbnail_background_color",
+        "thumbnails_format"};
+    for (const std::string &key : silent_keys) {
+        INFO(key);
+        const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+        REQUIRE(definition != nullptr);
+        CHECK(definition->invalidates_step == STEP_NONE);
+    }
+    // Witnesses: settings that can reach the G-code stay replaying it.
+    for (const std::string &key : {"notes", "printer_notes", "filament_notes", "gcode_label_objects"}) {
+        INFO(key);
+        const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+        REQUIRE(definition != nullptr);
+        CHECK(definition->invalidates_step != STEP_NONE);
+    }
+
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    print.process();
+    orchestrator.export_gcode(print, (directory.path() / "reference.gcode").string(), nullptr);
+    REQUIRE(print.is_step_done(STEP_GCODE));
+    const size_t gcode_timestamp = print.step_state_with_timestamp(STEP_GCODE).timestamp;
+
+    DynamicPrintConfig changed = print.full_print_config();
+    changed.set_deserialize_strict({
+        {"thumbnails", "4x4"}, {"thumbnails_format", "JPG"}, {"thumbnails_end_file", "1"},
+        {"thumbnails_with_support", "1"}, {"thumbnails_tag_format", "1"}, {"thumbnail_background", "solid"},
+        {"thumbnail_background_color", "#102030"}, {"thumbnail_color_mode", "uniform"}, {"thumbnails_color", "#ff0000"},
+        {"thumbnails_with_bed", "0"}});
+    CHECK(print.apply(model, changed) == PrintBase::APPLY_STATUS_CHANGED);
+    CHECK(print.is_step_done(STEP_GCODE));
+    CHECK(print.step_state_with_timestamp(STEP_GCODE).timestamp == gcode_timestamp);
+    // The new values are really in the Print, not only accepted.
+    CHECK(print.full_print_config().opt_serialize("thumbnails_format") == "JPG");
+    CHECK(print.full_print_config().opt_serialize("thumbnail_background") == "solid");
+    CHECK(print.full_print_config().opt_serialize("thumbnails_color") == "#ff0000");
+    CHECK(print.full_print_config().opt_bool("thumbnails_with_support"));
+}
+
+// A start script may print {notes}, so a change of the notes must regenerate the G-code reference.
+TEST_CASE("Notes still replay the G-code when a script reads them", "[plugins][gcode][exporter][config]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple",
+                         {{"start_gcode", ";NOTES {notes}"}, {"notes", "first"}});
+    print.process();
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    CHECK(read_binary_file(reference).find(";NOTES first") != std::string::npos);
+    REQUIRE(print.is_step_done(STEP_GCODE));
+
+    DynamicPrintConfig changed = print.full_print_config();
+    changed.set_deserialize_strict("notes", "second");
+    CHECK(print.apply(model, changed) == PrintBase::APPLY_STATUS_INVALIDATED);
+    CHECK_FALSE(print.is_step_done(STEP_GCODE));
+    print.process();
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    const std::string regenerated = read_binary_file(reference);
+    CHECK(regenerated.find(";NOTES second") != std::string::npos);
+    CHECK(regenerated.find(";NOTES first") == std::string::npos);
+}
+// A thumbnail encoder that cannot start fails its export only: the global stop flag stays down, and the next export works.
+TEST_CASE("Encoder errors stay local to their export", "[plugins][gcode][exporter][thumbnails]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedPluginActivation encoder(orchestrator, k_failing_encoder_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    const boost::filesystem::path destination = directory.path() / "final.probe";
+    write_binary_file(reference, "G1 X1\n");
+    write_binary_file(destination, "old destination bytes");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::FailingEncoder;
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                                destination.string(), selection),
+                      Catch::Matchers::Contains("Thumbnail provider 'test.thumbnail.failing' failed"));
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+    CHECK(snapshot_directory(directory.path()) == original_files);
+
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    CHECK(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                    destination.string(), selection) == destination.string());
+    CHECK(read_binary_file(destination) == "G1 X1\n");
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+}
+
+// A built-in selector group reads its own option key, so a firmware that is not the first provider is found by the
+// group resolution, by the C selection API and by the firmware ID that QUERY receives.
+TEST_CASE("Built-in selector groups resolve a firmware that is not the first", "[plugins][gcode][exporter][api-c]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    const char *const firmware_id = "gcode.firmware.klipper";
+    Print print;
+    DynamicPrintConfig plain = DynamicPrintConfig::full_print_config();
+    REQUIRE(plain.opt_serialize("gcode_firmware_plugin") != firmware_id);
+    // The target must not be the first active firmware, or the test would pass without the group lookup.
+    REQUIRE(orchestrator.get_active_plugins_for_step(GCODE_FIRMWARE).front()->get_id() != firmware_id);
+    DynamicPrintConfig config = plain;
+    config.set_deserialize_strict("gcode_firmware_plugin", firmware_id);
+    config.set_deserialize_strict(k_gcode_exporter_option_key, k_probe_exporter_id);
+
+    const Plugin *grouped = Steps::selected_active_plugin_from_group(
+        orchestrator, GCODE_FIRMWARE, "gcode_firmware_plugin", &config);
+    REQUIRE(grouped != nullptr);
+    CHECK(grouped->get_id() == firmware_id);
+
+    orchestrator_handle *handle = reinterpret_cast<orchestrator_handle *>(&orchestrator);
+    const orchestrator_plugin_handle *selected = orchestrator_select_plugin(
+        handle, ApiHost::to_config_handle(&config), GCODE_FIRMWARE, "gcode_firmware_plugin");
+    REQUIRE(selected != nullptr);
+    CHECK(std::string(orchestrator_plugin_id(selected)) == firmware_id);
+
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    CHECK(orchestrator.select_gcode_exporter(print, config).plugin_id == k_probe_exporter_id);
+    CHECK(g_exporter_probe_state.query_firmware_id == firmware_id);
+}
+
+// Child half of the next test: the process starts without the built-in exporter, as an installation could. Run only by it.
+TEST_CASE("Exporter startup without the built-in exporter", "[.][exporter-startup-child]")
+{
+    REQUIRE(std::getenv("SLIC3R_TEST_SIMPLE_EXPORTER_DISABLED") != nullptr);
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    REQUIRE_FALSE(orchestrator.is_plugin_active(orchestrator.get_plugin(k_default_gcode_exporter_id)));
+    Print print;
+
+    const ConfigOptionDef *selector = PrintConfigDef::instance().get(k_gcode_exporter_option_key);
+    REQUIRE(selector != nullptr);
+    REQUIRE(static_cast<bool>(selector->default_value));
+    CHECK(selector->default_value->serialize() == k_default_gcode_exporter_id);
+    const DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK(config.opt_serialize(k_gcode_exporter_option_key) == k_default_gcode_exporter_id);
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, config),
+                      "The configured G-code exporter 'gcode.exporter.simple' is inactive.");
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, DynamicPrintConfig()),
+                      "The configured G-code exporter 'gcode.exporter.simple' is inactive.");
+    check_exporter_profile_loading();
+}
+
+// Start a second test process without the built-in exporter, since the exporter list is fixed once the runtime starts.
+// Boost.Process is already part of the Boost used by the project, starts the executable without a shell (no quoting
+// rules), and boost::dll finds the running executable on every platform. The child inherits the working directory,
+// gets one extra environment variable, and is killed if it does not finish within the delay.
+TEST_CASE("An unavailable default exporter is never replaced by another provider", "[plugins][gcode][exporter]")
+{
+    ScopedTestDirectory directory;
+    const boost::filesystem::path log = directory.path() / "startup-child.txt";
+    namespace bp = boost::process;
+    // Keep the native (wide on Windows) path: a narrow conversion would break Unicode installation folders.
+    const boost::filesystem::path program = boost::dll::program_location();
+    bp::child child(bp::exe = program,
+                    bp::args = {"Exporter startup without the built-in exporter"},
+                    bp::env["SLIC3R_TEST_SIMPLE_EXPORTER_DISABLED"] = "1",
+                    (bp::std_out & bp::std_err) > log);
+    const bool finished = child.wait_for(std::chrono::seconds(300));
+    if (!finished)
+        child.terminate();
+    child.wait();
+    // Only the end of the child output tells which of its checks failed; the start is plugin loading noise.
+    const std::string child_output = read_binary_file(log);
+    INFO(child_output.substr(child_output.size() > 4000 ? child_output.size() - 4000 : 0));
+    CHECK(finished);
+    CHECK(child.exit_code() == 0);
+}
+// Verify the CLI parser accepts and selects an active exporter, exporter settings resolve to STEP_NONE, firmware still invalidates STEP_GCODE, and unavailable IDs fail visibly.
+TEST_CASE("G-code exporter selection is strict and its options do not invalidate slicing", "[plugins][gcode][exporter]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+
+    const ConfigOptionDef *exporter_option = PrintConfigDef::instance().get(k_probe_option_key);
+    REQUIRE(exporter_option != nullptr);
+    CHECK(exporter_option->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+    // The probe declares STEP_GCODE for its option, yet the host resolves an exporter option to STEP_NONE: STEP_EXPORT is queued
+    // only by an export request, and naming it would replay STEP_GCODE through the full-configuration diff of Print::apply().
+    REQUIRE(k_probe_option_declared_step == STEP_GCODE);
+    CHECK(exporter_option->invalidates_step == STEP_NONE);
+    const ConfigOptionDef *firmware_option = PrintConfigDef::instance().get("gcode_firmware_plugin");
+    REQUIRE(firmware_option != nullptr);
+    CHECK(firmware_option->invalidates_step == STEP_GCODE);
+
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    CHECK_THROWS(config.set_deserialize_strict("gcode_exporter_plugin", "test.gcode.exporter.missing"));
+
+    if (!DynamicPrintAndCLIConfig::is_cli_def_initialized())
+        DynamicPrintAndCLIConfig::initialize_cli_def();
+    const char *cli_arguments[] = {
+        "Slic3r", "--gcode-exporter-plugin", k_probe_exporter_id
+    };
+    DynamicPrintAndCLIConfig cli_config;
+    t_config_option_keys extra_arguments;
+    REQUIRE(cli_config.read_cli(3, cli_arguments, &extra_arguments));
+    const ConfigOption *cli_exporter_option = cli_config.option("gcode_exporter_plugin");
+    REQUIRE(cli_exporter_option != nullptr);
+    CHECK(cli_exporter_option->serialize() == k_probe_exporter_id);
+
+    {
+        ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+        Print cli_selected_print;
+        Model cli_selected_model;
+        initialize_fff_print(cli_selected_print, cli_selected_model, "gcode.exporter.simple");
+        DynamicPrintConfig cli_selected_config = cli_selected_print.full_print_config();
+        cli_selected_config.set_deserialize_strict(
+            "gcode_exporter_plugin", cli_exporter_option->serialize());
+        REQUIRE(cli_selected_print.apply(cli_selected_model, cli_selected_config) !=
+                PrintBase::APPLY_STATUS_INVALIDATED);
+        const Orchestrator::GCodeExporterSelection cli_selection =
+            orchestrator.select_gcode_exporter(cli_selected_print, cli_selected_print.full_print_config());
+        CHECK(cli_selection.plugin_id == k_probe_exporter_id);
+        CHECK(cli_selection.extension == ".probe");
+    }
+
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_probe_exporter_id);
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()),
+                      "The configured G-code exporter 'test.gcode.exporter.probe' is inactive.");
+}
+
+// Slice a small print and write its G-code reference, the state in which STEP_EXPORT may run.
+static boost::filesystem::path prepare_print_with_reference(Print &print, Model &model, const std::string &exporter_id,
+                                                            const boost::filesystem::path &directory)
+{
+    initialize_fff_print(print, model, exporter_id, {{"seam_visibility", "0"}});
+    print.process();
+    const boost::filesystem::path reference = directory / "reference.gcode";
+    Orchestrator::instance().reset_plugin_cancel();
+    Orchestrator::instance().export_gcode(print, reference.string(), nullptr);
+    return reference;
+}
+
+// The runner selects the exporter once (one QUERY per export), and the exporter reads its destination from the request
+// configuration while the Print's own configuration never holds it.
+TEST_CASE("The export runs one QUERY and reads the destination from the request", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    const boost::filesystem::path reference = prepare_print_with_reference(print, model, k_probe_exporter_id, directory.path());
+    const boost::filesystem::path destination = directory.path() / "requested.probe";
+
+    Print::ExportRequest request = print.make_export_request(ThumbnailsGeneratorCallback());
+    request.set_output_path(destination.string());
+    print.request_export(std::move(request));
+    const size_t queries_before = g_exporter_probe_state.query_count;
+    const size_t exports_before = g_exporter_probe_state.export_count;
+    orchestrator.export_requested(print);
+
+    CHECK(g_exporter_probe_state.query_count == queries_before + 1);
+    CHECK(g_exporter_probe_state.export_count == exports_before + 1);
+    CHECK(g_exporter_probe_state.export_output_path == destination.string());
+    CHECK(print.full_print_config().option("output_path") == nullptr);
+    CHECK(read_binary_file(destination) == read_binary_file(reference));
+    CHECK(print.export_result().local_path == destination.string());
+    CHECK(print.export_result().label == "Probe export");
+
+    // An exporter that QUERY refuses fails the export before EXPORT runs and before any file exists.
+    const boost::filesystem::path refused = directory.path() / "refused.probe";
+    Print::ExportRequest second_request = print.make_export_request(ThumbnailsGeneratorCallback());
+    second_request.set_output_path(refused.string());
+    print.request_export(std::move(second_request));
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Incompatible;
+    CHECK_THROWS_WITH(orchestrator.export_requested(print), "probe exporter is incompatible");
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    CHECK(g_exporter_probe_state.export_count == exports_before + 1);
+    CHECK_FALSE(boost::filesystem::exists(refused));
+    CHECK(print.export_result().local_path.empty());
+}
+
+// The built-in exporter publishes through the SDK helper and reports the file it really wrote, with its extension added
+// or kept, and a label; the Print keeps it.
+TEST_CASE("The built-in exporter reports the published file and a label", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    const boost::filesystem::path reference = prepare_print_with_reference(print, model, "gcode.exporter.simple", directory.path());
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+
+    const std::string bare = Test::export_print_to(
+        orchestrator, print, print.full_print_config(), reference.string(), (directory.path() / "bare").string(), selection);
+    CHECK(bare == (directory.path() / "bare.gcode").string());
+    CHECK(boost::filesystem::is_regular_file(bare));
+    CHECK(print.export_result().local_path == bare);
+    CHECK(print.export_result().label == "G-code file");
+
+    // An accepted alias is kept as typed.
+    const std::string alias = Test::export_print_to(
+        orchestrator, print, print.full_print_config(), reference.string(), (directory.path() / "typed.gco").string(), selection);
+    CHECK(alias == (directory.path() / "typed.gco").string());
+    CHECK(print.export_result().local_path == alias);
+
+    // An export that fails before the exporter runs leaves no result of the previous export behind.
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), (directory.path() / "missing.gcode").string(),
+                                       (directory.path() / "never.gcode").string(), selection));
+    CHECK(print.export_result().local_path.empty());
+    CHECK(print.export_result().label.empty());
+}
+
+// The file helper checks the destination before it writes anything, never touches the reference, and leaves no sibling.
+TEST_CASE("The file helper refuses a destination that cannot be published", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                            reference.string(), selection),
+                      "The G-code export destination must differ from its reference.");
+    const boost::filesystem::path directory_destination = directory.path() / "folder.gcode";
+    boost::filesystem::create_directories(directory_destination);
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                            directory_destination.string(), selection),
+                      "G-code export destination is not a file path: '" + directory_destination.string() + "'.");
+    const boost::filesystem::path missing_directory = directory.path() / "missing";
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                            (missing_directory / "out.gcode").string(), selection),
+                      "G-code export destination directory does not exist: '" + missing_directory.string() + "'.");
+    // The exporter asks for a missing destination; a requester that answers an empty one gets the refusal.
+    size_t asked = 0;
+    ExportInputForm seen;
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                            std::string(), selection, nullptr,
+                                            [&](ExportInputForm &form) {
+                                                ++asked;
+                                                seen = form;
+                                                form.values.set_key_value("output_path", new ConfigOptionString(std::string()));
+                                                return true;
+                                            }),
+                      "G-code export requires a non-empty destination (output_path).");
+    // The refusal comes from the answer: the exporter did ask for a path to save.
+    CHECK(asked == 1);
+    REQUIRE(seen.definitions.size() == 1);
+    CHECK(seen.definitions[0].opt_key == "output_path");
+    CHECK(seen.definitions[0].gui_type == ConfigOptionDef::GUIType::save_path);
+    boost::filesystem::remove_all(directory_destination);
+    CHECK(snapshot_directory(directory.path()) == original_files);
+}
+
+// Export through the probe, alter one existing sibling byte through a second handle while preserving length, and require CRC rejection, old-destination preservation, and sibling cleanup; the publisher owns the sibling.
+TEST_CASE("The publisher rejects a sibling changed after its writer flushes", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path output_directory = directory.path() / "outputs";
+    boost::filesystem::create_directories(output_directory);
+    Print print;
+    Model model;
+    g_exporter_probe_state.export_mode = ProbeExportMode::TamperAfterWrite;
+    const boost::filesystem::path reference = prepare_print_with_reference(
+        print, model, k_probe_exporter_id, directory.path());
+    const boost::filesystem::path destination = output_directory / "existing.probe";
+    write_binary_file(destination, "keep-existing-output");
+    g_exporter_probe_state.tamper_sibling_after_write = [&output_directory, &destination]() {
+        boost::filesystem::path sibling;
+        size_t sibling_count = 0;
+        for (boost::filesystem::directory_iterator entry(output_directory);
+             entry != boost::filesystem::directory_iterator(); ++entry) {
+            if (entry->path() != destination) {
+                sibling = entry->path();
+                ++sibling_count;
+            }
+        }
+        if (sibling_count != 1)
+            throw std::runtime_error("probe test did not find one sibling beside the destination");
+        const std::uintmax_t sibling_size = boost::filesystem::file_size(sibling);
+        if (sibling_size == 0)
+            throw std::runtime_error("probe test found an empty sibling to tamper with");
+        boost::nowide::fstream tamper(sibling.string().c_str(), std::ios::in | std::ios::out | std::ios::binary);
+        if (!tamper)
+            throw std::runtime_error("probe test could not open the sibling through a second descriptor");
+        char original_byte = 0;
+        tamper.read(&original_byte, 1);
+        if (!tamper)
+            throw std::runtime_error("probe test could not read the sibling byte");
+        tamper.seekp(0, std::ios::beg);
+        tamper.put(static_cast<char>(original_byte ^ 0x01));
+        tamper.flush();
+        if (!tamper)
+            throw std::runtime_error("probe test could not replace the sibling byte");
+        tamper.close();
+        if (!tamper)
+            throw std::runtime_error("probe test could not close the sibling descriptor");
+        if (boost::filesystem::file_size(sibling) != sibling_size)
+            throw std::runtime_error("probe test changed the sibling length");
+    };
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+
+    CHECK_THROWS_WITH(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                            destination.string(), selection),
+                      "G-code export temporary file changed while writing.");
+    CHECK(read_binary_file(destination) == "keep-existing-output");
+    size_t output_count = 0;
+    for (boost::filesystem::directory_iterator entry(output_directory);
+         entry != boost::filesystem::directory_iterator(); ++entry)
+        ++output_count;
+    CHECK(output_count == 1);
+    g_exporter_probe_state.tamper_sibling_after_write = std::function<void()>();
+}
+
+// An exporter without local file answers QUERY without extension, reads no destination, and may report nothing, a label
+// copied during the call, or (refused) a second result. The command line, which prints the file, refuses it clearly.
+TEST_CASE("An exporter without local file needs no extension and no destination", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation no_file(orchestrator, k_no_file_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_no_file_exporter_id, {{"seam_visibility", "0"}});
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+
+    Orchestrator::GCodeExporterSelection selection;
+    REQUIRE_NOTHROW(selection = orchestrator.select_gcode_exporter(print, print.full_print_config()));
+    CHECK(selection.plugin_id == k_no_file_exporter_id);
+    CHECK(selection.extension.empty());
+    CHECK(selection.accepts_extension(".anything"));
+
+    // No output_path in the request, and a reporter that says nothing: the Print holds an empty result.
+    const size_t exports_before = g_exporter_probe_state.no_file_export_count;
+    g_exporter_probe_state.no_file_mode = NoFileMode::ReportNothing;
+    DynamicPrintConfig export_config = print.full_print_config();
+    CHECK_NOTHROW(orchestrator.export_print(print, export_config, reference.string(), selection));
+    CHECK(g_exporter_probe_state.no_file_export_count == exports_before + 1);
+    CHECK_FALSE(g_exporter_probe_state.no_file_saw_output_path);
+    CHECK(print.export_result().local_path.empty());
+    CHECK(print.export_result().label.empty());
+
+    // A label alone; the exporter overwrote its buffer after the callback, so the host kept its own copy.
+    g_exporter_probe_state.no_file_mode = NoFileMode::ReportLabel;
+    CHECK_NOTHROW(orchestrator.export_print(print, export_config, reference.string(), selection));
+    CHECK(print.export_result().local_path.empty());
+    CHECK(print.export_result().label == "Sent to the printer");
+
+    // A second result is refused; the first one was already recorded when it was reported.
+    g_exporter_probe_state.no_file_mode = NoFileMode::ReportTwice;
+    CHECK_THROWS_WITH(orchestrator.export_print(print, export_config, reference.string(), selection),
+                      "The host refused the export result: an export reports one result.");
+    CHECK(print.export_result().label == "first report");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+
+    // The command line prints a file: an exporter that wrote none fails the command and leaves no reference behind.
+    g_exporter_probe_state.no_file_mode = NoFileMode::ReportLabel;
+    print.process();
+    CHECK_THROWS_WITH(orchestrator.export_gcode_cli(print, (directory.path() / "cli-output").string()),
+                      "The G-code exporter 'test.gcode.exporter.nofile' did not write a local file.");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+}
+
+// Read registered step ownership and the binary capability definition without changing runtime state; exporter settings invalidate no pipeline step, while the firmware setting retains STEP_GCODE.
+TEST_CASE("An exporter owns no invalidation step", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    const Plugin *builtin = orchestrator.get_plugin(k_default_gcode_exporter_id);
+    const Plugin *binary = orchestrator.get_plugin("gcode.exporter.bgcode");
+    const Plugin *probe = orchestrator.get_plugin(k_probe_exporter_id);
+    const Plugin *firmware = orchestrator.get_plugin("gcode.firmware.marlin2");
+    REQUIRE(builtin != nullptr);
+    REQUIRE(binary != nullptr);
+    REQUIRE(probe != nullptr);
+    REQUIRE(firmware != nullptr);
+    CHECK(plan_owner_step(*builtin) == STEP_NONE);
+    CHECK(plan_owner_step(*binary) == STEP_NONE);
+    CHECK(plan_owner_step(*probe) == STEP_NONE);
+    CHECK(plan_owner_step(*firmware) == STEP_GCODE);
+    const ConfigOptionDef *binary_capability = PrintConfigDef::instance().get("binary_gcode");
+    REQUIRE(binary_capability != nullptr);
+    CHECK(binary_capability->invalidates_step == STEP_NONE);
+}
+
+// Generate a reference with binary support disabled, apply a changed capability value and require STEP_GCODE to remain complete; the test mutates only its owned Print and Catch reports invalidation.
+TEST_CASE("Changing binary G-code support does not invalidate G-code", "[plugins][gcode][exporter][bgcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple", {{"binary_gcode", "0"}});
+    print.process();
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    REQUIRE(print.is_step_done(STEP_GCODE));
+
+    DynamicPrintConfig enabled_config = print.full_print_config();
+    enabled_config.set_deserialize_strict("binary_gcode", "1");
+    CHECK(print.apply(model, enabled_config) != PrintBase::APPLY_STATUS_INVALIDATED);
+    CHECK(print.is_step_done(STEP_GCODE));
+}
+
+// A destination that the built-in exporter refuses (suffix, missing directory) is refused before any thumbnail is rendered.
+TEST_CASE("A refused destination renders no thumbnail", "[plugins][gcode][exporter][export-contract][thumbnails]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple", {{"thumbnails", "4x4"}, {"thumbnails_format", "PNG"}});
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+
+    uint32_t calls = 0;
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                       (directory.path() / "wrong.bgcode").string(), selection, white_square_renderer(calls)));
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                       (directory.path() / "missing" / "out.gcode").string(), selection, white_square_renderer(calls)));
+    CHECK(calls == 0);
+    CHECK(snapshot_directory(directory.path()) == original_files);
+
+    // An accepted destination renders its thumbnail once.
+    CHECK_NOTHROW(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                        (directory.path() / "right.gcode").string(), selection, white_square_renderer(calls)));
+    CHECK(calls == 1);
+}
+
+// Query the registered provider with borrowed printer configurations and require its owned suffix or exact incompatibility diagnostic without creating files.
+TEST_CASE("Binary G-code QUERY requires printer support", "[plugins][gcode][exporter][bgcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("gcode_exporter_plugin", "gcode.exporter.bgcode");
+    config.set_deserialize_strict("binary_gcode", "1");
+
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
+    CHECK(selection.plugin_id == "gcode.exporter.bgcode");
+    CHECK(selection.extension == ".bgcode");
+    CHECK(selection.action_label == "Export binary G-code");
+    CHECK(selection.supports_removable_media);
+
+    config.set_deserialize_strict("binary_gcode", "0");
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, config),
+                      "The printer does not declare binary G-code support (binary_gcode).");
+}
+
+// An explicit exporter ID replaces the configured exporter for the selection only: it is resolved and queried alone, the
+// configuration setting is left untouched, and an unknown, inactive or incompatible ID is refused with its own message.
+TEST_CASE("An explicit exporter ID selects that exporter without the setting", "[plugins][gcode][exporter][bgcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("gcode_exporter_plugin", "gcode.exporter.simple");
+    config.set_deserialize_strict("binary_gcode", "1");
+
+    const Orchestrator::GCodeExporterSelection binary = orchestrator.select_gcode_exporter(print, config, "gcode.exporter.bgcode");
+    CHECK(binary.plugin_id == "gcode.exporter.bgcode");
+    CHECK(binary.extension == ".bgcode");
+    // An empty ID keeps reading the setting.
+    const Orchestrator::GCodeExporterSelection text = orchestrator.select_gcode_exporter(print, config, std::string());
+    CHECK(text.plugin_id == "gcode.exporter.simple");
+    CHECK(text.extension == ".gcode");
+    CHECK(config.opt_serialize("gcode_exporter_plugin") == "gcode.exporter.simple");
+
+    REQUIRE_THROWS_WITH(orchestrator.select_gcode_exporter(print, config, "test.gcode.exporter.missing"),
+                        "The configured G-code exporter 'test.gcode.exporter.missing' is not registered.");
+    REQUIRE_THROWS_WITH(orchestrator.select_gcode_exporter(print, config, k_probe_exporter_id),
+                        "The configured G-code exporter 'test.gcode.exporter.probe' is inactive.");
+
+    // The explicit exporter is queried with the configuration: without printer support its own QUERY refuses it.
+    config.set_deserialize_strict("binary_gcode", "0");
+    REQUIRE_THROWS_WITH(orchestrator.select_gcode_exporter(print, config, "gcode.exporter.bgcode"),
+                        "The printer does not declare binary G-code support (binary_gcode).");
+    CHECK(orchestrator.select_gcode_exporter(print, config, "gcode.exporter.simple").extension == ".gcode");
+}
+
+// QUERY checks raw-image support without a renderer or any export; BIQU is accepted when no thumbnail is requested, and PNG remains compatible.
+TEST_CASE("Binary G-code QUERY checks thumbnail image capability", "[plugins][exporter][bgcode][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bgcode",
+                         {{"thumbnails", "4x4"}, {"thumbnails_format", "BIQU"}});
+    DynamicPrintConfig config = print.full_print_config();
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, config),
+                      "Thumbnail provider 'BIQU' does not support raw images.");
+    config.set_deserialize_strict("thumbnails_format", "PNG");
+    REQUIRE_NOTHROW(orchestrator.select_gcode_exporter(print, config));
+    config.set_deserialize_strict("thumbnails_format", "BIQU");
+    config.set_deserialize_strict("thumbnails", "");
+    REQUIRE_NOTHROW(orchestrator.select_gcode_exporter(print, config));
+}
+
+// Deactivate every active thumbnail provider and require bgcode QUERY to name the configured encoder; guards restore activation even when an assertion fails.
+TEST_CASE("Binary G-code QUERY names an absent thumbnail encoder", "[plugins][exporter][bgcode][export-contract][thumbnails]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bgcode",
+                         {{"thumbnails", "4x4"}, {"thumbnails_format", "PNG"}});
+    const std::vector<Plugin *> providers = orchestrator.get_active_plugins_for_step(GCODE_THUMBNAIL);
+    REQUIRE_FALSE(providers.empty());
+    std::vector<std::unique_ptr<ScopedPluginActivation>> inactive;
+    for (const Plugin *provider : providers)
+        inactive.emplace_back(new ScopedPluginActivation(orchestrator, provider->get_id().c_str(), false));
+    CHECK_THROWS_WITH(orchestrator.select_gcode_exporter(print, print.full_print_config()),
+                      "GCODE_THUMBNAIL provider 'PNG' is not active");
+}
+
+// Select the serialized BIQU provider without an explicit ID and require its raw-image error before rendering; then verify a capable provider skips optional missing renders and rejects required skips.
+TEST_CASE("Binary G-code thumbnail helper checks raw-image capability before rendering", "[plugins][gcode][exporter][bgcode][raw-image]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict("thumbnails", "4x4");
+    config.set_deserialize_strict("thumbnails_format", "BIQU");
+    const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
+    const slic3r_api::Config config_view(ApiHost::to_config_handle(&config));
+    const slic3r_api::OrchestratorView orchestrator_view(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
+    uint32_t calls = 0;
+    const GCodeThumbnailRenderer renderer(print, white_square_renderer(calls));
+    std::vector<slic3r_api::GCodeThumbnailRequest> requests =
+        slic3r_api::default_gcode_thumbnail_requests(config_view);
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests.front().provider_id.empty());
+
+    CHECK_THROWS_WITH(slic3r_api::encode_gcode_thumbnail_images(
+                          orchestrator_view, print_view, config_view, renderer.c_renderer(), requests),
+                      "Thumbnail provider 'BIQU' does not support raw images.");
+    CHECK(calls == 0);
+    CHECK_THROWS_WITH(slic3r_api::encode_gcode_thumbnail_images(
+                          orchestrator_view, print_view, config_view, nullptr, requests),
+                      "Thumbnail provider 'BIQU' does not support raw images.");
+    CHECK(calls == 0);
+
+    config.set_deserialize_strict("thumbnails_format", "PNG");
+    const slic3r_api::Config png_config_view(ApiHost::to_config_handle(&config));
+    requests = slic3r_api::default_gcode_thumbnail_requests(png_config_view);
+    REQUIRE(requests.size() == 1);
+    REQUIRE(requests.front().provider_id.empty());
+    const std::vector<slic3r_api::GCodeThumbnailEncodedImage> optional_images =
+        slic3r_api::encode_gcode_thumbnail_images(orchestrator_view, print_view, png_config_view, nullptr, requests);
+    CHECK(optional_images.empty());
+    requests.front().required = true;
+    CHECK_THROWS_WITH(slic3r_api::encode_gcode_thumbnail_images(
+                          orchestrator_view, print_view, png_config_view, nullptr, requests),
+                      "A required raw G-code thumbnail was skipped.");
+    CHECK(calls == 0);
+}
+
+// Own a processed Print, text reference and export files; export with measured statistics, then validate every block, exact metadata keys, note-plus-reference bytes, thumbnails and import behavior, with Catch reporting discrepancies.
+TEST_CASE("Binary G-code export writes the reference body and exact metadata blocks", "[plugins][gcode][exporter][bgcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bgcode",
+                          {{"binary_gcode", "0"}, {"seam_visibility", "0"},
+                           {"thumbnails", "4x4,3x2"}, {"thumbnails_format", "PNG"},
+                           {"notes", "metadata export note"}, {"silent_mode", "0"}});
+    print.process();
+
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    GCodeProcessorResult reference_result;
+    orchestrator.export_gcode(print, reference.string(), &reference_result);
+    REQUIRE(print.print_statistics().statistics_available);
+    // Two empty lines at the end exercise the verified MeatPackComments behavior: empty lines are dropped from the decoded body.
+    write_binary_file(reference, read_binary_file(reference) + "\r\n\r\n");
+    const std::string reference_bytes = read_binary_file(reference);
+
+    DynamicPrintConfig export_config = print.full_print_config();
+    export_config.set_deserialize_strict("binary_gcode", "1");
+    export_config.set_deserialize_strict("layer_height", "0.32");
+    export_config.set_deserialize_strict("printhost_apikey", "E3B_SECRET_SENTINEL");
+    export_config.set_deserialize_strict("gcode_exporter_plugin", "gcode.exporter.bgcode");
+
+    DynamicPrintConfig probe_config = export_config;
+    probe_config.set_deserialize_strict("gcode_exporter_plugin", k_probe_exporter_id);
+    probe_config.set_deserialize_strict(k_probe_option_key, "1");
+    const Orchestrator::GCodeExporterSelection probe_selection =
+        orchestrator.select_gcode_exporter(print, probe_config);
+    Test::export_print_to(orchestrator, print, probe_config, reference.string(),
+                          (directory.path() / "metadata.probe").string(), probe_selection);
+    const std::vector<std::pair<std::string, std::string>> source_configuration =
+        g_exporter_probe_state.export_configuration;
+    const std::vector<std::pair<std::string, std::string>> source_statistics =
+        g_exporter_probe_state.export_statistics;
+    REQUIRE_FALSE(source_statistics.empty());
+
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, export_config);
+    const boost::filesystem::path destination = directory.path() / "complete.bgcode";
+    uint32_t render_calls = 0;
+    CHECK(Test::export_print_to(orchestrator, print, export_config, reference.string(), destination.string(),
+                                selection, white_square_renderer(render_calls)) == destination.string());
+    CHECK(render_calls == 2);
+
+    const BgcodeReadback readback = read_bgcode_file(destination);
+    REQUIRE(readback.file_metadata.size() == 1);
+    CHECK(readback.file_metadata.front().first == "Producer");
+    CHECK(readback.file_metadata.front().second.compare(0, std::string(SLIC3R_APP_NAME).size(), SLIC3R_APP_NAME) == 0);
+
+    // Build expected ordered key lists from the source entries the host actually supplied and the historical bgcode key groups.
+    const char *const printer_config_keys[] = {
+        "printer_model", "filament_type", "nozzle_diameter", "bed_temperature", "brim_width",
+        "fill_density", "layer_height", "temperature", "ironing", "support_material", "extruder_colour"};
+    const char *const printer_statistic_keys[] = {
+        "filament used [mm]", "filament used [g]", "filament cost", "filament used [cm3]",
+        "total filament used for wipe tower [g]"};
+    const char *const print_statistic_keys[] = {
+        "total toolchanges", "filament used [mm]", "filament used [cm3]", "filament used [g]",
+        "filament cost", "total filament used [g]", "total filament cost",
+        "total filament used for wipe tower [g]"};
+    std::vector<std::string> expected_printer_keys;
+    for (const char *key : printer_config_keys) {
+        if (find_bgcode_metadata_value(source_configuration, key) != nullptr)
+            expected_printer_keys.emplace_back(key);
+    }
+    for (const char *key : printer_statistic_keys) {
+        if (find_bgcode_metadata_value(source_statistics, key) != nullptr)
+            expected_printer_keys.emplace_back(key);
+    }
+    // The Reader measured this print, so the normal-mode times are written; no silent-mode line exists, whatever silent_mode says.
+    expected_printer_keys.emplace_back("estimated printing time (normal mode)");
+    expected_printer_keys.emplace_back("max_layer_z");
+
+    std::vector<std::string> expected_print_keys;
+    for (const char *key : print_statistic_keys) {
+        if (find_bgcode_metadata_value(source_statistics, key) != nullptr)
+            expected_print_keys.emplace_back(key);
+    }
+    expected_print_keys.emplace_back("estimated printing time (normal mode)");
+    expected_print_keys.emplace_back("estimated first layer printing time (normal mode)");
+
+    std::vector<std::string> actual_printer_keys;
+    for (const std::pair<std::string, std::string> &entry : readback.printer_metadata)
+        actual_printer_keys.push_back(entry.first);
+    std::vector<std::string> actual_print_keys;
+    for (const std::pair<std::string, std::string> &entry : readback.print_metadata)
+        actual_print_keys.push_back(entry.first);
+    CHECK(actual_printer_keys == expected_printer_keys);
+    CHECK(actual_print_keys == expected_print_keys);
+    const std::string *printer_normal_time =
+        find_bgcode_metadata_value(readback.printer_metadata, "estimated printing time (normal mode)");
+    REQUIRE(printer_normal_time != nullptr);
+    // Oracles independent of the host plan: the time and layer 0 time of the Reader result, and the highest ";Z:" of the text.
+    const PrintEstimatedStatistics::Mode &reader_normal = reference_result.print_statistics.modes[0];
+    REQUIRE_FALSE(reader_normal.layers_times.empty());
+    const std::string expected_time = get_time_dhms(reader_normal.time);
+    const std::string expected_first_layer = get_time_dhms(reader_normal.layers_times.front());
+    CHECK(reader_normal.time > 0.f);
+    CHECK(*printer_normal_time == expected_time);
+    const std::string *max_layer_z = find_bgcode_metadata_value(readback.printer_metadata, "max_layer_z");
+    REQUIRE(max_layer_z != nullptr);
+    CHECK(highest_marker_z(reference_bytes) > 10.);
+    CHECK(*max_layer_z == format_two_decimals(highest_marker_z(reference_bytes)));
+    const std::string *print_normal_time =
+        find_bgcode_metadata_value(readback.print_metadata, "estimated printing time (normal mode)");
+    REQUIRE(print_normal_time != nullptr);
+    CHECK(*print_normal_time == expected_time);
+    const std::string *print_first_layer_time =
+        find_bgcode_metadata_value(readback.print_metadata, "estimated first layer printing time (normal mode)");
+    REQUIRE(print_first_layer_time != nullptr);
+    CHECK(*print_first_layer_time == expected_first_layer);
+
+    const std::string *source_filament_mm = find_bgcode_metadata_value(source_statistics, "filament used [mm]");
+    const std::string *source_toolchanges = find_bgcode_metadata_value(source_statistics, "total toolchanges");
+    const std::string *source_wipe_tower_total =
+        find_bgcode_metadata_value(source_statistics, "total filament used for wipe tower [g]");
+    REQUIRE(source_filament_mm != nullptr);
+    REQUIRE(source_toolchanges != nullptr);
+    REQUIRE(source_wipe_tower_total != nullptr);
+    const std::string *printer_filament_mm =
+        find_bgcode_metadata_value(readback.printer_metadata, "filament used [mm]");
+    const std::string *print_filament_mm =
+        find_bgcode_metadata_value(readback.print_metadata, "filament used [mm]");
+    const std::string *print_toolchanges =
+        find_bgcode_metadata_value(readback.print_metadata, "total toolchanges");
+    const std::string *printer_wipe_tower_total =
+        find_bgcode_metadata_value(readback.printer_metadata, "total filament used for wipe tower [g]");
+    const std::string *print_wipe_tower_total =
+        find_bgcode_metadata_value(readback.print_metadata, "total filament used for wipe tower [g]");
+    REQUIRE(printer_filament_mm != nullptr);
+    REQUIRE(print_filament_mm != nullptr);
+    REQUIRE(print_toolchanges != nullptr);
+    REQUIRE(printer_wipe_tower_total != nullptr);
+    REQUIRE(print_wipe_tower_total != nullptr);
+    CHECK(*printer_filament_mm == *source_filament_mm);
+    CHECK(*print_filament_mm == *source_filament_mm);
+    CHECK(*print_toolchanges == *source_toolchanges);
+    CHECK(*printer_wipe_tower_total == *source_wipe_tower_total);
+    CHECK(*print_wipe_tower_total == *source_wipe_tower_total);
+    CHECK(std::none_of(actual_print_keys.begin(), actual_print_keys.end(), [](const std::string &key) {
+        return key == "objects layers count" || key == "total layers count" || key == "has_support";
+    }));
+
+    const std::string secret = "E3B_SECRET_SENTINEL";
+    CHECK(std::none_of(readback.slicer_metadata.begin(), readback.slicer_metadata.end(), [&secret](
+        const std::pair<std::string, std::string> &entry) {
+        return entry.second.find(secret) != std::string::npos;
+    }));
+    const std::string *layer_height = find_bgcode_metadata_value(readback.slicer_metadata, "layer_height");
+    REQUIRE(layer_height != nullptr);
+    CHECK(*layer_height == "0.32");
+    DynamicPrintConfig imported = DynamicPrintConfig::full_print_config();
+    imported.load(destination.string(), ForwardCompatibilitySubstitutionRule::EnableSilent);
+    CHECK(imported.opt_float("layer_height") == Approx(0.32));
+
+    CHECK(GCodeProcessor::get_binarizer_config().gcode_encoding ==
+          bgcode::core::EGCodeEncodingType::MeatPackComments);
+    CHECK(readback.gcode_encoding == bgcode::core::EGCodeEncodingType::MeatPackComments);
+    REQUIRE(reference_bytes.find("G28 ; home all axes") != std::string::npos);
+    CHECK(readback.gcode.find("G28 ; home all axes") == std::string::npos);
+    const slic3r_api::Config export_config_view(ApiHost::to_config_handle(&export_config));
+    const std::string expected_body = slic3r_api::format_gcode_notes(export_config_view) + reference_bytes;
+    // Match the decoded output from both sides. Verified on a decoded file: MeatPackComments keeps standalone comments and every other line's text unchanged, and drops inline command comments and empty lines, so the normalization removes the CR of CRLF endings, empty lines and inline command comments.
+    const auto normalize_meatpack_lines = [](const std::string &body) {
+        std::vector<std::string> lines;
+        std::istringstream input(body);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            if (line.empty())
+                continue;
+            if (line.front() != ';') {
+                const size_t inline_comment = line.find(';');
+                if (inline_comment != std::string::npos) {
+                    line.erase(inline_comment);
+                    while (!line.empty() && (line.back() == ' ' || line.back() == '\t'))
+                        line.pop_back();
+                }
+            }
+            if (!line.empty())
+                lines.push_back(line);
+        }
+        return lines;
+    };
+    const std::vector<std::string> actual_gcode_lines = normalize_meatpack_lines(readback.gcode);
+    const std::vector<std::string> expected_gcode_lines = normalize_meatpack_lines(expected_body);
+    const size_t common_line_count = std::min(actual_gcode_lines.size(), expected_gcode_lines.size());
+    const std::vector<std::string>::const_iterator first_line_mismatch =
+        std::mismatch(actual_gcode_lines.begin(), actual_gcode_lines.begin() + common_line_count,
+                      expected_gcode_lines.begin()).first;
+    const size_t line_mismatch_index = size_t(std::distance(actual_gcode_lines.begin(), first_line_mismatch));
+    INFO("G-code line mismatch at " << line_mismatch_index + 1 << "; actual="
+         << (line_mismatch_index < actual_gcode_lines.size() ? actual_gcode_lines[line_mismatch_index] : "<end>")
+         << "; expected="
+         << (line_mismatch_index < expected_gcode_lines.size() ? expected_gcode_lines[line_mismatch_index] : "<end>"));
+    CHECK(actual_gcode_lines == expected_gcode_lines);
+    // The reference ends with two empty lines; MeatPackComments must have dropped them from the decoded body.
+    CHECK(readback.gcode.find("\r\n\r\n") == std::string::npos);
+    REQUIRE(readback.thumbnails.size() == 2);
+    const std::string png_signature("\x89PNG\r\n\x1a\n", 8);
+    CHECK(readback.thumbnails[0].format == uint16_t(bgcode::core::EThumbnailFormat::PNG));
+    CHECK(readback.thumbnails[0].width == 4);
+    CHECK(readback.thumbnails[0].height == 4);
+    REQUIRE(readback.thumbnails[0].bytes.size() >= png_signature.size());
+    CHECK(std::memcmp(readback.thumbnails[0].bytes.data(), png_signature.data(), png_signature.size()) == 0);
+    CHECK(readback.thumbnails[1].format == uint16_t(bgcode::core::EThumbnailFormat::PNG));
+    CHECK(readback.thumbnails[1].width == 3);
+    CHECK(readback.thumbnails[1].height == 2);
+    REQUIRE(readback.thumbnails[1].bytes.size() >= png_signature.size());
+    CHECK(std::memcmp(readback.thumbnails[1].bytes.data(), png_signature.data(), png_signature.size()) == 0);
+    GCodeProcessor binary_reader;
+    binary_reader.process_file(destination.string());
+    CHECK(binary_reader.get_result().is_binary_file);
+
+    DynamicPrintConfig silent_config = export_config;
+    silent_config.set_deserialize_strict("silent_mode", "1");
+    const Orchestrator::GCodeExporterSelection silent_selection =
+        orchestrator.select_gcode_exporter(print, silent_config);
+    const boost::filesystem::path silent_destination = directory.path() / "silent.bgcode";
+    CHECK(Test::export_print_to(orchestrator, print, silent_config, reference.string(),
+                                silent_destination.string(), silent_selection) == silent_destination.string());
+    const BgcodeReadback silent_readback = read_bgcode_file(silent_destination);
+    // silent_mode adds no line: the Reader never computes a silent-mode time, and a false zero is not written.
+    for (const std::string &key : {"estimated printing time (silent mode)", "estimated first layer printing time (silent mode)"}) {
+        CHECK(find_bgcode_metadata_value(silent_readback.printer_metadata, key) == nullptr);
+        CHECK(find_bgcode_metadata_value(silent_readback.print_metadata, key) == nullptr);
+    }
+    CHECK(find_bgcode_metadata_value(silent_readback.print_metadata, "estimated printing time (normal mode)") != nullptr);
+    CHECK(silent_readback.thumbnails.empty());
+    CHECK(snapshot_directory(directory.path()).size() == 4);
+}
+
+// Initialize two cubes printed by tools 1 and 2 with distinct filament diameters and densities and a time cost, so that
+// the material of the two tools differs and the time cost stays out of the weights.
+void initialize_two_tool_print(Print &print, Model &model)
+{
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_num_extruders(2);
+    config.set_deserialize_strict({
+        {"gcode_firmware_plugin", "gcode.firmware.marlin2"},
+        {"gcode_exporter_plugin", "gcode.exporter.simple"},
+        {"wipe_tower", "0"},
+        {"single_extruder_multi_material", "0"},
+        {"layer_height", "0.3"},
+        {"time_cost", "2"},
+        {"filament_diameter", "1.75,2.85"},
+        {"filament_density", "1.1,1.2"},
+        {"filament_cost", "20,25"},
+        {"filament_type", "PLA,PETG"}});
+    Test::init_print({Test::TestMesh::cube_20x20x20, Test::TestMesh::cube_20x20x20}, print, model, config);
+    for (const char *key : {"perimeter_extruder", "infill_extruder", "solid_infill_extruder"}) {
+        model.objects()[0].config.set_deserialize_strict(key, "1");
+        model.objects()[1].config.set_deserialize_strict(key, "2");
+    }
+    print.apply(model, config);
+}
+
+// Export a reference through the probe exporter with a configuration and keep what the probe saw in g_exporter_probe_state.
+void export_through_probe(Orchestrator &orchestrator, Print &print, DynamicPrintConfig config,
+                          const boost::filesystem::path &reference, const boost::filesystem::path &destination)
+{
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    config.set_deserialize_strict("gcode_exporter_plugin", k_probe_exporter_id);
+    config.set_deserialize_strict(k_probe_option_key, "1");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, config);
+    Test::export_print_to(orchestrator, print, config, reference.string(), destination.string(), selection);
+}
+
+// Split the value of one text statistics line at its ", " separators, empty when the label is absent.
+std::vector<std::string> statistics_values(const std::string &label)
+{
+    const std::string *value = find_bgcode_metadata_value(g_exporter_probe_state.export_statistics, label);
+    std::vector<std::string> values;
+    if (value == nullptr)
+        return values;
+    for (size_t begin = 0; begin <= value->size();) {
+        const size_t end = value->find(", ", begin);
+        values.push_back(value->substr(begin, end == std::string::npos ? std::string::npos : end - begin));
+        if (end == std::string::npos)
+            break;
+        begin = end + 2;
+    }
+    return values;
+}
+
+// Compare the numeric statistics that the probe received with values recomputed from the Reader result, the
+// configuration of the export and the G-code text, then with the text statistics of the same export.
+void expect_numeric_statistics(const GCodeProcessorResult &result, const DynamicPrintConfig &export_config,
+                               const std::string &body)
+{
+    const ExporterProbeState &seen = g_exporter_probe_state;
+    REQUIRE(seen.export_has_numeric);
+    CHECK(seen.export_has_measured);
+    const PrintEstimatedStatistics::Mode &normal = result.print_statistics.modes[0];
+    REQUIRE_FALSE(normal.layers_times.empty());
+    CHECK(normal.time > 0.f);
+    CHECK(seen.export_numeric.estimated_time_seconds == double(normal.time));
+    CHECK(seen.export_numeric.first_layer_time_seconds == double(normal.layers_times.front()));
+    CHECK(seen.export_numeric.layer_count == count_layer_change_markers(body));
+    CHECK(seen.export_numeric.layer_count > 0);
+    CHECK(seen.export_numeric.max_print_z == Approx(highest_marker_z(body)).margin(1e-3));
+
+    const std::vector<ExpectedMaterial> expected = expected_materials(result, export_config);
+    REQUIRE(seen.export_filaments.size() == expected.size());
+    double total_length = 0., total_volume = 0., total_weight = 0.;
+    for (size_t tool = 0; tool < expected.size(); ++tool) {
+        CAPTURE(tool);
+        CHECK(seen.export_filaments[tool].tool == tool);
+        CHECK(seen.export_filaments[tool].length_mm == Approx(expected[tool].length_mm).epsilon(1e-9));
+        CHECK(seen.export_filaments[tool].volume_mm3 == Approx(expected[tool].volume_mm3).epsilon(1e-9));
+        CHECK(seen.export_filaments[tool].weight_g == Approx(expected[tool].weight_g).epsilon(1e-9));
+        total_length += expected[tool].length_mm;
+        total_volume += expected[tool].volume_mm3;
+        total_weight += expected[tool].weight_g;
+    }
+    CHECK(seen.export_numeric.total_length_mm == Approx(total_length).epsilon(1e-9));
+    CHECK(seen.export_numeric.total_volume_mm3 == Approx(total_volume).epsilon(1e-9));
+    CHECK(seen.export_numeric.total_weight_g == Approx(total_weight).epsilon(1e-9));
+
+    // Secondary check: the text lines are these values rounded to two decimals (cubic centimeters for the volume).
+    const std::vector<std::string> text_mm = statistics_values("filament used [mm]");
+    const std::vector<std::string> text_cm3 = statistics_values("filament used [cm3]");
+    const std::vector<std::string> text_g = statistics_values("filament used [g]");
+    REQUIRE(text_mm.size() == seen.export_filaments.size());
+    REQUIRE(text_cm3.size() == seen.export_filaments.size());
+    REQUIRE(text_g.size() == seen.export_filaments.size());
+    for (size_t tool = 0; tool < seen.export_filaments.size(); ++tool) {
+        CHECK(text_mm[tool] == format_two_decimals(seen.export_filaments[tool].length_mm));
+        CHECK(text_cm3[tool] == format_two_decimals(seen.export_filaments[tool].volume_mm3 / 1000.));
+        CHECK(text_g[tool] == format_two_decimals(seen.export_filaments[tool].weight_g));
+    }
+    const std::string *text_total = find_bgcode_metadata_value(seen.export_statistics, "total filament used [g]");
+    REQUIRE(text_total != nullptr);
+    CHECK(*text_total == format_two_decimals(seen.export_numeric.total_weight_g));
+}
+
+// Export a two-tool print whose Reader result is kept: with the configuration of the Print, then with a one-tool
+// configuration whose density differs (the measured second tool is ignored). The numeric statistics are compared with
+// oracles that do not use the host: the Reader result, the export configuration and the G-code text.
+TEST_CASE("The exporter receives numeric statistics recomputed from the Reader result",
+          "[plugins][gcode][exporter][export-contract][statistics]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_two_tool_print(print, model);
+    print.process();
+
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    GCodeProcessorResult result;
+    orchestrator.export_gcode(print, reference.string(), &result);
+    REQUIRE(print.print_statistics().statistics_available);
+    const std::string body = read_binary_file(reference);
+    REQUIRE(result.print_statistics.volumes_per_extruder.size() == 2);
+
+    export_through_probe(orchestrator, print, print.full_print_config(), reference, directory.path() / "two.probe");
+    const DynamicPrintConfig two_tools = print.full_print_config();
+    expect_numeric_statistics(result, two_tools, body);
+    CHECK(g_exporter_probe_state.export_filaments.size() == 2);
+    // The two tools do not weigh the same: a mix-up of tools or of the per-tool properties cannot pass.
+    CHECK(g_exporter_probe_state.export_filaments[0].weight_g != Approx(g_exporter_probe_state.export_filaments[1].weight_g));
+    // The totals are the sums of the tools and exclude the time cost of the Print.
+    CHECK(g_exporter_probe_state.export_numeric.total_weight_g == Approx(print.print_statistics().total_weight));
+
+    DynamicPrintConfig one_tool = print.full_print_config();
+    one_tool.set_num_extruders(1);
+    one_tool.set_deserialize_strict("filament_density", "2");
+    one_tool.set_deserialize_strict("filament_diameter", "2");
+    export_through_probe(orchestrator, print, one_tool, reference, directory.path() / "one.probe");
+    expect_numeric_statistics(result, one_tool, body);
+    CHECK(g_exporter_probe_state.export_filaments.size() == 1);
+    // The length uses the diameter of the export configuration (2 mm), not the 1.75 mm of the Print.
+    const double print_diameter_length = result.print_statistics.volumes_per_extruder.at(0) / (PI * 1.75 * 1.75 / 4.);
+    CHECK(g_exporter_probe_state.export_filaments[0].length_mm != Approx(print_diameter_length));
+    CHECK(g_exporter_probe_state.export_filaments[0].length_mm ==
+          Approx(result.print_statistics.volumes_per_extruder.at(0) / (PI * 1.0 * 1.0)).epsilon(1e-9));
+    CHECK(g_exporter_probe_state.export_numeric.total_weight_g ==
+          Approx(result.print_statistics.volumes_per_extruder.at(0) / 1000. * 2.).epsilon(1e-9));
+}
+
+// An export without a Reader pass still has the plan facts, and every measured value is zero with an empty list; an
+// export on a Print that never reached STEP_GCODE has no plan, so its plan facts are zero.
+TEST_CASE("The exporter receives the plan facts without measured statistics",
+          "[plugins][gcode][exporter][export-contract][statistics]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple");
+    print.process();
+    // A direct export of a reference that STEP_GCODE did not produce: the plan facts are zero until STEP_GCODE has
+    // published them, even though the processed Print has a plan.
+    const boost::filesystem::path foreign_reference = directory.path() / "foreign.gcode";
+    write_binary_file(foreign_reference, "G1 X1\n");
+    export_through_probe(orchestrator, print, print.full_print_config(), foreign_reference, directory.path() / "foreign.probe");
+    CHECK(g_exporter_probe_state.export_has_numeric);
+    CHECK(g_exporter_probe_state.export_numeric.layer_count == 0);
+    CHECK(g_exporter_probe_state.export_numeric.max_print_z == 0.);
+
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    REQUIRE_FALSE(print.print_statistics().statistics_available);
+    const std::string body = read_binary_file(reference);
+
+    export_through_probe(orchestrator, print, print.full_print_config(), reference, directory.path() / "one.probe");
+    const ExporterProbeState &seen = g_exporter_probe_state;
+    CHECK(seen.export_has_numeric);
+    CHECK_FALSE(seen.export_has_measured);
+    CHECK(seen.export_statistics.empty());
+    CHECK(seen.export_numeric.layer_count == count_layer_change_markers(body));
+    CHECK(seen.export_numeric.layer_count > 0);
+    CHECK(seen.export_numeric.max_print_z == Approx(highest_marker_z(body)).margin(1e-3));
+    CHECK(seen.export_numeric.max_print_z > 10.);
+    CHECK(seen.export_numeric.estimated_time_seconds == 0.);
+    CHECK(seen.export_numeric.first_layer_time_seconds == 0.);
+    CHECK(seen.export_numeric.total_length_mm == 0.);
+    CHECK(seen.export_numeric.total_volume_mm3 == 0.);
+    CHECK(seen.export_numeric.total_weight_g == 0.);
+    CHECK(seen.export_filaments.empty());
+
+    // A Print that never produced G-code has no plan: its facts are zero.
+    Print unprocessed;
+    Model unprocessed_model;
+    initialize_fff_print(unprocessed, unprocessed_model, "gcode.exporter.simple");
+    const boost::filesystem::path stub = directory.path() / "stub.gcode";
+    write_binary_file(stub, "G1 X1\n");
+    export_through_probe(orchestrator, unprocessed, unprocessed.full_print_config(), stub, directory.path() / "stub.probe");
+    CHECK(seen.export_has_numeric);
+    CHECK_FALSE(seen.export_has_measured);
+    CHECK(seen.export_numeric.layer_count == 0);
+    CHECK(seen.export_numeric.max_print_z == 0.);
+}
+
+// With complete objects and one shared skirt, the plan has a leading auxiliary layer: the layer count given to the
+// exporter is the number of ";LAYER_CHANGE" markers of the G-code (every layer group of the plan), which is not the
+// count of the object layers.
+TEST_CASE("The exporter layer count includes auxiliary layers",
+          "[plugins][gcode][exporter][export-contract][statistics]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.simple",
+                         {{"complete_objects", "1"}, {"skirts", "1"}, {"skirt_height", "1"}, {"skirt_distance", "6"},
+                          {"complete_objects_one_skirt", "1"}, {"brim_width", "0"}});
+    print.process();
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    GCodeProcessorResult result;
+    orchestrator.export_gcode(print, reference.string(), &result);
+    const std::string body = read_binary_file(reference);
+
+    export_through_probe(orchestrator, print, print.full_print_config(), reference, directory.path() / "layers.probe");
+    const size_t object_layers = print.object(0).layer_count();
+    CHECK(g_exporter_probe_state.export_numeric.layer_count == count_layer_change_markers(body));
+    CHECK(g_exporter_probe_state.export_numeric.layer_count > object_layers);
+    CHECK(print.print_statistics().object_layer_count == int(object_layers));
+    CHECK(g_exporter_probe_state.export_numeric.layer_count == uint32_t(print.print_statistics().total_layer_count));
+}
+// Export binary G-code from a reference that was generated without a Reader pass: the highest layer Z is still written,
+// the time lines are absent (an unmeasured time is not a zero), and no silent-mode line exists whatever silent_mode says.
+TEST_CASE("Binary G-code omits the times that the host did not measure",
+          "[plugins][gcode][exporter][bgcode][statistics]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bgcode",
+                         {{"binary_gcode", "0"}, {"silent_mode", "1"}});
+    print.process();
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    orchestrator.export_gcode(print, reference.string(), nullptr);
+    REQUIRE_FALSE(print.print_statistics().statistics_available);
+
+    DynamicPrintConfig export_config = print.full_print_config();
+    export_config.set_deserialize_strict("binary_gcode", "1");
+    const Orchestrator::GCodeExporterSelection selection = orchestrator.select_gcode_exporter(print, export_config);
+    const boost::filesystem::path destination = directory.path() / "direct.bgcode";
+    REQUIRE(Test::export_print_to(orchestrator, print, export_config, reference.string(), destination.string(),
+                                  selection) == destination.string());
+    const BgcodeReadback readback = read_bgcode_file(destination);
+    const std::string *max_layer_z = find_bgcode_metadata_value(readback.printer_metadata, "max_layer_z");
+    REQUIRE(max_layer_z != nullptr);
+    CHECK(*max_layer_z == format_two_decimals(highest_marker_z(read_binary_file(reference))));
+    CHECK(*max_layer_z != "0.00");
+    // libbgcode refuses an empty print metadata block, so without measured values that block holds the plan Z alone: the
+    // accepted fallback, with the value of the printer block.
+    REQUIRE(readback.print_metadata.size() == 1);
+    CHECK(readback.print_metadata.front().first == "max_layer_z");
+    CHECK(readback.print_metadata.front().second == *max_layer_z);
+    for (const char *key : {"estimated printing time (normal mode)", "estimated printing time (silent mode)",
+                            "estimated first layer printing time (normal mode)",
+                            "estimated first layer printing time (silent mode)"}) {
+        CAPTURE(key);
+        CHECK(find_bgcode_metadata_value(readback.printer_metadata, key) == nullptr);
+        CHECK(find_bgcode_metadata_value(readback.print_metadata, key) == nullptr);
+    }
+}
+// Let the publisher reject invalid paths before its writer starts, then fail an export after the private bgcode file opens and prove both old output and directory contents survive.
+TEST_CASE("Binary G-code publication validates paths and cleans private files", "[plugins][gcode][exporter][bgcode][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bgcode",
+                          {{"binary_gcode", "1"}, {"thumbnails", "4x4"}, {"thumbnails_format", "PNG"}});
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    const Orchestrator::GCodeExporterSelection selection =
+        orchestrator.select_gcode_exporter(print, print.full_print_config());
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+    uint32_t calls = 0;
+
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                       (directory.path() / "wrong.gcode").string(), selection,
+                                       white_square_renderer(calls)));
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                       (directory.path() / "missing" / "output.bgcode").string(), selection,
+                                       white_square_renderer(calls)));
+    CHECK(calls == 0);
+    CHECK(snapshot_directory(directory.path()) == original_files);
+
+    const boost::filesystem::path destination = directory.path() / "existing.bgcode";
+    write_binary_file(destination, "existing destination bytes");
+    const std::map<std::string, std::string> files_before_render_failure = snapshot_directory(directory.path());
+    // The callback is owned by this test and throws only after the binary writer requests its first rendered image.
+    const ThumbnailsGeneratorCallback failing_renderer = [&calls](const ThumbnailsParams &) -> ThumbnailsList {
+        ++calls;
+        throw std::runtime_error("test thumbnail renderer failed");
+    };
+    CHECK_THROWS(Test::export_print_to(orchestrator, print, print.full_print_config(), reference.string(),
+                                       destination.string(), selection, failing_renderer));
+    CHECK(calls == 1);
+    CHECK(read_binary_file(destination) == "existing destination bytes");
+    CHECK(snapshot_directory(directory.path()) == files_before_render_failure);
+}
+
+// Ask for a destination through the export-input callback and verify the shared save-path definition advertises only the binary suffix.
+TEST_CASE("Binary G-code exporter requests its own destination filter", "[plugins][gcode][exporter][bgcode][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bgcode", {{"binary_gcode", "1"}});
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    const boost::filesystem::path destination = directory.path() / "answered.bgcode";
+    write_binary_file(reference, "G1 X1\n");
+    const Orchestrator::GCodeExporterSelection selection =
+        orchestrator.select_gcode_exporter(print, print.full_print_config());
+    ExportInputForm seen;
+    size_t asked = 0;
+    const std::string published = Test::export_print_to(
+        orchestrator, print, print.full_print_config(), reference.string(), std::string(), selection, nullptr,
+        [&seen, &asked, &destination](ExportInputForm &form) {
+            ++asked;
+            seen = form;
+            form.values.set_key_value("output_path", new ConfigOptionString(destination.string()));
+            return true;
+        });
+
+    CHECK(asked == 1);
+    REQUIRE(seen.definitions.size() == 1);
+    CHECK(seen.definitions.front().opt_key == "output_path");
+    CHECK(seen.definitions.front().type == coString);
+    CHECK(seen.definitions.front().gui_type == ConfigOptionDef::GUIType::save_path);
+    CHECK(seen.definitions.front().sidetext == "G-code (*.bgcode)|*.bgcode");
+    CHECK(published == destination.string());
+    CHECK(boost::filesystem::is_regular_file(destination));
+}
+
+// Through the runner, an exporter without local file succeeds on a ready reference with a request that holds no output_path.
+TEST_CASE("The runner exports without destination for an exporter that needs none", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation no_file(orchestrator, k_no_file_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    prepare_print_with_reference(print, model, k_no_file_exporter_id, directory.path());
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+
+    Print::ExportRequest request = print.make_export_request(ThumbnailsGeneratorCallback());
+    REQUIRE(request.output_path().empty());
+    REQUIRE(request.config.option("output_path") == nullptr);
+    print.request_export(std::move(request));
+    g_exporter_probe_state.no_file_mode = NoFileMode::ReportLabel;
+    const size_t exports_before = g_exporter_probe_state.no_file_export_count;
+    CHECK_NOTHROW(orchestrator.export_requested(print));
+    CHECK(g_exporter_probe_state.no_file_export_count == exports_before + 1);
+    CHECK_FALSE(g_exporter_probe_state.no_file_saw_output_path);
+    CHECK(print.export_result().local_path.empty());
+    CHECK(print.export_result().label == "Sent to the printer");
+    CHECK(snapshot_directory(directory.path()) == original_files);
+}
+
+// The exporter published a file and reported it, then the Print was cancelled before the exporter returned: the export fails,
+// yet the result stays available so that the caller can find the published file.
+TEST_CASE("A cancellation after the report keeps the result", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation probe(orchestrator, k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    g_exporter_probe_state.query_mode = ProbeQueryMode::Compatible;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    prepare_print_with_reference(print, model, k_probe_exporter_id, directory.path());
+    const boost::filesystem::path destination = directory.path() / "published.probe";
+
+    Print::ExportRequest request = print.make_export_request(ThumbnailsGeneratorCallback());
+    request.set_output_path(destination.string());
+    print.request_export(std::move(request));
+    g_exporter_probe_state.export_mode = ProbeExportMode::PublishThenCancel;
+    g_exporter_probe_state.print_to_cancel = &print;
+    CHECK_THROWS(orchestrator.export_requested(print));
+    g_exporter_probe_state.print_to_cancel = nullptr;
+    g_exporter_probe_state.export_mode = ProbeExportMode::Copy;
+    print.restart();
+
+    CHECK(boost::filesystem::is_regular_file(destination));
+    CHECK(print.export_result().local_path == destination.string());
+    CHECK(print.export_result().label == "Probe export");
+    CHECK_FALSE(orchestrator.is_plugin_cancelled());
+}
+
+// The host copies the strings of a report during the callback: an exporter that overwrites its buffers right afterwards does
+// not change what the host kept, and its second report is refused.
+TEST_CASE("The host copies the reported strings during the callback", "[plugins][gcode][exporter][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    ScopedPluginActivation raw_exporter(orchestrator, k_raw_query_exporter_id);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_raw_query_exporter_id);
+    const boost::filesystem::path reference = directory.path() / "reference.gcode";
+    write_binary_file(reference, "G1 X1\n");
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::Valid;
+    g_exporter_probe_state.raw_first_report_status = -1;
+    g_exporter_probe_state.raw_second_report_status = -1;
+    Orchestrator::GCodeExporterSelection selection;
+    REQUIRE_NOTHROW(selection = orchestrator.select_gcode_exporter(print, print.full_print_config()));
+    DynamicPrintConfig export_config = print.full_print_config();
+    CHECK_NOTHROW(orchestrator.export_print(print, export_config, reference.string(), selection));
+    g_exporter_probe_state.raw_query_mode = RawQueryMode::MissingAnswer;
+
+    CHECK(g_exporter_probe_state.raw_first_report_status == 1);
+    CHECK(g_exporter_probe_state.raw_second_report_status == 0);
+    CHECK(print.export_result().local_path == "initial path");
+    CHECK(print.export_result().label == "initial label");
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Inputs that an exporter asks for during its setup
+// ---------------------------------------------------------------------------------------------------------------------
+
+namespace {
+
+// A print with a ready reference whose statistics were read back, for exports that go through the export step.
+struct InputsPrint
+{
+    Print print;
+    Model model;
+    boost::filesystem::path reference;
+
+    // Slice the cube with the given exporter and produce the reference in `directory`; `read_back` also reads it for the statistics.
+    InputsPrint(const char *exporter_id, const boost::filesystem::path &directory, bool read_back,
+                const std::vector<std::pair<std::string, std::string>> &settings = {{"seam_visibility", "0"}})
+    {
+        initialize_fff_print(print, model, exporter_id, settings);
+        print.process();
+        reference = directory / "reference.gcode";
+        Orchestrator::instance().reset_plugin_cancel();
+        GCodeProcessorResult result;
+        Orchestrator::instance().export_gcode(print, reference.string(), read_back ? &result : nullptr);
+    }
+
+    // A request that exports to `destination` (none when empty) and asks the given requester.
+    Print::ExportRequest request(const boost::filesystem::path &destination, ExportInputsCallback inputs)
+    {
+        Print::ExportRequest result = print.make_export_request(ThumbnailsGeneratorCallback());
+        if (!destination.empty())
+            result.set_output_path(destination.string());
+        result.inputs = std::move(inputs);
+        return result;
+    }
+
+    // Deposit the request and run the export step.
+    void export_with(Print::ExportRequest request)
+    {
+        print.request_export(std::move(request));
+        Orchestrator::instance().export_requested(print);
+    }
+};
+
+// Forget what the previous test case left in the state of the fixtures.
+void reset_inputs_state(InputsMode mode)
+{
+    g_inputs_state = InputsState();
+    g_inputs_state.mode = mode;
+}
+
+} // namespace
+
+// Deposit a request with the same directory/base hints as disk export and inspect the proposal copied by the probe; scoped files and Print own all data, and pipeline failures fail the test.
+TEST_CASE("STEP_EXPORT proposes the composed suffix from directory and base hints", "[plugins][gcode][exporter][step-export][compound-extension]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_probe_exporter_id);
+    ScopedTestDirectory directory;
+    g_exporter_probe_state = ExporterProbeState{};
+    g_exporter_probe_state.extension = ".gcode.3mf";
+    InputsPrint cube(k_probe_exporter_id, directory.path(), false);
+    Print::ExportRequest request = cube.request(directory.path() / "published.gcode.3mf", ExportInputsCallback());
+    request.output_path_suggestion_directory = directory.path().string();
+    request.output_path_suggestion_filename_base = "suggested";
+    cube.export_with(std::move(request));
+    CHECK(g_exporter_probe_state.export_output_suggestion == (directory.path() / "suggested.gcode.3mf").string());
+    CHECK(cube.print.export_result().local_path == (directory.path() / "published.gcode.3mf").string());
+    g_exporter_probe_state = ExporterProbeState{};
+}
+
+// Cover the definition shape used by the GUI's direct file picker without constructing widgets.
+TEST_CASE("A single path input is one string-valued save or open definition", "[plugins][export-inputs]")
+{
+    Slic3r::ConfigOptionDef definition;
+    definition.type = Slic3r::coString;
+    definition.gui_type = Slic3r::ConfigOptionDef::GUIType::save_path;
+    std::vector<Slic3r::ConfigOptionDef> definitions(1, definition);
+    CHECK(Slic3r::is_single_path_input(definitions));
+
+    definitions.front().gui_type = Slic3r::ConfigOptionDef::GUIType::open_path;
+    CHECK(Slic3r::is_single_path_input(definitions));
+
+    definitions.front().gui_type = Slic3r::ConfigOptionDef::GUIType::save_path;
+    definitions.front().type = Slic3r::coBool;
+    CHECK_FALSE(Slic3r::is_single_path_input(definitions));
+
+    definitions.front() = definition;
+    definitions.push_back(definition);
+    CHECK_FALSE(Slic3r::is_single_path_input(definitions));
+
+    definitions.resize(1);
+    definitions.front().gui_type = Slic3r::ConfigOptionDef::GUIType::undefined;
+    CHECK_FALSE(Slic3r::is_single_path_input(definitions));
+}
+
+// The requester sees the definitions the exporter sent, filled with the value of the request (else the default), and its answers
+// reach the exporter in the configuration of the request, with the pointer it already read. The answers are not metadata.
+TEST_CASE("A validated form gives its answers to the exporter", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), false);
+    const boost::filesystem::path destination = directory.path() / "answered.inputs";
+
+    size_t asked = 0;
+    ExportInputForm seen;
+    Print::ExportRequest request = cube.request(destination, [&](ExportInputForm &form) {
+        ++asked;
+        seen = form;
+        // The proposals are in the form; answer the three inputs.
+        form.values.set_key_value(k_input_note_key, new ConfigOptionString("answer note"));
+        form.values.set_key_value(k_input_flag_key, new ConfigOptionBool(true));
+        form.values.set_key_value(k_input_existing_key, new ConfigOptionString("changed notes"));
+        return true;
+    });
+    request.config.set_key_value(k_input_existing_key, new ConfigOptionString("kept notes"));
+    REQUIRE_FALSE(request.config.has(k_input_note_key));
+    // Neither the request nor the catalogue knows the keys of the form before the export.
+    REQUIRE(PrintConfigDef::instance().get(k_input_note_key) == nullptr);
+    REQUIRE(PrintConfigDef::instance().get(k_input_flag_key) == nullptr);
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+
+    // The definitions arrive in the order of the exporter, with their text, GUI type and the default domain of the plugin.
+    REQUIRE(asked == 1);
+    REQUIRE(seen.definitions.size() == 3);
+    CHECK(seen.definitions[0].opt_key == k_input_note_key);
+    CHECK(seen.definitions[0].type == coString);
+    CHECK(seen.definitions[0].label == "Export note");
+    CHECK(seen.definitions[0].tooltip == "Where the note goes");
+    CHECK(seen.definitions[0].gui_type == ConfigOptionDef::GUIType::save_path);
+    CHECK(seen.definitions[0].sidetext == "Notes (*.txt)|*.txt");
+    // The plugin declares no domain of its own: the definitions use the default domain of the plugin, the application catalogue.
+    CHECK(seen.definitions[0].translation_domain == "Slic3r");
+    CHECK(seen.definitions[1].opt_key == k_input_flag_key);
+    CHECK(seen.definitions[1].type == coBool);
+    CHECK(seen.definitions[2].opt_key == k_input_existing_key);
+
+    // The proposals: the default of a new key, and the value that the request already held.
+    REQUIRE(seen.values.option(k_input_note_key) != nullptr);
+    CHECK(seen.values.option<ConfigOptionString>(k_input_note_key)->value == "default note");
+    REQUIRE(seen.values.option(k_input_flag_key) != nullptr);
+    CHECK_FALSE(seen.values.option<ConfigOptionBool>(k_input_flag_key)->value);
+    REQUIRE(seen.values.option(k_input_existing_key) != nullptr);
+    CHECK(seen.values.option<ConfigOptionString>(k_input_existing_key)->value == "kept notes");
+
+    // The run read the answers, and the result is the file that it published.
+    CHECK(g_inputs_state.export_count == 1);
+    CHECK(g_inputs_state.note == "answer note");
+    CHECK(g_inputs_state.flag == "1");
+    CHECK(g_inputs_state.existing == "changed notes");
+    CHECK(cube.print.export_result().local_path == destination.string());
+    CHECK(boost::filesystem::exists(destination));
+
+    // The metadata were taken before the answers, and the keys of the form never entered the catalogue.
+    for (const std::pair<std::string, std::string> &entry : g_inputs_state.configuration) {
+        CHECK(entry.first != k_input_note_key);
+        CHECK(entry.second.find("changed notes") == std::string::npos);
+    }
+    CHECK(PrintConfigDef::instance().get(k_input_note_key) == nullptr);
+    CHECK(PrintConfigDef::instance().get(k_input_flag_key) == nullptr);
+    CHECK_FALSE(cube.print.full_print_config().has(k_input_note_key));
+}
+
+// A value of the request that is empty counts as absent: the default of the definition is proposed.
+TEST_CASE("An empty value of the request is replaced by the default of the definition", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), false);
+
+    std::string proposed;
+    Print::ExportRequest request = cube.request(directory.path() / "empty.inputs", [&](ExportInputForm &form) {
+        proposed = form.values.option<ConfigOptionString>(k_input_existing_key)->value;
+        return true;
+    });
+    request.config.set_key_value(k_input_existing_key, new ConfigOptionString(""));
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+    CHECK(proposed == "fallback notes");
+    CHECK(g_inputs_state.existing == "fallback notes");
+}
+
+// A requester that cancels cancels the export: the Print is cancelled, the exporter's run does not happen, nothing is published,
+// and the exporter's own error (it throws when the host says stop) does not replace the cancellation.
+TEST_CASE("A cancelled form cancels the export", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), false);
+    const boost::filesystem::path destination = directory.path() / "never.inputs";
+    const std::map<std::string, std::string> original_files = snapshot_directory(directory.path());
+
+    CHECK_THROWS_AS(cube.export_with(cube.request(destination, [](ExportInputForm &) { return false; })), CanceledException);
+    CHECK(cube.print.canceled());
+    CHECK(g_inputs_state.export_count == 0);
+    CHECK(cube.print.export_result().local_path.empty());
+    CHECK_FALSE(boost::filesystem::exists(destination));
+    CHECK(snapshot_directory(directory.path()) == original_files);
+    // The stop request concerned this export only.
+    CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
+    cube.print.restart();
+}
+
+// Without a requester the exporter's request fails with a clear message and the run does not happen.
+TEST_CASE("An exporter that asks for inputs fails when nobody can answer", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), false);
+    const boost::filesystem::path destination = directory.path() / "never.inputs";
+
+    CHECK_THROWS_WITH(cube.export_with(cube.request(destination, nullptr)),
+                      "This export needs inputs, but no input form is available.");
+    CHECK_FALSE(cube.print.canceled());
+    CHECK(g_inputs_state.export_count == 0);
+    CHECK(cube.print.export_result().local_path.empty());
+    CHECK_FALSE(boost::filesystem::exists(destination));
+    CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
+}
+
+// Each refused definition names its setting, the requester is not asked, and the run does not happen.
+TEST_CASE("A refused definition fails the export before the requester is asked", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), false);
+    const boost::filesystem::path destination = directory.path() / "never.inputs";
+
+    struct Case
+    {
+        InputsMode  mode;
+        const char *message;
+    };
+    const Case cases[] = {
+        {InputsMode::EmptyKey, "An input definition of the exporter 'test.gcode.exporter.inputs' has no key."},
+        {InputsMode::BadDefault, "The default value of the input 'test.export.bad_default' is not valid for its type."},
+        {InputsMode::BadGuiType, "The input 'test.export.bad_gui' has an unknown GUI type."},
+        {InputsMode::WrongType, "The input 'notes' is asked with another type than the setting the export already holds."},
+        {InputsMode::BadGraph, "The input 'test.export.bad_graph' has invalid graph settings."},
+        {InputsMode::DomainUnregistered, "The input 'test.export.domain' uses the translation domain 'test.unregistered.domain', which the plugin did not register."},
+        {InputsMode::List, "The input 'test.export.list' is a list; an input must be a single setting."},
+        {InputsMode::RepeatedKey, "The input 'test.export.twice' is asked more than once."},
+        {InputsMode::Point3, "The input 'test.export.point3' has a type that the form of the requester cannot show."},
+    };
+    for (const Case &refused : cases) {
+        reset_inputs_state(refused.mode);
+        INFO(refused.message);
+        size_t asked = 0;
+        CHECK_THROWS_WITH(cube.export_with(cube.request(destination, [&asked](ExportInputForm &) { ++asked; return true; })),
+                          refused.message);
+        CHECK(asked == 0);
+        CHECK(g_inputs_state.export_count == 0);
+        CHECK_FALSE(cube.print.canceled());
+        CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
+    }
+}
+
+// A requester that cannot ask (it throws) fails the export with its message.
+TEST_CASE("A failing requester fails the export with its message", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), false);
+
+    CHECK_THROWS_WITH(cube.export_with(cube.request(directory.path() / "never.inputs",
+                          [](ExportInputForm &) -> bool { throw RuntimeError("the form could not open"); })),
+                      "the form could not open");
+    CHECK(g_inputs_state.export_count == 0);
+    CHECK_FALSE(cube.print.canceled());
+    CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
+}
+
+// A raw exporter that ignores the 0 of the host is not run, and a second request is refused.
+TEST_CASE("The host stops an exporter that ignores its refusal", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_raw_inputs_exporter_id);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_raw_inputs_exporter_id, directory.path(), false);
+    const boost::filesystem::path destination = directory.path() / "never.raw2";
+
+    // The requester cancels, the exporter goes on as if nothing happened: its run must not happen.
+    reset_inputs_state(InputsMode::Standard);
+    g_inputs_state.raw_mode = RawInputsMode::IgnoreStop;
+    CHECK_THROWS_AS(cube.export_with(cube.request(destination, [](ExportInputForm &) { return false; })), CanceledException);
+    CHECK(g_inputs_state.raw_first_status == 0);
+    CHECK(g_inputs_state.raw_run_count == 0);
+    cube.print.restart();
+
+    // An export asks once: the second request is refused, whatever the first answer was, and the run does not happen.
+    reset_inputs_state(InputsMode::Standard);
+    g_inputs_state.raw_mode = RawInputsMode::AskTwice;
+    size_t asked = 0;
+    CHECK_THROWS_WITH(cube.export_with(cube.request(destination, [&asked](ExportInputForm &) { ++asked; return true; })),
+                      "The exporter asked for its inputs more than once: an export asks once.");
+    CHECK(asked == 1);
+    CHECK(g_inputs_state.raw_first_status == 1);
+    CHECK(g_inputs_state.raw_second_status == 0);
+    CHECK(g_inputs_state.raw_run_count == 0);
+    CHECK_FALSE(Orchestrator::instance().is_plugin_cancelled());
+}
+
+// The built-in exporter asks for its destination when the request has none (or an empty one), proposing the path of the host with the
+// file filter of its suffixes; with a destination it asks nothing.
+TEST_CASE("The built-in exporter asks for the destination only when the request has none", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", "cube_{total_toolchanges}.gcode"}});
+    const boost::filesystem::path answered = directory.path() / "answered.gcode";
+
+    ExportInputForm seen;
+    size_t asked = 0;
+    Print::ExportRequest request = cube.request(boost::filesystem::path(), [&](ExportInputForm &form) {
+        ++asked;
+        seen = form;
+        form.values.set_key_value("output_path", new ConfigOptionString(answered.string()));
+        return true;
+    });
+    // An empty destination counts as none.
+    request.set_output_path(std::string());
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+
+    REQUIRE(asked == 1);
+    REQUIRE(seen.definitions.size() == 1);
+    CHECK(seen.definitions[0].opt_key == "output_path");
+    CHECK(seen.definitions[0].type == coString);
+    CHECK(seen.definitions[0].gui_type == ConfigOptionDef::GUIType::save_path);
+    CHECK(seen.definitions[0].sidetext == "G-code (*.gcode;*.g;*.gco)|*.gcode;*.g;*.gco");
+    // The proposal is the suggestion of the host, backslashes of a Windows path included.
+    const std::string suggestion = cube.print.output_filepath(std::string(), std::string(), ".gcode");
+    CHECK(boost::filesystem::path(suggestion).filename().string() == "cube_0.gcode");
+    REQUIRE(seen.values.option<ConfigOptionString>("output_path") != nullptr);
+    CHECK(seen.values.option<ConfigOptionString>("output_path")->value == suggestion);
+    // The answer is the file that the exporter wrote and reported.
+    CHECK(cube.print.export_result().local_path == answered.string());
+    CHECK(boost::filesystem::exists(answered));
+
+    // With a destination nothing is asked.
+    asked = 0;
+    const boost::filesystem::path given = directory.path() / "given.gcode";
+    REQUIRE_NOTHROW(cube.export_with(cube.request(given, [&asked](ExportInputForm &) { ++asked; return true; })));
+    CHECK(asked == 0);
+    CHECK(cube.print.export_result().local_path == given.string());
+}
+
+// The runner proposes a path that holds the final statistics, not their placeholders, in the request that the exporter reads.
+TEST_CASE("The export request holds the suggested output path with the final statistics", "[plugins][gcode][exporter][export-inputs]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", "cube_{total_toolchanges}_{initial_extruder}.gcode"}});
+
+    REQUIRE_NOTHROW(cube.export_with(cube.request(directory.path() / "suggested.inputs", [](ExportInputForm &) { return true; })));
+    CHECK(boost::filesystem::path(g_inputs_state.suggestion).filename().string() == "cube_0_0.inputs");
+    CHECK(g_inputs_state.suggestion == cube.print.output_filepath(std::string(), std::string(), ".inputs"));
+    // The suggestion is a setting of the request only.
+    CHECK_FALSE(cube.print.full_print_config().has("output_path_suggestion"));
+}
+
+// Verify that the runner combines an existing proposed directory and request-owned basename with final print statistics.
+TEST_CASE("STEP_EXPORT uses the request directory and basename for its file suggestion", "[plugins][exporter][step-export]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path suggestion_directory = directory.path() / "suggested";
+    boost::filesystem::create_directories(suggestion_directory);
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", "{input_filename_base}_{total_toolchanges}.gcode"}});
+    Print::ExportRequest request = cube.request(directory.path() / "written.inputs", [](ExportInputForm &) { return true; });
+    request.output_path_suggestion_directory = suggestion_directory.string();
+    request.output_path_suggestion_filename_base = "custom";
+
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+    CHECK(g_inputs_state.suggestion == (suggestion_directory / "custom_0.inputs").string());
+}
+
+// Verify that a missing proposed directory is ignored while the supplied basename still uses the current model-derived directory.
+TEST_CASE("STEP_EXPORT ignores a missing proposed directory", "[plugins][exporter][step-export]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path missing_directory = directory.path() / "removed-folder";
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", "{input_filename_base}_{total_toolchanges}.gcode"}});
+    const std::string model_directory_suggestion = cube.print.output_filepath(std::string(), "fallback", ".inputs");
+    Print::ExportRequest request = cube.request(directory.path() / "written.inputs", [](ExportInputForm &) { return true; });
+    request.output_path_suggestion_directory = missing_directory.string();
+    request.output_path_suggestion_filename_base = "fallback";
+
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+    CHECK(g_inputs_state.suggestion == model_directory_suggestion);
+    CHECK(boost::filesystem::path(g_inputs_state.suggestion).parent_path() != missing_directory);
+}
+
+// Export with ASCII fallback from a UTF-8 base and literal template text; require the final filename to be folded while the proposed directory is unchanged.
+TEST_CASE("STEP_EXPORT folds only the suggested filename when requested", "[plugins][gcode][exporter][step-export]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    const boost::filesystem::path suggestion_directory = directory.path() / boost::filesystem::path(u8"sortie-\u00e9");
+    boost::filesystem::create_directories(suggestion_directory);
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), true,
+                     {{"seam_visibility", "0"}, {"output_filename_format", u8"{input_filename_base}_sortié_{total_toolchanges}.gcode"}});
+    Print::ExportRequest request = cube.request(directory.path() / "written.inputs", [](ExportInputForm &) { return true; });
+    request.output_path_suggestion_directory = suggestion_directory.string();
+    request.output_path_suggestion_filename_base = u8"caf\u00e9";
+    request.output_path_suggestion_ascii_fallback = true;
+
+    REQUIRE_NOTHROW(cube.export_with(std::move(request)));
+    const boost::filesystem::path suggestion(g_inputs_state.suggestion);
+    CHECK(suggestion.parent_path() == suggestion_directory);
+    CHECK(suggestion.filename().string() == "cafe_sortie_0.inputs");
+}
+
+// The exporter named by the request is the one that runs, whatever the setting says; an empty ID keeps the setting, a refused
+// ID or one that its QUERY rejects fails the export with the selection message, and the setting is never modified.
+TEST_CASE("STEP_EXPORT runs the exporter named by the request", "[plugins][gcode][exporter][step-export][bgcode]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), true, {{"seam_visibility", "0"}, {"binary_gcode", "1"}});
+    const ExportInputsCallback no_inputs = [](ExportInputForm &) { return true; };
+
+    const boost::filesystem::path binary_destination = directory.path() / "named.bgcode";
+    Print::ExportRequest binary_request = cube.request(binary_destination, no_inputs);
+    binary_request.exporter_id = "gcode.exporter.bgcode";
+    REQUIRE_NOTHROW(cube.export_with(std::move(binary_request)));
+    CHECK(cube.print.export_result().local_path == binary_destination.string());
+    const BgcodeReadback binary_readback = read_bgcode_file(binary_destination);
+    CHECK_FALSE(binary_readback.file_metadata.empty());
+
+    // Without an ID the setting (the text exporter) applies: the file is plain G-code, not a binary one.
+    const boost::filesystem::path text_destination = directory.path() / "setting.gcode";
+    REQUIRE_NOTHROW(cube.export_with(cube.request(text_destination, no_inputs)));
+    CHECK(read_binary_file(text_destination).compare(0, 4, "GCDE") != 0);
+
+    // An explicit exporter that its QUERY refuses fails the export with that message.
+    DynamicPrintConfig unsupported = cube.print.full_print_config();
+    unsupported.set_deserialize_strict("binary_gcode", "0");
+    Print::ExportRequest refused_request = cube.request(directory.path() / "refused.bgcode", no_inputs);
+    refused_request.config = unsupported;
+    refused_request.exporter_id = "gcode.exporter.bgcode";
+    cube.print.request_export(std::move(refused_request));
+    REQUIRE_THROWS_WITH(Orchestrator::instance().export_requested(cube.print),
+                        "The printer does not declare binary G-code support (binary_gcode).");
+    CHECK_FALSE(boost::filesystem::exists(directory.path() / "refused.bgcode"));
+
+    CHECK(cube.print.full_print_config().opt_serialize("gcode_exporter_plugin") == "gcode.exporter.simple");
+}
+
+// A statistic that the print does not hold fails with a message that cites the template and the variable, for the helper and for the runner.
+TEST_CASE("A missing statistic in the output name is an error", "[plugins][gcode][exporter][export-inputs][output-filename]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    PrintStatistics statistics;
+    CHECK_THROWS_WITH(statistics.finalize_output_path("run_{print_time}.gcode"),
+                      Catch::Matchers::Contains("Cannot apply the print statistics to the export file name (output_filename_format):") &&
+                      Catch::Matchers::Contains("Not a variable name") &&
+                      Catch::Matchers::Contains("run_{print_time}"));
+    // A name without variable is kept, and a known one is replaced.
+    CHECK(statistics.finalize_output_path("plain.gcode") == "plain.gcode");
+    CHECK(statistics.finalize_output_path("run_{total_toolchanges}.gcode") == "run_0.gcode");
+    SLAPrintStatistics sla_statistics;
+    CHECK_THROWS_WITH(sla_statistics.finalize_output_path("run_{no_such_statistic}.sl1"),
+                      Catch::Matchers::Contains("Cannot apply the print statistics to the export file name (output_filename_format):") &&
+                      Catch::Matchers::Contains("Not a variable name"));
+
+    // The runner builds the suggestion of an exporter that writes a file: with no print time measured, the name cannot be built.
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    InputsPrint cube(k_inputs_exporter_id, directory.path(), false,
+                     {{"seam_visibility", "0"}, {"output_filename_format", "cube_{print_time}.gcode"}});
+    CHECK_THROWS_WITH(cube.export_with(cube.request(directory.path() / "never.inputs", [](ExportInputForm &) { return true; })),
+                      Catch::Matchers::Contains("Failed processing of the output_filename_format template.") &&
+                      Catch::Matchers::Contains("Not a variable name"));
+    CHECK(g_inputs_state.export_count == 0);
+}
+
+// The command line asks its questions on the streams it is given.
+TEST_CASE("The command line asks the inputs of the exporter on its streams", "[plugins][gcode][exporter][export-inputs][cli]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedPluginActivation activation(Orchestrator::instance(), k_inputs_exporter_id);
+    reset_inputs_state(InputsMode::Standard);
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, k_inputs_exporter_id, {{"seam_visibility", "0"}});
+    print.process();
+
+    // First answer typed, second a boolean word, third left empty: the request holds an empty value, so the default is kept.
+    std::istringstream in("typed note\nyes\n\n");
+    std::ostringstream out;
+    std::string exported;
+    REQUIRE_NOTHROW(exported = Orchestrator::instance().export_gcode_cli(print, (directory.path() / "cli").string(), in, out));
+    CHECK(exported == (directory.path() / "cli.inputs").string());
+    CHECK(g_inputs_state.export_count == 1);
+    CHECK(g_inputs_state.note == "typed note");
+    CHECK(g_inputs_state.flag == "1");
+    CHECK(g_inputs_state.existing == "fallback notes");
+    CHECK(out.str() == "Export note (Where the note goes) [default note]: "
+                       "Export flag [0]: "
+                       "Notes of the export [fallback notes]: ");
+}
+
+// The requester of the command line: proposals, refused answers, typed conversions and a closed input.
+TEST_CASE("The stream requester converts answers and reports a closed input", "[plugins][gcode][exporter][export-inputs][cli]")
+{
+    ExportInputForm form;
+    ConfigOptionDef count;
+    count.opt_key = "test.count";
+    count.type = coInt;
+    count.label = "Count";
+    count.set_default_value(new ConfigOptionInt(3));
+    ConfigOptionDef text;
+    text.opt_key = "test.text";
+    text.type = coString;
+    text.full_label = "Text";
+    text.set_default_value(new ConfigOptionString("C:\\dir\\file.gcode"));
+    ConfigOptionDef flag;
+    flag.opt_key = "test.flag";
+    flag.type = coBool;
+    flag.label = "Flag";
+    flag.set_default_value(new ConfigOptionBool(false));
+    form.definitions = {count, text, flag};
+    for (const ConfigOptionDef &definition : form.definitions)
+        form.values.set_key_value(definition.opt_key, definition.create_default_option());
+
+    SECTION("empty lines keep the proposals")
+    {
+        std::istringstream in("\n\n\n");
+        std::ostringstream out;
+        REQUIRE(make_stream_export_inputs(in, out)(form));
+        CHECK(form.values.option<ConfigOptionInt>("test.count")->value == 3);
+        CHECK(form.values.option<ConfigOptionString>("test.text")->value == "C:\\dir\\file.gcode");
+        CHECK_FALSE(form.values.option<ConfigOptionBool>("test.flag")->value);
+        CHECK(out.str() == "Count [3]: Text [C:\\dir\\file.gcode]: Flag [0]: ");
+    }
+
+    SECTION("a refused answer is reported and asked again, the others are converted")
+    {
+        // The string is taken as typed (no escape sequence), the integer and the boolean through their types.
+        std::istringstream in("abc\n12\nD:\\out\\n.gcode\ntrue\r\n");
+        std::ostringstream out;
+        REQUIRE(make_stream_export_inputs(in, out)(form));
+        CHECK(form.values.option<ConfigOptionInt>("test.count")->value == 12);
+        CHECK(form.values.option<ConfigOptionString>("test.text")->value == "D:\\out\\n.gcode");
+        CHECK(form.values.option<ConfigOptionBool>("test.flag")->value);
+        CHECK(out.str() == "Count [3]: The value given for test.count is refused.\n"
+                           "Count [3]: Text [C:\\dir\\file.gcode]: Flag [0]: ");
+    }
+
+    SECTION("a closed input names the setting")
+    {
+        std::istringstream in("5\n");
+        std::ostringstream out;
+        CHECK_THROWS_WITH(make_stream_export_inputs(in, out)(form),
+                          "The standard input closed before the value of test.text was given.");
+        CHECK(form.values.option<ConfigOptionInt>("test.count")->value == 5);
+    }
+}
+
+namespace {
+using BambuEntries = std::map<std::string, std::string>;
+// Build a literal rectangular prism for slicing arithmetic tests.
+TriangleMesh plate_test_box(double x, double y, double width, double depth);
+// Append an owned test path in plateau coordinates with an optional source layer and physical Z offset.
+void plate_test_path(Print &print, const Layer *source, uint32_t catalog, double z, double x, double y,
+                     double length, float width, float height, ExtrusionRole role, double z_offset = 0.);
+// Copy decompressed entries and optionally their ZIP compression methods into owned maps.
+BambuEntries read_bambu_zip(const std::string &bytes, std::map<std::string, mz_uint> *compression = nullptr);
+// Parse borrowed XML into an owned tree and propagate malformed-document errors.
+boost::property_tree::ptree bambu_xml(const std::string &bytes);
+// Find one metadata/header_item key in a borrowed XML subtree, returning empty when absent.
+std::string bambu_value(const boost::property_tree::ptree &tree, const std::string &key);
+// Build numeric metadata whose static arrays remain valid throughout a synchronous test export.
+raw_gcode_export_metadata bambu_test_metadata(bool measured = true);
+// Write a direct archive with borrowed metadata and renderer, returning owned ZIP bytes.
+std::string bambu_test_archive(Print &print, const DynamicPrintConfig &config, const boost::filesystem::path &reference,
+    const raw_gcode_export_metadata &metadata, const raw_gcode_thumbnail_renderer *renderer = nullptr,
+    const plugin_run_context &context = {});
+// Check exact entry/content types, plate metadata, relations and optional PNG compression methods.
+void check_bambu_package(const BambuEntries &entries, bool thumbnails, const std::map<std::string, mz_uint> &compression = {}, bool plate_json = true);
+
+TriangleMesh plate_test_box(double x, double y, double width, double depth)
+{
+    TriangleMesh mesh = Test::mesh(Test::TestMesh::cube_20x20x20);
+    mesh.scale(Vec3f(float(width / 20.), float(depth / 20.), .02f));
+    mesh.translate(Vec3f(float(x), float(y), 0.f));
+    return mesh;
+}
+
+void plate_test_path(Print &print, const Layer *source, uint32_t catalog, double z, double x, double y,
+                     double length, float width, float height, ExtrusionRole role, double z_offset)
+{
+    Printing::PrintingPlan &plan = print.mutable_printing_plan();
+    if (plan.groups.empty()) plan.groups.emplace_back();
+    plan.groups.front().layers.emplace_back();
+    Printing::PrintingLayerGroup &layer = plan.groups.front().layers.back();
+    layer.print_z = scale_i(z);
+    if (source) layer.layers.push_back(source);
+    layer.tool_groups.emplace_back();
+    Printing::PrintingToolGroup &tool = layer.tool_groups.back();
+    tool.extruder_id = 0;
+    std::unique_ptr<ExtrusionPath> path = Test::GCode::make_firmware_path(
+        ArcPolyline(Points{Point::new_scale(x, y), Point::new_scale(x + length, y)}), 20.f, 500.f);
+    path->remove_property<ExtrusionAttributes>();
+    ExtrusionEntityCollection tree;
+    tree.get_or_add_property<ExtrusionAttributes>() = ExtrusionAttributes(role, ExtrusionFlow(.2, width, height));
+    tree.get_or_add_property<ExtrusionPropertyZOffset>().z_offset = scale_i(z_offset);
+    tree.append_child(std::move(path));
+    Printing::PrintingExtrusion extrusion;
+    extrusion.printing_catalog_id = catalog;
+    extrusion.sregion_island_role = role;
+    if (source) extrusion.region_island = &source->island(0).regions_islands().front();
+    extrusion.root.reset(tree.clone());
+    tool.extrusions.push_back(std::move(extrusion));
+}
+
+// Borrow ZIP bytes and copy strings plus optional compression metadata into caller-owned maps; require successful miniz reads and release its reader on normal return, propagating allocation failures.
+BambuEntries read_bambu_zip(const std::string &bytes, std::map<std::string, mz_uint> *compression)
+{
+    mz_zip_archive zip = {};
+    REQUIRE(mz_zip_reader_init_mem(&zip, bytes.data(), bytes.size(), 0));
+    BambuEntries entries;
+    for (mz_uint index = 0; index < mz_zip_reader_get_num_files(&zip); ++index) {
+        mz_zip_archive_file_stat stat = {};
+        REQUIRE(mz_zip_reader_file_stat(&zip, index, &stat));
+        if (compression != nullptr)
+            (*compression)[stat.m_filename] = stat.m_method;
+        std::string text(size_t(stat.m_uncomp_size), '\0');
+        REQUIRE(mz_zip_reader_extract_to_mem(&zip, index, text.data(), text.size(), 0));
+        REQUIRE(entries.emplace(stat.m_filename, std::move(text)).second);
+    }
+    REQUIRE(mz_zip_reader_end(&zip));
+    return entries;
+}
+// Parse UTF-8 XML from a borrowed string stream into an owned tree; no host state changes and parser/allocation failures propagate.
+boost::property_tree::ptree bambu_xml(const std::string &bytes)
+{
+    std::istringstream input(bytes);
+    boost::property_tree::ptree tree;
+    boost::property_tree::read_xml(input, tree);
+    return tree;
+}
+// Inspect borrowed XML children and return a copied value for one key; absent keys return empty and malformed attributes propagate parser lookup errors.
+std::string bambu_value(const boost::property_tree::ptree &tree, const std::string &key)
+{
+    for (const auto &[tag, child] : tree) {
+        if ((tag == "metadata" || tag == "header_item") && child.get<std::string>("<xmlattr>.key") == key)
+            return child.get<std::string>("<xmlattr>.value");
+    }
+    return {};
+}
+// Return a by-value numeric record borrowing immutable static lists; unmeasured mode keeps the numeric group present but empties statistics, as supported by export 4.2.
+raw_gcode_export_metadata bambu_test_metadata(bool measured)
+{
+    static const raw_gcode_export_entry statistics[] = {{"filament used [mm]", "120.00"}};
+    static const raw_gcode_export_filament_usage usage[] = {{0, 120., 288., 0.36}};
+    raw_gcode_export_metadata metadata = {};
+    metadata.struct_size = sizeof(metadata);
+    metadata.statistics = measured ? raw_gcode_export_list{statistics, 1} : raw_gcode_export_list{};
+    metadata.estimated_time_seconds = 61.;
+    metadata.first_layer_time_seconds = 12.5;
+    metadata.layer_count = 7;
+    metadata.max_print_z = 1.4;
+    metadata.filaments = {usage, 1};
+    metadata.total_weight_g = .36;
+    return metadata;
+}
+// Borrow the Print/config/reference for the direct synchronous writer and return its owned binary string; cancellation/rendering/archive failures propagate and private file cleanup remains production code's responsibility.
+std::string bambu_test_archive(Print &print, const DynamicPrintConfig &config, const boost::filesystem::path &reference,
+    const raw_gcode_export_metadata &metadata, const raw_gcode_thumbnail_renderer *renderer, const plugin_run_context &context)
+{
+    std::ostringstream output(std::ios::binary);
+    slic3r_api::GCodeGeneration::Exporter::write_bambu_gcode_archive(context,
+        slic3r_api::OrchestratorView(Orchestrator::instance().handle()),
+        slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
+        slic3r_api::Config(Slic3r::ApiHost::to_config_handle(&config)), reference.string(), renderer, &metadata, output);
+    return output.str();
+}
+void check_bambu_package(const BambuEntries &entries, bool thumbnails, const std::map<std::string, mz_uint> &compression, bool plate_json)
+{
+    std::set<std::string> expected = {"[Content_Types].xml", "_rels/.rels", "3D/3dmodel.model",
+        "Metadata/plate_1.gcode", "Metadata/plate_1.gcode.md5", "Metadata/project_settings.config",
+        "Metadata/model_settings.config", "Metadata/_rels/model_settings.config.rels", "Metadata/slice_info.config"};
+    if (thumbnails) {
+        expected.insert("Metadata/plate_1.png");
+        expected.insert("Metadata/plate_1_small.png");
+    }
+    if (plate_json) expected.insert("Metadata/plate_1.json");
+    std::set<std::string> actual;
+    for (const auto &[name, bytes] : entries)
+        actual.insert(name);
+    CHECK(actual == expected);
+    std::map<std::string, std::string> defaults, overrides;
+    const boost::property_tree::ptree types = bambu_xml(entries.at("[Content_Types].xml"));
+    for (const auto &[tag, child] : types.get_child("Types")) {
+        if (tag == "Default")
+            defaults[child.get<std::string>("<xmlattr>.Extension")] = child.get<std::string>("<xmlattr>.ContentType");
+        if (tag == "Override")
+            overrides[child.get<std::string>("<xmlattr>.PartName")] = child.get<std::string>("<xmlattr>.ContentType");
+    }
+    CHECK(defaults.at("gcode") == "text/x.gcode");
+    CHECK(overrides.at("/Metadata/project_settings.config") == "application/json");
+    const std::map<std::string, std::string> expected_types = {
+        {"rels", "application/vnd.openxmlformats-package.relationships+xml"},
+        {"model", "application/vnd.ms-package.3dmanufacturing-3dmodel+xml"},
+        {"png", "image/png"}, {"gcode", "text/x.gcode"}, {"config", "application/xml"}, {"md5", "text/plain"}, {"json", "application/json"}};
+    CHECK(defaults.count("json") == (plate_json ? 1 : 0));
+    for (const auto &[name, bytes] : entries) {
+        if (name != "[Content_Types].xml") {
+            CHECK((overrides.count("/" + name) || defaults.count(boost::filesystem::path(name).extension().string().substr(1))));
+            const std::string extension = boost::filesystem::path(name).extension().string().substr(1);
+            const std::string expected_type = name == "Metadata/project_settings.config" ? "application/json" : expected_types.at(extension);
+            const std::string actual_type = overrides.count("/" + name) ? overrides.at("/" + name) : defaults.at(extension);
+            CAPTURE(name);
+            CHECK(actual_type == expected_type);
+        }
+    }
+    const boost::property_tree::ptree settings = bambu_xml(entries.at("Metadata/model_settings.config"));
+    std::map<std::string, std::string> plate;
+    for (const auto &[tag, child] : settings.get_child("config.plate"))
+        if (tag == "metadata") plate[child.get<std::string>("<xmlattr>.key")] = child.get<std::string>("<xmlattr>.value");
+    CHECK(plate.at("plater_id") == "1");
+    CHECK(plate.at("plater_name").empty());
+    CHECK(plate.at("locked") == "false");
+    CHECK((plate.count("pattern_bbox_file") != 0) == plate_json);
+    if (plate_json) CHECK(plate.at("pattern_bbox_file") == "Metadata/plate_1.json");
+    if (plate_json && thumbnails)
+        CHECK(entries.at("Metadata/model_settings.config").find("thumbnail_file") <
+              entries.at("Metadata/model_settings.config").find("pattern_bbox_file"));
+    if (thumbnails) {
+        CHECK(compression.at("Metadata/plate_1.png") == MZ_NO_COMPRESSION);
+        CHECK(compression.at("Metadata/plate_1_small.png") == MZ_NO_COMPRESSION);
+    }
+    for (const std::string &rels : {std::string("_rels/.rels"), std::string("Metadata/_rels/model_settings.config.rels")}) {
+        const boost::property_tree::ptree relationships = bambu_xml(entries.at(rels));
+        for (const auto &[tag, child] : relationships.get_child("Relationships")) {
+            if (tag != "Relationship")
+                continue;
+            const std::string target = child.get<std::string>("<xmlattr>.Target");
+            CHECK(target.front() == '/');
+            CHECK(entries.count(target.substr(1)) == 1);
+            const std::string type = child.get<std::string>("<xmlattr>.Type");
+            if (target == "/3D/3dmodel.model")
+                CHECK(type == "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel");
+            else if (target == "/Metadata/plate_1.gcode")
+                CHECK(type == "http://schemas.bambulab.com/package/2021/gcode");
+            else
+                CHECK((type == "http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" ||
+                    type == "http://schemas.bambulab.com/package/2021/cover-thumbnail-middle" ||
+                    type == "http://schemas.bambulab.com/package/2021/cover-thumbnail-small"));
+        }
+    }
+}
+}
+
+// Serialize owned values without an archive, preserving compact sorted keys, numeric types and UTF-8 names.
+TEST_CASE("Bambu plate JSON serialization is compact and typed", "[plugins][bambu3mf][f4c]")
+{
+    using namespace slic3r_api::GCodeGeneration::Exporter;
+    PlateJsonDescription description;
+    description.bbox_all = {1., 2., 3., 4.};
+    const std::string name = u8"A<&\"\\é";
+    description.objects.push_back({7, name, {1., 2., 3., 4.}, 1.5, .2});
+    description.filament_ids = {0, 2};
+    description.filament_colors = {"raw", "#123456"};
+    description.first_extruder = 2;
+    description.nozzle_diameter = .6;
+    description.is_seq_print = true;
+    const std::string bytes = serialize_plate_json(description);
+    const nlohmann::json parsed = nlohmann::json::parse(bytes);
+    CHECK(bytes == parsed.dump());
+    CHECK(bytes.find('\n') == std::string::npos);
+    CHECK(bytes.find("{\"bbox_all\":[1.0,2.0,3.0,4.0],\"bbox_objects\":[{\"area\":1.5,") == 0);
+    CHECK(parsed["bbox_objects"][0]["name"].get<std::string>() == name);
+    CHECK(parsed["bbox_objects"][0]["id"].is_number_integer());
+    CHECK(parsed["bbox_objects"][0]["area"].is_number_float());
+    CHECK(parsed["is_seq_print"].is_boolean());
+    CHECK(parsed["version"] == 2);
+    CHECK(parsed["first_layer_time"] == 0.);
+    CHECK(parsed["first_extruder"] == 2);
+    description.nozzle_diameter = std::numeric_limits<double>::infinity();
+    CHECK_THROWS(serialize_plate_json(description));
+    description.filament_ids.clear();
+    CHECK(serialize_plate_json(description).empty());
+    description.objects.clear();
+    CHECK(serialize_plate_json(description).empty());
+}
+
+// Slice a literal ring and square, then select sparse printed instances independently of catalog order.
+TEST_CASE("Bambu plate JSON groups sliced objects and sparse instances", "[plugins][bambu3mf][f4c]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    Print print;
+    Model model;
+    DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+    config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"brim_width", "0"},
+        {"skirts", "0"}, {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"},
+        {"first_layer_size_compensation", "0"}, {"seam_visibility", "0"}});
+    TriangleMesh ring = plate_test_box(0., 0., 2., 10.);
+    ring.merge(plate_test_box(4., 0., 6., 10.));
+    ring.merge(plate_test_box(2., 0., 2., 2.));
+    ring.merge(plate_test_box(2., 4., 2., 6.));
+    Test::init_print({ring, plate_test_box(0., 0., 5., 5.)}, print, model, config);
+    ModelObject &a = model.objects()[0];
+    a.name = u8"ring<&\"\\é";
+    a.instances.front()->set_offset(Vec3d(20., 30., 0.));
+    a.add_instance(*a.instances.front())->set_offset(Vec3d(40., 30., 0.));
+    a.add_instance(*a.instances.front())->set_offset(Vec3d(100., 100., 0.));
+    a.add_instance(*a.instances.front())->set_offset(Vec3d(60., 30., 0.));
+    model.objects()[1].instances.front()->set_offset(Vec3d(60., 10., 0.));
+    print.apply(model, config);
+    print.process();
+    const boost::filesystem::path reference = directory.path() / "literal.gcode";
+    Orchestrator::instance().export_gcode(print, reference.string(), nullptr);
+    Printing::PrintingPlan &plan = print.mutable_printing_plan();
+    Printing::PrintingObjectInstance first, last, square;
+    for (const Printing::PrintingObjectInstance &instance : plan.object_instances) {
+        if (instance.object == &print.object(0) && instance.object_instance_idx == 1) first = instance;
+        if (instance.object == &print.object(0) && instance.object_instance_idx == 3) last = instance;
+        if (instance.object == &print.object(1)) square = instance;
+    }
+    REQUIRE(first.object != nullptr);
+    REQUIRE(last.object != nullptr);
+    Printing::PrintingObjectInstance synthetic;
+    synthetic.name = "not a real object";
+    plan.object_instances = {synthetic, last, synthetic, first, synthetic, square};
+    DynamicPrintConfig exported = print.full_print_config();
+    exported.set_num_extruders(3);
+    exported.set_deserialize_strict({{"filament_colour", "raw0;raw1;raw2"}, {"nozzle_diameter", "0.4,0.5,0.6"}});
+    REQUIRE_FALSE(plan.groups.empty());
+    plan.groups.front().layers.front().tool_groups.front().extruder_id = 2;
+    plan.groups.front().layers.front().tool_groups.emplace_back();
+    plan.groups.front().layers.front().tool_groups.back().extruder_id = 0;
+    const BambuEntries entries = read_bambu_zip(bambu_test_archive(print, exported, reference, bambu_test_metadata()));
+    check_bambu_package(entries, false);
+    const nlohmann::json plate = nlohmann::json::parse(entries.at("Metadata/plate_1.json"));
+    REQUIRE(plate["bbox_objects"].size() == 2);
+    CHECK(plate["bbox_objects"][0]["id"] == 3);
+    CHECK(plate["bbox_objects"][0]["name"] == first.name);
+    CHECK(plate["bbox_objects"][0]["area"].get<double>() == Approx(96.));
+    const std::array<double, 4> expected_a{40., 30., 70., 40.}, expected_b{60., 10., 65., 15.}, expected_all{40., 10., 70., 40.};
+    // Slicing's integer closing can move a boundary by up to 11 scaled units; keep a 20-unit bound.
+    for (size_t axis = 0; axis < 4; ++axis) {
+        CHECK(std::abs(plate["bbox_objects"][0]["bbox"][axis].get<double>() - expected_a[axis]) < .00002);
+        CHECK(std::abs(plate["bbox_objects"][1]["bbox"][axis].get<double>() - expected_b[axis]) < .00002);
+        CHECK(std::abs(plate["bbox_all"][axis].get<double>() - expected_all[axis]) < .00002);
+    }
+    CHECK(plate["bbox_objects"][1]["area"].get<double>() == Approx(25.));
+    CHECK(plate["filament_ids"] == nlohmann::json::array({0, 2}));
+    CHECK(plate["first_extruder"] == 2);
+    CHECK(plate["filament_colors"] == nlohmann::json::array({"raw0", "raw2"}));
+    CHECK(plate["nozzle_diameter"].get<double>() == Approx(.6));
+    CHECK(plate["first_layer_time"] == 12.5);
+    const boost::property_tree::ptree slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+    std::set<uint32_t> ids;
+    for (const auto &[tag, child] : slice.get_child("config.plate"))
+        if (tag == "object") ids.insert(child.get<uint32_t>("<xmlattr>.identify_id"));
+    CHECK(ids.count(3) == 1);
+    CHECK(ids.count(5) == 1);
+    for (const auto &[name, token] : std::map<std::string, std::string>{{"Cool Plate", "cool_plate"},
+        {"Engineering Plate", "eng_plate"}, {"High Temp Plate", "hot_plate"}, {"Textured PEI Plate", "textured_plate"},
+        {"Textured Cool Plate", "textured_cool_plate"}, {"Supertack Plate", "supertack_plate"}}) {
+        exported.set_deserialize_strict("curr_bed_type", name);
+        const BambuEntries bed = read_bambu_zip(bambu_test_archive(print, exported, reference, bambu_test_metadata(false)));
+        const nlohmann::json value = nlohmann::json::parse(bed.at("Metadata/plate_1.json"));
+        CHECK(value["bed_type"] == token);
+        CHECK(value["first_layer_time"] == 0.);
+    }
+    exported.erase("curr_bed_type");
+    const BambuEntries unknown = read_bambu_zip(bambu_test_archive(print, exported, reference, bambu_test_metadata(false)));
+    CHECK(nlohmann::json::parse(unknown.at("Metadata/plate_1.json"))["bed_type"] == "unknown");
+}
+
+// Use controlled final-plan paths to distinguish brim and skirt in one bucket, support heights and overlapping towers.
+TEST_CASE("Bambu plate JSON reads attributed plan coverage and physical first layers", "[plugins][bambu3mf][f4c]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false, {{"seam_visibility", "0"},
+        {"brim_width", "0"}, {"skirts", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    cube.model.objects().front().instances.front()->set_offset(Vec3d::Zero());
+    const DynamicPrintConfig placed = cube.print.full_print_config();
+    cube.print.apply(cube.model, placed);
+    cube.print.process();
+    Orchestrator::instance().export_gcode(cube.print, cube.reference.string(), nullptr);
+    Printing::PrintingPlan &plan = cube.print.mutable_printing_plan();
+    plan.groups.clear();
+    REQUIRE(plan.object_instances.size() == 1);
+    plan.object_instances.emplace_back();
+    plan.object_instances.emplace_back();
+    PrintObject &object = cube.print.object(0);
+    BoundingBox original_box;
+    for (const ExPolygon &slice : object.layer(0).lslices()) original_box.merge(slice.contour.points);
+    REQUIRE(unscaled(original_box.max.x() + object.instances().front().shift.x()) < 30.);
+    object.layer(0).get_or_add_property<LayerAdhesionProperty>().kind = RAW_LAYER_ADHESION_KIND_BRIM;
+    object.layer(1).get_or_add_property<LayerAdhesionProperty>().kind = RAW_LAYER_ADHESION_KIND_SKIRT;
+    object.layer(2).get_or_add_property<LayerSupportProperty>();
+    object.layer(3).get_or_add_property<LayerSupportProperty>();
+    plate_test_path(cube.print, &object.layer(0), 0, .2, 30., 50., 10., 2.f, .2f, ExtrusionRole::Perimeter);
+    plate_test_path(cube.print, &object.layer(1), 0, .2, 500., 500., 10., 2.f, .2f, ExtrusionRole::Perimeter);
+    plate_test_path(cube.print, &object.layer(2), 0, .2, 100., 20., 10., 2.f, .2f, ExtrusionRole::SupportMaterialInterface);
+    plate_test_path(cube.print, &object.layer(3), 0, .4, 1000., 20., 10., 2.f, .2f, ExtrusionRole::SupportMaterial);
+    plate_test_path(cube.print, nullptr, 1, .2, 10., 20., 10., 2.f, .2f, ExtrusionRole::WipeTower, .1);
+    const Slic3r::ApiHost::GCodeExportDescription one = Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&cube.print));
+    REQUIRE(one.wipe_tower.present);
+    plate_test_path(cube.print, nullptr, 2, .4, 10., 20., 10., 2.f, .1f, ExtrusionRole::WipeTower, -.1);
+    const Slic3r::ApiHost::GCodeExportDescription overlapped = Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&cube.print));
+    CHECK(overlapped.wipe_tower.area == Approx(one.wipe_tower.area));
+    plate_test_path(cube.print, nullptr, 1, .5, 2000., 20., 10., 2.f, .2f, ExtrusionRole::WipeTower);
+    plate_test_path(cube.print, nullptr, 1, .1, 3000., 20., 10., 2.f, .2f, ExtrusionRole::WipeTower, .5);
+    const Slic3r::ApiHost::GCodeExportDescription copied = Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&cube.print));
+    REQUIRE(copied.objects[0].brim.present);
+    REQUIRE(copied.objects[0].support.present);
+    CHECK(copied.objects[0].brim.bbox == (std::array<double, 4>{30., 49., 40., 51.}));
+    CHECK(copied.objects[0].support.bbox == (std::array<double, 4>{100., 19., 110., 21.}));
+    CHECK(copied.wipe_tower.bbox == one.wipe_tower.bbox);
+    CHECK(copied.wipe_tower.area == Approx(one.wipe_tower.area));
+    CHECK(copied.wipe_tower.layer_height == Approx(.1));
+    const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, cube.print.full_print_config(), cube.reference, bambu_test_metadata()));
+    const nlohmann::json plate = nlohmann::json::parse(entries.at("Metadata/plate_1.json"));
+    REQUIRE(plate["bbox_objects"].size() == 2);
+    CHECK(plate["bbox_objects"][0]["bbox"][2].get<double>() == Approx(110.));
+    CHECK(plate["bbox_objects"][0]["area"].get<double>() == Approx(400.).margin(.001));
+    CHECK(plate["bbox_objects"][1]["id"] == 1000);
+    CHECK(plate["bbox_objects"][1]["name"] == "wipe_tower");
+    object.layer(0).get_or_add_property<LayerAdhesionProperty>().kind = RAW_LAYER_ADHESION_KIND_SKIRT;
+    REQUIRE_FALSE(LayerAdhesionProperty::layer_is_brim(object.layer(0)));
+    const Slic3r::ApiHost::GCodeExportDescription no_brim = Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&cube.print));
+    CHECK_FALSE(no_brim.objects[0].brim.present);
+    const BambuEntries unbrimmed = read_bambu_zip(bambu_test_archive(cube.print, cube.print.full_print_config(), cube.reference, bambu_test_metadata()));
+    const nlohmann::json without = nlohmann::json::parse(unbrimmed.at("Metadata/plate_1.json"));
+    INFO(without.dump());
+    CHECK(without["bbox_objects"][0]["bbox"][2].get<double>() < 30.);
+    // An arc bulges beyond both endpoints; a path-box approximation cannot satisfy this coverage bound.
+    plan.object_instances.emplace_back();
+    const Geometry::ArcWelder::Path arc{{Point::new_scale(300., 20.)},
+        {Point::new_scale(310., 20.), float(scale_i(5.)), Geometry::ArcWelder::Orientation::CW}};
+    std::unique_ptr<ExtrusionPath> curved = Test::GCode::make_firmware_path(ArcPolyline(arc), 20.f, 500.f);
+    REQUIRE(curved->polyline_ref().has_arc());
+    curved->get_or_add_property<ExtrusionAttributes>() = ExtrusionAttributes(ExtrusionRole::WipeTower, ExtrusionFlow(.2, 2.f, .2f));
+    Printing::PrintingExtrusion arc_extrusion;
+    arc_extrusion.printing_catalog_id = 3;
+    arc_extrusion.sregion_island_role = ExtrusionRole::WipeTower;
+    arc_extrusion.root = std::move(curved);
+    plan.groups.front().layers.front().tool_groups.front().extrusions.push_back(std::move(arc_extrusion));
+    const Slic3r::ApiHost::GCodeExportDescription curved_facts = Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&cube.print));
+    CHECK(curved_facts.wipe_tower.bbox[3] > 25.8);
+}
+
+// Generate adhesion before exporting so object-local patterns, owner-marked copies, patches and global layers stay distinct.
+TEST_CASE("Bambu plate JSON follows generated brim ownership", "[plugins][bambu3mf][f4c][brim]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    for (const std::string &mode : {std::string("normal"), std::string("sequential"), std::string("parallel"),
+        std::string("ears"), std::string("interior"), std::string("patch-sequential"), std::string("patch-parallel"),
+        std::string("global"), std::string("raft")}) {
+        CAPTURE(mode);
+        const bool patch = mode.find("patch") != std::string::npos;
+        const bool raft = mode == "raft";
+        const bool global = mode == "global";
+        const bool sequential = mode == "sequential" || mode == "patch-sequential";
+        DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
+        config.set_deserialize_strict({{"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"seam_visibility", "0"},
+            {"brim_width", patch || raft || mode == "interior" ? "0" : "3"}, {"brim_width_interior", mode == "interior" ? "1" : "0"},
+            {"brim_per_object", global ? "0" : "1"}, {"brim_ears", mode == "ears" ? "1" : "0"},
+            {"complete_objects", sequential ? "1" : "0"}, {"parallel_objects_step", mode.find("parallel") != std::string::npos ? "1" : "0"},
+            {"skirts", "1"}, {"skirt_distance", "30"}, {"complete_objects_one_skirt", "1"}, {"brim_skirt_trim", "0"},
+            {"raft_layers", raft ? "2" : "0"}, {"support_material", raft ? "1" : "0"},
+            {"xy_size_compensation", "0"}, {"xy_inner_size_compensation", "0"}, {"first_layer_size_compensation", "0"}});
+        TriangleMesh mesh = plate_test_box(0., 0., 20., 20.);
+        if (mode == "interior") {
+            mesh = plate_test_box(0., 0., 2., 10.);
+            mesh.merge(plate_test_box(8., 0., 2., 10.));
+            mesh.merge(plate_test_box(2., 0., 6., 2.));
+            mesh.merge(plate_test_box(2., 8., 6., 2.));
+        }
+        Print print;
+        Model model;
+        Test::init_print({mesh}, print, model, config);
+        ModelObject &object = model.objects().front();
+        object.instances.front()->set_offset(Vec3d(40., 50., 0.));
+        object.add_instance(*object.instances.front())->set_offset(Vec3d(100., 50., 0.));
+        if (patch) object.add_volume(plate_test_box(-8., 6., 6., 6.))->set_type(ModelVolumeType::BRIM_PATCH);
+        print.apply(model, config);
+        print.process();
+        const boost::filesystem::path reference = directory.path() / "generated.gcode";
+        Orchestrator::instance().export_gcode(print, reference.string(), nullptr);
+        if (global) {
+            // Add a detached first-layer support sentinel to the final plan to test global-brim exclusion independently.
+            Layer &support_source = print.object(0).layer(0);
+            support_source.get_or_add_property<LayerSupportProperty>();
+            for (uint32_t id = 0; id < print.printing_plan()->object_instances.size(); ++id)
+                if (print.printing_plan()->object_instances[id].object == &print.object(0))
+                    plate_test_path(print, &support_source, id, .1, 500., 20., 10., 2.f, .1f, ExtrusionRole::SupportMaterialInterface);
+        }
+        const Slic3r::ApiHost::GCodeExportDescription facts = Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&print));
+        size_t brims = 0;
+        for (const Slic3r::ApiHost::GCodeExportObject &entry : facts.objects) {
+            if (!entry.real) continue;
+            brims += entry.brim.present ? 1 : 0;
+        }
+        CHECK(brims == (global || raft ? 0 : 2));
+        CHECK(facts.global_brim.present == global);
+        if (global)
+            for (const Slic3r::ApiHost::GCodeExportObject &entry : facts.objects)
+                if (entry.real) REQUIRE(entry.support.present);
+        // Raft settings do not change which normal object layer supplies area and thickness.
+        if (raft) REQUIRE(print.object(0).has_raft());
+        const BambuEntries entries = read_bambu_zip(bambu_test_archive(print, print.full_print_config(), reference, bambu_test_metadata()));
+        const nlohmann::json plate = nlohmann::json::parse(entries.at("Metadata/plate_1.json"));
+        REQUIRE(plate["bbox_objects"].size() == 1);
+        CHECK(plate["is_seq_print"] == sequential);
+        CHECK(plate["bbox_objects"][0]["area"].get<double>() == Approx(mode == "interior" ? 64. : 400.).margin(.001));
+        CHECK(plate["bbox_objects"][0]["layer_height"].get<double>() == Approx(unscaled(print.object(0).layer(0).scaled_height())));
+        if (global || raft) {
+            CHECK(plate["bbox_objects"][0]["bbox"][0].get<double>() == Approx(40.).margin(.00002));
+            CHECK(plate["bbox_objects"][0]["bbox"][2].get<double>() == Approx(120.).margin(.00002));
+        }
+        if (global) {
+            CHECK(plate["bbox_all"][0].get<double>() < 39.);
+            CHECK(plate["bbox_all"][2].get<double>() > 121.);
+        }
+        if (patch) CHECK(plate["bbox_objects"][0]["bbox"][0].get<double>() < 33.);
+        CHECK(plate["bbox_all"][0].get<double>() > 25.);
+        CHECK(plate["bbox_all"][2].get<double>() < 130.);
+    }
+}
+
+// Keep file, content type and XML reference absent independently for synthetic-only catalogs, no visits and no slices.
+TEST_CASE("Bambu plate JSON is absent without real slices or visited tools", "[plugins][bambu3mf][f4c]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false, {{"seam_visibility", "0"}});
+    SECTION("only synthetic catalog") {
+        for (Printing::PrintingObjectInstance &instance : cube.print.mutable_printing_plan().object_instances) instance.object = nullptr;
+    }
+    SECTION("no concrete tool") { cube.print.mutable_printing_plan().groups.clear(); }
+    SECTION("real object has no sliced layer") {
+        cube.print.mutable_printing_plan().groups.clear();
+        cube.print.object(0).clear_layers();
+        cube.print.mutable_printing_plan().groups.emplace_back();
+        cube.print.mutable_printing_plan().groups[0].layers.emplace_back();
+        cube.print.mutable_printing_plan().groups[0].layers[0].tool_groups.emplace_back();
+        cube.print.mutable_printing_plan().groups[0].layers[0].tool_groups[0].extruder_id = 0;
+    }
+    const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, cube.print.full_print_config(), cube.reference, bambu_test_metadata()));
+    check_bambu_package(entries, false, {}, false);
+    CHECK(entries.count("Metadata/plate_1.json") == 0);
+}
+
+// QUERY checks firmware and encoder capability, and identity belongs to the printer firmware; no renderer is needed.
+TEST_CASE("Bambu archive QUERY and printer identity are explicit", "[plugins][gcode][exporter][bambu3mf][bambu]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    Orchestrator &host = Orchestrator::instance();
+    const Orchestrator::GCodeExporterSelection selected = host.select_gcode_exporter(print, print.full_print_config());
+    CHECK(selected.extension == ".gcode.3mf");
+    CHECK(selected.action_label == "Export Bambu sliced file");
+    CHECK(selected.supports_removable_media);
+    DynamicPrintConfig incompatible = print.full_print_config();
+    incompatible.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
+    CHECK_THROWS_WITH(host.select_gcode_exporter(print, incompatible), "Bambu sliced files require gcode.firmware.bambu.");
+    const ConfigOptionDef *identity = PrintConfigDef::instance().get("bambu_slicer_identity");
+    REQUIRE(identity != nullptr);
+    CHECK(identity->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+    CHECK(identity->default_value->serialize() == "superslicer");
+    CHECK(print.full_print_config().opt_serialize("bambu_slicer_identity") == "superslicer");
+}
+
+// Produce all three identities from one ready reference and parse the archive; exact literals, copied XML/JSON strings, ids and independent MD5 reject malformed or invented output.
+TEST_CASE("Bambu archives preserve wrapped reference bytes and fixed identity formats", "[plugins][gcode][exporter][bambu3mf][bambu]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false,
+        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"gcode_label_objects", "firmware"}});
+    const std::string special = u8"<cube & \"quoted\" \\ café>";
+    cube.print.mutable_printing_plan().object_instances.front().name = special;
+    DynamicPrintConfig config = cube.print.full_print_config();
+    config.set_deserialize_strict("perimeters", "2");
+    config.set_key_value("start_gcode", new ConfigOptionString("; " + special));
+    const std::string reference = read_binary_file(cube.reference);
+    raw_slic3r_version_info host = {};
+    host.struct_size = sizeof(host);
+    REQUIRE(orchestrator_get_version_info(&host));
+    const std::string host_producer = "generated by " SLIC3R_APP_KEY " " SLIC3R_VERSION;
+    const std::string host_application = host.application_name;
+    const std::string host_version = host.version;
+    const std::vector<std::string> identities = {"superslicer", "orcaslicer", "bambustudio"};
+    config.set_deserialize_strict("printer_model_id", "C12");
+    config.set_deserialize_strict("nozzle_diameter", "0.6");
+    config.set_deserialize_strict("filament_type", "ASA");
+    config.set_deserialize_strict("filament_colour", "#2F6B9A");
+    for (const std::string &identity : identities) {
+        CAPTURE(identity);
+        config.set_deserialize_strict("bambu_slicer_identity", identity);
+        size_t warnings = 0;
+        plugin_run_context context = {};
+        context.host_context = reinterpret_cast<plugin_host_context *>(&warnings);
+        context.report_warning = [](plugin_host_context *opaque, const char *) { ++*reinterpret_cast<size_t *>(opaque); };
+        const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata(), nullptr, context));
+        CHECK(warnings == 1);
+        check_bambu_package(entries, false);
+        const std::string &gcode = entries.at("Metadata/plate_1.gcode");
+        const std::string producer = identity == "superslicer" ? host_producer :
+            identity == "orcaslicer" ? "generated by OrcaSlicer 2.5.0-dev" : "BambuStudio 02.08.01.55";
+        const std::string prefix = "; HEADER_BLOCK_START\n; " + producer + "\n";
+        CHECK(gcode.substr(0, prefix.size()) == prefix);
+        CHECK(gcode.find("; total estimated time: 1m 1s\n") != std::string::npos);
+        CHECK(gcode.find("model printing time") == std::string::npos);
+        CHECK(gcode.find("; total layer number: 7\n") != std::string::npos);
+        CHECK(gcode.find("; max_z_height: 1.40\n") != std::string::npos);
+        CHECK(gcode.find("; filament: 1\n") != std::string::npos);
+        CHECK(gcode.find("; wall_loops = 2\n") != std::string::npos);
+        const std::string start = "; EXECUTABLE_BLOCK_START\n";
+        const size_t executable = gcode.find(start);
+        REQUIRE(executable != std::string::npos);
+        CHECK(gcode.substr(executable + start.size(), reference.size()) == reference);
+        CHECK(gcode.substr(executable + start.size() + reference.size()) == "; EXECUTABLE_BLOCK_END\n; filament used [mm] = 120.00\n");
+        CHECK(gcode.find("; HEADER_BLOCK_END\n; CONFIG_BLOCK_START\n") != std::string::npos);
+        CHECK(gcode.find("; CONFIG_BLOCK_END\n" + start) != std::string::npos);
+        CHECK(gcode.find("HEADER_BLOCK_START", gcode.find("HEADER_BLOCK_START") + 1) == std::string::npos);
+        CHECK(gcode.find("thumbnail begin") == std::string::npos);
+        CHECK(gcode.find("SuperSlicer_config") == std::string::npos);
+        CHECK(entries.at("Metadata/plate_1.gcode.md5") == boost::to_upper_copy(QuickDigest5::toHash(gcode)));
+        CHECK(entries.at("Metadata/plate_1.gcode.md5").size() == 32);
+        const nlohmann::json json = nlohmann::json::parse(entries.at("Metadata/project_settings.config"));
+        CHECK(json.at("version") == "02.08.01.55");
+        CHECK(json.at("wall_loops") == "2");
+        CHECK(json.at("machine_start_gcode") == "; " + special);
+        CHECK_FALSE(json.contains("bambu_slicer_identity"));
+        const boost::property_tree::ptree model = bambu_xml(entries.at("3D/3dmodel.model"));
+        CHECK(model.get_child("model.resources").empty());
+        CHECK(model.get_child("model.build").empty());
+        std::string application;
+        std::map<std::string, std::string> model_metadata;
+        for (const auto &[tag, child] : model.get_child("model"))
+            if (tag == "metadata") model_metadata[child.get<std::string>("<xmlattr>.name")] = child.data();
+        application = model_metadata.at("Application");
+        CHECK(application == (identity == "superslicer" ? host_application + "-" + host_version : "BambuStudio-02.08.01.55"));
+        CHECK(model_metadata.at("BambuStudio:3mfVersion") == "1");
+        if (identity == "orcaslicer")
+            CHECK(model_metadata.at("OrcaSlicer") == "2.5.0-dev");
+        else
+            CHECK(model_metadata.count("OrcaSlicer") == 0);
+        const boost::property_tree::ptree slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+        CHECK(bambu_value(slice.get_child("config.header"), "X-BBL-Client-Type") == "slicer");
+        CHECK(bambu_value(slice.get_child("config.header"), "X-BBL-Client-Version") == (identity == "superslicer" ? host_version : "02.08.01.55"));
+        CHECK(bambu_value(slice.get_child("config.header"), "OrcaSlicer-Version") == (identity == "orcaslicer" ? "2.5.0-dev" : ""));
+        CHECK(bambu_value(slice.get_child("config.plate"), "printer_model_id") == "C12");
+        CHECK(bambu_value(slice.get_child("config.plate"), "nozzle_diameters") == "0.6");
+        CHECK(bambu_value(slice.get_child("config.plate"), "prediction") == "61");
+        CHECK(bambu_value(slice.get_child("config.plate"), "weight") == "0.36");
+        CHECK(bambu_value(slice.get_child("config.plate"), "first_layer_time") == "12.500000");
+        size_t objects = 0;
+        size_t filaments = 0;
+        for (const auto &[tag, child] : slice.get_child("config.plate")) {
+            if (tag == "object") {
+                ++objects;
+                CHECK(child.get<std::string>("<xmlattr>.name") == special);
+                const std::string id = child.get<std::string>("<xmlattr>.identify_id");
+                CHECK(gcode.find("; model label id: " + id + "\n") != std::string::npos);
+                CHECK(reference.find("unique label id: " + id + "\n") != std::string::npos);
+            }
+            if (tag == "filament") {
+                ++filaments;
+                CHECK(child.get<std::string>("<xmlattr>.id") == "1");
+                CHECK(child.get<std::string>("<xmlattr>.type") == "ASA");
+                CHECK(child.get<std::string>("<xmlattr>.color") == "#2F6B9A");
+                CHECK(child.get<std::string>("<xmlattr>.used_m") == "0.12");
+                CHECK(child.get<std::string>("<xmlattr>.used_g") == "0.36");
+            }
+        }
+        CHECK(objects == 1);
+        CHECK(filaments == 1);
+        const boost::property_tree::ptree settings = bambu_xml(entries.at("Metadata/model_settings.config"));
+        CHECK(bambu_value(settings.get_child("config.plate"), "gcode_file") == "Metadata/plate_1.gcode");
+        CHECK(bambu_value(settings.get_child("config.plate"), "pattern_bbox_file") == "Metadata/plate_1.json");
+        for (const char *key : {"thumbnail_file", "thumbnail_no_light_file", "top_file", "pick_file"})
+            CHECK(bambu_value(settings.get_child("config.plate"), key).empty());
+    }
+    CHECK(read_binary_file(cube.reference) == reference);
+    CHECK(snapshot_directory(directory.path()).size() == 1);
+}
+
+// Keep an empty statistics list with the complete numeric group and remove identity from the export copy; measured fields must be absent rather than fabricated, while host identity remains the fallback.
+TEST_CASE("Bambu archives omit unmeasured statistics and use the host identity fallback", "[plugins][gcode][exporter][bambu3mf]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false);
+    DynamicPrintConfig config = cube.print.full_print_config();
+    config.erase("bambu_slicer_identity");
+    const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata(false)));
+    const std::string &gcode = entries.at("Metadata/plate_1.gcode");
+    CHECK(gcode.find("total estimated time") == std::string::npos);
+    CHECK(gcode.find("filament used [mm]") == std::string::npos);
+    CHECK(gcode.find("; generated by " SLIC3R_APP_KEY " ") != std::string::npos);
+    const boost::property_tree::ptree slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+    CHECK(bambu_value(slice.get_child("config.plate"), "prediction").empty());
+    CHECK(bambu_value(slice.get_child("config.plate"), "weight").empty());
+    CHECK(bambu_value(slice.get_child("config.plate"), "first_layer_time").empty());
+    for (const auto &[tag, child] : slice.get_child("config.plate"))
+        CHECK(tag != "filament");
+    CHECK(gcode.find("; filament: \n") != std::string::npos);
+}
+
+// Exercise copied catalog identities independently of geometry: synthetic entries leave holes and repeated source objects remain separate instances; over-limit or disabled labels must not advertise cancellable blocks.
+TEST_CASE("Bambu catalog export preserves holes and instance identities", "[plugins][gcode][exporter][bambu3mf]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false,
+        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}, {"gcode_label_objects", "firmware"}});
+    ModelInstance *second = cube.model.objects().front().add_instance(*cube.model.objects().front().instances.front());
+    second->set_offset(Vec3d(30., 0., 0.));
+    const DynamicPrintConfig applied = cube.print.full_print_config();
+    cube.print.apply(cube.model, applied);
+    cube.print.process();
+    Orchestrator::instance().export_gcode(cube.print, cube.reference.string(), nullptr);
+    Printing::PrintingPlan &plan = cube.print.mutable_printing_plan();
+    REQUIRE(plan.object_instances.size() >= 2);
+    const Printing::PrintingObjectInstance original = plan.object_instances.front();
+    Printing::PrintingObjectInstance synthetic = original;
+    synthetic.object = nullptr;
+    synthetic.name = "synthetic";
+    plan.object_instances.clear();
+    plan.object_instances.push_back(synthetic);
+    plan.object_instances.push_back(original);
+    plan.object_instances.push_back(synthetic);
+    plan.object_instances.push_back(original);
+    plan.object_instances[3].object_instance_idx = 1;
+    const std::vector<Slic3r::ApiHost::GCodeExportObject> copied = Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&cube.print)).objects;
+    REQUIRE(copied.size() == 4);
+    CHECK_FALSE(copied[0].real);
+    CHECK(copied[1].id == 1);
+    CHECK(copied[3].id == 3);
+    CHECK(copied[1].real);
+    CHECK(copied[3].real);
+    CHECK(copied[1].name == original.name);
+    CHECK(copied[3].name == original.name);
+    // Drive the real firmware with the copied catalog and a small unscripted path; the full pipeline's script events require a separate storage/session bridge.
+    const std::function<std::string(uint32_t, uint32_t)> emit = [&](uint32_t first, uint32_t last) {
+        Printing::PrintingPlan emitted_plan;
+        emitted_plan.object_instances = plan.object_instances;
+        Printing::PrintingToolGroup tool;
+        tool.extruder_id = 0;
+        Test::GCode::append_path_extrusion(tool, Test::GCode::make_firmware_path(
+            ArcPolyline(Points{Point::new_scale(0., 0.), Point::new_scale(1., 0.)}), 20.f, 500.f));
+        slic3r_api::GCodeGeneration::Firmware::BambuGCodeFirmwareSession session;
+        std::string text = session.begin_print(slic3r_api::Print(reinterpret_cast<const print_handle *>(&cube.print)),
+            slic3r_api::ConstPrintingPlan(reinterpret_cast<const printing_plan_handle *>(&emitted_plan)));
+        text += session.begin_tool_group(slic3r_api::ConstPrintingToolGroup(reinterpret_cast<const printing_tool_group_handle *>(&tool)));
+        for (uint32_t id : {first, last}) {
+            tool.extrusions.front().printing_catalog_id = id;
+            text += session.write_extrusion(slic3r_api::ConstPrintingExtrusion(reinterpret_cast<const printing_extrusion_handle *>(&tool.extrusions.front())));
+        }
+        text += session.end_print();
+        return text;
+    };
+    const std::string reference = emit(1, 3);
+    write_binary_file(cube.reference, reference);
+    CHECK(reference.find("unique label id: 1\n") != std::string::npos);
+    CHECK(reference.find("unique label id: 3\n") != std::string::npos);
+    DynamicPrintConfig config = cube.print.full_print_config();
+    config.set_deserialize_strict("gcode_label_objects", "firmware");
+    BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata()));
+    CHECK(entries.at("Metadata/plate_1.gcode").find("; model label id: 1,3\n") != std::string::npos);
+    boost::property_tree::ptree slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+    std::vector<int> ids;
+    for (const auto &[tag, child] : slice.get_child("config.plate"))
+        if (tag == "object") ids.push_back(child.get<int>("<xmlattr>.identify_id"));
+    CHECK(ids == (std::vector<int>{1, 3}));
+    plan.object_instances.assign(64, original);
+    const std::string at_limit = emit(0, 63);
+    CHECK(at_limit.find("unique label id: 63\n") != std::string::npos);
+    write_binary_file(cube.reference, at_limit);
+    entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata()));
+    slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+    CHECK(bambu_value(slice.get_child("config.plate"), "label_object_enabled") == "true");
+    std::string limit_ids;
+    for (uint32_t id = 0; id < 64; ++id)
+        limit_ids += (id == 0 ? "" : ",") + std::to_string(id);
+    CHECK(entries.at("Metadata/plate_1.gcode").find("; model label id: " + limit_ids + "\n") != std::string::npos);
+    size_t limit_count = 0;
+    for (const auto &[tag, child] : slice.get_child("config.plate"))
+        if (tag == "object") CHECK(child.get<size_t>("<xmlattr>.identify_id") == limit_count++);
+    CHECK(limit_count == 64);
+    for (bool disabled : {false, true}) {
+        plan.object_instances.assign(disabled ? 2 : 65, original);
+        config.set_deserialize_strict("gcode_label_objects", disabled ? "disabled" : "firmware");
+        const_cast<PrintConfig &>(cube.print.config()).gcode_label_objects.value = disabled ? LabelObjectsStyle::Disabled : LabelObjectsStyle::Firmware;
+        const std::string unlabelled = emit(0, 1);
+        CHECK(unlabelled.find("M624") == std::string::npos);
+        write_binary_file(cube.reference, unlabelled);
+        entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata()));
+        CHECK(entries.at("Metadata/plate_1.gcode").find("; model label id:") == std::string::npos);
+        slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+        CHECK(bambu_value(slice.get_child("config.plate"), "label_object_enabled") == "false");
+        size_t count = 0;
+        for (const auto &[tag, child] : slice.get_child("config.plate"))
+            if (tag == "object") CHECK(child.get<size_t>("<xmlattr>.identify_id") == count++);
+        CHECK(count == (disabled ? 2 : 65));
+    }
+    Print missing;
+    CHECK_THROWS_WITH(Slic3r::ApiHost::copy_gcode_export_objects(reinterpret_cast<const print_handle *>(&missing)),
+        "Bambu export requires a finalized printing plan.");
+}
+
+// Use the existing raw renderer bridge at explicit sizes even with BIQU selected; PNG bytes and relations must correspond to real entries and no graphical engine is used.
+TEST_CASE("Bambu archives request PNG at 512 and 128 independently of text thumbnails", "[plugins][gcode][exporter][bambu3mf][thumbnails][f4c]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false);
+    DynamicPrintConfig config = cube.print.full_print_config();
+    config.set_deserialize_strict("thumbnails_format", "BIQU");
+    uint32_t calls = 0;
+    GCodeThumbnailRenderer renderer(cube.print, white_square_renderer(calls));
+    std::map<std::string, mz_uint> compression;
+    const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata(), renderer.c_renderer()), &compression);
+    CHECK(calls == 2);
+    check_bambu_package(entries, true, compression);
+    const boost::property_tree::ptree settings = bambu_xml(entries.at("Metadata/model_settings.config"));
+    CHECK(bambu_value(settings.get_child("config.plate"), "thumbnail_file") == "Metadata/plate_1.png");
+    const boost::property_tree::ptree rels = bambu_xml(entries.at("_rels/.rels"));
+    size_t image_relations = 0;
+    for (const auto &[tag, child] : rels.get_child("Relationships"))
+        if (tag == "Relationship" && boost::ends_with(child.get<std::string>("<xmlattr>.Target"), ".png"))
+            ++image_relations;
+    CHECK(image_relations == 3);
+    for (const std::pair<std::string, uint32_t> &item : std::vector<std::pair<std::string, uint32_t>>{{"Metadata/plate_1.png",512}, {"Metadata/plate_1_small.png",128}}) {
+        const std::string &png = entries.at(item.first);
+        REQUIRE(png.size() > 24);
+        CHECK(png.substr(0, 8) == std::string("\x89PNG\r\n\x1a\n", 8));
+        for (size_t offset : {size_t(16), size_t(20)}) {
+            const uint32_t dimension = (uint32_t(uint8_t(png[offset])) << 24) | (uint32_t(uint8_t(png[offset+1])) << 16) |
+                (uint32_t(uint8_t(png[offset+2])) << 8) | uint8_t(png[offset+3]);
+            CHECK(dimension == item.second);
+        }
+    }
+}
+
+// Check the production progressive MD5 formatter against a known vector, not a second call to the same implementation.
+TEST_CASE("Bambu progressive MD5 uses canonical uppercase words", "[plugins][gcode][exporter][bambu3mf]")
+{
+    boost::uuids::detail::md5 digest;
+    digest.process_bytes("a", 1);
+    digest.process_bytes("bc", 2);
+    CHECK(slic3r_api::GCodeGeneration::Exporter::bambu_md5_hex(digest) == "900150983CD24FB0D6963F7D28E17F72");
+}
+
+// Fail rendering only after observing the private file, then cancel with a staged entry active; the destination and reference remain unchanged and scoped directory snapshots expose abandoned files.
+TEST_CASE("Bambu failed publication and staged cancellation clean private resources", "[plugins][gcode][exporter][bambu3mf][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false,
+        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    const boost::filesystem::path destination = directory.path() / "existing.3mf";
+    write_binary_file(destination, "keep destination");
+    const std::map<std::string, std::string> before = snapshot_directory(directory.path());
+    bool saw_private = false;
+    const ThumbnailsGeneratorCallback fail = [&](const ThumbnailsParams &) -> ThumbnailsList {
+        for (const boost::filesystem::directory_entry &entry : boost::filesystem::directory_iterator(directory.path()))
+            saw_private |= boost::starts_with(entry.path().filename().string(), "bambu3mf-");
+        throw std::runtime_error("Bambu test render failure");
+    };
+    Orchestrator &host = Orchestrator::instance();
+    const Orchestrator::GCodeExporterSelection selected = host.select_gcode_exporter(cube.print, cube.print.full_print_config(), "gcode.exporter.bambu3mf");
+    CHECK_THROWS(Test::export_print_to(host, cube.print, cube.print.full_print_config(), cube.reference.string(), destination.string(), selected, fail));
+    CHECK(saw_private);
+    CHECK(snapshot_directory(directory.path()) == before);
+    struct Cancel { int calls = 0; } cancel;
+    plugin_run_context context = {};
+    context.host_context = reinterpret_cast<plugin_host_context *>(&cancel);
+    context.is_cancelled = [](plugin_host_context *opaque) -> int { return ++reinterpret_cast<Cancel *>(opaque)->calls >= 5; };
+    // Four small metadata entries precede the staged header append: the fifth check is inside the opened G-code entry.
+    CHECK_THROWS_AS(bambu_test_archive(cube.print, cube.print.full_print_config(), cube.reference, bambu_test_metadata(), nullptr, context), slic3r_api::PluginCancelled);
+    CHECK(cancel.calls == 5);
+    CHECK(snapshot_directory(directory.path()) == before);
+    CHECK(Test::export_print_to(host, cube.print, cube.print.full_print_config(), cube.reference.string(), destination.string(), selected) == destination.string());
+    CHECK(read_bambu_zip(read_binary_file(destination)).count("Metadata/plate_1.gcode") == 1);
+    CHECK(snapshot_directory(directory.path()).size() == before.size());
+}
+
+// Wrap LF, CRLF and unterminated references without changing their bytes; require an autonomous final delimiter, no unnecessary separator and an independently recomputed MD5.
+TEST_CASE("Bambu executable delimiters preserve reference line endings", "[plugins][gcode][exporter][bambu3mf]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false);
+    for (const std::string &ending : {std::string("\n"), std::string("\r\n"), std::string()}) {
+        CAPTURE(ending);
+        const std::string reference = "G1 X2" + ending;
+        write_binary_file(cube.reference, reference);
+        const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, cube.print.full_print_config(), cube.reference, bambu_test_metadata()));
+        const std::string &gcode = entries.at("Metadata/plate_1.gcode");
+        const std::string begin = "; EXECUTABLE_BLOCK_START\n";
+        const size_t start = gcode.find(begin);
+        REQUIRE(start != std::string::npos);
+        const size_t body = start + begin.size();
+        CHECK(gcode.substr(body, reference.size()) == reference);
+        const std::string separator = ending.empty() ? "\n" : "";
+        CHECK(gcode.substr(body + reference.size()) == separator + "; EXECUTABLE_BLOCK_END\n; filament used [mm] = 120.00\n");
+        CHECK(entries.at("Metadata/plate_1.gcode.md5") == boost::to_upper_copy(QuickDigest5::toHash(gcode)));
+        CHECK(read_binary_file(cube.reference) == reference);
+    }
+}
+
+// Toggle only the host's date policy and restore it on every exit; producer lines follow that policy for the host/Orca identities, whereas BambuStudio keeps its fixed version-only format.
+TEST_CASE("Bambu producer dates follow the host policy for each identity", "[plugins][gcode][exporter][bambu3mf]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false);
+    DynamicPrintConfig config = cube.print.full_print_config();
+    struct DateRestore {
+        bool dated;
+        // Restore the borrowed process-global policy without retaining strings or throwing during unwinding.
+        ~DateRestore() { set_header_generate_with_date(dated); }
+    } restore{header_slic3r_generated().find(" on ") != std::string::npos};
+    for (bool dated : {false, true}) {
+        set_header_generate_with_date(dated);
+        for (const std::string &identity : {std::string("superslicer"), std::string("orcaslicer"), std::string("bambustudio")}) {
+            CAPTURE(dated, identity);
+            config.set_deserialize_strict("bambu_slicer_identity", identity);
+            const std::string before = header_slic3r_generated();
+            const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata()));
+            const std::string after = header_slic3r_generated();
+            const std::string &gcode = entries.at("Metadata/plate_1.gcode");
+            const std::string header = "; HEADER_BLOCK_START\n; ";
+            REQUIRE(gcode.find(header) == 0);
+            const std::string producer = gcode.substr(header.size(), gcode.find('\n', header.size()) - header.size());
+            if (identity == "bambustudio") {
+                CHECK(producer == "BambuStudio 02.08.01.55");
+                continue;
+            }
+            const std::string prefix = identity == "orcaslicer" ? "generated by OrcaSlicer 2.5.0-dev" :
+                std::string("generated by " SLIC3R_APP_KEY " ") + (dated ? SLIC3R_VERSION_FULL : SLIC3R_VERSION);
+            if (dated) {
+                REQUIRE(boost::starts_with(producer, prefix + " on "));
+                const std::string date = producer.substr(prefix.size());
+                // Host timestamps use a sortable UTC date: compare the enclosing calls, not an assumed fixed second.
+                CHECK(date >= before.substr(before.rfind(" on ")));
+                CHECK(date <= after.substr(after.rfind(" on ")));
+                CHECK(date.size() > 4);
+            } else {
+                CHECK(producer == prefix);
+                CHECK(producer.find(" on") == std::string::npos);
+            }
+        }
+    }
+}
+
+// Supply measured materials for logical tools zero and two plus the host's support fact; require sparse one-based filament identities, exact type/color/material and no unused tool entry.
+TEST_CASE("Bambu measured materials preserve sparse tools and the support fact", "[plugins][gcode][exporter][bambu3mf]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false);
+    DynamicPrintConfig config = cube.print.full_print_config();
+    config.set_num_extruders(3);
+    config.set_deserialize_strict("filament_type", "ASA;PLA;PETG");
+    config.set_deserialize_strict("filament_colour", "#2F6B9A;#FFFFFF;#E17055");
+    const raw_gcode_export_entry statistics[] = {{"filament used [mm]", "120.00, 0.00, 350.00"}, {"has_support", "1"}};
+    const raw_gcode_export_filament_usage usage[] = {{0, 120., 288., .36}, {2, 350., 840., 1.01}};
+    raw_gcode_export_metadata metadata = bambu_test_metadata();
+    metadata.statistics = {statistics, 2};
+    metadata.filaments = {usage, 2};
+    metadata.total_weight_g = 1.37;
+    const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, metadata));
+    CHECK(entries.at("Metadata/plate_1.gcode").find("; filament: 1,3\n") != std::string::npos);
+    const boost::property_tree::ptree slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+    CHECK(bambu_value(slice.get_child("config.plate"), "support_used") == "true");
+    std::vector<int> ids;
+    for (const auto &[tag, child] : slice.get_child("config.plate")) {
+        if (tag != "filament")
+            continue;
+        const int id = child.get<int>("<xmlattr>.id");
+        ids.push_back(id);
+        CHECK(child.get<std::string>("<xmlattr>.type") == (id == 1 ? "ASA" : "PETG"));
+        CHECK(child.get<std::string>("<xmlattr>.color") == (id == 1 ? "#2F6B9A" : "#E17055"));
+        CHECK(child.get<std::string>("<xmlattr>.used_m") == (id == 1 ? "0.12" : "0.35"));
+        CHECK(child.get<std::string>("<xmlattr>.used_g") == (id == 1 ? "0.36" : "1.01"));
+    }
+    CHECK(ids == (std::vector<int>{1, 3}));
+}
+
+// Deactivate PNG for one raw QUERY and restore its activation on scope exit; the provider must return one ordinary incompatibility with a copied diagnostic rather than failing its execution.
+TEST_CASE("Bambu QUERY reports an unavailable PNG encoder as incompatible", "[plugins][gcode][exporter][bambu3mf][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    ScopedPluginActivation inactive_png(host, "PNG", false);
+    struct QueryResult {
+        size_t calls = 0;
+        raw_gcode_export_query_status status = RAW_GCODE_EXPORT_QUERY_UNSET;
+        std::string message;
+    } answer;
+    run_ctx_gcode_export query = {};
+    query.operation = RAW_GCODE_EXPORT_OPERATION_QUERY;
+    query.config = ApiHost::to_config_handle(&print.full_print_config());
+    query.print = reinterpret_cast<const print_handle *>(&print);
+    query.firmware_plugin_id = "gcode.firmware.bambu";
+    query.query_callback_context = &answer;
+    query.emit_query_result = [](void *opaque, const raw_gcode_export_query_result *result) {
+        QueryResult &copy = *static_cast<QueryResult *>(opaque);
+        ++copy.calls;
+        copy.status = result->status;
+        copy.message = result->message == nullptr ? std::string() : result->message;
+    };
+    raw_plugin_run_payload payload = {};
+    payload.data = &query;
+    Plugin *provider = host.get_plugin("gcode.exporter.bambu3mf");
+    REQUIRE(provider != nullptr);
+    std::string error;
+    const raw_plugin_execution_status executed = host.execute_plugin(*provider, nullptr, &payload, 1, false, &error);
+    INFO("QUERY execution diagnostic: " << error);
+    CHECK(executed == RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(answer.calls == 1);
+    CHECK(answer.status == RAW_GCODE_EXPORT_QUERY_INCOMPATIBLE);
+    CHECK(answer.message == "The PNG thumbnail encoder is unavailable.");
+}
+
+// Reuse two real catalog entries under both and Octoprint styles, then make them synthetic; only firmware-capable styles with real entries may advertise Bambu cancellation labels.
+TEST_CASE("Bambu label styles distinguish real and synthetic catalogs", "[plugins][gcode][exporter][bambu3mf]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false);
+    Printing::PrintingPlan &plan = cube.print.mutable_printing_plan();
+    const Printing::PrintingObjectInstance original = plan.object_instances.front();
+    plan.object_instances.assign(2, original);
+    DynamicPrintConfig config = cube.print.full_print_config();
+    for (const std::string &style : {std::string("both"), std::string("octoprint")}) {
+        CAPTURE(style);
+        config.set_deserialize_strict("gcode_label_objects", style);
+        const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata()));
+        const boost::property_tree::ptree slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+        CHECK(bambu_value(slice.get_child("config.plate"), "label_object_enabled") == (style == "both" ? "true" : "false"));
+        if (style == "both")
+            CHECK(entries.at("Metadata/plate_1.gcode").find("; model label id: 0,1\n") != std::string::npos);
+        else
+            CHECK(entries.at("Metadata/plate_1.gcode").find("; model label id:") == std::string::npos);
+    }
+    config.set_deserialize_strict("gcode_label_objects", "both");
+    for (Printing::PrintingObjectInstance &object : plan.object_instances)
+        object.object = nullptr;
+    const BambuEntries entries = read_bambu_zip(bambu_test_archive(cube.print, config, cube.reference, bambu_test_metadata()));
+    const boost::property_tree::ptree slice = bambu_xml(entries.at("Metadata/slice_info.config"));
+    CHECK(bambu_value(slice.get_child("config.plate"), "label_object_enabled") == "false");
+    CHECK(entries.at("Metadata/plate_1.gcode").find("; model label id:") == std::string::npos);
+}
+
+// Invoke the actual provider's EXPORT setup and copy its borrowed save definition before declining the request; no writer runs, and static callback text is checked independently of the shared helper.
+TEST_CASE("Bambu exporter emits its actual save path definition", "[plugins][gcode][exporter][bambu3mf][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    Print print;
+    Model model;
+    initialize_fff_print(print, model, "gcode.exporter.bambu3mf", {{"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    struct Definition {
+        size_t count = 0;
+        std::string filter;
+        std::string tooltip;
+    } seen;
+    run_ctx_gcode_export request = {};
+    request.operation = RAW_GCODE_EXPORT_OPERATION_EXPORT;
+    request.config = ApiHost::to_config_handle(&print.full_print_config());
+    request.print = reinterpret_cast<const print_handle *>(&print);
+    request.input_callback_context = &seen;
+    request.request_export_inputs = [](void *opaque, const raw_config_option_def *definitions, size_t count) -> int32_t {
+        Definition &copy = *static_cast<Definition *>(opaque);
+        copy.count = count;
+        if (count != 0) {
+            copy.filter = definitions[0].sidetext;
+            copy.tooltip = definitions[0].tooltip;
+        }
+        return 0;
+    };
+    raw_plugin_run_payload payload = {};
+    payload.data = &request;
+    Plugin *provider = host.get_plugin("gcode.exporter.bambu3mf");
+    REQUIRE(provider != nullptr);
+    std::string error;
+    host.execute_plugin(*provider, &print, &payload, 1, false, &error);
+    INFO(error);
+    CHECK(seen.count == 1);
+    CHECK(seen.filter == "Bambu sliced file (*.gcode.3mf;*.3mf)|*.gcode.3mf;*.3mf");
+    CHECK(seen.tooltip == "Where the sliced archive is written.");
+}
+
+// Query while PNG is present, then deactivate it before EXPORT; the already selected exporter must report the same clear availability diagnostic and preserve the existing destination and reference.
+TEST_CASE("Bambu EXPORT rechecks PNG availability after selection", "[plugins][gcode][exporter][bambu3mf][export-contract]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false,
+        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    Orchestrator &host = Orchestrator::instance();
+    const Orchestrator::GCodeExporterSelection selected = host.select_gcode_exporter(cube.print, cube.print.full_print_config(), "gcode.exporter.bambu3mf");
+    const boost::filesystem::path destination = directory.path() / "keep.3mf";
+    write_binary_file(destination, "keep destination");
+    const std::map<std::string, std::string> before = snapshot_directory(directory.path());
+    ScopedPluginActivation inactive_png(host, "PNG", false);
+    CHECK_THROWS_WITH(Test::export_print_to(host, cube.print, cube.print.full_print_config(), cube.reference.string(), destination.string(), selected),
+        "The PNG thumbnail encoder is unavailable.");
+    CHECK(snapshot_directory(directory.path()) == before);
+}
+
+namespace {
+// Text-only session: its adapter exposes no raw-image callback, and any attempt to encode is an unexpected operation.
+class TextOnlyPngSession final : public slic3r_api::GCodeThumbnailEncoderSession
+{
+public:
+    // Report no image capability without changing state, allocating or transferring ownership.
+    bool supports_image() const noexcept override { return false; }
+    // Reject encoding of the borrowed request without retaining it; capability checks must have stopped the exporter before rendering.
+    std::vector<uint8_t> encode(const raw_gcode_thumbnail_render_request &) override
+    {
+        throw std::runtime_error("The text-only PNG test provider must not encode an image.");
+    }
+};
+
+// Reserve PNG in a fresh child registry before builtin registration. The real PNG duplicate is refused there, leaving the parent registry and other tests untouched.
+class TextOnlyPngProvider final : public slic3r_api::PluginBase
+{
+public:
+    // Borrow the child host for registration and own the later directory probe; base construction failures propagate.
+    explicit TextOnlyPngProvider(orchestrator_handle *host) : PluginBase(host) {}
+    boost::filesystem::path directory;
+    mutable bool saw_private = false;
+private:
+    // Publish the fixed service id required by the Bambu exporter, without effects or ownership transfer.
+    const char *id_impl() const noexcept override { return "PNG"; }
+    // Identify the active test replacement without effects or failure.
+    const char *name_impl() const noexcept override { return "Text-only PNG test encoder"; }
+    // Describe the deliberately absent image capability without allocating or changing state.
+    const char *description_impl() const noexcept override { return "PNG-identified service with no raw-image capability."; }
+    // Publish the thumbnail service step without effects or failure.
+    slicing_step_t step_impl() const noexcept override { return GCODE_THUMBNAIL; }
+    // Return a borrowed empty dependency list without effects or failure.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Keep the test provider at default priority without effects or failure.
+    int32_t priority_impl() const noexcept override { return 0; }
+    // Inspect the owned probe directory and publish a fresh text-only session to the borrowed payload; the host owns session destruction and invalid payload, filesystem or allocation failures propagate.
+    void run_impl(const plugin_run_context *context) const override
+    {
+        run_ctx_gcode_thumbnail *payload = plugin_ctx_as_gcode_thumbnail(context);
+        if (payload == nullptr || payload->print == nullptr)
+            throw std::invalid_argument("The PNG capability probe needs a Print.");
+        if (!directory.empty()) {
+            for (const boost::filesystem::directory_entry &entry : boost::filesystem::directory_iterator(directory))
+                saw_private |= boost::starts_with(entry.path().filename().string(), "bambu3mf-");
+        }
+        payload->instance = slic3r_api::make_gcode_thumbnail_encoder_instance(
+            std::unique_ptr<slic3r_api::GCodeThumbnailEncoderSession>(new TextOnlyPngSession()));
+    }
+};
+// Construct one child-process-owned provider using the borrowed host and return its reference; allocation/base failures propagate and no second instance is created.
+TextOnlyPngProvider &text_only_png_provider(orchestrator_handle *host)
+{
+    static TextOnlyPngProvider provider(host);
+    return provider;
+}
+// Register the child probe before builtin PNG registration via the existing runtime hook; the static provider owns its state, the host copies metadata and a duplicate/invalid registration throws.
+void register_text_only_png_capability_provider(orchestrator_handle *host)
+{
+    TextOnlyPngProvider &provider = text_only_png_provider(host);
+    Orchestrator &registry = *reinterpret_cast<Orchestrator *>(host);
+    if (!registry.register_plugin(provider.c_instance()))
+        throw std::runtime_error("Cannot register the isolated text-only PNG provider.");
+}
+}
+
+// Run an isolated registry with an active, text-only PNG service; QUERY must report ordinary incompatibility and EXPORT must refuse before creating a private archive or changing files. The parent waits without terminating its child.
+TEST_CASE("Bambu rejects an active PNG provider without image capability", "[plugins][gcode][exporter][bambu3mf][thumbnails]")
+{
+    if (std::getenv("SLIC3R_TEST_BAMBU_TEXT_ONLY_PNG") == nullptr) {
+        ScopedTestDirectory directory;
+        const boost::filesystem::path log = directory.path() / "png-capability-child.log";
+        boost::process::child child(boost::process::exe = boost::dll::program_location(),
+            boost::process::args = {"Bambu rejects an active PNG provider without image capability", "-r", "compact"},
+            boost::process::env["SLIC3R_TEST_BAMBU_TEXT_ONLY_PNG"] = "1",
+            (boost::process::std_out & boost::process::std_err) > log);
+        child.wait();
+        const std::string output = read_binary_file(log);
+        INFO(output.substr(output.size() > 6000 ? output.size() - 6000 : 0));
+        CHECK(child.exit_code() == 0);
+        return;
+    }
+
+    Orchestrator &host = Orchestrator::instance();
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    TextOnlyPngProvider &text_only = text_only_png_provider(host.handle());
+    REQUIRE(host.is_plugin_active("PNG"));
+    REQUIRE(host.get_plugin("PNG")->get_name() == "Text-only PNG test encoder");
+    ScopedTestDirectory directory;
+    InputsPrint cube("gcode.exporter.simple", directory.path(), false,
+        {{"seam_visibility", "0"}, {"gcode_firmware_plugin", "gcode.firmware.bambu"}});
+    text_only.directory = directory.path();
+    const std::string expected = "Thumbnail provider 'PNG' does not support raw images.";
+    struct QueryAnswer {
+        size_t calls = 0;
+        raw_gcode_export_query_status status = RAW_GCODE_EXPORT_QUERY_UNSET;
+        std::string message;
+    } answer;
+    run_ctx_gcode_export query = {};
+    query.operation = RAW_GCODE_EXPORT_OPERATION_QUERY;
+    query.config = ApiHost::to_config_handle(&cube.print.full_print_config());
+    query.print = reinterpret_cast<const print_handle *>(&cube.print);
+    query.firmware_plugin_id = "gcode.firmware.bambu";
+    query.query_callback_context = &answer;
+    query.emit_query_result = [](void *opaque, const raw_gcode_export_query_result *result) {
+        QueryAnswer &copy = *static_cast<QueryAnswer *>(opaque);
+        ++copy.calls;
+        copy.status = result->status;
+        copy.message = result->message == nullptr ? std::string() : result->message;
+    };
+    raw_plugin_run_payload payload = {};
+    payload.data = &query;
+    Plugin *provider = host.get_plugin("gcode.exporter.bambu3mf");
+    REQUIRE(provider != nullptr);
+    std::string error;
+    CHECK(host.execute_plugin(*provider, nullptr, &payload, 1, false, &error) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    CHECK(answer.calls == 1);
+    CHECK(answer.status == RAW_GCODE_EXPORT_QUERY_INCOMPATIBLE);
+    CHECK(answer.message == expected);
+
+    const boost::filesystem::path destination = directory.path() / "keep.3mf";
+    write_binary_file(destination, "keep destination");
+    const std::map<std::string, std::string> before = snapshot_directory(directory.path());
+    Orchestrator::GCodeExporterSelection selection;
+    selection.plugin_id = "gcode.exporter.bambu3mf";
+    selection.extension = ".gcode.3mf";
+    CHECK_THROWS_WITH(Test::export_print_to(host, cube.print, cube.print.full_print_config(), cube.reference.string(), destination.string(), selection), expected);
+    CHECK_FALSE(text_only.saw_private);
+    CHECK(snapshot_directory(directory.path()) == before);
+}

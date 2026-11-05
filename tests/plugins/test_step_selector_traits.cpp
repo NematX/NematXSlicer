@@ -16,21 +16,33 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
-/* These tests check declarations that describe plugin selectors, settings that choose registered plugins.
-   StepSelectorTraits.hpp defines these declarations. A declaration for an entire step supplies defaults
-   to named groups; a declaration for an exact group replaces every field.
-   Call graph:
-     TEST_CASE (declaration checks)
-       Orchestrator::register_builtin_step_selector
-       Orchestrator::step_selector
-       Steps::plugin_exclusive_group_definition
-       Steps::make_exclusive_step_group
-     TEST_CASE (selection checks)
-       check_seam_selection -> check_selection
-   Description checks read the plugin manager without registering settings. Selection checks
-   initialize the shared runtime and restore activation flags afterward. Test providers that do no work
-   register after startup and remain inactive outside their selection checks. The generated-selector snapshot
-   checks the serialized definitions and layout strings separately. */
+/*
+These tests check declarations that describe plugin selectors, settings that choose registered plugins.
+StepSelectorTraits.hpp defines these declarations. A declaration for an entire step supplies defaults
+to named groups; a declaration for an exact group replaces every field.
+Description checks read the plugin manager without registering settings. Selection checks
+initialize the shared runtime and restore activation flags afterward. Test providers that do no work
+register after startup and remain inactive outside their selection checks. The generated-selector snapshot
+checks the serialized definitions and layout strings separately.
+
+Operation notes:
+- TEST_CASE (declaration checks)
+- Orchestrator::register_builtin_step_selector
+- Steps::plugin_exclusive_group_definition
+- Steps::make_exclusive_step_group
+- TEST_CASE (selection checks)
+- check_seam_selection :  check_selection
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- Orchestrator::instance()
+        |-- Steps::plugin_exclusive_group_option_key()
+        |-- PrintConfigDef::instance()
+        |-- host.registered_plugins()
+        `-- check_seam_selection()
+*/
 
 namespace {
 using namespace Slic3r;
@@ -672,31 +684,36 @@ TEST_CASE("Thumbnail selection errors name the inactive stored encoder",
     print.apply(model, config);
     const slic3r_api::OrchestratorView view(reinterpret_cast<orchestrator_handle *>(&host));
     const slic3r_api::Print print_view(reinterpret_cast<const print_handle *>(&print));
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr),
+    const ConfigBase *base_config = &config;
+    const slic3r_api::Config config_view(reinterpret_cast<const config_handle *>(base_config));
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr),
                       "GCODE_THUMBNAIL provider 'JPG' is not active");
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr, "missing.encoder"),
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr, "missing.encoder"),
                       "Unknown GCODE_THUMBNAIL provider: missing.encoder");
     for (const Plugin *plugin : host.registered_plugins()) {
         if (plugin->get_step() == GCODE_THUMBNAIL) continue;
-        CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr, plugin->get_id()),
+        CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr, plugin->get_id()),
                           "Unknown GCODE_THUMBNAIL provider: " + plugin->get_id());
         break;
     }
+    config.set_deserialize_strict("thumbnails_format", "PNG");
+    CHECK(print.full_print_config().opt_serialize("thumbnails_format") == "JPG");
+    CHECK_NOTHROW(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr));
     config.optptr("thumbnails_format")->set_int(1000000);
     REQUIRE(config.option("thumbnails_format")->serialize().empty());
-    print.apply(model, config);
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, nullptr),
-                      "Invalid GCODE_THUMBNAIL provider selection");
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(view, print_view, config_view, nullptr),
+                      "No active G-code thumbnail encoder.");
 }
 
-// Check explicit lookup with an invalid Print view; reading its settings would assert in Debug.
+// Check explicit lookup with invalid Print and configuration views; reading either would assert in Debug.
 TEST_CASE("Explicit thumbnail lookup does not access Print configuration",
           "[plugins][thumbnail][selector-traits]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const slic3r_api::OrchestratorView host(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()));
     const slic3r_api::Print unavailable_print;
-    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(host, unavailable_print, nullptr, "missing.encoder"),
+    const slic3r_api::Config unavailable_config;
+    CHECK_THROWS_WITH(slic3r_api::GCodeThumbnailEncoder(host, unavailable_print, unavailable_config, nullptr, "missing.encoder"),
                       "Unknown GCODE_THUMBNAIL provider: missing.encoder");
 }
 
@@ -833,14 +850,14 @@ TEST_CASE("Selector traits record effective seam and service metadata", "[plugin
         const Steps::StepExclusiveGroup group = Steps::plugin_exclusive_group_definition(
             host, service.first, service.second, provider);
         REQUIRE(group.traits.invalidates_step.has_value());
-        CHECK(*group.traits.invalidates_step == STEP_GCODE);
+        CHECK(*group.traits.invalidates_step == (service.first == GCODE_THUMBNAIL ? STEP_NONE : STEP_GCODE));
         CHECK(*group.traits.invalidates_step == group.option_def.invalidates_step);
         CHECK(group.traits.container_type == group.option_def.container_type);
     }
 }
 
 // Build test-owned choice lists from reversed member ids and check separate keys and labels for a group and an entire stage.
-// Shared startup owns plugins and writer activation is restored. Application settings and expected snapshot data are unchanged.
+// Shared startup owns plugins and exporter activation is restored. Application settings and expected snapshot data are unchanged.
 TEST_CASE("Selector dropdown preferences preserve native ordering and historical group layout identities",
           "[plugins][step-pipeline][selector-group-priority][selector-traits]")
 {
@@ -871,21 +888,23 @@ TEST_CASE("Selector dropdown preferences preserve native ordering and historical
     CHECK(firmware_whole.option_key_storage == "gcode_firmware_plugin");
     CHECK(firmware_group.traits.option_key == firmware_whole.traits.option_key);
     CHECK(firmware_group.traits.invalidates_step == firmware_whole.traits.invalidates_step);
-    ThumbnailActivationGuard writer_guard(host, STEP_GCODE);
-    REQUIRE(host.set_plugin_active("gcode.printing_plan_file_writer", true));
-    bool found_writer = false;
+    CHECK(Steps::get_exclusive_steps().count(STEP_GCODE) == 0);
+    CHECK(PrintConfigDef::instance().get("step_gcode_plugin") == nullptr);
+    ThumbnailActivationGuard exporter_guard(host, STEP_EXPORT);
+    REQUIRE(host.set_plugin_active("gcode.exporter.simple", true));
+    bool found_exporter = false;
     for (const Steps::StepExclusivePluginGroup &entry : Steps::active_exclusive_plugin_groups(host))
-        if (entry.group.step == STEP_GCODE) {
-            found_writer = true;
-            CHECK(entry.group.ui_fragment.find("line:G-code plugin\n") != std::string::npos);
+        if (entry.group.step == STEP_EXPORT) {
+            found_exporter = true;
+            CHECK(entry.group.ui_fragment.find("line:G-code exporter\n") != std::string::npos);
         }
-    CHECK(found_writer);
-    const Steps::StepExclusiveGroup writer_table = Steps::make_exclusive_step_group(host, STEP_GCODE,
-        Steps::get_exclusive_steps().at(STEP_GCODE));
-    CHECK(writer_table.ui_fragment.find("line:G-code step plugin\n") != std::string::npos);
+    CHECK(found_exporter);
+    const Steps::StepExclusiveGroup exporter_table = Steps::make_exclusive_step_group(host, STEP_EXPORT,
+        Steps::get_exclusive_steps().at(STEP_EXPORT));
+    CHECK(exporter_table.ui_fragment.find("line:G-code exporter\n") != std::string::npos);
 }
 
-// Check the keys, labels and declared settings of all ten selectors for entire steps.
+// Check the keys, labels and declared settings of all nine selectors for entire steps.
 TEST_CASE("Whole-step selector traits come from their owner module",
           "[plugins][step-pipeline][selector-snapshot][selector-traits]")
 {
@@ -906,7 +925,7 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         {STEP_INFILL, RAW_OPTION_CATEGORY_INFILL, RAW_PRESET_TYPE_FFF_PRINT, STEP_INFILL, false},
         {STEP_WIPETOWER, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_WIPETOWER, false},
         {STEP_LAYER_STICHING, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_LAYER_STICHING, false},
-        {STEP_GCODE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true},
+        {STEP_EXPORT, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_NONE, true},
         {GCODE_FIRMWARE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true}
     };
     const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &identities = Steps::get_exclusive_steps();
@@ -936,7 +955,7 @@ TEST_CASE("Whole-step selector traits come from their owner module",
     }
 }
 
-// Check that firmware, thumbnail and reader declarations make selector changes require G-code generation to run again.
+// Check that firmware and reader choices replay G-code, while thumbnail and exporter choices affect only export.
 TEST_CASE("G-code service selector invalidation comes from the owner modules",
           "[plugins][step-pipeline][selector-traits][gcode]")
 {
@@ -945,15 +964,17 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
     Plugin provider(probe.c_instance(), "Slic3r", "");
     const std::pair<slicing_step_t, const char *> services[] = {
         {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
-        {GCODE_READER, "reader_invalidation_probe"}
+        {GCODE_READER, "reader_invalidation_probe"}, {STEP_EXPORT, "gcode_exporter_plugin"}
     };
     for (const std::pair<slicing_step_t, const char *> &service : services) {
         INFO(int(service.first));
+        const slicing_step_t invalidation = service.first == GCODE_THUMBNAIL || service.first == STEP_EXPORT ?
+            STEP_NONE : STEP_GCODE;
         const StepSelectorTraits *declared = host.step_selector(service.first, "");
         REQUIRE(declared != nullptr);
         CHECK(host.step_selector_is_builtin(service.first, ""));
         REQUIRE(declared->invalidates_step.has_value());
-        CHECK(*declared->invalidates_step == STEP_GCODE);
+        CHECK(*declared->invalidates_step == invalidation);
         CHECK(declared->category == RAW_OPTION_CATEGORY_OUTPUT);
         CHECK(declared->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
         const char *const groups[] = {service.second, "service_invalidation_probe"};
@@ -962,11 +983,11 @@ TEST_CASE("G-code service selector invalidation comes from the owner modules",
             const StepSelectorTraits *resolved = host.step_selector(service.first, group_id);
             REQUIRE(resolved != nullptr);
             REQUIRE(resolved->invalidates_step.has_value());
-            CHECK(*resolved->invalidates_step == STEP_GCODE);
+            CHECK(*resolved->invalidates_step == invalidation);
             const Steps::StepExclusiveGroup group = Steps::plugin_exclusive_group_definition(
                 host, service.first, group_id, provider);
             REQUIRE(group.traits.invalidates_step.has_value());
-            CHECK(*group.traits.invalidates_step == STEP_GCODE);
+            CHECK(*group.traits.invalidates_step == invalidation);
             CHECK(group.option_def.invalidates_step == *declared->invalidates_step);
             CHECK(group.option_def.category == declared->category);
             CHECK(group.option_def.option_preset_type == declared->option_preset_type);
@@ -1003,7 +1024,7 @@ TEST_CASE("Thumbnail selector traits are declared by the G-code module",
     CHECK(encoder->category == RAW_OPTION_CATEGORY_OUTPUT);
     CHECK(encoder->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
     REQUIRE(encoder->invalidates_step.has_value());
-    CHECK(*encoder->invalidates_step == STEP_GCODE);
+    CHECK(*encoder->invalidates_step == STEP_NONE);
     CHECK(encoder->ui_target_file == "print.ui");
     CHECK(encoder->ui_page.empty());
     CHECK(encoder->ui_group.empty());
@@ -1028,6 +1049,54 @@ TEST_CASE("Thumbnail selector traits are declared by the G-code module",
     CHECK_FALSE(other.traits.strict_selection);
     CHECK(other.traits.read_with_one_provider);
     CHECK_FALSE(other.traits.provider_settings_rules);
+}
+
+// Check export-only declarations and selection with and without the required built-in exporter, restoring activation afterward.
+// The application owns the retained descriptions and providers; the test owns configurations and inserts no application setting.
+TEST_CASE("Export selector traits preserve the strict built-in default even when unavailable",
+          "[plugins][step-pipeline][selector-traits][exporter]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Orchestrator &host = Orchestrator::instance();
+    const StepSelectorTraits *whole = host.step_selector(STEP_EXPORT, "");
+    const StepSelectorTraits *exporter = host.step_selector(STEP_EXPORT, "gcode_exporter_plugin");
+    REQUIRE(whole != nullptr);
+    REQUIRE(exporter != nullptr);
+    CHECK(whole != exporter);
+    CHECK(host.step_selector_is_builtin(STEP_EXPORT, ""));
+    CHECK(host.step_selector_is_builtin(STEP_EXPORT, "gcode_exporter_plugin"));
+    CHECK(exporter->exclusive_group == "gcode_exporter_plugin");
+    CHECK(exporter->option_key == "gcode_exporter_plugin");
+    for (const StepSelectorTraits *traits : {whole, exporter}) {
+        REQUIRE(traits->invalidates_step.has_value());
+        CHECK(*traits->invalidates_step == STEP_NONE);
+        CHECK(traits->category == RAW_OPTION_CATEGORY_OUTPUT);
+        CHECK(traits->option_preset_type == RAW_PRESET_TYPE_FFF_PRINTER);
+        CHECK(traits->strict_selection);
+        CHECK(traits->read_with_one_provider);
+        CHECK(traits->show_with_one_provider);
+        CHECK_FALSE(traits->auto_value);
+        REQUIRE(traits->value_when_absent.has_value());
+        CHECK(*traits->value_when_absent == "gcode.exporter.simple");
+    }
+    ThumbnailActivationGuard guard(host, STEP_EXPORT);
+    Plugin *simple = host.get_plugin("gcode.exporter.simple");
+    Plugin *binary = host.get_plugin("gcode.exporter.bgcode");
+    REQUIRE(simple != nullptr);
+    REQUIRE(binary != nullptr);
+    for (Plugin *plugin : host.registered_plugins())
+        if (plugin->get_step() == STEP_EXPORT) REQUIRE(host.set_plugin_active(plugin, plugin == binary));
+    DynamicConfig absent;
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", nullptr, nullptr);
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &absent, nullptr);
+    DynamicConfig config;
+    config.set_key_value("gcode_exporter_plugin", new ConfigOptionString("gcode.exporter.bgcode"));
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &config, binary);
+    config.set_key_value("gcode_exporter_plugin", new ConfigOptionString("missing.exporter"));
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &config, nullptr);
+    REQUIRE(host.set_plugin_active(simple, true));
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", nullptr, simple);
+    check_selection(host, STEP_EXPORT, "gcode_exporter_plugin", &absent, simple);
 }
 
 // Check that GUI rules do not depend on the thumbnail selector and invalid choices select no encoder, even with one active.

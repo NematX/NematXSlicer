@@ -20,6 +20,15 @@ ExtrusionAxisState converts deposited volume into E-axis coordinates and owns
 both the exact requested position and the rounding remainder left by G-code
 precision. Each call updates that state and returns only the optional,
 quantized E number that a firmware encoder may display.
+
+Call setup() with the tool's copied settings before generating E coordinates.
+Use extrusion operations for deposited material and explicit retract/unretract
+operations for filament debt. An empty optional means rounding requires no
+visible E number; a present zero can still be an absolute E0 command.
+
+The state carries the small amount left by output rounding into later moves,
+so repeated quantization does not lose the requested total. The class owns these
+numbers and does not retain a borrowed configuration view.
 */
 
 namespace slic3r_api { namespace GCodeGeneration {
@@ -110,6 +119,8 @@ public:
     double extruded_dE_left() const { return m_dE_left; }
     double retracted() const { return m_retracted; }
     double restart_extra() const { return m_restart_extra; }
+    // Reads the deferred tool-change extra without consuming it (unretract() does).
+    double restart_extra_toolchange() const { return m_restart_extra_toolchange; }
     void set_position(double e);
     void set_retracted(double retracted, double restart_extra);
     /* Schedule a signed adjustment for the next unretract without changing E now. */

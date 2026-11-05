@@ -6,7 +6,7 @@
 #define slic3r_step_gcode_h_
 
 #define SLIC3R_PLUGIN_API_STEP_GCODE_MAJOR 6u
-#define SLIC3R_PLUGIN_API_STEP_GCODE_MINOR 0u
+#define SLIC3R_PLUGIN_API_STEP_GCODE_MINOR 1u
 
 #include "slic3r_step_common.h"
 #include "../slic3r_gcode_firmware.h"
@@ -19,10 +19,23 @@ extern "C" {
 /*
 Payload for STEP_GCODE.
 
-STEP_GCODE plugins are responsible for turning the already ordered
-PrintingPlan into an output file. The host computes the final path from the
-print settings before the plugin runs, then passes it here as a borrowed UTF-8
-string. The string is valid only during the current plugin run.
+The selected STEP_GCODE plugins (one per exclusive group) run one after the
+other, by increasing priority, with the same payload and the same firmware
+session. The built-in writer (priority 0) turns the already ordered
+PrintingPlan into the output file at output_path and publishes that path as the
+Reader source. A plugin of higher priority finds that file and may modify it in
+place, preferably by replacing it transactionally; its change reaches the Reader
+only because the writer published output_path as the source. Only the writer
+publishes the Reader source. Before the writer, no fresh file is guaranteed:
+output_path may still hold the file of an earlier attempt.
+
+An error or a cancellation raised by any plugin fails the step, which is then not
+validated. The file already published stays in place and only a later
+successful attempt replaces it.
+
+The host computes the final path from the print settings before the plugins
+run, then passes it here as a borrowed UTF-8 string. The string is valid only
+during the current plugin run.
 
 The final plan is read-only at this boundary. All ordering and plan editing
 finishes before the writer runs. The source Print remains the context for

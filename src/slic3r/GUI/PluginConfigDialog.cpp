@@ -3,36 +3,38 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* This file displays available plugins and saves which ones the application will enable.
-   A plugin is a component that performs a slicing job. A package is its installed
-   directory of code and resources; installing a package does not enable all its
-   plugins. Activation means enabling a plugin for use after application restart.
+/*
+This file displays available plugins and saves which ones the application will enable.
+A plugin is a component that performs a slicing job. A package is its installed
+directory of code and resources; installing a package does not enable all its
+plugins. Activation means enabling a plugin for use after application restart.
 
-   Construct PluginConfigDialog and call ShowModal(). build_catalog() first copies
-   registered plugins and unavailable configured ids into dialog-owned entries.
-   build_navigation() and refresh_plugin_list() display them without losing
-   checkbox state during search or filtering.
+Construct PluginConfigDialog and call ShowModal(). build_catalog() first copies
+registered plugins and unavailable configured ids into dialog-owned entries.
+build_navigation() and refresh_plugin_list() display them without losing
+checkbox state during search or filtering.
 
-   An exclusive group contains alternatives for one processing stage. A selector
-   is the per-print setting choosing one enabled member. Orchestrator, the
-   application's plugin manager, retains the group's complete description before
-   this dialog opens. build_catalog() reads that description. A translation
-   domain names its text catalogue; untranslated instead requires verbatim display.
+An exclusive group contains alternatives for one processing stage. A selector
+is the per-print setting choosing one enabled member. Orchestrator, the
+application's plugin manager, retains the group's complete description before
+this dialog opens. build_catalog() reads that description. A translation
+domain names its text catalogue; untranslated instead requires verbatim display.
 
-   write_active_plugins() validates checked ids and writes plugins/activated.ini
-   only when the user saves. save_and_restart() also requests application restart.
-   This changes future availability, not the current print's selector values,
-   and does not install or remove package files.
+write_active_plugins() validates checked ids and writes plugins/activated.ini
+only when the user saves. save_and_restart() also requests application restart.
+This changes future availability, not the current print's selector values,
+and does not install or remove package files.
 
-   Call graph:
-     PluginConfigDialog
-       build_catalog
-       build
-         build_navigation
-     refresh_plugin_list
-       refresh_details
-     save_and_restart
-       write_active_plugins */
+Representative direct calls (branches are not a timeline):
+
+    PluginConfigDialog::build()
+        |-- build_navigation()
+        `-- refresh_plugin_list()
+
+    PluginConfigDialog::save_changes()
+        |-- write_active_plugins()
+        `-- show_error()
+*/
 
 #include "PluginConfigDialog.hpp"
 
@@ -458,7 +460,10 @@ wxString step_name(slicing_step_t step)
     case STEP_EXTRUSION_EDIT:            return _L("Extrusion editing");
     case STEP_EXTRUSION_SIMPLIFICATION:  return _L("Extrusion simplification");
     case STEP_GCODE:                     return _L("G-code generation");
+    case STEP_EXPORT:                    return _L("Export");
     case GCODE_FIRMWARE:                 return _L("G-code firmware");
+    case GCODE_THUMBNAIL:                return _L("G-code thumbnails");
+    case GCODE_READER:                   return _L("G-code readers");
     case INFILL_PATTERN:                 return _L("Infill patterns");
     case INFILL_SURFACE_RECIPE_MODIFIER: return _L("Infill surface recipes");
     case BRIDGE_DETECTOR:                return _L("Bridge detectors");
@@ -526,6 +531,7 @@ std::optional<PluginPhase> phase_for_step(slicing_step_t step)
     case STEP_EXTRUSION_SIMPLIFICATION:
         return PluginPhase::PostProcessing;
     case STEP_GCODE:
+    case STEP_EXPORT:
     case GCODE_FIRMWARE:
         return PluginPhase::Output;
     default:
@@ -1242,7 +1248,7 @@ void PluginConfigDialog::build_navigation()
         STEP_FINALIZE_SLICING, STEP_ORDERING, SEAM_PLACER,
         STEP_CHECK_CONFLICT, STEP_LAYER_EXTRUSION_EDIT, STEP_LAYER_STICHING,
         STEP_EXTRUSION_EDIT, STEP_EXTRUSION_SIMPLIFICATION,
-        STEP_GCODE, GCODE_FIRMWARE
+        STEP_GCODE, STEP_EXPORT, GCODE_FIRMWARE
     };
     for (PluginPhase phase : phases) {
         const NavigationScope phase_scope { PluginNavigationKind::Phase, phase, STEP_NONE };

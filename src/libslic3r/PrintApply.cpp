@@ -4,6 +4,18 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+// Print::apply(): bring the Print in line with a new Model and a new full configuration.
+//
+// The new inputs are compared with the stored ones (model objects, volumes, the print/object/region
+// configurations and the full configuration). Every difference is copied into the Print, and each
+// one also asks for the replay of the pipeline checkpoints that depend on it. Configuration keys
+// get their checkpoint from Steps::config_option_replay_checkpoint(), so the three readers of a
+// key (state invalidation, running-step test and full-configuration diff) agree. The diffs
+// themselves are never filtered: a key without a consumer is still stored.
+// The worker thread reads the stored configuration without a lock, so apply() stops it before
+// replacing storage, whether or not a replay is requested. The returned status is UNCHANGED when
+// nothing differs, CHANGED when inputs were replaced and the caller must restart any work it
+// stopped, and INVALIDATED when computed outputs were discarded.
 #include "Layer.hpp"
 #include "LayerRegion.hpp"
 
@@ -16,6 +28,30 @@
 #include "Steps/StepPipeline.hpp"
 
 #include <optional>
+
+/*
+Apply a source model and configuration to an existing FFF Print.
+
+This module matches source objects and regions to the copies used for slicing,
+updates their settings and placements, and invalidates results whose inputs
+changed. Reusing unaffected results is separate from rebuilding invalid ones:
+apply prepares the Print for the pipeline rather than running every slicing step.
+
+The model supplied by the caller remains the source of editing state. Print
+owns its applied copies and generated results. Matching identities and comparing
+settings decide which copies can be reused and which processing suffix must run.
+
+Representative direct calls (branches are not a timeline):
+
+    Print::apply()
+        |-- print_config_diffs()
+        |-- full_print_config_diffs()
+        |-- this->invalidate_state_by_config_options()
+        |-- model_volume_list_copy_configs()
+        |-- generate_print_object_regions()
+        |-- this->rebuild_active_print_regions()
+        `-- Steps::StepPipeline::clear_checkpoint_outputs()
+*/
 
 namespace Slic3r {
 
@@ -1006,6 +1042,7 @@ static std::shared_ptr<PrintObjectRegions> generate_print_object_regions(
     return print_object_regions;
 }
 
+// Apply a borrowed model and an owned full config, update print state and invalidate affected outputs; return the strongest change status and propagate cleanup or validation failures.
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config)
 {
 #ifdef _DEBUG
@@ -1026,10 +1063,6 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     DynamicPrintConfig   filament_overrides;
     t_config_option_keys print_diff       = print_config_diffs(m_config, new_full_config, filament_overrides);
     t_config_option_keys full_config_diff = full_print_config_diffs(m_full_print_config, new_full_config);
-    // If just a physical printer was changed, but printer preset is the same, then there is no need to apply whole print
-    // see https://github.com/prusa3d/PrusaSlicer/issues/8800
-    if (full_config_diff.size() == 1 && full_config_diff[0] == "physical_printer_settings_id")
-        full_config_diff.clear();
 
     // Collect changes to object and region configs.
     t_config_option_keys object_diff      = m_default_object_config.diff(new_full_config);
@@ -1050,11 +1083,8 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     };
     const auto config_running_step_affected = [&running_step_affected](const t_config_option_keys &keys) {
         for (const t_config_option_key &key : keys) {
-            const ConfigOptionDef *def = PrintConfigDef::instance().get(key);
-            if (def != nullptr && def->invalidates_step == STEP_NONE)
-                continue;
-            if (running_step_affected(def == nullptr ? Steps::Checkpoint::None :
-                Steps::checkpoint_before_step(def->invalidates_step)))
+            const std::optional<Steps::Checkpoint> checkpoint = Steps::config_option_replay_checkpoint(key);
+            if (checkpoint.has_value() && running_step_affected(*checkpoint))
                 return true;
         }
         return false;
@@ -1118,7 +1148,30 @@ Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_
     size_t num_extruders = m_config.nozzle_diameter.size();
     bool   num_extruders_changed = false;
     if (! full_config_diff.empty()) {
-        update_apply_status(request_replay(Steps::checkpoint_before_step(STEP_GCODE)));
+        // Replay from the earliest checkpoint any changed key needs. A key without a consumer needs none.
+        // Bookkeeping keys replay from their own consumer, at most from the G-code plan; every other key
+        // that replays at all replays from the plan, as the G-code export reads the full configuration.
+        std::optional<Steps::Checkpoint> full_config_checkpoint;
+        for (const t_config_option_key &key : full_config_diff) {
+            std::optional<Steps::Checkpoint> key_checkpoint = Steps::config_option_replay_checkpoint(key);
+            if (!key_checkpoint.has_value())
+                continue;
+            const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+            const Steps::Checkpoint plan_checkpoint = Steps::checkpoint_before_step(STEP_GCODE);
+            if (definition == nullptr || definition->nature != ConfigOptionNature::Bookkeeping ||
+                *key_checkpoint > plan_checkpoint)
+                key_checkpoint = plan_checkpoint;
+            if (!full_config_checkpoint.has_value() || *key_checkpoint < *full_config_checkpoint)
+                full_config_checkpoint = key_checkpoint;
+        }
+        if (full_config_checkpoint.has_value())
+            update_apply_status(request_replay(*full_config_checkpoint));
+        else {
+            // The worker reads the configuration without a lock: stop it before the storage below is replaced.
+            // The status is CHANGED, so the caller restarts the work it stopped, and no timestamp moves.
+            this->call_cancel_callback();
+            update_apply_status(false);
+        }
         m_placeholder_parser.clear_config();
         // Set the profile aliases for the PrintBase::output_filename()
 		m_placeholder_parser.set("print_preset",              new_full_config.option("print_settings_id")->clone());

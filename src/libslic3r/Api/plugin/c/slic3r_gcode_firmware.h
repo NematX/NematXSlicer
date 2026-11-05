@@ -6,7 +6,7 @@
 #define slic3r_gcode_firmware_h_
 
 #define SLIC3R_PLUGIN_API_GCODE_FIRMWARE_MAJOR 6u
-#define SLIC3R_PLUGIN_API_GCODE_FIRMWARE_MINOR 0u
+#define SLIC3R_PLUGIN_API_GCODE_FIRMWARE_MINOR 1u
 
 #include <stdint.h>
 
@@ -48,10 +48,11 @@ typedef struct raw_gcode_firmware_result {
 } raw_gcode_firmware_result;
 
 typedef void (*gcode_firmware_destroy_fn)(void *session);
-/* Compose the preamble, including plan's before-events exactly once. The writer
-   emits no separate callback for those events. Print and sorted plan are
-   read-only borrowed handles valid for this call, with no ownership transfer.
-   Thumbnail services are acquired by the firmware through the orchestrator. */
+/* Compose the G-code preamble, including plan's before-events exactly once. The
+   writer emits no separate callback for those events. The text is G-code only:
+   file headers, notes and thumbnails belong to the exporter, never to the
+   firmware. Print and sorted plan are read-only borrowed handles valid for this
+   call, with no ownership transfer. */
 typedef void (*gcode_firmware_begin_print_fn)(
     void *session,
     const print_handle *print,

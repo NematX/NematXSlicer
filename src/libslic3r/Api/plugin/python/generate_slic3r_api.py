@@ -64,7 +64,8 @@ HEADER_ORDER = [
     "slic3r_volume.h",
 ]
 
-PYTHON_EXCLUDED_HEADERS = set()
+# The exporter service is exposed through the C++ plugin SDK, not the Python provider API.
+PYTHON_EXCLUDED_HEADERS = {"slic3r_step_gcode_export.h"}
 
 
 TYPE_ALIASES = {
@@ -102,6 +103,7 @@ TYPE_ALIASES = {
     "raw_gcode_reader_operation": "int32_t",
     "raw_gcode_thumbnail_status": "int32_t",
     "raw_gcode_thumbnail_pixel_format": "int32_t",
+    "raw_gcode_thumbnail_encoded_format": "int32_t",
     "raw_gcode_thumbnail_origin": "int32_t",
     "raw_gcode_thumbnail_camera": "int32_t",
     "raw_gcode_thumbnail_projection": "int32_t",

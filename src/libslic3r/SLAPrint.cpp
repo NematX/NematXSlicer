@@ -37,6 +37,41 @@
 //! return same string
 #define _u8L(s) Slic3r::I18N::translate(s)
 
+/*
+Prepare and execute a resin-printing (SLA) job from the applied model and settings.
+Object processing creates sliced regions, supports and pads; print processing
+combines their layers for raster output and the selected SLA archive format.
+It does not use the filament G-code exporter contract.
+
+SLAPrint owns its applied objects and computed results. Changes to model or
+settings invalidate the affected processing stages; later execution recreates
+those results before export. GUI callbacks observe progress and cancellation
+without becoming owners of the generated support or slice data.
+
+Representative direct calls (branches are not a timeline):
+
+    SLAPrint::apply()
+        |-- print_config_diffs()
+        |-- this->invalidate_state_by_config_options()
+        |-- SLAArchiveWriter::create()
+        |-- this->invalidate_all_steps()
+        |-- object->invalidate_all_steps()
+        |-- m_model.assign_copy()
+        |-- print_object->invalidate_all_steps()
+        |-- it_print_object_status->print_object->invalidate_all_steps()
+        |-- model_object.assign_copy()
+        |-- it_print_object_status->print_object->invalidate_state_by_config_options()
+        |-- it_print_object_status->print_object->set_instances()
+        |-- print_object->set_instances()
+        `-- pos.print_object->invalidate_all_steps()
+
+    SLAPrint::process()
+        |-- apply_steps_on_objects()
+        |-- set_started()
+        |-- printsteps.execute()
+        `-- set_done()
+*/
+
 namespace Slic3r {
 
 
@@ -1259,21 +1294,20 @@ DynamicConfig SLAPrintStatistics::placeholders()
     return config;
 }
 
+// Apply the print statistics to the stem of an output path; a variable that the statistics do not hold throws a PlaceholderParserError that cites the template line and the variable, instead of
+// keeping the variable in the name.
 std::string SLAPrintStatistics::finalize_output_path(const std::string &path_in) const
 {
-    std::string final_path;
+    const boost::filesystem::path path(path_in);
+    const DynamicConfig cfg = this->config();
+    const PlaceholderParser pp;
     try {
-        boost::filesystem::path path(path_in);
-        DynamicConfig cfg = this->config();
-        PlaceholderParser pp;
-        std::string new_stem = pp.process(path.stem().string(), 0, &cfg);
-        final_path = (path.parent_path() / (new_stem + path.extension().string())).string();
+        const std::string new_stem = pp.process(path.stem().string(), 0, &cfg);
+        return (path.parent_path() / (new_stem + path.extension().string())).string();
+    } catch (const PlaceholderParserError &error) {
+        throw PlaceholderParserError(_u8L("Cannot apply the print statistics to the export file name (output_filename_format):") +
+                                     "\n" + error.what());
     }
-    catch (const std::exception &ex) {
-        BOOST_LOG_TRIVIAL(error) << "Failed to apply the print statistics to the export file name: " << ex.what();
-        final_path = path_in;
-    }
-    return final_path;
 }
 
 void SLAPrint::StatusReporter::operator()(SLAPrint &         p,

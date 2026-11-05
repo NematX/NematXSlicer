@@ -34,6 +34,7 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/PrintObject.hpp"
 #include "libslic3r/Printing/PrintingPlan.hpp"
+#include "libslic3r/Plugins/GCode/Reader/BambuGCodeReaderItems.hpp"
 #include "libslic3r/Plugins/GCode/Reader/BuiltinGCodeReaderBase.hpp"
 #include "libslic3r/Plugins/GCode/Reader/KlipperGCodeReader.hpp"
 #include "libslic3r/Plugins/GCode/Reader/Marlin2GCodeReader.hpp"
@@ -41,10 +42,10 @@
 #include "libslic3r/Plugins/GCode/Reader/RepRapGCodeReaderState.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 
-/* Tests for normalized G-code Reader events, built-in command handling,
-   host viewer conversion, and legacy GCodeProcessor results. */
-
 /*
+Tests for normalized G-code Reader events, built-in command handling,
+host viewer conversion, and legacy GCodeProcessor results.
+
 G-code reader event tests
 =========================
 
@@ -55,7 +56,19 @@ real run payload and capture the same callbacks that the host implements.
 Viewer material tests use Print settings to distinguish single-extruder
 multi-material (SEMM) shared retraction debt from independent tool debts,
 and compare role/tool volumes with the existing length and mass totals.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- ensure_plugin_test_runtime_initialized()
+        |-- Orchestrator::instance()
+        |-- initial_state()
+        |-- print.config()
+        |-- config.nozzle_diameter.set()
+        `-- execute_reader()
 */
+
+
 
 namespace {
 
@@ -101,6 +114,34 @@ private:
     const char *m_id;
     int32_t m_priority;
     bool m_fail_probe;
+};
+
+// Reader that never matches a probe and whose read always throws, to exercise a failing reread of generated G-code.
+class FailingReadTestReader final : public slic3r_api::GCodeReaderPluginBase
+{
+public:
+    // Bind the test reader to the process-wide orchestrator used by plugin tests.
+    explicit FailingReadTestReader(orchestrator_handle *orchestrator) : GCodeReaderPluginBase(orchestrator) {}
+
+private:
+    // Return the stable test reader identity.
+    const char *id_impl() const noexcept override { return "gcode.reader.test.failing_read"; }
+    // Label the test reader.
+    const char *name_impl() const noexcept override { return "gcode.reader.test.failing_read"; }
+    // Describe the test reader.
+    const char *description_impl() const noexcept override
+    { return "Fails every read, so that tests can exercise a failing reread."; }
+    // Use no dependencies so the reader is isolated.
+    const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Rank below the built-in readers so that detection never selects it.
+    int32_t priority_impl() const noexcept override { return 1000; }
+    // Never claim a G-code prefix.
+    uint32_t probe_impl(std::string_view) const override { return 0u; }
+    // Fail the read after it started.
+    void read_impl(const plugin_run_context &, const run_ctx_gcode_reader &, slic3r_api::GCodeStateTracker &) const override
+    {
+        throw std::runtime_error("Deliberate Reader read failure.");
+    }
 };
 
 // Exercise both supported extension styles of the common dispatcher. G91 is
@@ -342,9 +383,18 @@ raw_plugin_execution_status execute_reader(
     const char *reader_id, ReaderProbe &probe,
     const raw_gcode_reader_state &initial, Print *print = nullptr);
 uint32_t reprap_reader_state_id();
+uint32_t bambu_reader_state_id();
 raw_gcode_reader_state initial_state(
     std::vector<raw_gcode_reader_event_item> &items,
     uint32_t reader_state_id = GCODE_READER_STATE_ID_PORTABLE);
+// Copy the items of a state keyed by (type, target), without the line number.
+std::map<std::pair<uint32_t, uint32_t>, double> machine_items(
+    const slic3r_api::GCodeStateTracker &state);
+// Check that two states hold exactly the same (type, target, value) items,
+// ignoring only the line number which every command advances; an item present
+// in one state and absent from the other is a failure.
+void check_same_machine_state(const slic3r_api::GCodeStateTracker &before,
+                              const slic3r_api::GCodeStateTracker &after);
 
 void supply_chunk(void *context,
                   raw_gcode_reader_chunk *chunk,
@@ -424,6 +474,17 @@ raw_plugin_execution_status execute_reader(
     context.emit_final_state = collect_final_state;
     raw_plugin_run_payload payload = {&context};
     return orchestrator.execute_plugin(*plugin, print, &payload, 1);
+}
+
+uint32_t bambu_reader_state_id()
+{
+    const orchestrator_runtime_id id = orchestrator_register_runtime_id(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+        GCODE_READER_STATE_ID_TYPE,
+        slic3r_api::GCodeGeneration::Reader::BAMBU_READER_STATE_NAME);
+    if (id == ORCHESTRATOR_RUNTIME_ID_INVALID)
+        throw std::runtime_error("The Bambu Reader state identity could not be registered for the test.");
+    return id;
 }
 
 uint32_t reprap_reader_state_id()
@@ -1064,7 +1125,7 @@ TEST_CASE("All built-in G-code readers publish identical common marker items",
         "gcode.reader.default", "gcode.reader.marlin1",
         "gcode.reader.marlin2", "gcode.reader.prusa",
         "gcode.reader.sprinter", "gcode.reader.reprap",
-        "gcode.reader.klipper"
+        "gcode.reader.klipper", "gcode.reader.bambu"
     };
     const std::string source =
         ";LAYER_CHANGE\n"
@@ -1091,7 +1152,7 @@ TEST_CASE("All built-in G-code readers publish identical common marker items",
     const std::vector<ObservedEvent> expected_events = default_probe.observed;
 
     // Catch2 re-enters the test case for each dynamic section, so keep this
-    // count across those invocations and verify that all six comparisons ran.
+    // count across those invocations and verify that all seven comparisons ran.
     static size_t comparison_count = 0;
     constexpr size_t reader_count = sizeof(reader_ids) / sizeof(reader_ids[0]);
     for (size_t reader_index = 1; reader_index < reader_count; ++reader_index) {
@@ -1104,7 +1165,8 @@ TEST_CASE("All built-in G-code readers publish identical common marker items",
             std::vector<raw_gcode_reader_event_item> initial_items;
             const uint32_t state_id = std::string_view(reader_id) ==
                 "gcode.reader.reprap" ? reprap_state_id :
-                GCODE_READER_STATE_ID_PORTABLE;
+                std::string_view(reader_id) == "gcode.reader.bambu" ?
+                bambu_reader_state_id() : GCODE_READER_STATE_ID_PORTABLE;
             const raw_gcode_reader_state initial = initial_state(
                 initial_items, state_id);
             ReaderProbe probe;
@@ -1135,7 +1197,7 @@ TEST_CASE("All built-in G-code readers publish identical common marker items",
             }
 
             if (reader_index + 1 == reader_count) {
-                CHECK(comparison_count == 6);
+                CHECK(comparison_count == 7);
             }
         }
     }
@@ -1336,7 +1398,7 @@ TEST_CASE("Built-in G-code readers are active addressable services",
         "gcode.reader.default", "gcode.reader.marlin1",
         "gcode.reader.marlin2", "gcode.reader.prusa",
         "gcode.reader.sprinter", "gcode.reader.reprap",
-        "gcode.reader.klipper"
+        "gcode.reader.klipper", "gcode.reader.bambu"
     };
     for (const char *id : ids) {
         Plugin *plugin = orchestrator.get_plugin(id);
@@ -1346,6 +1408,398 @@ TEST_CASE("Built-in G-code readers are active addressable services",
         CHECK(orchestrator.is_plugin_active(plugin));
     }
     CHECK(orchestrator.get_plugin("gcode.reader.marlin") == nullptr);
+}
+
+// A typical Bambu start/object block: every Bambu-only command sits between complete moves.
+TEST_CASE("Bambu G-code reader keeps state across Bambu-only commands",
+          "[plugins][gcode][reader][bambu]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    const raw_gcode_reader_state initial = initial_state(initial_items);
+    std::vector<raw_gcode_reader_event_item> bambu_items;
+    const raw_gcode_reader_state bambu_initial = initial_state(bambu_items, bambu_reader_state_id());
+    const std::string source =
+        "G90\nM83\n"
+        "G1 X10 Y10 Z0.2 F1200\n"
+        "M620 S0A\nM620.1 E F523 T240\nM621 S0A\n"
+        "G1 X20 Y10 E1\n"
+        "M624 AQAAAAAAAAA=\nM981 S1 P20000\nM1002 gcode_claim_action : 1\n"
+        "M622 J1\nM623\n"
+        "G1 X30 Y10 E1\n"
+        "M976 S1 P1\nM400 P100\nM991 S0 P1\nM106 P2 S178\nM106 P3 S153\n"
+        "G29.2 S1\nM625\n"
+        "G1 X40 Y10 E1\n";
+    // G90, M83, G1 and M106 are known to the Marlin 2 reader; the 13 other
+    // commands (M620, M620.1, M621, M624, M981, M1002, M622, M623, M976, M400,
+    // M991, G29.2 and M625) are Bambu-only and unknown to it.
+    constexpr size_t bambu_only_commands = 13;
+
+    SECTION("the Bambu reader publishes no diagnostic and loses no segment") {
+        ReaderProbe probe;
+        probe.chunks = {source};
+        REQUIRE(execute_reader("gcode.reader.bambu", probe, bambu_initial) ==
+                RAW_PLUGIN_EXECUTION_SUCCESS);
+        REQUIRE(probe.final_state);
+        CHECK(observed_event_count(probe, RAW_GCODE_READER_EVENT_DIAGNOSTIC) == 0);
+        CHECK(observed_event_count(probe, RAW_GCODE_READER_EVENT_INVALIDATE) == 0);
+        CHECK(observed_event_count(probe, RAW_GCODE_READER_EVENT_LINEAR_MOVE) == 4);
+        const slic3r_api::GCodeStateTracker &state = *probe.final_state;
+        REQUIRE(state.x());
+        CHECK(*state.x() == Approx(40.0));
+        REQUIRE(state.y());
+        CHECK(*state.y() == Approx(10.0));
+        REQUIRE(state.z());
+        CHECK(*state.z() == Approx(0.2));
+        // M106 P2 / P3 are the platter and exhaust fans: neither tool selections
+        // nor the fans of the tools 2 and 3.
+        CHECK_FALSE(state.fan_speed(2));
+        CHECK_FALSE(state.fan_speed(3));
+        REQUIRE(state.value(slic3r_api::GCodeGeneration::Reader::BAMBU_ITEM_PLATTER_FAN_SPEED));
+        CHECK(*state.value(slic3r_api::GCodeGeneration::Reader::BAMBU_ITEM_PLATTER_FAN_SPEED) ==
+              Approx(178.0 * 100.0 / 255.0));
+        REQUIRE(state.value(slic3r_api::GCodeGeneration::Reader::BAMBU_ITEM_EXHAUST_FAN_SPEED));
+        CHECK(*state.value(slic3r_api::GCodeGeneration::Reader::BAMBU_ITEM_EXHAUST_FAN_SPEED) ==
+              Approx(153.0 * 100.0 / 255.0));
+        CHECK(state.active_tool() == 0u);
+    }
+
+    SECTION("the Marlin 2 reader reports each of them and invalidates the state") {
+        ReaderProbe probe;
+        probe.chunks = {source};
+        REQUIRE(execute_reader("gcode.reader.marlin2", probe, initial) ==
+                RAW_PLUGIN_EXECUTION_SUCCESS);
+        size_t unknown_commands = 0;
+        for (const ObservedEvent &event : probe.observed)
+            if (event.diagnostic == RAW_GCODE_READER_DIAGNOSTIC_UNKNOWN_COMMAND)
+                ++unknown_commands;
+        CHECK(unknown_commands == bambu_only_commands);
+        CHECK(observed_event_count(probe, RAW_GCODE_READER_EVENT_INVALIDATE) ==
+              bambu_only_commands);
+    }
+
+    SECTION("the viewer keeps every segment only with the Bambu reader") {
+        GCodeReaderService service(Orchestrator::instance(), nullptr);
+        const GCodeProcessorResult bambu = service.read_for_viewer(
+            "gcode.reader.bambu", source);
+        CHECK(bambu.reader_diagnostics.empty());
+        CHECK(bambu.moves.size() == 4);
+        const GCodeProcessorResult marlin = service.read_for_viewer(
+            "gcode.reader.marlin2", source);
+        CHECK_FALSE(marlin.reader_diagnostics.empty());
+        CHECK(marlin.moves.size() < 4);
+    }
+}
+
+std::map<std::pair<uint32_t, uint32_t>, double> machine_items(
+    const slic3r_api::GCodeStateTracker &state)
+{
+    std::map<std::pair<uint32_t, uint32_t>, double> items;
+    for (uint32_t index = 0; index < state.state().item_count; ++index) {
+        const raw_gcode_reader_event_item &item = state.state().items[index];
+        if (item.type != RAW_GCODE_READER_ITEM_LINE_NUMBER)
+            items[{item.type, item.target}] = item.value;
+    }
+    return items;
+}
+
+void check_same_machine_state(const slic3r_api::GCodeStateTracker &before,
+                              const slic3r_api::GCodeStateTracker &after)
+{
+    const std::map<std::pair<uint32_t, uint32_t>, double> expected = machine_items(before);
+    const std::map<std::pair<uint32_t, uint32_t>, double> actual = machine_items(after);
+    // Every expected item must survive unchanged...
+    for (const auto &[key, value] : expected) {
+        CAPTURE(key.first, key.second);
+        const std::map<std::pair<uint32_t, uint32_t>, double>::const_iterator found =
+            actual.find(key);
+        CHECK(found != actual.end());
+        if (found != actual.end())
+            CHECK(found->second == Approx(value));
+    }
+    // ...and no item may appear.
+    for (const auto &[key, value] : actual) {
+        CAPTURE(key.first, key.second, value);
+        CHECK(expected.count(key) == 1);
+    }
+}
+// Read `source` with `reader_id`, starting on tool `active_tool` (none when empty)
+// with every fan unknown, and return the final state.
+slic3r_api::GCodeStateTracker read_fans(const char *reader_id, const std::string &source,
+                                        std::optional<uint32_t> active_tool)
+{
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    raw_gcode_reader_state initial = initial_state(initial_items,
+        std::string(reader_id) == "gcode.reader.bambu" ? bambu_reader_state_id() : GCODE_READER_STATE_ID_PORTABLE);
+    for (raw_gcode_reader_event_item &item : initial_items)
+        if (item.type == RAW_GCODE_READER_ITEM_ACTIVE_TOOL)
+            item.value = double(active_tool.value_or(0));
+    if (!active_tool)
+        initial_items.erase(std::remove_if(initial_items.begin(), initial_items.end(),
+            [](const raw_gcode_reader_event_item &item) { return item.type == RAW_GCODE_READER_ITEM_ACTIVE_TOOL; }),
+            initial_items.end());
+    initial.items = initial_items.data();
+    initial.item_count = static_cast<uint32_t>(initial_items.size());
+    ReaderProbe probe;
+    probe.chunks = {source};
+    REQUIRE(execute_reader(reader_id, probe, initial) == RAW_PLUGIN_EXECUTION_SUCCESS);
+    REQUIRE(probe.final_state);
+    return *probe.final_state;
+}
+
+// Bambu reads the P of M106 / M107 as a fan number: P1 or no P is the part fan of
+// the active tool, P2 and P3 are the platter and exhaust fans (their own items,
+// never the FAN_SPEED of the tools 2 and 3), any other P keeps the Marlin 2 meaning.
+TEST_CASE("Bambu G-code reader reads M106 P as a fan number",
+          "[plugins][gcode][reader][bambu][fan]")
+{
+    ensure_plugin_test_runtime_initialized();
+    using slic3r_api::GCodeGeneration::Reader::BAMBU_ITEM_EXHAUST_FAN_SPEED;
+    using slic3r_api::GCodeGeneration::Reader::BAMBU_ITEM_PLATTER_FAN_SPEED;
+    const auto percent = [](double pwm) { return pwm * 100.0 / 255.0; };
+
+    SECTION("P1, no P and M107 set the part fan of the active tool") {
+        const slic3r_api::GCodeStateTracker state =
+            read_fans("gcode.reader.bambu", "M106 P1 S255\n", 2u);
+        REQUIRE(state.fan_speed(2));
+        CHECK(*state.fan_speed(2) == Approx(100.0));
+        CHECK_FALSE(state.fan_speed(0));
+        CHECK_FALSE(state.fan_speed(1));
+        const slic3r_api::GCodeStateTracker plain =
+            read_fans("gcode.reader.bambu", "M106 S128\n", 2u);
+        REQUIRE(plain.fan_speed(2));
+        CHECK(*plain.fan_speed(2) == Approx(percent(128.0)));
+        CHECK_FALSE(plain.fan_speed(0));
+        const slic3r_api::GCodeStateTracker stopped =
+            read_fans("gcode.reader.bambu", "M106 S255\nM107\n", 2u);
+        REQUIRE(stopped.fan_speed(2));
+        CHECK(*stopped.fan_speed(2) == Approx(0.0));
+        CHECK_FALSE(stopped.fan_speed(0));
+    }
+
+    SECTION("P2 and P3 are their own items and M107 P2 / P3 stop them") {
+        const slic3r_api::GCodeStateTracker state = read_fans("gcode.reader.bambu",
+            "M106 P2 S178\nM106 P3 S153\n", 3u);
+        REQUIRE(state.value(BAMBU_ITEM_PLATTER_FAN_SPEED));
+        CHECK(*state.value(BAMBU_ITEM_PLATTER_FAN_SPEED) == Approx(percent(178.0)));
+        REQUIRE(state.value(BAMBU_ITEM_EXHAUST_FAN_SPEED));
+        CHECK(*state.value(BAMBU_ITEM_EXHAUST_FAN_SPEED) == Approx(percent(153.0)));
+        for (uint32_t fan = 0; fan < 4; ++fan)
+            CHECK_FALSE(state.fan_speed(fan));
+        const slic3r_api::GCodeStateTracker stopped = read_fans("gcode.reader.bambu",
+            "M106 P2 S178\nM106 P3 S153\nM107 P2\nM107 P3\n", 3u);
+        REQUIRE(stopped.value(BAMBU_ITEM_PLATTER_FAN_SPEED));
+        CHECK(*stopped.value(BAMBU_ITEM_PLATTER_FAN_SPEED) == Approx(0.0));
+        REQUIRE(stopped.value(BAMBU_ITEM_EXHAUST_FAN_SPEED));
+        CHECK(*stopped.value(BAMBU_ITEM_EXHAUST_FAN_SPEED) == Approx(0.0));
+        // A command without S sets nothing, as in the Marlin 2 parser.
+        const slic3r_api::GCodeStateTracker unchanged =
+            read_fans("gcode.reader.bambu", "M106 P2\n", 3u);
+        CHECK_FALSE(unchanged.value(BAMBU_ITEM_PLATTER_FAN_SPEED));
+    }
+
+    SECTION("P0 and P4 keep the Marlin 2 meaning") {
+        const slic3r_api::GCodeStateTracker state = read_fans("gcode.reader.bambu",
+            "M106 P0 S255\nM106 P4 S128\n", 2u);
+        REQUIRE(state.fan_speed(0));
+        CHECK(*state.fan_speed(0) == Approx(100.0));
+        REQUIRE(state.fan_speed(4));
+        CHECK(*state.fan_speed(4) == Approx(percent(128.0)));
+        CHECK_FALSE(state.fan_speed(2));
+        CHECK_FALSE(state.value(BAMBU_ITEM_PLATTER_FAN_SPEED));
+        CHECK_FALSE(state.value(BAMBU_ITEM_EXHAUST_FAN_SPEED));
+    }
+
+    SECTION("without an active tool the Marlin 2 meaning applies") {
+        const slic3r_api::GCodeStateTracker state = read_fans("gcode.reader.bambu",
+            "M106 S255\nM106 P1 S128\n", std::nullopt);
+        REQUIRE(state.fan_speed(0));
+        CHECK(*state.fan_speed(0) == Approx(100.0));
+        REQUIRE(state.fan_speed(1));
+        CHECK(*state.fan_speed(1) == Approx(percent(128.0)));
+    }
+
+    SECTION("the Marlin 2 reader keeps P as a tool") {
+        const slic3r_api::GCodeStateTracker state = read_fans("gcode.reader.marlin2",
+            "M106 P2 S178\nM106 S255\n", 3u);
+        REQUIRE(state.fan_speed(2));
+        CHECK(*state.fan_speed(2) == Approx(percent(178.0)));
+        REQUIRE(state.fan_speed(0));
+        CHECK(*state.fan_speed(0) == Approx(100.0));
+        CHECK_FALSE(state.value(BAMBU_ITEM_PLATTER_FAN_SPEED));
+    }
+}
+
+// The viewer shows the part fan of the tool of each move: P2 and P3 must not
+// change it, and an M106 / M107 without P must follow the selected tool.
+TEST_CASE("Bambu G-code reader shows only the part fan of the tool in the viewer",
+          "[plugins][gcode][reader][bambu][viewer][fan]")
+{
+    ensure_plugin_test_runtime_initialized();
+    Print print;
+    PrintConfig &config = const_cast<PrintConfig &>(print.config());
+    config.nozzle_diameter.set(std::vector<double>{0.4, 0.4, 0.4, 0.4});
+    config.filament_diameter.set(std::vector<double>{1.75, 1.75, 1.75, 1.75});
+    config.extruder_offset.deserialize("0x0,0x0,0x0,0x0", false);
+    Printing::PrintingPlan &plan = print.mutable_printing_plan();
+    PluginStorage storage;
+    slic3r_api::Ordering::ObjectInstanceCatalogPlugin::populate_object_instance_catalog(
+        reinterpret_cast<const print_handle *>(&print),
+        reinterpret_cast<printing_plan_handle *>(&plan),
+        reinterpret_cast<storage_handle *>(&storage));
+    GCodeReaderService service(Orchestrator::instance(), &print);
+    const std::string source =
+        "T2\nM106 P1 S255\nG1 X10 F600\nM106 P2 S255\nM106 P3 S255\nG1 X20\n"
+        "M107\nG1 X30\n";
+    // Tool change, then the three moves: the part fan of the tool 2 is on, stays
+    // on while the platter and exhaust fans start, then stops with M107.
+    const GCodeProcessorResult bambu = service.read_for_viewer("gcode.reader.bambu", source);
+    REQUIRE(bambu.moves.size() == 4);
+    CHECK(bambu.moves[1].fan_speed == Approx(100.0));
+    CHECK(bambu.moves[2].fan_speed == Approx(100.0));
+    CHECK(bambu.moves[3].fan_speed == Approx(0.0));
+    // The Marlin 2 reader reads P1 as the tool 1 and P2 as the tool 2.
+    const GCodeProcessorResult marlin = service.read_for_viewer("gcode.reader.marlin2", source);
+    REQUIRE(marlin.moves.size() == 4);
+    CHECK(marlin.moves[1].fan_speed == Approx(0.0));
+    CHECK(marlin.moves[2].fan_speed == Approx(100.0));
+}
+
+// The fan items are private to the Bambu schema: the Reader runs only from a state
+// of its own identity, and no other Reader accepts that state.
+TEST_CASE("Bambu G-code reader items belong to the Bambu state identity",
+          "[plugins][gcode][reader][bambu][fan]")
+{
+    ensure_plugin_test_runtime_initialized();
+    using slic3r_api::GCodeGeneration::Reader::BAMBU_ITEM_PLATTER_FAN_SPEED;
+    const uint32_t bambu_id = bambu_reader_state_id();
+    CHECK(bambu_id != GCODE_READER_STATE_ID_PORTABLE);
+    CHECK(bambu_id != reprap_reader_state_id());
+
+    // The final state carries the items under the Bambu identity.
+    const slic3r_api::GCodeStateTracker state =
+        read_fans("gcode.reader.bambu", "M106 P2 S178\n", 0u);
+    CHECK(state.reader_id() == bambu_id);
+    CHECK(state.value(BAMBU_ITEM_PLATTER_FAN_SPEED));
+
+    std::vector<raw_gcode_reader_event_item> portable_items;
+    const raw_gcode_reader_state portable = initial_state(portable_items);
+    std::vector<raw_gcode_reader_event_item> bambu_items;
+    const raw_gcode_reader_state bambu = initial_state(bambu_items, bambu_id);
+    // The Bambu Reader rejects a portable state, and the other Readers a Bambu state.
+    ReaderProbe portable_probe;
+    portable_probe.chunks = {"M106 P2 S178\n"};
+    // A failed execution requests the common plugin cancellation: reset it each time.
+    CHECK(execute_reader("gcode.reader.bambu", portable_probe, portable) !=
+          RAW_PLUGIN_EXECUTION_SUCCESS);
+    Orchestrator::instance().reset_plugin_cancel();
+    for (const char *other : {"gcode.reader.marlin2", "gcode.reader.default", "gcode.reader.reprap"}) {
+        CAPTURE(other);
+        ReaderProbe probe;
+        probe.chunks = {"M106 P2 S178\n"};
+        CHECK(execute_reader(other, probe, bambu) != RAW_PLUGIN_EXECUTION_SUCCESS);
+        Orchestrator::instance().reset_plugin_cancel();
+    }
+    // The host builds the initial state of each Reader with its own identity.
+    GCodeReaderService service(Orchestrator::instance(), nullptr);
+    CHECK(service.initial_state("gcode.reader.bambu").reader_id() == bambu_id);
+    CHECK(service.initial_state("gcode.reader.marlin2").reader_id() == GCODE_READER_STATE_ID_PORTABLE);
+}
+// Each integer command and each dotted sub-code is read on its own, so that a
+// missing entry in either list names its command. The state must be identical
+// before and after: neutral means "changes nothing", not only "does not warn".
+TEST_CASE("Bambu G-code reader treats the listed commands as neutral",
+          "[plugins][gcode][reader][bambu]")
+{
+    ensure_plugin_test_runtime_initialized();
+    std::vector<raw_gcode_reader_event_item> initial_items;
+    raw_gcode_reader_state initial = initial_state(initial_items, bambu_reader_state_id());
+    // Seed temperatures and fans so that a neutral command altering them is detected.
+    initial_items.push_back({RAW_GCODE_READER_ITEM_TOOL_TEMPERATURE, 0, 210.0});
+    initial_items.push_back({RAW_GCODE_READER_ITEM_BED_TEMPERATURE, 0, 60.0});
+    initial_items.push_back({RAW_GCODE_READER_ITEM_FAN_SPEED, 0, 50.0});
+    initial_items.push_back({RAW_GCODE_READER_ITEM_FAN_SPEED, 2, 30.0});
+    initial_items.push_back({RAW_GCODE_READER_ITEM_FEEDRATE, 0, 1200.0});
+    initial_items.push_back({RAW_GCODE_READER_ITEM_ACCELERATION, 0, 500.0});
+    initial.items = initial_items.data();
+    initial.item_count = static_cast<uint32_t>(initial_items.size());
+    const slic3r_api::GCodeStateTracker before(initial);
+    REQUIRE(before.tool_temperature(0));
+    REQUIRE(before.fan_speed(2));
+    const char *const commands[] = {
+        "M624 AQAAAAAAAAA=", "M625", "M981 S1 P20000", "M1003 S1",
+        "M976 S1 P1", "M977 S1 P60", "M400 P100", "M73 P10 R5", "M620 S0A",
+        "M621 S0A", "M622 J1", "M623", "M1002 gcode_claim_action : 1",
+        "M991 S0 P1", "M960 S1 P1", "M970 Q1 A7", "M971 S11 C10 O0",
+        "M972 S5 P0", "M973 S3", "M974 Q1 S2 P0", "M975 S1", "M982 S1",
+        "M628 S0", "M629",
+        "M620.1 E F523 T240", "M620.10 A0 F300", "M620.11 S0 I0",
+        "M622.1 S1", "M970.3 Q1 A7", "M201.2 K1.0", "M73.2 R1.0",
+        "M982.2 S1", "G29.2 S1"
+    };
+    for (const char *command : commands) {
+        CAPTURE(command);
+        ReaderProbe probe;
+        const std::string text = std::string(command) + "\n";
+        probe.chunks = {text};
+        REQUIRE(execute_reader("gcode.reader.bambu", probe, initial) ==
+                RAW_PLUGIN_EXECUTION_SUCCESS);
+        REQUIRE(probe.final_state);
+        REQUIRE(probe.observed.size() == 1);
+        CHECK(probe.observed.front().kind == RAW_GCODE_READER_EVENT_STATE_UPDATE);
+        CHECK_FALSE(probe.observed.front().diagnostic);
+        check_same_machine_state(before, *probe.final_state);
+    }
+
+    // Probing, the Z offset and a toolhead path move or change the frame: they stay unknown. The
+    // neighbours M620.12 and M622.2 of listed sub-codes show that the comparison is exact.
+    for (const char *command : {"G29", "G29.1 Z0.1", "M620.1 X54 Y0 F21000 P0",
+                                "M620.1 X54", "M620.1 Y0", "M620.1 Z2",
+                                "M620.12 A0", "M622.2 S1"}) {
+        CAPTURE(command);
+        ReaderProbe probe;
+        const std::string text = std::string(command) + "\n";
+        probe.chunks = {text};
+        REQUIRE(execute_reader("gcode.reader.bambu", probe, initial) ==
+                RAW_PLUGIN_EXECUTION_SUCCESS);
+        REQUIRE(probe.final_state);
+        REQUIRE(probe.observed.size() == 2);
+        CHECK(probe.observed[0].diagnostic ==
+              RAW_GCODE_READER_DIAGNOSTIC_UNKNOWN_COMMAND);
+        CHECK(probe.observed[1].kind == RAW_GCODE_READER_EVENT_INVALIDATE);
+        CHECK_FALSE(probe.final_state->x());
+    }
+}
+
+TEST_CASE("Bambu G-code reader is detected only from a Bambu-only header comment",
+          "[plugins][gcode][reader][bambu][probe]")
+{
+    ensure_plugin_test_runtime_initialized();
+    Orchestrator &orchestrator = Orchestrator::instance();
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "; firmware: MARLIN 2\nG1 X1\n") == "gcode.reader.marlin2");
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "; generated for MaRlIn\nG1 X1\n") == "gcode.reader.marlin2");
+    // Each Bambu-only marker is enough on its own, blank lines included.
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "; BambuStudio 02.00.00.00\nG1 X1\n") == "gcode.reader.bambu");
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "; printer_model = Bambu Lab X1 Carbon\nG1 X1\n") == "gcode.reader.bambu");
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "\n; other comment\n\n; BambuStudio 02.00.00.00\nG1 X1\n") ==
+          "gcode.reader.bambu");
+    // A marker after the first command, or inside a command, is not a header.
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "G1 X1\n; BambuStudio 02.00.00.00\n") == "gcode.reader.default");
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "M117 BambuStudio\nG1 X1\n") == "gcode.reader.default");
+    // Orca writes these for any printer: they do not identify a Bambu one.
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "; generated by OrcaSlicer 2.1.0\n; HEADER_BLOCK_START\nG1 X1\n") ==
+          "gcode.reader.default");
+    CHECK(detect_gcode_reader(orchestrator, nullptr,
+          "; generated by OrcaSlicer 2.1.0\n; KLIPPER\nG1 X1\n") ==
+          "gcode.reader.klipper");
 }
 
 TEST_CASE("Dialect G-code readers preserve and update representable state",
@@ -1980,7 +2434,8 @@ TEST_CASE("Built-in G-code readers preserve extrusion after tool selection and G
     ensure_plugin_test_runtime_initialized();
     const bool semm = GENERATE(false, true);
     const char *reader_id = GENERATE("gcode.reader.default", "gcode.reader.marlin1",
-        "gcode.reader.marlin2", "gcode.reader.prusa", "gcode.reader.sprinter", "gcode.reader.reprap", "gcode.reader.klipper");
+        "gcode.reader.marlin2", "gcode.reader.prusa", "gcode.reader.sprinter", "gcode.reader.reprap", "gcode.reader.klipper",
+        "gcode.reader.bambu");
     CAPTURE(semm, reader_id);
     Print print;
     PrintConfig &config = const_cast<PrintConfig &>(print.config());
@@ -3891,6 +4346,7 @@ void register_gcode_reader_test_providers(orchestrator_handle *orchestrator)
     static ProbeTestReader lexical_second(orchestrator, "gcode.reader.test.b", 10, false);
     static ProbeTestReader lower_priority(orchestrator, "gcode.reader.test.lower_priority", 20, false);
     static ProbeTestReader failing_probe(orchestrator, "gcode.reader.test.failing_probe", 0, true);
+    static FailingReadTestReader failing_read(orchestrator);
     static CommonHandlerOverrideReader common_handlers(orchestrator);
     static RepRapHandlerOverrideReader reprap_handlers(orchestrator);
     static MarlinHandlerOverrideReader marlin_handlers(orchestrator);
@@ -3901,6 +4357,7 @@ void register_gcode_reader_test_providers(orchestrator_handle *orchestrator)
     orchestrator_register_plugin(orchestrator, lexical_first.c_instance());
     orchestrator_register_plugin(orchestrator, lower_priority.c_instance());
     orchestrator_register_plugin(orchestrator, failing_probe.c_instance());
+    orchestrator_register_plugin(orchestrator, failing_read.c_instance());
     orchestrator_register_plugin(orchestrator, common_handlers.c_instance());
     orchestrator_register_plugin(orchestrator, reprap_handlers.c_instance());
     orchestrator_register_plugin(orchestrator, marlin_handlers.c_instance());

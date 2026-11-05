@@ -10,6 +10,16 @@ The suite checks the core store, the C ABI and the C++ borrowed view together.
 It deliberately mutates channels only from the test thread; the concurrent case
 is limited to identifier allocation, which is the only thread-safe write
 operation promised by the public contract.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::init_print()
+        |-- Steps::StepPipeline::run_slice()
+        |-- Steps::StepPipeline::run_gcode()
+        |-- print.apply()
+        |-- Test::GCode::read_text_file()
+        `-- print.prepare_checkpoint_resume()
 */
 
 #include <catch2/catch.hpp>
@@ -340,7 +350,6 @@ TEST_CASE("Custom G-code model updates replay Ordering without reslicing and pre
     Print print;
     Model model;
     DynamicPrintConfig config = Test::PerimeterPluginTests::perimeter_config({
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"},
         {"gcode_firmware_plugin", "gcode.firmware.marlin2"}
     });
     Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);

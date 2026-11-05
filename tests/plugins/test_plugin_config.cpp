@@ -1621,7 +1621,6 @@ TEST_CASE("Former skirt catch-all options resume at their verified first consume
 
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("gcode_flavor", "marlin");
-    config.set_deserialize_strict("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
     Model model;
     Print print;
@@ -1661,7 +1660,9 @@ TEST_CASE("Former skirt catch-all options resume at their verified first consume
     const slicing_step_t resume = Steps::checkpoint_resume_step(routing.checkpoint);
     for (const slicing_step_t step : Steps::execution_order()) {
         CAPTURE(step);
-        CHECK(print.should_execute_step(step) == !Steps::executes_before(step, resume));
+        // The export is queued by an explicit request only, never by a replay.
+        CHECK(print.should_execute_step(step) ==
+              (step != STEP_EXPORT && !Steps::executes_before(step, resume)));
     }
     CHECK_FALSE(print.should_execute_step(STEP_LAYER_HEIGHT));
     CHECK_FALSE(print.should_execute_step(STEP_SLICING));

@@ -1,15 +1,49 @@
 ///|/ Copyright (c) Prusa Research 2020 - 2023 Enrico Turri @enricoturri1966, Vojtěch Bubník @bubnikv, Pavel Mikuš
-///@Godrak, Lukáš Matěna @lukasmatena, Filip Sykala @Jony01, Oleksandra Iushchenko @YuSanka
-///|/ Copyright (c) SuperSlicer 2023 Remi Durand @supermerill
-///|/
-///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
-///|/
-///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
-///|/
+/*
+Read G-code into the preview paths, material totals and time estimates used by
+the application. Parsing updates a model of the machine's active modes and
+coordinates; interpreted moves then become viewer records and measurements.
+Post-processing uses those measurements to update the output's metadata.
 
-/* The G-code processor interprets machine moves into preview paths, filament
-   volumes and estimated times. Post-processing rewrites text or binary metadata
-   from those measurements, including the wipe tower filament weight. */
+The processor owns the result it accumulates. Preview construction and rewriting
+metadata are separate phases: neither is a source of sliced extrusion geometry.
+
+/@Godrak, Lukáš Matěna @lukasmatena, Filip Sykala @Jony01, Oleksandra Iushchenko @YuSanka
+/|/ Copyright (c) SuperSlicer 2023 Remi Durand @supermerill
+/|/
+/|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+/|/
+/|/ SuperSlicer is released under the terms of the AGPLv3 or higher
+/|/
+
+The G-code processor interprets machine moves into preview paths, filament
+volumes and estimated times. Post-processing rewrites text or binary metadata
+from those measurements, including the wipe tower filament weight.
+
+Representative direct calls (branches are not a timeline):
+
+    GCodeProcessor::process_file()
+        |-- boost::nowide::fopen()
+        |-- is_valid_binary_gcode()
+        |-- fclose()
+        `-- process_binary_file()
+
+    GCodeProcessor::process_gcode_line()
+        |-- process_G0()
+        |-- process_G1()
+        |-- process_G2_G3()
+        |-- process_G90()
+        |-- process_G91()
+        `-- process_tags()
+
+    GCodeProcessor::post_process()
+        |-- process_placeholders()
+        |-- process_used_filament()
+        |-- process_binary_file()
+        `-- rename_file()
+*/
+
+
 #include "GCodeProcessor.hpp"
 
 #include <cassert>
@@ -1620,19 +1654,27 @@ std::vector<std::pair<GCodeExtrusionRole, float>> GCodeProcessor::get_roles_time
     return ret;
 }
 
+// Return substitutions from ConfigBase or the legacy tail reader; its first attempt parses into a copy of caller-owned config and commits only on success.
+// On RuntimeError, fallback reads at most the final 65,535 bytes and applies recognized options directly to config before requiring 80, so a low-count exception can leave those values applied. Missing-header discovery scans the whole file, an accepted cost for rare files; unreadable input, parse, and allocation failures propagate.
 ConfigSubstitutions load_from_slic3r_gcode_file(const std::string& filename, DynamicPrintConfig& config, ForwardCompatibilitySubstitutionRule compatibility_rule)
 {
-    // for reference, see: ConfigBase::load_from_gcode_file()
+    DynamicPrintConfig imported_config = config;
+    try {
+        ConfigSubstitutions substitutions = imported_config.load_from_gcode_file(filename, compatibility_rule);
+        config = std::move(imported_config);
+        return substitutions;
+    } catch (const Slic3r::RuntimeError &) {
+    }
 
-    boost::nowide::ifstream ifs(filename);
-
-    auto                      header_end_pos = ifs.tellg();
+    boost::nowide::ifstream ifs(filename, std::ifstream::binary);
+    const std::fstream::pos_type header_end_pos = ifs.tellg();
     ConfigSubstitutionContext substitutions_ctxt(compatibility_rule);
-    size_t                    key_value_pairs = 0;
+    size_t key_value_pairs = 0;
 
     ifs.seekg(0, ifs.end);
-    auto file_length = ifs.tellg();
-    auto data_length = std::min<std::fstream::pos_type>(65535, file_length - header_end_pos);
+    const std::fstream::pos_type file_length = ifs.tellg();
+    const std::fstream::pos_type data_length =
+        std::min<std::fstream::pos_type>(65535, file_length - header_end_pos);
     ifs.seekg(file_length - data_length, ifs.beg);
     std::vector<char> data(size_t(data_length) + 1, 0);
     ifs.read(data.data(), data_length);

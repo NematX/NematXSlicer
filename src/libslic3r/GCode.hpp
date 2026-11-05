@@ -13,9 +13,21 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* The legacy generator exposes stream export and per-layer processing over
-   borrowed print geometry. It owns writer state and placeholder values; legacy
-   generated wipe data describes only the global tower. */
+/*
+GCode is the legacy FFF command generator. It traverses sliced layers in print
+order, prepares travel/tool changes and extrusion moves, and writes them through
+its machine writer. Script placeholders expose model, configuration and measured
+execution values at the points where user G-code is expanded.
+
+The source Print supplies borrowed geometry and settings for one export. GCode
+owns its writer state, temporary ordering/output data and placeholder values.
+Do not confuse that temporary export state with the layers owned by Print or
+with the independently implemented plugin-based printing-plan writer.
+
+The legacy generator exposes stream export and per-layer processing over
+borrowed print geometry. It owns writer state and placeholder values; legacy
+generated wipe data describes only the global tower.
+*/
 #ifndef slic3r_GCode_hpp_
 #define slic3r_GCode_hpp_
 
@@ -227,9 +239,9 @@ public:
     //void            set_layer_count(unsigned int value) { m_layer_count = value; }
     void            apply_print_configs(const Print &print);
 
-    // append full config to the given string
+    // Append filtered full-print configuration lines to the given string.
     static void append_full_config(const Print& print, std::string& str);
-    // translate full config into a list of <key, value> items
+    // Append sorted, non-excluded full-print settings except disabled optional entries; retain existing destination entries.
     static void encode_full_config(const Print& print, std::vector<std::pair<std::string, std::string>>& config);
 
     using ObjectLayerToPrint  = GCode::ObjectLayerToPrint;

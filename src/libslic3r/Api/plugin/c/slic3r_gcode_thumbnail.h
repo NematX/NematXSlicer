@@ -5,7 +5,7 @@
 #ifndef slic3r_gcode_thumbnail_h_
 #define slic3r_gcode_thumbnail_h_
 
-#define SLIC3R_PLUGIN_API_GCODE_THUMBNAIL_MAJOR 1u
+#define SLIC3R_PLUGIN_API_GCODE_THUMBNAIL_MAJOR 2u
 #define SLIC3R_PLUGIN_API_GCODE_THUMBNAIL_MINOR 0u
 
 #include <stdint.h>
@@ -24,11 +24,23 @@ G-code thumbnail service API
 The host renderer and the encoder deliberately live on opposite sides of this
 contract. The host owns the OpenGL scene and returns one borrowed RGBA8 image;
 the selected GCODE_THUMBNAIL provider copies or consumes that image during the
-same callback and returns a complete byte block ready for the output file.
+same callback. encode() returns a complete byte block ready for the output file;
+encode_image() (below) returns the compressed image alone.
 
 Every pointer returned through a result remains valid only until the next call
 on the same renderer or encoder session. Callers must copy data they need to
 retain. No allocation crosses the ABI and plugins must never free host pixels.
+
+An encoder offers two outputs for the same render request. encode() returns a
+text block framed for the output file (placement markers, base64 or BIQU lines).
+encode_image(), which is optional, returns the compressed image itself: its
+bytes, its format and its size, with no framing. A consumer that writes images
+into a binary container (such as a binary G-code file) uses encode_image().
+An encoder that cannot produce a compressed image leaves the encode_image member
+of its vtable null (the vtable itself always covers its whole size); the consumer
+then reports that this encoder does not support raw images. encode_image() ignores
+with_format_tag. The image is upright (first row at the top), as the file formats
+expect it.
 */
 
 typedef enum raw_gcode_thumbnail_status {
@@ -158,16 +170,47 @@ typedef struct raw_gcode_thumbnail_encode_result {
     const char *error_message;
 } raw_gcode_thumbnail_encode_result;
 
+/* Format of a compressed image. UNSET (0) is never a valid answer. */
+typedef enum raw_gcode_thumbnail_encoded_format {
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_UNSET = 0,
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_PNG,
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_JPG,
+    RAW_GCODE_THUMBNAIL_ENCODED_FORMAT_QOI
+} raw_gcode_thumbnail_encoded_format;
+
+/* Result of encode_image(). On SUCCESS, format is not UNSET, bytes holds
+   bytes_size > 0 bytes of that format, and width and height are those of the
+   request. SKIPPED (no renderer) carries no image. bytes and error_message stay
+   valid until the next call on the same session. */
+typedef struct raw_gcode_thumbnail_encoded_image_result {
+    uint32_t struct_size;
+    raw_gcode_thumbnail_status status;
+    raw_gcode_thumbnail_encoded_format format;
+    uint32_t width;
+    uint32_t height;
+    const uint8_t *bytes;
+    uint64_t bytes_size;
+    const char *error_message;
+} raw_gcode_thumbnail_encoded_image_result;
+
 typedef void (*gcode_thumbnail_encoder_destroy_fn)(void *session);
 typedef void (*gcode_thumbnail_encode_fn)(
     void *session,
     const raw_gcode_thumbnail_render_request *request,
     raw_gcode_thumbnail_encode_result *result);
+typedef void (*gcode_thumbnail_encode_image_fn)(
+    void *session,
+    const raw_gcode_thumbnail_render_request *request,
+    raw_gcode_thumbnail_encoded_image_result *result);
 
+/* destroy and encode are mandatory. encode_image may be null. A consumer checks
+   struct_size against the whole structure, so a vtable that stops after encode
+   (the layout of version 1) is refused. */
 typedef struct raw_gcode_thumbnail_encoder_vtable {
     uint32_t struct_size;
     gcode_thumbnail_encoder_destroy_fn destroy;
     gcode_thumbnail_encode_fn encode;
+    gcode_thumbnail_encode_image_fn encode_image;
 } raw_gcode_thumbnail_encoder_vtable;
 
 typedef struct raw_gcode_thumbnail_encoder_instance {

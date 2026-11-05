@@ -100,6 +100,36 @@
     #include <CommCtrl.h>
 #endif // WIN32
 
+/*
+Build and update the application's print, filament and printer settings tabs.
+Each tab presents the edited preset through option groups, tracks changes and
+compatibility, and coordinates preset selection with Plater. The tab edits
+configuration; background processing applies that configuration to a Print.
+
+Rebuilding pages or switching presets must preserve the distinction between
+saved profiles and their edited copies. Actions that are choices for one export
+belong to that export request, not to a permanent profile field merely because
+they appear beside printer settings in the interface.
+
+Representative direct calls (branches are not a timeline):
+
+    Tab::create_pages()
+        |-- load_implemented_ui_fragments()
+        |-- merged_ui_layout()
+        |-- boost::replace_all()
+        |-- current_group->append_line()
+        |-- boost::split()
+        `-- this->create_options_page()
+
+    Tab::on_value_change()
+        |-- plater()
+        |-- this->compatible_widget_reload()
+        |-- sidebar()
+        |-- update_wiping_button_visibility()
+        |-- update_dirty()
+        `-- update()
+*/
+
 namespace Slic3r {
 namespace GUI {
 
@@ -4432,6 +4462,9 @@ void Tab::load_current_preset()
 
     update();
     if (type() == Slic3r::Preset::TYPE_PRINTER) {
+        // A loaded printer brings its own G-code exporter setting: drop the exporter picked from the export button menu.
+        if (wxGetApp().plater() != nullptr)
+            wxGetApp().plater()->reset_gcode_exporter_choice();
         // For the printer profile, generate the extruder pages.
         if (preset.printer_technology() == ptFFF)
             on_preset_loaded();

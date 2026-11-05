@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
     test_clipper_offset_contacts.cpp
     test_clipper_offset_parity.cpp
     test_clipper_offset_strategies.cpp
+    test_bambu_config_export.cpp
     test_config_translations.cpp
     test_deferred_callback_exception.cpp
     test_extrusion_continuity.cpp
@@ -64,6 +65,9 @@ add_executable(${_TEST_NAME}_tests
     test_rectilinear_sawtooth.cpp
     test_rectilinear_with_perimeter.cpp
     test_gcode_default_firmware_session.cpp
+    test_gcode_exporter.cpp
+    test_step_export.cpp
+    test_gcode_statistics.cpp
     test_gcode_custom_gcode_per_print_z.cpp
     test_gcode_feature_gcode.cpp
     test_gcode_firmware_dialects.cpp
@@ -72,6 +76,7 @@ add_executable(${_TEST_NAME}_tests
     test_gcode_layer_height_slider.cpp
     test_gcode_reader_compatibility.cpp
     test_gcode_reader.cpp
+    test_gcode_post_process.cpp
     test_gcode_printing_plan_file_writer.cpp
     test_gcode_script_processor.cpp
     test_gcode_settings_scripts.cpp

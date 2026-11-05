@@ -10,8 +10,12 @@ slicer_version = 2.7.63.0-alpha+UNKNOWN
 [abi]
 slic3r_plugin_types.h = 4.1
 slic3r_orchestrator.h = 3.5
+slic3r_slicing_step.h = 2.4
+slic3r_config_def.h = 1.6
 slic3r_extrusion_entity.h = 1.0
 steps/slic3r_step_post_perimeter.h = 1.0
+steps/slic3r_step_gcode_export.h = 4.2
+slic3r_gcode_thumbnail.h = 2.0
 ```
 
 The slicer version records the build environment, not compatibility. It remains
@@ -29,15 +33,51 @@ orchestrator 3.5 interface supplies activation-independent registration lookup
 and application-side logging. Package manifests and native version tables use
 these public header macros; generated Python bindings derive their callback
 return types and requirements from the same headers.
+A contract whose structure is validated against its own `sizeof` (a vtable or
+a result checked by `struct_size >= sizeof`) cannot gain a member in a minor
+version: a table built before the change would be refused. Growing such a
+structure is a major version. The G-code thumbnail service
+(`slic3r_gcode_thumbnail.h`) is at 2.0 for this reason: its encoder table
+gained the optional `encode_image` callback.
 
 Plugin-types 4.1 includes the support-toolpath header identity
 `SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH` (58), naming
-`steps/slic3r_step_support_toolpath.h`. Its sized vtable layout is unchanged from 4.0.
+`steps/slic3r_step_support_toolpath.h`, and the exporter header identity
+`SLIC3R_PLUGIN_API_STEP_GCODE_EXPORT` (59), naming
+`steps/slic3r_step_gcode_export.h`. Its sized vtable layout is unchanged from 4.0.
 
 Data-tree 5.0 removes the branch surface modifier and reserves bit 10. Support-toolpath
 2.0 removes the branch role: branch bodies are sparse support, and the sheath algorithm
 shares the sparse selector. Packages requiring data-tree 4.x or support-toolpath 1.x
 must be rebuilt. Support-step remains 1.3; its publication payload is unchanged.
+
+The G-code exporter step is at 4.2: QUERY requires a borrowed Print in its
+payload, while the generic execution-context Print remains null. Exporter 3.x
+packages are incompatible. QUERY reads settings from its configuration argument
+and only computation-stable Print data (applied configuration and selected
+services), never geometry or layers. It may acquire a service to inspect a
+capability, but must stay quick, without rendering or writing, including on the
+GUI thread. Compatibility cannot depend on request-only destination settings.
+Compatible QUERY answers may append `action_label` (optional UTF-8 text without
+ellipsis, translated by the GUI in the provider's domain) and
+`supports_removable_media` (0 or 1). The host reads each field only when covered
+by `struct_size`; a 4.0 provider retains an empty label and removable-media
+support. The C++ provider view also defaults to removable-media support.
+An empty label uses the GUI's ordinary export label. Incompatible answers do not
+provide action information. The GUI adds the ellipsis and uses suitability only
+for the FFF removable-media action, not as a restriction on chosen file paths.
+Since 4.2 the EXPORT metadata ends with numeric statistics, appended flat after the
+text `statistics` list and read only when `struct_size` covers the last of them
+(`total_weight_g`); a 4.1 host structure carries none and the C++ view reads zeros.
+They are the unrounded values from which the text is formatted, computed once with the
+configuration copy of the export (the tools of its nozzle diameters): the estimated
+time and the time of the Reader's layer 0 in seconds (nominal path time, no
+acceleration; no silent-mode time exists), `layer_count` and `max_print_z` (millimeters,
+without the Z offset) from the printing plan, and a per-tool array of length (mm),
+volume (mm3) and weight (g) with their totals. The plan facts are zero until STEP_GCODE
+has published them, also for a direct export of a reference it did not produce. The times and the material are valid if and
+only if the numeric statistics exist and the text `statistics` list is not empty, else zero. All of it is host memory
+borrowed for the synchronous EXPORT call. Plugins built for 4.1 keep working.
 
 Native packages embed a pointer-free, versioned ASCII ABI record through
 `slic3r_plugin_register_version.h`, using the same header-version macros as the

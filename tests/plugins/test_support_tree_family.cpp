@@ -33,11 +33,23 @@
 #include <stdexcept>
 #include <oneapi/tbb/global_control.h>
 
-/* Tree-family tests: the slabs that the tree and organic styles publish. The branch slab planner is checked on synthetic
-   overhang layers, the slabs of small objects on their geometry (interfaces, floors, heights, XY distance, branch overhang),
-   then the published surfaces and the G-code of a whole print. The grid is unchanged by this family, which the grid
-   comparison tests cover. Tip-material checks copy published paths and fused islands once per run, then lazily measure
-   islands without changing the geometry. The Print::validate checks of the tree family settings (the [validate] case) are checked here too. */
+/*
+Tree-family tests: the slabs that the tree and organic styles publish. The branch slab planner is checked on synthetic
+overhang layers, the slabs of small objects on their geometry (interfaces, floors, heights, XY distance, branch overhang),
+then the published surfaces and the G-code of a whole print. The grid is unchanged by this family, which the grid
+comparison tests cover. Tip-material checks copy published paths and fused islands once per run, then lazily measure
+islands without changing the geometry. The Print::validate checks of the tree family settings (the [validate] case) are checked here too.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- Test::init_print()
+        |-- SG::prepare_legacy_inputs()
+        |-- generator.generate()
+        |-- TF::generate_tree_slabs()
+        `-- Common::publish()
+*/
 
 using namespace Slic3r;
 namespace SG = Slic3r::Test::SupportGrid;
@@ -1693,7 +1705,7 @@ TEST_CASE("Tree and organic prints export support and interface paths", "[plugin
     std::string code;
     try {
         print.process();
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Slic3r::Test::GCode::read_text_file(path);
     } catch (...) {
         Slic3r::Test::GCode::remove_output_pair(path);
@@ -3090,7 +3102,7 @@ TEST_CASE("Tree and organic supports are generated and exported on a variable la
     std::string code;
     try {
         print.process();
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Slic3r::Test::GCode::read_text_file(path);
     } catch (...) {
         Slic3r::Test::GCode::remove_output_pair(path);
@@ -4024,7 +4036,7 @@ std::string close_z_export(Print &print, const char *name)
     std::string code;
     try {
         print.process();
-        Orchestrator::instance().export_gcode(print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(print, path.string(), nullptr);
         code = Slic3r::Test::GCode::read_text_file(path);
     } catch (...) {
         Slic3r::Test::GCode::remove_output_pair(path);

@@ -6,19 +6,29 @@
 #ifndef slic3r_Plugin_hpp_
 #define slic3r_Plugin_hpp_
 
+#include <atomic>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin.h"
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
 
-// Plugin copies a validated C function table for the slicer application.
-// The plugin object and its executable code remain owned by the plugin.
-// Call initialize(), then setup(), setup_run() and run().
-// These phases prepare the plugin before executing its jobs.
-// These calls associate the host's execution state with their calling thread.
-// clear() releases a Print's cached data at a saved pipeline boundary or during Print destruction.
-// It receives the Print identity and the same persistent storage used during setup().
+/*
+Plugin copies a validated C function table for the slicer application.
+The plugin object and its executable code remain owned by the plugin.
+Call initialize(), then setup(), setup_run() and run().
+These phases prepare the plugin before executing its jobs.
+These calls associate the host's execution state with their calling thread.
+clear() releases a Print's cached data at a saved pipeline boundary or during Print destruction.
+It receives the Print identity and the same persistent storage used during setup().
+
+The wrapper copies callback addresses and descriptive text after validating the
+reported C table size. It does not own the provider object or the executable
+code those addresses refer to. Keep both alive through every host callback.
+Cleanup at a saved pipeline boundary releases data for the supplied Print;
+it does not destroy the registered provider.
+*/
 
 namespace Slic3r {
 
@@ -71,6 +81,17 @@ protected:
     std::vector<DefinedConfigKey> m_defined_config_keys;
     int m_priority;
     int32_t m_exclusive_group_priority = 100;
+    // Number of run() calls since registration; tests use it to prove that a service did not run.
+    // Copy construction starts at zero, copy assignment keeps the target's value, which keeps Plugin copyable.
+    // The increment happens before the plugin callback, so a failing run is counted too.
+    struct RunCounter
+    {
+        std::atomic<uint64_t> value{0};
+        RunCounter() = default;
+        RunCounter(const RunCounter &) {}
+        RunCounter &operator=(const RunCounter &) { return *this; }
+    };
+    mutable RunCounter m_run_count;
 
 public:
     // Check and copy the function table and descriptions while borrowing the plugin object.
@@ -105,6 +126,8 @@ public:
     // Select the supplied execution on this thread while the plugin runs one job.
     // Count every run() call, whatever its outcome.
     void run(const plugin_run_context &context) const;
+    // Return how many times run() was called, whatever the outcome.
+    uint64_t get_run_count() const noexcept { return m_run_count.value.load(std::memory_order_relaxed); }
     // An absent callback succeeds without touching the plugin's storage.
     // Returns PLUGIN_ERROR_OK, or a diagnostic id the host resolves through
     // Orchestrator::error_message().

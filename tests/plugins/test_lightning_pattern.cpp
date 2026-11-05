@@ -39,6 +39,28 @@
 #include <sstream>
 #include <oneapi/tbb/global_control.h>
 
+/*
+Test Lightning infill from its geometric preparation through published paths.
+Small surfaces and inspectable distance fields isolate tree growth and branch
+connection; other cases compare native and plugin results or run the slicing
+steps together. Geometry snapshots and path measurements are taken from owned
+fixtures rather than changing the production interfaces to expose test state.
+
+Activation guards restore the providers selected before a case. The owning
+Model and Print outlive every borrowed surface, layer and extrusion view used
+by that case, including work performed on internal workers.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- make_cube()
+        |-- prepared.print.apply()
+        |-- Steps::StepLayerHeightGeneration::run_step()
+        |-- Steps::StepSlicing::run_step()
+        |-- Steps::StepPostSlicing::run_step()
+        `-- Steps::StepGeneratePerimeter::run_step()
+*/
+
 using namespace Slic3r;
 using namespace Slic3r::Test::PerimeterPluginTests;
 
@@ -938,14 +960,13 @@ TEST_CASE("Lightning exports through the existing G-code pipeline", "[plugins][l
     DynamicPrintConfig config = DynamicPrintConfig::full_print_config();
     config.set_deserialize_strict("fill_pattern", "lightning");
     config.set_deserialize_strict("fill_density", "20%");
-    config.set_deserialize_strict("step_gcode_plugin", "gcode.printing_plan_file_writer");
     config.set_deserialize_strict("gcode_firmware_plugin", "gcode.firmware.marlin2");
     PreparedPerimeterPrint prepared;
     Slic3r::Test::init_print({Slic3r::Test::TestMesh::cube_20x20x20}, prepared.print, prepared.model, config);
     const boost::filesystem::path path = Slic3r::Test::GCode::temporary_gcode_path();
     try {
         prepared.print.process();
-        Orchestrator::instance().export_gcode(prepared.print, path.string(), nullptr, nullptr);
+        Orchestrator::instance().export_gcode(prepared.print, path.string(), nullptr);
         const std::string code = Slic3r::Test::GCode::read_text_file(path);
         CHECK(code.find("G1") != std::string::npos);
         CHECK(code.find(" E") != std::string::npos);

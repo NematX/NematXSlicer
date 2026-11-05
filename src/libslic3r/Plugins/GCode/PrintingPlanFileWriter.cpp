@@ -26,30 +26,15 @@
 PrintingPlan file serializer
 ============================
 
-This STEP_GCODE plugin owns the output artifact for the selected firmware
-implementation. It walks the already ordered PrintingPlan and writes the
+This STEP_GCODE plugin (priority 0) creates the output artifact for the
+selected firmware implementation. Plugins of higher priority run after it, find
+the published file at the same path and may modify it before the host Reader
+consumes it. It walks the already ordered PrintingPlan and writes the
 chunks returned by the firmware session to one atomically published file. The
 plugin does not interpret extrusion geometry or assemble individual machine
 commands.
 
 The normal execution flow is:
-
-    setup_run_impl()
-    `-- count all extrusion roots for progress reporting
-
-    run_impl()
-    `-- write_plan_file()
-        |-- validate the G-code context and output path
-        |-- open a sibling temporary file
-        |-- serialize the nested plan boundaries in order:
-        |   |-- print begin/events/end
-        |   |-- group begin/events/end
-        |   |-- layer begin/events/end
-        |   |-- tool-group begin/events/end
-        |   `-- extrusion and event chunks
-        |-- flush and close the temporary stream
-        |-- replace the final output through FilesystemTransaction
-        `-- remove the temporary file if serialization fails
 
 Every firmware result is written before the next firmware callback is called,
 because the returned string may be backed by state owned by the session. Empty
@@ -58,6 +43,35 @@ their boundaries. The firmware view owns G-code generation and state changes;
 this plugin only provides the traversal, stream checks, and publication
 guarantee. A cleanup warning after a successful commit is reported separately
 from an output-generation failure.
+
+Operation notes:
+- count all extrusion roots for progress reporting
+- validate the G-code context and output path
+- open a sibling temporary file
+- serialize the nested plan boundaries in order:
+- print begin/events/end
+- group begin/events/end
+- layer begin/events/end
+- tool-group begin/events/end
+- extrusion and event chunks
+- flush and close the temporary stream
+- replace the final output through FilesystemTransaction
+- remove the temporary file if serialization fails
+
+Representative direct calls (branches are not a timeline):
+
+    write_plan_file()
+        |-- serialize_plan()
+        |-- publish_output_file()
+        `-- slic3r_api::publish_gcode_reader_source_path()
+
+    serialize_plan()
+        |-- firmware.begin_print()
+        |-- firmware.begin_group()
+        |-- firmware.write_event()
+        |-- firmware.begin_layer()
+        |-- firmware.begin_tool_group()
+        `-- firmware.write_extrusion()
 */
 
 namespace slic3r_api { namespace GCodeGeneration { namespace PrintingPlanFileWriterPlugin {
@@ -308,22 +322,11 @@ private:
     {
         return "Writes ordered firmware chunks to one atomically published output file.";
     }
-    const char *exclusive_group_impl() const noexcept override { return "step_gcode_plugin"; }
     slicing_step_t step_impl() const noexcept override { return STEP_GCODE; }
     const char *const *dependencies_impl() const noexcept override { return k_no_dependencies; }
+    // Priority 0 runs before plugins with a higher value; a plugin with a lower value
+    // runs before this writer, before any fresh file exists.
     int32_t priority_impl() const noexcept override { return 0; }
-    void inilialize_impl(storage_handle *) const override
-    {
-        // Firmware selectors insert after this anchor in the printer page.
-        orchestrator_add_ui_fragment(
-            m_orchestrator,
-            "printer_fff.ui",
-            "step_gcode_plugin",
-            "page:General:printer\n"
-            "group:Firmware\n"
-            "\tsetting:insert$beforesetting$gcode_flavor:step_gcode_plugin\n",
-            0);
-    }
     const char *progress_message_format_impl() const noexcept override
     {
         return "Writing G-code: %u / %u extrusions";

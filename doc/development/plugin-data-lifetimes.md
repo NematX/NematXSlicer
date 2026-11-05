@@ -33,7 +33,7 @@ Member names are those of the native storage, not necessarily those of the API g
 | `Print` | After `STEP_FINALIZE_SLICING`: source tree finalized; resume at `STEP_ORDERING`. |
 | `Ordering` | After `STEP_ORDERING`: optional save of the plan, which remains editable in its working copy. |
 | `Plan` | After `STEP_EXTRUSION_SIMPLIFICATION`: final plan read-only for `STEP_GCODE`. |
-| `GCode` | End of export and of the optional read-back; does not reopen any write right on the inputs. |
+| `GCode` | G-code reference ready (`STEP_GCODE` and the optional read-back are done); resumes at `STEP_EXPORT`, which runs only on an export request and does not reopen any write right on the inputs. |
 | Call / session / storage | Lifetime independent of checkpoints, specified for the relevant owner. |
 
 The actual order is that of `Steps::execution_order()`, not the numeric order of the `slicing_step_t` values.
@@ -889,7 +889,7 @@ Source: `src/libslic3r/Api/plugin/c/steps/slic3r_step_seam_placer.h:21`.
 | `GCodeFirmwareSessionHolder::{session,output,error}` | Provider state and C++ helper buffers | Until the next callback/destruction; a const interface does not make the firmware state immutable |
 | `GCodeThumbnailRenderer::{m_image,m_error}` | Owned image/diagnostic | Next render/destruction |
 | `ThumbnailData::{pixels,width,height}` | Owned pixels and dimensions copied into the view | Borrowed const pixels, never storage_free |
-| `GCodeThumbnailEncoderHolder::{session,bytes,error,mutex}` | Owned session and encoded output | Next encode/destruction; the callback lock does not extend the borrow |
+| `GCodeThumbnailEncoderHolder::{session,bytes,image,error,mutex}` | Owned session, framed text block and compressed image (`image.bytes` backs the pointer of `encode_image`) | Next encode or encode_image/destruction; the callback lock does not extend the borrow |
 | `ViewerReaderInvocation::m_active_chunk` | string_view of the chunk supplied by the source | Next chunk/end of call; not the owner of the bytes |
 | `ProbeInvocation::m_prefix` | Borrowed prefix | Probe call |
 | `raw_gcode_reader_event::items`, `raw_gcode_reader_state::items` | Synchronous borrowed arrays | Recipient copies what it keeps |

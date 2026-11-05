@@ -5,6 +5,50 @@
 
 #include "BBConfig.hpp"
 
+/*
+Bambu / Orca configuration import
+=================================
+
+A Bambu (Orca) project stores its settings in a JSON file (read_json_file_bambu) or in `key = value`
+lines (convert_settings_from_bambu). Both readers turn them into SuperSlicer settings in the same steps:
+
+    1. the two printer variables the Bambu firmware reads (scan_first_layer, enable_power_loss_recovery)
+       are appended to printer_custom_variables, and the custom-variable keys are dropped;
+    2. the key is renamed by BBConfiguration::Tables::key_translation_map (Bambu key -> SuperSlicer key);
+    3. complicated_convert() rewrites the settings that need another value or several keys, then
+       Tables::value_translation_map renames the values (also for the elements of a vector);
+    4. handle_legacy_map runs on all readers; only the JSON reader also applies from_prusa;
+    5. custom G-codes are translated word by word (custom_gcode_transform) and
+
+The tables are built once by BBConfiguration::tables(), a function local static, and are also read by
+BambuConfigExport.cpp to write the same correspondence the other way round.
+
+Operation notes:
+- very_complicated_convert() handles the settings that depend on several others.
+
+Representative direct calls (branches are not a timeline):
+
+    read_json_file_bambu()
+        |-- tables()
+        |-- route_printer_custom_variable()
+        |-- complicated_convert()
+        |-- PrintConfigDef::handle_legacy_map()
+        |-- config.set_deserialize()
+        |-- PrintConfigDef::from_prusa()
+        |-- custom_gcode_transform()
+        `-- very_complicated_convert()
+
+    convert_settings_from_bambu()
+        |-- route_printer_custom_variable()
+        |-- PrintConfigDef::handle_legacy_map()
+        |-- complicated_convert()
+        |-- print_config.set_deserialize()
+        |-- very_complicated_convert()
+        `-- custom_gcode_transform()
+*/
+
+#include <cctype>
+#include <cmath>
 #include <map>
 #include <regex>
 #include <string>
@@ -15,6 +59,7 @@
 #include <boost/property_tree/ptree.hpp>
 #include <nlohmann/json.hpp>
 
+#include "CustomVariables.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/Config/PrintConfig.hpp"
@@ -52,27 +97,36 @@ namespace BBConfiguration {
 #define BBL_JSON_KEY_DEFAULT_MATERIALS "default_materials"
 #define BBL_JSON_KEY_MODEL_ID "model_id"
 
-std::map<std::string, std::string> key_translation_map;
-std::map<std::string, std::map<std::string, std::string>> value_translation_map;
-std::vector<std::pair<std::string, std::string>> custom_gcode_replace; // vector<pair>, as i want to keep the ordering
-enum BBSettingType: uint8_t{
-    bbstFFF_PRINT = 0<<0,
-    bbstFFF_FILAMENT = 0<<1,
-    bbstFFF_PRINTER = 0<<2,
-    bbstSLA_PRINT = 0<<3,
-    bbstSLA_MATERIAL = 0<<4,
-    bbstSLA_PRINTER = 0<<5,
-
-};
-std::map<std::string, BBSettingType> key_custom_settings_translation_map;
 // std::map<std::string, std::function<void(std::map<std::string, std::string>&, std::map<std::string,
 // std::vector<std::string>>&, const std::string&, const std::string&)>> transform_complicated; std::map<std::string,
 // std::function<void(std::map<std::string, std::string>&, std::map<std::string, std::vector<std::string>>&, const
 // std::string&, const std::vector<std::string>&)>> transform_vector_complicated;
-bool is_init = false;
 
-void init()
+// Fill and return the translation tables (called once, by tables()).
+Tables make_tables();
+
+// Rewrite imported key/value arguments and append settings derived from them to the caller's output map.
+void complicated_convert(t_config_option_key &opt_key, std::string &value,
+                         const std::map<std::string, std::string> &input,
+                         std::map<std::string, std::string> &output);
+
+// Return whether the character can be part of an identifier or a number of a custom G-code.
+bool is_word_char(char c);
+
+// Replace, in a custom G-code, the whole identifiers named by the tables and the special text forms.
+std::string translate_custom_gcode(const std::string &gcode, const Tables &tables);
+
+// Append `name = value` to printer_custom_variables when a Bambu key is one of the two printer variables
+// the Bambu firmware reads; return whether the key was one of them.
+bool route_printer_custom_variable(DynamicPrintConfig &print_config, const std::string &opt_key, const std::string &opt_value);
+
+Tables make_tables()
 {
+    Tables tables;
+    std::map<std::string, std::string> &key_translation_map = tables.key_translation_map;
+    std::map<std::string, std::map<std::string, std::string>> &value_translation_map = tables.value_translation_map;
+    std::map<std::string, BBSettingType> &key_custom_settings_translation_map = tables.key_custom_settings_translation_map;
+
     key_translation_map["version"] = "";
     key_translation_map["from"] = "";
     key_translation_map["name"] = "";
@@ -95,6 +149,7 @@ void init()
     key_translation_map["is_infill_first"]                          = "infill_first";
     key_translation_map["bottom_shell_layers"]                      = "bottom_solid_layers";
     key_translation_map["bottom_shell_thickness"]                   = "bottom_solid_min_thickness";
+    // Approximation: bottom-solid flow covers more layers than SuperSlicer's first-layer-only flow.
     key_translation_map["bottom_solid_infill_flow_ratio"]   = "first_layer_flow_ratio";
     //key_translation_map["bridge_acceleration"]                      = "bridge_acceleration";
     //key_translation_map["bridge_angle"]                             = "bridge_angle";
@@ -106,6 +161,7 @@ void init()
     //key_translation_map["brim_ears_max_angle"]                      = "brim_ears_max_angle";
     key_translation_map["brim_object_gap"]                          = "brim_separation";
     key_translation_map["brim_width"]                               = "brim_width";
+    // Approximation: Orca's skirt speed is reused as SuperSlicer's brim speed, although their scopes differ.
     key_translation_map["skirt_speed"]                              = "brim_speed";
     //key_translation_map["compatible_printers_condition"]            = "compatible_printers_condition";
     //key_translation_map["compatible_printers"]                      = "compatible_printers";
@@ -236,7 +292,7 @@ void init()
     //key_translation_map["internal_bridge_flow"]                   = "bridge_flow_ratio"; //TO ADD
     key_translation_map["bridge_flow"]                              = "bridge_flow_ratio";
     key_translation_map["top_solid_infill_flow_ratio"]              = "fill_top_flow_ratio";
-    //key_translation_map["infill_combination"]                       = "infill_every_layers"; // bool -> int
+    key_translation_map["infill_combination"]                       = "infill_every_layers"; // bool -> int, see complicated_convert
     key_translation_map["print_sequence"]                           = "complete_objects";
     key_translation_map["brim_type"]                                = "brim_type"; //handled by from_prusa
     //key_translation_map["notes"]                                    = "notes";
@@ -484,23 +540,35 @@ void init()
 
 
 /// GCODE
-    custom_gcode_replace.emplace_back("[bed_temperature_initial_layer_single]", "{first_layer_bed_temperature[initial_extruder]}");
-    custom_gcode_replace.emplace_back("bed_temperature_initial_layer_single", "first_layer_bed_temperature[initial_extruder]");
-    custom_gcode_replace.emplace_back("initial_extruder_id", "initial_extruder");
-    custom_gcode_replace.emplace_back("bbl_bed_temperature_gcode", "false");
-    custom_gcode_replace.emplace_back("bed_temperature_initial_layer", "first_layer_bed_temperature");
-    custom_gcode_replace.emplace_back("bed_temperature_initial_layer_vector", "\"\"");
-    custom_gcode_replace.emplace_back("[temperature_initial_layer]", "{first_layer_temperature[initial_extruder]}");
-    custom_gcode_replace.emplace_back("temperature_initial_layer", "first_layer_temperature[initial_extruder]");
-    //custom_gcode_replace.emplace_back("overall_chamber_temperature", "chamber_temperature"); //fixme: it's a max.
+    // Text forms with brackets: a Bambu "[name]" placeholder becomes a SuperSlicer "{expression}".
+    tables.special_gcode_replace.emplace_back("[bed_temperature_initial_layer_single]", "{first_layer_bed_temperature[initial_extruder]}");
+    tables.special_gcode_replace.emplace_back("[temperature_initial_layer]", "{first_layer_temperature[initial_extruder]}");
+    // Whole identifiers with another meaning than a renamed setting.
+    tables.identifier_gcode_replace.emplace_back("bed_temperature_initial_layer_single", "first_layer_bed_temperature[initial_extruder]");
+    tables.identifier_gcode_replace.emplace_back("initial_extruder_id", "initial_extruder");
+    tables.identifier_gcode_replace.emplace_back("bbl_bed_temperature_gcode", "false");
+    tables.identifier_gcode_replace.emplace_back("bed_temperature_initial_layer", "first_layer_bed_temperature");
+    tables.identifier_gcode_replace.emplace_back("bed_temperature_initial_layer_vector", "\"\"");
+    tables.identifier_gcode_replace.emplace_back("temperature_initial_layer", "first_layer_temperature[initial_extruder]");
+    //tables.identifier_gcode_replace.emplace_back("overall_chamber_temperature", "chamber_temperature"); //fixme: it's a max.
 
     //if plate_name, then add plate_name as custom setting
     key_custom_settings_translation_map["print_custom_variables"] = BBSettingType(bbstFFF_PRINT | bbstSLA_PRINT);
     key_custom_settings_translation_map["filament_custom_variables"] = BBSettingType(bbstFFF_FILAMENT | bbstSLA_MATERIAL);
     key_custom_settings_translation_map["printer_custom_variables"] = BBSettingType(bbstFFF_PRINTER | bbstSLA_PRINTER);
     key_custom_settings_translation_map["plate_name"] = BBSettingType(bbstFFF_PRINT | bbstSLA_PRINT);
+    return tables;
 }
 
+const Tables &tables()
+{
+    // Initialized once and thread-safely (C++11 local statics); no one writes it afterwards.
+    static const Tables instance = make_tables();
+    return instance;
+}
+
+// Rewrite borrowed key/value arguments and append dependent settings into the caller's output map;
+// numeric inputs must be serialized settings, malformed numbers may throw, and no ownership is transferred.
 void complicated_convert(t_config_option_key &opt_key,
                          std::string &value,
                          const std::map<std::string, std::string> &input,
@@ -533,11 +601,13 @@ void complicated_convert(t_config_option_key &opt_key,
     }
     if ("enable_arc_fitting" == opt_key) {
         opt_key = "arc_fitting";
-        if ("1" == value) {
-            value = "bambu";
-        } else {
-            assert(value == "0");
+        // Older Bambu files hold a bool; Orca's enumeration is disabled|enabled|sparse_infill.
+        if ("0" == value || "disabled" == value) {
             value = "disabled";
+        } else {
+            // sparse_infill approximates sparse-only arcs by global arcs; enabled, old bool 1 and
+            // unknown values also enable arcs under the import's permissive policy.
+            value = "bambu";
         }
     }
     if ("support_material_top_interface_pattern" == opt_key || "support_interface_pattern" == opt_key) {
@@ -562,8 +632,8 @@ void complicated_convert(t_config_option_key &opt_key,
     if ("bridge_density" == opt_key || "bridge_overlap_min" == opt_key) {
         output["bridge_overlap"] = std::to_string(int(std::stof(value.c_str()) * 1.3));
     }
-    //check that the value is good.
-    if ("infill_combination" == opt_key) {
+    // infill_combination (bool) has been renamed to infill_every_layers (number of layers) by the key table.
+    if ("infill_every_layers" == opt_key) {
         if ("0" == value) {
             value = "1";
         } else {
@@ -611,7 +681,8 @@ void very_complicated_convert(ConfigSubstitutionContext &unconverted_config, Con
             // get layer height
             double layer_height = conf_to_read_and_update.get_computed_value("layer_height");
 
-            double overhangs_max_slope = std::tan(make_overhang_printable_angle) * layer_height;
+            // The Bambu angle is in degrees, std::tan wants radians.
+            double overhangs_max_slope = std::tan(make_overhang_printable_angle * PI / 180.) * layer_height;
             conf_to_read_and_update.set_deserialize("overhangs_max_slope",
                                                     Slic3r::to_string_nozero(overhangs_max_slope, 3));
             conf_to_read_and_update.set_deserialize("overhangs_bridge_threshold", "!0");
@@ -630,10 +701,15 @@ void very_complicated_convert(ConfigSubstitutionContext &unconverted_config, Con
 //settings from orca that I can't convert
 // ironing_pattern
 
+// Note: BBSettingType values are all 0, so the tests below are false and a custom variable key is
+// swallowed (the function returns true) without being stored. It is deliberately not repaired here: it
+// would start to store `plate_name` and the three *_custom_variables keys as nested variables. The two
+// variables that the Bambu firmware reads are routed by route_printer_custom_variable() instead.
 bool push_into_custom_variable(DynamicPrintConfig &print_config,
                                const std::string & opt_key,
                                const std::string & opt_value)
 {
+    const std::map<std::string, BBSettingType> &key_custom_settings_translation_map = tables().key_custom_settings_translation_map;
     if (auto it = key_custom_settings_translation_map.find(opt_key); it != key_custom_settings_translation_map.end()) {
         if ((it->second & bbstFFF_PRINT) != 0 || (it->second & bbstSLA_PRINT) != 0) {
             if (print_config.opt<ConfigOptionStrings>("print_custom_variables") == nullptr)
@@ -666,6 +742,7 @@ bool push_into_custom_variables(DynamicPrintConfig &            print_config,
                                 const std::string &             opt_key,
                                 const std::vector<std::string> &opt_value)
 {
+    const std::map<std::string, BBSettingType> &key_custom_settings_translation_map = tables().key_custom_settings_translation_map;
     if (auto it = key_custom_settings_translation_map.find(opt_key); it != key_custom_settings_translation_map.end()) {
         if ((it->second & bbstFFF_FILAMENT) != 0 || (it->second & bbstSLA_MATERIAL) != 0) {
             for (int i = 0; i < opt_value.size(); ++i) {
@@ -682,50 +759,115 @@ bool push_into_custom_variables(DynamicPrintConfig &            print_config,
     return false;
 }
 
+// A word is a run of letters, digits and underscores: the unit that a G-code template names a setting with.
+bool is_word_char(const char c)
+{
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+}
+
+// Text forms are replaced first (they hold brackets that a word replacement would split), then each whole
+// word is replaced at most once: the identifier table wins over the setting key table, and the empty
+// targets of the key table (version, from, name) and its identities are not replacements.
+// A word is only replaced when it is entirely a known name, so `top_surface_line_width` is not touched by
+// the rename of `line_width`.
+std::string translate_custom_gcode(const std::string &gcode, const Tables &tables)
+{
+    std::string text = gcode;
+    for (const std::pair<std::string, std::string> &entry : tables.special_gcode_replace)
+        boost::replace_all(text, entry.first, entry.second);
+
+    const auto replacement_of = [&tables](const std::string &word) -> const std::string * {
+        for (const std::pair<std::string, std::string> &entry : tables.identifier_gcode_replace)
+            if (entry.first == word)
+                return &entry.second;
+        const auto key = tables.key_translation_map.find(word);
+        if (key != tables.key_translation_map.end() && !key->second.empty() && key->second != word)
+            return &key->second;
+        return nullptr;
+    };
+
+    std::string result;
+    result.reserve(text.size());
+    for (size_t pos = 0; pos < text.size();) {
+        if (!is_word_char(text[pos])) {
+            result += text[pos++];
+            continue;
+        }
+        size_t end = pos;
+        while (end < text.size() && is_word_char(text[end]))
+            ++end;
+        const std::string word = text.substr(pos, end - pos);
+        const std::string *replacement = replacement_of(word);
+        result += replacement != nullptr ? *replacement : word;
+        pos = end;
+    }
+    return result;
+}
+
 //TODO: ensure it's inside '{' '[' script section, reliably
 void custom_gcode_transform(DynamicPrintConfig &print_config)
 {
+    const Tables &translation = tables();
     for (std::string opt_key : {"template_custom_gcode", "toolchange_gcode", "before_layer_gcode",
                                 "between_objects_gcode", "end_gcode", "layer_gcode", "feature_gcode", "start_gcode",
-                                "color_change_gcode", "pause_print_gcode", "toolchange_gcode"}) {
+                                "color_change_gcode", "pause_print_gcode"}) {
         auto opt = print_config.opt<ConfigOptionString>(opt_key);
-        if (opt != nullptr) {
-            std::string &custom_gcode = opt->value;
-            // check & replace setting name
-            for (auto &entry : key_translation_map) { boost::replace_all(custom_gcode, entry.first, entry.second); }
-            // check & replace special things
-            for (auto &entry : custom_gcode_replace) { boost::replace_all(custom_gcode, entry.first, entry.second); }
-        }
+        if (opt != nullptr)
+            opt->value = translate_custom_gcode(opt->value, translation);
     }
     for (std::string opt_key : {"end_filament_gcode", "start_filament_gcode"}) {
         auto opt = print_config.opt<ConfigOptionStrings>(opt_key);
         if (opt != nullptr) {
             std::vector<std::string> custom_gcode_values = opt->get_values();
-            for (std::string &custom_gcode : custom_gcode_values) {
-                // check & replace setting name
-                for (auto &entry : key_translation_map) {
-                    boost::replace_all(custom_gcode, entry.first, entry.second);
-                }
-                // check & replace special things
-                for (auto &entry : custom_gcode_replace) {
-                    boost::replace_all(custom_gcode, entry.first, entry.second);
-                }
-            }
+            for (std::string &custom_gcode : custom_gcode_values)
+                custom_gcode = translate_custom_gcode(custom_gcode, translation);
             opt->set(custom_gcode_values);
         }
     }
 }
 
+// The Bambu firmware reads these two variables from printer_custom_variables (see BambuGCodeFirmware.cpp).
+// A line is appended, never replacing the text already there; a variable already defined with the same
+// value is not repeated, so importing twice into the same configuration adds nothing.
+bool route_printer_custom_variable(DynamicPrintConfig &print_config, const std::string &opt_key, const std::string &opt_value)
+{
+    if (opt_key != "scan_first_layer" && opt_key != "enable_power_loss_recovery")
+        return false;
+    std::string value = opt_value;
+    if (opt_key == "enable_power_loss_recovery") {
+        // Older Bambu files hold a bool where Orca now has printer_configuration|enable|disable.
+        if (value == "1" || value == "true")
+            value = "enable";
+        else if (value == "0" || value == "false")
+            value = "disable";
+    }
+    ConfigOptionString *variables = print_config.option<ConfigOptionString>("printer_custom_variables", true);
+    if (variables == nullptr)
+        return true;
+    const std::map<std::string, std::string> existing = parse_custom_variable_lines(variables->value);
+    const auto same = existing.find(opt_key);
+    if (same != existing.end() && same->second == value)
+        return true;
+    if (!variables->value.empty() && variables->value.back() != '\n')
+        variables->value += '\n';
+    variables->value += opt_key + " = " + value + "\n";
+    return true;
+}
+
 } // BBconfiguration
 
+// Read the caller's JSON path into borrowed config/substitution outputs under the C numeric locale;
+// apply scalar/vector rules, handle_legacy_map and from_prusa, then G-code transforms. Missing definitions
+// return false; parse errors are logged and processing continues, while later conversion errors may throw
+// after partial updates. Output ownership stays with the caller; a completed conversion returns true.
 bool read_json_file_bambu(const std_path &temp_file,
                              DynamicPrintConfig &         config,
                              ConfigSubstitutionContext &  config_substitutions,
                              bool                         with_phony)
 {
     using namespace BBConfiguration;
-    if (!is_init) // not thread-safe
-        init();
+    const std::map<std::string, std::string> &key_translation_map = tables().key_translation_map;
+    const std::map<std::string, std::map<std::string, std::string>> &value_translation_map = tables().value_translation_map;
 
     std::map<std::string, std::string>              key_values;
     std::map<std::string, std::vector<std::string>> key_vector_values;
@@ -813,7 +955,7 @@ bool read_json_file_bambu(const std_path &temp_file,
 
     // key_translation_map
     for (const auto& [bb_key, value] : key_values) {
-        if (push_into_custom_variable(config, bb_key, value))
+        if (route_printer_custom_variable(config, bb_key, value) || push_into_custom_variable(config, bb_key, value))
             continue;
 
         std::string my_key = bb_key;
@@ -872,6 +1014,10 @@ bool read_json_file_bambu(const std_path &temp_file,
                 if (key.empty()) {
                     break;
                 }
+                // The value table applies to every element of a vector, like it does to a scalar.
+                if (auto it_key = value_translation_map.find(key); it_key != value_translation_map.end())
+                    if (auto it_val = it_key->second.find(values[idx]); it_val != it_key->second.end())
+                        values[idx] = it_val->second;
             }
             if (!key.empty()) {
                 good_key_vector_values[key] = values;
@@ -1017,14 +1163,17 @@ std::map<std::string, std::string> read_ini_file_bambu(const std_path &temp_file
     return key_values;
 }
 
+// Consume a copied settings map and update borrowed print config/substitutions through key/value rules,
+// handle_legacy_map and G-code transforms, but not from_prusa; with_phony is unused, success returns true,
+// conversion failures propagate with possible partial updates and no transfer of output ownership.
 bool convert_settings_from_bambu(std::map<std::string, std::string> bambu_settings_serialized,
                                  DynamicPrintConfig &               print_config,
                                  ConfigSubstitutionContext &        config_substitutions,
                                  bool                               with_phony)
 {
     using namespace BBConfiguration;
-    if (!is_init) // not thread-safe
-        init();
+    const std::map<std::string, std::string> &key_translation_map = tables().key_translation_map;
+    const std::map<std::string, std::map<std::string, std::string>> &value_translation_map = tables().value_translation_map;
     
     // transform entries into susi config
     std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> dict_opt;
@@ -1033,7 +1182,7 @@ bool convert_settings_from_bambu(std::map<std::string, std::string> bambu_settin
         t_config_option_key opt_key = entry.first;
         std::string value = entry.second;
 
-        if (push_into_custom_variable(print_config, opt_key, value))
+        if (route_printer_custom_variable(print_config, opt_key, value) || push_into_custom_variable(print_config, opt_key, value))
             continue;
 
         if (auto it = key_translation_map.find(opt_key); it != key_translation_map.end())
@@ -1077,6 +1226,9 @@ bool convert_settings_from_bambu(std::map<std::string, std::string> bambu_settin
     return true;
 }
 
+// Consume a copied settings map into the borrowed object config using the print config as parent;
+// apply key/value rules and handle_legacy_map, not from_prusa or custom G-code transforms. with_phony is
+// unused, success returns true, conversion errors propagate with partial updates and no ownership transfer.
 bool convert_settings_from_bambu(std::map<std::string, std::string> bambu_settings_serialized,
                                  const DynamicPrintConfig &         print_config,
                                  ModelConfigObject &                object_config,
@@ -1084,8 +1236,8 @@ bool convert_settings_from_bambu(std::map<std::string, std::string> bambu_settin
                                  bool                               with_phony)
 {
     using namespace BBConfiguration;
-    if (!is_init) // not thread-safe
-        init();
+    const std::map<std::string, std::string> &key_translation_map = tables().key_translation_map;
+    const std::map<std::string, std::map<std::string, std::string>> &value_translation_map = tables().value_translation_map;
     
     // transform entries into susi config
     std::unordered_map<t_config_option_key, std::pair<t_config_option_key, std::string>> dict_opt;

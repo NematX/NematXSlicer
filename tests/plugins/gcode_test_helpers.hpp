@@ -15,6 +15,16 @@
 #include "libslic3r/Printing/PrintingPlan.hpp"
 
 /*
+Provide neutral fixtures shared by G-code plugin tests: small printing plans,
+firmware probes, owned session guards and temporary text files. A component test
+selects the fixture it needs, drives the real public execution path, then reads
+the resulting text or exposed state for its own assertions.
+
+For a typical writer test, construct the source Print and plan, acquire a
+firmware instance, run the writer, and read the completed file before cleanup.
+Keep the plan and Print alive while sessions borrow them. FirmwareInstanceOwner
+destroys its raw session once; file helpers do not transfer the caller's Print.
+
 Shared G-code plugin test fixtures
 ==================================
 
@@ -126,7 +136,9 @@ std::string stored_script_string(
 std::unique_ptr<ExtrusionEntity> special_command_entity(
     ExtrusionPropertySpecialCommand::Code code,
     double value = 0.0);
-void select_printing_plan_writer(
+// Select the G-code firmware of the Print's configuration, as a printer preset does. The PrintingPlan
+// writer needs no selection: it is the active STEP_GCODE plugin by default.
+void select_printing_plan_firmware(
     Print &print,
     const std::string &firmware_id = "gcode.firmware.marlin2");
 slic3r_api::PrintingPlan printing_plan_view(Print &print);

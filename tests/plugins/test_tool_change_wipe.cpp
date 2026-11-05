@@ -1,11 +1,23 @@
-/* The production wipe service is exercised through borrowed phase payloads and
-   through the whole export pipeline. Compact owned plans isolate visit boundaries,
-   volume fallbacks, rounded-flow rows and speeds; sliced prints check tool commands,
-   platter positions and tower Z offsets without replacing downstream plugins.
-   Reader-derived statistics are checked against role/tool volumes and an
-   explicit post-export CLI read, preserving source-layer areas and metadata.
-   Overlapping model parts exercise typed surfaces and closed overhang fragments;
-   materialized Travel connectors into synthetic towers need machine travel speed. */
+/*
+The production wipe service is exercised through borrowed phase payloads and
+through the whole export pipeline. Compact owned plans isolate visit boundaries,
+volume fallbacks, rounded-flow rows and speeds; sliced prints check tool commands,
+platter positions and tower Z offsets without replacing downstream plugins.
+Reader-derived statistics are checked against role/tool volumes and an
+explicit post-export CLI read, preserving source-layer areas and metadata.
+Overlapping model parts exercise typed surfaces and closed overhang fragments;
+materialized Travel connectors into synthetic towers need machine travel speed.
+
+Representative direct calls (branches are not a timeline):
+
+    TEST_CASE
+        |-- Test::Plugins::ensure_plugin_test_runtime_initialized()
+        |-- configure_print()
+        |-- host.prepare_plugin_host_context()
+        |-- host.prepare_plugin_run_context()
+        |-- run_service()
+        `-- check_leaf()
+*/
 #include <catch2/catch.hpp>
 #include <algorithm>
 #include <atomic>
@@ -1926,7 +1938,7 @@ TEST_CASE("Two overlapping model parts export both tools and a wipe tower", "[pl
         {"extrusion_multiplier", "1,1"}, {"perimeter_extruder", "1"}, {"infill_extruder", "1"},
         {"solid_infill_extruder", "1"}, {"support_material_extruder", "0"},
         {"step_perimeter_plugin", "perimeter.generator.simple"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin"}});
+        {"gcode_flavor", "marlin"}});
     Print print;
     Model model;
     ModelObject *object = model.add_object();
@@ -1999,7 +2011,7 @@ TEST_CASE("Two overlapping model parts keep the tower sparse share below ten per
         {"extrusion_multiplier", "1,1"}, {"perimeter_extruder", "1"}, {"infill_extruder", "1"},
         {"solid_infill_extruder", "1"}, {"support_material_extruder", "0"},
         {"step_perimeter_plugin", "perimeter.generator.simple"},
-        {"step_gcode_plugin", "gcode.printing_plan_file_writer"}, {"gcode_flavor", "marlin"}});
+        {"gcode_flavor", "marlin"}});
     Print print;
     Model model;
     ModelObject *object = model.add_object();
@@ -2187,7 +2199,7 @@ TEST_CASE("Tower tool changes export the manager speed override", "[plugins][wip
         });
         return lines;
     };
-    Test::GCode::select_printing_plan_writer(print, "gcode.firmware.marlin2");
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.marlin2");
     const std::string marlin_path = (checkout / "build" / "temp" /
         (std::string("tower_speed_override") + (semm ? "_semm" : "") + ".gcode")).string();
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, marlin_path, nullptr));
@@ -2230,7 +2242,7 @@ TEST_CASE("Tower tool changes export the manager speed override", "[plugins][wip
     CHECK(open == 0);
     CHECK_FALSE(nested);
     CHECK(covered == changes);
-    Test::GCode::select_printing_plan_writer(print, "gcode.firmware.klipper");
+    Test::GCode::select_printing_plan_firmware(print, "gcode.firmware.klipper");
     const std::string klipper_path = (checkout / "build" / "temp" /
         (std::string("tower_speed_override_klipper") + (semm ? "_semm" : "") + ".gcode")).string();
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, klipper_path, nullptr));
@@ -2575,6 +2587,8 @@ TEST_CASE("Reader statistics fill preserves source areas and export metadata",
     stats.initial_extruder_id = 1;
     stats.total_toolchanges = 4;
     stats.printing_extruders = {0, 1};
+    stats.object_layer_count = 7;
+    stats.total_layer_count = 9;
     stats.is_computing_gcode = true;
     stats.estimated_print_time[1] = 123.0;
     const double expected_mass = 10.0 * area0 * 1.1 * 0.001 + 20.0 * area1 * 1.3 * 0.001;
@@ -2598,6 +2612,9 @@ TEST_CASE("Reader statistics fill preserves source areas and export metadata",
         CHECK(stats.initial_extruder_id == 1);
         CHECK(stats.total_toolchanges == 4);
         CHECK(stats.printing_extruders == std::vector<extruder_index_t>{0, 1});
+        CHECK(stats.object_layer_count == 7);
+        CHECK(stats.total_layer_count == 9);
+        CHECK(stats.statistics_available.load());
         CHECK(stats.is_computing_gcode.load());
     }
     result.print_statistics.volumes_per_role_per_extruder.clear();
@@ -2615,7 +2632,7 @@ TEST_CASE("Reader statistics fill preserves source areas and export metadata",
 
 // Export a sliced single-tool print or a two-tool tower print through production
 // plugins. Reconcile reader volumes independently, then export without a viewer
-// result and explicitly reread before measured filename finalization, as the CLI does.
+// result (statistics unavailable) and export again with a local result, as the CLI does.
 TEST_CASE("Export statistics include the tower share for preview and explicit CLI reads",
           "[plugins][gcode][wipe-tower][print-statistics][integration]")
 {
@@ -2698,9 +2715,14 @@ TEST_CASE("Export statistics include the tower share for preview and explicit CL
     REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, cli_path, nullptr));
     CHECK(print.print_statistics().estimated_print_time.empty());
     CHECK(print.print_statistics().total_used_filament == 0.0);
+    CHECK_FALSE(print.print_statistics().statistics_available);
     CHECK(boost::filesystem::exists(print.gcode_reader_source_path()));
     CHECK(print.gcode_reader_plugin_id() == result.reader_plugin_id);
-    REQUIRE_NOTHROW(Steps::StepReadGeneratedGcode::read_statistics(Orchestrator::instance(), print));
+    GCodeProcessorResult local_result;
+    // The reference of the export above is valid and would be reused without reading: ask for a new pass that reads it.
+    print.request_replay_from_worker(Steps::Checkpoint::Plan);
+    REQUIRE_NOTHROW(Orchestrator::instance().export_gcode(print, cli_path, &local_result));
+    CHECK(stats.statistics_available);
     CHECK(stats.total_extruded_volume == Approx(expected_volume));
     CHECK(stats.total_used_filament == Approx(expected_length));
     CHECK(stats.total_weight == Approx(expected_mass));

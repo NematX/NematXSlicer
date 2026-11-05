@@ -25,6 +25,15 @@
 #include "libslic3r/Thread.hpp"
 
 /*
+Run plugin work for the objects selected by a pipeline step. One preparation
+call sets up the plugin execution; per-object setup_run calls prepare the jobs,
+then run calls perform them. All preparation workers finish before execution
+workers begin, and all workers finish before their borrowed callback data dies.
+
+The helpers test cancellation and plugin failure between these phases. A host
+callback failure is contained before returning through C and is attributed to
+the owning Print rather than allowing an exception across the plugin interface.
+
 These helpers run pipeline plugins and handle failures from host callbacks.
 setup() prepares the plugin. setup_run() prepares each job. All preparation
 calls finish before run() starts those jobs. Each phase checks the owning
@@ -95,6 +104,7 @@ inline const char *builtin_step_name(slicing_step_t step)
     case STEP_EXTRUSION_EDIT:        return "STEP_EXTRUSION_EDIT";
     case STEP_EXTRUSION_SIMPLIFICATION: return "STEP_EXTRUSION_SIMPLIFICATION";
     case STEP_GCODE:                 return "STEP_GCODE";
+    case STEP_EXPORT:                return "STEP_EXPORT";
     case INFILL_PATTERN:             return "INFILL_PATTERN";
     case INFILL_SURFACE_RECIPE_MODIFIER: return "INFILL_SURFACE_RECIPE_MODIFIER";
     case BRIDGE_DETECTOR:            return "BRIDGE_DETECTOR";

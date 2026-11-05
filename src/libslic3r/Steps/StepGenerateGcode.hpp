@@ -6,7 +6,6 @@
 #ifndef steps_stepgenerategcode_hpp_
 #define steps_stepgenerategcode_hpp_
 
-#include "libslic3r/Api/plugin/c/slic3r_gcode_thumbnail.h"
 #include <string>
 
 #include "libslic3r/Api/plugin/c/slic3r_plugin_types.h"
@@ -28,8 +27,7 @@ void clear(Print &print);
 void prepare(Print &print);
 bool validate_pre(const Print &print, std::string *error = nullptr);
 bool validate_post(const Print &print, std::string *error = nullptr);
-std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path,
-        const raw_gcode_thumbnail_renderer *thumbnail_renderer = nullptr);
+std::string run_step(Orchestrator &orchestrator, Print &print, const std::string &path);
 
 } // namespace Steps::StepGenerateGcode
 } // namespace Slic3r

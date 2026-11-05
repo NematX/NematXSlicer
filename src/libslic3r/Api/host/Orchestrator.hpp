@@ -7,6 +7,7 @@
 
 #include <atomic>
 #include <cassert>
+#include <iosfwd>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -24,44 +25,58 @@
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_extrusion_property.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Config/ConfigDef.hpp"
 #include "libslic3r/GCode/ThumbnailData.hpp"
 #include "libslic3r/MultiPoint.hpp"
 #include "libslic3r/Polygon.hpp"
 
 #include "libslic3r/Config/GuiRuleRegistry.hpp"
+#include "ExportInputs.hpp"
 
 #include "Plugin.hpp"
 #include "StepSelectorTraits.hpp"
 
-/* This header exposes plugin registration, selection settings and job execution.
-   The host is the slicer application. Orchestrator is its process-wide manager
-   of plugins, components that perform jobs at processing stages called steps.
+/*
+This header exposes plugin registration, selection settings and job execution.
+The host is the slicer application. Orchestrator is its process-wide manager
+of plugins, components that perform jobs at processing stages called steps.
 
-   Use instance(), plugin_registration_scope() and register_plugin() to introduce
-   instances under an installed package directory. PluginRegistrationScope ends
-   that association when destroyed. Registration does not enable an instance.
+Use instance(), plugin_registration_scope() and register_plugin() to introduce
+instances under an installed package directory. PluginRegistrationScope ends
+that association when destroyed. Registration does not enable an instance.
 
-   An exclusive group holds alternative plugins for one step. Its selector is
-   a setting naming a member. ExclusiveGroupDefinition combines text and package
-   identity with StepSelectorTraits, its placement and selection rules. Register
-   descriptions, enable members, then elect_exclusive_group_definitions() and
-   create_selector_print_config() retain descriptions and create settings.
-   finalize_selector_option() filters choices without replacing their text.
-   exclusive_group_definition_or_default() reads the retained description;
-   its untranslated flag requires verbatim display without catalogue lookup.
+An exclusive group holds alternative plugins for one step. Its selector is
+a setting naming a member. ExclusiveGroupDefinition combines text and package
+identity with StepSelectorTraits, its placement and selection rules. Register
+descriptions, enable members, then elect_exclusive_group_definitions() and
+create_selector_print_config() retain descriptions and create settings.
+finalize_selector_option() filters choices without replacing their text.
+exclusive_group_definition_or_default() reads the retained description;
+its untranslated flag requires verbatim display without catalogue lookup.
 
-   initialize_plugins() reads initialization result codes before execute_plugin()
-   prepares and runs callable jobs. Contexts passed to plugin functions borrow
-   application data for those calls only. Package reports and execution diagnostics
-   distinguish non-fatal warnings from failures.
+initialize_plugins() reads initialization result codes before execute_plugin()
+prepares and runs callable jobs. Contexts passed to plugin functions borrow
+application data for those calls only. Package reports and execution diagnostics
+distinguish non-fatal warnings from failures.
 
-   For concurrent prints, create one RunContext per execution. It owns the progress
-   counters and stop state. Hold the RunScope returned by enter_run(context, &print)
-   until the execution's worker threads have finished. Destroying the scope restores
-   the previous thread association. It does not free plugin allocations.
+For concurrent prints, create one RunContext per execution. It owns the progress
+counters and stop state. Hold the RunScope returned by enter_run(context, &print)
+until the execution's worker threads have finished. Destroying the scope restores
+the previous thread association. It does not free plugin allocations.
 
-   PluginStorage remains shared. Print asks clear(print, storage) to release its
-   cached data when replaying from a saved pipeline boundary or during destruction. */
+PluginStorage remains shared. Print asks clear(print, storage) to release its
+cached data when replaying from a saved pipeline boundary or during destruction.
+
+For file export, the host first asks the selected exporter whether it accepts
+the configuration and firmware. That QUERY returns compatibility information
+without writing output. EXPORT then uses a completed G-code reference and an
+export-specific configuration. The reference belongs to the print; it is not
+the destination file and must remain unchanged by the exporter.
+
+The export entry points connect that two-operation contract to plugin execution.
+They are separate from plugin registration and ordinary geometry processing:
+choosing a file format is not a request to recompute sliced geometry.
+*/
 
 namespace Slic3r {
 
@@ -86,6 +101,12 @@ namespace ApiClipper { class ClipperShapes; }
 // the translation unit containing C exports used only by external plugins.
 void link_config_definition_api() noexcept;
 
+// Tell whether a plugin started through the C API by the plugin running on this thread raises the global stop flag
+// when it fails. Orchestrator::execute_plugin() sets the answer to its cancel_on_error argument for the thread that runs
+// the plugin. Only the stop flag is concerned: messages still go to the log and to the GUI message queue. Threads that the
+// plugin starts itself, including parallel helpers, keep the default true.
+bool c_api_executions_cancel_on_error();
+
 } // namespace Slic3r
 
 // Host-side state passed back to callbacks through the opaque C ABI handle.
@@ -109,9 +130,15 @@ struct plugin_host_context
     // Borrow the Print's RunContext, or the thread's context when no Print is supplied.
     // Copies keep the same pointer. Its owner must keep it alive until all callbacks return.
     void *run_context = nullptr;
+    // Borrowed invocation-local output for one payload; report_error writes here instead of queueing a GUI message.
+    std::string *reported_error = nullptr;
 };
 
 namespace Slic3r {
+
+// Identity of the built-in exporter and the printer-profile key that selects an exporter.
+inline constexpr const char *k_default_gcode_exporter_id = "gcode.exporter.simple";
+inline constexpr const char *k_gcode_exporter_option_key = "gcode_exporter_plugin";
 
 struct GenericFacetsAnnotationDefinition
 {
@@ -308,6 +335,22 @@ public:
         slicing_step_t id = STEP_NONE;
         std::string name;
         slicing_step_t invalidates_step = STEP_ANY;
+    };
+
+    struct GCodeExporterSelection
+    {
+        std::string plugin_id;
+        // Suffix with its dot for an exporter that writes a local file; empty otherwise.
+        std::string extension;
+
+        // Owned untranslated button text; absent labels use the GUI's ordinary export label.
+        std::string action_label;
+        bool supports_removable_media = true;
+
+        // Match a complete destination name against the exporter suffix, its final component or built-in text aliases, ignoring case; no extension imposes no restriction.
+        bool accepts_extension(const std::string &destination) const;
+        // Return a unique path in the system temporary directory, `prefix` + random part + the exporter extension; nothing is created.
+        std::string temporary_path(const std::string &prefix) const;
     };
 
     struct PluginUiFragment
@@ -556,13 +599,13 @@ public:
     option_def_error_code create_selector_print_config(const raw_config_option_def &def,
         const SelectorIdentity &identity, bool auto_enabled);
 
-    // Execute the normal setup/setup_run/run lifecycle for one plugin. The
-    // payload array remains owned by the caller for the duration of this call.
+    // Execute setup/setup_run/run for caller-owned payloads; reported_error is call-local and requires at most one payload.
     raw_plugin_execution_status execute_plugin(Plugin &plugin,
                                                Print *print,
                                                const raw_plugin_run_payload *payloads,
                                                uint32_t run_count,
-                                               bool cancel_on_error = true);
+                                               bool cancel_on_error = true,
+                                               std::string *reported_error = nullptr);
 
     // Start and complete one installed package load. Loaders add precise
     // issues as they encounter them; successful registrations are associated
@@ -622,11 +665,57 @@ public:
     // Export the already-sliced print through the G-code side of the step
     // pipeline. The path_template is resolved with Print::output_filepath()
     // before STEP_GCODE runs, so the selected G-code plugin receives the exact
-    // file path it must create.
+    // file path it must create. The file is the G-code reference: it holds no
+    // header, notes or thumbnails, which export_print() adds. No image is rendered here.
+    // The reference is read-only for the export: when STEP_GCODE is done, its
+    // published source is the resolved path and that file still exists, nothing
+    // runs again (no writer, post-processing script or modifier), and `result`
+    // is not reset: it keeps the content of the last reading, and only its
+    // reader_plugin_id is assigned again from the Print. Otherwise STEP_GCODE
+    // runs and fills `result` when one is given; a failing read resets `result`,
+    // leaves STEP_GCODE not done and propagates the exception. The final statuses
+    // are published when the step ran and when the reference was reused.
     std::string export_gcode(Print &print_to_export,
                              const std::string &path_template,
-                             GCodeProcessorResult *result,
-                             ThumbnailsGeneratorCallback thumbnail_cb = nullptr);
+                             GCodeProcessorResult *result);
+
+    // Resolve and query the exporter from stable Print data and config, returning owned ID, extension, action text and removable suitability or throwing without rendering or writing.
+    // A non-empty explicit_id selects that active exporter provider instead of the one named by the `gcode_exporter_plugin`
+    // setting of config, which is then not read for the exporter nor modified; empty keeps the setting.
+    GCodeExporterSelection select_gcode_exporter(const Print &print, const DynamicPrintConfig &config,
+                                                 const std::string &explicit_id = std::string());
+    // Run the exporter chosen by `selection` (from select_gcode_exporter(), which ran QUERY) on a borrowed reference, with
+    // configuration, sliced-width and (when available) statistics metadata. The exporter reads its destination from the
+    // `output_path` setting of `config` and publishes its output itself; it reports what it wrote, and the host keeps
+    // that in Print::export_result() as soon as it is reported. The reference is never reread here, and the host does
+    // not check the destination. thumbnail_cb renders the images the exporter asks for (empty: none, as on the command
+    // line). inputs_cb asks the requester for the values that the exporter needs during its setup (empty: the requester cannot be
+    // asked, which fails an exporter that asks); the answers are copied into config, which the exporter reads, after the
+    // metadata were encoded, so they are not part of the metadata. A cancellation by the requester cancels the Print and throws
+    // CanceledException; any other refusal throws a RuntimeError that gives its cause. Throws on failure and on cancellation. The
+    // caller must not hold Print::state_mutex().
+    void export_print(Print &print,
+                      DynamicPrintConfig &config,
+                      const std::string &reference_path,
+                      const GCodeExporterSelection &selection,
+                      ThumbnailsGeneratorCallback thumbnail_cb = nullptr,
+                      ExportInputsCallback inputs_cb = nullptr);
+    // Convert one definition sent by a running exporter into a native one, without registering it in the catalogue of settings;
+    // throws std::invalid_argument, naming the key, when it is refused.
+    ConfigOptionDef export_input_definition(const Plugin &plugin, const raw_config_option_def &raw) const;
+    // Run STEP_EXPORT for the request that Print::request_export queued, on the reference that STEP_GCODE
+    // already prepared; what the exporter reported is in Print::export_result(). Unlike export_gcode(), it never
+    // replays STEP_GCODE: with no request, or with a reference that is not ready, it throws and exports nothing. It
+    // publishes no 100 % status of its own; the progress of the step is Print::pipeline_progress(). The caller must not
+    // hold Print::state_mutex().
+    void export_requested(Print &print);
+    // Select the exporter first (its QUERY gives the extension that names the destination, like the GUI does; the runner
+    // selects it again for the export), generate a private reference beside the requested destination (STEP_GCODE rereads
+    // it for the statistics), export to the statistics-finalized path, and remove the reference. Return the local file that
+    // the exporter reported; an exporter that wrote none fails the command.
+    std::string export_gcode_cli(Print &print, const std::string &requested_output_path);
+    // Same, with the streams that the exporter's input requests use (a question per setting on out, the answer on in).
+    std::string export_gcode_cli(Print &print, const std::string &requested_output_path, std::istream &in, std::ostream &out);
 
     Orchestrator(const Orchestrator&) = delete;
     Orchestrator& operator=(const Orchestrator&) = delete;
@@ -819,6 +908,10 @@ private:
     bool m_initializing_plugin_failed { false };
     std::string m_initializing_plugin_failure;
 };
+
+// Resolve the pipeline step whose results a plugin's options invalidate: the executable producer that a service runs in. Services that
+// only change delivery (GCODE_THUMBNAIL, the exporters of STEP_EXPORT) and unsupported steps give STEP_NONE.
+slicing_step_t plan_owner_step(const Plugin &plugin);
 
 // Owns every object a plugin creates through the C API (polylines, extrusions, configs, meshes, ...)
 // and hands out stable pointers ("handles") to them.

@@ -1,7 +1,28 @@
-// Central source of compatibility decisions for installation and execution.
-// Read all C contracts only here, not in every consumer. INI parsing preserves
-// header names literally and never treats the informational slicer version as
-// an ABI constraint.
+/*
+A package manifest lists the public C headers and versions its code requires.
+The host compares those requirements with the versions it implements before
+allowing registration. A major version identifies a compatible binary layout;
+a minor version identifies additions within that layout.
+
+Read requirements, compare each used contract, and return one compatibility
+decision with its diagnostics. Keeping this policy here lets package installation
+and runtime loading make the same decision from the same version table.
+
+Central source of compatibility decisions for installation and execution.
+Read all C contracts only here, not in every consumer. INI parsing preserves
+header names literally and never treats the informational slicer version as
+an ABI constraint.
+
+Representative direct calls (branches are not a timeline):
+
+    read_plugin_package_metadata()
+        `-- parse_plugin_package_metadata()
+
+    validate_plugin_api_requirements()
+        |-- host_plugin_api_contracts()
+        |-- std::find_if()
+        `-- version_text()
+*/
 #include "PluginApiCompatibility.hpp"
 #include <algorithm>
 #include <charconv>
@@ -42,6 +63,7 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_extrusion_edit.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_extrusion_simplification.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_finalize_slicing.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_export.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_firmware.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode_reader.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_gcode.h"

@@ -18,6 +18,25 @@
 #include "jpeglib.h"
 #include "qoi/qoi.h"
 
+/*
+Compress thumbnail pixels into the image formats used by G-code exporters.
+compress_thumbnail() selects the format-specific encoder; each result owns the
+encoded buffer and releases it through the allocator required by its codec.
+The input ThumbnailData remains the caller's image and is not an output file.
+
+PNG, JPEG and QOI produce compressed images. The BIQU path produces the printer's
+special thumbnail representation. Pixel orientation and codec-specific buffer
+handling are resolved here so callers can consume one completed result.
+
+Representative direct calls (branches are not a timeline):
+
+    compress_thumbnail()
+        |-- compress_thumbnail_png()
+        |-- compress_thumbnail_jpg()
+        |-- compress_thumbnail_qoi()
+        `-- compress_thumbnail_biqu()
+*/
+
 namespace Slic3r::GCodeThumbnails {
 
 using namespace std::literals;
@@ -133,7 +152,12 @@ std::unique_ptr<CompressedImageBuffer> compress_thumbnail_jpg(const ThumbnailDat
     auto out = std::make_unique<CompressedJPG>();
     out->data = malloc(compressed_data_size);
     out->size = size_t(compressed_data_size);
-    ::memcpy(out->data, (const void*)compressed_data.data(), out->size);
+    // After jpeg_finish_compress(), compressed_data_ptr and compressed_data_size describe the real output. When the
+    // output outgrew the initial buffer (very small images), libjpeg moved it to a buffer allocated with malloc() and
+    // left the initial one untouched: copy from the returned pointer, then free() that buffer.
+    ::memcpy(out->data, (const void*)compressed_data_ptr, out->size);
+    if (compressed_data_ptr != compressed_data.data())
+        free(compressed_data_ptr);
     return out;
 }
 

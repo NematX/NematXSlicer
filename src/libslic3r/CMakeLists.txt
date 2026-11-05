@@ -46,6 +46,12 @@ set(SLIC3R_SOURCES
     Algorithm/RegionExpansion.cpp
 	AnyPtr.hpp
 	Api/host/ApiHostUtils.hpp
+	Api/host/ExportInputs.cpp
+	Api/host/ExportInputs.hpp
+	Api/host/GCodeExportMetadata.cpp
+	Api/host/GCodeExportMetadata.hpp
+	Api/host/GCodeExportObjects.cpp
+	Api/host/GCodeExportObjects.hpp
 	Api/host/GCodeReaderResultBuilder.cpp
 	Api/host/GCodeReaderResultBuilder.hpp
 	Api/host/GCodeReaderService.cpp
@@ -130,6 +136,7 @@ set(SLIC3R_SOURCES
 	Api/plugin/c/steps/slic3r_step_extrusion_simplification.h
 	Api/plugin/c/steps/slic3r_step_finalize_slicing.h
 	Api/plugin/c/steps/slic3r_step_gcode.h
+	Api/plugin/c/steps/slic3r_step_gcode_export.h
 	Api/plugin/c/steps/slic3r_step_gcode_firmware.h
 	Api/plugin/c/steps/slic3r_step_gcode_reader.h
 	Api/plugin/c/steps/slic3r_step_gcode_thumbnail.h
@@ -174,6 +181,15 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/properties/ExtrusionProperties.hpp
 	Api/plugin/cpp/properties/PrintingExtrusionScopeProperty.hpp
 	Api/plugin/cpp/gcode/EncodableState.hpp
+	Api/plugin/cpp/gcode/GCodeExporterPlugin.cpp
+	Api/plugin/cpp/gcode/GCodeExporterPlugin.hpp
+	Api/plugin/cpp/gcode/GCodeExportMetadataViews.hpp
+	Api/plugin/cpp/gcode/GCodeFilePublisher.cpp
+	Api/plugin/cpp/gcode/GCodeFilePublisher.hpp
+	Api/plugin/cpp/gcode/GCodePrivateFile.cpp
+	Api/plugin/cpp/gcode/GCodePrivateFile.hpp
+	Api/plugin/cpp/gcode/GCodeTextEnvelope.cpp
+	Api/plugin/cpp/gcode/GCodeTextEnvelope.hpp
 	Api/plugin/cpp/gcode/DefaultExtruder.cpp
 	Api/plugin/cpp/gcode/DefaultExtruder.hpp
 	Api/plugin/cpp/gcode/DefaultGCodeFirmwareSession.cpp
@@ -234,6 +250,15 @@ set(SLIC3R_SOURCES
 	Api/plugin/cpp/Views.hpp
 	Plugins/BridgeDetector.cpp
 	Plugins/BridgeDetector.hpp
+	Plugins/GCode/Exporter/BambuGCodeExporter.cpp
+	Plugins/GCode/Exporter/BambuGCodeExporter.hpp
+	Plugins/GCode/Exporter/BinaryGCodeExporter.cpp
+	Plugins/GCode/Exporter/BinaryGCodeExporter.hpp
+	Plugins/GCode/Exporter/DefaultGCodeExporter.cpp
+	Plugins/GCode/Exporter/DefaultGCodeExporter.hpp
+	Plugins/GCode/Exporter/GCodeExporterShared.hpp
+	Plugins/GCode/Firmware/BambuGCodeFirmware.cpp
+	Plugins/GCode/Firmware/BambuGCodeFirmware.hpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.cpp
 	Plugins/GCode/Firmware/BuiltinGCodeFirmwares.hpp
 	Plugins/GCode/Firmware/KlipperGCodeFirmware.cpp
@@ -248,6 +273,9 @@ set(SLIC3R_SOURCES
 	Plugins/GCode/Firmware/RepRapGCodeFirmware.hpp
 	Plugins/GCode/Firmware/SprinterGCodeFirmware.cpp
 	Plugins/GCode/Firmware/SprinterGCodeFirmware.hpp
+	Plugins/GCode/Reader/BambuGCodeReader.cpp
+	Plugins/GCode/Reader/BambuGCodeReader.hpp
+	Plugins/GCode/Reader/BambuGCodeReaderItems.hpp
 	Plugins/GCode/Reader/BuiltinGCodeReaderBase.cpp
 	Plugins/GCode/Reader/BuiltinGCodeReaderBase.hpp
 	Plugins/GCode/Reader/DefaultGCodeReader.cpp
@@ -277,6 +305,8 @@ set(SLIC3R_SOURCES
 	Plugins/GCode/CustomGCodePerPrintZOrdering.cpp
 	Plugins/GCode/CustomGCodePerPrintZRecord.cpp
 	Plugins/GCode/CustomGCodePerPrintZRecord.hpp
+	Plugins/GCode/PostProcessScripts.cpp
+	Plugins/GCode/PostProcessScripts.hpp
 	Plugins/GCode/PrintingPlanFileWriter.cpp
 	Plugins/GCode/PrintingPlanFileWriter.hpp
 	Plugins/GCode/SettingsGCodeScripts.cpp
@@ -583,6 +613,8 @@ set(SLIC3R_SOURCES
 	Plugins/WipeTower/WipeTowerManager.hpp
 	Printing/PrintingPlan.cpp
 	Printing/PrintingPlan.hpp
+	Printing/PrintingPlanFacts.cpp
+	Printing/PrintingPlanFacts.hpp
 	Steps/StepDetectSupportSpots.cpp
 	Steps/StepDetectSupportSpots.hpp
 	Steps/StepSkirtBrim.cpp
@@ -629,6 +661,8 @@ set(SLIC3R_SOURCES
 	Steps/StepPrepareForPeriemters.hpp
 	Steps/StepPrepareInfill.cpp
 	Steps/StepPrepareInfill.hpp
+	Steps/StepExport.cpp
+	Steps/StepExport.hpp
 	Steps/StepReadGeneratedGcode.cpp
 	Steps/StepReadGeneratedGcode.hpp
 	Steps/StepSlicing.cpp
@@ -728,6 +762,7 @@ set(SLIC3R_SOURCES
     FileParserError.hpp
     FilesystemTransaction.cpp
     FilesystemTransaction.hpp
+	ScopedTemporaryFile.hpp
     FilesystemTransactionTest.hpp
     Fill/Fill.cpp
     Fill/Fill3DHoneycomb.cpp
@@ -767,8 +802,14 @@ set(SLIC3R_SOURCES
     Format/3mf.hpp
     Format/AMF.cpp
     Format/AMF.hpp
+    Format/BambuConfigExport.cpp
+    Format/BambuConfigExport.hpp
     Format/BBConfig.cpp
     Format/BBConfig.hpp
+    Format/CustomVariables.cpp
+    Format/CustomVariables.hpp
+    Format/OrcaConfigKeys.cpp
+    Format/OrcaConfigKeys.hpp
     Format/bbs_3mf.hpp
     Format/bbs_3mf.cpp
     Format/OBJ.cpp
@@ -1082,6 +1123,8 @@ set(SLIC3R_SOURCES
     TriangulateWall.hpp
     utils.cpp
     Utils.hpp
+    Utils/ASCIIFolding.cpp
+    Utils/ASCIIFolding.hpp
     Time.cpp
     Time.hpp
     Timer.cpp

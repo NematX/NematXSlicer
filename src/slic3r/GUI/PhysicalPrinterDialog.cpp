@@ -36,12 +36,34 @@
 #include "PresetComboBoxes.hpp"
 #include "PrintHostDialogs.hpp"
 #include "RemovableDriveManager.hpp"
-#include "slic3r/Utils/ASCIIFolding.hpp"
+#include "libslic3r/Utils/ASCIIFolding.hpp"
 #include "slic3r/Utils/FixModelByWin10.hpp"
 #include "slic3r/Utils/PrintHost.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
 #include "Tab.hpp"
 #include "wxExtensions.hpp"
+
+/*
+Edit a physical printer's connection details and associated printer presets.
+The dialog builds typed settings controls, validates the edited values and
+updates the selected physical-printer record when the user accepts. Preset rows
+manage associations; they do not copy or regenerate a sliced Print.
+
+Discovery, file selection and connection-related prompts use modal UI owned by
+this dialog. Cancelled edits must not be mistaken for accepted configuration.
+The owning preset collections keep the saved records after the dialog closes.
+
+Representative direct calls (branches are not a timeline):
+
+    PhysicalPrinterDialog::OnOK()
+        |-- m_printer.reset_presets()
+        |-- m_printer.add_preset()
+        |-- m_printer.set_name()
+        |-- printers.save_printer()
+        |-- printers.select_printer()
+        |-- select_preset()
+        `-- update_preset_choice()
+*/
 namespace Slic3r {
 namespace GUI {
 

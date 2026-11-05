@@ -581,9 +581,16 @@ public:
     DynamicPrintConfig&        physical_printer_config() { return m_physical_printer_config; }
 
     virtual std::string        output_filename(const std::string &filename_base = std::string()) const = 0;
+    // Format an output name with an exporter-specific extension through the legacy virtual by default.
+    virtual std::string        output_filename(const std::string &filename_base,
+                                               const std::string &default_extension) const;
     // If the filename_base is set, it is used as the input for the template processing. In that case the path is expected to be the directory (may be empty).
     // If filename_set is empty, than the path may be a file or directory. If it is a file, then the macro will not be processed.
     std::string                output_filepath(const std::string &path, const std::string &filename_base = std::string()) const;
+    // Resolve automatic, directory-based, or explicit output paths using the supplied default extension.
+    std::string                output_filepath(const std::string &path,
+                                               const std::string &filename_base,
+                                               const std::string &default_extension) const;
 
     // If the background processing stop was requested, throw CanceledException.
     // To be called by the worker thread and its sub-threads (mostly launched on the TBB thread pool) regularly.

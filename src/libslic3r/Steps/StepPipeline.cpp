@@ -11,6 +11,7 @@
 #include "libslic3r/Api/internal/LayerRegionAccess.hpp"
 #include "libslic3r/Api/internal/PrintObjectAccess.hpp"
 #include "libslic3r/Config/ConfigDef.hpp"
+#include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "libslic3r/I18N.hpp"
 #include "libslic3r/format.hpp"
@@ -21,6 +22,7 @@
 #include "libslic3r/Steps/StepDetectSupportSpots.hpp"
 #include "libslic3r/Steps/StepExtrusionEdition.hpp"
 #include "libslic3r/Steps/StepExtrusionOrdering.hpp"
+#include "libslic3r/Steps/StepExport.hpp"
 #include "libslic3r/Steps/StepExtrusionSimplification.hpp"
 #include "libslic3r/Steps/StepFinalizeSlicing.hpp"
 #include "libslic3r/Steps/StepGenerateGcode.hpp"
@@ -46,8 +48,6 @@
 #include "libslic3r/Steps/StepSurfaceGeneration.hpp"
 #include "libslic3r/SurfaceCollection.hpp"
 #include "libslic3r/Thread.hpp"
-
-#include <boost/log/trivial.hpp>
 
 #include <algorithm>
 #include <cassert>
@@ -149,6 +149,34 @@ std::string generated_plugin_exclusive_group_option_key(const Orchestrator &orch
 // Inputs are not retained or changed; lookup, comparison and formatting failures propagate.
 std::optional<std::string> unsupported_active_setting(const Orchestrator &orchestrator, const ConfigDef &definitions, const ConfigBase &config,
     const std::function<const Plugin *(const std::string &group_id)> &selected_plugin_of_group);
+// Resolve the replay checkpoint of a key from the print configuration catalogue (see the declaration).
+// This only reads the catalogue: the active plugin readers are looked up here because
+// tighten_used_config_key_invalidations() cannot record them for a bookkeeping key (it keeps
+// STEP_ANY, which is also the catalogue default), and it would have to rewrite the definition.
+std::optional<Checkpoint> config_option_replay_checkpoint(const std::string &key)
+{
+    const ConfigOptionDef *definition = PrintConfigDef::instance().get(key);
+    if (definition == nullptr)
+        return Checkpoint::None;
+    slicing_step_t step = definition->invalidates_step;
+    if (step == STEP_NONE)
+        return std::nullopt;
+    if (definition->nature == ConfigOptionNature::Bookkeeping) {
+        if (step == STEP_ANY)
+            step = STEP_NONE;
+        // Keep the earliest step among the active plugins that read the key; STEP_NONE means none found yet.
+        for (const Plugin *plugin : Orchestrator::instance().active_plugins()) {
+            for (const Plugin::UsedConfigKey &used_key : plugin->get_used_config_keys()) {
+                if (used_key.key != key)
+                    continue;
+                const slicing_step_t owner = plan_owner_step(*plugin);
+                if (owner != STEP_NONE && (step == STEP_NONE || executes_before(owner, step)))
+                    step = owner;
+            }
+        }
+    }
+    return step == STEP_NONE ? std::nullopt : std::optional<Checkpoint>(checkpoint_before_step(step));
+}
 
 const std::vector<slicing_step_t> &execution_order()
 {
@@ -177,6 +205,7 @@ const std::vector<slicing_step_t> &execution_order()
         STEP_EXTRUSION_EDIT,
         STEP_EXTRUSION_SIMPLIFICATION,
         STEP_GCODE,
+        STEP_EXPORT,
     };
     return steps;
 }
@@ -231,7 +260,10 @@ Checkpoint checkpoint_before_step(const slicing_step_t step)
         return Checkpoint::Print;
     if (step_index < execution_index(checkpoint_resume_step(Checkpoint::Plan)))
         return Checkpoint::Ordering;
-    return Checkpoint::Plan;
+    // The export is the only step after the reference: it resumes from the reference itself.
+    if (step_index < execution_index(checkpoint_resume_step(Checkpoint::GCode)))
+        return Checkpoint::Plan;
+    return Checkpoint::GCode;
 }
 
 slicing_step_t checkpoint_resume_step(const Checkpoint checkpoint)
@@ -242,7 +274,7 @@ slicing_step_t checkpoint_resume_step(const Checkpoint checkpoint)
     case Checkpoint::Print:    return STEP_ORDERING;
     case Checkpoint::Ordering: return STEP_WIPETOWER;
     case Checkpoint::Plan:     return STEP_GCODE;
-    case Checkpoint::GCode:    return STEP_NONE;
+    case Checkpoint::GCode:    return STEP_EXPORT;
     }
     assert(false);
     return STEP_LAYER_HEIGHT;
@@ -406,7 +438,7 @@ std::string option_key_for_plugin_group(const Orchestrator &orchestrator,
     return generated_plugin_exclusive_group_option_key(orchestrator, step, group_id);
 }
 
-// Compare the numeric identity with the built-in list; services are recognized but are not added to execution order.
+// Return whether the supplied ID is a recognized built-in step or service; unknown IDs return false without mutation.
 bool is_known_builtin_step(slicing_step_t step)
 {
     switch (step) {
@@ -438,6 +470,7 @@ bool is_known_builtin_step(slicing_step_t step)
     case STEP_EXTRUSION_EDIT:
     case STEP_EXTRUSION_SIMPLIFICATION:
     case STEP_GCODE:
+    case STEP_EXPORT:
     case INFILL_PATTERN:
     case INFILL_SURFACE_RECIPE_MODIFIER:
     case BRIDGE_DETECTOR:
@@ -474,12 +507,12 @@ std::string plugin_group_ui_fragment(const StepExclusiveGroup &group, const std:
 }
 
 /*
-Populate the returned group with owned display strings, borrowed raw-option pointers, and its UI
-fragment; copied strings become group-owned buffers, while the raw option definition borrows those
-buffers. Mark the selector enum for inactive-ID pruning during finalization. That finalization
-replaces the enum table, which ConfigOptionEnumGeneric only borrows, so no selector-bearing config
-may exist before finalize_plugin_option_defs(); this function creates metadata only. Allocation
-failures propagate and no option-definition validation occurs here.
+Populate one exclusive group with owned display strings, borrowed raw-option pointers, and a UI
+fragment; the raw definition borrows strings stored by the group. Mark plugin IDs for pruning during
+finalization and keep STEP_EXPORT's selector at STEP_NONE because it changes only output format.
+The group must outlive registration, while option finalization replaces borrowed enum storage only
+before selector-bearing configs are created. Allocation failures propagate; no option definition is
+registered here.
 */
 StepExclusiveGroup make_exclusive_group(slicing_step_t step,
                                         const std::string &group_id,
@@ -584,6 +617,7 @@ void register_builtin_step_selectors(Orchestrator &orchestrator)
     StepGenerateWipeTower::register_selector_traits(orchestrator);
     StepLayerStiching::register_selector_traits(orchestrator);
     StepGenerateGcode::register_selector_traits(orchestrator);
+    StepExport::register_selector_traits(orchestrator);
     StepReadGeneratedGcode::register_selector_traits(orchestrator);
     for (const std::pair<const slicing_step_t, StepExclusiveIdentity> &entry : get_exclusive_steps()) {
         if (orchestrator.exclusive_group_definition(entry.first, entry.second.key) == nullptr) {
@@ -642,6 +676,7 @@ std::string plugin_exclusive_group_option_key(const Orchestrator &orchestrator,
     return option_key_for_plugin_group(orchestrator, step, group_id);
 }
 
+// Rebuild option-definition pointers into this group's owned strings and enum arrays, retaining the fixed PNG or simple-exporter defaults; no storage is transferred and allocation failures propagate.
 void StepExclusiveGroup::refresh_storage_pointers()
 {
     if (!option_key_storage.empty())
@@ -707,12 +742,13 @@ const std::map<slicing_step_t, StepExclusiveIdentity> &get_exclusive_steps()
         {STEP_INFILL,         {"step_infill_plugin",         "Infill plugin",          "Infill step plugin"}},
         {STEP_WIPETOWER,      {"step_wipetower_plugin",      "Wipe tower plugin",      "Wipe tower step plugin"}},
         {STEP_LAYER_STICHING, {"step_layer_stiching_plugin", "Layer stitching plugin", "Layer stitching step plugin"}},
-        {STEP_GCODE,          {"step_gcode_plugin",          "G-code plugin",          "G-code step plugin"}},
-        {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}}
+        {GCODE_FIRMWARE,      {"gcode_firmware_plugin",      "G-code firmware",        "G-code firmware"}},
+        {STEP_EXPORT,        {"gcode_exporter_plugin",      "G-code exporter",        "G-code exporter"}}
     };
     return s_groups;
 }
 
+// Build owned group snapshots with borrowed provider pointers, retaining the G-code exporter selector with one provider; empty groups are omitted and allocation failures propagate.
 std::vector<StepExclusivePluginGroup> active_exclusive_plugin_groups(Orchestrator &orchestrator)
 {
     std::vector<StepExclusivePluginGroup> out;
@@ -776,6 +812,11 @@ Plugin *selected_plugin_from_group(const Orchestrator &orchestrator, const StepE
 {
     if (plugins.empty())
         return nullptr;
+    if (config == nullptr && group.traits.strict_selection && group.traits.value_when_absent) {
+        for (Plugin *plugin : plugins)
+            if (plugin->get_id() == *group.traits.value_when_absent) return plugin;
+        return nullptr;
+    }
     if (config == nullptr)
         return default_provider_from_group(plugins);
 
@@ -894,6 +935,10 @@ Plugin *selected_or_active_plugin_for_step(Orchestrator &orchestrator,
     return plugins.empty() ? nullptr : plugins.front();
 }
 
+// Collect the active providers of `exclusive_group` on `step` (borrowed) and select one with the borrowed config. A built-in
+// selector (the entry of get_exclusive_steps() with the same step and group ID, such as the G-code firmware or exporter)
+// takes priority and reads its own option key; any other group reads the key derived from its step and ID. Return null
+// when the group has no active provider or the group rules reject the configured ID; nothing is mutated.
 Plugin *selected_active_plugin_from_group(Orchestrator &orchestrator,
                                           slicing_step_t step,
                                           const std::string &exclusive_group,
@@ -951,9 +996,15 @@ std::optional<std::string> unsupported_active_setting(
 
 namespace {
 
+// Build the progress plan of the steps from first_step to last_step (both included) that are
+// pending, unless an unfinished plan is still active. Steps after last_step are not counted:
+// the preview ends at STEP_GCODE, so a pending export must not hold its percentage below 100. The plan starts at
+// initial_percent, which the main bar never falls below.
 void initialize_pipeline_progress(Orchestrator &orchestrator,
                                   Print &print,
-                                  const slicing_step_t first_step)
+                                  const slicing_step_t first_step,
+                                  const slicing_step_t last_step,
+                                  const int initial_percent = 0)
 {
     if (print.pipeline_progress().active() && print.pipeline_progress().percent() < 100)
         return;
@@ -970,6 +1021,8 @@ void initialize_pipeline_progress(Orchestrator &orchestrator,
         in_requested_scope = in_requested_scope || step == first_step;
         if (!in_requested_scope)
             continue;
+        if (executes_before(last_step, step))
+            break;
         if (!print.should_execute_step(step))
             continue;
 
@@ -985,10 +1038,15 @@ void initialize_pipeline_progress(Orchestrator &orchestrator,
                 if (plugin != nullptr)
                     unit_ids.push_back(plugin->get_id());
         }
+        // After its plugins the host owns one more unit. It is completed by the end of the
+        // step (complete_step), after the Reader pass, so the percentage stays below 100
+        // until the pass is done.
+        if (step == STEP_GCODE)
+            unit_ids.push_back(k_gcode_read_progress_unit);
         if (unit_ids.empty())
             unit_ids.emplace_back();
     }
-    print.pipeline_progress().initialize(units_by_step);
+    print.pipeline_progress().initialize(units_by_step, initial_percent);
 }
 
 void begin_step(Print &print, slicing_step_t step, const std::string &message)
@@ -1029,21 +1087,31 @@ void run_step_if_requested(Print &print, slicing_step_t step, RunFn &&run_fn)
     if (step == STEP_LAYER_HEIGHT)
         print.save_metadata_checkpoint(Checkpoint::None);
     print.set_running_step(step);
-    {
-        const RunningStepScope running_step_scope{print};
-        run_fn();
-    }
+    try {
+        {
+            const RunningStepScope running_step_scope{print};
+            run_fn();
+        }
 
-    // A step may observe cancellation cooperatively and return without
-    // throwing. Do not publish such partial work as a completed step.
-    print.throw_if_canceled();
-    print.pipeline_progress().complete_step(step);
-    print.pipeline_progress().verify_step_complete(step);
-    if (step == STEP_POST_SLICING) {
+        // A step may observe cancellation cooperatively and return without
+        // throwing. Do not publish such partial work as a completed step.
         print.throw_if_canceled();
-        print.save_metadata_checkpoint(Checkpoint::Slicing);
+        print.pipeline_progress().complete_step(step);
+        print.pipeline_progress().verify_step_complete(step);
+        if (step == STEP_POST_SLICING) {
+            print.throw_if_canceled();
+            print.save_metadata_checkpoint(Checkpoint::Slicing);
+        }
+        print.mark_step_executed(step);
+    } catch (...) {
+        // A failed or cancelled step may have completed only some of its
+        // progress units, and the pipeline would then refuse the units of the
+        // next attempt as out of order. Drop the whole table: the next
+        // run_gcode() rebuilds a fresh one, because it only keeps a table that
+        // is active and incomplete.
+        print.pipeline_progress().reset();
+        throw;
     }
-    print.mark_step_executed(step);
 }
 
 void run_layer_height_generation(Orchestrator &orchestrator, Print &print, const std::string &path)
@@ -1072,14 +1140,14 @@ void run_post_slicing(Orchestrator &orchestrator, Print &print, const std::strin
     });
 }
 
-// Borrow the host/Print and optional renderer/result destinations, executing
+// Borrow the host/Print and optional result destinations, executing
 // marked steps through until. Export publishes the source/reader pair and only
 // reads when a viewer result is requested, filling measured statistics on success.
 // No borrowed pointers are retained; pipeline failures/cancellation propagate,
-// while optional preview-read failures remain non-critical warnings.
+// including a failure to read the generated G-code when a viewer result is requested:
+// STEP_GCODE is then not marked as done.
 void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::string &path,
                          slicing_step_t until = STEP_GCODE,
-                         const raw_gcode_thumbnail_renderer *thumbnail_renderer = nullptr,
                          std::string *reader_plugin_id = nullptr,
                          GCodeProcessorResult *gcode_result = nullptr)
 {
@@ -1241,54 +1309,35 @@ void run_remaining_steps(Orchestrator &orchestrator, Print &print, const std::st
         begin_step(print, STEP_GCODE, L("Generating G-code"));
         StepGenerateGcode::prepare(print);
         const std::string selected_reader = StepGenerateGcode::run_step(
-            orchestrator, print, path, thumbnail_renderer);
-        // The writer published the source; associate its already-selected
-        // reader so an explicit CLI reread needs no new firmware session.
+            orchestrator, print, path);
+        // The STEP_GCODE plugins have all finished and the writer published the
+        // source; associate its already-selected reader so an explicit CLI reread needs no new firmware session.
         print.set_gcode_reader_source_path(print.gcode_reader_source_path(), selected_reader);
         if (reader_plugin_id != nullptr)
             *reader_plugin_id = selected_reader;
 
+        // The Reader pass is a host progress unit of this step: announce it, then
+        // complete the unit below once the pass is over.
         if (gcode_result != nullptr) {
+            begin_step(print, STEP_GCODE, L("Reading the generated G-code"));
             try {
                 StepReadGeneratedGcode::run(
                     orchestrator, print, selected_reader, *gcode_result);
                 StepReadGeneratedGcode::fill_print_statistics(
                     *gcode_result, print.config(), print.print_statistics());
             } catch (const CanceledException &) {
-                // Preview generation is optional when it fails, but an
-                // explicit slicing cancellation must still unwind the whole
-                // pipeline with the standard host exception.
                 throw;
-            } catch (const std::exception &error) {
-                gcode_result->reset();
-                gcode_result->reader_plugin_id = selected_reader;
-                const std::string message =
-                    "G-code preview is unavailable because the generated text could not be read: " +
-                    std::string(error.what());
-                BOOST_LOG_TRIVIAL(warning) << message;
-                Print::StatusMonitor status(print);
-                status.active_step_add_warning(
-                    PrintStateBase::WarningLevel::NON_CRITICAL, message);
             } catch (...) {
+                // The step stays undone, so the caller's result must not keep
+                // the reading of an earlier reference.
                 gcode_result->reset();
-                gcode_result->reader_plugin_id = selected_reader;
-                const std::string message =
-                    "G-code preview is unavailable because the generated text reader failed unexpectedly.";
-                BOOST_LOG_TRIVIAL(warning) << message;
-                Print::StatusMonitor status(print);
-                status.active_step_add_warning(
-                    PrintStateBase::WarningLevel::NON_CRITICAL, message);
+                throw;
             }
         }
-        // The Reader and firmware are services nested under the G-code writer.
-        // Complete the writer's single top-level unit only after those services
-        // and the optional viewer result have also finished.
-        Plugin *writer = selected_or_active_plugin_for_step(
-            orchestrator, STEP_GCODE, &print.full_print_config());
-        if (writer != nullptr)
-            print.pipeline_progress().complete_plugin(STEP_GCODE, writer->get_id());
     });
     if (stop_after(STEP_GCODE, until)) return;
+    // STEP_EXPORT does not run here: it needs a request and a ready reference, and must never trigger an earlier
+    // step that an invalidation made pending. StepPipeline::run_export() runs it alone.
 }
 
 } // namespace
@@ -1332,10 +1381,11 @@ void StepPipeline::run_slice(Orchestrator &orchestrator, Print &print)
         print.prepare_checkpoint_resume();
     }
     // run_slice() starts a new end-to-end execution. run_gcode() will retain
-    // this table while it is incomplete so slicing and export share one
-    // denominator.
+    // this table while it is incomplete so slicing and the G-code reference of
+    // the preview share one denominator. It ends at STEP_GCODE: the export has
+    // its own table (see run_export()).
     print.pipeline_progress().reset();
-    initialize_pipeline_progress(orchestrator, print, STEP_LAYER_HEIGHT);
+    initialize_pipeline_progress(orchestrator, print, STEP_LAYER_HEIGHT, STEP_GCODE);
 
     run_layer_height_generation(orchestrator, print, path);
     run_slicing(orchestrator, print, path);
@@ -1345,7 +1395,6 @@ void StepPipeline::run_slice(Orchestrator &orchestrator, Print &print)
 
 std::string StepPipeline::run_gcode(Orchestrator &orchestrator, Print &print,
                              const std::string &path,
-                             const raw_gcode_thumbnail_renderer *thumbnail_renderer,
                              GCodeProcessorResult *result)
 {
 #ifdef _DEBUG
@@ -1362,11 +1411,41 @@ std::string StepPipeline::run_gcode(Orchestrator &orchestrator, Print &print,
     // Resume from the latest valid checkpoint, restoring the ordered plan copy
     // when plan editors are the first steps to replay.
     print.prepare_checkpoint_resume();
-    initialize_pipeline_progress(orchestrator, print, checkpoint_resume_step(Checkpoint::Slicing));
+    initialize_pipeline_progress(orchestrator, print, checkpoint_resume_step(Checkpoint::Slicing), STEP_GCODE);
     std::string reader_plugin_id;
-    run_remaining_steps(orchestrator, print, path, STEP_GCODE, thumbnail_renderer,
-                        &reader_plugin_id, result);
+    run_remaining_steps(orchestrator, print, path, STEP_GCODE, &reader_plugin_id, result);
     return reader_plugin_id;
+}
+
+// Run STEP_EXPORT alone. It deliberately does not go through run_remaining_steps(): that function visits every step and
+// runs those that are pending, so a STEP_GCODE invalidated between the request and this call (or between a check made
+// by the caller and the loop) would be replayed and the writer would run again to serve an export. Here only the export
+// is run; its runner fails when the reference is not ready. Throws when no export was queued. The request is consumed on
+// every outcome. Locking: the caller must not hold state_mutex(); the step takes it where it needs it.
+void StepPipeline::run_export(Orchestrator &orchestrator, Print &print)
+{
+    if (!print.should_execute_step(STEP_EXPORT))
+        throw RuntimeError("No export was requested: deposit an export request before running the export.");
+
+    orchestrator.reset_plugin_cancel();
+    // The export is an operation of its own: it gets a fresh progress plan holding this step only, whatever
+    // the unfinished plan of an earlier operation was. The plan starts at the percentage already shown, which is
+    // not the percentage of the previous plan: process() resets that plan when nothing is left to slice, and
+    // export_gcode() publishes its 100 % without a plan. The main bar never goes back; the progress inside the step
+    // is the secondary bar. A new slicing is a new operation and may restart at 0.
+    const int shown_percent = print.pipeline_progress().shown_percent();
+    print.pipeline_progress().reset();
+    initialize_pipeline_progress(orchestrator, print, STEP_EXPORT, STEP_EXPORT, shown_percent);
+    try {
+        run_step_if_requested(print, STEP_EXPORT, [&] {
+            begin_step(print, STEP_EXPORT, L("Exporting G-code"));
+            StepExport::run_step(orchestrator, print);
+        });
+    } catch (...) {
+        // A request serves one attempt: a failed or cancelled attempt must not leave it for a later one.
+        print.take_export_request();
+        throw;
+    }
 }
 
 void StepPipeline::run(Orchestrator &orchestrator, Print &print, const std::string &path)

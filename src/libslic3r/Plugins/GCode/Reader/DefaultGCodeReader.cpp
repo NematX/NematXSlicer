@@ -5,6 +5,7 @@
 
 #include "DefaultGCodeReader.hpp"
 
+#include "BambuGCodeReader.hpp"
 #include "KlipperGCodeReader.hpp"
 #include "Marlin1GCodeReader.hpp"
 #include "Marlin2GCodeReader.hpp"
@@ -20,17 +21,16 @@ The default Reader is a deliberately conservative concrete use of the shared
 modal parser. This file also owns registration so the loader has one entry
 point while each dialect keeps its implementation isolated in its own file.
 
-    register_builtin_gcode_reader_plugins()
-        +-- DefaultGCodeReader
-        +-- Marlin1GCodeReader
-        +-- Marlin2GCodeReader
-        +-- PrusaGCodeReader
-        +-- SprinterGCodeReader
-        +-- RepRapGCodeReader
-        `-- KlipperGCodeReader
-
-All seven objects are process-lived and immutable. Per-run state belongs to the
+All eight objects are process-lived and immutable. Per-run state belongs to the
 base parser, allowing simultaneous probes and reads without shared mutation.
+
+Operation notes:
+- register_builtin_gcode_reader_plugins()
+
+Representative direct calls (branches are not a timeline):
+
+    register_builtin_gcode_reader_plugins()
+        `-- orchestrator_register_plugin()
 */
 
 namespace slic3r_api { namespace GCodeGeneration { namespace Reader {
@@ -70,6 +70,7 @@ void register_builtin_gcode_reader_plugins(orchestrator_handle *orchestrator)
     static SprinterGCodeReader sprinter_reader(orchestrator);
     static RepRapGCodeReader reprap_reader(orchestrator);
     static KlipperGCodeReader klipper_reader(orchestrator);
+    static BambuGCodeReader bambu_reader(orchestrator);
     orchestrator_register_plugin(orchestrator, default_reader.c_instance());
     orchestrator_register_plugin(orchestrator, marlin1_reader.c_instance());
     orchestrator_register_plugin(orchestrator, marlin2_reader.c_instance());
@@ -77,6 +78,7 @@ void register_builtin_gcode_reader_plugins(orchestrator_handle *orchestrator)
     orchestrator_register_plugin(orchestrator, sprinter_reader.c_instance());
     orchestrator_register_plugin(orchestrator, reprap_reader.c_instance());
     orchestrator_register_plugin(orchestrator, klipper_reader.c_instance());
+    orchestrator_register_plugin(orchestrator, bambu_reader.c_instance());
 }
 
 }}} // namespace slic3r_api::GCodeGeneration::Reader

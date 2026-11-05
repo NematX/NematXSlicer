@@ -14,6 +14,16 @@
 #ifndef slic3r_MainFrame_hpp_
 #define slic3r_MainFrame_hpp_
 
+/*
+MainFrame owns the application's main windows and menus. Construction connects
+menu commands to Plater actions; update handlers decide which commands are
+available from current GUI state. The frame requests work from Plater rather
+than running slicing or a file exporter from a menu callback.
+
+The application frame owns menus and routes their actions to Plater. Availability
+checks combine current GUI state with cached exporter information.
+*/
+
 #include <wx/filehistory.h>
 #include <wx/string.h>
 
@@ -115,6 +125,7 @@ class MainFrame : public DPIFrame
     bool can_export_supports() const;
     bool can_export_gcode() const;
     bool can_send_gcode() const;
+	// Check model, pending export, cached exporter suitability and connected drives for the removable export menu action.
 	bool can_export_gcode_sd() const;
 	bool can_eject() const;
     bool can_slice() const;

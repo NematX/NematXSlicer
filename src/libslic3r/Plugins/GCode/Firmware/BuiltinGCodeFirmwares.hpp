@@ -27,6 +27,7 @@ void register_prusa_gcode_firmware_plugin(orchestrator_handle *orchestrator);
 void register_reprap_gcode_firmware_plugin(orchestrator_handle *orchestrator);
 void register_sprinter_gcode_firmware_plugin(orchestrator_handle *orchestrator);
 void register_klipper_gcode_firmware_plugin(orchestrator_handle *orchestrator);
+void register_bambu_gcode_firmware_plugin(orchestrator_handle *orchestrator);
 void register_builtin_gcode_firmware_plugins(orchestrator_handle *orchestrator);
 
 }}} // namespace slic3r_api::GCodeGeneration::Firmware
