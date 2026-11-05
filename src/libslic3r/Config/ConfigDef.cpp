@@ -20,7 +20,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* Definitions own metadata and defaults. Nature predicates describe persistence and comparison eligibility without changing stored values. */
+
 #include "ConfigDef.hpp"
 
 #include <cassert>
@@ -53,6 +53,24 @@
 #include "PrintConfig.hpp"
 #include "Semver.hpp"
 #include "Utils.hpp"
+
+/*
+Configuration definitions describe options and own their default values.
+An option's nature determines where it may be saved and whether it is compared.
+These permission checks do not change the stored value.
+
+The caller can preserve unknown text separately; it is not an active option.
+
+Operation notes:
+- ConfigBase::set_deserialize_nothrow
+- set_deserialize_raw: parse a known option
+- On an unknown key, record its name and original text in ConfigSubstitutions
+
+Representative direct calls (branches are not a timeline):
+
+    ConfigBase::set_deserialize_nothrow()
+        `-- this->set_deserialize_raw()
+*/
 
 #define L(s) (s)
 
@@ -894,7 +912,9 @@ bool ConfigBase::set_deserialize_nothrow(const t_config_option_key &opt_key_src,
     assert(value == value_src);
     try {
         return this->set_deserialize_raw(opt_key, value, substitutions_ctxt, append);
-    } catch (UnknownOptionException e) {
+    } catch (const UnknownOptionException &) {
+        // Keep the unknown key and its text for the caller without installing an active option.
+        substitutions_ctxt.emplace(std::string(opt_key), std::string(value));
         return true;
     }
 }

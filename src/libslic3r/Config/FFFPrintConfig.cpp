@@ -21,10 +21,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* Built-in FFF option definitions and preset key lists. Tower options invalidate
-   tower generation, and export merges their current envelopes with the cached
-   slicing hull. Object tower offsets use model-instance XY. Active single-extruder
-   multi-material (SEMM) requires support from the selected firmware provider. */
 #include "FFFPrintConfig.hpp"
 
 #include <algorithm>
@@ -41,6 +37,35 @@
 #include "Flow.hpp"
 #include "PointUtils.hpp"
 #include "Api/plugin/c/slic3r_slicing_step.h"
+
+/*
+Build the definitions and profile key lists for filament printing (FFF).
+init_categories() assigns built-in settings to their profile types;
+init_fff_params() supplies their types, defaults, validation limits and GUI text.
+These definitions describe settings; they do not hold a user's chosen values or
+generate toolpaths. Consumers copy defaults into the appropriate config store.
+
+Retained unknown settings are text, not options used by slicing.
+print_custom_setting stores JSON groups named print and printer.
+filament_custom_setting stores one JSON string per filament position.
+These fields preserve imported data; they are not the custom-variable fields.
+
+Operation notes:
+- init_categories: assign keys to the profile types that own them
+- init_fff_params: define FFF options and their defaults
+
+Representative direct calls (branches are not a timeline):
+
+    init_categories()
+        `-- definition.option_keys()
+
+    init_fff_params()
+        |-- init_milling_params()
+        |-- init_categories()
+        |-- definition.add()
+        |-- def->set_default_value()
+        `-- def->set_enum_values()
+*/
 
 namespace Slic3r {
 
@@ -958,6 +983,7 @@ void init_categories(PrintConfigDef &definition)
         "support_tree_top_rate",
         // miscellaneous
         "notes", 
+        "print_custom_setting",
         "print_custom_variables",
         "complete_objects",
         "parallel_islands",
@@ -1107,6 +1133,7 @@ void init_categories(PrintConfigDef &definition)
 
     definition.option_keys(RAW_PRESET_TYPE_FFF_FILAMENT).insert({
         "filament_colour", 
+        "filament_custom_setting",
         "filament_custom_variables",
         "filament_diameter", "filament_type", "filament_soluble", "filament_notes",
         "filament_max_wipe_tower_speed",
@@ -1236,6 +1263,7 @@ void init_categories(PrintConfigDef &definition)
         "before_layer_gcode",
         "layer_gcode",
         //printer fields
+        "print_custom_setting",
         "printer_custom_variables",
         "printer_vendor",
         "printer_model", 
@@ -2489,6 +2517,15 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comAdvancedE | comPrusa;
     def->is_vector_extruder = true;
     def->set_default_value(new ConfigOptionStrings{ "#29B2B2" });
+
+    // Preserve unknown settings as a JSON string for each filament position.
+    def = definition.add("filament_custom_setting", coStrings, ptFFF);
+    def->label = L("Custom setting");
+    def->category = OptionCategory::advanced;
+    def->mode = comExpert | comSuSi;
+    def->cli = ConfigOptionDef::nocli;
+    def->is_vector_extruder = true;
+    def->set_default_value(new ConfigOptionStrings{ "" });
 
     def = definition.add("filament_custom_variables", coStrings, ptFFF);
     def->label = L("Custom variables");
@@ -4521,6 +4558,14 @@ void init_fff_params(PrintConfigDef &definition)
     def->mode = comAdvancedE | comPrusa;
     def->cli = ConfigOptionDef::nocli;
     def->set_default_value(new ConfigOptionEnum<PrintHostType>(htPrusaLink));
+
+    // Store unknown print/printer settings in one string, under separate JSON groups.
+    def = definition.add("print_custom_setting", coString, ptFFF);
+    def->label = L("Custom setting");
+    def->category = OptionCategory::advanced;
+    def->mode = comExpert | comSuSi;
+    def->cli = ConfigOptionDef::nocli;
+    def->set_default_value(new ConfigOptionString{ "" });
 
     def = definition.add("print_custom_variables", coString, ptFFF);
     def->label = L("Custom variables");

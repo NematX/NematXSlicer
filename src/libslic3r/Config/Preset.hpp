@@ -5,6 +5,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
+
 #ifndef slic3r_Preset_hpp_
 #define slic3r_Preset_hpp_
 
@@ -17,6 +18,21 @@
 
 #include "PrintConfig.hpp"
 #include "libslic3r/Semver.hpp"
+
+/*
+Preset is one saved profile plus its identity and compatibility state. A
+PresetCollection loads profiles of one category, keeps an edited copy of the
+selected profile and resolves selection/compatibility against the other categories.
+Load or import first, choose profiles, then compose the configuration used by Print.
+Unknown text preservation below is a separate persistence path, not another way
+to add live typed options to the slicing configuration.
+
+Preset owns one profile's settings and identity. Collections load and select these profiles.
+Validate retained JSON before loading. preserve_unknown_* helpers save unrecognized text separately.
+print_custom_setting_for_origin() extracts the print or printer group when splitting a project.
+merge_print_custom_settings() combines those groups when building the full configuration.
+Known profile metadata remains separate from these retained values.
+*/
 
 namespace Slic3r {
 
@@ -267,8 +283,10 @@ public:
     static const std::string&               suffix_modified();
     static std::string                      remove_suffix_modified(const std::string& name);
     static void                             normalize(DynamicPrintConfig &config);
-    // Report configuration fields, which are misplaced into a wrong group, remove them from the config.
-    static std::string                      remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config);
+    // Remove keys absent from default_config and return their names as comma-separated text.
+    // Optionally capture their serialized values, but only when local, project and G-code saves all allow them.
+    static std::string                      remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config,
+                                                               ConfigSubstitutions *preserved_substitutions = nullptr);
     
     //for emplace_back
 protected:
@@ -283,6 +301,22 @@ protected:
     friend class        PresetBundle;
     friend class        _BBS_3MF_Importer;
 };
+
+// Save captured FFF text in the print/printer group or the filament JSON field for preset_type.
+// Values already stored there take precedence. These values are not active slicing options.
+void preserve_unknown_preset_settings(DynamicPrintConfig &config, Preset::Type preset_type, const ConfigSubstitutions &substitutions);
+// Infer groups for unknown project keys from their name prefixes; keep explicitly stored groups.
+// Split filament values only when their count matches the extruder count. Otherwise keep the whole text.
+void preserve_unknown_project_settings(DynamicPrintConfig &config, const ConfigSubstitutions &substitutions);
+// Check the JSON structure and string values of retained settings without changing config.
+// Invalid data raises ConfigurationError. The meaning of unknown settings is not checked.
+void validate_preset_custom_settings(const DynamicPrintConfig &config);
+// Extract the JSON group named by origin (print or printer) without changing config.
+// Return an empty string when the group is absent. Invalid stored JSON raises ConfigurationError.
+std::string print_custom_setting_for_origin(const DynamicPrintConfig &config, const char *origin);
+// Combine stored print/printer JSON groups without changing either source or the profile metadata.
+// Printer config wins on a shared value. Return an empty string when both stored objects are empty.
+std::string merge_print_custom_settings(const DynamicPrintConfig &print_config, const DynamicPrintConfig &printer_config);
 
 bool is_compatible_with_print  (const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_print, const PresetWithVendorProfile &active_printer);
 bool is_compatible_with_printer(const PresetWithVendorProfile &preset, const PresetWithVendorProfile &active_printer, const DynamicPrintConfig *extra_config);

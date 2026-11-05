@@ -21,11 +21,6 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* Print configuration loading, normalization and preset conversion. Dynamic
-   object overrides contain only a subset of printer settings: normalization
-   can clamp a tower tool's upper bound only when nozzle data is present.
-   Output-statistics definitions describe measured filename placeholders;
-   wipe-tower filament is a length in mm, not an extruded volume. */
 #include "PrintConfig.hpp"
 #include "FFFPrintConfig.hpp"
 #include "SLA/SLAPrintConfig.hpp"
@@ -54,6 +49,31 @@
 #include "Semver.hpp"
 #include "SLA/SupportTree.hpp"
 #include "Utils.hpp"
+
+/* Print configuration loading, normalization and preset conversion for preset
+   importers and the slicing configuration stores declared in PrintConfig.hpp.
+   Definition setup supplies option metadata, enum names and default values;
+   output-statistics definitions describe measured filename placeholders.
+   Wipe-tower filament is a length in mm, not an extruded volume.
+   Loading first converts serialized source names and values, then stores typed
+   options. Normalization adjusts the resulting option set separately so it can
+   also process dynamic object overrides without requiring a complete preset.
+   Dynamic object overrides contain only a subset of printer settings:
+   normalization can clamp a tower tool's upper bound only when nozzle data is present.
+
+   Legacy map loading keeps source names until each conversion branch runs.
+   The caller owns the map; historical setting names and values are converted
+   within these branches as needed, not necessarily both in every branch.
+   Enum lookup tables retain the serialized names used by configuration options.
+
+   Main entry points and their separate responsibilities:
+     PrintConfigDef::PrintConfigDef - initialize option definitions and metadata.
+     PrintConfigDef::handle_legacy_map - convert the caller's serialized map.
+       Handle_legacy_tools::_handle_legacy - apply historical name/value rules
+         while the original source name is still available for each branch.
+     DynamicPrintConfig::normalize_fdm - adjust owned dynamic options for FDM
+       constraints, using nozzle data only when the option subset supplies it.
+*/
 
 namespace Slic3r {
 
@@ -2267,6 +2287,9 @@ std::unordered_set<std::string> prusa_export_to_remove_keys = {
 "z_step",
 
 "print_version",
+// Do not copy retained unknown settings into the Prusa-compatible configuration.
+"print_custom_setting",
+"filament_custom_setting",
 };
 
 std::unordered_set<std::string> prusa_export_to_change_keys =

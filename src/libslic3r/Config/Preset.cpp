@@ -11,6 +11,8 @@
 
 #include <cassert>
 
+#include <nlohmann/json.hpp>
+
 #include "AppConfig.hpp"
 #include "Exception.hpp"
 #include "I18N.hpp"
@@ -53,6 +55,44 @@
 #include "GCode/Thumbnails.hpp"
 
 #include "PresetBundle.hpp"
+
+/*
+Preset collections load, select and compare profiles for the GUI or callers without a GUI.
+A Preset holds one profile's settings, identity and compatibility state.
+
+Unrecognized FFF settings are preserved as text in JSON, not applied to slicing.
+Known settings placed in the wrong profile type can also be preserved, but only
+when their save permissions allow it. Validation checks the JSON shape and string
+values; it cannot check the meaning of settings the application does not recognize.
+Known profile metadata, such as inherits, stays separate.
+
+A combined project configuration loses the source profile of unknown keys.
+Key prefixes suggest a print, printer or filament group. Explicitly stored JSON
+takes precedence over that guess. Composition later combines the saved groups.
+
+Operation notes:
+- Validate stored JSON, normalize settings, then remove misplaced keys
+- preserve_unknown_preset_settings: retain permitted text under its profile type
+- preserve_unknown_project_settings: infer groups from combined project keys
+
+Representative direct calls (branches are not a timeline):
+
+    PresetCollection::load_presets()
+        |-- config.load_from_ini()
+        |-- validate_preset_custom_settings()
+        |-- Preset::normalize()
+        |-- Preset::remove_invalid_keys()
+        |-- preserve_unknown_preset_settings()
+        `-- this->select_preset()
+
+    preserve_unknown_preset_settings()
+        |-- unknown_settings_json()
+        |-- Json::object()
+        |-- merge_json_objects()
+        |-- parse_print_custom_setting()
+        |-- captured.dump()
+        `-- parse_filament_custom_setting()
+*/
 
 using boost::property_tree::ptree;
 
@@ -414,7 +454,222 @@ void Preset::normalize(DynamicPrintConfig &config)
     handle_legacy_sla(config);
 }
 
-std::string Preset::remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config)
+namespace {
+
+using Json = nlohmann::json;
+
+// Merge JSON objects recursively. A source value replaces the target value for the same key.
+void merge_json_objects(Json &target, const Json &source);
+// Parse a JSON object. An empty string gives an empty object.
+// Invalid JSON or a non-object value raises ConfigurationError.
+Json parse_custom_setting(const std::string &serialized);
+// Parse stored print data. Only print/printer groups containing string values are accepted.
+// Invalid structure raises ConfigurationError, as in parse_custom_setting().
+Json parse_print_custom_setting(const std::string &serialized);
+// Parse one filament's stored data as an object of string values.
+// Invalid structure raises ConfigurationError, as in parse_custom_setting().
+Json parse_filament_custom_setting(const std::string &serialized);
+// Collect only unknown values, not replacements of known options.
+Json unknown_settings_json(const ConfigSubstitutions &substitutions);
+// Recognize the printer/extruder name prefixes available in a flat imported configuration.
+bool starts_with_any(const std::string &key, std::initializer_list<const char *> prefixes);
+// Split a quoted, C-escaped string list or a comma-separated value list.
+// Keep each string in serialized form. A malformed quoted list stays as one unchanged value.
+std::vector<std::string> split_raw_vector_value(const std::string &value);
+
+void merge_json_objects(Json &target, const Json &source)
+{
+    for (Json::const_iterator item = source.begin(); item != source.end(); ++item) {
+        Json &destination = target[item.key()];
+        if (destination.is_object() && item.value().is_object())
+            merge_json_objects(destination, item.value());
+        else
+            destination = item.value();
+    }
+}
+
+Json parse_custom_setting(const std::string &serialized)
+{
+    if (serialized.empty())
+        return Json::object();
+    Json parsed;
+    try {
+        parsed = Json::parse(serialized);
+    } catch (const Json::exception &error) {
+        throw ConfigurationError(std::string("Invalid custom setting JSON: ") + error.what());
+    }
+    if (!parsed.is_object())
+        throw ConfigurationError("Custom setting must be a JSON object");
+    return parsed;
+}
+
+Json parse_print_custom_setting(const std::string &serialized)
+{
+    Json parsed = parse_custom_setting(serialized);
+    for (Json::const_iterator origin = parsed.begin(); origin != parsed.end(); ++origin) {
+        if ((origin.key() != "print" && origin.key() != "printer") || !origin.value().is_object())
+            throw ConfigurationError("Print custom setting has an invalid origin");
+        for (const Json &value : origin.value())
+            if (!value.is_string())
+                throw ConfigurationError("Print custom setting values must be strings");
+    }
+    return parsed;
+}
+
+Json parse_filament_custom_setting(const std::string &serialized)
+{
+    Json parsed = parse_custom_setting(serialized);
+    for (const Json &value : parsed)
+        if (!value.is_string())
+            throw ConfigurationError("Filament custom setting values must be strings");
+    return parsed;
+}
+
+Json unknown_settings_json(const ConfigSubstitutions &substitutions)
+{
+    Json result = Json::object();
+    for (const ConfigSubstitution &substitution : substitutions)
+        if (substitution.opt_def == nullptr && !substitution.old_name.empty())
+            result[substitution.old_name] = substitution.old_value;
+    return result;
+}
+
+bool starts_with_any(const std::string &key, std::initializer_list<const char *> prefixes)
+{
+    for (const char *prefix : prefixes)
+        if (boost::starts_with(key, prefix))
+            return true;
+    return false;
+}
+
+std::vector<std::string> split_raw_vector_value(const std::string &value)
+{
+    if (!value.empty() && value.front() == '"') {
+        std::vector<std::string> strings;
+        if (!unescape_strings_cstyle(value, strings))
+            return {value};
+        std::vector<std::string> items;
+        items.reserve(strings.size());
+        for (const std::string &item : strings)
+            items.push_back(escape_strings_cstyle({item}));
+        return items;
+    }
+    std::vector<std::string> items;
+    boost::split(items, value, boost::is_any_of(","));
+    return items;
+}
+
+} // namespace
+
+void preserve_unknown_project_settings(DynamicPrintConfig &config, const ConfigSubstitutions &substitutions)
+{
+    const Json unknown = unknown_settings_json(substitutions);
+    if (unknown.empty())
+        return;
+    const ConfigOptionFloats *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+    const size_t extruder_count = nozzles == nullptr ? 1 : std::max<size_t>(1, nozzles->size());
+    Json print_groups = Json::object();
+    std::vector<Json> filament_slots(extruder_count, Json::object());
+    for (Json::const_iterator item = unknown.begin(); item != unknown.end(); ++item) {
+        const std::string &key = item.key();
+        const std::string value = item.value().get<std::string>();
+        if (boost::starts_with(key, "filament_")) {
+            const std::vector<std::string> items = split_raw_vector_value(value);
+            if (items.size() == extruder_count) {
+                for (size_t slot = 0; slot < extruder_count; ++slot)
+                    filament_slots[slot][key] = items[slot];
+                continue;
+            }
+        }
+        const bool printer = starts_with_any(key, {
+            "printer_", "firmware_", "machine_", "printhost_", "host_", "bed_", "thumbnails_", "gcode_",
+            "extruder_", "retract_", "deretract_", "nozzle_", "tool_"});
+        print_groups[printer ? "printer" : "print"][key] = value;
+    }
+    // The combined project no longer identifies the source profile of each key.
+    // Keep explicitly stored groups when they conflict with the group inferred from a key prefix.
+    if (!print_groups.empty()) {
+        ConfigOptionString *setting = config.option<ConfigOptionString>("print_custom_setting", true);
+        merge_json_objects(print_groups, parse_print_custom_setting(setting->value));
+        setting->value = print_groups.dump();
+    }
+    bool any_filament = false;
+    for (const Json &slot : filament_slots)
+        any_filament = any_filament || !slot.empty();
+    if (any_filament) {
+        ConfigOptionStrings *setting = config.option<ConfigOptionStrings>("filament_custom_setting", true);
+        std::vector<std::string> values = setting->get_values();
+        values.resize(extruder_count);
+        for (size_t slot = 0; slot < extruder_count; ++slot) {
+            Json captured = filament_slots[slot];
+            merge_json_objects(captured, parse_filament_custom_setting(values[slot]));
+            values[slot] = captured.empty() ? std::string() : captured.dump();
+        }
+        setting->set(values);
+    }
+}
+
+void preserve_unknown_preset_settings(DynamicPrintConfig &config, Preset::Type preset_type, const ConfigSubstitutions &substitutions)
+{
+    const Json unknown = unknown_settings_json(substitutions);
+    if (unknown.empty())
+        return;
+    if (preset_type == Preset::TYPE_FFF_PRINT || preset_type == Preset::TYPE_PRINTER) {
+        ConfigOptionString *setting = config.option<ConfigOptionString>("print_custom_setting", false);
+        if (setting == nullptr)
+            return;
+        const char *origin = preset_type == Preset::TYPE_FFF_PRINT ? "print" : "printer";
+        Json captured = Json::object({{origin, unknown}});
+        merge_json_objects(captured, parse_print_custom_setting(setting->value));
+        setting->value = captured.dump();
+    } else if (preset_type == Preset::TYPE_FFF_FILAMENT) {
+        ConfigOptionStrings *setting = config.option<ConfigOptionStrings>("filament_custom_setting", false);
+        if (setting == nullptr)
+            return;
+        std::vector<std::string> values = setting->get_values();
+        if (values.empty())
+            values.emplace_back();
+        Json captured = unknown;
+        merge_json_objects(captured, parse_filament_custom_setting(values.front()));
+        values.front() = captured.dump();
+        setting->set(values);
+    }
+}
+
+void validate_preset_custom_settings(const DynamicPrintConfig &config)
+{
+    const ConfigOptionString *print_setting = config.option<ConfigOptionString>("print_custom_setting");
+    if (print_setting != nullptr)
+        parse_print_custom_setting(print_setting->value);
+    const ConfigOptionStrings *filament_setting = config.option<ConfigOptionStrings>("filament_custom_setting");
+    if (filament_setting != nullptr)
+        for (const std::string &value : filament_setting->get_values())
+            parse_filament_custom_setting(value);
+}
+
+std::string print_custom_setting_for_origin(const DynamicPrintConfig &config, const char *origin)
+{
+    const ConfigOptionString *setting = config.option<ConfigOptionString>("print_custom_setting");
+    if (setting == nullptr)
+        return {};
+    const Json parsed = parse_print_custom_setting(setting->value);
+    const Json::const_iterator item = parsed.find(origin);
+    return item == parsed.end() ? std::string() : Json{{origin, *item}}.dump();
+}
+
+std::string merge_print_custom_settings(const DynamicPrintConfig &print_config, const DynamicPrintConfig &printer_config)
+{
+    Json merged = Json::object();
+    for (const DynamicPrintConfig *config : {&print_config, &printer_config}) {
+        const ConfigOptionString *setting = config->option<ConfigOptionString>("print_custom_setting");
+        if (setting != nullptr)
+            merge_json_objects(merged, parse_print_custom_setting(setting->value));
+    }
+    return merged.empty() ? std::string() : merged.dump();
+}
+
+std::string Preset::remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config,
+                                        ConfigSubstitutions *preserved_substitutions)
 {
     std::string incorrect_keys;
     for (const std::string &key : config.keys())
@@ -425,6 +680,10 @@ std::string Preset::remove_invalid_keys(DynamicPrintConfig &config, const Dynami
                 incorrect_keys += ", ";
                 incorrect_keys += key;
             }
+            // Retained JSON can reach projects and G-code. Do not use it to bypass a known key's save restrictions.
+            if (preserved_substitutions != nullptr && config.writes_key(key, ConfigWriteTarget::Local) &&
+                config.writes_key(key, ConfigWriteTarget::Project) && config.writes_key(key, ConfigWriteTarget::GCode))
+                preserved_substitutions->emplace_back(key, config.opt_serialize(key));
             config.erase(key);
         }
     return incorrect_keys;
@@ -609,15 +868,21 @@ void PresetCollection::load_presets(
                 try {
                     DynamicPrintConfig config;
                     ConfigSubstitutions config_substitutions = config.load_from_ini(preset.file, substitution_rule);
-                    if (! config_substitutions.empty())
-                        substitutions.push_back({ preset.name, m_type, PresetConfigSubstitutions::Source::UserFile, preset.file, std::move(config_substitutions) });
+                    validate_preset_custom_settings(config);
                     // Find a default preset for the config. The PrintPresetCollection provides different default preset based on the "printer_technology" field.
                     const Preset &default_preset = this->default_preset_for(config);
                     preset.config = default_preset.config;
                     preset.config.apply(std::move(config));
                     Preset::normalize(preset.config);
                     // Report configuration fields, which are misplaced into a wrong group.
-                    std::string incorrect_keys = Preset::remove_invalid_keys(preset.config, default_preset.config);
+                    std::string incorrect_keys = Preset::remove_invalid_keys(preset.config, default_preset.config, &config_substitutions);
+                    preserve_unknown_preset_settings(preset.config, m_type, config_substitutions);
+                    // Preserving unknown text must not open a value-substitution dialog. Keep real known-value changes.
+                    config_substitutions.erase(std::remove_if(config_substitutions.begin(), config_substitutions.end(),
+                        [](const ConfigSubstitution &entry) { return entry.opt_def == nullptr; }), config_substitutions.end());
+                    if ((substitution_rule == ForwardCompatibilitySubstitutionRule::Enable ||
+                         substitution_rule == ForwardCompatibilitySubstitutionRule::EnableSystemSilent) && !config_substitutions.empty())
+                        substitutions.push_back({preset.name, m_type, PresetConfigSubstitutions::Source::UserFile, preset.file, std::move(config_substitutions)});
                     if (! incorrect_keys.empty())
                         BOOST_LOG_TRIVIAL(error) << "Error in a preset file: The preset \"" <<
                             preset.file << "\" contains the following incorrect keys: " << incorrect_keys << ", which were removed";
@@ -682,6 +947,7 @@ ExternalPreset PresetCollection::load_external_preset(
     // keys of the profile section (see Preset.hpp). Borrowed; nullptr means no restriction.
     const std::set<t_config_option_key> *read_keys)
 {
+    validate_preset_custom_settings(combined_config);
     // Load the preset over a default preset, so that the missing fields are filled in from the default preset.
     DynamicPrintConfig cfg(this->default_preset_for(combined_config).config);
     t_config_option_keys keys = cfg.keys();
@@ -798,6 +1064,7 @@ ExternalPreset PresetCollection::load_external_preset(
 
 Preset& PresetCollection::load_preset(const std::string &path, const std::string &name, DynamicPrintConfig &&config, bool select)
 {
+    validate_preset_custom_settings(config);
     auto it = this->find_preset_internal(name);
     if (it == m_presets.end() || it->name != name) {
         // The preset was not found. Create a new preset.

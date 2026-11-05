@@ -1,12 +1,6 @@
 ///|/ Copyright (c) SuperSlicer 2026 Durand Remi @supermerill
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-// FFF-specific static print configuration classes.
-//
-// This header keeps the common dynamic/config-definition layer in PrintConfig.hpp
-// separate from the large FFF static configuration hierarchy. Include it when
-// code needs PrintObjectConfig, PrintRegionConfig, PrintConfig, GCodeConfig,
-// FullPrintConfig, or FFF-specific enum values.
 
 #ifndef slic3r_FFFPrintConfig_hpp_
 #define slic3r_FFFPrintConfig_hpp_
@@ -14,6 +8,17 @@
 #include <cstdint>
 
 #include "PrintConfig.hpp"
+
+// FFF-specific static print configuration classes.
+//
+// This header keeps the common dynamic/config-definition layer in PrintConfig.hpp
+// separate from the large FFF static configuration hierarchy. Include it when
+// code needs PrintObjectConfig, PrintRegionConfig, PrintConfig, GCodeConfig,
+// FullPrintConfig, or FFF-specific enum values.
+//
+// print_custom_setting preserves unknown text in JSON groups named print and printer.
+// filament_custom_setting preserves one JSON string per filament position.
+// These stored values do not act as slicing options or custom variables.
 
 namespace Slic3r {
 
@@ -741,6 +746,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
     ((ConfigOptionStrings,              extruder_colour))
     //((ConfigOptionBools,                fan_always_on))
     ((ConfigOptionStrings,              filament_colour))
+    ((ConfigOptionStrings,              filament_custom_setting))
     ((ConfigOptionStrings,              filament_custom_variables))
     ((ConfigOptionStrings,              filament_notes))
     ((ConfigOptionPercents,             filament_max_overlap))
@@ -770,6 +776,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE_WITH_SCOPE(
     ((ConfigOptionFloat,                parallel_objects_step_max_z))
     ((ConfigOptionStrings,              post_process))
     ((ConfigOptionPoint,                priming_position))
+    ((ConfigOptionString,               print_custom_setting))
     ((ConfigOptionString,               print_custom_variables))
     ((ConfigOptionString,               printer_custom_variables))
     ((ConfigOptionString,               printer_model))
