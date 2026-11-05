@@ -28,6 +28,7 @@ add_executable(${_TEST_NAME}_tests
 	test_polygon.cpp
 	test_preset_names.cpp
 	test_preset_preservation.cpp
+	test_preset_vendors.cpp
 	test_polyline.cpp
 	test_mutable_polygon.cpp
 	test_mutable_priority_queue.cpp

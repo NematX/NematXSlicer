@@ -47,6 +47,8 @@ Unrecognized text uses separate JSON groups named print or printer.
 Import extracts each group. full_config() combines them.
 
 Operation notes:
+- load_system_presets_from
+- Sort vendor INI filenames, load each bundle, then merge profiles and update name maps
 - load_configbundle / load_config_file_config
 - Validate retained JSON, load profiles and apply known profile metadata
 - full_config / full_fff_config
@@ -391,6 +393,12 @@ PresetsConfigSubstitutions PresetBundle::load_presets(AppConfig &config, Forward
 // For each vendor, there will be a single PresetBundle loaded.
 std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_presets(ForwardCompatibilitySubstitutionRule compatibility_rule)
 {
+    return this->load_system_presets_from((boost::filesystem::path(data_dir()) / "vendor").string(), compatibility_rule);
+}
+
+std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_presets_from(
+    const std::string &vendor_directory, ForwardCompatibilitySubstitutionRule compatibility_rule)
+{
     if (compatibility_rule == ForwardCompatibilitySubstitutionRule::EnableSystemSilent)
         // Loading system presets, don't log substitutions.
         compatibility_rule = ForwardCompatibilitySubstitutionRule::EnableSilent;
@@ -398,15 +406,23 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
         // Loading system presets, throw on unknown option value.
         compatibility_rule = ForwardCompatibilitySubstitutionRule::Disable;
 
-    // Here the vendor specific read only Config Bundles are stored.
-    boost::filesystem::path     dir = (boost::filesystem::path(data_dir()) / "vendor").make_preferred();
+    boost::filesystem::path     dir(vendor_directory);
+    this->reset(false);
+    // Directory iteration order is unspecified; sorting makes duplicate resolution reproducible.
+    std::vector<boost::filesystem::directory_entry> files;
+    for (const boost::filesystem::directory_entry &entry : boost::filesystem::directory_iterator(dir))
+        if (Slic3r::is_ini_file(entry))
+            files.push_back(entry);
+    std::sort(files.begin(), files.end(), [](const boost::filesystem::directory_entry &left,
+                                           const boost::filesystem::directory_entry &right) {
+        return left.path().filename().string() < right.path().filename().string();
+    });
     PresetsConfigSubstitutions  substitutions;
     std::string                 errors_cummulative;
     bool                        first = true;
-    for (auto &dir_entry : boost::filesystem::directory_iterator(dir))
+    for (const boost::filesystem::directory_entry &dir_entry : files)
         if (Slic3r::is_ini_file(dir_entry)) {
             std::string name = dir_entry.path().filename().string();
-            // Remove the .ini suffix.
             name.erase(name.size() - 4);
             try {
                 // Load the config bundle, flatten it.
@@ -427,10 +443,11 @@ std::pair<PresetsConfigSubstitutions, std::string> PresetBundle::load_system_pre
                                 errors_cummulative += ", ";
                             errors_cummulative += duplicates[i];
                         }
+                        errors_cummulative += "\n";
                     }
                 }
             } catch (const std::runtime_error &err) {
-                errors_cummulative += err.what();
+                errors_cummulative += dir_entry.path().string() + ": " + err.what();
                 errors_cummulative += "\n";
             }
         }
