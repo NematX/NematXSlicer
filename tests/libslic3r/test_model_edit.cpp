@@ -5,6 +5,7 @@
 
 #include <catch2/catch.hpp>
 
+#include "libslic3r/CutUtils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/TriangleSelector.hpp"
@@ -22,15 +23,19 @@ by the same Model until its caller removes them.
 Painting cases query ModelVolume::facets_annotation_keys(), check the
 alphabetical non-empty keys and remove one entry before querying again.
 
+Cut-group cases call update_object_cut_id() and synchronize_model_after_cut()
+as separate client operations, then inspect IDs and consistency counters.
+They also check partial cuts, separate dowels and unrelated objects.
+
 Representative direct calls (branches are not a timeline):
 
     TEST_CASE
-        |-- model.add_object()
+        |-- update_object_cut_id()
+        |-- invalid.check_sum()
+        |-- with_dowels.check_sum()
         |-- make_cube()
-        |-- first->add_instance()
-        |-- set_offset()
-        |-- set_rotation()
-        `-- model.merge_objects_into_multipart()
+        |-- other->cut_id.init()
+        `-- updated.check_sum()
 */
 
 using namespace Slic3r;
@@ -129,4 +134,48 @@ TEST_CASE("Volumes list their non-empty facet annotation keys", "[model_edit]")
     CHECK(volume->facets_annotation_keys() == std::vector<std::string>{"builtin:seam", "plugin:paint"});
     volume->reset_facets_annotation("plugin:paint");
     CHECK(volume->facets_annotation_keys() == std::vector<std::string>{"builtin:seam"});
+}
+
+TEST_CASE("Cut group bookkeeping follows the GUI rules", "[model_edit][cut]")
+{
+    CutObjectBase invalid;
+    update_object_cut_id(invalid, ModelObjectCutAttribute::KeepUpper |
+        ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::InvalidateCutInfo, 0);
+    CHECK(invalid.id().invalid());
+
+    update_object_cut_id(invalid, ModelObjectCutAttribute::KeepUpper |
+        ModelObjectCutAttribute::KeepLower, 0);
+    REQUIRE(invalid.id().valid());
+    CHECK(invalid.check_sum() == 2);
+
+    const CutObjectBase before_partial = invalid;
+    update_object_cut_id(invalid, ModelObjectCutAttribute::KeepUpper, 0);
+    CHECK(invalid.is_equal(before_partial));
+
+    CutObjectBase with_dowels = invalid;
+    update_object_cut_id(with_dowels, ModelObjectCutAttribute::KeepUpper |
+        ModelObjectCutAttribute::KeepLower | ModelObjectCutAttribute::CreateDowels, 2);
+    CHECK(with_dowels.has_same_id(invalid));
+    CHECK(with_dowels.check_sum() == invalid.check_sum() + 3);
+
+    Model model;
+    ModelObject *first = model.add_object("first", "first.stl", make_cube(1, 1, 1));
+    ModelObject *second = model.add_object("second", "second.stl", make_cube(1, 1, 1));
+    ModelObject *other = model.add_object("other", "other.stl", make_cube(1, 1, 1));
+    first->cut_id = invalid;
+    second->cut_id = invalid;
+    other->cut_id.init();
+    const CutObjectBase other_before = other->cut_id;
+
+    CutObjectBase updated = invalid;
+    update_object_cut_id(updated, ModelObjectCutAttribute::KeepUpper |
+        ModelObjectCutAttribute::KeepLower, 0);
+    CHECK(updated.has_same_id(invalid));
+    CHECK(updated.check_sum() == invalid.check_sum() + 1);
+    first->cut_id = updated;
+    synchronize_model_after_cut(model, updated);
+
+    CHECK(second->cut_id.is_equal(updated));
+    CHECK(first->cut_id.is_equal(updated));
+    CHECK(other->cut_id.is_equal(other_before));
 }

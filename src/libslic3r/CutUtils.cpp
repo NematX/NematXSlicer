@@ -15,9 +15,75 @@
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelector.hpp"
 
+/*
+Cut creates cut results for scene editors. The caller copies those results into
+the scene while Cut is alive. Cut owns the returned objects in its internal model.
+The same placement and cleanup rules apply to plane, contour or groove cuts.
+
+A cut group identifies objects produced by related cuts. Its members share an ID
+and a consistency counter. The caller updates this state before cutting, then
+copies it to the remaining group members after replacing the source object.
+Callers must prevent concurrent edits to that scene.
+
+Operation notes:
+- Cut::perform_with_plane / perform_by_contour / perform_with_groove
+- Cut volumes: create the requested geometry
+- post_process: retain and place the requested parts
+- finalize: discard temporary objects and keep the results inside Cut
+- update_object_cut_id: update the source group's state before cutting
+- synchronize_model_after_cut: update the surviving members afterwards
+
+Representative direct calls (branches are not a timeline):
+
+    Cut::perform_with_plane()
+        |-- mo->clone_for_cut()
+        |-- process_modifier_cut()
+        |-- process_solid_part_cut()
+        |-- post_process()
+        |-- delete_extra_modifiers()
+        `-- finalize()
+
+    update_object_cut_id()
+        |-- cut_id.init()
+        `-- cut_id.increase_check_sum()
+
+    synchronize_model_after_cut()
+        |-- obj->cut_id.has_same_id()
+        |-- obj->cut_id.is_equal()
+        `-- obj->cut_id.copy()
+*/
+
 namespace Slic3r {
 
 using namespace Geometry;
+
+void update_object_cut_id(CutObjectBase &cut_id, ModelObjectCutAttributes attributes, const int dowels_count)
+{
+    // Group identity is meaningful only when all parts of the source are retained.
+    if (!attributes.has(ModelObjectCutAttribute::KeepUpper) ||
+        !attributes.has(ModelObjectCutAttribute::KeepLower) ||
+        attributes.has(ModelObjectCutAttribute::InvalidateCutInfo))
+        return;
+
+    if (cut_id.id().invalid())
+        cut_id.init();
+    // Advance the group's consistency counter for the extra parts, including separate dowels.
+    {
+        int cut_obj_cnt = -1;
+        if (attributes.has(ModelObjectCutAttribute::KeepUpper))    cut_obj_cnt++;
+        if (attributes.has(ModelObjectCutAttribute::KeepLower))    cut_obj_cnt++;
+        if (attributes.has(ModelObjectCutAttribute::CreateDowels)) cut_obj_cnt += dowels_count;
+        if (cut_obj_cnt > 0)
+            cut_id.increase_check_sum(size_t(cut_obj_cnt));
+    }
+}
+
+void synchronize_model_after_cut(Model &model, const CutObjectBase &cut_id)
+{
+    for (ModelObject *obj : model.object_ptrs())
+        if (obj->is_cut() && obj->cut_id.has_same_id(cut_id) && !obj->cut_id.is_equal(cut_id))
+            obj->cut_id.copy(cut_id);
+}
 
 static void apply_tolerance(ModelVolume* vol)
 {
@@ -668,4 +734,3 @@ const ModelObjectPtrs& Cut::perform_with_groove(const Groove& groove, const Tran
 }
 
 } // namespace Slic3r
-
