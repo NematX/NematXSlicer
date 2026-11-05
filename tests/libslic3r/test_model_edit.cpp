@@ -7,6 +7,7 @@
 
 #include "libslic3r/Model.hpp"
 #include "libslic3r/TriangleMesh.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 
 /*
 These tests check scene edits used by the GUI or callers without a GUI.
@@ -17,6 +18,9 @@ Multipart merge cases exercise Model::merge_objects_into_multipart().
 The new object keeps each source's first-instance placement, volume IDs,
 settings, layer-height ranges and printability; the sources remain owned
 by the same Model until its caller removes them.
+
+Painting cases query ModelVolume::facets_annotation_keys(), check the
+alphabetical non-empty keys and remove one entry before querying again.
 
 Representative direct calls (branches are not a timeline):
 
@@ -108,4 +112,21 @@ TEST_CASE("Merging objects assigns the single-part extruder after volume sorting
     CHECK(merged->volumes[1]->config.opt_int("extruder") == 3);
     CHECK(merged->volumes[2]->id() == modifier_id);
     CHECK_FALSE(merged->volumes[2]->config.has("extruder"));
+}
+
+TEST_CASE("Volumes list their non-empty facet annotation keys", "[model_edit]")
+{
+    Model model;
+    ModelObject *object = model.add_object("cube", "cube.stl", make_cube(10, 10, 10));
+    ModelVolume *volume = object->volumes[0];
+    CHECK(volume->facets_annotation_keys().empty());
+    volume->facets_annotation_mutable("empty");
+    TriangleSelector selector(volume->mesh());
+    selector.set_facet(0, EnforcerBlockerType::ENFORCER);
+    volume->facets_annotation_mutable("plugin:paint").set(selector);
+    selector.set_facet(0, EnforcerBlockerType::BLOCKER);
+    volume->facets_annotation_mutable("builtin:seam").set(selector);
+    CHECK(volume->facets_annotation_keys() == std::vector<std::string>{"builtin:seam", "plugin:paint"});
+    volume->reset_facets_annotation("plugin:paint");
+    CHECK(volume->facets_annotation_keys() == std::vector<std::string>{"builtin:seam"});
 }

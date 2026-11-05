@@ -1035,6 +1035,15 @@ bool ModelVolume::has_facets_annotation(const std::string &key) const
     return annotation != nullptr && !annotation->empty();
 }
 
+std::vector<std::string> ModelVolume::facets_annotation_keys() const
+{
+    std::vector<std::string> keys;
+    for (const std::pair<const std::string, FacetsAnnotation> &entry : m_generic_facets_annotations)
+        if (!entry.second.empty())
+            keys.emplace_back(entry.first);
+    return keys;
+}
+
 const FacetsAnnotation *ModelVolume::facets_annotation(const std::string &key) const
 {
     const std::map<std::string, FacetsAnnotation>::const_iterator it = m_generic_facets_annotations.find(key);

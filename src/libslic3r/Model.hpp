@@ -982,6 +982,10 @@ public:
     // with the model so a plugin annotation can still be recognized even if
     // plugin load order changes between application runs.
     bool has_facets_annotation(const std::string &key) const;
+    // Return the keys of non-empty painting entries in alphabetical order.
+    // This list excludes support painting.
+    // It also excludes multi-material painting.
+    std::vector<std::string> facets_annotation_keys() const;
     const FacetsAnnotation *facets_annotation(const std::string &key) const;
     FacetsAnnotation &facets_annotation_mutable(const std::string &key);
     void reset_facets_annotation(const std::string &key);
