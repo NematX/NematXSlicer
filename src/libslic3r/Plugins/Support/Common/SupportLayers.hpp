@@ -1,0 +1,79 @@
+///|/ SuperSlicer is released under the terms of the AGPLv3 or higher.
+/* Temporary support slabs, the data a support family hands to the publication.
+
+   A support family fills a GeneratedSupport: its slabs are owned by one deque
+   and listed by role (top contacts, bottom contacts, base slabs, interfaces).
+   SupportPublication.hpp then turns the slabs into auxiliary layers of the object.
+   Generator layers are temporary slabs: print_z is their top, bottom_z their
+   geometric bottom, and height their printable thickness. Contacts meet the
+   object, interfaces extend contacts, base slabs form sparse columns, and
+   branch slabs are the bodies of tree branches, printed by the branch sheath.
+   A deque owns the slabs until generation ends, so vectors may safely point
+   into it. Only the final auxiliary layers are published to the object.
+
+   The geometry of a slab is a polygon collection kept in the plugin storage
+   given at construction (StoredPolygonCollection): it is released when the
+   slab is destroyed. Top contacts also keep their contact and overhang areas,
+   which the other slabs do not have:
+
+       GeneratorLayer slab(storage);
+       slab.contact_polygons.emplace(storage); // only for a top contact */
+#ifndef plugins_support_common_layers_hpp_
+#define plugins_support_common_layers_hpp_
+
+#include <deque>
+#include <optional>
+#include <vector>
+
+#include "libslic3r/Api/plugin/cpp/GeometryViews.hpp"
+
+namespace slic3r_api::Support::Common {
+// Branch slabs are listed with the base slabs: publication treats them as base-like and prints them as branch surfaces.
+enum class LayerType { TopContact, BottomContact, TopInterface, BottomInterface, Base, Intermediate, Branch };
+
+struct GeneratorLayer {
+    // Create an empty intermediate slab whose geometry lives in storage.
+    explicit GeneratorLayer(storage_handle *storage) : polygons(storage) {}
+
+    LayerType type = LayerType::Intermediate;
+    coord_t print_z = 0, bottom_z = 0, height = 0, height_block = 0;
+    size_t object_above = size_t(-1), object_below = size_t(-1);
+    bool bridging = false;
+    StoredPolygonCollection polygons;
+    std::optional<StoredPolygonCollection> contact_polygons, overhang_polygons;
+
+    // Order slabs by top Z, then decreasing height, with bridge slabs first.
+    bool operator<(const GeneratorLayer &rhs) const {
+        return print_z < rhs.print_z || (print_z == rhs.print_z &&
+            (height > rhs.height || (height == rhs.height && bridging && !rhs.bridging)));
+    }
+    // Return the top-contact bottom or bottom-contact top used to divide Z intervals.
+    coord_t extreme_z() const { return type == LayerType::TopContact ? bottom_z : print_z; }
+    // Return the printable bottom, excluding any separation gap.
+    coord_t bottom_print_z() const { return print_z - height; }
+    // Give the slab back its initial values: no geometry, intermediate type, zero Z.
+    void reset();
+};
+using GeneratorLayers = std::vector<GeneratorLayer *>;
+using LayerStorage = std::deque<GeneratorLayer>;
+
+inline void GeneratorLayer::reset()
+{
+    type = LayerType::Intermediate;
+    print_z = bottom_z = height = height_block = 0;
+    object_above = object_below = size_t(-1);
+    bridging = false;
+    polygons.clear();
+    contact_polygons.reset();
+    overhang_polygons.reset();
+}
+
+struct GeneratedSupport {
+    // Keep the slabs and their temporary geometry in storage.
+    explicit GeneratedSupport(storage_handle *storage) : storage(storage) {}
+    storage_handle *storage;
+    LayerStorage slabs;
+    GeneratorLayers top, bottom, base, interfaces;
+};
+} // namespace slic3r_api::Support::Common
+#endif

@@ -73,6 +73,7 @@ const raw_used_config_key k_used_config_keys[] = {
     {"perimeter_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"solid_infill_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"support_material_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"support_material_interface_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"thin_walls_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"top_solid_infill_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"travel_acceleration", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE}
@@ -589,7 +590,7 @@ struct AccelerationPartitionKey
 using AccelerationPartitions = std::map<AccelerationPartitionKey, RegionalProcessPartition>;
 using RegionalSettingsPartitions = std::map<RegionalSourceKey, RegionalSettingsPartition>;
 
-// Resolve role acceleration, including support-relative skirt/brim acceleration.
+// Resolve role acceleration, then apply first-layer and machine limits.
 double role_acceleration(const ExtrusionSettingsContext &context,
                          raw_extrusion_role role);
 
@@ -655,17 +656,6 @@ private:
     mutable AccelerationPartitions m_partitions;
 };
 
-/*
-Resolve a role's acceleration in mm/s² from the borrowed region, object and
-print settings. `context` supplies the default, first-layer and machine-limit
-values, while `role` selects the feature; skirt/brim percentages use support
-acceleration from `support_material_acceleration`, itself resolved from
-`default_acceleration`, and zero brim acceleration inherits that support value.
-First-layer and enabled extrusion machine limits cap the result. It returns
-zero when the default is unresolved and otherwise a nonnegative acceleration;
-it does not mutate or own configuration, and configuration lookup failures
-propagate.
-*/
 double role_acceleration(const ExtrusionSettingsContext &context,
                          raw_extrusion_role role)
 {
@@ -681,13 +671,18 @@ double role_acceleration(const ExtrusionSettingsContext &context,
     const double external = effective_value(region, "external_perimeter_acceleration", perimeter);
     const double solid = effective_value(region, "solid_infill_acceleration", acceleration);
     const double bridge = effective_value(region, "bridge_acceleration", acceleration);
-    const double support = effective_value(
-        context.object_config, "support_material_acceleration", acceleration);
+    // Support acceleration is also the base of the interface and brim/skirt
+    // values; zero in any of them inherits its base.
+    const double support = effective_value(context.object_config, "support_material_acceleration", acceleration);
 
     // Select the most specific role override while retaining the family
     // fallback for disabled or zero options.
     if (RAW_EXTRUSION_ROLE_IS_SKIRT(role))
         acceleration = effective_value(context.object_config, "brim_acceleration", support);
+    else if (RAW_EXTRUSION_ROLE_IS_SUPPORT(role))
+        acceleration = RAW_EXTRUSION_ROLE_IS_SUPPORT_INTERFACE(role) ?
+            effective_value(context.object_config, "support_material_interface_acceleration", support) :
+            support;
     else if (role == RAW_EXTRUSION_ROLE_GAP_FILL)
         acceleration = effective_value(region, "gap_fill_acceleration", perimeter);
     else if (role == RAW_EXTRUSION_ROLE_THIN_WALL)
@@ -779,7 +774,8 @@ void collect_unresolved_roles(MutableExtrusionEntity entity,
         return;
     }
 
-    if (leaf_disposition(entity, state) == LeafDisposition::Editable && state.acceleration <= 0.f)
+    if (leaf_disposition(entity, state, EPropertySpeedField::Acceleration) == LeafDisposition::Editable &&
+        state.acceleration <= 0.f)
         roles.insert(state.attributes.extrusion_role());
 }
 
@@ -882,7 +878,8 @@ void assign_acceleration_tree(MutableExtrusionEntity entity,
         return;
     }
 
-    const LeafDisposition disposition = leaf_disposition(entity, state);
+    const LeafDisposition disposition =
+        leaf_disposition(entity, state, EPropertySpeedField::Acceleration);
     if (disposition == LeafDisposition::Empty || state.acceleration > 0.f)
         return;
 

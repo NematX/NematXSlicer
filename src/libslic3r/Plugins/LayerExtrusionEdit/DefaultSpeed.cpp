@@ -80,6 +80,7 @@ const raw_used_config_key k_used_config_keys[] = {
     {"overhangs_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"perimeter_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"solid_infill_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
+    {"support_material_interface_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"support_material_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"thin_walls_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
     {"top_solid_infill_speed", RAW_CO_FLOAT_OR_PERCENT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE},
@@ -684,7 +685,7 @@ struct SpeedPartitionKey
 using AutospeedPartitions = std::map<AutospeedPartitionKey, RegionalProcessPartition>;
 using SpeedPartitions = std::map<SpeedPartitionKey, RegionalProcessPartition>;
 
-// Resolve role speed, including support-relative skirt/brim percentages.
+// Resolve the role speed through the legacy percentage fallback hierarchy.
 double role_speed(const ExtrusionSettingsContext &context,
                   raw_extrusion_role role,
                   bool full_overhang_speed,
@@ -832,37 +833,37 @@ bool SpeedPartitionKey::operator<(const SpeedPartitionKey &rhs) const
     return has_volumetric_flow < rhs.has_volumetric_flow;
 }
 
-/*
-Resolve a role's speed in mm/s from the borrowed region and object settings.
-`role` selects the feature, `full_overhang_speed` marks a full
-overhang, and `auto_base` is zero before autospeed or its per-flow mm/s base
-afterward; skirt/brim percentages use support speed resolved from
-`support_material_speed`. It returns a candidate speed, or zero for the caller's
-autospeed/max-print fallback. It does not mutate or own configuration, and
-configuration lookup failures propagate.
-*/
 double role_speed(const ExtrusionSettingsContext &context,
                   raw_extrusion_role role,
                   bool full_overhang_speed,
                   double auto_base)
 {
-    // Autospeed is the fallback for perimeter and infill families. These
-    // settings refine them: external_perimeter_speed refines perimeter;
-    // top_solid_infill_speed and infill_speed refine solid; internal_bridge_speed
-    // refines bridge. solid_infill_speed and bridge_speed start at autospeed.
+    // Build the shared fallback chain once. Role-specific percentages are
+    // evaluated against the preceding value, ending at the autospeed base.
     const Config &region = context.region_config;
     const double perimeter = effective_value(region, "perimeter_speed", auto_base);
     const double external = effective_value(region, "external_perimeter_speed", perimeter);
     const double solid = effective_value(region, "solid_infill_speed", auto_base);
     const double bridge = effective_value(region, "bridge_speed", auto_base);
-    // Support speed starts at autospeed and then supplies brim/skirt percentages.
+    // Support speed follows the autospeed base. It is also the base of the
+    // interface and brim/skirt percentages.
     const double support = effective_value(context.object_config, "support_material_speed", auto_base);
 
-    // Resolve roles outside the perimeter and infill families first.
+    // Resolve roles outside the perimeter and infill families first. For
+    // brim/skirt and support interface, a percentage refines the support
+    // speed, while zero means autospeed for that feature itself, whatever the
+    // support speed is.
     if (RAW_EXTRUSION_ROLE_IS_SKIRT(role)) {
         const double brim = context.object_config.effective_float_or_percent_or_default(
             "brim_speed", support, 0.0);
         return brim > 0.0 ? brim : auto_base;
+    }
+    if (RAW_EXTRUSION_ROLE_IS_SUPPORT(role)) {
+        if (!RAW_EXTRUSION_ROLE_IS_SUPPORT_INTERFACE(role))
+            return support;
+        const double interface_speed = context.object_config.effective_float_or_percent_or_default(
+            "support_material_interface_speed", support, 0.0);
+        return interface_speed > 0.0 ? interface_speed : auto_base;
     }
     if (RAW_EXTRUSION_ROLE_HAS(role, RAW_EXTRUSION_ROLE_MILL))
         return region.float_or_default("milling_speed", 0.0);

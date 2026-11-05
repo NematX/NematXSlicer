@@ -904,14 +904,13 @@ TEST_CASE("Whole-step selector traits come from their owner module",
         {STEP_PERIMETER, RAW_OPTION_CATEGORY_PERIMETER, RAW_PRESET_TYPE_FFF_PRINT, STEP_PERIMETER, false},
         {STEP_INFILL_GROUP, RAW_OPTION_CATEGORY_INFILL, RAW_PRESET_TYPE_FFF_PRINT, STEP_INFILL_GROUP, false},
         {STEP_INFILL, RAW_OPTION_CATEGORY_INFILL, RAW_PRESET_TYPE_FFF_PRINT, STEP_INFILL, false},
-        {STEP_SUPPORT, RAW_OPTION_CATEGORY_SUPPORT, RAW_PRESET_TYPE_FFF_PRINT, STEP_SUPPORT, false},
         {STEP_WIPETOWER, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_WIPETOWER, false},
         {STEP_LAYER_STICHING, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINT, STEP_LAYER_STICHING, false},
         {STEP_GCODE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true},
         {GCODE_FIRMWARE, RAW_OPTION_CATEGORY_OUTPUT, RAW_PRESET_TYPE_FFF_PRINTER, STEP_GCODE, true}
     };
     const std::map<slicing_step_t, Steps::StepExclusiveIdentity> &identities = Steps::get_exclusive_steps();
-    REQUIRE(identities.size() == 10);
+    REQUIRE(identities.size() == 9);
     for (const Expected &entry : expected) {
         INFO(int(entry.step));
         const std::map<slicing_step_t, Steps::StepExclusiveIdentity>::const_iterator identity = identities.find(entry.step);

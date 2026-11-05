@@ -6,7 +6,7 @@
 #define slic3r_data_tree_h_
 
 #define SLIC3R_PLUGIN_API_DATA_TREE_MAJOR 4u
-#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 3u
+#define SLIC3R_PLUGIN_API_DATA_TREE_MINOR 7u
 
 /*
 Data-tree access for a sliced Print.
@@ -171,6 +171,20 @@ typedef uint16_t raw_surface_type;
 
 /* Second layer over bridge */
 #define RAW_SURFACE_TYPE_MOD_OVERBRIDGE (1 << 8)
+
+/* Support modifier: the surface belongs to a support auxiliary layer (support base or interface), not to the object. */
+#define RAW_SURFACE_TYPE_MOD_SUPPORT (1 << 9)
+
+/* Branch modifier: the surface is the body of a tree branch, printed by the branch toolpath role. */
+#define RAW_SURFACE_TYPE_MOD_BRANCH (1 << 10)
+
+/* Contact modifier: marks the dense areas of a support contact layer, the layer placed against the object (under it for a top surface, resting on it for a
+   bottom surface): the area touching the object above or below and the margin of that contact, that is the dense area of the contact layer around it.
+   Bridging bottom contacts carry it. A dense top or bottom support surface without it is an interface of its side, and a contact merged into the base is
+   published as sparse base without it. Support families must set it on every contact area; no host check verifies the marking. Toolpath algorithms read
+   it. On a side without interface layers, interfaces and contacts both use the base settings and bucket; the bit only selects contact handling,
+   such as non-soluble bottom-contact bridging flow. */
+#define RAW_SURFACE_TYPE_MOD_CONTACT (1 << 11)
 
 /* Check if flag is set */
 #define RAW_SURFACE_TYPE_HAS(type, flag) (((type) & (flag)) != 0)
@@ -518,6 +532,17 @@ normally keep infill_areas unchanged rather than treating it as no infill.
 Never free or retain element handles across perimeter/infill reprocessing.
 */
 SLIC3R_HOST_API const expolygon_collection_handle *layer_island_get_infill_no_overlap_areas(const layer_island_handle *me);
+/*
+Borrow the areas of this island that ask for support. STEP_SUPPORT_DEMAND
+writes them (it runs right after STEP_POST_SLICING); plugins up to STEP_SUPPORT
+may refine them with support_demand_get_island_mutable() (bridge removal in
+STEP_POST_PERIMETER, bridged infill removal in STEP_POST_INFILL); support
+generation reads them. Any step may read them;
+before STEP_SUPPORT_DEMAND the collection is empty. A valid island
+returns a collection owned by that island; it may be empty and must not be
+freed. Null returns null.
+*/
+SLIC3R_HOST_API const expolygon_collection_handle *layer_island_get_support_demand(const layer_island_handle *me);
 
 /* Borrow this island's metadata container; null returns null. */
 SLIC3R_HOST_API const plugin_property_container_handle *layer_island_get_properties(const layer_island_handle *me);

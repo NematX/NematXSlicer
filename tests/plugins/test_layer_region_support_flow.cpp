@@ -189,7 +189,7 @@ TEST_CASE("Object support and region flows match the native flows at any height"
         check_flow(object_get_support_flow(handle, interface_role, height, 0., 0), interface_flow);
         check_flow(object_get_support_flow(handle, base_role, height, 0., OBJECT_SUPPORT_FLOW_FIRST_LAYER),
                    support_material_1st_layer_flow(&object, native_height));
-        // Bottom contact, as the native support generator derives it from the interface flow.
+        // Bottom contact, as the native support geometry derives it from the interface flow.
         const Flow bottom = soluble ? interface_flow.with_flow_ratio(bridge_ratio) :
             Flow::bridging_flow(std::sqrt(bridge_ratio) * interface_flow.nozzle_diameter(), interface_flow.nozzle_diameter());
         check_flow(object_get_support_flow(handle, interface_role, height, 0., OBJECT_SUPPORT_FLOW_BOTTOM_CONTACT), bottom);

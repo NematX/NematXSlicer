@@ -6,24 +6,30 @@
 #include "SupportDemandBridgeRemoval.hpp"
 
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <iterator>
 #include <utility>
-#include <vector>
 
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_post_perimeter.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportBridgeStrokes.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 
 /*
 Support-demand bridge removal
 =============================
 
-This plugin provides a STEP_SUPPORT_DEMAND post-process for the
-`dont_support_bridges` object setting. It edits the support-demand areas before
-support generation; it does not remove already-generated support extrusions.
+This plugin refines the support demand for the `dont_support_bridges` object
+setting. It runs in STEP_POST_PERIMETER, once the perimeters are final, because
+it finds bridges from the perimeter and gap-fill extrusions; the demand itself
+was written by STEP_SUPPORT_DEMAND right after slicing. It edits the islands'
+support demand before support generation; it does not remove generated support
+extrusions. Its priority puts it after the plugins that add perimeters over
+overhangs and before the ones that only alter their look (fuzzy skin) or tag
+them (overhang detection).
 
 For each object layer after the first, the plugin examines perimeter and gap
 fill extrusion trees in every island. Straight segments are split at their
@@ -47,13 +53,22 @@ The normal call flow is:
         `-- walk object layers after the first
             `-- for each layer island
                 |-- bridge_areas_for_island()
-                |   |-- expand lower-layer support by the probe distance
                 |   |-- visit perimeter and gap-fill extrusion trees
-                |   |-- split straight segments at support intersections
-                |   `-- keep unsupported intervals anchored at both ends
+                |   |-- Common::grown_lower_support(): expand lower-layer support by the probe distance
+                |   `-- Common::append_entity_strokes() (SupportBridgeStrokes.hpp)
+                |       |-- split straight segments at support intersections
+                |       `-- keep unsupported intervals anchored at both ends
                 `-- remove_bridges_from_island_demand()
-                    |-- subtract bridge areas from the current demand
-                    `-- publish the remaining demand
+                    `-- subtract bridge areas from the island's demand
+
+Bridged infill is not handled here: the infill is generated after this step, so
+support.demand.bridge_infill_removal removes the demand under its bridge lines at
+STEP_POST_INFILL, with the same rule (shared in Common/SupportBridgeStrokes.hpp).
+
+Only a bridge anchored at both ends loses its demand: a straight segment with a
+free end (a cantilever) keeps it. The demand is removed whenever dont_support_bridges
+is on, whether or not it comes from an enforcer: the demand of the enforcers is not
+distinguished from the demand of the overhangs (known limit of this version).
 
 Curved extrusion segments are ignored by the bridge-area detector. The
 operation is limited to the current island and its immediately lower layer;
@@ -69,20 +84,12 @@ const char *k_support_demand_bridge_removal_id = "support.demand.bridge_removal"
 const char *k_dependencies[] = { nullptr };
 const raw_used_config_key k_used_config_keys[] = {
     { "dont_support_bridges", RAW_CO_BOOL, RAW_CONTAINER_TYPE_OBJECT, RAW_PRESET_TYPE_FFF_PRINT },
-    { "support_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
-    { "raft_layers", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
+    { "support_material", RAW_CO_BOOL, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
 };
 
 struct BridgeRemovalConfig
 {
     bool dont_support_bridges = false;
-};
-
-struct BridgeLineFlow
-{
-    coord_t endpoint_extension = scale_i(0.4);
-    double half_width = scale_d(0.2);
-    double support_probe_offset = scale_d(0.2);
 };
 
 BridgeRemovalConfig read_object_config(const Object &object)
@@ -93,184 +100,9 @@ BridgeRemovalConfig read_object_config(const Object &object)
     return out;
 }
 
-uint32_t island_work_count(const Object &object)
-{
-    uint32_t count = 0;
-    for (uint32_t layer_idx = 1; layer_idx < object.layer_count(); ++layer_idx)
-        count += object.layer(layer_idx).island_count();
-    return count;
-}
-
-BridgeLineFlow bridge_line_flow(const LayerIsland &island)
-{
-    BridgeLineFlow out;
-    bool found = false;
-    for (uint32_t region_idx = 0; region_idx < island.region_count(); ++region_idx) {
-        const c_flow flow = island.region(region_idx).flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
-        if (flow.width <= 0)
-            continue;
-
-        out.endpoint_extension = found ? std::min(out.endpoint_extension, flow.width) : flow.width;
-        const coord_t effective_spacing = flow.spacing > 0 ? flow.spacing : flow.width;
-        const double half_width = 0.5 * double(std::max(flow.width, effective_spacing)) + scale_d(0.001);
-        out.half_width = found ? std::max(out.half_width, half_width) : half_width;
-        const double support_probe_offset = 0.5 * double(flow.nozzle_diameter > 0 ? flow.nozzle_diameter : flow.width);
-        out.support_probe_offset = found ? std::max(out.support_probe_offset, support_probe_offset) : support_probe_offset;
-        found = true;
-    }
-    return out;
-}
-
-bool point_supported_by_expolygons(const ExPolygonCollection &support_polygons, c_point point)
-{
-    for (ExPolygon slice : support_polygons)
-        if (slice.contains(point))
-            return true;
-    return false;
-}
-
-double segment_parameter(c_point point, c_point segment_a, c_point segment_b)
-{
-    const coord_t dx = segment_b.x - segment_a.x;
-    const coord_t dy = segment_b.y - segment_a.y;
-    if (std::abs(dx) >= std::abs(dy))
-        return dx == 0 ? 0. : double(point.x - segment_a.x) / double(dx);
-    return dy == 0 ? 0. : double(point.y - segment_a.y) / double(dy);
-}
-
-c_point segment_point_at(c_point segment_a, c_point segment_b, double parameter)
-{
-    c_point out = {};
-    out.x = coord_t(std::llround(double(segment_a.x) + double(segment_b.x - segment_a.x) * parameter));
-    out.y = coord_t(std::llround(double(segment_a.y) + double(segment_b.y - segment_a.y) * parameter));
-    return out;
-}
-
-void add_polygon_line_intersections(const Polygon &polygon,
-                                    c_point segment_a,
-                                    c_point segment_b,
-                                    std::vector<double> &parameters)
-{
-    const multipoint_const_view polygon_view = polygon.view();
-    const uint32_t intersection_count = points_intersections(&polygon_view, segment_a, segment_b, nullptr);
-    if (intersection_count == 0)
-        return;
-
-    std::vector<c_point> intersections(intersection_count);
-    multipoint_view out_intersections = {};
-    out_intersections.array = intersections.data();
-    out_intersections.size = intersection_count;
-    points_intersections(&polygon_view, segment_a, segment_b, &out_intersections);
-
-    for (c_point point : intersections) {
-        const double parameter = segment_parameter(point, segment_a, segment_b);
-        if (parameter >= -1e-9 && parameter <= 1. + 1e-9)
-            parameters.push_back(std::clamp(parameter, 0., 1.));
-    }
-}
-
-std::vector<double> lower_support_intersection_parameters(const ExPolygonCollection &lower_support,
-                                                          c_point segment_a,
-                                                          c_point segment_b)
-{
-    std::vector<double> parameters;
-    parameters.reserve(8);
-    parameters.push_back(0.);
-    parameters.push_back(1.);
-
-    for (ExPolygon support_area : lower_support) {
-        add_polygon_line_intersections(support_area.contour(), segment_a, segment_b, parameters);
-        for (Polygon hole : support_area.holes())
-            add_polygon_line_intersections(hole, segment_a, segment_b, parameters);
-    }
-
-    std::sort(parameters.begin(), parameters.end());
-    parameters.erase(std::unique(parameters.begin(), parameters.end(),
-                                 [](double lhs, double rhs) { return std::abs(lhs - rhs) < 1e-9; }),
-                     parameters.end());
-    return parameters;
-}
-
-void set_demand_from_operand(const run_ctx_support_demand &ctx,
-                             const LayerIsland &island,
-                             ClipperOperand &&operand)
-{
-    StoredExPolygonCollection polygons = operand.to_expolygon_collection();
-    polygons.ensure_valid();
-    ctx.set(ctx.demand, island.handle(), polygons.mutable_handle());
-}
-
-void append_bridge_segment_area(storage_handle *storage,
-                                const ExPolygonCollection &lower_support,
-                                const BridgeLineFlow &flow,
-                                const ClipperContext &clipper,
-                                const c_extrusion_segment &segment,
-                                ClipperOperand &bridges)
-{
-    if (segment.radius != 0.f || c_point_distance_to(segment.point_a, segment.point_b) <= SCALED_EPSILON)
-        return;
-
-    // The old support code first subtracts the lower layer from perimeter
-    // polylines, then checks whether each remaining straight unsupported piece
-    // is anchored at both ends. Rebuild that split locally: every interval
-    // between lower-support intersections is sampled, and only unsupported
-    // intervals whose extended endpoints land on support are considered real
-    // bridges.
-    const std::vector<double> parameters =
-        lower_support_intersection_parameters(lower_support, segment.point_a, segment.point_b);
-    for (size_t idx = 1; idx < parameters.size(); ++idx) {
-        const double begin = parameters[idx - 1];
-        const double end = parameters[idx];
-        if (end - begin <= 1e-9)
-            continue;
-
-        const c_point begin_point = segment_point_at(segment.point_a, segment.point_b, begin);
-        const c_point end_point = segment_point_at(segment.point_a, segment.point_b, end);
-        if (c_point_distance_to(begin_point, end_point) <= SCALED_EPSILON)
-            continue;
-
-        const c_point middle = segment_point_at(segment.point_a, segment.point_b, 0.5 * (begin + end));
-        const bool middle_supported = point_supported_by_expolygons(lower_support, middle);
-        if (middle_supported)
-            continue;
-
-        StoredPolyline line(storage);
-        line.push_back(begin_point);
-        line.push_back(end_point);
-        line.extend_start(flow.endpoint_extension);
-        line.extend_end(flow.endpoint_extension);
-        const bool front_supported = point_supported_by_expolygons(lower_support, line.front());
-        const bool back_supported = point_supported_by_expolygons(lower_support, line.back());
-        if (!front_supported || !back_supported)
-            continue;
-
-        ClipperOperand bridge_area = clipper_offset(clipper(line), flow.half_width, CLIPPER_JOIN_SQUARE, 0.,
-                                                    CLIPPER_END_OPEN_SQUARE);
-        if (!bridge_area.empty())
-            bridges.concat_replace(bridge_area);
-    }
-}
-
-void append_bridge_areas_from_entity(storage_handle *storage,
-                                     const ExPolygonCollection &lower_support,
-                                     const BridgeLineFlow &flow,
-                                     const ClipperContext &clipper,
-                                     const ExtrusionEntity &entity,
-                                     ClipperOperand &bridges)
-{
-    // The extrusion tree may contain collection nodes. Only local polylines can
-    // describe printable bridge spans, so recurse until we find leaves carrying
-    // segments.
-    for (uint32_t segment_idx = 0; segment_idx < entity.segment_count(); ++segment_idx)
-        append_bridge_segment_area(storage, lower_support, flow, clipper, entity.segment(segment_idx), bridges);
-
-    for (uint32_t child_idx = 0; child_idx < entity.child_count(); ++child_idx)
-        append_bridge_areas_from_entity(storage, lower_support, flow, clipper, entity.child(child_idx), bridges);
-}
-
 void append_bridge_areas_from_region_island(storage_handle *storage,
                                             const ExPolygonCollection &lower_support,
-                                            const BridgeLineFlow &flow,
+                                            const Common::BridgeLineFlow &flow,
                                             const ClipperContext &clipper,
                                             const LayerRegionIsland &region_island,
                                             raw_extrusion_role role,
@@ -280,8 +112,7 @@ void append_bridge_areas_from_region_island(storage_handle *storage,
         return;
 
     const ExtrusionEntity root(region_island.extrusion(role));
-    append_bridge_areas_from_entity(storage, lower_support, flow, clipper,
-                                    root, bridges);
+    Common::append_entity_strokes(storage, lower_support, flow, clipper, root, bridges);
 }
 
 ClipperOperand bridge_areas_for_island(storage_handle *storage,
@@ -290,12 +121,8 @@ ClipperOperand bridge_areas_for_island(storage_handle *storage,
                                        const ClipperContext &clipper)
 {
     ClipperOperand bridges = clipper.empty();
-    const BridgeLineFlow flow = bridge_line_flow(island);
-    ClipperOperand lower_support_operand = clipper_offset(clipper(lower_layer.slices()),
-                                                          flow.support_probe_offset,
-                                                          CLIPPER_JOIN_SQUARE,
-                                                          0.);
-    StoredExPolygonCollection lower_support = lower_support_operand.to_expolygon_collection();
+    const Common::BridgeLineFlow flow = Common::bridge_line_flow(island, RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER, false);
+    StoredExPolygonCollection lower_support = Common::grown_lower_support(clipper, lower_layer, flow);
 
     for (uint32_t region_island_idx = 0; region_island_idx < island.region_island_count(); ++region_island_idx) {
         const LayerRegionIsland region_island = island.region_island(region_island_idx);
@@ -308,23 +135,23 @@ ClipperOperand bridge_areas_for_island(storage_handle *storage,
     return bridges.empty() ? std::move(bridges) : clipper_union(bridges);
 }
 
-void remove_bridges_from_island_demand(const run_ctx_support_demand &ctx,
+void remove_bridges_from_island_demand(const plugin_run_context *run_ctx,
                                        storage_handle *storage,
                                        const Layer &lower_layer,
                                        const LayerIsland &island,
                                        const ClipperContext &clipper)
 {
-    expolygon_collection_handle *existing_handle = ctx.get(ctx.demand, island.handle());
-    if (existing_handle == nullptr)
+    const ExPolygonCollection existing = island.support_demand();
+    if (existing.empty())
         return;
 
     ClipperOperand bridges = bridge_areas_for_island(storage, lower_layer, island, clipper);
     if (bridges.empty())
         return;
 
-    ExPolygonCollection existing(existing_handle);
-    ClipperOperand remaining = clipper_diff_with_safety_offset(clipper(existing), bridges);
-    set_demand_from_operand(ctx, island, std::move(remaining));
+    StoredExPolygonCollection remaining =
+        clipper_diff_with_safety_offset(clipper(existing), bridges).to_expolygon_collection();
+    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), remaining.mutable_handle());
 }
 
 } // namespace
@@ -353,7 +180,7 @@ const char *SupportDemandBridgeRemoval::description_impl() const noexcept
 
 slicing_step_t SupportDemandBridgeRemoval::step_impl() const noexcept
 {
-    return STEP_SUPPORT_DEMAND;
+    return STEP_POST_PERIMETER;
 }
 
 const char *const *SupportDemandBridgeRemoval::dependencies_impl() const noexcept
@@ -363,7 +190,9 @@ const char *const *SupportDemandBridgeRemoval::dependencies_impl() const noexcep
 
 int32_t SupportDemandBridgeRemoval::priority_impl() const noexcept
 {
-    return 15;
+    // After ExtraPerimetersOnOverhangs (-20) and ExtraPerimeterOverhangWave (-19),
+    // which add perimeters over overhangs; before FuzzySkin (0) and DetectOverhang (50).
+    return -10;
 }
 
 int32_t SupportDemandBridgeRemoval::used_config_keys(raw_used_config_key *keys) const noexcept
@@ -402,7 +231,7 @@ void SupportDemandBridgeRemoval::inilialize_impl(storage_handle *) const
     def.printer_technology = RAW_PT_FFF;
     def.label = "Don't support bridges";
     def.category = RAW_OPTION_CATEGORY_SUPPORT;
-    def.invalidates_step = STEP_SLICING;
+    def.invalidates_step = STEP_POST_PERIMETER;
     def.tooltip = "Experimental option for preventing support material from being generated under bridged areas.";
     def.mode = RAW_CONFIG_OPTION_MODE_ADV_EXP | RAW_CONFIG_OPTION_MODE_PRUSA;
     def.default_serialized_value = "1";
@@ -415,31 +244,29 @@ void SupportDemandBridgeRemoval::inilialize_impl(storage_handle *) const
                                  0);
 
     GuiRule::activate("dont_support_bridges")
-        .when(any_of({
-            GuiCondition::true_("support_material"),
-            GuiCondition::non_zero("raft_layers")
-        }))
+        .when(GuiCondition::true_("support_material"))
         .add_to(m_orchestrator);
 }
 
+// Borrows a post-perimeter payload and reserves progress above layer zero when bridge removal is enabled; missing payload does nothing and cancellation propagates.
 void SupportDemandBridgeRemoval::setup_run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
-    const run_ctx_support_demand *ctx = plugin_ctx_as_support_demand(run_ctx);
+    const run_ctx_post_perimeter_generation *ctx = plugin_ctx_as_post_perimeter_generation(run_ctx);
     if (ctx == nullptr || ctx->object == nullptr)
         return;
 
     const Object object(ctx->object);
     const BridgeRemovalConfig config = read_object_config(object);
     if (config.dont_support_bridges)
-        progress().add_max(island_work_count(object));
+        progress().add_max(Common::island_work_count(object, 1));
 }
 
 void SupportDemandBridgeRemoval::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
-    const run_ctx_support_demand *ctx = plugin_ctx_as_support_demand(run_ctx);
-    if (ctx == nullptr || ctx->object == nullptr || ctx->demand == nullptr)
+    const run_ctx_post_perimeter_generation *ctx = plugin_ctx_as_post_perimeter_generation(run_ctx);
+    if (ctx == nullptr || ctx->object == nullptr)
         return;
 
     const Object object(ctx->object);
@@ -460,7 +287,7 @@ void SupportDemandBridgeRemoval::run_impl(const plugin_run_context *run_ctx) con
             throw_if_cancelled(run_ctx);
 
             const LayerIsland island = layer.island(island_idx);
-            remove_bridges_from_island_demand(*ctx, storage, lower_layer, island, clipper);
+            remove_bridges_from_island_demand(run_ctx, storage, lower_layer, island, clipper);
             progress().increment();
         }
     }

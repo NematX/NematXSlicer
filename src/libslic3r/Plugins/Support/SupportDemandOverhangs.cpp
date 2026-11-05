@@ -5,14 +5,13 @@
 
 #include "SupportDemandOverhangs.hpp"
 
-#include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <limits>
 
 #include "libslic3r/Api/plugin/c/slic3r_orchestrator.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/cpp/Views.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportDemand.hpp"
 
 /*
 SupportDemandOverhangs
@@ -44,8 +43,8 @@ allowance when it is valid; otherwise, half the smallest external-perimeter
 width of the island is used.
 
 The calculation is performed independently for each layer island. The result
-is limited to the current island slice and stored in the host-owned demand
-map. This stage identifies areas that need support; it does not generate the
+is limited to the current island slice and stored in the island's support
+demand. This stage identifies areas that need support; it does not generate the
 support extrusions themselves.
 */
 
@@ -56,6 +55,9 @@ namespace {
 const char *k_support_demand_overhangs_id = "support.demand.overhangs";
 const char *k_no_dependencies[] = { nullptr };
 
+// Reads the smallest positive external-perimeter flow width, falling back to 0.4 mm.
+coord_t island_external_perimeter_width(const LayerIsland &island);
+
 struct ObjectSupportDemandConfig
 {
     bool support_material = false;
@@ -63,6 +65,10 @@ struct ObjectSupportDemandConfig
     int32_t support_material_enforce_layers = 0;
     int32_t support_material_threshold = 0;
 };
+
+// Computes an enforced-layer zero or the guarded horizontal allowance for one island.
+coord_t lower_layer_offset(const ObjectSupportDemandConfig &config, const Layer &lower_layer,
+                           const LayerIsland &island, uint32_t layer_idx);
 
 ObjectSupportDemandConfig read_object_config(const Object &object)
 {
@@ -85,30 +91,24 @@ bool has_support_demand(const ObjectSupportDemandConfig &config)
     return has_auto_support(config) || config.support_material_enforce_layers > 0;
 }
 
-uint32_t island_work_count(const Object &object)
-{
-    uint32_t count = 0;
-    for (uint32_t layer_idx = 1; layer_idx < object.layer_count(); ++layer_idx)
-        count += object.layer(layer_idx).island_count();
-    return count;
-}
-
 bool enforced_support_layer(const ObjectSupportDemandConfig &config, uint32_t layer_idx)
 {
     return config.support_material_enforce_layers > 0 && layer_idx < uint32_t(config.support_material_enforce_layers);
 }
 
+// Reads the smallest positive external-perimeter flow width of the borrowed island, or 0.4 mm when none exists; returns scaled units without changing the island.
 coord_t island_external_perimeter_width(const LayerIsland &island)
 {
     coord_t width = std::numeric_limits<coord_t>::max();
     for (uint32_t region_idx = 0; region_idx < island.region_count(); ++region_idx) {
         const c_flow flow = island.region(region_idx).flow(RAW_EXTRUSION_ROLE_EXTERNAL_PERIMETER);
-        if (flow.width > 0 && (width == 0 || flow.width < width))
-            width = std::min(width, flow.width);
+        if (flow.width > 0 && flow.width < width)
+            width = flow.width;
     }
     return width < std::numeric_limits<coord_t>::max() ? width : scale_i(0.4);
 }
 
+// Returns zero for enforced layers, otherwise the guarded threshold margin using borrowed lower height and the island's minimum positive external width; views are unchanged, failed host flow reads return a null flow, and no positive width makes island_external_perimeter_width() fall back to 0.4 mm.
 coord_t lower_layer_offset(const ObjectSupportDemandConfig &config,
                            const Layer &lower_layer,
                            const LayerIsland &island,
@@ -117,16 +117,11 @@ coord_t lower_layer_offset(const ObjectSupportDemandConfig &config,
     if (enforced_support_layer(config, layer_idx))
         return 0;
 
-    if (config.support_material_threshold > 0) {
-        const double threshold_rad = PI * double(config.support_material_threshold + 1) / 180.;
-        if (threshold_rad > 0. && threshold_rad < PI / 2.)
-            return scale_to_layer_coord(unscaled(lower_layer.height()) / std::tan(threshold_rad));
-    }
-
-    return island_external_perimeter_width(island) / 2;
+    return Common::overhang_margin(config.support_material_threshold, lower_layer.height(), island_external_perimeter_width(island), true);
 }
 
-void add_to_demand(const run_ctx_support_demand &ctx,
+// Converts and validates borrowed unsupported areas before unioning existing demand, then moves storage-owned polygons into the island without revalidation or a cancellation check; context must allow demand mutation and geometry/allocation failures propagate. Common unites first, then converts/validates/checks cancellation; changing that order could change output.
+void add_to_demand(const plugin_run_context *run_ctx,
                    const LayerIsland &island,
                    storage_handle *storage,
                    ClipperOperand &unsupported)
@@ -138,14 +133,11 @@ void add_to_demand(const run_ctx_support_demand &ctx,
     StoredExPolygonCollection polygons = unsupported.to_expolygon_collection();
     polygons.ensure_valid();
 
-    expolygon_collection_handle *existing = ctx.get(ctx.demand, island.handle());
-    if (existing != nullptr) {
-        ExPolygonCollection existing_polygons(existing);
-        polygons = clipper_union2(clipper(existing_polygons), clipper(polygons)).to_expolygon_collection();
-        polygons.ensure_valid();
-    }
+    const ExPolygonCollection existing = island.support_demand();
+    if (!existing.empty())
+        polygons = clipper_union2(clipper(existing), clipper(polygons)).to_expolygon_collection();
 
-    ctx.set(ctx.demand, island.handle(), polygons.mutable_handle());
+    expolygons_move(support_demand_get_island_mutable(run_ctx, island.handle()), polygons.mutable_handle());
 }
 
 } // namespace
@@ -192,6 +184,7 @@ const char *SupportDemandOverhangs::progress_message_format_impl() const noexcep
     return "Support demand overhangs: %u / %u islands";
 }
 
+// Borrows a demand payload and reserves progress for islands above layer zero; missing payload does nothing and cancellation propagates.
 void SupportDemandOverhangs::setup_run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
@@ -200,14 +193,14 @@ void SupportDemandOverhangs::setup_run_impl(const plugin_run_context *run_ctx) c
         return;
 
     const Object object(ctx->object);
-    progress().add_max(island_work_count(object));
+    progress().add_max(Common::island_work_count(object, 1));
 }
 
 void SupportDemandOverhangs::run_impl(const plugin_run_context *run_ctx) const
 {
     throw_if_cancelled(run_ctx);
     const run_ctx_support_demand *ctx = plugin_ctx_as_support_demand(run_ctx);
-    if (ctx == nullptr || ctx->object == nullptr || ctx->demand == nullptr)
+    if (ctx == nullptr || ctx->object == nullptr)
         return;
 
     const Object object(ctx->object);
@@ -244,7 +237,7 @@ void SupportDemandOverhangs::run_impl(const plugin_run_context *run_ctx) const
                 lower_support = clipper_offset(lower_support, double(offset));
 
             ClipperOperand unsupported = clipper_diff_with_safety_offset(clipper(island.slice()), lower_support);
-            add_to_demand(*ctx, island, storage, unsupported);
+            add_to_demand(run_ctx, island, storage, unsupported);
             progress().increment();
         }
     }

@@ -17,6 +17,7 @@ add_executable(${_TEST_NAME}_tests
     test_bridge_detector_cancellation.cpp
     mesh_queries_c_fixture.c
     plugin_api_headers_c_fixture.c
+    support_pattern_c_fixture.c
     mesh_query_visibility_reference.cpp
     test_mesh_queries.cpp
     test_triangle_mesh_storage.cpp
@@ -89,6 +90,16 @@ add_executable(${_TEST_NAME}_tests
     test_layer_extrusion_edit_travel_deceleration.cpp
     test_layer_extrusion_edit_speed.cpp
     test_layer_region_support_flow.cpp
+    test_support_grid_family.cpp
+    test_support_grid_legacy_compare.cpp
+    test_support_tree_dump.cpp
+    test_support_tree_routing.cpp
+    test_support_tree_settings.cpp
+    test_support_tree_volumes.cpp
+test_support_tree_family.cpp
+    test_support_tree_legacy_compare.cpp
+    test_support_publication.cpp
+    test_support_slab_placement.cpp
     test_flat_area_layer_height.cpp
     test_nozzle_cleaning.cpp
     test_ordering_advanced_extrusion_tree.cpp
@@ -129,14 +140,25 @@ add_executable(${_TEST_NAME}_tests
     test_step_selector_snapshot.cpp
     test_step_selector_traits.cpp
     test_dense_infill.cpp
+    test_support_demand_buildplate_only.cpp
     test_support_demand_modifiers.cpp
     test_support_demand_overhangs.cpp
+    test_support_toolpath_step.cpp
+    test_support_toolpath_legacy.cpp
+    test_support_toolpath_branch.cpp
+    test_support_branch_classify.cpp
+    test_support_common.cpp
+    test_support_step.cpp
+    test_layer_extrusion_edit_support_acceleration.cpp
+    test_support_pattern_service.cpp
+    test_support_tool_ordering.cpp
     test_surface_clean_infill_surfaces.cpp
     test_surface_initial_typed_surface_builder.cpp
     test_surface_infill_region_compatibility_splitter.cpp
     test_surface_solid_shells.cpp
     test_surface_top_surface_expansion.cpp
     test_tool_change_wipe.cpp
+    test_tree_geometry.cpp
     test_vase_multi_island_connector.cpp
     test_wipe_tower_footprint.cpp
     test_wipe_tower_layout.cpp

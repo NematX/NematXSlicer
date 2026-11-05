@@ -31,7 +31,7 @@ namespace Slic3r {
 /// a SurfaceType should be composed of a Position & density flag
 /// Position: top, bottom, internal
 /// Density: solid, sparse, void
-/// optinally, is can also have one bridge modifier (bridge, over-bridge).
+/// Optional modifiers describe bridge flow, membership in a support auxiliary layer, or a support contact.
 enum SurfaceType  : uint16_t { 
     stNone = 0,
     /// Position: Top horizontal surface, visible from the top.
@@ -52,6 +52,17 @@ enum SurfaceType  : uint16_t {
     stModBridge = 1 << 7,
     /// Bridge Modifier: 2nd layer of dense infill over sparse infill/nothing, may be printed with an over-extruding flow.
     stModOverBridge = 1 << 8,
+    /// Support modifier: the surface belongs to a support auxiliary layer (support base or interface), not to the object.
+    stModSupport = 1 << 9,
+    /// Branch modifier: the surface is the body of a tree branch, printed by the branch toolpath role.
+    stModBranch = 1 << 10,
+    /// Contact modifier: the dense areas of a support contact layer, the layer placed against the object (under it for a top surface, resting on it for a
+    /// bottom surface): the area touching the object above or below and the margin of that contact, that is the dense area of the contact layer around it.
+    /// Bridging bottom contacts carry it. A dense top or bottom support surface without it is an interface of its side, and a contact merged into the base
+    /// is published as sparse base without it. On a side without interface layers, interfaces and contacts both use the base settings and bucket;
+    /// the bit only selects contact handling, such as non-soluble bottom-contact bridging flow.
+    /// Support families must mark every contact area; no host check verifies the marking.
+    stModContact = 1 << 11,
 };
 inline SurfaceType operator|(SurfaceType a, SurfaceType b) {
     return static_cast<SurfaceType>(static_cast<uint16_t>(a) | static_cast<uint16_t>(b));
@@ -74,6 +85,7 @@ inline SurfaceType operator&=(SurfaceType& a, SurfaceType b) {
 //inline bool operator!=(SurfaceType a, SurfaceType b) {
 //    return static_cast<uint16_t>(a) ^ static_cast<uint16_t>(b) != 0;
 //}
+// Describe the recognized position, density and modifier bits of a surface type.
 std::string surfaceType_to_string(SurfaceType st);
 
 
@@ -202,6 +214,12 @@ public:
     bool has_pos_bottom() const;
     bool has_mod_bridge() const;
     bool has_mod_overBridge() const;
+    // True when the surface belongs to a support auxiliary layer.
+    bool has_mod_support() const;
+    // True when the surface is the body of a tree branch.
+    bool has_mod_branch() const;
+    // True when the surface is a dense area of a support contact layer.
+    bool has_mod_contact() const;
 };
 
 typedef std::vector<Surface> Surfaces;
@@ -401,7 +419,9 @@ void ensure_valid(Surfaces &surfaces, coord_t resolution = SCALED_EPSILON);
 
 class SVG;
 
+// Choose a diagnostic RGB color for a surface type, scaled by saturation.
 extern const std::string surface_type_to_color_name(const SurfaceType surface_type, float saturation = 1);
+// Draw the surface-type color legend at the supplied SVG position.
 extern void export_surface_type_legend_to_svg(SVG &svg, const Point &pos);
 extern Point export_surface_type_legend_to_svg_box_size();
 extern bool export_to_svg(const char *path, const Surfaces &surfaces, const float transparency = 1.f);

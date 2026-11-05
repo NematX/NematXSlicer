@@ -208,11 +208,6 @@ std::vector<double> generate_object_layers(
     const SlicingParameters     &slicing_params,
     const std::vector<double> &layer_height_profile);
 
-// Check whether the layer height profile describes a fixed layer height profile.
-bool check_object_layers_fixed(
-    const SlicingParameters     &slicing_params,
-    const std::vector<double> &layer_height_profile);
-
 // Produce a 1D texture packed into a 2D texture describing in the RGBA format
 // the planned object layers.
 // Returns number of cells used by the texture of the 0th LOD level.

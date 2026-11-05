@@ -148,10 +148,19 @@ plugin settings. A plugin's own layout fragment takes precedence over generated 
 #include "libslic3r/Plugins/Surface/InfillRegionCompatibilitySplitter.hpp"
 #include "libslic3r/Plugins/Surface/SolidShells.hpp"
 #include "libslic3r/Plugins/Surface/TopSurfaceExpansion.hpp"
+#include "libslic3r/Plugins/Support/SupportDemandBridgeInfillRemoval.hpp"
 #include "libslic3r/Plugins/Support/SupportDemandBridgeRemoval.hpp"
 #include "libslic3r/Plugins/WipeTower/ToolChangeUnretract.hpp"
 #include "libslic3r/Plugins/WipeTower/ToolChangeWipe.hpp"
 #include "libslic3r/Plugins/WipeTower/WipeTowerManager.hpp"
+#include "libslic3r/Plugins/Support/Grid/SupportFamilyGrid.hpp"
+#include "libslic3r/Plugins/Support/Tree/SupportFamilyTree.hpp"
+#include "libslic3r/Plugins/Support/Toolpath/SupportToolpathBranch.hpp"
+#include "libslic3r/Plugins/Support/Toolpath/SupportToolpathLegacy.hpp"
+#include "libslic3r/Plugins/Support/SupportDemandBuildplateOnly.hpp"
+#include "libslic3r/Plugins/Support/SupportDemandModifiers.hpp"
+#include "libslic3r/Plugins/Support/SupportDemandOverhangs.hpp"
+#include "libslic3r/Plugins/Support/SupportDemandPainting.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -688,6 +697,7 @@ void register_builtin_plugin(orchestrator_handle *orchestrator,
 }
 
 // Invoke each built-in registration helper with the borrowed host; instances remain owned by their modules.
+
 void register_builtin_plugins(orchestrator_handle *orchestrator)
 {
     register_builtin_plugin(orchestrator, "standard_layer_height_generator",
@@ -838,8 +848,7 @@ void register_builtin_plugins(orchestrator_handle *orchestrator)
     register_builtin_plugin(orchestrator, "surface.infill_region_compatibility_splitter",
         slic3r_api::SurfaceGeneration::InfillRegionCompatibilitySplitterPlugin::
             register_infill_region_compatibility_splitter_plugin);
-    register_builtin_plugin(orchestrator, "support_demand_bridge_removal",
-        slic3r_api::Support::SupportDemandBridgeRemovalPlugin::register_support_demand_bridge_removal_plugin);
+    register_builtin_support_demand_plugins(orchestrator);
     // Last: the built-in activation rules reference settings created by the
     // other plugins; the pending-rule queue attaches the ones that appear later.
     register_builtin_plugin(orchestrator, "gui_rules.core",
@@ -947,6 +956,35 @@ void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator)
 }
 
 } // namespace
+
+// Register demand, grid geometry and native toolpath providers before initialization; startup and tests share these registrations and activation defaults.
+void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
+{
+    register_builtin_plugin(orchestrator, "support.demand.overhangs",
+        slic3r_api::Support::SupportDemandOverhangsPlugin::register_support_demand_overhangs_plugin);
+    register_builtin_plugin(orchestrator, "support.demand.painting",
+        slic3r_api::Support::SupportDemandPaintingPlugin::register_support_demand_painting_plugin);
+    register_builtin_plugin(orchestrator, "support.demand.modifiers",
+        slic3r_api::Support::SupportDemandModifiersPlugin::register_support_demand_modifiers_plugin);
+    register_builtin_plugin(orchestrator, "support.demand.buildplate_only",
+        slic3r_api::Support::SupportDemandBuildplateOnlyPlugin::register_support_demand_buildplate_only_plugin);
+    register_builtin_plugin(orchestrator, "support.demand.bridge_removal",
+        slic3r_api::Support::SupportDemandBridgeRemovalPlugin::register_support_demand_bridge_removal_plugin);
+    register_builtin_plugin(orchestrator, "support.demand.bridge_infill_removal",
+        slic3r_api::Support::SupportDemandBridgeInfillRemovalPlugin::register_support_demand_bridge_infill_removal_plugin);
+    register_builtin_plugin(orchestrator, "support.family.grid",
+        slic3r_api::Support::Grid::register_support_family_grid_plugin);
+    register_builtin_plugin(orchestrator, "support.family.tree",
+        slic3r_api::Support::Tree::register_support_family_tree_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_sparse",
+        slic3r_api::Support::Toolpath::register_support_toolpath_sparse_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_bottom",
+        slic3r_api::Support::Toolpath::register_support_toolpath_bottom_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_top",
+        slic3r_api::Support::Toolpath::register_support_toolpath_top_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.branch_sheath",
+        slic3r_api::Support::Toolpath::register_support_toolpath_branch_plugin);
+}
 
 bool resolve_plugin_startup_activation_config(const boost::filesystem::path &data_directory,
                                               PluginActivationConfig &config,

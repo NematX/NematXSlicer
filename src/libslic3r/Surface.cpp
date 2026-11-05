@@ -82,6 +82,24 @@ Surface::has_mod_overBridge() const
     return has(stModOverBridge);
 }
 
+// True when the surface belongs to a support auxiliary layer.
+bool Surface::has_mod_support() const
+{
+    return has(stModSupport);
+}
+
+// True when the surface is the body of a tree branch.
+bool Surface::has_mod_branch() const
+{
+    return has(stModBranch);
+}
+
+// True when the surface is a dense area of a support contact layer.
+bool Surface::has_mod_contact() const
+{
+    return has(stModContact);
+}
+
 BoundingBox get_extents(const Surface &surface)
 {
     return get_extents(surface.expolygon.contour);
@@ -130,8 +148,13 @@ void ensure_valid(Surfaces &surfaces, coord_t resolution /*= SCALED_EPSILON*/)
     }
 }
 
+// SVG color of a surface type; saturation scales the channels.
 const std::string surface_type_to_color_name(const SurfaceType surface_type, float saturation)
 {
+    // The all-bits-set value is the diagnostic invalid sentinel, not a support type.
+    if (surface_type != SurfaceType(-1) && (surface_type & stModBranch) != 0) return (std::string("rgb(")+std::to_string(int(saturation*128))+",0,"+std::to_string(int(saturation*128))+")"); // purple
+    if (surface_type != SurfaceType(-1) && (surface_type & stModContact) != 0) return (std::string("rgb(")+std::to_string(int(saturation*255))+","+std::to_string(int(saturation*64))+",0)"); // dark orange
+    if (surface_type != SurfaceType(-1) && (surface_type & stModSupport) != 0) return (std::string("rgb(")+std::to_string(int(saturation*255))+","+std::to_string(int(saturation*128))+",0)"); // orange
     if ((surface_type & stPosTop) != 0) return (std::string("rgb(")+std::to_string(int(saturation*255))+",0,0)"); // "red";
     if (surface_type == (stPosBottom | stDensSolid | stModBridge)) return (std::string("rgb(0,0,")+std::to_string(int(saturation*255))+")"); // "blue";
     if ((surface_type & stPosBottom) != 0) return (std::string("rgb(0,")+std::to_string(int(saturation*255))+",0)"); // "green";
@@ -150,6 +173,7 @@ Point export_surface_type_legend_to_svg_box_size()
     return Point(scale_i(1.+10.*8.), scale_i(3.)); 
 }
 
+// Draw the surface-type color legend at pos.
 void export_surface_type_legend_to_svg(SVG &svg, const Point &pos)
 {
     // 1st row
@@ -166,6 +190,12 @@ void export_surface_type_legend_to_svg(SVG &svg, const Point &pos)
     svg.draw_legend(Point(pos_x, pos_y), "bottom bridge"  , surface_type_to_color_name(stPosBottom | stModBridge));
     pos_x += step_x;
     svg.draw_legend(Point(pos_x, pos_y), "invalid"        , surface_type_to_color_name(SurfaceType(-1)));
+    pos_x += step_x;
+    svg.draw_legend(Point(pos_x, pos_y), "support"        , surface_type_to_color_name(stModSupport));
+    pos_x += step_x;
+    svg.draw_legend(Point(pos_x, pos_y), "support branch" , surface_type_to_color_name(stModSupport | stModBranch));
+    pos_x += step_x;
+    svg.draw_legend(Point(pos_x, pos_y), "support contact", surface_type_to_color_name(stModSupport | stModContact));
     // 2nd row
     pos_x = pos_x0;
     pos_y = pos(1) + scale_i(2.8);
@@ -196,6 +226,7 @@ bool export_to_svg(const char *path, const Surfaces &surfaces, const float trans
 }
 
 
+// Names of the set type bits joined by "||", or "none".
 std::string surfaceType_to_string(SurfaceType st)
 {
     std::string str;
@@ -240,6 +271,21 @@ std::string surfaceType_to_string(SurfaceType st)
         if (!str.empty())
             str += "||";
         str += "modOverBridge";
+    }
+    if ((st & stModSupport) != 0) {
+        if (!str.empty())
+            str += "||";
+        str += "modSupport";
+    }
+    if ((st & stModBranch) != 0) {
+        if (!str.empty())
+            str += "||";
+        str += "modBranch";
+    }
+    if ((st & stModContact) != 0) {
+        if (!str.empty())
+            str += "||";
+        str += "modContact";
     }
     return str.empty() ? "none" : str;
 }

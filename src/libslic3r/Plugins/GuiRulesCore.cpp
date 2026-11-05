@@ -90,6 +90,12 @@ const GuiCondition have_support = any_of({
     true_("support_material"),
     non_zero("raft_layers")
 });
+// A support foot exists: the support option, a raft, or enforced support layers (which build support without the option).
+const GuiCondition has_support_foot = any_of({
+    true_("support_material"),
+    non_zero("raft_layers"),
+    non_zero("support_material_enforce_layers")
+});
 const GuiCondition have_brim = any_of({
     non_zero("brim_width"),
     non_zero("brim_width_interior")
@@ -100,15 +106,21 @@ const GuiCondition have_interface = any_of({
     all_of({ non_zero("raft_layers"), non_zero("support_material_interface_layers") }),
     all_of({ non_zero("raft_layers"), non_zero("support_material_bottom_interface_layers") })
 });
-const GuiCondition has_organic = any_of({
-    all_of({ int_equals("support_material_style", int(SupportMaterialStyle::smsOrganic)),
+// The tree and organic styles are both served by the tree support family, so they share the
+// support_tree_* settings. The family runs for the support option or for enforced layers.
+const GuiCondition has_tree_family = any_of({
+    all_of({ any_of({ int_equals("support_material_style", int(SupportMaterialStyle::smsTree)),
+                      int_equals("support_material_style", int(SupportMaterialStyle::smsOrganic)) }),
              true_("support_material") }),
-    all_of({ int_equals("support_material_style", int(SupportMaterialStyle::smsOrganic)),
+    all_of({ any_of({ int_equals("support_material_style", int(SupportMaterialStyle::smsTree)),
+                      int_equals("support_material_style", int(SupportMaterialStyle::smsOrganic)) }),
              non_zero("support_material_enforce_layers") })
 });
 
-// base AND NOT(has_organic_supports):
-// NOT(style == organic AND (support OR enforce > 0)).
+// base AND NOT(organic supports): NOT(style == organic AND (support OR enforce > 0)).
+// The organic body is the branch sheath (the loop that walls an organic branch section), so the
+// sparse fill settings (the infill pattern of the support body) do not apply to it; the tree style
+// still builds its base slabs (horizontal bands of support between two Z levels) as sparse fills.
 GuiCondition without_organic_supports(const GuiCondition &base)
 {
     return all_of({
@@ -371,25 +383,33 @@ void GuiRulesCore::inilialize_impl(storage_handle *) const
 
     add_rule({ "support_tree_angle", "support_tree_angle_slow", "support_tree_branch_diameter",
                "support_tree_branch_diameter_angle", "support_tree_branch_diameter_double_wall",
-               "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate" },
-             has_organic);
+               "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate",
+               "support_tree_max_overhang" },
+             has_tree_family);
 
     add_rule({ "support_material_interface_spacing", "support_material_interface_extruder",
                "support_material_interface_speed",
                "support_material_interface_angle_increment",
                "support_material_bottom_interface_expansion" }, have_interface);
+    // Interfaces are common to every support family.
     add_rule({ "support_material_interface_layer_height", "support_material_interface_angle",
                "support_material_bottom_interface_pattern",
-               "support_material_interface_contact_loops" }, without_organic_supports(have_interface));
+               "support_material_interface_contact_loops" }, have_interface);
     add_rule({ "support_material_with_sheath", "support_material_pattern",
                "support_material_spacing", "support_material_angle",
-               "support_material_angle_height", "support_material_layer_height" },
+               "support_material_angle_height" },
              without_organic_supports(have_support));
+    // The layer height is the maximum slab height of the slab planner, used by every style.
+    add_rule({ "support_material_layer_height" }, have_support);
 
-    add_rule({ "support_material_synchronize_layers" }, any_of({
-        all_of({ true_("support_material"), int_equals("support_material_contact_distance_type", int(zdNone)) }),
-        all_of({ non_zero("raft_layers"), int_equals("support_material_contact_distance_type", int(zdNone)) })
-    }));
+    // Synchronization also retains object Z positions for non-soluble support, while contacts keep their separation gaps.
+    // Only the grid and snug family follows it: tree and organic supports choose their layer heights from the branch slopes.
+    add_rule({ "support_material_synchronize_layers" }, all_of({ have_support, any_of({
+        int_equals("support_material_style", int(SupportMaterialStyle::smsGrid)),
+        int_equals("support_material_style", int(SupportMaterialStyle::smsSnug)) }) }));
+
+    // The first layer of every support style and of the raft: its density and the expansion of its foot.
+    add_rule({ "raft_first_layer_density", "raft_first_layer_expansion" }, has_support_foot);
 
     // raft
     add_rule({ "raft_contact_distance" }, all_of({

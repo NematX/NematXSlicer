@@ -5,6 +5,7 @@
 
 #include "libslic3r/Api/host/Orchestrator.hpp"
 #include "libslic3r/Api/host/steps/SupportDemandStep.hpp"
+#include "libslic3r/Api/plugin/c/slic3r_data_tree.h"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/Model.hpp"
@@ -100,18 +101,20 @@ struct DemandSummary
     double area_mm2 = 0.;
 };
 
-DemandSummary summarize_support_demand(ApiHost::Steps::SupportDemandSet &demand)
+// Sum the support demand stored in the object's islands; entry_count counts the
+// islands that ask for support.
+DemandSummary summarize_support_demand(const PrintObject &object)
 {
     DemandSummary summary;
-    summary.entry_count = demand.entry_count();
-    for (uint32_t entry_idx = 0; entry_idx < demand.entry_count(); ++entry_idx) {
-        const LayerSliceIsland *island = demand.entry_island(entry_idx);
-        ExPolygons *polygons = demand.get(island);
-        if (polygons == nullptr)
-            continue;
-        summary.polygon_count += polygons->size();
-        summary.area_mm2 += unscaled(unscaled(area(*polygons)));
-    }
+    for (const Layer &layer : object.layers())
+        for (const LayerSliceIsland &island : layer.islands()) {
+            const ExPolygons &polygons = island.support_demand();
+            if (polygons.empty())
+                continue;
+            ++summary.entry_count;
+            summary.polygon_count += polygons.size();
+            summary.area_mm2 += unscaled(unscaled(area(polygons)));
+        }
     return summary;
 }
 
@@ -133,10 +136,8 @@ DemandSummary run_support_demand(const TriangleMesh &mesh, const DynamicPrintCon
     Orchestrator &orchestrator = Orchestrator::instance();
     run_until_support_demand_input(orchestrator, print);
 
-    Steps::StepSupportDemand::State state;
-    Steps::StepSupportDemand::run_step(orchestrator, print, state);
-    ApiHost::Steps::SupportDemandSet &demand = state.demand_for(print.object(0));
-    return summarize_support_demand(demand);
+    Steps::StepSupportDemand::run_step(orchestrator, print);
+    return summarize_support_demand(print.object(0));
 }
 
 bool has_meaningful_demand(const DemandSummary &summary)
@@ -235,4 +236,73 @@ TEST_CASE("SupportDemandOverhangs uses support_material_enforce_layers for early
     const DemandSummary enforced_layer = run_support_demand(
         shallow_slope, support_demand_config(true, false, 0, 2));
     REQUIRE(has_meaningful_demand(enforced_layer));
+}
+
+TEST_CASE("Support demand is island data, readable later and emptied by the step cleanup", "[plugins][support-demand]")
+{
+    // STEP_SUPPORT_DEMAND now runs right after slicing and stores its result in
+    // the layer islands, so any later step can read it through the data tree.
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    Slic3r::Test::init_print({make_sloped_cube(5.)}, print, model, support_demand_config(true, true, 0, 0));
+    Orchestrator &orchestrator = Orchestrator::instance();
+    run_until_support_demand_input(orchestrator, print);
+    REQUIRE_FALSE(has_meaningful_demand(summarize_support_demand(print.object(0))));
+
+    Steps::StepSupportDemand::run_step(orchestrator, print);
+    REQUIRE(has_meaningful_demand(summarize_support_demand(print.object(0))));
+
+    // The public getter borrows the same island-owned collection.
+    for (const Layer &layer : print.object(0).layers())
+        for (const LayerSliceIsland &island : layer.islands()) {
+            const expolygon_collection_handle *demand =
+                layer_island_get_support_demand(reinterpret_cast<const layer_island_handle *>(&island));
+            CHECK(reinterpret_cast<const ExPolygons *>(demand) == &island.support_demand());
+        }
+
+    // A replay from Checkpoint::Slicing clears the step outputs before rerunning it.
+    Steps::StepSupportDemand::clear(print);
+    CHECK(summarize_support_demand(print.object(0)).entry_count == 0);
+}
+
+TEST_CASE("Support demand edits are allowed from STEP_SUPPORT_DEMAND through STEP_SUPPORT", "[plugins][support-demand]")
+{
+    Slic3r::Test::Plugins::ensure_plugin_test_runtime_initialized();
+    Model model;
+    Print print;
+    Slic3r::Test::init_print({make_sloped_cube(5.)}, print, model, support_demand_config(true, true, 0, 0));
+    run_until_support_demand_input(Orchestrator::instance(), print);
+    const LayerSliceIsland &first_island = *print.object(0).layer(1).islands().begin();
+    const layer_island_handle *island = reinterpret_cast<const layer_island_handle *>(&first_island);
+
+    // A minimal run context: the host only needs the Print (for its running
+    // step) and the error callback.
+    struct Errors { int count = 0; } errors;
+    plugin_host_context host_context;
+    host_context.print = &print;
+    plugin_run_context run_ctx = {};
+    run_ctx.host_context = &host_context;
+    static Errors *s_errors = nullptr;
+    s_errors = &errors;
+    run_ctx.report_error = [](plugin_host_context *, const char *) { ++s_errors->count; };
+
+    // Outside a pipeline run there is no restriction, like other data-tree edits.
+    CHECK(support_demand_get_island_mutable(&run_ctx, island) != nullptr);
+    // Before the demand is built, or after support generation, it is refused.
+    print.set_running_step(STEP_POST_SLICING);
+    CHECK(support_demand_get_island_mutable(&run_ctx, island) == nullptr);
+    print.set_running_step(STEP_SKIRT_BRIM);
+    CHECK(support_demand_get_island_mutable(&run_ctx, island) == nullptr);
+    CHECK(errors.count == 2);
+
+    // Every step of the window may edit it: the demand step, a step after the
+    // perimeters, and support generation itself.
+    for (const slicing_step_t step : {STEP_SUPPORT_DEMAND, STEP_POST_PERIMETER, STEP_INFILL, STEP_SUPPORT}) {
+        print.set_running_step(step);
+        expolygon_collection_handle *demand = support_demand_get_island_mutable(&run_ctx, island);
+        CHECK(reinterpret_cast<const ExPolygons *>(demand) == &first_island.support_demand());
+    }
+    print.set_running_step(STEP_NONE);
+    CHECK(errors.count == 2);
 }

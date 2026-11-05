@@ -393,6 +393,10 @@ public:
     ExPolygonCollection infill_no_overlap_areas() const {
         return ExPolygonCollection(layer_island_get_infill_no_overlap_areas(handle()));
     }
+    // Areas of this island that ask for support (see layer_island_get_support_demand()).
+    ExPolygonCollection support_demand() const {
+        return ExPolygonCollection(layer_island_get_support_demand(handle()));
+    }
 
     ConstPluginProperties properties() const {
         return ConstPluginProperties(layer_island_get_properties(handle()));

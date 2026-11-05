@@ -95,7 +95,8 @@ class AbiPackagingTests(unittest.TestCase):
         catalog = json.loads(self.generator.generate_abi_catalog())
         for symbol in ("PLUGIN_ERROR_OK", "PLUGIN_ERROR_GENERAL"):
             self.assertEqual(catalog["python_symbols"][symbol], ["slic3r_plugin_types.h"])
-        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [4, 0])
+        self.assertEqual(catalog["headers"]["slic3r_plugin_types.h"]["version"], [4, 1])
+        self.assertEqual(namespace["SLIC3R_PLUGIN_API_STEP_SUPPORT_TOOLPATH"], 58)
         self.assertEqual(catalog["headers"]["slic3r_config_def.h"]["version"], [1, 5])
         self.assertEqual(catalog["headers"]["slic3r_orchestrator.h"]["version"], [3, 5])
         self.assertEqual(namespace["PLUGIN_INITIALIZE"]._restype_, ctypes.c_int32)
@@ -147,6 +148,9 @@ class AbiPackagingTests(unittest.TestCase):
             first = self.generator.generate_abi_catalog()
             self.assertEqual(first, self.generator.generate_abi_catalog())
             catalog = json.loads(first)
+            self.assertEqual(catalog["headers"]["steps/slic3r_step_support.h"]["version"], [1, 3])
+            self.assertEqual(catalog["headers"]["steps/slic3r_step_support_toolpath.h"]["version"], [1, 3])
+            self.assertIn("steps/slic3r_step_support_toolpath.h", catalog["python_symbols"]["RunCtxSupportToolpath"])
             self.assertIn("slic3r_extrusion_entity.h", catalog["c_functions"]["extrusion_is_loop"])
             self.assertIn("slic3r_geometry.h", catalog["python_symbols"]["CPoint"])
             self.assertIn("slic3r_plugin_types.h", catalog["python_symbols"]["PLUGIN_SETUP"])
@@ -402,6 +406,7 @@ class AbiPackagingTests(unittest.TestCase):
                 "infill_grouping_context": "steps/slic3r_step_infill_group.h",
                 "infill_context": "steps/slic3r_step_infill.h",
                 "support_demand_context": "steps/slic3r_step_support_demand.h",
+                "support_toolpath_context": "steps/slic3r_step_support_toolpath.h",
                 "skirt_brim_context": "steps/slic3r_step_skirt_brim.h",
                 "ordering_context": "steps/slic3r_step_ordering.h",
                 "gcode_context": "steps/slic3r_step_gcode.h",
@@ -410,6 +415,7 @@ class AbiPackagingTests(unittest.TestCase):
             for method, header in execution_methods.items():
                 with self.subTest(execution_method=method):
                     self.assertIn(header, bindings.methods[method])
+            self.assertIn("steps/slic3r_step_support_toolpath.h", bindings.symbols["SupportToolpathContext"])
 
             self.assertIn(
                 "slic3r_plugin_run_context.h",
@@ -475,7 +481,7 @@ class AbiPackagingTests(unittest.TestCase):
         """The auxiliary mutator (data tree 4.1), the object flows (4.2) and their millimeter variants (4.3) declare the data-tree header."""
         with tempfile.TemporaryDirectory() as directory:
             catalog, _catalog_path = self._write_catalog(Path(directory))
-            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [4, 3])
+            self.assertEqual(catalog.headers["slic3r_data_tree.h"]["version"], [4, 7])
             self.assertIn("slic3r_data_tree.h", catalog.c_functions["layer_region_island_set_fill_surfaces"])
             for function in ("object_get_support_flow", "object_get_region_flow",
                              "object_get_support_flow_mm", "object_get_region_flow_mm"):

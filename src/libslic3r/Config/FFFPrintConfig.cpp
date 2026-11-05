@@ -952,6 +952,7 @@ void init_categories(PrintConfigDef &definition)
         "support_tree_branch_diameter_angle",
         "support_tree_branch_diameter_double_wall", 
         "support_tree_branch_distance",
+        "support_tree_max_overhang",
         "support_tree_tip_diameter",
         "support_tree_top_rate",
         // miscellaneous
@@ -5261,7 +5262,7 @@ void init_fff_params(PrintConfigDef &definition)
 
     def = definition.add("raft_first_layer_density", coPercent, ptFFF);
     def->label = L("First layer density");
-    def->full_label = L("Raft first layer density");
+    def->full_label = L("Raft and support first layer density");
     def->category = OptionCategory::support;
     def->invalidates_step = STEP_SUPPORT;
     def->tooltip = L("Density of the first raft or support layer.");
@@ -5273,10 +5274,10 @@ void init_fff_params(PrintConfigDef &definition)
 
     def = definition.add("raft_first_layer_expansion", coFloat, ptFFF);
     def->label = L("First layer expansion");
-    def->full_label = L("Raft first layer expansion");
+    def->full_label = L("Raft and support first layer expansion");
     def->category = OptionCategory::support;
     def->invalidates_step = STEP_SUPPORT;
-    def->tooltip = L("Expansion of the first raft or support layer to improve adhesion to print bed.");
+    def->tooltip = L("Expansion of the first raft layer or of the foot of the support (grid, snug, tree and organic styles) to improve adhesion to the print bed. The expanded foot does not cross the object.");
     def->sidetext = L("mm");
     def->min = 0;
     def->mode = comExpert | comPrusa;
@@ -6149,7 +6150,7 @@ void init_fff_params(PrintConfigDef &definition)
     def = definition.add("parallel_objects_step", coFloat, ptFFF);
     def->label = L("Parallel printing step");
     def->category = OptionCategory::output;
-    def->invalidates_step = STEP_GCODE;
+    def->invalidates_step = STEP_SUPPORT;
     def->tooltip = L("When multiple objects are present, instead of jumping from one to another at each layer"
         " the printer will continue to print the current object layers up to this height before moving to the next object."
         " (first layers will be still printed one by one)."
@@ -6639,7 +6640,7 @@ void init_fff_params(PrintConfigDef &definition)
     def->tooltip = L("Style and shape of the support towers. Projecting the supports into a regular grid "
         "will create more stable supports, while snug support towers will save material and reduce "
         "object scarring."
-        "\nOrganic: create tree support structure, but this algorithm force to synchronize the support layers with object layers, and only allow for one layer height for each object.");
+        "\nOrganic: create tree support structure, but this algorithm force to synchronize the support layers with object layers.");
     def->set_enum<SupportMaterialStyle>({
         { "grid", L("Grid") }, 
         { "snug", L("Snug") },
@@ -6655,7 +6656,9 @@ void init_fff_params(PrintConfigDef &definition)
     // TRN PrintSettings : "Synchronize with object layers"
     def->tooltip = L("Synchronize support layers with the object print layers. This is useful "
                    "with multi-material printers, where the extruder switch is expensive. "
-                   "This option is only available when top contact Z distance is set to zero.");
+                   "Contact layers keep the configured Z distances. Intermediate layers follow object layers; "
+                   "extra layers may be inserted near contacts to respect support layer height limits."
+                   "\nOnly grid and snug supports use it: tree and organic supports choose their layer heights from the branch slopes.");
     def->mode = comExpert | comPrusa;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -6769,6 +6772,24 @@ void init_fff_params(PrintConfigDef &definition)
                      "causing better overhang but making support harder to remove.");
     def->mode = comAdvancedE | comPrusa;
     def->set_default_value(new ConfigOptionFloat(1.));
+
+    // Largest horizontal overhang of a branch outline between two support layers. A nearly vertical branch
+    // can use thick layers, while a strongly inclined one needs thin layers to stay under this overhang.
+    def = definition.add("support_tree_max_overhang", coFloatOrPercent, ptFFF);
+    def->label = L("Max branch overhang");
+    def->category = OptionCategory::support;
+    def->invalidates_step = STEP_SUPPORT;
+    // TRN PrintSettings: "Organic supports" > "Max branch overhang"
+    def->tooltip = L("Maximum horizontal overhang of a tree branch outline from one support layer to the next. "
+                     "A nearly vertical branch allows thick support layers, while a strongly inclined branch needs thin layers "
+                     "to stay under this overhang. It also limits the branch angle, so that the overhang can be printed "
+                     "at the minimum layer height. If expressed as percentage (for example 50%), it will be calculated "
+                     "over the support material extrusion width.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "support_material_extrusion_width";
+    def->min = 0;
+    def->mode = comAdvancedE | comPrusa;
+    def->set_default_value(new ConfigOptionFloatOrPercent(50, true));
 
     def = definition.add("support_tree_top_rate", coPercent, ptFFF);
     def->label = L("Branch Density");

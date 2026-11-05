@@ -62,6 +62,7 @@
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_skirt_brim.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_slicing.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support.h"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_support_toolpath.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_support_spot.h"
 #include "libslic3r/Api/plugin/c/steps/slic3r_step_surface_generation.h"

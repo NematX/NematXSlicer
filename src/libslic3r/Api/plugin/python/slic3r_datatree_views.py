@@ -1675,6 +1675,10 @@ class LayerIsland(DataTreeView):
     def infill_no_overlap_areas(self) -> ExPolygonCollection:
         return ExPolygonCollection(self.api, self.api.host.layer_island_get_infill_no_overlap_areas(self.c_handle()))
 
+    def support_demand(self) -> ExPolygonCollection:
+        """Borrow the areas of this island that ask for support (empty before STEP_SUPPORT_DEMAND)."""
+        return ExPolygonCollection(self.api, self.api.host.layer_island_get_support_demand(self.c_handle()))
+
     def region_count(self) -> int:
         return int(self.api.host.layer_island_count_region(self.c_handle()))
 

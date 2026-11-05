@@ -83,13 +83,21 @@ public:
      * are linked to the neighboring segments, so you can iterate over the
      * segments until you reach the last segment.
      *
+     * Infinite edges and edges with a non-finite vertex are skipped when the
+     * first and the last segment are searched, so the range is invalid when
+     * such an edge bounds it. A valid range can still contain such an edge
+     * between its bounds: a caller that iterates over the range and reads the
+     * integer positions of the vertices (to_point) must require a diagram
+     * without a finite edge with a non-finite vertex.
+     *
      * Adapted from CuraEngine VoronoiUtils::computePointCellRange by Tim Kuipers @BagelOrb,
      * Jaime van Kessel @nallath, Remco Burema @rburema and @Ghostkeeper.
      *
      * @param cell The cell to compute the range of line segments for.
      * @param segment_begin Begin iterator for all edges of the input Polygons.
      * @param segment_end End iterator for all edges of the input Polygons.
-     * @return Range of line segments that surround the cell.
+     * @return Range of line segments that surround the cell, invalid when an
+     *         infinite edge or an edge with a non-finite vertex bounds it.
      */
     template<typename SegmentIterator>
     static typename boost::polygon::enable_if<
