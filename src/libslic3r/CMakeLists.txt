@@ -960,6 +960,7 @@ set(SLIC3R_SOURCES
     MultiPoint.cpp
     MultiPoint.hpp
     MutablePriorityQueue.hpp
+    NativeAdhesionLayerHelpers.hpp
     NormalUtils.cpp
     NormalUtils.hpp
     NumericUtils.hpp

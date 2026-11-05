@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cassert>
 #include <iterator>
+#include <utility>
 #include <vector>
 
 #include "libslic3r/Api/plugin/c/slic3r_config_def.h"
@@ -33,29 +34,49 @@ feature.
 
 The normal execution flow is:
 
-    run_impl()
-    `-- trim_brim_against_skirt()
-        |-- validate the step context and the trim setting
-        |-- collect print-level brim and skirt trees
-        |-- trim the print-level brim when both trees exist
-        |-- collect each object's local brim and skirt trees
-        |-- use the print-level skirt as a fallback for an object-level brim
-        `-- replace each affected brim auxiliary layer
+For the global trim operation, the helper functions perform the geometric work:
 
-For each trim operation, the helper functions perform the geometric work:
-
-    trim_print_brim()
-    |-- skirt_trim_area()
-    |   `-- collect closed skirt loops and offset their outer/inner bounds
-    |-- append_trimmed_brim_tree()
-    |   `-- recursively clip every brim leaf against that band
-    |-- preserve the original leaf properties on every remaining piece
-    `-- remove and republish the brim auxiliary layer
+Object-owned brim is clipped one source layer and instance at a time. Its mask
+stays in the same local coordinate system: a print-level fallback is copied and
+translated back by that instance's shift before skirt_trim_area(). The trimmed
+root is published with its owner before its source layer is removed, preserving
+placement even when equal-Z publication changes layer indices.
 
 Only closed skirt polylines with usable extrusion dimensions contribute to the
 trim band. Open or invalid skirt paths are ignored, and the plugin clips
 existing brim centerlines rather than regenerating their extrusion widths or
 producing final machine G-code.
+
+Operation notes:
+- trim_brim_against_skirt()
+- validate the step context and the trim setting
+- collect print-level brim and skirt trees
+- trim the print-level brim when both trees exist
+- snapshot each object's brim layer identities and validate their owners
+- collect the matching local skirt, or translate the print-level fallback
+- replace each affected brim auxiliary layer
+- collect closed skirt loops and offset their outer/inner bounds
+- append_trimmed_brim_tree()
+- recursively clip every brim leaf against that band
+- preserve the original leaf properties on every remaining piece
+- remove and republish the brim auxiliary layer
+
+Representative direct calls (branches are not a timeline):
+
+    trim_brim_against_skirt()
+        |-- collect_auxiliary_layer_extrusions()
+        |-- trim_print_brim()
+        |-- layer_instance_projections()
+        |-- translate_trim_tree()
+        |-- publish_brim()
+        |-- skirt_trim_area()
+        `-- append_trimmed_brim_tree()
+
+    trim_print_brim()
+        |-- skirt_trim_area()
+        |-- append_trimmed_brim_tree()
+        |-- remove_auxiliary_layers()
+        `-- publish_brim()
 */
 
 namespace slic3r_api { namespace SkirtBrim { namespace DefaultBrimSkirtTrimPlugin {
@@ -95,6 +116,23 @@ const raw_used_config_key k_used_config_keys[] = {
     { "infill_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE },
     { "solid_infill_extruder", RAW_CO_INT, RAW_CONTAINER_TYPE_NONE, RAW_PRESET_TYPE_NONE }
 };
+
+// Traverse a mutable view into owned storage and translate only polylines, leaving commands/properties unchanged; no ownership transfer occurs and a rejected mutation throws.
+void translate_trim_tree(MutableExtrusionEntity entity, c_point shift);
+
+// Borrow local trimmed geometry and publish its moved root with optional instance provenance; return false for empty output and propagate geometry/allocation failures without changing unrelated layers.
+bool publish_brim(storage_handle *storage,
+                  orchestrator_handle *orchestrator,
+                  const Print &print,
+                  const Object &object,
+                  coord_t height,
+                  coord_t print_z,
+                  coord_t slice_z,
+                  StoredExtrusionEntity &brim,
+                  std::optional<uint32_t> owner_instance = std::nullopt);
+
+// Borrow the print and storage, trim global brim in plate space and each object layer separately against a locally translated skirt mask. Republish instance-specific local roots before removing their sources, preserving provenance and propagating failures.
+void trim_brim_against_skirt(const plugin_run_context *run_ctx, orchestrator_handle *orchestrator);
 
 void append_closed_leaf_polygons(storage_handle *storage,
                                  const ExtrusionEntity &entity,
@@ -231,7 +269,8 @@ bool publish_brim(storage_handle *storage,
                   coord_t height,
                   coord_t print_z,
                   coord_t slice_z,
-                  StoredExtrusionEntity &brim)
+                  StoredExtrusionEntity &brim,
+                  std::optional<uint32_t> owner_instance)
 {
     if (storage == nullptr || brim.empty())
         return false;
@@ -252,7 +291,7 @@ bool publish_brim(storage_handle *storage,
                                                          slice_z,
                                                          RAW_LAYER_ADHESION_KIND_BRIM,
                                                          0,
-                                                         brim.mutable_view());
+                                                         brim.mutable_view(), owner_instance);
 }
 
 bool trim_print_brim(storage_handle *storage,
@@ -310,17 +349,68 @@ void trim_brim_against_skirt(const plugin_run_context *run_ctx, orchestrator_han
 
     for (uint32_t object_idx = 0; object_idx < print.object_count(); ++object_idx) {
         const Object object = print.object(object_idx);
-        StoredExtrusionEntity object_brim =
-            collect_auxiliary_layer_extrusions(storage, object, layer_is_brim_adhesion);
-        if (object_brim.empty() || object.layer_count() == 0)
+        if (object.layer_count() == 0)
             continue;
-
-        StoredExtrusionEntity object_skirt =
-            collect_auxiliary_layer_extrusions(storage, object, layer_is_normal_skirt_adhesion);
-        const ExtrusionEntity skirt =
-            object_skirt.empty() ? print_skirt.readonly() : object_skirt.readonly();
-        trim_print_brim(storage, orchestrator, print, object, object.layer(0), object_brim.readonly(), skirt);
+        bool has_skirt = !print_skirt.empty();
+        for (uint32_t index = 0; index < object.auxiliary_layer_count(); ++index)
+            has_skirt = has_skirt || layer_is_normal_skirt_adhesion(object.auxiliary_layer(index));
+        if (!has_skirt)
+            continue;
+        // Publication inserts equal-Z layers before existing ones: snapshot borrowed source identities, not their changing indices.
+        std::vector<Layer> source_layers;
+        for (uint32_t index = 0; index < object.auxiliary_layer_count(); ++index) {
+            const Layer layer = object.auxiliary_layer(index);
+            if (layer_is_brim_adhesion(layer))
+                source_layers.push_back(layer);
+        }
+        for (const Layer &layer : source_layers) {
+            StoredExtrusionEntity brim(storage);
+            append_auxiliary_layer_extrusions(storage, layer, brim);
+            for (const std::pair<uint32_t, c_point> &projection : layer_instance_projections(object, layer)) {
+                const uint32_t owner = projection.first;
+                const c_point shift = projection.second;
+                StoredExtrusionEntity local_skirt(storage);
+                for (uint32_t skirt_index = 0; skirt_index < object.auxiliary_layer_count(); ++skirt_index) {
+                    const Layer skirt_layer = object.auxiliary_layer(skirt_index);
+                    if (!layer_is_normal_skirt_adhesion(skirt_layer))
+                        continue;
+                    for (const std::pair<uint32_t, c_point> &skirt_projection : layer_instance_projections(object, skirt_layer))
+                        if (skirt_projection.first == owner)
+                            append_auxiliary_layer_extrusions(storage, skirt_layer, local_skirt);
+                }
+                if (local_skirt.empty() && !print_skirt.empty()) {
+                    local_skirt = StoredExtrusionEntity(storage, print_skirt.readonly());
+                    translate_trim_tree(local_skirt.mutable_view(), c_point{-shift.x, -shift.y});
+                }
+                if (local_skirt.empty()) {
+                    StoredExtrusionEntity copy(storage, brim.readonly());
+                    if (!publish_brim(storage, orchestrator, print, object,
+                            layer.height(), layer.print_z(), layer.slice_z(), copy, owner))
+                        throw std::runtime_error("Default brim/skirt trim could not preserve instance brim.");
+                    continue;
+                }
+                StoredExPolygonCollection mask = skirt_trim_area(storage, local_skirt.readonly());
+                StoredExtrusionEntity trimmed(storage);
+                trimmed.disable_sort().disable_reverse();
+                append_trimmed_brim_tree(storage, brim.readonly(), mask.readonly(), trimmed);
+                if (!trimmed.empty() && !publish_brim(storage, orchestrator, print, object,
+                        layer.height(), layer.print_z(), layer.slice_z(), trimmed, owner))
+                    throw std::runtime_error("Default brim/skirt trim could not publish instance brim.");
+            }
+            object.remove_auxiliary_layer(layer);
+        }
     }
+}
+
+void translate_trim_tree(MutableExtrusionEntity entity, c_point shift)
+{
+    if (entity.has_polyline()) {
+        if (!entity.translate(shift))
+            throw std::runtime_error("Cannot translate skirt trim geometry.");
+        return;
+    }
+    for (uint32_t index = 0; index < entity.child_count(); ++index)
+        translate_trim_tree(entity.child_mutable(index), shift);
 }
 
 class DefaultBrimSkirtTrim : public PluginBase

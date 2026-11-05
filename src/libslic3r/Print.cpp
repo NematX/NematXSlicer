@@ -21,14 +21,43 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
-/* Print owns slicing state and validates placement. Tower envelopes are config-only
-   square-plus-brim polygons; instance towers follow ModelInstance translations
-   without rotation. They contribute to the export-time hull and owner clearance;
-   the cached first-layer hull contains only slicing geometry. Slicing also caches
-   tool ordering for preview ticks and legacy export. Statistics use measured
-   export totals and the wipe-tower share for sidebar and placeholders.
-   Validation checks print-level active settings against their selected plugin
-   group providers; object/region overrides are not inspected by that guard. */
+/*
+Print represents one FFF slicing job. It owns the applied configuration, sliced
+objects and processing state. Applying a model updates that state and marks
+affected results for recomputation; the pipeline then produces geometry, a
+printing plan and the G-code used by the preview. Exporting a file consumes
+those results rather than transferring ownership of the sliced objects.
+
+The model describes source geometry and placements. PrintObject holds the
+corresponding sliced data; the printing plan places generated extrusion paths
+in print order. Placement checks and measured statistics serve different parts
+of that lifecycle and must not be confused with generated geometry.
+
+Print owns slicing state and validates placement. Tower envelopes are config-only
+square-plus-brim polygons; instance towers follow ModelInstance translations
+without rotation. They contribute to the export-time hull and owner clearance;
+the cached first-layer hull contains only slicing geometry. Slicing also caches
+tool ordering for preview ticks and legacy export. Statistics use measured
+export totals and the wipe-tower share for sidebar and placeholders.
+Validation checks print-level active settings against their selected plugin
+group providers; object/region overrides are not inspected by that guard.
+
+Representative direct calls (branches are not a timeline):
+
+    Print::process()
+        |-- slice()
+        |-- this->sort_object_instances_by_model_order()
+        |-- chain_print_object_instances()
+        `-- assign_custom_gcodes()
+
+    Print::validate()
+        |-- Steps::unsupported_active_setting()
+        |-- sequential_print_horizontal_clearance_valid()
+        |-- sequential_print_vertical_clearance_valid()
+        |-- PrintObject::update_layer_height_profile()
+        |-- generate_object_layers()
+        `-- PrintRegion::collect_object_printing_extruders()
+*/
 #include "Print.hpp"
 #include "WipeTowerFootprint.hpp"
 
@@ -47,7 +76,7 @@
 #include <oneapi/tbb/parallel_for.h>
 
 #include "BoundingBox.hpp"
-#include "AdhesionLayerHelpers.hpp"
+#include "NativeAdhesionLayerHelpers.hpp"
 #include "Api/internal/PrintAccess.hpp"
 #include "Api/internal/PrintObjectAccess.hpp"
 #include "Api/host/Orchestrator.hpp"
@@ -1738,8 +1767,9 @@ void ApiInternal::PrintAccess::rebuild_first_layer_convex_hull_after_skirt_brim(
 
     const PrintObject *auxiliary_object = print.auxiliary_object();
     if (auxiliary_object != nullptr)
-        append_matching_auxiliary_layer_points(
-            *auxiliary_object, layer_is_any_adhesion, print.m_first_layer_convex_hull.points);
+        for (const Layer &layer : auxiliary_object->auxiliary_layers())
+            if (layer_is_any_adhesion(layer))
+                append_auxiliary_layer_points(layer, print.m_first_layer_convex_hull.points);
     for (PrintObjectUPtr &object : print.m_objects)
         append_matching_auxiliary_layer_points(*object, layer_is_any_adhesion, print.m_first_layer_convex_hull.points);
 

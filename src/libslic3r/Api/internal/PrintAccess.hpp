@@ -8,6 +8,16 @@
 #include "libslic3r/DataTreeFwd.hpp"
 #include "libslic3r/Polygon.hpp"
 
+/*
+The host uses these accessors after an adhesion plugin has published its layers:
+normalize their directions, then rebuild the first-layer hull. For example:
+
+    ApiInternal::PrintAccess::rebuild_first_layer_convex_hull_after_skirt_brim(print);
+
+The Print remains the owner of the outputs. This is a host implementation helper,
+not an additional mutation interface for plugins.
+*/
+
 namespace Slic3r {
 
 class ExtrusionEntity;
@@ -28,6 +38,7 @@ struct PrintAccess
     static void clear_brim(Print &print);
     static void clear_skirt(Print &print);
     static void normalize_skirt_brim_direction(Print &print);
+    // Replace the owned plate-space hull with first-layer geometry, global adhesion and validated instance projections of local slices. Borrowed layers stay unchanged; invalid owners and allocation failures propagate.
     static void rebuild_first_layer_convex_hull_after_skirt_brim(Print &print);
 };
 

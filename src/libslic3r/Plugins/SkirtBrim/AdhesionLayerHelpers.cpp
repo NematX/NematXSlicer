@@ -14,20 +14,31 @@ the metadata expected by later consumers.
 
 The normal execution flow is:
 
-    publish_adhesion_extrusion_to_auxiliary_layer()
-    |-- validate the handles, geometry, and extrusion
-    |-- build an auxiliary layer from the subject polygons
-    |-- attach the adhesion kind and flags to the layer
-    |-- get the first layer island and its perimeter extrusion root
-    |-- append the generated extrusion to that root
-    `-- remove the auxiliary layer if any publication step fails
-
 The operation is intentionally transactional from the caller's point of
 view: a failed build or insertion must not leave a partially initialized
 adhesion layer in the object. The helper currently publishes into the first
 island and perimeter bucket created by the auxiliary-layer builder; it does
 not distribute geometry across multiple islands or generate final machine
 G-code.
+
+Operation notes:
+- publish_adhesion_extrusion_to_auxiliary_layer()
+- validate the handles, geometry, and extrusion
+- build an auxiliary layer from the subject polygons
+- attach the adhesion kind and flags to the layer
+- get the first layer island and its perimeter extrusion root
+- append the generated extrusion to that root
+- remove the auxiliary layer if any publication step fails
+
+Representative direct calls (branches are not a timeline):
+
+    publish_adhesion_extrusion_to_auxiliary_layer()
+        |-- build_auxiliary_layer_regions_from_subject()
+        |-- get_or_add()
+        |-- object.remove_auxiliary_layer()
+        |-- layer_island_get_or_create_region_island()
+        |-- layer_region_island_get_mutable_extrusion()
+        `-- append_child_move()
 */
 #include "AdhesionLayerHelpers.hpp"
 
@@ -43,7 +54,8 @@ bool publish_adhesion_extrusion_to_auxiliary_layer(storage_handle *storage,
                                                    coord_t slice_z,
                                                    raw_layer_adhesion_kind kind,
                                                    raw_layer_adhesion_flag flags,
-                                                   MutableExtrusionEntity extrusion)
+                                                   MutableExtrusionEntity extrusion,
+                                                   std::optional<uint32_t> owner_instance)
 {
     if (storage == nullptr || orchestrator == nullptr || !print.valid() || !object.valid() ||
         !subject.valid() || !extrusion.valid() || subject.empty() || extrusion.empty())
@@ -63,6 +75,11 @@ bool publish_adhesion_extrusion_to_auxiliary_layer(storage_handle *storage,
     LayerAdhesionProperty &property = result.layer.mutable_properties().get_or_add(LayerAdhesionProperty::key);
     property.kind = kind;
     property.flags = flags;
+    if (owner_instance) {
+        LayerInstanceProperty &owner = result.layer.mutable_properties().get_or_add(LayerInstanceProperty::key);
+        owner.object_instance_idx = *owner_instance;
+        owner.reserved = 0;
+    }
 
     /*
     Publish the generated tree in the perimeter bucket used by all built-in

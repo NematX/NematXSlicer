@@ -6,10 +6,22 @@
 ///|/ SuperSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 
-/* The canvas owns scene volumes and translates interactions into plater events.
-   Tower proxies have object_id INT_MAX: volume_id zero is global, owner-index+1
-   is an instance tower. Move-event Z uses that owner identity and XY carries
-   global position or an offset from ModelInstance translation, respectively. */
+/*
+GLCanvas3D displays and interacts with the platter and the G-code preview.
+Scene rebuilding creates renderable volumes from model or print results;
+rendering draws those volumes, while mouse and keyboard handlers update the
+selection or send editing requests to Plater. The canvas does not own the core
+model and slicing results merely because it displays them.
+
+Generated features need their own display identities so interaction can find
+their owner without treating them as ordinary model volumes. The tower rules
+below describe that mapping, not an extra source of printable geometry.
+
+The canvas owns scene volumes and translates interactions into plater events.
+Tower proxies have object_id INT_MAX: volume_id zero is global, owner-index+1
+is an instance tower. Move-event Z uses that owner identity and XY carries
+global position or an offset from ModelInstance translation, respectively.
+*/
 #ifndef slic3r_GLCanvas3D_hpp_
 #define slic3r_GLCanvas3D_hpp_
 
@@ -1165,6 +1177,7 @@ private:
 
     // Create 3D thick extrusion lines for a skirt and brim.
     // Adds a new Slic3r::GUI::3DScene::Volume to volumes, updates collision with the build_volume.
+    // Borrow print adhesion and draw each object's already-projected brim once without extra shifts. Empty geometry is skipped; mesh and allocation failures propagate.
     void _load_skirt_brim_preview_toolpaths(const BuildVolume &build_volume);
     // Create 3D thick extrusion lines for object forming extrusions.
     // Adds a new Slic3r::GUI::3DScene::Volume to $self->volumes,

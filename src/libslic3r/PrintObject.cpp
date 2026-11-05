@@ -22,7 +22,7 @@
 
 #include <boost/log/trivial.hpp>
 
-#include "AdhesionLayerHelpers.hpp"
+#include "NativeAdhesionLayerHelpers.hpp"
 #include "Api/internal/PrintObjectAccess.hpp"
 #include "BoundingBox.hpp"
 #include "ClipperUtils.hpp"
@@ -39,6 +39,26 @@
 #include "TriangleMeshSlicer.hpp"
 #include "TriangleSelectorWrapper.hpp"
 #include "Utils.hpp"
+
+/*
+Maintain the sliced representation of one model object for Print.
+
+PrintObject owns its object layers and auxiliary layers. Regions connect those
+layers to effective settings; instances describe the physical copies that share
+this sliced geometry. Preparing or clearing layers therefore changes data used
+by later surface, extrusion and ordering stages, not the source model mesh.
+
+The object supplies slicing parameters, layer creation and cleanup, and access
+to the generated islands. Its owning Print coordinates recomputation. References
+to layers and their descendants must not survive a rebuild of those collections.
+
+Representative direct calls (branches are not a timeline):
+
+    PrintObject::update_slicing_parameters()
+        |-- SlicingParameters::create_from_config()
+        |-- default_region_config()
+        `-- this->object_extruders()
+*/
 
 using namespace std::literals;
 
@@ -97,8 +117,47 @@ void ApiInternal::PrintObjectAccess::clear_skirt_auxiliary_layers(PrintObject &o
 const ExtrusionEntityCollection &PrintObject::brim() const
 {
     m_legacy_brim_cache.clear();
-    collect_auxiliary_layer_extrusions(*this, layer_is_brim_adhesion, m_legacy_brim_cache);
+    std::vector<ExtrusionEntityCollection> by_instance(instances().size());
+    bool marked = false;
+    for (const Layer &layer : auxiliary_layers()) {
+        if (!layer_is_brim_adhesion(layer))
+            continue;
+        if (layer.get_property<LayerInstanceProperty>() == nullptr) {
+            append_auxiliary_layer_extrusions(layer, m_legacy_brim_cache);
+            continue;
+        }
+        const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(this));
+        const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+        for (const std::pair<uint32_t, c_point> &projection : slic3r_api::layer_instance_projections(object_view, layer_view)) {
+            ExtrusionEntityCollection copy;
+            append_auxiliary_layer_extrusions(layer, copy);
+            translate_adhesion_tree(copy, Point(projection.second.x, projection.second.y));
+            by_instance[projection.first].append(std::move(copy));
+        }
+        marked = true;
+    }
+    if (marked)
+        for (ExtrusionEntityCollection &copy : by_instance)
+            m_legacy_brim_cache.append(std::move(copy));
     return m_legacy_brim_cache;
+}
+
+ExtrusionEntityCollection PrintObject::brim_in_plateau_coordinates() const
+{
+    ExtrusionEntityCollection result;
+    const slic3r_api::Object object_view(reinterpret_cast<const object_handle *>(this));
+    for (const Layer &layer : auxiliary_layers()) {
+        if (!layer_is_brim_adhesion(layer))
+            continue;
+        const slic3r_api::Layer layer_view(reinterpret_cast<const layer_handle *>(&layer));
+        for (const std::pair<uint32_t, c_point> &projection : slic3r_api::layer_instance_projections(object_view, layer_view)) {
+            ExtrusionEntityCollection copy;
+            append_auxiliary_layer_extrusions(layer, copy);
+            translate_adhesion_tree(copy, Point(projection.second.x, projection.second.y));
+            result.append(std::move(copy));
+        }
+    }
+    return result;
 }
 
 const ExtrusionEntityCollection &PrintObject::skirt() const
