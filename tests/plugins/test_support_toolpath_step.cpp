@@ -207,7 +207,7 @@ public:
         setup_records.clear();
         setup_run_records.clear();
         run_records.clear();
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top", "support.toolpath.legacy_bottom_contact", "support.toolpath.legacy_top_contact"})
             REQUIRE(Orchestrator::instance().set_plugin_active(id, false));
         for (SupportToolpathProbe *probe : probes())
             REQUIRE(Orchestrator::instance().set_plugin_active(probe->id(), true));
@@ -217,7 +217,7 @@ public:
     {
         for (SupportToolpathProbe *probe : probes())
             Orchestrator::instance().set_plugin_active(probe->id(), false);
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top", "support.toolpath.legacy_bottom_contact", "support.toolpath.legacy_top_contact"})
             Orchestrator::instance().set_plugin_active(id, true);
     }
 };
@@ -519,7 +519,7 @@ public:
         Test::Plugins::ensure_plugin_test_runtime_initialized();
         pattern_records.clear();
         m_supportbase_was_active = Orchestrator::instance().is_plugin_active("supportbase");
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top", "support.toolpath.legacy_bottom_contact", "support.toolpath.legacy_top_contact"})
             REQUIRE(Orchestrator::instance().set_plugin_active(id, false));
         REQUIRE(Orchestrator::instance().set_plugin_active(SupportPatternProbe::k_id, true));
         REQUIRE(Orchestrator::instance().set_plugin_active("supportbase", true));
@@ -529,7 +529,7 @@ public:
     {
         Orchestrator::instance().set_plugin_active("supportbase", m_supportbase_was_active);
         Orchestrator::instance().set_plugin_active(SupportPatternProbe::k_id, false);
-        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"})
+        for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top", "support.toolpath.legacy_bottom_contact", "support.toolpath.legacy_top_contact"})
             Orchestrator::instance().set_plugin_active(id, true);
     }
 
@@ -706,12 +706,13 @@ TEST_CASE("Support toolpath selectors default to auto and follow the support sty
     model.objects()[1].config.set_deserialize_strict("support_material_style", "grid");
     print.apply(model, config);
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(host, STEP_SUPPORT_TOOLPATH, print);
-    REQUIRE(selected.size() == 4);
+    REQUIRE(selected.size() == 6);
     for (size_t index = 0; index < selected.size(); ++index) {
         CHECK(selected[index].object_indices == (index == 0 ? std::vector<size_t>{1} :
             index == 1 ? std::vector<size_t>{0} : std::vector<size_t>{0, 1}));
         CHECK(selected[index].plugin->get_id() == std::vector<std::string>{Common::k_legacy_sparse_id,
-            Common::k_branch_sheath_id, Common::k_legacy_bottom_id, Common::k_legacy_top_id}[index]);
+            Common::k_branch_sheath_id, Common::k_legacy_bottom_contact_id, Common::k_legacy_bottom_id,
+            Common::k_legacy_top_contact_id, Common::k_legacy_top_id}[index]);
     }
     model.objects()[0].config.set_deserialize_strict(key, Common::k_legacy_sparse_id);
     print.apply(model, config);
@@ -746,14 +747,15 @@ TEST_CASE("Organic objects print their sparse support with the branch sheath thr
     model.objects()[0].config.set_deserialize_strict("support_material_style", "organic");
     print.apply(model, config);
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(host, STEP_SUPPORT_TOOLPATH, print);
-    REQUIRE(selected.size() == 4);
+    REQUIRE(selected.size() == 6);
     for (const Steps::ObjectStepPlugin &entry : selected) {
         if (entry.plugin->get_id() == Common::k_branch_sheath_id)
             CHECK(entry.object_indices == std::vector<size_t>{0});
         else if (entry.plugin->get_id() == Common::k_legacy_sparse_id)
             CHECK(entry.object_indices == std::vector<size_t>{1});
         else {
-            CHECK((entry.plugin->get_id() == Common::k_legacy_bottom_id || entry.plugin->get_id() == Common::k_legacy_top_id));
+            CHECK((entry.plugin->get_id() == Common::k_legacy_bottom_id || entry.plugin->get_id() == Common::k_legacy_top_id ||
+                   entry.plugin->get_id() == Common::k_legacy_bottom_contact_id || entry.plugin->get_id() == Common::k_legacy_top_contact_id));
             CHECK(entry.object_indices == std::vector<size_t>{0, 1});
         }
     }
@@ -839,7 +841,7 @@ TEST_CASE("Auto support toolpath selectors resolve before slicing and complete t
     print.apply(model, config);
     const std::vector<Steps::ObjectStepPlugin> selected = Steps::selected_plugins_per_object(
         Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, print);
-    REQUIRE(selected.size() == 4);
+    REQUIRE(selected.size() == 6);
     for (size_t index = 0; index < selected.size(); ++index)
         CHECK(selected[index].object_indices == (index == 0 ? std::vector<size_t>{1} :
             index == 1 ? std::vector<size_t>{0} : std::vector<size_t>{0, 1}));

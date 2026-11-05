@@ -415,6 +415,7 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
         {SEAM_PLACER, "seam_placer_plugin"}, {GCODE_THUMBNAIL, "thumbnail_encoder_plugin"},
         {GCODE_FIRMWARE, "gcode_firmware_plugin"}, {STEP_ORDERING, "ordering.extrusion_tree"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_sparse"},
+        {STEP_SUPPORT_TOOLPATH, "support_toolpath_bottom_contact"}, {STEP_SUPPORT_TOOLPATH, "support_toolpath_top_contact"},
         {STEP_SUPPORT_TOOLPATH, "support_toolpath_bottom_interface"}, {STEP_SUPPORT_TOOLPATH, "support_toolpath_top_interface"}
     };
     for (const std::pair<slicing_step_t, const char *> &identity : real_groups) {
@@ -614,6 +615,8 @@ const char *const k_expected[] = {
     "ui|step_layer_height_plugin|print.ui|step_layer_height_plugin|priority=0|page:Notes\\ngroup:Exclusive step plugins\\nline:Layer height step plugin\\nsetting:step_layer_height_plugin\\nend_line\\n",
     "ui|step_perimeter_plugin|print.ui|step_perimeter_plugin|priority=0|page:Notes\\ngroup:Exclusive step plugins\\nline:Perimeter step plugin\\nsetting:step_perimeter_plugin\\nend_line\\n",
     "ui|thumbnails_format|printer_fff.ui|thumbnail_encoder_plugin|priority=1|page:General:printer\\ngroup:Firmware\\n\\tsetting:insert$beforesetting$thumbnails:thumbnails_format\\n",
+    "group|1350|real|support_toolpath_bottom_contact|key=exclusive_group_1350_support_toolpath_bottom_contact_plugin|label=Bottom support contact|tooltip=Selects the algorithm that prints support contacts below the object. Automatic selection uses the first matching active preference, otherwise the active group default.|type=8|container=3|preset=1|category=7|invalidates=1350|mode=22|gui=7|plugin_ids=1|technology=1|default=auto|values=auto,support.toolpath.legacy_bottom_contact|ui=page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_bottom_contact_plugin\\nend_line\\n",
+    "group|1350|real|support_toolpath_top_contact|key=exclusive_group_1350_support_toolpath_top_contact_plugin|label=Top support contact|tooltip=Selects the algorithm that prints support contacts above the support. Automatic selection uses the first matching active preference, otherwise the active group default.|type=8|container=3|preset=1|category=7|invalidates=1350|mode=22|gui=7|plugin_ids=1|technology=1|default=auto|values=auto,support.toolpath.legacy_top_contact|ui=page:Support material\\ngroup:Support toolpaths\\nline:\\nsetting:exclusive_group_1350_support_toolpath_top_contact_plugin\\nend_line\\n",
 };
     std::vector<std::string> expected;
     for (const char *row : k_expected) if (row != nullptr) expected.emplace_back(row);

@@ -737,7 +737,8 @@ TEST_CASE("Grid legacy comparison: concentric interfaces", "[plugins][support-gr
 TEST_CASE("Grid legacy comparison: automatic sparse interfaces", "[plugins][support-grid][legacy-compare][support-pattern][slow]") {
     for (const char *style : {"grid", "snug"}) compare(1, style, false, 3, false, "auto_sparse");
 }
-// Compare top contact loops around the overhang. The snug soluble combination is left out: the
+// Compare top contact loops around the overhang with equal default contact and interface patterns; active loops keep the top contacts.
+// The snug soluble combination is left out: the
 // family demand differs slightly from the native overhang detection there, and the loop length
 // follows the contact contour, so that documented difference is amplified beyond one percent.
 TEST_CASE("Grid legacy comparison: contact loops", "[plugins][support-grid][legacy-compare][support-pattern][slow]") {
@@ -1082,11 +1083,9 @@ TEST_CASE("Grid legacy comparison: interface pattern follows the native contact 
         std::vector<SG::LayerSurfaceAreas> published;
         if (std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") != nullptr)
             for (const Layer &layer : print.object(0).auxiliary_layers()) published.push_back(SG::layer_surface_areas(layer));
-        SG::toolpaths(print);
         PrintObject &object = print.object(0);
-        const InterfaceReport plugin = report_interface_layers(object.auxiliary_layers(), "plugin");
         std::set<coord_t> top_contacts, bottom_contacts;
-        // Contact bits and position bits identify each side independently of the selected path pattern.
+        // Published contact bits identify each side before the rectilinear bottom contacts are handed back.
         for (const Layer &layer : object.auxiliary_layers()) {
             if (layer.scaled_bottom_z() <= 0) continue;
             for (const LayerSliceIsland &island : layer.islands())
@@ -1099,6 +1098,13 @@ TEST_CASE("Grid legacy comparison: interface pattern follows the native contact 
         }
         REQUIRE_FALSE(top_contacts.empty());
         REQUIRE_FALSE(bottom_contacts.empty());
+        SG::toolpaths(print);
+        const InterfaceReport plugin = report_interface_layers(object.auxiliary_layers(), "plugin");
+        for (const Layer &layer : object.auxiliary_layers())
+            for (const LayerSliceIsland &island : layer.islands())
+                for (const LayerRegionIsland &region : island.regions_islands())
+                    for (const Surface &surface : region.fill_surfaces())
+                        if (surface.has_pos_bottom()) CHECK_FALSE(surface.has_mod_contact());
         for (const coord_t z : top_contacts) {
             CAPTURE(z);
             REQUIRE(plugin.by_z.count(z) == 1);
@@ -1152,6 +1158,8 @@ TEST_CASE("Support interface pattern matches the native contact layers on a proj
     for (const std::pair<const char *, const char *> &provider : {
         std::pair<const char *, const char *>{"support_toolpath_sparse", "support.toolpath.legacy_sparse"},
         {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom"},
+        {"support_toolpath_bottom_contact", "support.toolpath.legacy_bottom_contact"},
+        {"support_toolpath_top_contact", "support.toolpath.legacy_top_contact"},
         {"support_toolpath_top_interface", "support.toolpath.legacy_top"}}) {
         const std::string key = Steps::plugin_exclusive_group_option_key(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, provider.first);
         if (!key.empty())

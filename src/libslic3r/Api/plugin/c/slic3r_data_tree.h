@@ -182,7 +182,9 @@ typedef uint16_t raw_surface_type;
    Bridging bottom contacts carry it. A dense top or bottom support surface without it is an interface of its side, and a contact merged into the base is
    published as sparse base without it. Support families must set it on every contact area; no host check verifies the marking. Toolpath algorithms read
    it. On a side without interface layers, interfaces and contacts both use the base settings and bucket; the bit only selects contact handling,
-   such as non-soluble bottom-contact bridging flow. */
+   such as contact patterns and loops. The bridge modifier, not contact, selects bridge flow. Five toolpath roles distinguish sparse support,
+   bottom contact/interface and top contact/interface. Contact toolpath providers may hand areas back
+   to their interface role by republishing the same surfaces with only contact cleared, preserving geometry, order, properties and other flags. */
 #define RAW_SURFACE_TYPE_MOD_CONTACT (1 << 11)
 
 /* Check if flag is set */

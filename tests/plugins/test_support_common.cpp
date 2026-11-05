@@ -929,7 +929,8 @@ TEST_CASE("Support plugins declare their keys from the Common library", "[plugin
         CAPTURE(id);
         CHECK_FALSE(declares_raft(*plugin));
     }
-    for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top"}) {
+    for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.legacy_bottom", "support.toolpath.legacy_top",
+                           "support.toolpath.legacy_bottom_contact", "support.toolpath.legacy_top_contact"}) {
         const Plugin *toolpath = Orchestrator::instance().get_plugin(id);
         REQUIRE(toolpath != nullptr);
         declares(*toolpath, geometry);

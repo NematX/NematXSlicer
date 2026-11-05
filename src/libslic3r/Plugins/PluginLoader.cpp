@@ -980,8 +980,12 @@ void register_builtin_support_demand_plugins(orchestrator_handle *orchestrator)
         slic3r_api::Support::Toolpath::register_support_toolpath_sparse_plugin);
     register_builtin_plugin(orchestrator, "support.toolpath.legacy_bottom",
         slic3r_api::Support::Toolpath::register_support_toolpath_bottom_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_bottom_contact",
+        slic3r_api::Support::Toolpath::register_support_toolpath_bottom_contact_plugin);
     register_builtin_plugin(orchestrator, "support.toolpath.legacy_top",
         slic3r_api::Support::Toolpath::register_support_toolpath_top_plugin);
+    register_builtin_plugin(orchestrator, "support.toolpath.legacy_top_contact",
+        slic3r_api::Support::Toolpath::register_support_toolpath_top_contact_plugin);
     register_builtin_plugin(orchestrator, "support.toolpath.branch_sheath",
         slic3r_api::Support::Toolpath::register_support_toolpath_branch_plugin);
 }

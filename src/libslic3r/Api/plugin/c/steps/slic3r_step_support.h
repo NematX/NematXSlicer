@@ -113,7 +113,11 @@ contact area: no host check verifies the marking, and the toolpath algorithms
 read the bit to select contact handling. On a side with interface layers,
 contacts use the configured contact pattern. On a side without interface layers,
 interfaces and contacts both use the base settings and bucket; the bit only
-selects contact handling, such as non-soluble bottom-contact bridging flow.
+selects contact handling, such as contact patterns and loops. The bridge modifier
+selects bridge flow independently. Toolpath providers use five roles: sparse,
+bottom contact, bottom interface, top contact and top interface. A contact
+provider may hand areas back by republishing the same surfaces with only contact
+cleared, preserving geometry, order, properties and every other flag.
 A package built against 1.2 does not mark contacts, so its contact areas are
 classified as interfaces: they use interface settings when enabled on that
 side, otherwise base settings and bucket without contact handling.

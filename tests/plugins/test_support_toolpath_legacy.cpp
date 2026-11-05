@@ -3,23 +3,28 @@
 #include "libslic3r/Api/host/Plugin.hpp"
 #include "libslic3r/Api/plugin/cpp/AuxiliaryLayerHelpers.hpp"
 #include "libslic3r/Api/plugin/cpp/SurfaceViews.hpp"
+#include "libslic3r/Api/plugin/c/steps/slic3r_step_support_demand.h"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/Plugins/Support/Toolpath/LegacySupportPaths.hpp"
+#include "libslic3r/Plugins/Support/Toolpath/SupportToolpathLegacy.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportCloseZ.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportCounters.hpp"
+#include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 
-/* Small roof-and-platform objects exercise the three built-in support roles.
+/* Small roof-and-platform objects and synthetic layers exercise the five built-in support roles.
    The slicing prefix leaves support editable, then the normal dispatcher fills
    the typed surfaces. Leaf checks resolve inherited flow attributes, so both
    native paths and generic API wrappers are tested in their published form.
    A failing pattern checks that a legacy algorithm preserves its sole error message.
    Synthetic dense bottom surfaces distinguish marked bridging contacts from unmarked
    interfaces even when interface layers are disabled; both retain base-role settings.
-   Two cases drive the internal helpers directly: synthetic slabs for height
+    Contact cases check automatic fusion, priority ordering, selector descriptions,
+    preserved metadata and earlier paths, per-component coverage and replay.
+    Two cases drive the internal helpers directly: synthetic slabs for height
     modulation and plain arguments for the filler pattern choice. A variable-height grid/tree case runs the full support
     toolpath dispatcher, reports modulation counters and checks published heights and height-scaled flow. */
 
@@ -49,6 +54,32 @@ private:
     std::vector<Plugin *> m_previous;
 };
 
+// Metadata-only alternatives exercise contact selector elections without changing any print data.
+class ContactGroupProbe final : public slic3r_api::PluginBase {
+public:
+    // Borrow process-lifetime strings and select the native side's execution priority.
+    ContactGroupProbe(orchestrator_handle *host, const char *id, const char *group, int32_t priority)
+        : PluginBase(host), m_id(id), m_group(group), m_priority(priority) {}
+private:
+    // Return the stable registration identifier without effects or failures.
+    const char *id_impl() const noexcept override { return m_id; }
+    // Select the support toolpath callback step without effects or failures.
+    slicing_step_t step_impl() const noexcept override { return STEP_SUPPORT_TOOLPATH; }
+    // Return the contact role shared with the native provider without effects or failures.
+    const char *exclusive_group_impl() const noexcept override { return m_group; }
+    // Keep execution priority identical within the role without effects or failures.
+    int32_t priority_impl() const noexcept override { return m_priority; }
+    // Prefer the probe's selector text to the native description without changing execution order.
+    int32_t exclusive_group_priority_impl() const noexcept override { return 0; }
+    // Require no other providers and transfer no ownership.
+    const char *const *dependencies_impl() const noexcept override { return nullptr; }
+    // This metadata probe publishes no paths or surfaces and cannot fail.
+    void run_impl(const plugin_run_context *) const override {}
+    const char *m_id;
+    const char *m_group;
+    int32_t m_priority;
+};
+
 struct PathCounts { size_t base = 0, interface = 0, loops = 0, bridges = 0; double first_width = 0; };
 // Check leaf role, positive flow and bucket placement and count loops and bridge flows.
 void check_paths(const ExtrusionEntity &entity, ExtrusionRole bucket, PathCounts &counts, bool first, const ExtrusionAttributes *attributes = nullptr);
@@ -60,6 +91,11 @@ void collect_leaves(const ExtrusionEntity &entity, std::vector<const ExtrusionEn
 double bridge_length(const ExtrusionEntity &tree);
 // Sum the bridging-flow interface path length published across one object's auxiliary layers.
 double published_bridge_length(const PrintObject &object);
+// Publish ordered disjoint surfaces in a marked auxiliary layer above the bed at the supplied scaled Z and height, moving copies into the object.
+// Test assertions expose API failures; returned region is borrowed until the object is destroyed.
+layer_region_island_handle *publish_test_surfaces(Print &print, PluginStorage &storage, const ExPolygons &areas,
+                                                 const std::vector<raw_surface_type> &types,
+                                                 coord_t print_z = scale_i(0.6), coord_t height = scale_i(0.2));
 
 // Resolve nearest attributes and inspect every published leaf; missing flow or a role in the wrong bucket fails the test while counts accumulate owned scalar values.
 void check_paths(const ExtrusionEntity &entity, ExtrusionRole bucket, PathCounts &counts, bool first, const ExtrusionAttributes *attributes)
@@ -121,10 +157,37 @@ double published_bridge_length(const PrintObject &object)
     return total;
 }
 
+layer_region_island_handle *publish_test_surfaces(Print &print, PluginStorage &storage, const ExPolygons &areas,
+                                                 const std::vector<raw_surface_type> &types, coord_t print_z, coord_t height)
+{
+    REQUIRE(areas.size() == types.size());
+    PrintObject &object = print.object(0);
+    const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
+        SG::handle(storage), SG::print_view(print), SG::object_view(object),
+        slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&areas)),
+        height, print_z, print_z - height / 2);
+    REQUIRE(built.created);
+    layer_handle *layer = nullptr;
+    for (uint32_t index = 0; index < object_count_auxiliary_layer(SG::object_view(object).handle()); ++index) {
+        layer_handle *candidate = object_get_auxiliary_layer(SG::object_view(object).handle(), index);
+        if (candidate == built.layer.handle()) layer = candidate;
+    }
+    REQUIRE(layer != nullptr);
+    REQUIRE(plugin_property_get_or_add_data_mutable(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+        layer_get_properties_mutable(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT) != nullptr);
+    layer_region_island_handle *region = layer_island_get_or_create_region_island(layer_get_island_mutable(layer, 0), nullptr, 0, 0);
+    REQUIRE(region != nullptr);
+    slic3r_api::StoredSurfaceCollection surfaces(SG::handle(storage));
+    for (size_t index = 0; index < areas.size(); ++index)
+        surfaces.append(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&areas[index])), types[index]);
+    REQUIRE(slic3r_api::LayerRegionIsland(region).set_fill_surfaces(&surfaces));
+    return region;
 }
 
-// Publish one dense lower surface without interfaces: only the contact modifier selects bridging contact flow.
-TEST_CASE("Dense surfaces without interfaces require the contact bit for contact flow", "[plugins][support-toolpath-legacy]")
+}
+
+// Publish one dense lower surface without interfaces and retain its explicitly marked bridge flow after contact hand-back.
+TEST_CASE("Dense surfaces without interfaces retain explicitly marked bridge flow", "[plugins][support-toolpath-legacy][support-contact]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const bool contact = GENERATE(false, true);
@@ -156,12 +219,14 @@ TEST_CASE("Dense surfaces without interfaces require the contact bit for contact
     REQUIRE(region != nullptr);
     slic3r_api::StoredSurfaceCollection surfaces(reinterpret_cast<storage_handle *>(&storage));
     const raw_surface_type type = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_BOTTOM |
-        RAW_SURFACE_TYPE_DENS_SOLID | (contact ? RAW_SURFACE_TYPE_MOD_CONTACT : 0);
+        RAW_SURFACE_TYPE_DENS_SOLID | (contact ? RAW_SURFACE_TYPE_MOD_CONTACT | RAW_SURFACE_TYPE_MOD_BRIDGE : 0);
     surfaces.append(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&subject.front())), type);
     REQUIRE(slic3r_api::LayerRegionIsland(region).set_fill_surfaces(&surfaces));
 
     SG::toolpaths(print);
 
+    CHECK_FALSE(surface_get_type(layer_region_island_get_fill_surface(region, 0)) & RAW_SURFACE_TYPE_MOD_CONTACT);
+    CHECK(bool(surface_get_type(layer_region_island_get_fill_surface(region, 0)) & RAW_SURFACE_TYPE_MOD_BRIDGE) == contact);
     PathCounts counts;
     for (const Layer &support_layer : object.auxiliary_layers())
         for (const LayerSliceIsland &island : support_layer.islands())
@@ -175,6 +240,506 @@ TEST_CASE("Dense surfaces without interfaces require the contact bit for contact
         CHECK(counts.bridges == counts.base);
     else
         CHECK(counts.bridges == 0);
+}
+
+// Synthetic disjoint components exercise fusion without changing their rings or the explicitly supplied bridge state.
+TEST_CASE("Legacy contact fusion follows native contact patterns and the three automatic alternatives",
+          "[plugins][support-toolpath-legacy][support-contact]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool top = GENERATE(false, true);
+    const bool bridge = GENERATE(false, true);
+    const bool equal_pattern = GENERATE(false, true);
+    const bool loops = GENERATE(false, true);
+    const int interfaces = GENERATE(0, 3);
+    DynamicPrintConfig config = SG::config("grid", false, interfaces, false);
+    config.set_deserialize_strict({{"support_material_top_interface_pattern", equal_pattern ? "rectilinear" : "concentric"},
+                                   {"support_material_bottom_interface_pattern", equal_pattern ? "rectilinear" : "concentric"},
+                                   {"support_material_interface_contact_loops", loops ? "1" : "0"}});
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    SG::prefix(print);
+    PrintObject &object = print.object(0);
+    const slic3r_api::Support::Common::SupportParams geometry = SG::params(print, object);
+    const double width = unscaled(geometry.interface_flow.width);
+    const std::vector<double> widths{4., 4., width * 0.99, width * 1.01, width * 0.5};
+    ExPolygons areas;
+    for (size_t index = 0; index < widths.size(); ++index) {
+        const double x = index == 4 ? 10. : double(index) * 6.;
+        areas.emplace_back(Polygon({Point(scale_i(x), 0), Point(scale_i(x + widths[index]), 0),
+            Point(scale_i(x + widths[index]), scale_i(4.)), Point(scale_i(x), scale_i(4.))}));
+    }
+    areas.front().holes.emplace_back(Polygon({Point(scale_i(1.), scale_i(1.)), Point(scale_i(1.), scale_i(2.)),
+        Point(scale_i(2.), scale_i(2.)), Point(scale_i(2.), scale_i(1.))}));
+    const ExPolygons subject{ExPolygon(Polygon({Point(0, 0), Point(scale_i(30.), 0),
+        Point(scale_i(30.), scale_i(4.)), Point(0, scale_i(4.))}))};
+    PluginStorage storage;
+    storage_handle *store = reinterpret_cast<storage_handle *>(&storage);
+    const slic3r_api::AuxiliaryLayerBuildResult built = slic3r_api::build_auxiliary_layer_regions_from_subject(
+        store, slic3r_api::Print(reinterpret_cast<const print_handle *>(&print)),
+        slic3r_api::Object(reinterpret_cast<const object_handle *>(&object)),
+        slic3r_api::ExPolygonCollection(reinterpret_cast<const expolygon_collection_handle *>(&subject)),
+        scale_i(0.2), scale_i(0.6), scale_i(0.5));
+    REQUIRE(built.created);
+    layer_handle *layer = object_get_auxiliary_layer(reinterpret_cast<const object_handle *>(&object), 0);
+    REQUIRE(plugin_property_get_or_add_data_mutable(reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()),
+        layer_get_properties_mutable(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT) != nullptr);
+    layer_region_island_handle *region = layer_island_get_or_create_region_island(layer_get_island_mutable(layer, 0), nullptr, 0, 0);
+    REQUIRE(region != nullptr);
+    slic3r_api::StoredSurfaceCollection surfaces(store);
+    const slic3r_api::PluginPropertyKey<int32_t> marker = slic3r_api::PluginPropertyKey<int32_t>::register_dynamic(
+        reinterpret_cast<orchestrator_handle *>(&Orchestrator::instance()), "tests.support.contact.marker");
+    const raw_surface_type side = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_DENS_SOLID |
+        (top ? RAW_SURFACE_TYPE_POS_TOP : RAW_SURFACE_TYPE_POS_BOTTOM) | (bridge ? RAW_SURFACE_TYPE_MOD_BRIDGE : 0);
+    for (size_t index = 0; index < areas.size(); ++index) {
+        surfaces.append(slic3r_api::ExPolygon(reinterpret_cast<const expolygon_handle *>(&areas[index])),
+            side | (index == 1 ? 0 : RAW_SURFACE_TYPE_MOD_CONTACT));
+        surfaces.back_mutable().get_or_add(marker) = int32_t(index + 11);
+    }
+    REQUIRE(slic3r_api::LayerRegionIsland(region).set_fill_surfaces(&surfaces));
+    SG::toolpaths(print);
+    REQUIRE(layer_region_island_count_fill_surface(region) == areas.size());
+    for (size_t index = 0; index < areas.size(); ++index) {
+        CAPTURE(top, bridge, equal_pattern, loops, interfaces, index);
+        const surface_handle *surface = layer_region_island_get_fill_surface(region, uint32_t(index));
+        const bool retained = index != 1 && index != 2 && index != 4 && interfaces != 0 && (!equal_pattern || (top && loops));
+        CHECK(surface_get_type(surface) == (side | (retained ? RAW_SURFACE_TYPE_MOD_CONTACT : 0)));
+        REQUIRE(slic3r_api::Surface(surface).get(marker) != nullptr);
+        CHECK(*slic3r_api::Surface(surface).get(marker) == int32_t(index + 11));
+        const ExPolygon &actual = *reinterpret_cast<const ExPolygon *>(surface_get_expolygon(surface));
+        CHECK(actual.contour.points == areas[index].contour.points);
+        CHECK(actual.holes == areas[index].holes);
+    }
+    PathCounts counts;
+    Polygons covered;
+    for (const LayerSliceIsland &island : object.auxiliary_layers().front().islands())
+        for (const LayerRegionIsland &ri : island.regions_islands())
+            for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE})
+                if (ri.has_extrusion(bucket)) {
+                    check_paths(ri.extrusion(bucket), bucket, counts, false);
+                    ri.extrusion(bucket).polygons_covered_by_width(covered, 0.f);
+                }
+    for (const ExPolygon &component : areas)
+        CHECK(area(intersection_ex(covered, ExPolygons{component})) > 0);
+    CHECK(counts.base + counts.interface > 0);
+    CHECK((interfaces == 0 ? counts.interface : counts.base) == 0);
+    CHECK(counts.bridges == (bridge ? counts.base + counts.interface : 0));
+}
+
+// Disable one algorithm at a time: retained wide contacts and unmarked interfaces cannot be printed by the other role.
+TEST_CASE("Each contact and interface role prints only its own surfaces", "[plugins][support-toolpath-legacy][support-contact]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    const bool top = GENERATE(false, true);
+    const bool contact_only = GENERATE(false, true);
+    const bool bridge = GENERATE(false, true);
+    const ScopedActivePlugins active;
+    Orchestrator &host = Orchestrator::instance();
+    REQUIRE(host.set_plugin_active(top ? (contact_only ? "support.toolpath.legacy_top" : "support.toolpath.legacy_top_contact") :
+        (contact_only ? "support.toolpath.legacy_bottom" : "support.toolpath.legacy_bottom_contact"), false));
+    DynamicPrintConfig config = SG::config("grid", !bridge, 3, false);
+    config.set_deserialize_strict({{"support_material_top_interface_pattern", "concentric"},
+                                   {"support_material_bottom_interface_pattern", "concentric"}});
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+    SG::prefix(print);
+    const ExPolygons areas{ExPolygon(Polygon({Point(0, 0), Point(scale_i(4.), 0), Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))})),
+        ExPolygon(Polygon({Point(scale_i(6.), 0), Point(scale_i(10.), 0), Point(scale_i(10.), scale_i(4.)), Point(scale_i(6.), scale_i(4.))}))};
+    const raw_surface_type side = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_DENS_SOLID |
+        (top ? RAW_SURFACE_TYPE_POS_TOP : RAW_SURFACE_TYPE_POS_BOTTOM) | (bridge ? RAW_SURFACE_TYPE_MOD_BRIDGE : 0);
+    PluginStorage storage;
+    layer_region_island_handle *region = publish_test_surfaces(print, storage, areas, {raw_surface_type(side | RAW_SURFACE_TYPE_MOD_CONTACT), side});
+    SG::toolpaths(print);
+    CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 0)) == (side | RAW_SURFACE_TYPE_MOD_CONTACT));
+    CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 1)) == side);
+    size_t count = 0;
+    for (const LayerSliceIsland &island : print.object(0).auxiliary_layers().front().islands())
+        for (const LayerRegionIsland &ri : island.regions_islands()) {
+            if (!ri.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) continue;
+            std::vector<const ExtrusionEntity *> leaves;
+            collect_leaves(ri.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), leaves);
+            for (const ExtrusionEntity *leaf : leaves) {
+                ++count;
+                for (const ArcPolyline &line : leaf->as_polylines())
+                    for (size_t index = 0; index < line.size(); ++index)
+                        CHECK((contact_only ? line.get_point(index).x() < scale_i(4.1) : line.get_point(index).x() > scale_i(5.9)));
+            }
+        }
+    CHECK(count > 0);
+}
+
+// The host accepts either priority order; a late contact returns its area only after the interface has passed it.
+TEST_CASE("A contact provider running after its interface leaves handed-back areas unprinted",
+          "[plugins][support-toolpath][support-contact]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    namespace TP = slic3r_api::Support::Toolpath;
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *orchestrator = reinterpret_cast<orchestrator_handle *>(&host);
+    static TP::SupportToolpathLegacy late(orchestrator, TP::SurfaceRole::TopContact,
+        "test.support.contact.late", "test.support.contact.role.late", 210);
+    static TP::SupportToolpathLegacy early(orchestrator, TP::SurfaceRole::TopContact,
+        "test.support.contact.early", "test.support.contact.role.early", 190);
+    static TP::SupportToolpathLegacy interface_provider(orchestrator, TP::SurfaceRole::TopInterface,
+        "test.support.contact.interface", "test.support.contact.role.interface", 200);
+    if (!host.get_plugin("test.support.contact.late")) {
+        orchestrator_register_plugin(orchestrator, late.c_instance());
+        orchestrator_register_plugin(orchestrator, early.c_instance());
+        orchestrator_register_plugin(orchestrator, interface_provider.c_instance());
+        host.set_plugin_active("test.support.contact.late", false);
+        host.set_plugin_active("test.support.contact.early", false);
+        host.set_plugin_active("test.support.contact.interface", false);
+    }
+    const ScopedActivePlugins active;
+    const bool correct_order = GENERATE(false, true);
+    REQUIRE(host.set_plugin_active("support.toolpath.legacy_top_contact", false));
+    REQUIRE(host.set_plugin_active("support.toolpath.legacy_top", false));
+    REQUIRE(host.set_plugin_active("test.support.contact.late", !correct_order));
+    REQUIRE(host.set_plugin_active("test.support.contact.early", correct_order));
+    REQUIRE(host.set_plugin_active("test.support.contact.interface", true));
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, SG::config());
+    SG::prefix(print);
+    const ExPolygons areas{ExPolygon(Polygon({Point(0, 0), Point(scale_i(4.), 0), Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))}))};
+    PluginStorage storage;
+    layer_region_island_handle *region = publish_test_surfaces(print, storage, areas,
+        {RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_DENS_SOLID | RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_MOD_CONTACT});
+    SG::toolpaths(print);
+    CHECK_FALSE(surface_get_type(layer_region_island_get_fill_surface(region, 0)) & RAW_SURFACE_TYPE_MOD_CONTACT);
+    size_t count = 0;
+    for (const LayerSliceIsland &island : print.object(0).auxiliary_layers().front().islands())
+        for (const LayerRegionIsland &ri : island.regions_islands())
+            if (ri.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                std::vector<const ExtrusionEntity *> leaves;
+                collect_leaves(ri.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), leaves);
+                count += leaves.size();
+            }
+    CHECK((count > 0) == correct_order);
+}
+
+// Lower sparse and bottom footprints cover both dense roles, but only the first bottom contribution includes them in its flow modulation.
+TEST_CASE("Only the first bottom contribution modulates against lower sparse and bottom footprints",
+          "[plugins][support-toolpath-legacy][support-contact]")
+{
+    const bool handed_back = GENERATE(false, true);
+    SG::PathMeasure reference[2];
+    for (const bool lower_footprints : {false, true}) {
+        Print print;
+        Model model;
+        DynamicPrintConfig config = SG::config("grid", true, 3, false);
+        config.set_deserialize_strict("support_material_bottom_interface_pattern", handed_back ? "rectilinear" : "concentric");
+        Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+        SG::prefix(print);
+        PluginStorage storage;
+        const raw_surface_type bottom = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_BOTTOM | RAW_SURFACE_TYPE_DENS_SOLID;
+        const ExPolygons target{ExPolygon(Polygon({Point(0, 0), Point(scale_i(4.), 0),
+            Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))})),
+            ExPolygon(Polygon({Point(scale_i(6.), 0), Point(scale_i(10.), 0),
+            Point(scale_i(10.), scale_i(4.)), Point(scale_i(6.), scale_i(4.))}))};
+        if (lower_footprints) {
+            // The two disjoint lower types each cover half of both target components; neither type alone can thin every target path.
+            const ExPolygons lower{ExPolygon(Polygon({Point(0, 0), Point(scale_i(10.), 0),
+                Point(scale_i(10.), scale_i(2.)), Point(0, scale_i(2.))})),
+                ExPolygon(Polygon({Point(0, scale_i(2.)), Point(scale_i(10.), scale_i(2.)),
+                Point(scale_i(10.), scale_i(4.)), Point(0, scale_i(4.))}))};
+            publish_test_surfaces(print, storage, lower,
+                {bottom, RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE},
+                scale_i(0.5), scale_i(0.1));
+            for (const ExPolygon &footprint : lower)
+                for (const ExPolygon &component : target)
+                    REQUIRE(area(intersection_ex(ExPolygons{footprint}, ExPolygons{component})) > 0);
+        }
+        layer_region_island_handle *region = publish_test_surfaces(print, storage, target,
+            {raw_surface_type(bottom | RAW_SURFACE_TYPE_MOD_CONTACT), bottom});
+        SG::toolpaths(print);
+        CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 0)) ==
+            (bottom | (handed_back ? 0 : RAW_SURFACE_TYPE_MOD_CONTACT)));
+        CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 1)) == bottom);
+        SG::PathMeasure measured[2];
+        const Layer &layer = print.object(0).auxiliary_layers().back();
+        REQUIRE(layer.scaled_print_z() == scale_i(0.6));
+        REQUIRE(layer.scaled_height() == scale_i(0.2));
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &ri : island.regions_islands()) {
+                REQUIRE_FALSE(ri.has_extrusion(LayerRegionIsland::SUPPORT));
+                if (!ri.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) continue;
+                std::vector<const ExtrusionEntity *> leaves;
+                collect_leaves(ri.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), leaves);
+                for (const ExtrusionEntity *leaf : leaves) {
+                    const ExtrusionAttributes *attributes = leaf->get_property<ExtrusionAttributes>();
+                    REQUIRE(attributes != nullptr);
+                    REQUIRE(leaf->has_polyline());
+                    const size_t side = leaf->polyline_ref().front().x() < scale_i(5.) ? 0 : 1;
+                    const bool thinned = lower_footprints && (side == 0 || handed_back);
+                    CAPTURE(handed_back, lower_footprints, side);
+                    CHECK(attributes->height == Approx(thinned ? 0.1 : 0.2));
+                    CHECK(attributes->role == ExtrusionRole::SupportMaterialInterface);
+                    for (const ArcPolyline &line : leaf->as_polylines())
+                        for (size_t index = 0; index < line.size(); ++index)
+                            CHECK((side == 0 ? line.get_point(index).x() < scale_i(4.1) : line.get_point(index).x() > scale_i(5.9)));
+                    SG::PathMeasure &measure = measured[side];
+                    const double length = unscaled(leaf->polyline_ref().length());
+                    REQUIRE(length > 0);
+                    ++measure.count;
+                    measure.length += length;
+                    measure.volume += length * attributes->mm3_per_mm;
+                }
+            }
+        for (size_t side = 0; side < 2; ++side) {
+            REQUIRE(measured[side].count > 0);
+            if (!lower_footprints) reference[side] = measured[side];
+            else {
+                const double ratio = side == 0 || handed_back ? 0.5 : 1.;
+                CHECK(measured[side].count == reference[side].count);
+                CHECK(measured[side].length == Approx(reference[side].length));
+                CHECK(measured[side].volume == Approx(reference[side].volume * ratio));
+            }
+        }
+    }
+}
+
+// Default contacts use the interface reference paths without loops; active loops keep wide contacts and print removable outlines.
+TEST_CASE("Default contacts are handed back to the interface role", "[plugins][support-toolpath-legacy][support-contact]")
+{
+    const bool loops = GENERATE(false, true);
+    SG::PathMeasures reference;
+    for (const bool contact : {false, true}) {
+        Print print;
+        Model model;
+        DynamicPrintConfig config = SG::config();
+        config.set_deserialize_strict({{"support_material_interface_contact_loops", loops ? "1" : "0"},
+                                       {"support_material_top_interface_pattern", "rectilinear"}});
+        Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, config);
+        SG::prefix(print);
+        const ExPolygons areas{ExPolygon(Polygon({Point(0, 0), Point(scale_i(4.), 0), Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))})),
+            ExPolygon(Polygon({Point(scale_i(6.), 0), Point(scale_i(10.), 0), Point(scale_i(10.), scale_i(4.)), Point(scale_i(6.), scale_i(4.))}))};
+        const raw_surface_type side = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_DENS_SOLID | RAW_SURFACE_TYPE_POS_TOP;
+        PluginStorage storage;
+        layer_region_island_handle *region = publish_test_surfaces(print, storage, areas,
+            {raw_surface_type(side | (contact ? RAW_SURFACE_TYPE_MOD_CONTACT : 0)), side});
+        // Supply demand at the matching object layer so retained top contacts actually print loops, not just keep their marking.
+        run_ctx_support_demand payload{SG::print_view(print).handle(), SG::object_view(print.object(0)).handle()};
+        plugin_run_context context = {};
+        context.step = STEP_SUPPORT_DEMAND;
+        context.data = &payload;
+        context.plugin_storage = SG::handle(storage);
+        for (const Layer &object_layer : print.object(0).layers())
+            for (const LayerSliceIsland &island : object_layer.islands()) {
+                expolygon_collection_handle *demand = support_demand_get_island_mutable(&context,
+                    reinterpret_cast<const layer_island_handle *>(&island));
+                REQUIRE(demand != nullptr);
+                expolygons_copy(demand, reinterpret_cast<const expolygon_collection_handle *>(&areas));
+            }
+        SG::toolpaths(print);
+        CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 0)) ==
+            (side | (contact && loops ? RAW_SURFACE_TYPE_MOD_CONTACT : 0)));
+        CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 1)) == side);
+        const SG::PathMeasures measured = SG::measure_layer(print.object(0).auxiliary_layers().front());
+        REQUIRE_FALSE(measured.empty());
+        PathCounts counts;
+        for (const LayerSliceIsland &island : print.object(0).auxiliary_layers().front().islands())
+            for (const LayerRegionIsland &ri : island.regions_islands())
+                if (ri.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE))
+                    check_paths(ri.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), LayerRegionIsland::SUPPORT_INTERFACE, counts, false);
+        CHECK(counts.interface > 0);
+        if (!loops || !contact) CHECK(counts.loops == 0);
+        if (!contact) reference = measured;
+        else {
+            REQUIRE(measured.size() == reference.size());
+            for (const auto &[key, measure] : measured) {
+                REQUIRE(reference.count(key) == 1);
+                if (loops) {
+                    CHECK(measure.count != reference.at(key).count);
+                    CHECK(std::abs(measure.length - reference.at(key).length) > 1e-6);
+                } else {
+                    CHECK(measure.count == reference.at(key).count);
+                    CHECK(measure.length == Approx(reference.at(key).length));
+                    CHECK(measure.volume == Approx(reference.at(key).volume));
+                }
+            }
+        }
+    }
+}
+
+// Contact marking remains independent of interface counts, and never synthesizes a bridge modifier.
+TEST_CASE("Dense contact classification remains independent of interface-layer settings",
+          "[plugins][support-toolpath-legacy][support-contact]")
+{
+    const int interfaces = GENERATE(0, 3);
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, SG::config("grid", false, interfaces, false));
+    SG::prefix(print);
+    const ExPolygons areas{ExPolygon(Polygon({Point(0, 0), Point(scale_i(4.), 0), Point(scale_i(4.), scale_i(4.)), Point(0, scale_i(4.))})),
+        ExPolygon(Polygon({Point(scale_i(6.), 0), Point(scale_i(10.), 0), Point(scale_i(10.), scale_i(4.)), Point(scale_i(6.), scale_i(4.))}))};
+    const raw_surface_type side = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_DENS_SOLID | RAW_SURFACE_TYPE_POS_BOTTOM;
+    PluginStorage storage;
+    layer_region_island_handle *region = publish_test_surfaces(print, storage, areas, {raw_surface_type(side | RAW_SURFACE_TYPE_MOD_CONTACT), side});
+    CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 0)) == (side | RAW_SURFACE_TYPE_MOD_CONTACT));
+    CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 1)) == side);
+    SG::toolpaths(print);
+    CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 0)) == side);
+    CHECK(surface_get_type(layer_region_island_get_fill_surface(region, 1)) == side);
+    size_t paths_in_area[2] = {};
+    PathCounts counts;
+    for (const LayerSliceIsland &island : print.object(0).auxiliary_layers().front().islands())
+        for (const LayerRegionIsland &ri : island.regions_islands())
+            for (const ExtrusionRole bucket : {LayerRegionIsland::SUPPORT, LayerRegionIsland::SUPPORT_INTERFACE}) {
+                if (!ri.has_extrusion(bucket)) continue;
+                check_paths(ri.extrusion(bucket), bucket, counts, false);
+                std::vector<const ExtrusionEntity *> leaves;
+                collect_leaves(ri.extrusion(bucket), leaves);
+                for (const ExtrusionEntity *leaf : leaves)
+                    for (const ArcPolyline &line : leaf->as_polylines())
+                        ++paths_in_area[line.front().x() < scale_i(5.) ? 0 : 1];
+            }
+    CHECK(paths_in_area[0] > 0);
+    CHECK(paths_in_area[1] > 0);
+    CHECK(counts.bridges == 0);
+    CHECK((interfaces == 0 ? counts.interface : counts.base) == 0);
+}
+
+// A changed contact collection must not erase paths already stored in that region's support bucket.
+TEST_CASE("Contact hand-back preserves surface properties and earlier extrusions",
+          "[plugins][support-toolpath-legacy][support-contact]")
+{
+    Print print;
+    Model model;
+    Test::init_print({Test::TestMesh::cube_20x20x20}, print, model, SG::config());
+    SG::prefix(print);
+    ExPolygons areas;
+    for (size_t index = 0; index < 5; ++index) {
+        const double x = double(index) * 6.;
+        areas.emplace_back(Polygon({Point(scale_i(x), 0), Point(scale_i(x + 4.), 0),
+            Point(scale_i(x + 4.), scale_i(4.)), Point(scale_i(x), scale_i(4.))}));
+    }
+    const raw_surface_type dense = RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_DENS_SOLID;
+    const std::vector<raw_surface_type> types{
+        RAW_SURFACE_TYPE_MOD_SUPPORT | RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE,
+        raw_surface_type(dense | RAW_SURFACE_TYPE_POS_BOTTOM | RAW_SURFACE_TYPE_MOD_CONTACT | RAW_SURFACE_TYPE_MOD_BRIDGE),
+        raw_surface_type(dense | RAW_SURFACE_TYPE_POS_BOTTOM),
+        raw_surface_type(dense | RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_MOD_CONTACT),
+        raw_surface_type(dense | RAW_SURFACE_TYPE_POS_TOP)};
+    PluginStorage storage;
+    layer_region_island_handle *region = publish_test_surfaces(print, storage, areas, types);
+    const std::vector<c_point> points{{scale_i(1.), scale_i(1.)}, {scale_i(2.), scale_i(1.)}};
+    slic3r_api::StoredExtrusionEntity earlier(SG::handle(storage), points);
+    extrusion_entity_handle *root = layer_region_island_get_mutable_extrusion(region, RAW_EXTRUSION_ROLE_SUPPORT);
+    REQUIRE(root != nullptr);
+    REQUIRE(extrusion_insert_child_move(root, 0, earlier.mutable_handle()) != EXTRUSION_INDEX_INVALID);
+    SG::toolpaths(print);
+    REQUIRE(extrusion_child_count(root) > 1);
+    const slic3r_api::ExtrusionEntity kept(extrusion_child(root, 0));
+    const std::vector<c_point> actual = kept.points();
+    REQUIRE(actual.size() == points.size());
+    for (size_t index = 0; index < points.size(); ++index) {
+        CHECK(actual[index].x == points[index].x);
+        CHECK(actual[index].y == points[index].y);
+    }
+    REQUIRE(layer_region_island_count_fill_surface(region) == types.size());
+    for (size_t index = 0; index < types.size(); ++index) {
+        const surface_handle *surface = layer_region_island_get_fill_surface(region, uint32_t(index));
+        CHECK(surface_get_type(surface) == (types[index] & ~RAW_SURFACE_TYPE_MOD_CONTACT));
+        const ExPolygon &actual_area = *reinterpret_cast<const ExPolygon *>(surface_get_expolygon(surface));
+        CHECK(actual_area.contour.points == areas[index].contour.points);
+        CHECK(actual_area.holes == areas[index].holes);
+    }
+    size_t interface_leaves = 0;
+    for (const LayerSliceIsland &island : print.object(0).auxiliary_layers().front().islands())
+        for (const LayerRegionIsland &ri : island.regions_islands())
+            if (ri.has_extrusion(LayerRegionIsland::SUPPORT_INTERFACE)) {
+                std::vector<const ExtrusionEntity *> leaves;
+                collect_leaves(ri.extrusion(LayerRegionIsland::SUPPORT_INTERFACE), leaves);
+                interface_leaves += leaves.size();
+            }
+    CHECK(interface_leaves > 0);
+}
+
+// Compare every ordered published ring after dispatch, allowing only the contact bit selected by the native fusion rule to change.
+TEST_CASE("Published contacts follow the hand-back rules on a real print", "[plugins][support-toolpath-legacy][support-contact]")
+{
+    const bool soluble = GENERATE(false, true);
+    const int interfaces = GENERATE(0, 3);
+    const bool equal_pattern = GENERATE(false, true);
+    const bool loops = GENERATE(false, true);
+    Print print;
+    Model model;
+    DynamicPrintConfig config = SG::config("grid", soluble, interfaces);
+    config.set_deserialize_strict({{"support_material_top_interface_pattern", equal_pattern ? "rectilinear" : "concentric"},
+                                   {"support_material_bottom_interface_pattern", equal_pattern ? "rectilinear" : "concentric"},
+                                   {"support_material_interface_contact_loops", loops ? "1" : "0"}});
+    Test::init_print({SG::slab(true)}, print, model, config);
+    SG::prefix(print);
+    SG::family(print);
+    const slic3r_api::Support::Common::SupportParams geometry = SG::params(print, print.object(0));
+    std::vector<Surface> before;
+    size_t contacts[2] = {};
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces()) {
+                    before.push_back(surface);
+                    if (surface.has_mod_contact()) ++contacts[surface.has_pos_top() ? 1 : 0];
+                }
+    REQUIRE(contacts[1] > 0);
+    // A mergeable contact on a side without interfaces can already be published as sparse base.
+    if (interfaces != 0 || !soluble) REQUIRE(contacts[0] > 0);
+    SG::toolpaths(print);
+    size_t index = 0;
+    for (const Layer &layer : print.object(0).auxiliary_layers())
+        for (const LayerSliceIsland &island : layer.islands())
+            for (const LayerRegionIsland &region : island.regions_islands())
+                for (const Surface &surface : region.fill_surfaces()) {
+                    REQUIRE(index < before.size());
+                    const Surface &source = before[index++];
+                    CHECK(surface.expolygon.contour.points == source.expolygon.contour.points);
+                    CHECK(surface.expolygon.holes == source.expolygon.holes);
+                    const bool as_base = source.has_pos_top() ? !geometry.top_published_interfaces_enabled : !geometry.bottom_published_interfaces_enabled;
+                    const bool thin = offset_ex(source.expolygon, -double(geometry.interface_flow.width) / 2.).empty();
+                    const bool active_loops = source.has_pos_top() && geometry.top_published_interfaces_enabled && loops;
+                    const bool returned = source.has_mod_contact() && (as_base || (equal_pattern && !active_loops) || thin);
+                    CHECK(surface.surface_type == (returned ? SG::without_contact(source.surface_type) : source.surface_type));
+                }
+    CHECK(index == before.size());
+}
+
+// A changed contact setting invalidates support toolpaths; rebuilding must agree with a print that starts with that setting.
+TEST_CASE("Contact hand-back replay agrees with a fresh print", "[plugins][support-toolpath-legacy][support-contact]")
+{
+    DynamicPrintConfig config = SG::config();
+    Print replay;
+    Model replay_model;
+    Test::init_print({SG::slab(true)}, replay, replay_model, config);
+    replay.process();
+    config.set_deserialize_strict("support_material_top_interface_pattern", "concentric");
+    replay.apply(replay_model, config);
+    replay.process();
+    Print fresh;
+    Model fresh_model;
+    Test::init_print({SG::slab(true)}, fresh, fresh_model, config);
+    fresh.process();
+    REQUIRE(replay.object(0).auxiliary_layers().size() == fresh.object(0).auxiliary_layers().size());
+    size_t index = 0;
+    for (const Layer &layer : replay.object(0).auxiliary_layers()) {
+        const Layer &expected = fresh.object(0).auxiliary_layers()[index++];
+        CHECK(layer.scaled_print_z() == expected.scaled_print_z());
+        const SG::LayerSurfaceAreas actual_areas = SG::layer_surface_areas(layer);
+        const SG::LayerSurfaceAreas expected_areas = SG::layer_surface_areas(expected);
+        CHECK(actual_areas.top_contact == Approx(expected_areas.top_contact));
+        CHECK(actual_areas.top_interface == Approx(expected_areas.top_interface));
+        const SG::PathMeasures actual = SG::measure_layer(layer);
+        const SG::PathMeasures wanted = SG::measure_layer(expected);
+        REQUIRE(actual.size() == wanted.size());
+        for (const auto &[key, measure] : actual) {
+            REQUIRE(wanted.count(key) == 1);
+            CHECK(measure.count == wanted.at(key).count);
+            CHECK(measure.length == Approx(wanted.at(key).length));
+            CHECK(measure.volume == Approx(wanted.at(key).volume));
+        }
+    }
 }
 
 // Check that the built-in support toolpaths (not the native generator) print the interface lines of a support layer at the angle
@@ -236,18 +801,108 @@ TEST_CASE("Built-in support toolpaths turn interfaces by the angle increment per
 }
 
 // Check registration, activation and dispatch ordering of the production algorithms: sparse, branch, bottom, top.
+TEST_CASE("Contact groups retain their declaring provider and elect complete selector descriptions",
+          "[plugins][support-toolpath-legacy][support-contact]")
+{
+    Test::Plugins::ensure_plugin_test_runtime_initialized();
+    namespace Common = slic3r_api::Support::Common;
+    Orchestrator &host = Orchestrator::instance();
+    orchestrator_handle *orchestrator = reinterpret_cast<orchestrator_handle *>(&host);
+    static ContactGroupProbe bottom_b(orchestrator, "test.support.contact.group.bottom.b", Common::k_bottom_contact_role, 90);
+    static ContactGroupProbe bottom_a(orchestrator, "test.support.contact.group.bottom.a", Common::k_bottom_contact_role, 90);
+    static ContactGroupProbe top_b(orchestrator, "test.support.contact.group.top.b", Common::k_top_contact_role, 190);
+    static ContactGroupProbe top_a(orchestrator, "test.support.contact.group.top.a", Common::k_top_contact_role, 190);
+    const bool top = GENERATE(false, true);
+    const char *group = top ? Common::k_top_contact_role : Common::k_bottom_contact_role;
+    const char *native_id = top ? Common::k_legacy_top_contact_id : Common::k_legacy_bottom_contact_id;
+    const std::string native_label = top ? "Top support contact" : "Bottom support contact";
+    const std::string native_tooltip = top ? "Selects the algorithm that prints support contacts above the support." :
+        "Selects the algorithm that prints support contacts below the object.";
+    const Orchestrator::ExclusiveGroupDefinition *native = host.exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group);
+    REQUIRE(native != nullptr);
+    CHECK(native->plugin_id == native_id);
+    CHECK(native->label == native_label);
+    CHECK(native->tooltip == native_tooltip);
+    CHECK(native->traits.container_type == RAW_CONTAINER_TYPE_OBJECT);
+    CHECK(native->traits.category == RAW_OPTION_CATEGORY_SUPPORT);
+    CHECK(native->traits.option_preset_type == RAW_PRESET_TYPE_FFF_PRINT);
+    CHECK(native->traits.ui_target_file == "print.ui");
+    CHECK(native->traits.ui_page == "Support material");
+    CHECK(native->traits.ui_group == "Support toolpaths");
+    REQUIRE(native->traits.invalidates_step.has_value());
+    CHECK(*native->traits.invalidates_step == STEP_SUPPORT_TOOLPATH);
+    CHECK(native->traits.auto_value);
+    CHECK(Common::legacy_toolpath_preferences(Common::k_legacy_sparse_id).size() == 5);
+    ContactGroupProbe *a = top ? &top_a : &bottom_a;
+    ContactGroupProbe *b = top ? &top_b : &bottom_b;
+    const std::string a_id = top ? "test.support.contact.group.top.a" : "test.support.contact.group.bottom.a";
+    const std::string b_id = top ? "test.support.contact.group.top.b" : "test.support.contact.group.bottom.b";
+    if (!host.get_plugin(a_id)) {
+        Orchestrator::PluginRegistrationScope scope = host.plugin_registration_scope({}, false);
+        for (ContactGroupProbe *probe : {b, a}) {
+            orchestrator_register_plugin(orchestrator, probe->c_instance());
+            REQUIRE(host.get_plugin(probe == a ? a_id : b_id) != nullptr);
+            raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+            definition.exclusive_group = group;
+            definition.label = probe == a ? "Alternative A contact" : "Alternative B contact";
+            definition.tooltip = probe == a ? "Alternative A tooltip." : "Alternative B tooltip.";
+            definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
+            definition.category = RAW_OPTION_CATEGORY_SUPPORT;
+            definition.auto_value = 1;
+            definition.has_invalidates_step = 1;
+            definition.invalidates_step = STEP_SUPPORT_TOOLPATH;
+            definition.ui_page = "Support material";
+            definition.ui_group = "Support toolpaths";
+            probe->register_exclusive_group(STEP_SUPPORT_TOOLPATH, definition);
+            host.set_plugin_active(probe == a ? a_id : b_id, false);
+        }
+    }
+    const ScopedActivePlugins active;
+    struct RestoreDefinition {
+        Orchestrator &host;
+        std::string group, a_id, b_id;
+        // Remove probe candidates and reelect native text after assertions, including failures.
+        ~RestoreDefinition() {
+            host.set_plugin_active(a_id, false);
+            host.set_plugin_active(b_id, false);
+            host.elect_exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group);
+        }
+    } restore{host, group, a_id, b_id};
+    REQUIRE(host.set_plugin_active(b_id, true));
+    host.elect_exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group);
+    CHECK(host.exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group)->label == "Alternative B contact");
+    REQUIRE(host.set_plugin_active(a_id, true));
+    host.elect_exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group);
+    const Orchestrator::ExclusiveGroupDefinition elected = *host.exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group);
+    CHECK(elected.plugin_id == a_id);
+    CHECK(elected.label == "Alternative A contact");
+    CHECK(elected.tooltip == "Alternative A tooltip.");
+    REQUIRE(host.set_plugin_active(a_id, false));
+    CHECK(host.exclusive_group_definition(STEP_SUPPORT_TOOLPATH, group)->plugin_id == a_id);
+    CHECK_FALSE(host.is_plugin_active(a_id));
+}
+
+// Check registration, activation and dispatch ordering of the production algorithms: sparse, branch, bottom, top.
 TEST_CASE("Native support toolpath providers are active in role order", "[plugins][support-toolpath-legacy]")
 {
     Test::Plugins::ensure_plugin_test_runtime_initialized();
     const std::vector<Plugin *> providers = Orchestrator::instance().get_active_plugins_for_step(STEP_SUPPORT_TOOLPATH);
-    REQUIRE(providers.size() == 4);
-    const char *ids[] = {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom",
-                         "support.toolpath.legacy_top"};
-    const int32_t priorities[] = {0, 0, 100, 200};
-    for (size_t index = 0; index < 4; ++index) {
+    REQUIRE(providers.size() == 6);
+    const char *ids[] = {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath", "support.toolpath.legacy_bottom_contact",
+                         "support.toolpath.legacy_bottom", "support.toolpath.legacy_top_contact", "support.toolpath.legacy_top"};
+    const int32_t priorities[] = {0, 0, 90, 100, 190, 200};
+    CHECK(providers[2]->get_priority() < providers[3]->get_priority());
+    CHECK(providers[4]->get_priority() < providers[5]->get_priority());
+    for (size_t index = 0; index < 6; ++index) {
         CHECK(providers[index]->get_id() == ids[index]);
         CHECK(providers[index]->get_priority() == priorities[index]);
     }
+    std::ifstream stream(std::string(TEST_DATA_DIR) + "/../../src/plugins/default_activated.ini.in");
+    REQUIRE(stream.good());
+    std::ostringstream contents;
+    contents << stream.rdbuf();
+    CHECK(contents.str().find("support.toolpath.legacy_bottom_contact = 1") != std::string::npos);
+    CHECK(contents.str().find("support.toolpath.legacy_top_contact = 1") != std::string::npos);
 }
 
 // Run real surfaces through every role and check first-layer and bridge flows on a roof above a platform; a role with no interface layer prints its contact as base, without a bridge flow.
@@ -282,7 +937,8 @@ TEST_CASE("Native top contacts generate removable loops", "[plugins][support-too
     double lengths[2] = {};
     for (int enabled = 0; enabled < 2; ++enabled) {
         DynamicPrintConfig config = SG::config();
-        config.set_deserialize_strict({{"support_material_interface_contact_loops", enabled ? "1" : "0"}});
+        config.set_deserialize_strict({{"support_material_interface_contact_loops", enabled ? "1" : "0"},
+                                       {"support_material_top_interface_pattern", "concentric"}});
         Print print;
         Model model;
         Test::init_print({SG::slab()}, print, model, config);
@@ -372,7 +1028,8 @@ TEST_CASE("Legacy support pattern failure preserves only the pattern error", "[p
     const ScopedActivePlugins active;
     host.clear_active_plugins();
     for (const char *id : {"support.toolpath.legacy_sparse", "support.toolpath.branch_sheath",
-                           "support.toolpath.legacy_bottom", "support.toolpath.legacy_top", Probe::probe_pattern_id})
+                           "support.toolpath.legacy_bottom", "support.toolpath.legacy_top", "support.toolpath.legacy_bottom_contact",
+                           "support.toolpath.legacy_top_contact", Probe::probe_pattern_id})
         REQUIRE(host.set_plugin_active(id, true));
     Probe::pattern_fail_run = 1;
     (void) host.consume_plugin_messages();

@@ -77,6 +77,8 @@ inline DynamicPrintConfig config(const char *style = "grid", bool soluble = fals
     for (const std::pair<const char *, const char *> &provider : {
         std::pair<const char *, const char *>{"support_toolpath_sparse", SLIC3R_SELECTOR_AUTO_VALUE},
         {"support_toolpath_bottom_interface", "support.toolpath.legacy_bottom"},
+        {"support_toolpath_bottom_contact", "support.toolpath.legacy_bottom_contact"},
+        {"support_toolpath_top_contact", "support.toolpath.legacy_top_contact"},
         {"support_toolpath_top_interface", "support.toolpath.legacy_top"}}) {
         const std::string key = Steps::plugin_exclusive_group_option_key(Orchestrator::instance(), STEP_SUPPORT_TOOLPATH, provider.first);
         if (!key.empty()) result.set_deserialize_strict({{key, std::string(provider.second)}});
@@ -229,6 +231,7 @@ inline PathMeasures measure_layer(const Layer &layer)
 // Areas in mm2 of published support surfaces, separated by side and contact marking.
 struct LayerSurfaceAreas {
     double top_contact = 0, top_interface = 0, bottom_contact = 0, bottom_interface = 0, sparse = 0;
+    std::vector<Surface> contacts;
 };
 
 // Flow keys store tool, role, height and volume per length; the last two values are rounded to millionths before grouping.
@@ -270,6 +273,7 @@ inline LayerSurfaceAreas layer_surface_areas(const Layer &layer)
                 if ((type & stModSupport) == 0) continue;
                 const double mm2 = unscaled(unscaled(surface.expolygon.area()));
                 const bool contact = (surface.surface_type & stModContact) != 0;
+                if (contact && std::getenv("SLIC3R_SUPPORT_LAYER_TABLE") != nullptr) result.contacts.push_back(surface);
                 const SurfaceType sparse = stModSupport | stPosInternal | stDensSparse;
                 if ((type & sparse) == sparse && !contact) result.sparse += mm2;
                 else if ((type & (stPosTop | stDensSolid)) == (stPosTop | stDensSolid))
@@ -295,17 +299,38 @@ inline void record_layer_report(const std::string &section, const PrintObject &o
     out.imbue(std::locale::classic());
     out << std::fixed << std::setprecision(6);
     REQUIRE(published.size() == object.auxiliary_layers().size());
+    const slic3r_api::Support::Common::SupportParams geometry = params(*object.print(), object);
     size_t index = 0;
     for (const Layer &layer : object.auxiliary_layers()) {
         const LayerSurfaceAreas &before = published[index++];
         const LayerSurfaceAreas after = layer_surface_areas(layer);
         out << section << " z=" << layer.scaled_print_z() << " h=" << layer.scaled_height();
-        if (typed_areas)
+        if (typed_areas) {
             out << " top_c=" << before.top_contact << " top_i=" << before.top_interface
                 << " bottom_c=" << before.bottom_contact << " bottom_i=" << before.bottom_interface
                 << " sparse=" << before.sparse << " post_top_c=" << after.top_contact
-                << " post_bottom_c=" << after.bottom_contact;
-        else
+                << " post_bottom_c=" << after.bottom_contact << " post_top_i=" << after.top_interface
+                << " post_bottom_i=" << after.bottom_interface << " post_sparse=" << after.sparse
+                << " returned_top=" << before.top_contact - after.top_contact
+                << " returned_bottom=" << before.bottom_contact - after.bottom_contact;
+            out << " fusion_components=";
+            bool first_component = true;
+            for (const Surface &source : before.contacts) {
+                const bool top = source.has_pos_top();
+                const bool bridge = source.has_mod_bridge();
+                const bool as_base = top ? !geometry.top_published_interfaces_enabled : !geometry.bottom_published_interfaces_enabled;
+                std::string pattern = as_base ? "rectilinear" : top ? geometry.top_pattern_id : geometry.bottom_pattern_id;
+                if (bridge && pattern == "supportbase") pattern = "rectilinear";
+                const bool loops = top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops;
+                const bool specific = pattern != "rectilinear" || loops || (!top && bridge);
+                const bool thin = offset_ex(source.expolygon, -double(geometry.interface_flow.width) / 2.).empty();
+                if (!first_component) out << ';';
+                first_component = false;
+                out << (top ? "top" : "bottom") << '/' << (bridge ? "bridge" : "normal") << ':' << pattern
+                    << ":rectilinear:" << unscaled(unscaled(source.expolygon.area())) << ':'
+                    << (!specific ? "no-specific-setting" : pattern == "rectilinear" && !loops ? "equal-patterns" : thin ? "thin-component" : "retained");
+            }
+        } else
             out << " top_c=na top_i=na bottom_c=na bottom_i=na sparse=na post_top_c=na post_bottom_c=na";
         out << " footprint=" << unscaled(unscaled(area(union_ex(layer.lslices())))) << " paths=";
         bool first = true;

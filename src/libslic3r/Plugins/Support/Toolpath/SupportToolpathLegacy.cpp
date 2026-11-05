@@ -6,12 +6,14 @@
 #include "libslic3r/Plugins/Support/Common/SupportSettings.hpp"
 #include "libslic3r/Plugins/Support/Common/SupportToolpathRoles.hpp"
 
-/* The host registers all three algorithms as ordinary built-in plugins.
+/* The host registers all five algorithms as ordinary built-in plugins.
    Their setting list is the shared support geometry list of the Common
    library plus the path list (patterns, angles and the region settings passed
    to Fill). Registration copies each member's selector description into the host.
    Exceptions from calculation or publication
-   are reported by PluginBase, rather than escaping the plugin C ABI. */
+   are reported by PluginBase, rather than escaping the plugin C ABI.
+   Registration -> orchestrator_register_plugin -> register_exclusive_group.
+   run_impl -> generate_paths -> progress completion. */
 
 namespace slic3r_api::Support::Toolpath {
 // Read the fixed role and return fallback rank 0 for sparse or 100 otherwise; no state changes, ownership transfers or failures.
@@ -25,6 +27,12 @@ int32_t SupportToolpathLegacy::exclusive_group_priority_impl() const noexcept
 // Register the process-lifetime sparse instance and copy its object-scoped selector description into the borrowed host;
 // provider ownership stays static, and rejected declarations throw invalid_argument.
 void register_support_toolpath_sparse_plugin(orchestrator_handle *orchestrator);
+// Register a borrowed static contact provider and copy its object selector into the host;
+// no layers change, and rejected declarations throw invalid_argument through PluginBase.
+void register_support_toolpath_bottom_contact_plugin(orchestrator_handle *orchestrator);
+// Register a borrowed static contact provider and copy its object selector into the host;
+// no layers change, and rejected declarations throw invalid_argument through PluginBase.
+void register_support_toolpath_top_contact_plugin(orchestrator_handle *orchestrator);
 // Register the process-lifetime bottom instance and copy its object-scoped selector description into the borrowed host;
 // provider ownership stays static, and rejected declarations throw invalid_argument.
 void register_support_toolpath_bottom_plugin(orchestrator_handle *orchestrator);
@@ -66,7 +74,7 @@ void register_support_toolpath_sparse_plugin(orchestrator_handle *orchestrator)
 }
 void register_support_toolpath_bottom_plugin(orchestrator_handle *orchestrator)
 {
-    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Bottom, Common::k_legacy_bottom_id, Common::k_bottom_interface_role, 100);
+    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::BottomInterface, Common::k_legacy_bottom_id, Common::k_bottom_interface_role, 100);
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_bottom_interface_role;
@@ -83,7 +91,7 @@ void register_support_toolpath_bottom_plugin(orchestrator_handle *orchestrator)
 }
 void register_support_toolpath_top_plugin(orchestrator_handle *orchestrator)
 {
-    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::Top, Common::k_legacy_top_id, Common::k_top_interface_role, 200);
+    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::TopInterface, Common::k_legacy_top_id, Common::k_top_interface_role, 200);
     orchestrator_register_plugin(orchestrator, provider.c_instance());
     raw_exclusive_group_def definition = raw_exclusive_group_def_init();
     definition.exclusive_group = Common::k_top_interface_role;
@@ -96,6 +104,44 @@ void register_support_toolpath_top_plugin(orchestrator_handle *orchestrator)
     definition.invalidates_step = STEP_SUPPORT_TOOLPATH;
     definition.ui_page = "Support material";
     definition.ui_group = "Support toolpaths";
+    provider.register_exclusive_group(STEP_SUPPORT_TOOLPATH, definition);
+}
+void register_support_toolpath_bottom_contact_plugin(orchestrator_handle *orchestrator)
+{
+    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::BottomContact, Common::k_legacy_bottom_contact_id, Common::k_bottom_contact_role, 90);
+    orchestrator_register_plugin(orchestrator, provider.c_instance());
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = Common::k_bottom_contact_role;
+    definition.label = "Bottom support contact";
+    definition.tooltip = "Selects the algorithm that prints support contacts below the object.";
+    definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
+    definition.category = RAW_OPTION_CATEGORY_SUPPORT;
+    definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    definition.ui_target_file = "print.ui";
+    definition.ui_page = "Support material";
+    definition.ui_group = "Support toolpaths";
+    definition.has_invalidates_step = 1;
+    definition.invalidates_step = STEP_SUPPORT_TOOLPATH;
+    definition.auto_value = 1;
+    provider.register_exclusive_group(STEP_SUPPORT_TOOLPATH, definition);
+}
+void register_support_toolpath_top_contact_plugin(orchestrator_handle *orchestrator)
+{
+    static SupportToolpathLegacy provider(orchestrator, SurfaceRole::TopContact, Common::k_legacy_top_contact_id, Common::k_top_contact_role, 190);
+    orchestrator_register_plugin(orchestrator, provider.c_instance());
+    raw_exclusive_group_def definition = raw_exclusive_group_def_init();
+    definition.exclusive_group = Common::k_top_contact_role;
+    definition.label = "Top support contact";
+    definition.tooltip = "Selects the algorithm that prints support contacts above the support.";
+    definition.container_type = RAW_CONTAINER_TYPE_OBJECT;
+    definition.category = RAW_OPTION_CATEGORY_SUPPORT;
+    definition.option_preset_type = RAW_PRESET_TYPE_FFF_PRINT;
+    definition.ui_target_file = "print.ui";
+    definition.ui_page = "Support material";
+    definition.ui_group = "Support toolpaths";
+    definition.has_invalidates_step = 1;
+    definition.invalidates_step = STEP_SUPPORT_TOOLPATH;
+    definition.auto_value = 1;
     provider.register_exclusive_group(STEP_SUPPORT_TOOLPATH, definition);
 }
 }

@@ -99,7 +99,7 @@ area; no host check verifies the marking. A dense top or bottom surface without
 it is an interface of its side, and a contact merged into the base is published
 as sparse base without it. On a side without interface layers, interfaces and
 contacts both use the base settings and bucket; the bit only selects contact
-handling, such as non-soluble bottom-contact bridging flow. Algorithms that
+handling, such as contact patterns and loops; bridge alone selects bridge flow. Algorithms that
 separate contacts from intermediate interfaces read this bit. A package built
 against 1.2 does not mark contacts, so its contact areas are classified as
 interfaces: they use interface settings when enabled on that side, otherwise
@@ -108,12 +108,12 @@ slabs both carry support | internal | sparse. Version 2 removes the branch role;
 data-tree version 5 removes its surface modifier.
 
 Toolpath algorithms declare one role through their exclusive group:
-"support_toolpath_sparse",
-"support_toolpath_bottom_interface", or "support_toolpath_top_interface". When
+"support_toolpath_sparse", "support_toolpath_bottom_contact",
+"support_toolpath_bottom_interface", "support_toolpath_top_contact", or "support_toolpath_top_interface". When
 several plugins share a role the host generates a selector setting for each
 object, and only the plugin selected for that object runs on it. Selected
-plugins run sequentially by priority (recommended: sparse 0, bottom
-interface 100, top interface 200), each on the objects that selected it. A later
+plugins run sequentially by priority (legacy: sparse 0, bottom contact 90, bottom
+interface 100, top contact 190, top interface 200), each on the objects that selected it. A later
 role can read earlier extrusions. setup() of an algorithm receives the number of
 objects it runs on, so its progress counts only those runs.
 
@@ -123,9 +123,22 @@ overrides that preference. Providers in one role share execution priority.
 
 Each algorithm receives the whole object and walks its auxiliary layers,
 islands and region islands to find support surfaces of its role. It may group
-surfaces and process work in parallel. Each algorithm prints only the surfaces
-of its own role: no role takes another role's area, so a role without interface
-layers prints its own contact as base instead of handing it over.
+surfaces and process work in parallel. Contact roles print matching dense side
+surfaces with the contact bit; interface roles print that side without the bit.
+A contact provider may hand a component back by replacing the fill surface
+collection through layer_region_island_set_fill_surfaces(), clearing only contact
+and preserving geometry, order, properties and all other flags. The interface
+provider retains bridge flow on bridging surfaces it receives. The host imposes
+no role order or priority check: a provider handing back areas must run strictly
+before its interface provider, or those areas are not printed.
+Legacy providers fuse if no contact-specific setting is active, OR effective
+contact and interface patterns agree, OR the component is narrower than one
+interface extrusion width. Active top-contact loops prevent pattern-equality
+fusion, but a component narrower than one extrusion width is still handed back.
+Existing top/bottom interface pattern settings configure contacts; intermediate
+interfaces use rectilinear. No host fusion setting is added. On a side without
+interfaces both roles use base settings and bucket. Disabling a contact provider
+leaves its marked areas unprinted, without a forced fallback.
 It writes extrusions into the support-layer region islands through data-tree
 mutators. Auxiliary layers remain editable through STEP_FINALIZE_SLICING.
 Use the print and object handles only during the callback; never free them.

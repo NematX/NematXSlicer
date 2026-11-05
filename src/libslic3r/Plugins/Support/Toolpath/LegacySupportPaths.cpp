@@ -35,7 +35,11 @@
    into the base keeps its own role, while a mergeable contact is published as
    base and printed by the base role instead. The generated paths
    are published into the island that holds them, with the tool of the role.
+   Contact providers first return automatically fused components by clearing only
+   their contact bit. Interface providers fill those areas when their turn arrives.
    Filling precedes island assignment, so nearby contours can join in the union.
+   generate_paths -> process_layer -> hand_back_contacts -> should_fuse_contact
+                                  -> fill_layer_pass -> publish_layer_paths
 
    Every geometric operation goes through the plugin API: Clipper views for the
    booleans and offsets, data-tree views for the layers, the pattern service for
@@ -62,15 +66,6 @@ coord_t contact_match_tolerance(const Common::SupportParams &geometry)
 }
 
 using PathParams = Common::ToolpathParams;
-// Parts of one support layer's surfaces that are filled separately.
-struct LayerParts {
-    explicit LayerParts(storage_handle *storage) : base(storage), top_contact(storage), top_interface(storage), bottom_contact(storage), bottom_interface(storage) {}
-    Polys base;             // sparse columns
-    Polys top_contact;      // top surfaces marked as contact
-    Polys top_interface;    // remaining top surfaces (the intermediate interfaces)
-    Polys bottom_contact;   // bottom surfaces marked as contact (bridges included)
-    Polys bottom_interface; // remaining bottom surfaces
-};
 // One filler pass: a polygon set printed with the same settings.
 struct Pass {
     Pass(Polys polygons, bool contact, bool as_base, bool bridge) : polygons(std::move(polygons)), contact(contact), as_base(as_base), bridge(bridge) {}
@@ -87,15 +82,18 @@ struct Fragment {
 
 // Convert a Clipper result into a flat polygon collection, like the native polygon booleans.
 Polys as_polygons(ClipperOperand &&result);
-// Read the fill surfaces of one role in a region island; bridge 1 or 0 keeps only bridge or non-bridge surfaces, contact 1 or 0 only those with or without the
-// contact bit. Sparse includes base slabs and branch bodies; the returned rings belong to the supplied storage and API/allocation failures propagate.
-Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge = -1, int contact = -1);
+// Match borrowed type bits to a role; non-support or wrong-side surfaces return false without effects or failures.
+bool role_surface(raw_surface_type type, SurfaceRole role);
+// Copy matching rings into caller storage, optionally filtering bridge state; inputs stay unchanged and API/allocation failures propagate.
+Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge = -1);
 // Collect one role across the islands of a support layer before any union.
-Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge = -1, int contact = -1);
-// Split one support layer's typed surfaces into the parts that are filled separately: sparse, and the contact and interface areas of each side.
-LayerParts layer_parts(storage_handle *storage, const layer_handle *layer);
-// Join the upper contact and its intermediate interfaces, which the top role fills in one pass.
-void fuse_parts(LayerParts &parts);
+Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge = -1);
+// Evaluate fusion on a borrowed component; active loops block pattern-equality fusion, but not narrow-component erosion.
+// Positive scaled width defines erosion in storage; layers are unchanged and geometry failures propagate.
+bool should_fuse_contact(const Common::SupportParams &geometry, SurfaceRole role, bool bridge, const ExPolygon &area, storage_handle *storage);
+// Copy each changed region before clearing contact only; replacements move to the layer and invalidate source handles.
+// Rejection checks cancellation then throws runtime_error; allocation and geometry failures propagate without a silent result.
+void hand_back_contacts(const plugin_run_context *context, storage_handle *storage, layer_handle *layer, SurfaceRole role, const Common::SupportParams &geometry);
 // Whether any of the polylines crosses the area.
 bool crosses(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area);
 // Convert point lists to a storage-owned polyline collection, and back.
@@ -123,21 +121,23 @@ std::pair<PointLists, PointLists> split_lines(storage_handle *storage, const Poi
 void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coord_t z, const std::vector<Internal::Overlap> &overlapping, coord_t resolution);
 // Borrowed marked layers keyed by print Z, with their auxiliary-list position retained for operand order.
 using SupportLayerIndex = std::map<coord_t, std::vector<std::pair<uint32_t, const layer_handle *>>>;
-// Gather the lower support footprints whose top lies between the bottom and the current slab, sorted by Z.
-std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLayerIndex &support_layers, coord_t z, coord_t bottom, bool bottom_contact);
+// Gather lower footprints strictly between bottom and z into caller storage in ascending Z;
+// lower_slabs includes sparse and non-bridge bottom areas, and geometry/allocation failures propagate without changing layers.
+std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLayerIndex &support_layers, coord_t z, coord_t bottom, bool lower_slabs);
 
 // Returns the first layer reaching z: bottom=true selects bottom_z, false selects print_z; both sequences must be sorted.
 // Callers apply an inclusive tolerance window starting at this index.
 uint32_t first_layer_at(const Object &object, coord_t z, bool bottom);
-// Generate one role across a support layer and assign its paths to the islands they cross.
+// Return fused contacts then generate this role's paths with borrowed object-local Z indices and storage-owned temporaries.
+// Layers own the published paths; cancellation and pattern/assignment failures propagate to PluginBase.
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
                    const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer);
-// Collects contact demand, fills each pass in order, then assigns generated paths to this layer's islands.
-void fill_layer_passes(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
+// Fill one role/bridge pass and modulate against lower slabs; pass polygons lose loop footprints, temporaries belong to storage
+// until publication moves paths into layers, and pattern/assignment/cancellation failures propagate.
+void fill_layer_pass(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
                       const Object &object, const Common::SupportParams &geometry, const SupportLayerIndex &support_layers,
                       SurfaceRole role, layer_handle *layer, coord_t z, coord_t height, coord_t bottom,
-                      float base_angle, float angle, const std::string &contact_pattern, std::vector<Pass> &passes,
-                      bool top_as_base, bool bottom_as_base);
+                       float base_angle, float angle, const std::string &contact_pattern, Pass &pass, bool lower_slabs);
 // Moves generated children to the first intersecting island, using the role's bucket and tool.
 void publish_layer_paths(const plugin_run_context *context, storage_handle *storage, layer_handle *layer,
                          StoredExtrusionEntity &out, const Common::SupportParams &geometry, bool as_base);
@@ -147,46 +147,84 @@ Polys as_polygons(ClipperOperand &&result)
     return result.to_polygon_collection();
 }
 
-Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge, int contact)
+bool role_surface(raw_surface_type type, SurfaceRole role)
+{
+    const bool top = role == SurfaceRole::TopInterface || role == SurfaceRole::TopContact;
+    const bool contact = role == SurfaceRole::TopContact || role == SurfaceRole::BottomContact;
+    const raw_surface_type mask = RAW_SURFACE_TYPE_MOD_SUPPORT | (role == SurfaceRole::Sparse ?
+        RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE : top ?
+        RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_DENS_SOLID : RAW_SURFACE_TYPE_POS_BOTTOM | RAW_SURFACE_TYPE_DENS_SOLID);
+    if ((type & mask) != mask) return false;
+    return role == SurfaceRole::Sparse || surface_type_is_contact(type) == contact;
+}
+
+Polys role_polygons(storage_handle *storage, const layer_region_island_handle *region, SurfaceRole role, int bridge)
 {
     Polys result(storage);
-    const raw_surface_type mask = RAW_SURFACE_TYPE_MOD_SUPPORT | (role == SurfaceRole::Sparse ?
-        RAW_SURFACE_TYPE_POS_INTERNAL | RAW_SURFACE_TYPE_DENS_SPARSE : role == SurfaceRole::Top ?
-        RAW_SURFACE_TYPE_POS_TOP | RAW_SURFACE_TYPE_DENS_SOLID : RAW_SURFACE_TYPE_POS_BOTTOM | RAW_SURFACE_TYPE_DENS_SOLID);
     for (uint32_t index = 0; index < layer_region_island_count_fill_surface(region); ++index) {
         const surface_handle *surface = layer_region_island_get_fill_surface(region, index);
         const raw_surface_type type = surface_get_type(surface);
-        if ((type & mask) != mask || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge)) ||
-            (contact >= 0 && surface_type_is_contact(type) != bool(contact))) continue;
+        if (!role_surface(type, role) || (bridge >= 0 && bool(type & RAW_SURFACE_TYPE_MOD_BRIDGE) != bool(bridge))) continue;
         Common::append_polygons(result, ExPolygon(surface_get_expolygon(surface)));
     }
     return result;
 }
 
-Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge, int contact)
+Polys layer_polygons(storage_handle *storage, const layer_handle *layer, SurfaceRole role, int bridge)
 {
     Polys result(storage);
     for (uint32_t island_index = 0; island_index < layer_count_island(layer); ++island_index) {
         const layer_island_handle *island = layer_get_island(layer, island_index);
         for (uint32_t region_index = 0; region_index < layer_island_count_region_island(island); ++region_index)
-            result.append_move_from(role_polygons(storage, layer_island_get_region_island(island, region_index), role, bridge, contact));
+            result.append_move_from(role_polygons(storage, layer_island_get_region_island(island, region_index), role, bridge));
     }
     return result;
 }
 
-// Splits borrowed support-layer roles into the contact areas and the interface areas, owned by the caller's storage. The publication sets the contact bit
-// on the dense areas of a contact layer, bridging lower areas included; a contact merged into the base is published as sparse base without the bit and is
-// printed by the base role. The bit separates contacts from interfaces on both sides regardless of interface-layer settings;
-// unmarked dense surfaces remain interfaces. Geometry/allocation failures propagate.
-LayerParts layer_parts(storage_handle *storage, const layer_handle *layer)
+bool should_fuse_contact(const Common::SupportParams &geometry, SurfaceRole role, bool bridge, const ExPolygon &area, storage_handle *storage)
 {
-    LayerParts parts(storage);
-    parts.base = layer_polygons(storage, layer, SurfaceRole::Sparse);
-    parts.bottom_contact = layer_polygons(storage, layer, SurfaceRole::Bottom, -1, 1);
-    parts.bottom_interface = layer_polygons(storage, layer, SurfaceRole::Bottom, -1, 0);
-    parts.top_contact = layer_polygons(storage, layer, SurfaceRole::Top, -1, 1);
-    parts.top_interface = layer_polygons(storage, layer, SurfaceRole::Top, -1, 0);
-    return parts;
+    const bool top = role == SurfaceRole::TopContact;
+    const bool as_base = top ? !geometry.top_published_interfaces_enabled : !geometry.bottom_published_interfaces_enabled;
+    const std::string &configured = top ? geometry.top_pattern_id : geometry.bottom_pattern_id;
+    const std::string contact_pattern = Internal::surface_pattern(as_base, true, bridge, false, configured, geometry.base_pattern_id);
+    const std::string interface_pattern = Internal::surface_pattern(as_base, false, bridge, false, configured, geometry.base_pattern_id);
+    const bool loops = top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops;
+    const bool specific_active = contact_pattern != interface_pattern || loops || (!top && bridge);
+    if (!specific_active || (contact_pattern == interface_pattern && !loops)) return true;
+    const ClipperContext clipper(storage);
+    return clipper_offset(clipper(area), -double(geometry.interface_flow.width) / 2.).to_expolygon_collection().empty();
+}
+
+void hand_back_contacts(const plugin_run_context *context, storage_handle *storage, layer_handle *layer, SurfaceRole role, const Common::SupportParams &geometry)
+{
+    for (uint32_t island_index = 0; island_index < layer_count_island(layer); ++island_index) {
+        layer_island_handle *island = layer_get_island_mutable(layer, island_index);
+        for (uint32_t region_index = 0; region_index < layer_island_count_region_island(island); ++region_index) {
+            layer_region_island_handle *region = layer_island_get_region_island_mutable(island, region_index);
+            const uint32_t count = layer_region_island_count_fill_surface(region);
+            std::vector<bool> handed_back(count, false);
+            bool any = false;
+            for (uint32_t index = 0; index < count; ++index) {
+                const Surface source(layer_region_island_get_fill_surface(region, index));
+                if (!role_surface(source.type(), role)) continue;
+                const bool bridge = (source.type() & RAW_SURFACE_TYPE_MOD_BRIDGE) != 0;
+                handed_back[index] = should_fuse_contact(geometry, role, bridge, source.expolygon(), storage);
+                any = any || handed_back[index];
+            }
+            if (!any) continue;
+            StoredSurfaceCollection surfaces(storage);
+            for (uint32_t index = 0; index < count; ++index) {
+                const Surface source(layer_region_island_get_fill_surface(region, index));
+                surfaces.append(source.expolygon(), handed_back[index] ?
+                    surface_type_remove_flags(source.type(), RAW_SURFACE_TYPE_MOD_CONTACT) : source.type());
+                surfaces.back_mutable().copy_properties_from(source);
+            }
+            if (!LayerRegionIsland(region).set_fill_surfaces(&surfaces)) {
+                throw_if_cancelled(context);
+                throw std::runtime_error("Cannot hand support contacts back to the interface role");
+            }
+        }
+    }
 }
 
 // Binary-searches borrowed object layers: bottom=true selects bottom_z, false selects print_z, both assumed non-decreasing.
@@ -202,14 +240,6 @@ uint32_t first_layer_at(const Object &object, coord_t z, bool bottom)
         else last = middle;
     }
     return first;
-}
-
-void fuse_parts(LayerParts &parts)
-{
-    if (!parts.top_contact.empty() && !parts.top_interface.empty()) {
-        // The contact and its intermediate interfaces share one filler and one union.
-        parts.top_contact.append_move_from(parts.top_interface);
-    }
 }
 
 bool crosses(storage_handle *storage, const PointLists &lines, const ExPolygonCollection &area)
@@ -501,9 +531,7 @@ void modulate_entity(storage_handle *storage, MutableExtrusionEntity entity, coo
     extrusion_move_from(entity.mutable_handle(), result.mutable_handle());
 }
 
-// Searches the borrowed marked-layer Z index strictly between bottom and z, restores auxiliary order and collects footprints into
-// an owned sorted list in caller storage; bottom contacts include sparse/bottom roles, pairs are counted, and geometry/allocation failures propagate.
-std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLayerIndex &support_layers, coord_t z, coord_t bottom, bool bottom_contact)
+std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLayerIndex &support_layers, coord_t z, coord_t bottom, bool lower_slabs)
 {
     const ClipperContext clipper(storage);
     std::vector<Internal::Overlap> result;
@@ -522,10 +550,12 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLa
             const layer_island_handle *island = layer_get_island(layer, island_index);
             for (uint32_t region_index = 0; region_index < layer_island_count_region_island(island); ++region_index) {
                 const layer_region_island_handle *region = layer_island_get_region_island(island, region_index);
-                polygons.append_move_from(role_polygons(storage, region, SurfaceRole::Top));
-                if (bottom_contact) {
+                polygons.append_move_from(role_polygons(storage, region, SurfaceRole::TopContact));
+                polygons.append_move_from(role_polygons(storage, region, SurfaceRole::TopInterface));
+                if (lower_slabs) {
                     polygons.append_move_from(role_polygons(storage, region, SurfaceRole::Sparse));
-                    polygons.append_move_from(role_polygons(storage, region, SurfaceRole::Bottom, 0));
+                    polygons.append_move_from(role_polygons(storage, region, SurfaceRole::BottomContact, 0));
+                    polygons.append_move_from(role_polygons(storage, region, SurfaceRole::BottomInterface, 0));
                 }
             }
         }
@@ -538,22 +568,14 @@ std::vector<Internal::Overlap> overlaps(storage_handle *storage, const SupportLa
     return result;
 }
 
-// Generate and move this role's paths into layer-owned islands using borrowed inputs and storage-owned temporaries.
-// The context outlives the synchronous fill. Stopping exits through silent PluginCancelled (the cause has its message,
-// the step names it, or the runner rethrows the print cancellation); ordinary assignment, destination and pattern
-// refusals throw std::runtime_error.
-// support_z contains the same object's sorted unique marked auxiliary-layer tops; its rank selects the alternating support pattern.
-// support_layers borrows the marked support layers, keyed by print_z with their auxiliary-list positions. generate_paths builds
-// the index once per object; it and its borrowed handles live throughout the synchronous for_support_layers call.
 void process_layer(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage, const Object &object, const PathParams &params,
                    const std::vector<coord_t> &support_z, const SupportLayerIndex &support_layers, SurfaceRole role, layer_handle *layer)
 {
     Common::Counters::add(Common::Counters::totals.modulation_layers);
     const Common::SupportParams &geometry = params.geometry;
     const coord_t z = layer_get_print_z(layer), height = layer_get_height(layer), bottom = z - height;
-    const bool bridging = !geometry.soluble;
-    LayerParts parts = layer_parts(storage, layer);
-    fuse_parts(parts);
+    const bool contact = role == SurfaceRole::TopContact || role == SurfaceRole::BottomContact;
+    if (contact) hand_back_contacts(context, storage, layer, role, geometry);
     const LayerSupportProperty &property = *static_cast<const LayerSupportProperty *>(
         plugin_property_data(layer_get_properties(layer), PLUGIN_PROPERTY_TYPE_LAYER_SUPPORT));
     float base_angle = geometry.base_angle;
@@ -566,36 +588,31 @@ void process_layer(const plugin_run_context *context, const run_ctx_support_tool
         base_angle += float(M_PI / 2.);
     // Every style turns its interfaces by the configured increment from one interface id to the next.
     const float angle = interface_angle + property.interface_id * Common::radians(float(geometry.interface_angle_increment));
-    const std::string &contact_pattern = role == SurfaceRole::Top ? geometry.top_pattern_id : geometry.bottom_pattern_id;
-    const bool top_as_base = !geometry.top_published_interfaces_enabled, bottom_as_base = !geometry.bottom_published_interfaces_enabled;
-    std::vector<Pass> passes;
-    if (role == SurfaceRole::Sparse) {
-        if (!parts.base.empty()) passes.emplace_back(std::move(parts.base), false, true, false);
-    } else if (role == SurfaceRole::Top) {
-        if (!parts.top_contact.empty()) passes.emplace_back(std::move(parts.top_contact), true, top_as_base, false);
-        if (!parts.top_interface.empty()) passes.emplace_back(std::move(parts.top_interface), false, top_as_base, false);
-    } else {
-        // A bottom contact keeps the configured contact pattern even when it bridges, like the native filler; only its flow becomes a bridging flow.
-        if (!parts.bottom_contact.empty()) passes.emplace_back(std::move(parts.bottom_contact), true, bottom_as_base, bridging);
-        if (!parts.bottom_interface.empty()) passes.emplace_back(std::move(parts.bottom_interface), false, bottom_as_base, false);
+    const bool top = role == SurfaceRole::TopContact || role == SurfaceRole::TopInterface;
+    const std::string &contact_pattern = top ? geometry.top_pattern_id : geometry.bottom_pattern_id;
+    const bool as_base = role == SurfaceRole::Sparse || (top ? !geometry.top_published_interfaces_enabled : !geometry.bottom_published_interfaces_enabled);
+    const bool lower_slabs = role == SurfaceRole::BottomContact || (role == SurfaceRole::BottomInterface &&
+        layer_polygons(storage, layer, SurfaceRole::BottomContact).empty());
+    for (int bridge = 0; bridge != 2; ++bridge) {
+        Polys polygons = layer_polygons(storage, layer, role, bridge);
+        if (polygons.empty()) continue;
+        if (role == SurfaceRole::Sparse && bridge)
+            throw std::runtime_error("Sparse support surfaces cannot use bridge flow");
+        Pass pass(std::move(polygons), contact, as_base, bridge != 0);
+        fill_layer_pass(context, payload, storage, object, geometry, support_layers, role, layer, z, height, bottom,
+            base_angle, angle, contact_pattern, pass, lower_slabs);
     }
-    if (passes.empty()) return;
-    fill_layer_passes(context, payload, storage, object, geometry, support_layers, role, layer, z, height, bottom,
-        base_angle, angle, contact_pattern, passes, top_as_base, bottom_as_base);
 }
 
-// Fills borrowed ordered passes using this object's layer dimensions and angles, modulates against lower slabs, then publishes;
-// pass polygons may lose contact-loop footprints, storage owns temporary paths, and cancellation/geometry/pattern failures propagate.
-void fill_layer_passes(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
-                      const Object &object, const Common::SupportParams &geometry, const SupportLayerIndex &support_layers,
-                      SurfaceRole role, layer_handle *layer, coord_t z, coord_t height, coord_t bottom,
-                      float base_angle, float angle, const std::string &contact_pattern, std::vector<Pass> &passes,
-                      bool top_as_base, bool bottom_as_base)
+void fill_layer_pass(const plugin_run_context *context, const run_ctx_support_toolpath &payload, storage_handle *storage,
+                     const Object &object, const Common::SupportParams &geometry, const SupportLayerIndex &support_layers,
+                     SurfaceRole role, layer_handle *layer, coord_t z, coord_t height, coord_t bottom,
+                     float base_angle, float angle, const std::string &contact_pattern, Pass &pass, bool lower_slabs)
 {
     // Object demand directly above the layer: the removable loops of a top contact follow its outline.
     Polys overhang(storage);
     const coord_t match_tolerance = contact_match_tolerance(geometry);
-    if (role == SurfaceRole::Top && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops) {
+    if (role == SurfaceRole::TopContact && geometry.top_published_interfaces_enabled && geometry.interface_contact_loops) {
         const uint32_t matched = Internal::matched_layer(object, z + scale_to_layer_coord(geometry.gap_above), match_tolerance, true);
         if (matched < object.layer_count()) {
             const Layer object_layer = object.layer(matched);
@@ -605,58 +622,50 @@ void fill_layer_passes(const plugin_run_context *context, const run_ctx_support_
     }
     StoredExtrusionEntity out(storage);
     const ClipperContext clipper(storage);
-    for (Pass &pass : passes) {
-        const bool sparse_filler = role == SurfaceRole::Sparse;
-        // Only the sparse role uses the base filler; a contact printed with the base settings keeps its own filler.
-        const bool base_filler = pass.as_base && sparse_filler;
-        const raw_extrusion_role interface_role = geometry.top_interfaces_enabled ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL;
-        const raw_extrusion_role flow_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : interface_role;
-        // The native filler picks the bridging flow first, even for a contact printed with the base settings.
-        c_flow flow = pass.bridge ? object.support_flow(interface_role, geometry.layer_height, unscaled(height), OBJECT_SUPPORT_FLOW_BRIDGE)
-                                  : object.support_flow(flow_role, geometry.layer_height, unscaled(height));
-        double spacing = pass.as_base ? geometry.base_flow_mm.spacing : geometry.interface_flow_mm.spacing;
-        float density = float(pass.as_base ? geometry.base_density : geometry.interface_density);
-        const std::string pattern = Internal::surface_pattern(pass.as_base, pass.contact, pass.bridge, base_filler, contact_pattern, geometry.base_pattern_id);
-        float filler_angle = pass.as_base ? base_angle : angle;
-        double filler_z = unscaled(z);
-        const bool flange = bottom <= 0;
-        if (flange) {
-            // The native first layer fills its flange with the first-layer flow and the raft density.
-            // The base flange keeps the filler phase at Z = 0 and turns the base angle by a quarter turn;
-            // a contact printed with its own filler uses no angle and the print Z as phase.
-            flow = geometry.first_flow;
-            spacing = geometry.first_flow_mm.spacing;
-            density = float(geometry.raft_first_layer_density);
-            if (!base_filler) {
-                filler_angle = 0;
-            }
-        }
-        // The base filler wraps its pattern in a perimeter when the sheath is on; the first layer wraps every pass in a rectilinear one.
-        const bool sheath = base_filler && geometry.with_sheath;
-        const bool perimeter = flange || sheath;
-        const std::string inner = flange ? std::string("rectilinear") : pattern;
-        const raw_extrusion_role fill_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
-        const raw_infill_pattern_params recipe = flange && base_filler ? raw_infill_pattern_params{} :
-            Common::base_fill_recipe(payload, perimeter ? inner : pattern, fill_role, flow, spacing, density, filler_angle, filler_z);
-        if (pass.contact && !overhang.empty()) contact_loops(storage, out.mutable_view(), pass.polygons, overhang, flow, geometry.resolution);
-        StoredExPolygonCollection fused = sparse_filler ?
-            clipper_offset2(clipper(pass.polygons), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection() :
-            clipper_union_with_safety_offset(clipper(pass.polygons)).to_expolygon_collection();
-        fused.ensure_valid(geometry.resolution);
-        StoredExtrusionEntity paths(storage);
-        if (flange && base_filler)
-            Common::append_base_flange(context, payload, storage, paths.mutable_view(), fused, layer, geometry);
-        else
-            Common::fill_base_areas(context, payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
-        // A bottom contact also overlaps sparse and interface slabs, so it collects them for modulation.
-        const bool bottom_contact_pass = role == SurfaceRole::Bottom && &pass == &passes.front();
-        Internal::modulate(storage, paths.mutable_view(), z, overlaps(storage, support_layers, z, bottom, bottom_contact_pass), geometry.resolution);
-        Common::move_children(out.mutable_view(), paths.mutable_view());
+    const bool sparse_filler = role == SurfaceRole::Sparse;
+    // Only the sparse role uses the base filler; dense roles printed with base settings keep their own filler.
+    const bool base_filler = pass.as_base && sparse_filler;
+    const raw_extrusion_role interface_role = geometry.top_interfaces_enabled ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL;
+    const raw_extrusion_role flow_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : interface_role;
+    // Bridge flow follows the surface modifier even after contact is removed.
+    c_flow flow = pass.bridge ? object.support_flow(interface_role, geometry.layer_height, unscaled(height), OBJECT_SUPPORT_FLOW_BRIDGE)
+                             : object.support_flow(flow_role, geometry.layer_height, unscaled(height));
+    double spacing = pass.as_base ? geometry.base_flow_mm.spacing : geometry.interface_flow_mm.spacing;
+    float density = float(pass.as_base ? geometry.base_density : geometry.interface_density);
+    const std::string pattern = Internal::surface_pattern(pass.as_base, pass.contact, pass.bridge, base_filler, contact_pattern, geometry.base_pattern_id);
+    float filler_angle = pass.as_base ? base_angle : angle;
+    double filler_z = unscaled(z);
+    const bool flange = bottom <= 0;
+    if (flange) {
+        // The first layer uses the flange flow and raft density; dense fillers use zero angle and print Z as phase.
+        flow = geometry.first_flow;
+        spacing = geometry.first_flow_mm.spacing;
+        density = float(geometry.raft_first_layer_density);
+        if (!base_filler) filler_angle = 0;
     }
+    // A sheath wraps sparse support; the first layer wraps every pass in a rectilinear perimeter.
+    const bool sheath = base_filler && geometry.with_sheath;
+    const bool perimeter = flange || sheath;
+    const std::string inner = flange ? std::string("rectilinear") : pattern;
+    const raw_extrusion_role fill_role = pass.as_base ? RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL : RAW_EXTRUSION_ROLE_SUPPORT_MATERIAL_INTERFACE;
+    const raw_infill_pattern_params recipe = flange && base_filler ? raw_infill_pattern_params{} :
+        Common::base_fill_recipe(payload, perimeter ? inner : pattern, fill_role, flow, spacing, density, filler_angle, filler_z);
+    if (pass.contact && !overhang.empty()) contact_loops(storage, out.mutable_view(), pass.polygons, overhang, flow, geometry.resolution);
+    StoredExPolygonCollection fused = sparse_filler ?
+        clipper_offset2(clipper(pass.polygons), double(SCALED_EPSILON), -double(SCALED_EPSILON)).to_expolygon_collection() :
+        clipper_union_with_safety_offset(clipper(pass.polygons)).to_expolygon_collection();
+    fused.ensure_valid(geometry.resolution);
+    StoredExtrusionEntity paths(storage);
+    if (flange && base_filler)
+        Common::append_base_flange(context, payload, storage, paths.mutable_view(), fused, layer, geometry);
+    else
+        Common::fill_base_areas(context, payload, storage, paths.mutable_view(), fused, layer, recipe, perimeter);
+    // The first bottom role also collects lower sparse and non-bridge bottom slabs.
+    Internal::modulate(storage, paths.mutable_view(), z, overlaps(storage, support_layers, z, bottom, lower_slabs), geometry.resolution);
+    Common::move_children(out.mutable_view(), paths.mutable_view());
     // A part printed as base joins the support bucket and the support extruder, on this role's own
     // surface; otherwise the role keeps its interface bucket and extruder.
-    const bool as_base = role == SurfaceRole::Sparse || (role == SurfaceRole::Top ? top_as_base : bottom_as_base);
-    publish_layer_paths(context, storage, layer, out, geometry, as_base);
+    publish_layer_paths(context, storage, layer, out, geometry, pass.as_base);
 }
 
 // Moves borrowed generated children into layer-owned extrusion destinations in child order, choosing the first crossing island;
