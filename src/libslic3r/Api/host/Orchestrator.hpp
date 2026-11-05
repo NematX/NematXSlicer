@@ -424,15 +424,15 @@ public:
     // Look up runtime step metadata by stable namespaced name.
     const DynamicStepInfo *step_info(const char *namespaced_name) const;
 
-    // Copy host selector traits; return 1 added, 0 identical, -1 invalid, or -2 conflicting declaration.
+    // Copy a built-in selector declaration; return 1 if added, 0 if identical, -1 if invalid, or -2 if conflicting.
     // Existing declarations and print data are unchanged on rejection; allocations may throw.
     int32_t register_builtin_step_selector(slicing_step_t step, StepSelectorTraits traits);
     // Borrow retained rules for a named group, then stage-wide rules, or null when neither exists.
     // Any election or register_builtin_exclusive_group() call may invalidate the borrowed pointer; temporary-key allocation may throw.
     const StepSelectorTraits *step_selector(slicing_step_t step, const std::string &exclusive_group) const;
-    // Check whether this exact step/group has a protected host declaration, without whole-step fallback.
+    // Return whether this exact step and group has a built-in declaration, without falling back to the whole step.
     bool step_selector_is_builtin(slicing_step_t step, const std::string &exclusive_group) const;
-    // Borrow the layout filenames accepted by selector declarations and searched for fragments.
+    // Return the layout filenames accepted by selector declarations and searched for UI fragments.
     static const std::vector<std::string> &ui_layout_files();
 
     enum class SelectorIdentityKind { WholeStep, PluginGroup };
@@ -706,7 +706,7 @@ private:
     std::vector<PropertyInfo> m_custom_property_infos;
     slic3r_property_type m_next_custom_property_type { SLIC3R_PROPERTY_TYPE_CUSTOM_BEGIN };
     std::map<slicing_step_t, DynamicStepInfo> m_dynamic_step_infos;
-    // This registry contains only copied host declarations; membership records host provenance.
+    // Only declarations installed by built-in step modules belong in this registry.
     std::map<std::pair<slicing_step_t, std::string>, StepSelectorTraits> m_step_selectors;
     std::map<std::pair<slicing_step_t, std::string>, ExclusiveGroupDefinition> m_host_groups;
     std::map<std::pair<slicing_step_t, std::string>, std::map<std::string, ExclusiveGroupDefinition>> m_group_declarations;

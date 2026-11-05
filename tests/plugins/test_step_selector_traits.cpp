@@ -16,32 +16,41 @@
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
-/* Step modules install host-owned selector declarations during host construction. A whole-step
-   declaration supplies defaults to named groups, while an exact group replaces every field.
-   Local metadata checks read the process host without registering provider options. Selection checks
-   initialize the shared runtime and restore scoped activation changes. Dynamic no-op service providers
+/* These tests check declarations that describe plugin selectors, settings that choose registered plugins.
+   StepSelectorTraits.hpp defines these declarations. A declaration for an entire step supplies defaults
+   to named groups; a declaration for an exact group replaces every field.
+   Call graph:
+     TEST_CASE (declaration checks)
+       Orchestrator::register_builtin_step_selector
+       Orchestrator::step_selector
+       Steps::plugin_exclusive_group_definition
+       Steps::make_exclusive_step_group
+     TEST_CASE (selection checks)
+       check_seam_selection -> check_selection
+   Description checks read the plugin manager without registering settings. Selection checks
+   initialize the shared runtime and restore activation flags afterward. Test providers that do no work
    register after startup and remain inactive outside their selection checks. The generated-selector snapshot
    checks the serialized definitions and layout strings separately. */
 
 namespace {
 using namespace Slic3r;
 
-// Compare both public seam selection paths against a borrowed expected provider without changing configuration or activation.
+// Check that the group, C API and step selection paths return the expected seam provider, or no provider.
 void check_seam_selection(Orchestrator &host, const ConfigBase *config, const Plugin *expected);
-// Compare group, C API and step selection against the same borrowed expected provider.
+// Check that the group, C API and step paths select the expected provider, or no provider.
 void check_selection(Orchestrator &host, slicing_step_t step, const char *group,
                      const ConfigBase *config, const Plugin *expected);
 
 class SeamActivationGuard
 {
 public:
-    // Borrow the host and copy all seam-step activations before mutations; allocation failures propagate without activation changes.
+    // Save all seam provider activation flags so the test can change them temporarily.
     explicit SeamActivationGuard(Orchestrator &host) : m_host(host)
     {
         for (Plugin *plugin : host.registered_plugins())
             if (plugin->get_step() == SEAM_PLACER) m_saved.emplace_back(plugin, host.is_plugin_active(plugin));
     }
-    // Restore the saved flags through the host API; the borrowed host/providers must outlive this noexcept cleanup.
+    // Restore the saved activation flags; the plugin manager and providers must outlive this guard.
     ~SeamActivationGuard()
     {
         for (const std::pair<Plugin *, bool> &entry : m_saved) m_host.set_plugin_active(entry.first, entry.second);
@@ -54,7 +63,7 @@ private:
 class ThumbnailActivationGuard
 {
 public:
-    // Borrow the host and copy flags on the supplied step before mutations; allocations may throw without changing activations.
+    // Save activation flags for the supplied step so the test can change them temporarily.
     explicit ThumbnailActivationGuard(Orchestrator &host, slicing_step_t step = GCODE_THUMBNAIL) : m_host(host)
     {
         for (Plugin *plugin : host.registered_plugins())
@@ -73,27 +82,27 @@ private:
 class SingletonSelectorProbe final : public slic3r_api::PluginBase
 {
 public:
-    // Borrow a host and permanent identity strings for a no-op provider on the supplied dynamic step.
+    // Keep the plugin manager and id strings, which must outlive this provider, and copy the step and priorities.
     SingletonSelectorProbe(orchestrator_handle *host, slicing_step_t step, const char *id, const char *group,
                            int32_t group_priority = 100, int32_t execution_priority = 0)
         : PluginBase(host), m_step(step), m_id(id), m_group(group), m_group_priority(group_priority),
           m_execution_priority(execution_priority) {}
-    // Return the borrowed permanent provider id without effects or failures.
+    // Return the provider id supplied to the constructor.
     const char *id() const noexcept { return m_id; }
 private:
-    // Return the borrowed permanent provider id without effects or failures.
+    // Return the provider id supplied to the constructor.
     const char *id_impl() const noexcept override { return m_id; }
-    // Return the dynamic step value without effects or failures.
+    // Return the step supplied to the constructor.
     slicing_step_t step_impl() const noexcept override { return m_step; }
-    // Return the borrowed permanent group id without effects or failures.
+    // Return the group id supplied to the constructor.
     const char *exclusive_group_impl() const noexcept override { return m_group; }
-    // Report no dependencies without effects or failures.
+    // Report that this provider has no dependencies.
     const char *const *dependencies_impl() const noexcept override { return nullptr; }
     // Return the stored execution priority. Nothing is changed or transferred, and the call cannot fail.
     int32_t priority_impl() const noexcept override { return m_execution_priority; }
     // Return the immutable group preference without changing execution priority or provider state.
     int32_t exclusive_group_priority_impl() const noexcept override { return m_group_priority; }
-    // Ignore the borrowed context without producing output, changing state or failing.
+    // Do no work when this provider is run.
     void run_impl(const plugin_run_context *) const override {}
     slicing_step_t m_step;
     const char *m_id;
@@ -105,29 +114,26 @@ private:
 class SelectorTraitsProbe final : public slic3r_api::PluginBase
 {
 public:
-    // Borrow the host without registering or transferring ownership of this local metadata provider.
+    // Create an unregistered provider used only to supply selector description text.
     explicit SelectorTraitsProbe(orchestrator_handle *host) : PluginBase(host) {}
 private:
-    // Return a stable borrowed id without effects, allocation or failures.
+    // Return the fixed id for this test provider.
     const char *id_impl() const noexcept override { return "slic3r.test.selector_traits.probe"; }
-    // Return a copied step identity without effects, ownership changes or failures.
+    // Assign this provider to the post-infill step.
     slicing_step_t step_impl() const noexcept override { return STEP_POST_INFILL; }
-    // Report no dependencies without effects, ownership changes or failures.
+    // Report that this provider has no dependencies.
     const char *const *dependencies_impl() const noexcept override { return nullptr; }
-    // Return a constant execution priority without effects or failures.
+    // Give this provider execution priority zero.
     int32_t priority_impl() const noexcept override { return 0; }
-    // Ignore the borrowed context; no output or state is produced and this callback cannot fail.
+    // Do no work when this provider is run.
     void run_impl(const plugin_run_context *) const override {}
 };
 
-// Read borrowed configuration through group and step resolution and assert the borrowed expected provider or empty result.
-// No host/configuration mutation or ownership transfer occurs; assertion and serialization/allocation failures propagate.
 void check_seam_selection(Orchestrator &host, const ConfigBase *config, const Plugin *expected)
 {
     check_selection(host, SEAM_PLACER, "seam_placer_plugin", config, expected);
 }
 
-// Resolve borrowed config through all three entry points without mutation; assertion/allocation failures propagate.
 void check_selection(Orchestrator &host, slicing_step_t step, const char *group,
                      const ConfigBase *config, const Plugin *expected)
 {
@@ -586,8 +592,8 @@ TEST_CASE("Exclusive group alternatives require equal execution priorities",
     CHECK(host.get_plugin(whole.id()) == nullptr);
 }
 
-// Register permanent no-op providers after shared startup and scope their activations; owned string configs test all paths.
-// Registrations remain host-owned and inactive afterward; assertion/allocation failures unwind the activation guard.
+// Check that a group which reads a lone provider's stored id rejects a missing id through all three selection paths.
+// Compare a group that ignores that id, and restore activation flags after the checks.
 TEST_CASE("Strict singleton selectors reject a stale stored provider through every selection path",
           "[plugins][step-pipeline][selector-traits]")
 {
@@ -627,8 +633,7 @@ TEST_CASE("Strict singleton selectors reject a stale stored provider through eve
     }
 }
 
-// Scope built-in encoder activations and read serialized enum ids through every selection path.
-// Local configs/print own their data; no encoder executes on rejection and saved activations restore on failure.
+// Check that all three selection paths reject an inactive stored encoder even when only PNG is active.
 TEST_CASE("Singleton thumbnail selection rejects the inactive stored encoder through group and step paths",
           "[plugins][step-pipeline][selector-traits][thumbnail]")
 {
@@ -651,8 +656,7 @@ TEST_CASE("Singleton thumbnail selection rejects the inactive stored encoder thr
     check_selection(host, GCODE_THUMBNAIL, "thumbnail_encoder_plugin", nullptr, png);
 }
 
-// Apply config with an empty model: rejected selections need no object or renderer and never acquire a session.
-// Local model/print own their data; assertions and apply failures propagate while scoped flags restore on failure.
+// Check encoder error messages using an empty print; rejected choices need no renderer or acquired session.
 TEST_CASE("Thumbnail selection errors name the inactive stored encoder",
           "[plugins][thumbnail][selector-traits]")
 {
@@ -685,8 +689,7 @@ TEST_CASE("Thumbnail selection errors name the inactive stored encoder",
                       "Invalid GCODE_THUMBNAIL provider selection");
 }
 
-// Look up an explicit missing provider with an invalid Print view; accessing its config would assert in Debug.
-// Rejection precedes execution and leaves the borrowed host unchanged; only the exact lookup error is accepted.
+// Check explicit lookup with an invalid Print view; reading its settings would assert in Debug.
 TEST_CASE("Explicit thumbnail lookup does not access Print configuration",
           "[plugins][thumbnail][selector-traits]")
 {
@@ -697,8 +700,7 @@ TEST_CASE("Explicit thumbnail lookup does not access Print configuration",
                       "Unknown GCODE_THUMBNAIL provider: missing.encoder");
 }
 
-// Declare owned dynamic-step traits and construct local groups from borrowed provider metadata.
-// Assertions report rejected/mutated declarations; no options, providers or activations are registered by this test.
+// Check registration, replacement and validation of selector declarations on a dynamic step.
 TEST_CASE("Selector traits are looked up for the group first, then for the whole step",
           "[plugins][step-pipeline][selector-traits]")
 {
@@ -784,8 +786,7 @@ TEST_CASE("Selector traits are looked up for the group first, then for the whole
     CHECK(PrintConfigDef::instance().options.size() == option_count);
 }
 
-// Read constructor-installed host registry entries through the singleton, regardless of later provider registrations.
-// Borrowed declarations must have host provenance; no initialization of providers, configuration or activation is requested.
+// Check that built-in step declarations are present before initializing the shared plugin runtime.
 TEST_CASE("Built-in selector traits are declared before any plugin", "[plugins][step-pipeline][selector-traits]")
 {
     const Orchestrator &host = Orchestrator::instance();
@@ -807,8 +808,7 @@ TEST_CASE("Built-in selector traits are declared before any plugin", "[plugins][
     CHECK_FALSE(host.step_selector_is_builtin(STEP_POST_SLICING, "x"));
 }
 
-// Build local group metadata from borrowed host declarations and provider text without registering options or providers.
-// Assertions compare effective fields with the owned traits; allocation failures propagate and host state is unchanged.
+// Check that built-in declarations produce the expected selector descriptions without registering settings.
 TEST_CASE("Selector traits record effective seam and service metadata", "[plugins][step-pipeline][selector-traits]")
 {
     Orchestrator &host = Orchestrator::instance();
@@ -885,8 +885,7 @@ TEST_CASE("Selector dropdown preferences preserve native ordering and historical
     CHECK(writer_table.ui_fragment.find("line:G-code step plugin\n") != std::string::npos);
 }
 
-// Build all ten whole-step definitions through their owner traits, keeping the registered options and layout untouched.
-// Expected metadata is checked locally; complete table/definition/UI row equality is checked by the unchanged selector snapshot.
+// Check the keys, labels and declared settings of all ten selectors for entire steps.
 TEST_CASE("Whole-step selector traits come from their owner module",
           "[plugins][step-pipeline][selector-snapshot][selector-traits]")
 {
@@ -1137,8 +1136,7 @@ TEST_CASE("Named groups on whole-step selectors read the stored choice within th
           reinterpret_cast<const orchestrator_plugin_handle *>(host.get_plugin(first.id())));
 }
 
-// Read the exact host declaration and construct local metadata without registering options or changing activations.
-// The neutral group on the same service proves that scope, placement and invalidation are group-specific.
+// Check the seam declaration and verify that its scope, placement and invalidation do not apply to other groups.
 TEST_CASE("Regional seam selector traits are declared by the ordering module",
           "[plugins][step-pipeline][selector-traits][seam]")
 {
@@ -1177,9 +1175,8 @@ TEST_CASE("Regional seam selector traits are declared by the ordering module",
                               other.option_key_storage + "\nend_line\n");
 }
 
-// Activate only finalized seam enum members, excluding providers registered by later tests, and restore every saved flag.
-// Configurations own their values and borrow finalized enum maps; provider text and selection are read without print changes.
-// Missing runtime metadata fails assertions; allocation/serialization failures propagate through the activation guard.
+// Check missing, valid and invalid seam choices with multiple active providers, then with only one.
+// Use the registered selector's choices and restore activation flags after the checks.
 TEST_CASE("Regional seam selection preserves strict multi-provider and unread singleton choices",
           "[plugins][step-pipeline][selector-traits][seam]")
 {

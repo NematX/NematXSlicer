@@ -42,8 +42,8 @@ considered loaded when its registration succeeds, not only when it becomes
 active. Exclusive step groups use stable plugin IDs as stored enum values and
 user-facing names as labels; their setting and GUI fragment are created only
 after the available plugin set is known.
-Step-module selector traits control fallback layouts and provider-setting activation
-rules; provider-specific fragments take precedence across the supported layouts.
+StepSelectorTraits.hpp defines how step modules place selectors in the UI and enable
+plugin settings. A plugin's own layout fragment takes precedence over generated placement.
 */
 
 #include "PluginLoader.hpp"
@@ -162,7 +162,7 @@ namespace {
 // The application owns descriptions/rules; slicing data is unchanged, and failed creation rolls back new records and propagates errors.
 void register_exclusive_step_group_options_impl(Orchestrator &orchestrator);
 
-// Check a borrowed fragment id across the host's supported layout files without registering UI content.
+// Return whether any supported layout file contains a UI fragment with this id.
 bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fragment_id);
 
 // Register module-owned built-ins with a non-null borrowed host; registrations and diagnostics are retained by the host.
@@ -178,7 +178,7 @@ void add_exclusive_step_used_setting_rules(Orchestrator &orchestrator,
 // GuiRuleRegistry copies or queues the borrowed strings; setting values are unchanged, and allocations may throw.
 void add_selector_rule(Orchestrator &orchestrator, const Steps::StepExclusiveGroup &group,
                        const std::string &setting, const char *selection, const std::string &owner);
-// Register copied fallback fragments in trait-selected layouts unless a provider already placed the group.
+// Add generated UI fragments at the declared locations unless a plugin already placed the group in a supported layout.
 void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator);
 
 using RegisterPluginFn = void (*)(orchestrator_handle *);
@@ -914,8 +914,6 @@ bool has_ui_fragment(Orchestrator &orchestrator,
     return false;
 }
 
-// Search copied fragment lists in the host's layout order using a borrowed host and fragment id.
-// No registration, configuration or ownership changes occur; lookup/allocation failures propagate and absence returns false.
 bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fragment_id)
 {
     /*
@@ -931,9 +929,6 @@ bool has_ui_fragment_in_layout(Orchestrator &orchestrator, const std::string &fr
     return false;
 }
 
-// Build owned metadata for borrowed active providers and register copied fallback fragments in trait-declared layouts.
-// Provider placements in any supported layout win; existing fragments are retained, no print/configuration values or
-// provider ownership changes occur, and allocation failures propagate.
 void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator)
 {
     for (Steps::StepExclusivePluginGroup plugin_group : Steps::active_exclusive_plugin_groups(orchestrator)) {
@@ -943,7 +938,7 @@ void register_exclusive_step_group_ui_fragments_impl(Orchestrator &orchestrator)
         // generated setting name.
         const Steps::StepExclusiveGroup &group = plugin_group.group;
         // A feature plugin may place the selector next to its own controls.
-        // The trait-placed generated selector is a fallback for groups that
+        // Generate placement from the group's declaration only for groups that
         // did not already publish an explicit placement fragment.
         if (has_ui_fragment_in_layout(orchestrator, group.group_id))
             continue;

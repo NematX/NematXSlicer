@@ -86,7 +86,7 @@
 
 namespace Slic3r {
 
-// Compare every owned selector field without reading providers or configuration and without mutation.
+// Return whether every field of the two selector declarations is equal.
 static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelectorTraits &rhs);
 // Compare copied text, package identity and setting rules without calling plugins or changing stored data; comparison cannot fail.
 static bool same_group_definition(const Orchestrator::ExclusiveGroupDefinition &lhs,
@@ -783,7 +783,6 @@ int32_t orchestrator_selected_plugin_used_config_keys(orchestrator_handle *me,
 namespace Slic3r {
 
 // Initialize the host registries and reserve built-in runtime identities.
-// The singleton owns copied selector traits until shutdown; allocation failures propagate and no print data is accessed.
 Orchestrator::Orchestrator()
 {
     Steps::register_builtin_step_selectors(*this);
@@ -828,8 +827,6 @@ Orchestrator::Orchestrator()
     m_generic_facets_annotations.emplace_back(builtin_seam_facets_annotation_definition());
 }
 
-// Compare copied fields, including empty optionals and strings; no host state changes or ownership transfer occurs.
-// The borrowed inputs must remain alive during comparison, which cannot fail.
 static bool same_selector_traits(const StepSelectorTraits &lhs, const StepSelectorTraits &rhs)
 {
     return std::tie(lhs.exclusive_group, lhs.container_type, lhs.invalidates_step, lhs.category,
@@ -875,8 +872,6 @@ static bool same_selector_identity(const Orchestrator::SelectorIdentity &lhs, co
     return lhs.kind == rhs.kind && lhs.step == rhs.step && lhs.group == rhs.group;
 }
 
-// Return immutable process-owned layout names without reading configuration or transferring ownership.
-// First-use allocation failures propagate; no host registry or print data is changed.
 const std::vector<std::string> &Orchestrator::ui_layout_files()
 {
     static const std::vector<std::string> files {"print.ui", "printer_fff.ui", "filament.ui", "printer_sla.ui"};
@@ -1145,8 +1140,6 @@ const std::vector<SelectorAutoChoice> &Orchestrator::selector_auto_choices() con
     return m_selector_auto_choices;
 }
 
-// Check exact membership in the host-only registry; a whole-step fallback does not declare a named group.
-// The group name is borrowed, no state or ownership changes, and an absent entry returns false; temporary-key allocation may throw.
 bool Orchestrator::step_selector_is_builtin(slicing_step_t step, const std::string &exclusive_group) const
 {
     return m_step_selectors.find({step, exclusive_group}) != m_step_selectors.end();

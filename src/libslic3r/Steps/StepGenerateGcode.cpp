@@ -36,15 +36,15 @@
 STEP_GCODE bridge
 =================
 
-The G-code step is a plugin boundary. Earlier pipeline steps build a
+The G-code step delegates file creation to a plugin. Earlier pipeline steps build a
 PrintingPlan, then this step creates the selected firmware session and invokes
 the active STEP_GCODE writer. The writer receives the source Print, read-only
 PrintingPlan, borrowed firmware session, and resolved final output path.
-Selectors for the writer, firmware and thumbnail services invalidate this G-code
-step, which consumes their selections when producing the output artifact.
-The thumbnail selector uses the serialized key thumbnails_format. Consumers can
-request encoders independently of that default, so shared renderer settings have
-no selector-conditioned activation rules.
+Changing the writer, firmware or thumbnail selector requires G-code generation
+to run again, because it uses those choices to produce the output file.
+The thumbnail selector is stored under thumbnails_format. Callers can request
+an encoder without using that setting, so shared renderer settings remain editable
+regardless of the selected encoder.
 
 Before crossing that plugin boundary, the step validates the process speed of
 every geometric leaf and explicit E-only extrusion command, including those in

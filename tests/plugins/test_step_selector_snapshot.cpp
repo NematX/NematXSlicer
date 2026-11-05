@@ -18,30 +18,41 @@
 #include "libslic3r/Config/PrintConfig.hpp"
 #include "libslic3r/Steps/StepPipeline.hpp"
 
-/* Exclusive selectors are enums whose serialized values name active providers. This snapshot
-   records generated metadata and resolves stored choices through both public selection paths.
-   Raw group definitions borrow their own string storage, so copies refresh those pointers.
-   Activation changes are scoped; the optional output file contains a pasteable C++ initializer.
-   Python-package origins are read from recorded package roots; their providers and dependent selectors are excluded. */
+/* This test compares generated plugin selector descriptions and selection results with expected text rows.
+   A provider is a registered plugin. An exclusive selector is a setting that chooses one provider
+   for a step or group; its enum lists the available choices.
+
+   The test reads startup provider ids, settings and UI layout fragments, excluding providers
+   from the Python packages listed by python_package_provider(). ActivationGuard restores
+   saved activation flags. SLIC3R_SELECTOR_SNAPSHOT names an optional output file for C++ rows.
+   Call graph:
+     TEST_CASE
+       append_group -> escaped
+       append_registered -> python_package_provider, escaped
+       append_scenarios
+         finalized_members -> python_package_provider
+         append_group
+         append_selection -> python_package_provider
+   Group descriptions contain pointers into their own strings; copies refresh those pointers. */
 
 namespace {
 using namespace Slic3r;
 
 // Escape text into one snapshot line, or into a C++ string literal when literal is true.
 std::string escaped(const std::string &text, bool literal = false);
-// Append a generated definition's owned text, raw fields, enum and fragment without changing the host.
+// Refresh a copied group's string pointers and append its description, choices and UI text to rows.
 void append_group(std::vector<std::string> &rows, const std::string &prefix, Steps::StepExclusiveGroup group);
-// Capture registered definitions and every startup layout fragment matching borrowed candidate groups and native ids.
+// Append registered selector descriptions and matching startup UI fragments, excluding Python package choices.
 void append_registered(std::vector<std::string> &rows, const Orchestrator &host,
                        const std::set<std::string> &keys, const std::set<std::string> &groups,
                        const std::set<std::string> &provider_ids, const std::set<std::string> &excluded_keys);
 // Match the borrowed provider's package-root basename against Python packages installed by tests/plugins/CMakeLists.txt, not provider-id spelling.
 // State and ownership are unchanged; path and allocation errors propagate.
 bool python_package_provider(const Plugin &plugin);
-// Read native finalized selector ids and require each original id to name a registered member of the requested group.
+// Check that every selector choice belongs to the requested group and return ids outside Python packages.
 std::vector<std::string> finalized_members(const Orchestrator &host, slicing_step_t step,
                                          const std::string &group, const std::string &key);
-// Record group and step resolutions separately using borrowed configuration and active providers.
+// Append the providers selected through the group and step paths; write none for an empty result.
 void append_selection(std::vector<std::string> &rows, Orchestrator &host, const std::string &scenario,
                       slicing_step_t step, const std::string &group, const ConfigBase *config);
 // Capture stale, valid, absent and null selections with static no-op probes, restoring saved activation flags even on failure.
@@ -52,28 +63,28 @@ void append_scenarios(std::vector<std::string> &rows, Orchestrator &host, slicin
 class SnapshotProbe final : public slic3r_api::PluginBase
 {
 public:
-    // Borrow the host and retain scalar metadata for a provider with no configuration or execution effects.
+    // Keep the host, id, step and preference for a provider that performs no work.
     SnapshotProbe(orchestrator_handle *host, const char *id = "test.snapshot.selector",
                   slicing_step_t step = STEP_POST_INFILL, int priority = 0)
         : PluginBase(host), m_id(id), m_step(step), m_priority(priority) {}
 private:
-    // Return the stable borrowed provider identifier; its literal outlives this instance and cannot fail.
+    // Return the id supplied to the constructor; its text must outlive this instance.
     const char *id_impl() const noexcept override { return m_id; }
-    // Return the stable borrowed provider name without effects or failures.
+    // Use the provider id as its display name.
     const char *name_impl() const noexcept override { return m_id; }
-    // Return a borrowed description literal without effects or failures.
+    // Return the description displayed for this test provider.
     const char *description_impl() const noexcept override { return "Selector snapshot probe"; }
-    // Return the borrowed group identifier without effects or failures.
+    // Put all probe providers in the same exclusive group.
     const char *exclusive_group_impl() const noexcept override { return "test.snapshot.selector"; }
-    // Return the copied step identity without effects or failures.
+    // Return the step supplied to the constructor.
     slicing_step_t step_impl() const noexcept override { return m_step; }
-    // Report no dependencies without transferring ownership or changing state.
+    // Report that this provider has no dependencies.
     const char *const *dependencies_impl() const noexcept override { return nullptr; }
     // Return the common execution priority for test alternatives. Nothing is changed or transferred, and the call cannot fail.
     int32_t priority_impl() const noexcept override { return 0; }
     // Return the copied alternative preference without effects or failures.
     int32_t exclusive_group_priority_impl() const noexcept override { return m_priority; }
-    // Ignore the borrowed execution context; this provider produces no output and cannot fail.
+    // Do no work when this provider is run.
     void run_impl(const plugin_run_context *) const override {}
     const char *m_id;
     slicing_step_t m_step;
@@ -83,13 +94,13 @@ private:
 class ActivationGuard
 {
 public:
-    // Borrow the host and copy every activation; allocation failures propagate before any activation changes.
+    // Save each registered provider's activation flag for restoration when the guard is destroyed.
     explicit ActivationGuard(Orchestrator &host) : m_host(host)
     {
         for (Plugin *plugin : host.registered_plugins())
             m_saved.emplace_back(plugin, host.is_plugin_active(plugin));
     }
-    // Restore the saved activation flags; the borrowed host/providers must still exist and no ownership changes.
+    // Restore saved activation flags; the host and saved providers must outlive this guard.
     ~ActivationGuard()
     {
         for (const std::pair<Plugin *, bool> &entry : m_saved)
@@ -100,7 +111,6 @@ private:
     std::vector<std::pair<Plugin *, bool>> m_saved;
 };
 
-// Encode borrowed bytes without mutation; the owned result preserves newlines and allocation failures propagate.
 std::string escaped(const std::string &text, bool literal)
 {
     std::string result;
@@ -115,7 +125,6 @@ std::string escaped(const std::string &text, bool literal)
     return result;
 }
 
-// Refresh the value copy's borrowed raw pointers and append owned metadata; no host state changes and allocations may throw.
 void append_group(std::vector<std::string> &rows, const std::string &prefix, Steps::StepExclusiveGroup group)
 {
     group.refresh_storage_pointers();
@@ -136,8 +145,6 @@ void append_group(std::vector<std::string> &rows, const std::string &prefix, Ste
     rows.push_back(row.str());
 }
 
-// Read only present definitions and group-matching fragments; map fragment keys using the borrowed startup id set.
-// No host state changes; rows own their strings and allocation failures propagate.
 void append_registered(std::vector<std::string> &rows, const Orchestrator &host,
                        const std::set<std::string> &keys, const std::set<std::string> &groups,
                        const std::set<std::string> &provider_ids, const std::set<std::string> &excluded_keys)
@@ -192,7 +199,7 @@ void append_registered(std::vector<std::string> &rows, const Orchestrator &host,
             const std::map<std::pair<std::string, std::string>, std::string>::const_iterator native =
                 native_fragments.find({file, fragment.fragment_id});
             if (native == native_fragments.end()) continue;
-            // A fragment referencing an absent selector cannot display a native selector; provider-setting fragments remain valid.
+            // Skip fragments that display a missing selector, but keep fragments for other provider settings.
             if (PrintConfigDef::instance().get(native->second) == nullptr &&
                 fragment.content.find(native->second) != std::string::npos) {
                 native_fragments.erase(native);
@@ -217,8 +224,6 @@ bool python_package_provider(const Plugin &plugin)
     return packages.count(package) != 0;
 }
 
-// Copy ids from the finalized definition, validating borrowed host membership without changing activation.
-// Missing definitions, enums or providers fail REQUIRE; strings are owned by the result and allocation errors propagate.
 std::vector<std::string> finalized_members(const Orchestrator &host, slicing_step_t step,
                                          const std::string &group, const std::string &key)
 {
@@ -236,8 +241,6 @@ std::vector<std::string> finalized_members(const Orchestrator &host, slicing_ste
     return ids;
 }
 
-// Resolve both borrowed public paths without editing settings; record all step ids, not just its first provider.
-// Empty results are represented by none; returned rows own text and allocation/selection failures propagate.
 void append_selection(std::vector<std::string> &rows, Orchestrator &host, const std::string &scenario,
                       slicing_step_t step, const std::string &group, const ConfigBase *config)
 {
@@ -328,8 +331,7 @@ void append_scenarios(std::vector<std::string> &rows, Orchestrator &host, slicin
 }
 } // namespace
 
-// Normalize borrowed host activations to recorded native startup providers, then collect owned rows.
-// Guards restore activations on failure; metadata mismatches fail assertions and optional file writes must succeed.
+// Compare selector descriptions and selection results with expected rows, or write rows to the requested file.
 TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and placement",
           "[plugins][step-pipeline][selector-snapshot]")
 {
@@ -375,8 +377,8 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
                 ++native_count;
             }
         }
-        // Host generation needs two alternatives except for whole-step G-code/firmware selectors.
-        // Exclude selectors pushed below that threshold by Python removal; native-only finalized singletons stay intact.
+        // Exclude selectors left below the generation threshold after removing Python choices.
+        // G-code and firmware need one choice; other selectors need two. Keep existing selectors without Python choices.
         const size_t threshold = key == "step_gcode_plugin" || key == "gcode_firmware_plugin" ? 1 : 2;
         if (removed_python && native_count < threshold) excluded_keys.insert(key);
     }
@@ -437,8 +439,8 @@ TEST_CASE("Generated exclusive selectors keep their keys, scopes, categories and
         if (excluded_keys.count(key) == 0) keys.insert(key);
         groups.insert(plugin->get_exclusive_group());
     }
-    // Enumerate every native startup alternative, including providers disabled after shared initialization.
-    // Normal-runtime group metadata above and the ordering resolution below retain the recorded startup activation.
+    // Enable all startup providers outside Python packages to record even disabled alternatives.
+    // The group rows above and ordering selection below use startup activation instead.
     for (Plugin *plugin : host.registered_plugins())
         REQUIRE(host.set_plugin_active(plugin, provider_ids.count(plugin->get_id()) != 0));
     for (Steps::StepExclusivePluginGroup &entry : Steps::active_exclusive_plugin_groups(host)) {
